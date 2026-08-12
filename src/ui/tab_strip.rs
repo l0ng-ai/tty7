@@ -5,7 +5,9 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::Input;
+use gpui_component::list::List;
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_component::popover::Popover;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -36,15 +38,15 @@ pub(crate) const GRAB_HANDLE_W: f32 = 80.;
 
 const KEEP_SEGMENTS: usize = 3;
 
-/// How many saved hosts the New Tab menu lists before it stops. The menu is a
-/// shortcut, not the host list — anyone with more than a handful wants the
-/// palette or Settings, both one row further down.
-const NEW_TAB_MENU_HOSTS: usize = 5;
+/// The New Tab menu's box: wide enough for `user@host:port` beside a name, and
+/// short enough to sit under the button on the shortest window we support.
+const NEW_TAB_MENU_W: f32 = 320.;
+const NEW_TAB_MENU_MAX_H: f32 = 320.;
 
 /// Builds a launch specification without recomputing argument ownership locally.
 /// The inventory may originate from a remote host, so only its transported
 /// metadata can distinguish tty7 launch defaults from user-authored arguments.
-fn shell_spec(shell: &DetectedShell) -> ShellSpec {
+pub(crate) fn shell_spec(shell: &DetectedShell) -> ShellSpec {
     ShellSpec {
         program: shell.program.clone(),
         args: shell.args.clone(),
@@ -1003,127 +1005,48 @@ impl Tty7App {
         }
     }
 
+    /// The New Tab button's menu: this machine's shells and the saved hosts,
+    /// under one search box.
+    ///
+    /// A `PopupMenu` cannot hold a text field — it claims the keyboard for its
+    /// own navigation — so this is the palette's list widget in a popover
+    /// instead, which is where the search box comes from. Filtering matters
+    /// here because the list is as long as the machine is: nine shells is
+    /// ordinary, and a `~/.ssh/config` with two dozen hosts in it is too (#438).
     pub(crate) fn attach_new_tab_menu(
         &self,
         button: Button,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        let shells = self.shells.shells.clone();
-        let default_name = self.default_shell_label(cx);
         let app = cx.entity().downgrade();
         // Every other tile in this row names itself on hover — Switch
         // Workspace, More, Hide Sidebar. The three New Tab buttons that come
         // through here were the ones left silent.
         let button = button.tooltip(chord_hint(t(L10nKey::AppMenuNewTab), "NewTab", cx));
-        button.dropdown_menu(move |menu, _window, menu_cx| {
-            // Every shell on the machine plus a handful of hosts is already
-            // taller than a short window, and `PopupMenu` only scrolls itself
-            // past 20 items — under that it just runs off the screen edge.
-            let mut menu = menu.min_w(px(220.)).scrollable(true);
-            for shell in &shells {
-                let spec = shell_spec(shell);
-                let open = app.clone();
-                let item = if shell.label == default_name {
-                    let label: SharedString = shell.label.clone().into();
-                    PopupMenuItem::element(move |_window, cx| {
-                        h_flex()
-                            .w_full()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .child(label.clone())
-                            .child(
-                                div()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(t(L10nKey::ShellDefault)),
-                            )
-                    })
-                } else {
-                    PopupMenuItem::new(shell.label.clone())
+        let list = self.new_tab_picker.as_ref().map(|p| p.list.clone());
+        Popover::new("new-tab-menu")
+            .trigger(button)
+            .open(list.is_some())
+            .on_open_change(move |open, window, cx| {
+                let open = *open;
+                if let Some(app) = app.upgrade() {
+                    app.update(cx, |this, cx| this.toggle_new_tab_picker(open, window, cx));
+                }
+            })
+            .content(move |_state, _window, _cx| {
+                let Some(list) = list.clone() else {
+                    return div().into_any_element();
                 };
-                menu = menu.item(item.on_click(move |_, window, cx| {
-                    if let Some(app) = open.upgrade() {
-                        app.update(cx, |this, cx| {
-                            this.new_tab_with_shell(Some(spec.clone()), window, cx);
-                        });
-                    }
-                }));
-            }
-            if shells.is_empty() {
-                let open_default = app.clone();
-                menu = menu.item(PopupMenuItem::new(t(L10nKey::AppMenuNewTab)).on_click(
-                    move |_, window, cx| {
-                        if let Some(app) = open_default.upgrade() {
-                            app.update(cx, |this, cx| this.new_tab(window, cx));
-                        }
-                    },
-                ));
-            }
-
-            // A new tab on another machine is the same intent as a new tab on
-            // this one, so it belongs in the same menu. Opening one used to
-            // mean crossing the workspace switcher, its host dialog and the
-            // settings list first (#438).
-            menu = menu.separator();
-            let saved = crate::ui::ssh_connect::ssh_profiles_by_frecency(menu_cx);
-            let more_than_fits = saved.len() > NEW_TAB_MENU_HOSTS;
-            for profile in saved.into_iter().take(NEW_TAB_MENU_HOSTS) {
-                let id = profile.id;
-                let open = app.clone();
-                let address: SharedString =
-                    crate::core::ssh_profile::to_connect_string(&profile).into();
-                let name: SharedString = match profile.name.trim() {
-                    "" => address.clone(),
-                    named => named.to_string().into(),
-                };
-                // The address earns its place only when it says something the
-                // name does not — a host named after itself would read twice.
-                let subtitle = (name != address).then(|| address.clone());
-                menu = menu.item(
-                    PopupMenuItem::element(move |_window, cx| {
-                        h_flex()
-                            .w_full()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .child(name.clone())
-                            .children(subtitle.clone().map(|address| {
-                                div().text_color(cx.theme().muted_foreground).child(address)
-                            }))
-                    })
-                    .on_click(move |_, window, cx| {
-                        if let Some(app) = open.upgrade() {
-                            app.update(cx, |this, cx| this.connect_ssh_profile(id, window, cx));
-                        }
-                    }),
-                );
-            }
-
-            // Past the handful this menu lists, the rest are one row away: a
-            // filter box over every saved host, rather than a dropdown that
-            // grows without limit.
-            if more_than_fits {
-                let search = app.clone();
-                menu = menu.item(PopupMenuItem::new(t(L10nKey::NewTabMenuFindHost)).on_click(
-                    move |_, window, cx| {
-                        if let Some(app) = search.upgrade() {
-                            app.update(cx, |this, cx| this.open_ssh_host_picker(window, cx));
-                        }
-                    },
-                ));
-            }
-
-            let connect = app.clone();
-            menu.item(
-                PopupMenuItem::new(t(L10nKey::CmdSshAddConnection)).on_click(
-                    move |_, window, cx| {
-                        if let Some(app) = connect.upgrade() {
-                            app.update(cx, |this, cx| this.open_ssh_connect_input(window, cx));
-                        }
-                    },
-                ),
-            )
-        })
+                div()
+                    .w(px(NEW_TAB_MENU_W))
+                    .child(
+                        List::new(&list)
+                            .search_placeholder(t(L10nKey::NewTabMenuSearch))
+                            .py_1()
+                            .max_h(px(NEW_TAB_MENU_MAX_H)),
+                    )
+                    .into_any_element()
+            })
     }
 
     pub(crate) fn tab_context_menu(

@@ -99,6 +99,10 @@ pub enum CommandKind {
     OpenSshConnect(String),
     SetTheme(usize),
     ActivateTab(usize),
+    /// A shell from this machine's inventory, by its position in it — the New
+    /// Tab picker's rows. Positional like [`ActivateTab`](Self::ActivateTab),
+    /// so it carries no stable id and never lands in Recent.
+    NewTabWithShell(usize),
     ConnectSavedProfile(Uuid),
     EditSavedProfile(Uuid),
     SaveSshSessionAsHost,
@@ -204,6 +208,7 @@ impl CommandKind {
             | CheckoutBranch(_)
             | SetTheme(_)
             | ActivateTab(_)
+            | NewTabWithShell(_)
             | ConnectSavedProfile(_)
             | EditSavedProfile(_)
             | QuickConnect(_)
@@ -307,6 +312,7 @@ impl CommandKind {
             | CheckoutBranch(_)
             | SetTheme(_)
             | ActivateTab(_)
+            | NewTabWithShell(_)
             | ConnectSavedProfile(_)
             | EditSavedProfile(_)
             | SaveSshSessionAsHost
@@ -750,11 +756,25 @@ impl PaletteDelegate {
         this
     }
 
-    /// Every saved host, filtered by the same search box the palette uses, with
-    /// a typed address still good for a connection. The New Tab menu lists only
-    /// a handful, so this is where the rest of them are.
-    fn ssh_hosts(commands: Vec<Command>) -> Self {
+    /// The New Tab picker: this machine's shells, then the saved hosts, each
+    /// group under its own heading until a query flattens them. A typed address
+    /// is still worth offering — someone reaching for a host that was never
+    /// saved is in exactly the right place.
+    pub fn new_tab(shells: Vec<Command>, hosts: Vec<Command>) -> Self {
+        let mut commands = shells.clone();
+        commands.extend(hosts.clone());
+        let mut sections = vec![Section {
+            title: Some(t(L10nKey::NewTabMenuShells).into()),
+            commands: shells,
+        }];
+        if !hosts.is_empty() {
+            sections.push(Section {
+                title: Some(t(L10nKey::SettingsHosts).into()),
+                commands: hosts,
+            });
+        }
         Self {
+            sections,
             quick_connect_root: true,
             ..Self::new(commands)
         }
@@ -854,7 +874,7 @@ impl PaletteDelegate {
         self.selected.and_then(|ix| self.command_at(ix))
     }
 
-    fn first_row(&self) -> Option<IndexPath> {
+    pub fn first_row(&self) -> Option<IndexPath> {
         let section = self.sections.iter().position(|s| !s.commands.is_empty())?;
         Some(IndexPath::new(0).section(section))
     }
@@ -1076,7 +1096,6 @@ enum PaletteMenu {
     Root,
     Theme,
     SshConnect,
-    SshHosts,
 }
 
 pub struct PaletteView {
@@ -1114,22 +1133,6 @@ impl PaletteView {
         let mut view = Self::new(commands, window, cx);
         view.menu = PaletteMenu::SshConnect;
         view.show_ssh_connect(window, cx);
-        view
-    }
-
-    /// Open on the list of saved hosts, filterable, with a typed address still
-    /// good for an ad-hoc connection. Escape backs out to the root list.
-    pub fn new_ssh_hosts(
-        commands: Vec<Command>,
-        hosts: Vec<Command>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let mut view = Self::new(commands, window, cx);
-        view.menu = PaletteMenu::SshHosts;
-        let list = Self::build_list_with_delegate(PaletteDelegate::ssh_hosts(hosts), window, cx);
-        view._sub = cx.subscribe_in(&list, window, Self::on_list_event);
-        view.list = list;
         view
     }
 
@@ -1198,7 +1201,6 @@ impl PaletteView {
     fn search_placeholder(&self) -> &'static str {
         match self.menu {
             PaletteMenu::SshConnect => "user@host [-p 2222 -J jump]",
-            PaletteMenu::SshHosts => t(crate::ui::i18n::L10nKey::FilterHosts),
             PaletteMenu::Root => t(crate::ui::i18n::L10nKey::SearchCommandsOrHost),
             PaletteMenu::Theme => t(crate::ui::i18n::L10nKey::SearchTheme),
         }
@@ -1371,6 +1373,41 @@ mod tests {
             .into_iter()
             .map(|c| c.title)
             .collect()
+    }
+
+    /// The New Tab picker is one list of two kinds of thing, and a reader has
+    /// to be able to tell which is which at a glance — until they type, at
+    /// which point the headings are in the way of the answer.
+    #[test]
+    fn the_new_tab_picker_groups_shells_and_hosts_until_a_query_flattens_them() {
+        crate::ui::i18n::set_locale("en");
+        let shells = vec![
+            Command::new("zsh".to_string(), CommandKind::NewTabWithShell(0)),
+            Command::new("bash".to_string(), CommandKind::NewTabWithShell(1)),
+        ];
+        let hosts = vec![Command::new(
+            "prod-web".to_string(),
+            CommandKind::ConnectSavedProfile(Uuid::new_v4()),
+        )];
+
+        let picker = PaletteDelegate::new_tab(shells.clone(), hosts);
+        assert_eq!(picker.sections.len(), 2);
+        assert_eq!(picker.sections[0].title.as_deref(), Some("Shells"));
+        assert_eq!(picker.sections[1].title.as_deref(), Some("Hosts"));
+        assert_eq!(picker.sections[0].commands.len(), 2);
+        assert_eq!(picker.commands.len(), 3, "search runs over both groups");
+        assert!(
+            picker.quick_connect_root,
+            "an address typed here is worth connecting to"
+        );
+        assert!(
+            !picker.grouped_root,
+            "these rows are already grouped; the command groups have no say here"
+        );
+
+        // A machine with no saved hosts gets no empty heading.
+        let bare = PaletteDelegate::new_tab(shells, Vec::new());
+        assert_eq!(bare.sections.len(), 1);
     }
 
     #[test]

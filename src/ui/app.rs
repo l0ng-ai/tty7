@@ -4,6 +4,7 @@ use gpui::{
 };
 use gpui_component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{InputEvent, InputState};
+use gpui_component::list::{ListEvent, ListState};
 use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use gpui_component::slider::{SliderEvent, SliderState};
 use gpui_component::{
@@ -31,7 +32,7 @@ use crate::ui::forwards::{ForwardFields, added_forward, rule_of};
 use crate::ui::host_registry::HostId;
 use crate::ui::i18n::{L10nKey, set_locale, t, t_fmt, t_plural};
 use crate::ui::palette::{
-    ChromeState, Command, CommandGroup, CommandKind, PaletteEvent, PaletteView,
+    ChromeState, Command, CommandGroup, CommandKind, PaletteDelegate, PaletteEvent, PaletteView,
 };
 use crate::ui::pane::{CloseOutcome, Dir, Pane, PaneSlot};
 use crate::ui::presets::Fill;
@@ -502,6 +503,10 @@ pub struct Tty7App {
     _appearance_watch: Subscription,
     palette: Option<Entity<PaletteView>>,
     palette_sub: Option<Subscription>,
+    /// The New Tab button's picker while it is open. `None` is closed — the
+    /// popover is told what to be from this, so there is one answer to "is it
+    /// open" rather than two that can disagree.
+    pub(crate) new_tab_picker: Option<NewTabPicker>,
     /// Preset that was live when the palette's theme picker started previewing.
     /// `Some` means the theme on screen is a preview that was never written to
     /// disk, and closing the palette without confirming puts this one back.
@@ -740,6 +745,14 @@ fn clear_window_override_values(config: &mut Config, backdrop_is_local: bool) {
     if backdrop_is_local {
         config.window_backdrop = WindowBackdrop::Auto;
     }
+}
+
+/// The New Tab button's picker: the same searchable list the command palette
+/// uses, holding this machine's shells and the saved hosts, hung under the
+/// button rather than in the middle of the window.
+pub(crate) struct NewTabPicker {
+    pub(crate) list: Entity<ListState<PaletteDelegate>>,
+    _sub: Subscription,
 }
 
 impl Tty7App {
@@ -1055,6 +1068,7 @@ impl Tty7App {
             _appearance_watch: appearance_watch,
             palette: None,
             palette_sub: None,
+            new_tab_picker: None,
             theme_preview_restore: None,
             closed: Vec::new(),
             renaming: None,
@@ -4067,19 +4081,83 @@ impl Tty7App {
         commands
     }
 
-    /// Every saved host as its own palette row, in the order the New Tab menu
-    /// lists the first few — the search box over the whole list, for when the
-    /// host wanted is not among those few (#438).
-    pub(crate) fn open_ssh_host_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.is_some() {
-            self.close_palette(window, cx);
+    /// Open or close the New Tab picker. Building it fresh on every open is
+    /// the point: the shell inventory and the host list both move underneath
+    /// it, and a menu is only ever on screen for a moment.
+    pub(crate) fn toggle_new_tab_picker(
+        &mut self,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !open {
+            self.new_tab_picker = None;
+            cx.notify();
+            return;
         }
-        let hosts = self.ssh_host_commands(cx);
-        let commands = self.palette_commands(window, cx);
-        let view = cx.new(|cx| PaletteView::new_ssh_hosts(commands, hosts, window, cx));
-        self.palette_sub = Some(cx.subscribe_in(&view, window, Self::on_palette_event));
-        self.palette = Some(view);
+
+        let shells: Vec<Command> = self
+            .shells
+            .shells
+            .iter()
+            .enumerate()
+            .map(|(i, shell)| {
+                let mut row = Command::new(shell.label.clone(), CommandKind::NewTabWithShell(i));
+                if shell.label == self.default_shell_label(cx) {
+                    row = row.with_subtitle(t(L10nKey::ShellDefault));
+                }
+                row
+            })
+            .collect();
+        let mut hosts = self.ssh_host_commands(cx);
+        hosts.push(
+            Command::localized(
+                L10nKey::CmdSshAddConnection,
+                CommandKind::OpenSshConnectInput,
+            )
+            .in_group(CommandGroup::Ssh),
+        );
+
+        let delegate = PaletteDelegate::new_tab(shells, hosts);
+        let first = delegate.first_row();
+        let list = cx.new(|cx| ListState::new(delegate, window, cx).searchable(true));
+        list.update(cx, |state, cx| {
+            state.set_selected_index(first, window, cx);
+            // The popover took focus when it opened; the search box is what the
+            // next keystroke is meant for.
+            state.focus(window, cx);
+        });
+        let _sub = cx.subscribe_in(&list, window, Self::on_new_tab_picker_event);
+        self.new_tab_picker = Some(NewTabPicker { list, _sub });
         cx.notify();
+    }
+
+    fn on_new_tab_picker_event(
+        &mut self,
+        list: &Entity<ListState<PaletteDelegate>>,
+        ev: &ListEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match ev {
+            ListEvent::Confirm(ix) => {
+                let kind = list.read(cx).delegate().command_at(*ix);
+                // Closed before the command runs: some of them open a window of
+                // their own, and a menu still standing over it reads as stuck.
+                self.new_tab_picker = None;
+                match kind {
+                    Some(kind) => self.run_command(kind, window, cx),
+                    None => self.focus_active(window, cx),
+                }
+                cx.notify();
+            }
+            ListEvent::Cancel => {
+                self.new_tab_picker = None;
+                self.focus_active(window, cx);
+                cx.notify();
+            }
+            ListEvent::Select(_) => {}
+        }
     }
 
     fn ssh_host_commands(&self, cx: &App) -> Vec<Command> {
@@ -4183,6 +4261,14 @@ impl Tty7App {
         self.bump_command_frecency(&kind, cx);
         match kind {
             NewTab => self.new_tab(window, cx),
+            NewTabWithShell(i) => {
+                let spec = self
+                    .shells
+                    .shells
+                    .get(i)
+                    .map(crate::ui::tab_strip::shell_spec);
+                self.new_tab_with_shell(spec, window, cx);
+            }
             NewWorkspace => self.switch_workspace(None, window, cx),
             OpenWorkspacePicker => self.open_switcher(window, cx),
             StopWorkspace => self.stop_workspace(self.workspace, window, cx),
@@ -4312,7 +4398,11 @@ impl Tty7App {
             // then the palette never emits it.
             CheckoutBranch(_) => {}
             ToggleDiffViewMode => self.toggle_diff_view_mode(cx),
-            OpenThemePicker | OpenSshConnectInput => {}
+            // The palette answers this one itself, switching its own list to
+            // the address input; the New Tab picker has no list to switch, so
+            // it comes through here and opens the palette on that input.
+            OpenSshConnectInput => self.open_ssh_connect_input(window, cx),
+            OpenThemePicker => {}
             ActivateTab(i) => self.activate(i, window, cx),
         }
     }
