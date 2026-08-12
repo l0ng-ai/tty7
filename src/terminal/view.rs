@@ -5166,6 +5166,10 @@ impl TerminalView {
                 .top(cy_top)
                 .right_4()
                 .h(self.line_height)
+                // The row floats over live grid cells; a bare div inserts no
+                // hitbox, so a click aimed at it started a selection in the
+                // text underneath (#541).
+                .occlude()
                 .flex()
                 .items_center()
                 .font_family(self.font.family.clone())
@@ -5461,6 +5465,11 @@ impl TerminalView {
                 .absolute()
                 .left(x)
                 .top(y)
+                // The menu has no click handlers of its own, and a handlerless
+                // element inserts no hitbox — so without this the press falls
+                // through to the grid: the selection there is cleared, or a
+                // modified click opens whatever link lies under the row (#541).
+                .occlude()
                 .flex()
                 .flex_col()
                 .py_1()
@@ -5594,6 +5603,10 @@ impl TerminalView {
                 .absolute()
                 .left(px(GRID_PAD_X))
                 .top(y)
+                // Same fall-through as the completion menu (#541): a bare div
+                // inserts no hitbox, so a click on a history row landed on the
+                // grid beneath it.
+                .occlude()
                 .flex()
                 .flex_col()
                 .py_1()

@@ -235,6 +235,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already staged; the toast now carries the plan's actual reason ("Write a
   commit message first"), the same words the panel's own button shows on its
   tooltip. (#546)
+- **Terminal pop-up menus no longer leak clicks into the grid behind them** —
+  the completion menu and the reverse-search menu (both the floating panel and
+  the input-bar row) inserted no hitbox of their own, so a click that missed
+  every button fell straight through: it moved the cursor, started or cleared
+  a selection, and a Ctrl+click even opened the link hidden *under* the menu.
+  All three now occlude, so a click on menu background is simply swallowed.
+  (#541)
 
 ## [26.8.3] - 2026-08-12
 
