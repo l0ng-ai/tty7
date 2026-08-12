@@ -47,7 +47,7 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, BorderStyle, Bounds, Context, Corners, Edges, Focusable as _, Hsla, MouseButton,
     MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Window, canvas, div, fill, point,
-    prelude::*, px, quad,
+    prelude::*, px, quad, rems,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
@@ -62,18 +62,23 @@ use tty7_core::core::git::ops::{GitOp, ResetMode};
 use crate::ui::app::{CONTENT_INSET, Tty7App};
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::presets::{ActiveLanes, LANE_SLOTS, Lanes};
-use crate::ui::right_panel::info_chip;
+use crate::ui::right_panel::{META, META_MONO, TEXT, info_chip};
 use crate::ui::scm::path::{elide_middle, relative_time};
 use crate::ui::scm::state::RepoKey;
 
-/// One commit per row. 20px rather than the file list's 24: a graph row has no
+/// One commit per row. 24px rather than the file list's 26: a graph row has no
 /// icon column, and the vertical pitch wants to stay close to the lane pitch or
 /// the diagonal of a merge reads as a much shallower angle than it is.
 ///
 /// It also has to contain the line the subject is set on — gpui leads text at
-/// phi, so 12px occupies `round(12 × 1.618) = 19px`, and 20 is the first even
-/// pitch above it.
-const GRAPH_ROW_H: f32 = 20.;
+/// phi, so [`TEXT`] occupies `round(14 × 1.618) = 23px`, and 24 is the first
+/// even pitch above it. Both numbers were 4 smaller while the section was on
+/// the panel's old 12px step.
+///
+/// A taller row against an unchanged [`GRAPH_LANE_W`] steepens a merge's
+/// diagonal, which is the safe direction: the failure this pitch is guarding
+/// against is an angle read as *shallower* than the jump it draws.
+const GRAPH_ROW_H: f32 = 24.;
 /// Rows materialized above and below the visible band, so a fast scroll never
 /// outruns the window into blank space, and the "load more" band — laid out
 /// one row past the window's end — stays below the fold until it is real.
@@ -81,19 +86,21 @@ const GRAPH_WINDOW_MARGIN: usize = 4;
 
 /// Header of the section itself: fold, title, count, filter tile, scope picker.
 ///
-/// The truth, not a wish: the row sets this height explicitly and the tallest
-/// thing inside it is the `GRAPH_TILE` square, so 24 is what a reader measures
-/// — the 18px tile plus 3px of air above and below it. The resize constants
-/// below are counted against it, which is why it has to stay honest.
+/// The truth, not a wish: the row sets this height explicitly, and what a
+/// reader measures is the tallest thing inside it. That used to be the 18px
+/// `GRAPH_TILE`; now it is the title's own line — [`META`] leads to
+/// `round(12 × 1.618) = 20px` — so 24 is that line plus 2px of air on each
+/// side. The resize constants below are counted against it, which is why it
+/// has to stay honest.
 const GRAPH_HEADER_H: f32 = 24.;
 
 /// The header's controls: the filter tile and the scope picker beside it.
 ///
-/// An 18px square with an 11px glyph, sized against the 11px title beside it:
-/// two thirds of the box, which is the fill that keeps an icon from rattling
-/// around inside its tile.
+/// An 18px square with a 12px glyph, sized against the [`META`] title beside
+/// it: two thirds of the box, which is the fill that keeps an icon from
+/// rattling around inside its tile.
 const GRAPH_TILE: f32 = 18.;
-const GRAPH_TILE_GLYPH: f32 = 11.;
+const GRAPH_TILE_GLYPH: f32 = 12.;
 
 /// Horizontal distance between lane centres.
 const GRAPH_LANE_W: f32 = 12.;
@@ -103,10 +110,14 @@ const GRAPH_LANE_W: f32 = 12.;
 const GRAPH_PAD_L: f32 = 6.;
 const GRAPH_PAD_R: f32 = 6.;
 
-/// An ordinary node is a 3px disc and a lane line is 1.5px wide: the dot is
-/// 30% of the row's height, which is enough to read as a bead on a string
+/// An ordinary node is a 3px disc and a lane line is 1.5px wide: the dot is a
+/// quarter of the row's height, which is enough to read as a bead on a string
 /// without closing the gap to the row above. Merges and roots are drawn from
 /// the same radius rather than from a second vocabulary.
+///
+/// It stays 3 while the row grows, because what a bead is measured against is
+/// the string it is on — `GRAPH_LANE_W`, which has not moved. A quarter is the
+/// floor the test below holds it to.
 const GRAPH_DOT_R: f32 = 3.;
 const GRAPH_LINE_W: f32 = 1.5;
 
@@ -127,13 +138,17 @@ const _: () = assert!(GRAPH_MAX_LANES <= LANE_SLOTS);
 /// file list has to keep a usable part of a short one.
 ///
 /// Both of the fixed ones are counted in rows against the header: what they
-/// mean is a number of commits, not a number of pixels. 220 is `24 + 9.8 × 20`
+/// mean is a number of commits, not a number of pixels. 260 is `24 + 9.8 × 24`
 /// — nine commits and most of a tenth, and the fraction is deliberate, because
 /// a row cut by the bottom edge is the only honest way a fixed-height list says
-/// there is more below it. 88 is `24 + 3.2 × 20`, three and a bit, which is the
-/// least that still looks like history rather than like a mistake.
-const GRAPH_H_DEFAULT: f32 = 220.;
-const GRAPH_H_MIN: f32 = 88.;
+/// there is more below it. 100 is `24 + 3.2 × 24`, three and a bit, which is
+/// the least that still looks like history rather than like a mistake.
+///
+/// They grew with [`GRAPH_ROW_H`] — 220 and 88 around a 20px row — precisely
+/// because they are counted in commits: holding the pixels would have quietly
+/// bought the file list 40px by showing two fewer commits.
+const GRAPH_H_DEFAULT: f32 = 260.;
+const GRAPH_H_MIN: f32 = 100.;
 const GRAPH_H_MAX_RATIO: f32 = 0.65;
 
 /// The divider's grab area, matching `RESIZE_HANDLE_WIDTH` on the other axis.
@@ -896,7 +911,7 @@ impl Tty7App {
                             .flex_1()
                             .min_w(px(0.))
                             .truncate()
-                            .text_size(px(12.))
+                            .text_size(rems(TEXT))
                             .text_color(cx.theme().foreground)
                             .child(SharedString::from(subject.to_string())),
                     ),
@@ -904,13 +919,14 @@ impl Tty7App {
             .children(deco.map(|r| self.graph_ref_chip(r, extra, &mono, cx)))
             // The age is a mono token, so its column is measured in characters:
             // the widest it ever prints is four (`12mo`), and four of the mono
-            // face's advances at 10.5px is 25.2, rounded up to 26.
+            // face's advances at `META_MONO` is `4 × 11 × 0.6` = 26.4, rounded
+            // up to 27.
             .when(deco.is_none(), |d| {
                 d.child(
                     div()
                         .flex_none()
-                        .min_w(px(26.))
-                        .text_size(px(10.5))
+                        .min_w(px(27.))
+                        .text_size(rems(META_MONO))
                         .font_family(mono.clone())
                         .text_color(cx.theme().muted_foreground)
                         .child(SharedString::from(relative_time(
@@ -1047,7 +1063,7 @@ impl Tty7App {
             // clipping them to buy the subject the same handful is not a trade
             // — a half-eaten `refac…` costs a reader more than it gives back.
             .flex_none()
-            .text_size(px(12.))
+            .text_size(rems(TEXT))
             .text_color(type_tone(breaking, cx))
             .child(SharedString::from(match breaking {
                 true => format!("{kind}!"),
@@ -1131,7 +1147,7 @@ impl Tty7App {
             // A step under the subjects above it: this is a control the list
             // offers, not a commit, and it should not read as one more row of
             // history.
-            .text_size(px(11.))
+            .text_size(rems(META))
             .text_color(cx.theme().muted_foreground)
             .hover(|s| s.text_color(cx.theme().foreground))
             .child(SharedString::from(match loading {
@@ -1156,11 +1172,14 @@ impl Tty7App {
     /// and no control tinted, because nothing here is more important than the
     /// file list above it.
     ///
-    /// The title is 11px MEDIUM and the count 10.5px beside it, both muted:
-    /// this is a band label, not a heading a reader is meant to stop at, and
-    /// the rows below it are what the section is for. The count is set in the
-    /// UI font rather than mono — it sits inside the title's own phrase, and a
-    /// family change there would read as a token rather than as part of it.
+    /// The title is [`META`] MEDIUM and the count a step under it beside it,
+    /// both muted: this is a band label, not a heading a reader is meant to
+    /// stop at, and the rows below it are what the section is for. The count is
+    /// set in the UI font rather than mono — it sits inside the title's own
+    /// phrase, and a family change there would read as a token rather than as
+    /// part of it — so it borrows `META_MONO` for its size and nothing else.
+    /// The ladder has no half-steps, which is what the old 11/10.5 pair was;
+    /// the full step it lands on now does the same job a little more plainly.
     ///
     /// There is no lane-gutter fold. The lanes are the graph.
     fn graph_header(
@@ -1195,28 +1214,30 @@ impl Tty7App {
                     .child(
                         // A hair under the title it opens: the chevron is a
                         // mark, not a word, and at the label's own size it
-                        // starts competing with it for the corner.
+                        // starts competing with it for the corner. `.xsmall()`
+                        // is that size exactly, which is why this one is still
+                        // a number.
                         Icon::new(match expanded {
                             true => IconName::ChevronDown,
                             false => IconName::ChevronRight,
                         })
-                        .size(px(10.))
+                        .size(px(11.))
                         .text_color(muted),
                     )
                     .child(
                         div()
-                            .text_size(px(11.))
+                            .text_size(rems(META))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(muted)
                             .child(SharedString::from(t(L10nKey::ScmGraphTitle))),
                     )
                     // The count reads as part of the title, so it sits with it
-                    // rather than at the far end of the row — half a step
-                    // smaller and at normal weight, which is the whole
-                    // difference between the two words in this corner.
+                    // rather than at the far end of the row — a step smaller
+                    // and at normal weight, which is the whole difference
+                    // between the two words in this corner.
                     .children(count.map(|c| {
                         div()
-                            .text_size(px(10.5))
+                            .text_size(rems(META_MONO))
                             .text_color(muted)
                             .child(SharedString::from(c))
                     }))
@@ -1774,9 +1795,11 @@ mod tests {
         // And a hollow node keeps a hole: a stroke that eats the radius is a
         // filled dot wearing a ring's name.
         assert!(GRAPH_DOT_R - GRAPH_LINE_W >= 1.);
-        // The node also has to be worth the row it sits in: a 6px dot in a 20px
-        // row is 30% of it, and a bead much smaller than that stops reading as
-        // one on a string.
+        // The node also has to be worth the row it sits in: a 6px dot in a 24px
+        // row is a quarter of it, and a bead much smaller than that stops
+        // reading as one on a string. This is the floor, and the row is
+        // currently sitting on it — a taller row wants a larger dot, not the
+        // same one with more air around it.
         assert!(GRAPH_DOT_R * 2. >= GRAPH_ROW_H * 0.25);
     }
 

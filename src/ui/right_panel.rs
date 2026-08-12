@@ -44,19 +44,28 @@ pub(crate) const META_MONO: f32 = META - STEP;
 
 /// Uppercase section headings. Deliberately below `META` — it matches the tab
 /// sidebar's group headings, which are the same thing one panel over.
-const HEADING: f32 = 11. * STEP;
+pub(crate) const HEADING: f32 = 11. * STEP;
 
-// The right panel's type ramp: four steps, half a point apart, that the Info
-// and Source Control tabs draw from so switching between them does not change
-// the apparent size of the panel. (The Files tab, in `file_tree.rs`, is the
-// one holdout — it renders its rows with `text_sm()` = 14px.) The steps are
-// close together on purpose: the panel is a dense aside next to the terminal,
-// and the differences between them are meant to be felt as hierarchy rather
-// than seen as different type sizes.
+// The right panel's type ramp: four steps, a point apart, that the Info and
+// Source Control tabs both draw from so switching between them does not change
+// the apparent size of the panel. The Files tab, in `file_tree.rs`, reaches the
+// same 14px through `text_sm()`, which is the same rem under another name. The
+// steps are close together on purpose: the panel is a dense aside next to the
+// terminal, and the differences between them are meant to be felt as hierarchy
+// rather than seen as different type sizes.
 //
-// (The px constants that used to live here — PANEL_TEXT and its steps — were
-// superseded by the interface font scale's rems tokens; the Source Control
-// panel still names its own px steps locally until it moves onto that scale.)
+// Every tab of the panel is on this ladder now. The px constants that used to
+// live here — PANEL_TEXT and its steps — went when the interface font scale
+// landed, and `scm/` followed a branch later: it had been cut from main hours
+// before that commit and had copied the ladder as it stood, which left the
+// Source Control tab frozen at the *old* 12/11/10.5 while its neighbours moved
+// to 14/13/12/11 and started tracking `ui_font_size`. Nothing in git conflicted
+// — the two touched different files — so the only thing that would have caught
+// it was a reader noticing that one tab was a step smaller than the rest.
+//
+// Which is the reason to keep reaching for these names rather than spelling a
+// number: a size written as `px(12.)` anywhere in this panel is either a
+// mistake or something that is not type.
 
 /// Height of the search strip.
 ///

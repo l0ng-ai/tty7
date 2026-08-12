@@ -21,15 +21,22 @@
 //! second-level view announces itself by the way back at the top of it and by
 //! being the only thing on screen; it does not need a raised card, a larger
 //! ramp or filled tokens to say so, and an earlier round that gave it all
-//! three read as a foreign design pasted into the app. A later round tried the
-//! ramp on its own — 14/12/11.5 through the whole panel — and it read the same
-//! way: too big for a 260px column, and too loud beside the graph. The sizes
-//! below are the panel's own, and this view has no business being a step above
-//! them.
+//! three read as a foreign design pasted into the app.
+//!
+//! A round after that tried a larger ramp on its own — 14/12/11.5 — and it was
+//! turned down for reading too big in a 260px column and too loud beside the
+//! graph. That verdict was reached against a panel where everything else was
+//! 12/11/10.5, so what it actually measured was the *step*, not the size: this
+//! view a size above its neighbours. The neighbours have since moved. The whole
+//! right panel runs on `right_panel.rs`'s 14/13/12/11 and tracks `ui_font_size`
+//! with it, and being at 12 is now the thing that makes a tab read as a foreign
+//! design. So the sizes here are 14/12/11 — and the rule the old note was
+//! defending is unchanged and still the point: **this view is never a step
+//! above the rows in `panel.rs`.** It is on the ramp with them.
 
 use std::sync::Arc;
 
-use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px, rems};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use tty7_core::core::git::diff::CommitLabel;
@@ -39,80 +46,62 @@ use tty7_core::core::git::status::DecoStatus;
 use crate::terminal::git_diff::DiffSource;
 use crate::ui::app::{CONTENT_INSET, Tty7App};
 use crate::ui::i18n::{L10nKey, t, t_plural};
-use crate::ui::right_panel::{git_badge, info_chip};
+use crate::ui::right_panel::{META, META_MONO, TEXT, TEXT_MONO, git_badge, info_chip};
 use crate::ui::scm::path::{relative_time, split_display_path};
 use crate::ui::scm::state::{CommitDetailView, RepoKey};
 use crate::ui::scm::status::{status_color, status_glyph};
 
-/// A file row, the same height as the working tree's, and inset the same way.
-/// The two lists sit in one column and have to read as one grid.
-///
-/// Both numbers are a 12px row's. gpui leads a plain `div` at phi, so the row's
-/// mono name occupies `round(12 × 1.618) = 19px`, and 24 gives that line 2.5px
-/// of air on each side — dense, which is what a 260px column of paths wants.
-/// The text lands on `CONTENT_INSET` whatever `ROW_INSET` is, since the list
-/// subtracts it outside the row and the row adds it back inside.
-///
-/// Both have to equal `panel.rs`'s pair. That file carries the same two
-/// constants for the same reason, and a reader who opens a commit must not
-/// feel the pitch change under them.
-const ROW_H: f32 = 24.;
-const ROW_INSET: f32 = 4.;
+// A file row, the same height as the working tree's, and inset the same way:
+// the two lists sit in one column and have to read as one grid, so a reader who
+// opens a commit never feels the pitch change under them. Both numbers are
+// `panel.rs`'s, read rather than restated — this file used to hold a matching
+// pair of its own, kept in step by a comment.
+use crate::ui::scm::panel::{ROW_H, ROW_INSET};
 
 /// How much of the body is shown before it folds. Four lines is a paragraph;
 /// past that it is a changelog, and the file list is what the reader came for.
 const BODY_LINES: usize = 4;
 
-/// The body's leading, spelled out because the fold is a height and a height
-/// needs a line to multiply.
+/// The body's leading and its top padding, both in rems, because the fold is a
+/// height and a height that does not track the text it folds is a clip through
+/// the middle of a line the moment `ui_font_size` moves.
 ///
-/// 18px is what `phi()` already resolved 11px type to, so nothing moves by
-/// naming it — what it buys is a fold that lands on a line boundary instead of
-/// through the middle of one.
-const BODY_LINE_H: f32 = 18.;
+/// `19/16` is what `phi()` already resolves [`META`] to, so nothing moves by
+/// naming it — what it buys is a fold that lands on a line boundary.
+const BODY_LINE_H: f32 = 19. / 16.;
+const BODY_PAD_T: f32 = 2. / 16.;
 
 /// And how much of the subject, which wraps rather than folding. Three lines
-/// of 12px in 260px is around 90 characters — longer than every subject in
+/// of [`TEXT`] in 260px is around 78 characters — longer than every subject in
 /// this repository but a handful, and a cap for the ones that are a paragraph.
 const SUBJECT_LINES: usize = 3;
 
-/// The panel's type ramp, named rather than spelled out at each of its dozen
-/// uses. These are not this view's sizes to choose: they are the steps the
-/// right panel runs on, and the whole point of naming them here is that a
-/// future edit changes a constant instead of drifting one line of the body off
-/// the ramp.
-///
-/// 12px is body text and the loudest thing on screen — the subject, and the
-/// way back, which is the same size worn quietly. 11px is everything that
-/// qualifies it: the byline, the message body, the parents' label, the file
-/// count, the waiting notes. One point of difference is all a qualifier needs
-/// in a column this narrow; the separation is carried by weight and colour,
-/// not by the gap. 10.5px mono is the token size — sha-like strings, ref
-/// chips, the diff counts, and `git_badge`'s status letter. That one is barely
-/// a choice made here: `git_badge` and `info_chip` set their own mono at 10.5,
-/// and an object id has to read as the same kind of thing in this view as it
-/// does in the graph and on a file row.
-///
-/// Emphasis in this panel is weight and colour rather than size, and a fill
-/// only where it carries a meaning of its own — HEAD, and a tag. The subject is
-/// a step up in weight against the full foreground while everything under it is
-/// muted, and that separation is all it needs; it is what a card was briefly
-/// and wrongly asked to do, and what a larger ramp was later asked to do after
-/// that. Both were turned down. Nothing in this view is bigger than the
-/// working tree's rows are.
-///
-/// `right_panel.rs` is where the panel's own steps live, and these are that
-/// ramp under local names that say what each step does *here* — subject,
-/// qualifier, token. If the two ever disagree, that file is the one that is
-/// right.
-///
-/// The changed-file rows deliberately do not read these. They spell 12 and 11
-/// out because they have to stay pixel-identical to `scm_file_row` in
-/// `panel.rs`, and a constant shared with the prose above would let a change
-/// here silently break that.
-const SUBJECT_SIZE: f32 = 12.;
-const SECONDARY_SIZE: f32 = 11.;
-const TOKEN_SIZE: f32 = 10.5;
+// Which step of the right panel's ramp does what in this view.
+//
+// The names come from `right_panel.rs` and the sizes are not this view's to
+// choose. This file used to hold three of its own — `SUBJECT_SIZE`,
+// `SECONDARY_SIZE`, `TOKEN_SIZE`, at 12/11/10.5 — which was the panel's ramp as
+// it stood on the day this file was written and stopped being it a few hours
+// later.
+//
+// `TEXT` is the loudest thing on screen: the subject, and the way back, which
+// is the same size worn quietly. `META` is everything that qualifies it — the
+// byline, the message body, the parents' label, the file count, the waiting
+// notes. One step of difference is all a qualifier needs in a column this
+// narrow; the separation is carried by weight and colour, not by the gap.
+// `META_MONO` is the token size — sha-like strings, ref chips, the diff counts
+// — which is barely a choice made here: `git_badge` and `info_chip` are already
+// set in it, and an object id has to read as the same kind of thing in this
+// view as it does in the graph and on a file row. `TEXT_MONO` is a path, and
+// only a path.
+//
+// Emphasis in this panel is weight and colour rather than size, and a fill only
+// where it carries a meaning of its own — HEAD, and a tag. The subject is a
+// step up in weight against the full foreground while everything under it is
+// muted, and that separation is all it needs; it is what a card was briefly and
+// wrongly asked to do. Nothing in this view is bigger than the working tree's
+// rows are — which is now a statement about `panel.rs`'s rows rather than about
+// a pair of numbers that happened to match.
 
 impl Tty7App {
     /// Show one commit, replacing the working tree in the panel body.
@@ -185,7 +174,7 @@ impl Tty7App {
                     div()
                         .px(px(CONTENT_INSET))
                         .py(px(4.))
-                        .text_size(px(SECONDARY_SIZE))
+                        .text_size(rems(META))
                         .text_color(muted)
                         .child(if detail.loaded {
                             t(L10nKey::ScmCommitNotFound)
@@ -307,7 +296,7 @@ impl Tty7App {
                     .child(Icon::new(IconName::ChevronLeft).small().text_color(muted))
                     .child(
                         div()
-                            .text_size(px(SUBJECT_SIZE))
+                            .text_size(rems(TEXT))
                             .text_color(muted)
                             .child(t(L10nKey::ScmBackToChanges)),
                     ),
@@ -322,7 +311,7 @@ impl Tty7App {
                     .rounded(px(4.))
                     .cursor_pointer()
                     .hover(|s| s.bg(hover_bg))
-                    .text_size(px(TOKEN_SIZE))
+                    .text_size(rems(META_MONO))
                     .text_color(muted)
                     .font_family(mono.clone())
                     .tooltip(|window, cx| {
@@ -358,7 +347,7 @@ impl Tty7App {
                 // muted, and that is the whole of its emphasis — it sits on
                 // the same 12px step as the file rows below it.
                 div()
-                    .text_size(px(SUBJECT_SIZE))
+                    .text_size(rems(TEXT))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(cx.theme().foreground)
                     .line_clamp(SUBJECT_LINES)
@@ -366,7 +355,7 @@ impl Tty7App {
             )
             .child(
                 div()
-                    .text_size(px(SECONDARY_SIZE))
+                    .text_size(rems(META))
                     .text_color(cx.theme().muted_foreground)
                     .child(byline(commit, now_unix())),
             )
@@ -391,12 +380,12 @@ impl Tty7App {
                     // fold, because those four lines can each wrap again in a
                     // column this narrow.
                     div()
-                        .pt(px(2.))
-                        .text_size(px(SECONDARY_SIZE))
-                        .line_height(px(BODY_LINE_H))
+                        .pt(rems(BODY_PAD_T))
+                        .text_size(rems(META))
+                        .line_height(rems(BODY_LINE_H))
                         .text_color(cx.theme().muted_foreground)
                         .when(folded, |d| {
-                            d.max_h(px(2. + BODY_LINE_H * BODY_LINES as f32))
+                            d.max_h(rems(BODY_PAD_T + BODY_LINE_H * BODY_LINES as f32))
                                 .overflow_hidden()
                         })
                         .debug_selector(|| "scm-detail-body".into())
@@ -414,7 +403,7 @@ impl Tty7App {
                             .w_full()
                             .py(px(1.))
                             .cursor_pointer()
-                            .text_size(px(SECONDARY_SIZE))
+                            .text_size(rems(META))
                             .text_color(cx.theme().info)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 if let Some(open) = this.scm.detail.as_mut() {
@@ -526,7 +515,7 @@ impl Tty7App {
             .pb(px(4.))
             .child(
                 div()
-                    .text_size(px(SECONDARY_SIZE))
+                    .text_size(rems(META))
                     .text_color(muted)
                     .child(t(L10nKey::ScmCommitParents)),
             );
@@ -541,7 +530,7 @@ impl Tty7App {
                     .rounded(px(4.))
                     .cursor_pointer()
                     .hover(|s| s.bg(hover_bg))
-                    .text_size(px(TOKEN_SIZE))
+                    .text_size(rems(META_MONO))
                     .font_family(mono.clone())
                     .text_color(link)
                     .on_click(cx.listener(move |this, _, _window, cx| {
@@ -655,7 +644,7 @@ impl Tty7App {
             .pb(px(3.5))
             .child(
                 div()
-                    .text_size(px(SECONDARY_SIZE))
+                    .text_size(rems(META))
                     .text_color(muted)
                     .child(t_plural(L10nKey::ScmFilesChanged, files.len(), &[])),
             )
@@ -664,7 +653,7 @@ impl Tty7App {
                     h_flex()
                         .items_center()
                         .gap(px(5.))
-                        .text_size(px(TOKEN_SIZE))
+                        .text_size(rems(META_MONO))
                         .font_family(mono.clone())
                         .child(div().text_color(added_ink).child(format!("+{added}")))
                         .child(div().text_color(removed_ink).child(format!("−{removed}"))),
@@ -727,21 +716,20 @@ impl Tty7App {
             .child(
                 div()
                     .flex_none()
-                    // 12 and, below, 11: written out rather than taken from
-                    // `SUBJECT_SIZE` and `SECONDARY_SIZE`, which happen to
-                    // hold the same two numbers. The prose above this list is
-                    // free to move off the ramp one day; a row is not, because
-                    // it has to stay pixel-identical to `scm_file_row`, and
-                    // sharing a constant with the prose is exactly how that
-                    // would break without anybody touching this function.
+                    // `TEXT_MONO` and, below, `META`, which is what
+                    // `scm_file_row` reads too. This pair used to be written
+                    // out as bare 12 and 11 so that the prose above the list
+                    // could move off the panel's ramp without dragging the rows
+                    // with it — the two lists have to stay pixel-identical and
+                    // nothing enforces it but a comment.
                     //
-                    // Its counterpart spells the same two out for the same
-                    // reason, and says so in a comment pointing back here.
-                    // They are the SCM panel's own 12/11px steps (the panel
-                    // has not moved onto the interface font scale yet); a move
-                    // of that ramp has to be carried into both rows by hand,
-                    // and nothing but these two comments says so.
-                    .text_size(px(12.))
+                    // The escape hatch is gone because the thing it was
+                    // protecting against happened anyway, one level up: the
+                    // whole panel drifted off the interface font scale, and
+                    // spelling numbers out is what let it drift quietly. Both
+                    // rows now name the same two steps, so a move of the ramp
+                    // reaches them together or not at all.
+                    .text_size(rems(TEXT_MONO))
                     .font_family(mono.clone())
                     .text_color(if deco == DecoStatus::Deleted {
                         cx.theme().muted_foreground
@@ -757,7 +745,7 @@ impl Tty7App {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(11.))
+                        .text_size(rems(META))
                         .text_color(cx.theme().muted_foreground.opacity(0.75))
                         .child(dir.to_string()),
                 )
@@ -769,7 +757,7 @@ impl Tty7App {
         div()
             .px(px(CONTENT_INSET))
             .py(px(3.))
-            .text_size(px(SECONDARY_SIZE))
+            .text_size(rems(META))
             .text_color(cx.theme().muted_foreground.opacity(0.75))
             .child(text)
             .into_any_element()
@@ -794,7 +782,7 @@ fn panel_surface(cx: &gpui::App) -> crate::ui::presets::Surface {
 fn ref_span(text: &str, ink: gpui::Hsla, mono: &SharedString) -> AnyElement {
     div()
         .flex_none()
-        .text_size(px(TOKEN_SIZE))
+        .text_size(rems(META_MONO))
         .font_family(mono.clone())
         .text_color(ink)
         .child(text.to_string())
@@ -1347,10 +1335,13 @@ mod detail_gpui_tests {
                 .size
                 .height
         };
+        // The fold is in rems, so what it comes to in pixels is the window's
+        // own rem — asking it is the whole point of the change.
+        let rem = vcx.update(|window, _| window.rem_size().as_f32());
         let folded = body_h(&mut vcx);
         assert!(
-            folded <= px(2. + BODY_LINE_H * BODY_LINES as f32),
-            "a six-line body opens folded to four: {folded:?}"
+            folded <= px(rem * (BODY_PAD_T + BODY_LINE_H * BODY_LINES as f32)),
+            "a six-line body opens folded to four: {folded:?} at a {rem}px rem"
         );
 
         let fold = vcx

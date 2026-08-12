@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, Context, Focusable as _, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Focusable as _, SharedString, Window, div, prelude::*, px, rems};
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
@@ -29,20 +29,29 @@ use crate::terminal::git_diff::DiffSource;
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
 use crate::ui::host_ops::{HostId, SharedHost};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
-use crate::ui::right_panel::{SEARCH_H, git_badge, info_chip};
+use crate::ui::right_panel::{HEADING, META, META_MONO, SEARCH_H, TEXT_MONO, git_badge, info_chip};
 use crate::ui::rounding::{CARD_RADIUS, HAIRLINE, RoundedCorners as _, segment_corners};
 use crate::ui::scm::ScmIntent;
 use crate::ui::scm::path::{elide_middle, split_display_path};
 use crate::ui::scm::state::{RepoKey, ScmGroup};
 use crate::ui::scm::status::{status_color, status_glyph};
 
-/// A file row, and the group header above it. Both 24px, so the list reads as
+/// A file row, and the group header above it. Both 26px, so the list reads as
 /// one grid rather than as headers with a list hanging off them.
+///
+/// The pitch is the row's tallest line plus air: gpui leads a plain `div` at
+/// phi, so the mono path at [`TEXT_MONO`] occupies `round(13 × 1.618) = 21px`,
+/// and 26 gives it 2.5px on each side — dense, which is what a 260px column of
+/// paths wants. It was 24 around a 19px line while the panel was still on its
+/// own 12px step.
 ///
 /// It is also the height `scm/detail.rs` gives the changed-file rows it shows
 /// for a commit — the two lists are the same list pointed at different trees,
 /// and a reader who opens a commit must not feel the pitch change under them.
-const ROW_H: f32 = 24.;
+/// That file reads this constant rather than restating it; it used to carry its
+/// own copy with a comment asking the next reader to keep the two in step,
+/// which is the same kind of promise that let the panel's type ramp drift.
+pub(super) const ROW_H: f32 = 26.;
 
 /// The status letter's column, from `git_badge`. The group chevron sits in a
 /// box of exactly this width so the two line up in one column down the panel.
@@ -58,9 +67,9 @@ const BADGE_W: f32 = 14.;
 ///
 /// The text lands on `CONTENT_INSET` whatever this is — the list subtracts it
 /// outside the row and the row adds it back inside — so all this number sets
-/// is how far the hover fill bleeds past the text. `scm/detail.rs` carries the
-/// same pair for the same reason.
-const ROW_INSET: f32 = 4.;
+/// is how far the hover fill bleeds past the text. `scm/detail.rs` reads this
+/// one too.
+pub(super) const ROW_INSET: f32 = 4.;
 
 /// The key context the message box installs, and the one `ScmCommit` is
 /// bound inside. The two are the same string on purpose: a binding whose
@@ -135,19 +144,23 @@ const MSG_ROWS_MAX: usize = 6;
 /// stretched across it — the row it sits in reads "N staged" on the left and
 /// offers this on the right, so it only has to be as wide as its label.
 ///
-/// The frame is a hairline around a 22px interior, which puts it at 24 —
+/// The frame is a hairline around a 24px interior, which puts it at 26 —
 /// gpui measures border-box, and the hairline is part of what a reader sees.
-/// Twenty-four is the panel's row pitch, so the control sits on the same line
-/// grid as everything above and below it.
+/// Twenty-six is [`ROW_H`], the panel's row pitch, so the control sits on the
+/// same line grid as everything above and below it; it follows that constant
+/// rather than restating it, because the two moving apart is the only way this
+/// can go wrong.
 ///
-/// The chevron half is a 22px cell, so the divider falls where the eye expects
-/// it rather than a couple of pixels early.
+/// The chevron half is a square cell of the same interior, so the divider falls
+/// where the eye expects it rather than a couple of pixels early.
 ///
 /// `COMMIT_GLYPH` is the group chevron's size: a caret is an affordance, not
 /// content — it says "there is more here", and it says it at the same size as
-/// every other small mark in the panel.
-const COMMIT_H: f32 = 24.;
-const COMMIT_CHEVRON_W: f32 = 22.;
+/// every other small mark in the panel. Marks are px on purpose. The panel's
+/// *type* is on the interface font scale and grows with it; a caret is chrome,
+/// sized against the box it sits in.
+const COMMIT_H: f32 = ROW_H;
+const COMMIT_CHEVRON_W: f32 = COMMIT_H - 2.;
 const COMMIT_GLYPH: f32 = 11.;
 
 /// How long to wait before asking git again about a directory that answered
@@ -305,15 +318,16 @@ impl Tty7App {
             .items_center()
             .gap(px(6.))
             // Taller than a file row, and what sets it is the `TILE_SIZE_SM`
-            // sync tile at the end plus 2px of air — not the type, which is a
-            // step under it.
+            // sync tile at the end plus 2px of air. The branch trigger beside
+            // it is the same 24, so the row has one interior height and the
+            // type sits inside it rather than setting it.
             .h(px(28.))
             .pl(px(CONTENT_INSET))
             .pr(px(crate::ui::app::tile_trailing_inset_sm()))
             .child(
                 Icon::empty()
                     .path("icons/git-branch.svg")
-                    .size(px(12.))
+                    .xsmall()
                     .text_color(muted),
             )
             // The trigger is a `Button` because that is the one element the
@@ -324,15 +338,23 @@ impl Tty7App {
             // The branch is the most important word on the row, and it earns
             // that by being in full-strength ink — not by being set larger
             // than the file names underneath it.
+            //
+            // `.small()` is how a `Button` is told to use `TEXT`; `.xsmall()`
+            // is `META`, which is a step *under* the file names and would make
+            // the branch quieter than the paths it scopes. Sans at `TEXT`
+            // beside mono at `TEXT_MONO` is the ramp's own pairing, so the two
+            // read as one size — which is the rule this comment is stating.
+            // The height is spelled out because `.small()` also carries a 24px
+            // box and the row's own air is budgeted below.
             .child(
                 Button::new("scm-branch")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .dropdown_caret(true)
                     .label(elide_middle(&head_label(&status.head), BRANCH_NAME_CHARS).to_string())
                     .flex_1()
                     .min_w(px(0.))
-                    .h(px(20.))
+                    .h(px(24.))
                     .rounded(px(5.))
                     .text_color(fg)
                     .when(detached, |s| s.font_family(mono.clone()))
@@ -831,7 +853,7 @@ impl Tty7App {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(11.))
+                    .text_size(rems(META))
                     .text_color(muted)
                     .child(t_plural(L10nKey::ScmStagedFileCount, staged, &[])),
             )
@@ -858,11 +880,12 @@ impl Tty7App {
                     .bg(gpui::rgb(field_fill(sf)))
                     .hover(|s| s.bg(gpui::rgb(sf.hover)))
                     .child(
-                        // `xsmall` for the same reason the branch trigger is
-                        // `xsmall`: it is the token that sets a `Button`'s
-                        // label to 12px, the panel's own step. The padding and
-                        // the height are set below, so the size token is doing
-                        // nothing here but choosing the type.
+                        // `xsmall` is the token that sets a `Button`'s label to
+                        // `META`, and a control's label is what `META` is for:
+                        // the branch trigger above is `.small()` because it
+                        // shows a *value*, and this one shows a verb. The
+                        // padding and the height are set below, so the size
+                        // token is doing nothing here but choosing the type.
                         Button::new("scm-commit")
                             // A custom variant, not `.ghost()`: the frame is
                             // already painted at the ramp's hover rung, and a
@@ -1217,7 +1240,7 @@ impl Tty7App {
         div()
             .px(px(ROW_INSET))
             .py(px(3.))
-            .text_size(px(11.))
+            .text_size(rems(META))
             .text_color(cx.theme().muted_foreground.opacity(0.75))
             .child(text)
             .into_any_element()
@@ -1265,7 +1288,7 @@ impl Tty7App {
                         } else {
                             IconName::ChevronDown
                         })
-                        .size(px(11.)),
+                        .xsmall(),
                     ),
             )
             .child(
@@ -1273,7 +1296,7 @@ impl Tty7App {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(10.5))
+                    .text_size(rems(HEADING))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(cx.theme().muted_foreground)
                     .child(t(group_label(group)).to_uppercase()),
@@ -1281,7 +1304,7 @@ impl Tty7App {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(11.))
+                    .text_size(rems(META_MONO))
                     .font_family(mono)
                     .text_color(cx.theme().muted_foreground.opacity(0.75))
                     .child(count.to_string()),
@@ -1354,13 +1377,13 @@ impl Tty7App {
             // Mono, because a path is a token you compare character by
             // character.
             //
-            // `scm/detail.rs` draws the changed-file rows of a commit and
-            // spells this number and the directory's out by hand so the two
-            // lists stay pixel-identical. Moving one means moving the other.
+            // `scm/detail.rs` draws the changed-file rows of a commit from the
+            // same two steps, so the two lists stay pixel-identical. Moving one
+            // means moving the other.
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(12.))
+                    .text_size(rems(TEXT_MONO))
                     .font_family(mono.clone())
                     .text_color(if deco == DecoStatus::Deleted {
                         cx.theme().muted_foreground
@@ -1378,7 +1401,7 @@ impl Tty7App {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(11.))
+                        .text_size(rems(META))
                         .text_color(cx.theme().muted_foreground.opacity(0.75))
                         .child(dir.to_string()),
                 )
@@ -1858,7 +1881,7 @@ fn commit_half(cx: &gpui::App) -> ButtonCustomVariant {
 fn branch_note(text: &str, ink: gpui::Hsla, mono: &SharedString) -> AnyElement {
     div()
         .flex_none()
-        .text_size(px(10.5))
+        .text_size(rems(META_MONO))
         .font_family(mono.clone())
         .text_color(ink)
         .child(text.to_string())
@@ -2253,6 +2276,52 @@ mod tests {
             for (verb, _) in group_verbs(group) {
                 assert_ne!(*verb, RowVerb::OpenConflict);
             }
+        }
+    }
+
+    /// No type size in this panel is a number.
+    ///
+    /// The Source Control tab spent its whole life one step under the rest of
+    /// the right panel, and every part of how that happened was quiet. It was
+    /// branched from main hours before the interface font scale landed and
+    /// copied the ramp as it stood; the commit that moved every other file onto
+    /// rems could not touch these, because they were not on main yet; and the
+    /// merge that brought the two together had nothing to conflict over,
+    /// because the two sides had edited different files. Three sizes frozen at
+    /// 12/11/10.5 while their neighbours went to 14/13/12/11 and started
+    /// tracking `ui_font_size`, and the only thing that could have caught it
+    /// was somebody looking at two tabs and noticing.
+    ///
+    /// So: a size the reader can *read* is `rems(TEXT)` and its four siblings,
+    /// and a `text_size(px(…))` anywhere under `scm/` is either a mistake or a
+    /// value that should have been one of them. `px` still belongs on the
+    /// things type sits inside — row heights, tiles, the marks — and this only
+    /// looks at `text_size`.
+    ///
+    /// Reading the source is the point. Any assertion over the constants would
+    /// only prove the constants agree with themselves; what went wrong was a
+    /// literal at a call site, and a literal at a call site is what this reads.
+    #[test]
+    fn the_panels_type_is_named_rather_than_numbered() {
+        // Assembled rather than written, because this test reads the file it is
+        // written in and a spelled-out needle would find itself.
+        let needle = concat!("text_size", "(px(");
+        for (file, src) in [
+            ("panel.rs", include_str!("panel.rs")),
+            ("graph.rs", include_str!("graph.rs")),
+            ("detail.rs", include_str!("detail.rs")),
+        ] {
+            let offenders: Vec<&str> = src
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.starts_with("//"))
+                .filter(|line| line.contains(needle))
+                .collect();
+            assert!(
+                offenders.is_empty(),
+                "{file} sets type in pixels, which is how the panel fell a step \
+                 behind the rest of the window last time: {offenders:?}"
+            );
         }
     }
 
