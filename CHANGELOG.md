@@ -128,6 +128,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   automount off cannot see, and a `ZDOTDIR` aimed at nothing would start zsh
   with none of the user's own startup files at all. (#135)
 
+- **Put your own entries in the new-tab menu** — `custom_shells` in
+  `config.json` takes a list of `{label, program, args}`, and each one becomes a
+  row in the menu behind the sidebar's **+**, after the shells tty7 detected. A
+  distro, a container, a REPL, the same shell against a different profile: they
+  are launched exactly as written, since tty7 chose none of the command and has
+  no defaults to add to it. `shell` still names the one command that stands in
+  for the platform default; these are the rest. An entry with no `program` is
+  skipped, one with no `label` is named after what it runs, and one that
+  borrows a name already in the menu is marked `(Custom)` so the row telling
+  you what a plain new tab opens with stays the only one wearing it. (#443)
+
 ### Changed
 
 - **`tty7 pane close --json` now reports `{"closed": [ids]}`** rather than a

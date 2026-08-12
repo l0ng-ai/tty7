@@ -40,8 +40,53 @@ pub struct ShellInventory {
 }
 
 pub fn inventory() -> ShellInventory {
-    let configured = crate::core::config::shell_command();
-    inventory_from(detect_shells(), configured, &login_shell())
+    // One read for both halves: `shell_command()` would open and parse
+    // `config.json` a second time, and this runs every time the menu is built.
+    let config = crate::core::config::Config::load();
+    let configured = config
+        .shell
+        .as_ref()
+        .map(|s| (s.program.clone(), s.args.clone()));
+    let mut inventory = inventory_from(detect_shells(), configured, &login_shell());
+    append_custom(&mut inventory, &config.custom_shells);
+    inventory
+}
+
+/// Adds the user's own menu entries after everything that was detected.
+///
+/// After, not among: the detected list is ordered so the shell a new tab
+/// actually opens with sits at the top, and that ordering is the menu's answer
+/// to "what do I get if I just click". A user-authored entry is an extra, not a
+/// candidate for that position — so this runs once the default has already been
+/// settled and cannot move it.
+fn append_custom(inventory: &mut ShellInventory, custom: &[crate::core::config::CustomShell]) {
+    for entry in custom {
+        let program = entry.program.trim();
+        if program.is_empty() {
+            // Nothing to launch. The rest of the entry may be perfectly well
+            // formed, but a menu row that opens nothing is worse than no row.
+            continue;
+        }
+        let mut label = entry.label.trim().to_string();
+        if label.is_empty() {
+            label = basename(program);
+        }
+        // The menu marks its default row by matching the label
+        // (`tab_strip::shell_menu`), so a custom entry that borrows a name
+        // already in the list would wear a mark meant for another row. Same
+        // answer the configured shell already gets when it collides.
+        if inventory.shells.iter().any(|shell| shell.label == label) {
+            label.push_str(" (Custom)");
+        }
+        inventory.shells.push(DetectedShell {
+            label,
+            program: program.to_string(),
+            args: entry.args.clone(),
+            // tty7 chose none of this, so none of it is a tty7 default: the
+            // arguments have to survive into the pane exactly as written.
+            args_are_tty7_defaults: false,
+        });
+    }
 }
 
 pub fn detect_shells() -> Vec<DetectedShell> {
@@ -1180,5 +1225,79 @@ mod tests {
         assert_eq!(default_shell_name(Some("pwsh")), "pwsh");
         assert!(!default_shell_name(None).is_empty());
         assert!(!default_shell_name(Some("  ")).is_empty());
+    }
+
+    fn custom(label: &str, program: &str, args: &[&str]) -> crate::core::config::CustomShell {
+        crate::core::config::CustomShell {
+            label: label.to_string(),
+            program: program.to_string(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+        }
+    }
+
+    fn menu(shells: &[&str]) -> ShellInventory {
+        ShellInventory {
+            shells: shells.iter().map(|s| DetectedShell::bare(*s, *s)).collect(),
+            default_name: shells.first().map(|s| s.to_string()).unwrap_or_default(),
+        }
+    }
+
+    #[test]
+    fn a_custom_entry_joins_the_menu_with_its_arguments_intact() {
+        let mut inventory = menu(&["zsh"]);
+        append_custom(
+            &mut inventory,
+            &[custom("Ubuntu (dev)", "wsl.exe", &["-d", "Ubuntu"])],
+        );
+
+        let added = inventory.shells.last().expect("the entry");
+        assert_eq!(added.label, "Ubuntu (dev)");
+        assert_eq!(added.program, "wsl.exe");
+        assert_eq!(added.args, vec!["-d".to_string(), "Ubuntu".to_string()]);
+        assert!(
+            !added.args_are_tty7_defaults,
+            "tty7 contributed none of this command, so none of it may be replaced as a default"
+        );
+        assert_eq!(
+            inventory.default_name, "zsh",
+            "an extra entry does not change what a new tab opens with"
+        );
+    }
+
+    #[test]
+    fn a_custom_entry_with_nothing_to_launch_is_not_offered() {
+        let mut inventory = menu(&["zsh"]);
+        append_custom(&mut inventory, &[custom("Broken", "   ", &[])]);
+
+        assert_eq!(inventory.shells.len(), 1);
+    }
+
+    #[test]
+    fn a_custom_entry_with_no_label_is_named_after_what_it_runs() {
+        let mut inventory = menu(&["zsh"]);
+        append_custom(&mut inventory, &[custom("  ", "/opt/homebrew/bin/nu", &[])]);
+
+        assert_eq!(inventory.shells.last().expect("the entry").label, "nu");
+    }
+
+    #[test]
+    fn a_custom_entry_cannot_take_another_rows_name() {
+        let mut inventory = menu(&["zsh", "bash"]);
+        append_custom(&mut inventory, &[custom("zsh", "/usr/local/bin/zsh", &[])]);
+
+        // The menu tells its default row apart by label alone, so two rows
+        // called "zsh" would put that mark on whichever came first.
+        assert_eq!(
+            inventory.shells.last().expect("the entry").label,
+            "zsh (Custom)"
+        );
+        assert_eq!(
+            inventory
+                .shells
+                .iter()
+                .filter(|s| s.label == inventory.default_name)
+                .count(),
+            1
+        );
     }
 }

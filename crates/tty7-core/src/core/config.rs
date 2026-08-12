@@ -148,6 +148,8 @@ pub struct Config {
     #[serde(default = "default_prefix")]
     pub prefix: String,
     pub shell: Option<ShellConfig>,
+    #[serde(default)]
+    pub custom_shells: Vec<CustomShell>,
 
     pub link_url: bool,
     pub link_file_command: Option<String>,
@@ -432,6 +434,21 @@ pub struct ShellConfig {
     pub args: Vec<String>,
 }
 
+/// A launcher the user put in the new-tab menu themselves.
+///
+/// `shell` names the one command that stands in for the platform default;
+/// these are the rest — a distro, a container, a REPL, the same shell against a
+/// different profile. They are launched exactly as written, which is why `args`
+/// crosses as user-authored: tty7 has no defaults to contribute to a command it
+/// did not choose.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CustomShell {
+    pub label: String,
+    pub program: String,
+    pub args: Vec<String>,
+}
+
 pub fn default_font_fallbacks() -> Vec<String> {
     let names: &[&str] = if cfg!(target_os = "macos") {
         &[
@@ -494,6 +511,7 @@ impl Default for Config {
             keybinding_preset: default_preset(),
             prefix: default_prefix(),
             shell: None,
+            custom_shells: Vec::new(),
             link_url: true,
             link_file_command: None,
             ssh_loopback_forward: false,
