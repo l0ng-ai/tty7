@@ -1795,9 +1795,10 @@ impl Tty7App {
         };
 
         // Two lines rather than one, like the workspace rows below: the name
-        // is the main line, and the endpoint — with the link status — is the
-        // line under it, so a long address can never crowd the name out and
-        // the address itself no longer has to fight for the same row.
+        // is the main line, and the endpoint is the line under it. The
+        // endpoint keeps its natural width and the link status word — the
+        // trailing piece — truncates into whatever room is left, so neither
+        // the name nor the address can be crowded off the row.
         let head = h_flex()
             .id(gpui::SharedString::from(format!(
                 "switcher-host:{}",
@@ -1843,7 +1844,8 @@ impl Tty7App {
                                     .gap(px(5.))
                                     .child(
                                         div()
-                                            .min_w_0()
+                                            .flex_shrink_0()
+                                            .max_w(gpui::relative(1.0))
                                             .truncate()
                                             .text_xs()
                                             .text_color(dim)
@@ -1854,7 +1856,9 @@ impl Tty7App {
                                     }))
                                     .children(word.map(|w| {
                                         div()
-                                            .flex_shrink_0()
+                                            .flex_shrink_1()
+                                            .min_w_0()
+                                            .truncate()
                                             .text_xs()
                                             .text_color(word_color)
                                             .child(w)
