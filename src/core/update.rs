@@ -887,34 +887,49 @@ fn launch_pending(pending: PendingUpdate, cx: &mut App) {
 /// stays up. Settings still shows it as ready to install.
 #[cfg(target_os = "windows")]
 fn launch_pending_elevated(pending: PendingUpdate, cx: &mut App) {
-    match pending.launch_elevated() {
-        Ok(ElevationStart::Started) => {
-            // The watcher owns the staging directory from here. Forgetting it
-            // now is what stops a relaunch from trying to install it twice.
-            let mut state = UpdateState::load();
-            state.pending = None;
-            state.last_prompted = None;
-            state.save();
-            cx.quit();
-        }
-        Ok(ElevationStart::Declined) => {
-            log::info!(
-                "administrator approval for the {} update was declined; the package stays staged",
-                pending.version
-            );
-            update_status(cx, |status| status.phase = UpdatePhase::Idle);
-        }
-        Err(error) => {
-            let detail = format!("{error:#}");
-            log::error!("could not start the elevated install: {detail}");
-            record_failure(&pending.version, &detail, cx);
-            update_status(cx, |status| {
-                status.phase = UpdatePhase::Failed(UpdateFailure::Launch(detail));
-            });
-        }
-    }
+    // ShellExecuteEx cannot run on the UI thread: raising the UAC prompt
+    // pumps this thread's message loop (the shell broadcasts change
+    // notifications through the window), which re-enters gpui while its App
+    // is borrowed and aborts the process on a RefCell double-borrow. The
+    // whole launch — watcher spawn included, so the pairing stays atomic —
+    // runs on a background thread; only the bookkeeping comes back.
+    let launch = cx.background_executor().spawn(smol::unblock(move || {
+        let version = pending.version.clone();
+        (pending.launch_elevated(), version)
+    }));
+    cx.spawn(async move |cx| {
+        let (result, version) = launch.await;
+        cx.update(|cx| match result {
+            Ok(ElevationStart::Started) => {
+                // The watcher owns the staging directory from here. Forgetting
+                // it now is what stops a relaunch from trying to install it
+                // twice.
+                let mut state = UpdateState::load();
+                state.pending = None;
+                state.last_prompted = None;
+                state.save();
+                cx.quit();
+            }
+            Ok(ElevationStart::Declined) => {
+                log::info!(
+                    "administrator approval for the {version} update was declined; \
+                     the package stays staged"
+                );
+                update_status(cx, |status| status.phase = UpdatePhase::Idle);
+            }
+            Err(error) => {
+                let detail = format!("{error:#}");
+                log::error!("could not start the elevated install: {detail}");
+                record_failure(&version, &detail, cx);
+                update_status(cx, |status| {
+                    status.phase = UpdatePhase::Failed(UpdateFailure::Launch(detail));
+                });
+            }
+        })
+    })
+    .detach();
 }
-///
+
 /// Records a failure where the user can still find it tomorrow, and lets the
 /// version prompt again.
 ///
