@@ -1024,7 +1024,21 @@ impl Tty7App {
             // another machine, where handing the name to a local file manager
             // would open whatever this one keeps at that path, or nothing.
             if self.can_spawn_locally(cx) {
-                crate::terminal::view::open_file_path(path);
+                // The OS association can fail to spawn like any other opener
+                // (#542): say so with the same words a failed file link uses.
+                if let Err(e) = crate::terminal::view::open_file_path(path) {
+                    log::warn!("failed to open {}: {e}", path.display());
+                    window.push_notification(
+                        t_fmt(
+                            L10nKey::LinkFileOpenFailed,
+                            &[
+                                ("path", &path.display().to_string()),
+                                ("error", &e.to_string()),
+                            ],
+                        ),
+                        cx,
+                    );
+                }
             } else {
                 window.push_notification(
                     t_fmt(

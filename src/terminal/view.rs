@@ -2810,6 +2810,29 @@ impl TerminalView {
         );
     }
 
+    /// Same shape as `warn_image_upload_failed`: one toast per failed open, so
+    /// a broken `link_file_command` surfaces as a config problem instead of a
+    /// "dead link" (#542). Spawn is all that is reported — a spawned opener
+    /// that exits non-zero is nobody's to see.
+    fn warn_file_open_failed(
+        &self,
+        path: &std::path::Path,
+        reason: &std::io::Error,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        log::warn!("failed to open file link {}: {reason}", path.display());
+        let path = path.display().to_string();
+        let reason = reason.to_string();
+        window.push_notification(
+            crate::ui::i18n::t_fmt(
+                crate::ui::i18n::L10nKey::LinkFileOpenFailed,
+                &[("path", path.as_str()), ("error", reason.as_str())],
+            ),
+            cx,
+        );
+    }
+
     pub fn clear_scrollback(&mut self, cx: &mut Context<Self>) {
         use alacritty_terminal::vte::ansi::{ClearMode, Handler as _};
 
@@ -4716,7 +4739,7 @@ impl TerminalView {
                     is_dir,
                 },
                 ..,
-            ) => self.open_file_link(path, line, column, is_dir, cx),
+            ) => self.open_file_link(path, line, column, is_dir, window, cx),
             LinkAt::Unresolved { candidate, pending } => {
                 return self.report_unresolved_link(&candidate, pending, window, cx);
             }
@@ -4737,6 +4760,7 @@ impl TerminalView {
         line: Option<u32>,
         column: Option<u32>,
         is_dir: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let cfg = cx.global::<Config>();
@@ -4752,19 +4776,30 @@ impl TerminalView {
             true => mode,
             false => LinkFileOpen::Internal,
         };
-        match (mode, command) {
+        // Both external arms have to answer for a failed spawn (#542): a
+        // misspelled `link_file_command` or a missing opener used to hit only
+        // the log, and the link read as dead — while the path was only ever
+        // underlined because it verifiably exists. The built-in editor has
+        // its own error path downstream of OpenFileRequested.
+        let outcome = match (mode, command) {
             (LinkFileOpen::Command, Some(template)) => {
                 run_file_command(&template, &path, line, column)
             }
             (LinkFileOpen::System, _) => open_file_path(&path),
             // Told to run a command, with no command left to run: falling back
             // to the built-in editor beats the click doing nothing.
-            (LinkFileOpen::Internal | LinkFileOpen::Command, _) => cx.emit(OpenFileRequested {
-                path,
-                line,
-                column,
-                is_dir,
-            }),
+            (LinkFileOpen::Internal | LinkFileOpen::Command, _) => {
+                cx.emit(OpenFileRequested {
+                    path,
+                    line,
+                    column,
+                    is_dir,
+                });
+                return;
+            }
+        };
+        if let Err(e) = outcome {
+            self.warn_file_open_failed(&path, &e, window, cx);
         }
     }
 
@@ -6077,7 +6112,7 @@ fn select_end_copy(enabled: bool, grid: bool, editor: bool) -> SelectEndCopy {
 
 /// Hands a path to whatever the OS has it associated with. Also the fallback
 /// for a directory the file tree cannot reach.
-pub(crate) fn open_file_path(path: &std::path::Path) {
+pub(crate) fn open_file_path(path: &std::path::Path) -> std::io::Result<()> {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(windows) {
@@ -6085,9 +6120,8 @@ pub(crate) fn open_file_path(path: &std::path::Path) {
     } else {
         "xdg-open"
     };
-    if let Err(e) = std::process::Command::new(opener).arg(path).spawn() {
-        log::warn!("failed to open {}: {e}", path.display());
-    }
+    std::process::Command::new(opener).arg(path).spawn()?;
+    Ok(())
 }
 
 fn run_file_command(
@@ -6095,15 +6129,19 @@ fn run_file_command(
     path: &std::path::Path,
     line: Option<u32>,
     column: Option<u32>,
-) {
+) -> std::io::Result<()> {
     let argv = expand_file_command_template(template, path, line, column);
     let Some((program, args)) = argv.split_first() else {
-        log::warn!("link_file_command is empty; ignoring file link");
-        return;
+        // Sanitize maps a blank template to None, so the only way here is a
+        // template whose tokens all expand to nothing (a lone `{line}` on a
+        // link with no line number). Still a config error worth reporting.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "link_file_command expanded to nothing",
+        ));
     };
-    if let Err(e) = std::process::Command::new(program).args(args).spawn() {
-        log::warn!("failed to run link_file_command {template:?}: {e}");
-    }
+    std::process::Command::new(program).args(args).spawn()?;
+    Ok(())
 }
 
 fn expand_file_command_template(
@@ -7076,6 +7114,18 @@ mod tests {
             None,
         );
         assert_eq!(argv, vec!["code", "--goto", "{other}"]);
+    }
+
+    /// #542's contract: a failed open is an `Err` the click site can toast,
+    /// not a line in a logfile nobody is watching.
+    #[test]
+    fn a_file_command_that_cannot_spawn_comes_back_as_an_error() {
+        let path = Path::new("/tmp/wherever.rs");
+        // The binary does not exist, so the spawn itself fails.
+        assert!(super::run_file_command("tty7-no-such-binary {path}", path, None, None).is_err());
+        // A template whose tokens all expand to nothing is a config error,
+        // not a silent no-op.
+        assert!(super::run_file_command("{line}", path, None, None).is_err());
     }
 
     #[test]

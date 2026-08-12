@@ -242,6 +242,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a selection, and a Ctrl+click even opened the link hidden *under* the menu.
   All three now occlude, so a click on menu background is simply swallowed.
   (#541)
+- **A file link that fails to open says so** — clicking a file path whose
+  opener is missing, or whose `link_file_command` template expands to nothing,
+  used to fail into a logfile line and nothing else; the click now raises the
+  same kind of toast a failed image upload does, naming the path and the
+  error. (#542)
 
 ## [26.8.3] - 2026-08-12
 

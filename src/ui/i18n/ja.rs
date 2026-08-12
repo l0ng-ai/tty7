@@ -942,6 +942,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpImagePasteUploadFailed => {
             "貼り付けた画像を {host} にアップロードできませんでした: {error}"
         }
+        L10nKey::LinkFileOpenFailed => "{path} を開けませんでした: {error}",
         L10nKey::ForwardPanelTitle => "ポートフォワード",
         L10nKey::ForwardDisconnected => "切断済み",
         L10nKey::ForwardDisconnectedFrom => "{host} から切断されました",
