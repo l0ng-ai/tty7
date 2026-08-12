@@ -105,6 +105,16 @@ fn spawn_config_watcher(cx: &mut App) {
                     return;
                 }
                 announced = false;
+                // The keymap is rebuilt only when a binding actually moved.
+                // This watcher fires for every write under the config dir —
+                // including the app's own `save()`, which a sidebar drag or a
+                // palette open triggers — so reloading bindings on each tick
+                // would rebuild the whole keymap for nothing, and (before
+                // `rebind` cleared first) leak a full table per tick (#548).
+                // Read past the early return above: a load that failed leaves
+                // the global alone, so there is nothing to compare and the
+                // user's keys stay in the keymap the app is dispatching on.
+                let keymap_before = crate::ui::keymap::keybinding_config(cx);
                 crate::ui::i18n::set_locale(&config.gui_language);
                 cx.set_global(config);
                 reload_themes(cx);
@@ -118,6 +128,14 @@ fn spawn_config_watcher(cx: &mut App) {
                 // one place it can change from — and the inventory that carries
                 // it to the new-tab menu is cached per window.
                 crate::ui::windows::WindowRegistry::refresh_shells(cx);
+                // A hand-edited keybinding shows up in the settings list off the
+                // live global immediately; without this it never reaches the
+                // keymap gpui actually dispatches against, so the key looks
+                // bound and does nothing until restart. Gated on the triple so
+                // an unrelated save does not churn it.
+                if crate::ui::keymap::keybinding_config(cx) != keymap_before {
+                    crate::ui::keymap::rebind(cx);
+                }
                 cx.refresh_windows();
             });
         }

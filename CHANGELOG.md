@@ -94,6 +94,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   home picker — reads `USERPROFILE` as well as `HOME` and compares with
   separators normalized and case folded, so a `C:/Users/…` pane shortens
   under a `C:\Users\…` home (#544).
+- **A hand-edited keybinding takes effect without a restart.** The config
+  watcher reloaded everything except the keymap, so a `keybindings` edit
+  showed up in the settings list off the live global while the key itself
+  stayed dead until the app restarted. The watcher now rebuilds the keymap
+  when the binding config actually changed — `(keybindings,
+  keybinding_preset, prefix)` — so the app's own `save()`, which a sidebar
+  drag or a palette open triggers, does not churn it. The rebuild also
+  replaces the map instead of appending to it, so rebinding no longer leaves
+  a retired copy of the whole table behind for every keystroke to walk. A
+  config.json that does not parse keeps the keys it was already dispatching,
+  since the reload that fails never reaches the rebuild (#548).
 
 ## [26.8.3] - 2026-08-12
 
