@@ -128,6 +128,22 @@ impl Reorder {
         self.extent(&self.rects[self.from]) + self.gap
     }
 
+    /// Whether a slot was actually laid out. The tab strip renders only the
+    /// window of chips that fits and leaves the rest holding the
+    /// `Bounds::default()` they were seeded with, so a zero extent means "this
+    /// one is off screen" rather than "this one is empty". Every geometric
+    /// question below has to skip those: they have no origin to compare
+    /// against, and treating their origin as a real 0 is what put `min` past
+    /// `max` in `held_origin`'s clamp and crashed the first drag on an
+    /// overflowing strip.
+    fn measured(&self, r: &Bounds<Pixels>) -> bool {
+        self.extent(r) > px(0.)
+    }
+
+    fn measured_slots(&self) -> impl Iterator<Item = &Bounds<Pixels>> {
+        self.rects.iter().filter(|r| self.measured(r))
+    }
+
     pub(crate) fn target(&self, pointer: Point<Pixels>) -> usize {
         let leading = self.free_origin(pointer);
         let trailing = leading + self.extent(&self.rects[self.from]);
@@ -136,6 +152,13 @@ impl Reorder {
             .enumerate()
             .filter(|(i, _)| *i != self.from)
             .filter(|(i, r)| {
+                // A slot with no bounds keeps whichever side of the dragged
+                // chip it started on, so a windowed strip reorders only among
+                // the chips it is actually showing and the ones scrolled off
+                // either end stay put.
+                if !self.measured(r) {
+                    return *i < self.from;
+                }
                 let centre = self.along(r.origin) + self.extent(r) / 2.;
                 if *i < self.from {
                     leading >= centre
@@ -151,11 +174,19 @@ impl Reorder {
     }
 
     fn held_origin(&self, pointer: Point<Pixels>) -> Pixels {
-        let first = self.along(self.rects[0].origin);
-        let last = self.rects.last().expect("non-empty");
-        let end = self.along(last.origin) + self.extent(last);
-        self.free_origin(pointer)
-            .clamp(first, end - self.extent(&self.rects[self.from]))
+        let free = self.free_origin(pointer);
+        // Nothing drawn yet: there is no span to hold the chip inside, so let
+        // it follow the pointer rather than clamping against a made-up one.
+        let (Some(head), Some(tail)) = (self.measured_slots().next(), self.measured_slots().last())
+        else {
+            return free;
+        };
+        let first = self.along(head.origin);
+        let end = self.along(tail.origin) + self.extent(tail);
+        // The dragged chip can be wider than the span left for it once the
+        // window is down to a single chip, which would invert the clamp.
+        let last_start = (end - self.extent(&self.rects[self.from])).max(first);
+        free.clamp(first, last_start)
     }
 
     pub(crate) fn held_offset(&self, pointer: Point<Pixels>, target: usize) -> Pixels {
@@ -188,6 +219,7 @@ impl Reorder {
             };
             let span: Pixels = crossed
                 .filter(|&i| i != self.from && i < self.rects.len())
+                .filter(|&i| self.measured(&self.rects[i]))
                 .map(|i| self.extent(&self.rects[i]) + self.gap)
                 .fold(px(0.), |a, b| a + b);
             if target > self.from { span } else { -span }
@@ -327,6 +359,74 @@ mod tests {
         assert_eq!(r.begin_frame(1), (1, 0));
         assert_eq!(r.begin_frame(1), (1, 1));
         assert_eq!(r.begin_frame(2), (2, 1));
+    }
+
+    /// A strip that overflows renders a window of chips and leaves the rest of
+    /// the slots at the `Bounds::default()` they were seeded with. Those have
+    /// no origin and no extent, so taking the span from slot 0 and the last
+    /// slot put `min` past `max` and `clamp` panicked — a crash on the first
+    /// drag of any tab, as soon as there were more tabs than fit.
+    fn windowed_strip(n: usize, visible: std::ops::Range<usize>, from: usize) -> Reorder {
+        let w = 120.;
+        let gap = 6.;
+        let rects = (0..n)
+            .map(|i| {
+                if !visible.contains(&i) {
+                    return Bounds::default();
+                }
+                let slot = i - visible.start;
+                Bounds {
+                    origin: point(px(slot as f32 * (w + gap)), px(0.)),
+                    size: size(px(w), px(30.)),
+                }
+            })
+            .collect();
+        Reorder::new(
+            Surface::Strip,
+            from,
+            rects,
+            Axis::Horizontal,
+            px(gap),
+            point(px(w / 2.), px(15.)),
+        )
+    }
+
+    #[test]
+    fn an_unmeasured_slot_does_not_invert_the_held_clamp() {
+        // Six tabs, only 2..5 on screen, dragging the middle visible one.
+        let r = windowed_strip(6, 2..5, 3);
+        for x in [0., 60., 130., 400., 5000.] {
+            // Would have panicked with "assertion failed: min <= max".
+            let _ = r.held_offset(point(px(x), px(15.)), r.target(point(px(x), px(15.))));
+        }
+        // The dragged chip stays inside the span the strip actually drew,
+        // which is the three visible slots, not the whole six-tab list.
+        let held = |x: f32| r.held_origin(point(px(x), px(15.)));
+        assert_eq!(held(-500.), px(0.), "clamped to the first visible slot");
+        assert_eq!(held(5000.), px(252.), "clamped to the last visible slot");
+    }
+
+    #[test]
+    fn a_hidden_slot_keeps_the_side_of_the_dragged_chip_it_started_on() {
+        // Six tabs, 2..5 visible, dragging tab 3 (the middle of the window).
+        let r = windowed_strip(6, 2..5, 3);
+        let at = |x: f32| r.target(point(px(x), px(15.)));
+        // Tabs 0 and 1 are hidden ahead of the drag and always count; tab 5 is
+        // hidden behind it and never does. So the reachable targets are the
+        // three the window shows, and dragging left cannot push the tab past
+        // the tabs scrolled off the front.
+        assert_eq!(at(-500.), 2, "cannot pass the hidden tabs ahead of it");
+        assert_eq!(at(5000.), 4, "cannot pass the hidden tab behind it");
+        // A full-length permutation still comes out, with the hidden tabs
+        // left where they were.
+        assert_eq!(r.order(at(-500.)), vec![0, 1, 3, 2, 4, 5]);
+        assert_eq!(r.order(at(5000.)), vec![0, 1, 2, 4, 3, 5]);
+    }
+
+    #[test]
+    fn a_strip_with_nothing_measured_yet_does_not_panic() {
+        let r = windowed_strip(4, 0..0, 0);
+        let _ = r.held_offset(point(px(50.), px(15.)), r.target(point(px(50.), px(15.))));
     }
 
     #[test]
