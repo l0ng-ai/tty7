@@ -104,12 +104,9 @@ pub(crate) fn relative_time(now: u64, then: u64) -> String {
 
 pub(crate) fn display_path(path: &std::path::Path) -> String {
     let text = path.to_string_lossy();
-    let shortened = match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && text.starts_with(&home) => {
-            format!("~{}", &text[home.len()..])
-        }
-        _ => text.to_string(),
-    };
+    // Same home-abbreviation the Info panel and tab strip use: HOME with a
+    // USERPROFILE fallback, separators normalized, case folded (#544).
+    let shortened = crate::ui::path_display::abbreviate_home(&text).into_owned();
     if shortened.chars().count() <= PICKER_PATH_MAX {
         return shortened;
     }

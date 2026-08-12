@@ -78,6 +78,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command exists; only a *failed* hang-up (which `ws rm` reports by pane id)
   leaves orphans behind. The site reference, the bundled skill reference, and
   `ws rm --help` all read the same way now (#539).
+- **The Info panel's agent row reads one pane, not a splice of two** — the
+  name came from `tab.agent` (whichever leaf has an agent) while the status
+  came from `tab.agent_status` (the most urgent across the whole tab), so a
+  split tab running two agents could show one pane's name beside the other
+  pane's state. The row now takes both from the detail pane when it has an
+  agent, falling back to the tab aggregate only when the focused leaf has
+  none — so name and status always describe the same pane (#543).
+- **Windows paths in the Info panel shorten to their leaf again** — the cwd
+  row split on `/` only, so a backslash-spelled path (any agent-reported cwd,
+  a cmd pane, the shell-integration-off case) elided its *tail* and hid the
+  directory's own name. The split now takes the last of either separator,
+  and the `~` shortening — shared by the Info panel, the tab strip, and the
+  home picker — reads `USERPROFILE` as well as `HOME` and compares with
+  separators normalized and case folded, so a `C:/Users/…` pane shortens
+  under a `C:\Users\…` home (#544).
 
 ## [26.8.3] - 2026-08-12
 

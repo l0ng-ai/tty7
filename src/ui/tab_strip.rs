@@ -57,21 +57,10 @@ pub(crate) fn abbreviate_home(path: &str) -> std::borrow::Cow<'_, str> {
     if path.starts_with('~') {
         return Cow::Borrowed(path);
     }
-    let Some(home) = std::env::var_os("HOME") else {
-        return Cow::Borrowed(path);
-    };
-    let home = home.to_string_lossy();
-    let home = home.trim_end_matches('/');
-    if home.is_empty() {
-        return Cow::Borrowed(path);
-    }
-    if path == home {
-        return Cow::Owned("~".to_string());
-    }
-    match path.strip_prefix(home) {
-        Some(rest) if rest.starts_with('/') => Cow::Owned(format!("~{rest}")),
-        _ => Cow::Borrowed(path),
-    }
+    // The shared comparison: HOME with a USERPROFILE fallback, separators
+    // normalized, case folded — a Windows pane whose cwd spells itself
+    // `C:/Users/…` shortens under a `C:\Users\…` home too (#544).
+    crate::ui::path_display::abbreviate_home(path)
 }
 
 /// The separator a path spells itself with. A path carrying a single `\` is
