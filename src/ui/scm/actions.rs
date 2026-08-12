@@ -210,11 +210,13 @@ impl Tty7App {
         let message = self.scm_message(&repo, cx);
         let plan = crate::ui::scm::panel::commit_plan(&status, amend, &message);
         if !plan.enabled {
-            gpui_component::WindowExt::push_notification(
-                window,
-                t(L10nKey::ScmNothingToCommit).to_string(),
-                cx,
-            );
+            // The panel's own button exposes this through disabled + tooltip;
+            // the palette and the key binding have no tooltip to hover, so
+            // the toast has to carry the reason itself — "write a message
+            // first" and "nothing to commit" call for opposite actions, and
+            // answering the first with the second sends the user staging
+            // files they already staged (#546).
+            gpui_component::WindowExt::push_notification(window, t(plan.reason).to_string(), cx);
             // The follow-up dies with the commit: "commit and push" with
             // nothing to commit must not push whatever the branch holds.
             return;

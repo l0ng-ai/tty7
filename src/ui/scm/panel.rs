@@ -2395,6 +2395,17 @@ mod tests {
             !commit_plan(&staged, false, "   ").enabled,
             "an all-whitespace message is no message"
         );
+        // ...and the reason must say so: staged work with a blank message is
+        // not "nothing to commit", which is what the palette path used to
+        // answer (#546).
+        assert_eq!(
+            commit_plan(&staged, false, "  ").reason,
+            L10nKey::ScmCommitNeedsMessage
+        );
+        assert_eq!(
+            commit_plan(&clean, false, "msg").reason,
+            L10nKey::ScmNothingToCommit
+        );
         assert!(
             commit_plan(&clean, true, "").enabled,
             "amending with no message keeps HEAD's own with --no-edit"

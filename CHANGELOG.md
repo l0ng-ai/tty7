@@ -192,6 +192,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disable themselves with a tooltip that says why, every other path gets a
   toast naming the reason, and an unborn branch — no commits to send yet —
   gets its own answer instead of sharing the detached one's silence. (#545)
+- **A refused commit says why, not always "Nothing to commit"** — committing
+  from the palette or the key binding with staged work but a blank message was
+  answered with "Nothing to commit", which sends the user staging files they
+  already staged; the toast now carries the plan's actual reason ("Write a
+  commit message first"), the same words the panel's own button shows on its
+  tooltip. (#546)
 
 ## [26.8.3] - 2026-08-12
 
