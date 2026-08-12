@@ -133,8 +133,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row in the menu behind the sidebar's **+**, after the shells tty7 detected. A
   distro, a container, a REPL, the same shell against a different profile: they
   are launched exactly as written, since tty7 chose none of the command and has
-  no defaults to add to it. `shell` still names the one command that stands in
-  for the platform default; these are the rest. An entry with no `program` is
+  no defaults to add to it — including its shell integration, so a custom entry
+  opens without prompt marks or working-directory tracking even where the
+  detected row beside it has both. `shell` still names the one command that
+  stands in for the platform default; these are the rest. An entry with no
+  `program` is
   skipped, one with no `label` is named after what it runs, and one that
   borrows a name already in the menu is marked `(Custom)` so the row telling
   you what a plain new tab opens with stays the only one wearing it. (#443)

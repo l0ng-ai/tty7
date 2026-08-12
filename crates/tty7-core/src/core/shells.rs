@@ -16,6 +16,14 @@ pub struct DetectedShell {
     /// as tty7 defaults, so `true` preserves the previous protocol behavior.
     #[serde(default = "default_true")]
     pub args_are_tty7_defaults: bool,
+    /// Marks a row the user wrote into `custom_shells` rather than one tty7
+    /// found. Detection is what Settings offers to stand in for the platform
+    /// default; an entry the user added is a menu extra, and a picker that
+    /// carries only a program would quietly drop the arguments that make it
+    /// what it is. Older peers omit this field and had no such rows, so `false`
+    /// is the honest reading of their inventory.
+    #[serde(default)]
+    pub user_authored: bool,
 }
 
 impl DetectedShell {
@@ -25,6 +33,7 @@ impl DetectedShell {
             program: program.into(),
             args: Vec::new(),
             args_are_tty7_defaults: true,
+            user_authored: false,
         }
     }
 }
@@ -60,11 +69,15 @@ pub fn inventory() -> ShellInventory {
 /// candidate for that position — so this runs once the default has already been
 /// settled and cannot move it.
 fn append_custom(inventory: &mut ShellInventory, custom: &[crate::core::config::CustomShell]) {
-    for entry in custom {
+    for (index, entry) in custom.iter().enumerate() {
         let program = entry.program.trim();
         if program.is_empty() {
             // Nothing to launch. The rest of the entry may be perfectly well
             // formed, but a menu row that opens nothing is worse than no row.
+            // Say which one, though: a misspelled key deserializes to an entry
+            // that is simply empty, and a row that never appears is otherwise
+            // indistinguishable from the feature not working.
+            log::warn!("custom_shells[{index}] has no program; skipping it");
             continue;
         }
         let mut label = entry.label.trim().to_string();
@@ -74,8 +87,16 @@ fn append_custom(inventory: &mut ShellInventory, custom: &[crate::core::config::
         // The menu marks its default row by matching the label
         // (`tab_strip::shell_menu`), so a custom entry that borrows a name
         // already in the list would wear a mark meant for another row. Same
-        // answer the configured shell already gets when it collides.
-        if inventory.shells.iter().any(|shell| shell.label == label) {
+        // answer the configured shell already gets when it collides — and it
+        // has to keep answering until the name is actually free, since the
+        // suffixed name can collide in its turn with a second entry that
+        // borrowed the same one, or with a label the user wrote suffix and
+        // all. `default_name` counts even when no row carries it: a hole
+        // `inventory_from` can leave, and the one name a custom row must never
+        // occupy.
+        while inventory.default_name == label
+            || inventory.shells.iter().any(|shell| shell.label == label)
+        {
             label.push_str(" (Custom)");
         }
         inventory.shells.push(DetectedShell {
@@ -85,6 +106,7 @@ fn append_custom(inventory: &mut ShellInventory, custom: &[crate::core::config::
             // tty7 chose none of this, so none of it is a tty7 default: the
             // arguments have to survive into the pane exactly as written.
             args_are_tty7_defaults: false,
+            user_authored: true,
         });
     }
 }
@@ -163,6 +185,7 @@ fn inventory_from(
                 program,
                 args,
                 args_are_tty7_defaults: false,
+                user_authored: false,
             },
         );
     }
@@ -472,6 +495,7 @@ fn detect_windows() -> Vec<DetectedShell> {
             program: bash.to_string_lossy().into_owned(),
             args: vec!["-i".into(), "-l".into()],
             args_are_tty7_defaults: true,
+            user_authored: false,
         });
     }
 
@@ -481,6 +505,7 @@ fn detect_windows() -> Vec<DetectedShell> {
             program: "wsl.exe".into(),
             args: vec!["--distribution".into(), distro, "--cd".into(), "~".into()],
             args_are_tty7_defaults: true,
+            user_authored: false,
         });
     }
 
@@ -1299,5 +1324,51 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn custom_entries_that_all_want_the_same_name_still_get_one_each() {
+        let mut inventory = menu(&["zsh"]);
+        append_custom(
+            &mut inventory,
+            &[
+                custom("zsh", "/a", &[]),
+                custom("zsh", "/b", &[]),
+                custom("zsh (Custom)", "/c", &[]),
+            ],
+        );
+
+        // Two rows with the same name launching different programs is the one
+        // outcome the menu cannot present: `conformance` fails a host whose
+        // inventory names a label twice, and the user cannot tell the rows
+        // apart to pick between them.
+        let labels: Vec<_> = inventory.shells.iter().map(|s| &s.label).collect();
+        let unique: std::collections::HashSet<_> = labels.iter().collect();
+        assert_eq!(labels.len(), unique.len(), "{labels:?}");
+    }
+
+    #[test]
+    fn a_custom_entry_cannot_claim_a_default_name_no_row_carries() {
+        // `inventory_from` can name a default that is in no row — a login shell
+        // recorded in passwd whose file is gone. The menu marks its default by
+        // label, so a custom entry landing on that name would wear the mark
+        // while a plain new tab opened something else entirely.
+        let mut inventory = menu(&["zsh"]);
+        inventory.default_name = "ksh".into();
+        append_custom(&mut inventory, &[custom("ksh", "/usr/bin/ksh", &[])]);
+
+        assert_eq!(
+            inventory.shells.last().expect("the entry").label,
+            "ksh (Custom)"
+        );
+    }
+
+    #[test]
+    fn no_custom_entries_leaves_the_menu_exactly_as_it_was() {
+        let before = menu(&["zsh", "bash"]);
+        let mut after = before.clone();
+        append_custom(&mut after, &[]);
+
+        assert_eq!(before, after);
     }
 }

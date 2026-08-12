@@ -132,6 +132,26 @@ impl WindowRegistry {
         }
     }
 
+    /// Rebuilds every window's shell inventory from disk.
+    ///
+    /// `custom_shells` is read while that inventory is assembled, and it lives
+    /// in `config.json` — which hot-reloads. The menu it feeds has to follow the
+    /// file there, or the one surface the feature has appears not to work until
+    /// the app is restarted, while every other key in the same save takes hold
+    /// at once.
+    pub fn refresh_shells(cx: &mut App) {
+        Self::sweep(cx);
+        let apps: Vec<_> = cx
+            .global::<Self>()
+            .windows
+            .iter()
+            .map(|entry| entry.app.clone())
+            .collect();
+        for app in apps {
+            let _ = app.update(cx, |app, cx| app.refresh_shells(cx));
+        }
+    }
+
     fn register(
         cx: &mut App,
         workspace: WorkspaceId,

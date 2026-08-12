@@ -2103,6 +2103,7 @@ mod tests {
             program: "custom-shell".into(),
             args: vec!["--login".into()],
             args_are_tty7_defaults: false,
+            user_authored: false,
         };
         let spec = shell_spec(&shell);
 

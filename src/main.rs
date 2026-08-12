@@ -90,6 +90,10 @@ fn spawn_config_watcher(cx: &mut App) {
                 // in-app language picker does.
                 crate::ui::theme::set_menus(cx);
                 crate::ui::windows::WindowRegistry::refresh_locale(cx, None);
+                // `custom_shells` is only ever hand-edited, so this file is the
+                // one place it can change from — and the inventory that carries
+                // it to the new-tab menu is cached per window.
+                crate::ui::windows::WindowRegistry::refresh_shells(cx);
                 cx.refresh_windows();
             });
         }

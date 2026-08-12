@@ -148,7 +148,11 @@ pub struct Config {
     #[serde(default = "default_prefix")]
     pub prefix: String,
     pub shell: Option<ShellConfig>,
-    #[serde(default)]
+    /// Lenient on purpose: this is a hand-edited key with a nested shape, and a
+    /// typo in one entry must not fail the whole `Config` and hand the user
+    /// back defaults that the next settings write would then persist over what
+    /// they wrote.
+    #[serde(default, deserialize_with = "de_lenient")]
     pub custom_shells: Vec<CustomShell>,
 
     pub link_url: bool,
@@ -1526,6 +1530,29 @@ mod tests {
             cfg.ssh_profiles[0].auth,
             crate::core::ssh_profile::AuthMode::Auto
         );
+    }
+
+    #[test]
+    fn a_mistyped_custom_shell_does_not_cost_the_user_the_rest_of_the_config() {
+        let cfg = Config::default();
+        assert!(cfg.custom_shells.is_empty());
+
+        let cfg: Config =
+            serde_json::from_str(r#"{"font_size": 15.0, "custom_shells": {"Ubuntu": "wsl.exe"}}"#)
+                .expect("a bad custom_shells must not fail the whole config parse");
+        assert!(cfg.custom_shells.is_empty());
+        // The point of the leniency: `Config::load` hands back defaults for a
+        // config that fails to parse, and the next settings write persists them
+        // over the file. Everything the user wrote beside the typo survives.
+        assert_eq!(cfg.font_size, 15.0);
+
+        let cfg: Config = serde_json::from_str(
+            r#"{"custom_shells":[{"label":"Ubuntu","program":"wsl.exe","args":["-d","Ubuntu"]}]}"#,
+        )
+        .expect("a well-formed list parses");
+        assert_eq!(cfg.custom_shells.len(), 1);
+        assert_eq!(cfg.custom_shells[0].program, "wsl.exe");
+        assert_eq!(cfg.custom_shells[0].args, ["-d", "Ubuntu"]);
     }
 
     #[test]
