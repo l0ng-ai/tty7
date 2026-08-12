@@ -298,6 +298,15 @@ pub struct Config {
     /// as their history mysteriously forgetting the other window.
     #[serde(default)]
     pub per_pane_history: bool,
+
+    /// This instance is the stand-in for a file that could not be read or
+    /// parsed: `load` kept a copy aside and handed back defaults. Never
+    /// serialized — it describes how the file *load* went, not a setting —
+    /// and it makes [`Config::save`] refuse to run, because writing these
+    /// defaults back over the user's hand-edited file is how one typo becomes
+    /// permanent data loss (#537). Cleared only by a load that parses.
+    #[serde(skip)]
+    pub quarantined: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -574,29 +583,79 @@ impl Default for Config {
             agent_commands: HashMap::new(),
             restore_agent_sessions: true,
             per_pane_history: false,
+            quarantined: false,
         }
     }
 }
 
+/// How the file behind a [`Config::load_with_outcome`] went — the answer a
+/// hot-reload watcher needs before it swaps a running app onto the result,
+/// because "no file yet" and "a broken file" must not do the same thing
+/// (#537).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadOutcome {
+    /// The file parsed (after the usual field-level leniency).
+    Parsed,
+    /// There is no file (or no config dir yet): the defaults simply are the
+    /// config, and saving them is fine.
+    Absent,
+    /// The file existed but did not parse. A copy was kept beside it, and the
+    /// returned config is the defaults with writes suppressed — saving over
+    /// the broken file would make one typo permanent.
+    Quarantined,
+}
+
 impl Config {
     pub fn load() -> Self {
+        Self::load_with_outcome().0
+    }
+
+    /// [`Config::load`] with the verdict the file earned. Most callers want
+    /// the values either way and use `load`; the watcher that swaps a running
+    /// app onto the result needs the outcome to keep a broken file from
+    /// evicting the settings the app is running on.
+    pub fn load_with_outcome() -> (Self, LoadOutcome) {
         let Some(path) = Self::path() else {
-            return Config::default();
+            return (Config::default(), LoadOutcome::Absent);
         };
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return Config::default();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return (Config::default(), LoadOutcome::Absent);
+            }
+            Err(e) => {
+                // Unreadable is not unparseable, but the rule is the same:
+                // what cannot be read must not be overwritten. There may be
+                // nothing readable to keep a copy of, so nothing is parked —
+                // the file itself is still where the user left it.
+                log::warn!(
+                    "failed to read config at {}: {e}; using defaults, writes suppressed",
+                    path.display()
+                );
+                let mut cfg = Config::default();
+                cfg.quarantined = true;
+                return (cfg, LoadOutcome::Quarantined);
+            }
         };
         match serde_json::from_str::<Config>(strip_bom(&text)) {
             Ok(mut cfg) => {
                 cfg.sanitize();
-                cfg
+                (cfg, LoadOutcome::Parsed)
             }
             Err(e) => {
+                // The next `save` overwrites this file wholesale, so handing
+                // back defaults with no trace quietly discards whatever the
+                // file held the moment anything — a dragged sidebar divider —
+                // writes. Park a copy first, the way `WindowViews::load`
+                // does, and mark the stand-in so `save` refuses to run for it.
                 log::warn!(
-                    "failed to parse config at {}: {e}; using defaults",
+                    "failed to parse config at {}: {e}; keeping it aside and using defaults",
                     path.display()
                 );
-                Config::default()
+                quarantine(&path);
+                let mut cfg = Config::default();
+                cfg.quarantined = true;
+                (cfg, LoadOutcome::Quarantined)
             }
         }
     }
@@ -670,6 +729,14 @@ impl Config {
     }
 
     pub fn save(&self) {
+        if self.quarantined {
+            // The file this instance stands in for could not be read, so what
+            // the user wrote is still on disk — writing these defaults over it
+            // is the wholesale loss #537 is about. The fix is to repair the
+            // file; the next load that parses produces a writable config.
+            log::warn!("not saving over a config file that failed to load; fix or remove it first");
+            return;
+        }
         let Some(path) = Self::path() else {
             return;
         };
@@ -1590,6 +1657,76 @@ mod tests {
         assert!(!loaded.restore_session);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_corrupt_config_is_kept_aside_and_never_overwritten() {
+        let _guard = lock_config_file();
+        pin_config_dir();
+        let path = Config::path().expect("pinned config dir");
+        let aside = path.with_extension("json.corrupt");
+        std::fs::remove_file(&aside).ok();
+        std::fs::write(&path, "{ not json").unwrap();
+
+        let (loaded, outcome) = Config::load_with_outcome();
+        assert_eq!(outcome, LoadOutcome::Quarantined);
+        assert!(loaded.quarantined, "the stand-in must say what it is");
+        assert_eq!(
+            std::fs::read_to_string(&aside).as_deref().ok(),
+            Some("{ not json"),
+            "the next save overwrites config.json wholesale, so the old \
+             contents must already be parked beside it"
+        );
+
+        // The save every sidebar drag issues must not turn one typo into
+        // permanent loss: a quarantined config refuses to write, and the file
+        // on disk stays exactly the user's own.
+        loaded.save();
+        assert_eq!(
+            std::fs::read_to_string(&path).as_deref().ok(),
+            Some("{ not json"),
+            "a quarantined config must never overwrite the file it stood in for"
+        );
+
+        // Fixing the file is what re-arms writes.
+        std::fs::write(&path, r#"{"font_size": 19.0}"#).unwrap();
+        let (fixed, outcome) = Config::load_with_outcome();
+        assert_eq!(outcome, LoadOutcome::Parsed);
+        assert!(!fixed.quarantined);
+        fixed.save();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("19.0"));
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&aside).ok();
+    }
+
+    #[test]
+    fn a_missing_config_file_is_absent_not_quarantined() {
+        let _guard = lock_config_file();
+        pin_config_dir();
+        let path = Config::path().expect("pinned config dir");
+        std::fs::remove_file(&path).ok();
+
+        let (loaded, outcome) = Config::load_with_outcome();
+        assert_eq!(outcome, LoadOutcome::Absent);
+        // A first run saves its defaults without anyone calling that loss.
+        assert!(!loaded.quarantined);
+    }
+
+    #[test]
+    fn the_quarantined_flag_never_reaches_disk() {
+        let cfg = Config {
+            quarantined: true,
+            ..Config::default()
+        };
+        let text = serde_json::to_string(&cfg).unwrap();
+        assert!(!text.contains("quarantined"));
+        // And a hand-written `"quarantined": true` in the file does not
+        // suppress saves either — the flag belongs to the loader, not the file.
+        let parsed: Config =
+            serde_json::from_str(r#"{"quarantined": true, "font_size": 20.0}"#).unwrap();
+        assert!(!parsed.quarantined);
+        assert_eq!(parsed.font_size, 20.0);
     }
 
     #[test]

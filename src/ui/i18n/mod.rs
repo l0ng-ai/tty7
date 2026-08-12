@@ -1168,6 +1168,8 @@ l10n_keys! {
     AppRestart,
     AppRestartServerNoServer,
     AppRestartServerBody,
+    ConfigQuarantinedStartup,
+    ConfigQuarantinedReload,
     AppWorktreeRemoveDetailDirty,
     AppWorktreeRemoveDetailClean,
     AppWorktreeRemoveTitle,

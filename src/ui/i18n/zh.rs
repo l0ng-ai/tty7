@@ -1339,6 +1339,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppRestartServerBody => {
             "这会停止本机上所有正在运行的 shell——其中仍在运行的任何内容都会被终止。你的标签页和布局会被保留，并以全新的 shell 重新打开。"
         }
+        L10nKey::ConfigQuarantinedStartup => {
+            "config.json 无法解析，tty7 正以默认设置运行。文件原内容已保留为旁边的 config.json.corrupt——修好文件后会自动重载；在此之前，设置里的更改不会被保存。"
+        }
+        L10nKey::ConfigQuarantinedReload => {
+            "修改后的 config.json 无法解析，已保留当前在用的设置。文件内容已另存为旁边的 config.json.corrupt——修好文件后会自动重载；在此之前，设置里的更改不会被保存。"
+        }
         L10nKey::AppWorktreeRemoveDetailDirty => {
             "位于 {path} 的已关闭标签页的 worktree 有未提交的变更。"
         }

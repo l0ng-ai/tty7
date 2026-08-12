@@ -79,7 +79,16 @@ fn spawn_config_watcher(cx: &mut App) {
             while rx.try_recv().is_ok() {}
 
             cx.update(|cx| {
-                let config = Config::load();
+                let (config, outcome) = Config::load_with_outcome();
+                if outcome == crate::core::config::LoadOutcome::Quarantined {
+                    // Keep the settings the app is running on: swapping the
+                    // stand-in defaults in would flash the whole UI onto
+                    // defaults, and the load already parked the broken file
+                    // beside the original. It reloads itself the moment the
+                    // file parses again.
+                    notify_config_quarantined(cx, false);
+                    return;
+                }
                 crate::ui::i18n::set_locale(&config.gui_language);
                 cx.set_global(config);
                 crate::ui::presets::load_registry(cx);
@@ -108,6 +117,31 @@ fn is_theme_file(p: &std::path::Path) -> bool {
                 || e.eq_ignore_ascii_case("yml")
                 || e.eq_ignore_ascii_case("itermcolors")
         })
+}
+
+/// Says out loud that config.json did not load and where its contents were
+/// parked. Without this the symptom is "my settings are gone" (startup) or
+/// "my edit did nothing" (reload) — both read as data loss, and neither
+/// points at the file that needs fixing.
+fn notify_config_quarantined(cx: &mut App, startup: bool) {
+    use gpui_component::WindowExt as _;
+
+    let Some(workspace) = crate::ui::windows::WindowRegistry::most_recent(cx) else {
+        return;
+    };
+    let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, workspace) else {
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        window.push_notification(
+            crate::ui::i18n::t(if startup {
+                crate::ui::i18n::L10nKey::ConfigQuarantinedStartup
+            } else {
+                crate::ui::i18n::L10nKey::ConfigQuarantinedReload
+            }),
+            cx,
+        );
+    });
 }
 
 fn strip_os_arg_prefix(arg: &std::ffi::OsStr, prefix: &str) -> Option<std::ffi::OsString> {
@@ -447,7 +481,10 @@ fn main() {
             #[cfg(target_os = "macos")]
             set_dock_icon_for_bare_binary();
             crate::ui::i18n::set_locale(&gui_language);
-            cx.set_global(Config::load());
+            // The load above is reused rather than re-read: a second read of a
+            // file that fails to parse would quarantine a second copy.
+            let quarantined = config.quarantined;
+            cx.set_global(config);
             crate::ui::theme::refresh_system_appearance(cx);
             crate::core::session::WorkspaceStore::init(cx);
             crate::ui::windows::WindowRegistry::init(cx);
@@ -465,6 +502,9 @@ fn main() {
 
             let reopen = crate::ui::windows::restore_target(cx, open_path.as_deref());
             crate::ui::windows::open_at(cx, reopen, open_path);
+            if quarantined {
+                notify_config_quarantined(cx, true);
+            }
         });
 }
 

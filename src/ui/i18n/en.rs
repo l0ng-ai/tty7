@@ -1424,6 +1424,12 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppRestartServerBody => {
             "This stops every running shell on this computer — anything still running in them will be terminated. Your tabs and layout are kept and reopened with fresh shells."
         }
+        L10nKey::ConfigQuarantinedStartup => {
+            "config.json could not be parsed, so tty7 is running on default settings. The file's contents were kept beside it as config.json.corrupt — fix the file and it reloads itself. Until then, changes made in Settings are not saved."
+        }
+        L10nKey::ConfigQuarantinedReload => {
+            "The edited config.json could not be parsed, so the running settings were kept. The file's contents were set aside as config.json.corrupt — fix the file and it reloads itself. Until then, changes made in Settings are not saved."
+        }
         L10nKey::AppWorktreeRemoveDetailDirty => {
             "The closed tab's worktree at {path} has uncommitted changes."
         }

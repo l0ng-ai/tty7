@@ -32,6 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a path a build tool printed from the workspace root did not resolve from a
   member directory. A path that matches nothing under either now says so
   instead of the click doing nothing.
+- **A broken config.json can no longer be silently replaced by defaults** —
+  a file that failed to parse was ignored with only a log line, and the next
+  write of any setting — dragging the sidebar divider, zooming the font with
+  Ctrl+=, saving anything in Settings — serialized the in-memory defaults
+  over it wholesale, turning one typo into the loss of every hand edit. A
+  load that fails to parse now keeps the file's contents beside it as
+  `config.json.corrupt` (the same quarantine `views.json` already had), and
+  the stand-in defaults carry a mark that makes `save` refuse to run, so
+  nothing writes until the file parses again. The hot-reload watcher tells
+  "broken" apart from "absent" and keeps the settings the app is running on
+  instead of swapping defaults in mid-session, and both the startup and the
+  reload path say what happened and where the copy is. A file that simply
+  cannot be *read* logs a warning now too — it used to fall to defaults with
+  no trace at all. (#537)
 
 ## [26.8.3] - 2026-08-12
 

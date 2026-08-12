@@ -9,9 +9,14 @@ impl gpui::Global for Config {}
 
 impl Config {
     pub fn load() -> Self {
+        Self::load_with_outcome().0
+    }
+
+    pub fn load_with_outcome() -> (Self, LoadOutcome) {
         #[cfg(test)]
-        assert_scratch_config_dir("Config::load");
-        Self(CoreConfig::load())
+        assert_scratch_config_dir("Config::load_with_outcome");
+        let (core, outcome) = CoreConfig::load_with_outcome();
+        (Self(core), outcome)
     }
 
     #[cfg(test)]

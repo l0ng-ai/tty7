@@ -1460,6 +1460,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppRestartServerBody => {
             "このコンピュータで実行中のすべてのシェルが停止します。タブとレイアウトは保持され、新しいシェルで開きます"
         }
+        L10nKey::ConfigQuarantinedStartup => {
+            "config.json を解析できなかったため、デフォルト設定で実行しています。ファイルの内容は config.json.corrupt として残しました——修正すれば自動で再読み込みされます。それまでは設定での変更は保存されません"
+        }
+        L10nKey::ConfigQuarantinedReload => {
+            "編集された config.json を解析できなかったため、実行中の設定をそのまま保持しています。ファイルの内容は config.json.corrupt として保存しました——修正すれば自動で再読み込みされます。それまでは設定での変更は保存されません"
+        }
         L10nKey::AppWorktreeRemoveDetailDirty => {
             "閉じたタブの {path} にあるワークツリーには未コミットの変更があります"
         }
