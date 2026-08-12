@@ -1817,10 +1817,53 @@ impl Tty7App {
         cx: &mut Context<Self>,
         on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
+        self.segmented_full(sf, id, options, Some(selected), None, cx, on_pick)
+    }
+
+    /// A segmented control over a fixed set of values, used where the config
+    /// accepts anything in a range. When the live value matches a bucket
+    /// exactly that bucket is highlighted; when it does not, a trailing
+    /// "Custom (N)" cell carries the highlight instead of the nearest bucket
+    /// getting a label it does not have — `scrollback_limit: 5000` used to
+    /// light up "10,000", and clicking that cell silently overwrote the real
+    /// value with the bucket's (#550). `custom` is `(index, label)`; its cell
+    /// never fires `on_pick`, so the active custom value is never "re-picked"
+    /// into a bucket it is not.
+    pub(crate) fn segmented_valued(
+        &self,
+        id: impl Into<SharedString>,
+        options: &[&str],
+        selected: Option<usize>,
+        custom_label: Option<String>,
+        cx: &mut Context<Self>,
+        on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let sf = cx.global::<presets::Surfaces>().window;
+        self.segmented_full(sf, id, options, selected, custom_label, cx, on_pick)
+    }
+
+    fn segmented_full(
+        &self,
+        sf: presets::Surface,
+        id: impl Into<SharedString>,
+        options: &[&str],
+        selected: Option<usize>,
+        custom_label: Option<String>,
+        cx: &mut Context<Self>,
+        on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
         let border = cx.theme().border;
         let id: SharedString = id.into();
         let on_pick = std::rc::Rc::new(on_pick);
-        let count = options.len();
+        let count = options.len() + usize::from(custom_label.is_some());
+        // The display cells: the fixed buckets, then the custom cell if the
+        // live value matched none of them.
+        let cells: Vec<(String, Option<usize>)> = options
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (l.to_string(), Some(i)))
+            .chain(custom_label.map(|l| (l, None)))
+            .collect();
         h_flex()
             .id(gpui::ElementId::Name(id.clone()))
             .h(px(24.))
@@ -1829,19 +1872,20 @@ impl Tty7App {
             .border_color(border)
             .bg(gpui::rgb(sf.base))
             .overflow_hidden()
-            .children(options.iter().enumerate().map(|(i, label)| {
-                let active = i == selected;
+            .children(cells.into_iter().enumerate().map(|(i, (label, bucket))| {
+                // The custom cell (bucket None) is highlighted when no bucket
+                // is; a bucket is highlighted only on an exact match.
+                let active = bucket == selected || (bucket.is_none() && selected.is_none());
                 let on_pick = on_pick.clone();
                 let corners =
                     rounding::segment_corners(i, count, rounding::TRACK_RADIUS, rounding::HAIRLINE);
-                h_flex()
+                let cell = h_flex()
                     .id(gpui::ElementId::NamedInteger(id.clone(), i as u64))
                     .items_center()
                     .justify_center()
                     .h_full()
                     .px_2p5()
                     .text_sm()
-                    .cursor_pointer()
                     .rounded_corners(corners)
                     .when(i > 0, |s| s.border_l_1().border_color(border))
                     .when(active, |s| {
@@ -1853,11 +1897,18 @@ impl Tty7App {
                         s.text_color(gpui::rgb(sf.text_resting))
                             .hover(|h| h.bg(gpui::rgb(sf.hover)))
                     })
-                    .active(|s| s.bg(gpui::rgb(sf.pressed)))
-                    .child(label.to_string())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        on_pick(this, i, window, cx);
-                    }))
+                    .child(label);
+                match bucket {
+                    Some(ix) => cell
+                        .cursor_pointer()
+                        .active(|s| s.bg(gpui::rgb(sf.pressed)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            on_pick(this, ix, window, cx);
+                        })),
+                    // The custom cell names the current value; it is not a
+                    // button, because there is no bucket value to write.
+                    None => cell,
+                }
             }))
             .into_any_element()
     }
@@ -4779,11 +4830,19 @@ impl Tty7App {
         let smooth_scroll = cfg.smooth_scroll;
         let mouse_reporting = cfg.mouse_reporting;
         let bell = cfg.bell;
-        let scrollback_idx = match cfg.scrollback_limit {
-            n if n <= 1_000 => 0,
-            n if n <= 10_000 => 1,
-            _ => 2,
-        };
+        // A bucket highlights only on an exact match; any other value gets a
+        // "Custom (N)" cell so the highlight never claims a number the config
+        // does not have, and clicking that cell cannot overwrite it (#550).
+        let scrollback_buckets = [1_000usize, 10_000, 100_000];
+        let scrollback_sel = scrollback_buckets
+            .iter()
+            .position(|&b| b == cfg.scrollback_limit);
+        let scrollback_custom = scrollback_sel.is_none().then(|| {
+            t_fmt(
+                L10nKey::SettingsCustomValue,
+                &[("value", &cfg.scrollback_limit.to_string())],
+            )
+        });
         let scroll_slider = match self.active_settings() {
             Some(s) => s.scroll_slider.clone(),
             None => return div().into_any_element(),
@@ -4834,10 +4893,11 @@ impl Tty7App {
                 .child(Input::new(&link_file_command_input).small())
                 .into_any_element()
         });
-        let scrollback_radio = self.segmented(
+        let scrollback_radio = self.segmented_valued(
             "term-scrollback",
             &["1,000", "10,000", "100,000"],
-            scrollback_idx,
+            scrollback_sel,
+            scrollback_custom,
             cx,
             |this, ix, _w, cx| {
                 let lines = match ix {
@@ -5333,12 +5393,18 @@ impl Tty7App {
             NotifyMode::Unfocused => 1,
             NotifyMode::Always => 2,
         };
-        let threshold_idx = match cfg.notify_threshold_secs {
-            n if n <= 5 => 0,
-            n if n <= 10 => 1,
-            n if n <= 30 => 2,
-            _ => 3,
-        };
+        // Exact-match highlight with a "Custom (Ns)" fallback, same as the
+        // scrollback row: a hand-set 20s used to light up "30s" (#550).
+        let threshold_buckets = [5u64, 10, 30, 60];
+        let threshold_sel = threshold_buckets
+            .iter()
+            .position(|&b| b == cfg.notify_threshold_secs);
+        let threshold_custom = threshold_sel.is_none().then(|| {
+            t_fmt(
+                L10nKey::SettingsCustomValue,
+                &[("value", &format!("{}s", cfg.notify_threshold_secs))],
+            )
+        });
         let notify_radio = self.segmented(
             "wt-notify",
             &[
@@ -5357,10 +5423,11 @@ impl Tty7App {
                 this.set_notify_mode(mode, cx);
             },
         );
-        let threshold_radio = self.segmented(
+        let threshold_radio = self.segmented_valued(
             "wt-notify-threshold",
             &["5s", "10s", "30s", "1m"],
-            threshold_idx,
+            threshold_sel,
+            threshold_custom,
             cx,
             |this, ix, _w, cx| {
                 let secs = match ix {

@@ -92,14 +92,18 @@ fn hsla_to_u32(color: gpui::Hsla) -> u32 {
     (to(rgba.r) << 16) | (to(rgba.g) << 8) | to(rgba.b)
 }
 
-const FONT_SIZE_MIN: f32 = 6.0;
-const FONT_SIZE_MAX: f32 = 48.0;
+// The steppers clamp to the same range `sanitize` allows, defined in
+// tty7-core next to the validation: a local, narrower pair used to push a
+// config-legal value the wrong way — `font_size: 50` shrank to 48 on "+",
+// and the result was written back to the file (#550).
+pub(crate) use crate::core::config::{
+    FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN,
+};
+
 pub(crate) const FONT_SIZE_STEP: f32 = 1.0;
 
 pub(crate) const UI_FONT_SIZE_STEP: f32 = 1.0;
 
-const LINE_HEIGHT_MIN: f32 = 1.0;
-const LINE_HEIGHT_MAX: f32 = 2.0;
 pub(crate) const LINE_HEIGHT_STEP: f32 = 0.05;
 
 const MAX_CLOSED_TABS: usize = 20;

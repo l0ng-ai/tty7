@@ -489,6 +489,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsThemePanelLight => "ライトモード用のテーマを選択",
         L10nKey::SettingsThemePanelDark => "ダークモード用のテーマを選択",
         L10nKey::SettingsCustom => "カスタム",
+        L10nKey::SettingsCustomValue => "カスタム ({value})",
         L10nKey::SettingsBuiltIn => "組み込み",
         L10nKey::SettingsDark => "ダーク",
         L10nKey::SettingsLight => "ライト",

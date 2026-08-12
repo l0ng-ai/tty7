@@ -423,6 +423,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsThemePanelLight => "选择浅色模式的主题。",
         L10nKey::SettingsThemePanelDark => "选择深色模式的主题。",
         L10nKey::SettingsCustom => "自定义",
+        L10nKey::SettingsCustomValue => "自定义 ({value})",
         L10nKey::SettingsBuiltIn => "内置",
         L10nKey::SettingsDark => "深色",
         L10nKey::SettingsLight => "浅色",

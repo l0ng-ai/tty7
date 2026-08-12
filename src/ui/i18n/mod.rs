@@ -422,6 +422,7 @@ l10n_keys! {
     SettingsThemePanelLight,
     SettingsThemePanelDark,
     SettingsCustom,
+    SettingsCustomValue,
     SettingsBuiltIn,
     SettingsDark,
     SettingsLight,

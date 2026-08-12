@@ -685,11 +685,11 @@ impl Config {
         if !self.font_size.is_finite() || self.font_size <= 0.0 {
             self.font_size = Config::default().font_size;
         }
-        self.font_size = self.font_size.clamp(4.0, 256.0);
+        self.font_size = self.font_size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
         if !self.line_height.is_finite() || self.line_height <= 0.0 {
             self.line_height = Config::default().line_height;
         }
-        self.line_height = self.line_height.clamp(0.5, 4.0);
+        self.line_height = self.line_height.clamp(LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
         if !self.ui_font_size.is_finite() || self.ui_font_size <= 0.0 {
             self.ui_font_size = default_ui_font_size();
         }
@@ -1036,6 +1036,17 @@ pub const UI_FONT_SIZE_DEFAULT: f32 = 16.0;
 pub const UI_FONT_SIZE_MIN: f32 = 12.0;
 pub const UI_FONT_SIZE_MAX: f32 = 24.0;
 
+/// The terminal's font-size and line-height bounds, shared by `sanitize` and
+/// the GUI's steppers. The GUI used to keep its own, narrower pair (6–48,
+/// 1.0–2.0), so a value inside the config range but outside the GUI's got
+/// pushed the *wrong way* by a single step — `font_size: 50` shrank to 48 on
+/// "+" — and written back to the file, permanently (#550). One range, defined
+/// where the value is validated, is the `ui_font_size` precedent.
+pub const FONT_SIZE_MIN: f32 = 4.0;
+pub const FONT_SIZE_MAX: f32 = 256.0;
+pub const LINE_HEIGHT_MIN: f32 = 0.5;
+pub const LINE_HEIGHT_MAX: f32 = 4.0;
+
 fn default_ui_font_size() -> f32 {
     UI_FONT_SIZE_DEFAULT
 }
@@ -1309,6 +1320,32 @@ mod tests {
         assert!(lh.is_finite() && lh > 0.0);
 
         assert_eq!(sanitized(15.0, 1.4), (15.0, 1.4));
+    }
+
+    #[test]
+    fn sanitize_clamps_to_the_same_bounds_the_gui_steps_within() {
+        // The GUI used to clamp to its own, narrower pair, so a config-legal
+        // value landed outside the stepper's range and one click pushed it the
+        // wrong way. The bounds are one shared set now, and sanitize must
+        // agree with them exactly — a value at either edge survives unchanged
+        // (#550).
+        let mut cfg = Config {
+            font_size: FONT_SIZE_MIN,
+            line_height: LINE_HEIGHT_MAX,
+            ..Config::default()
+        };
+        cfg.sanitize();
+        assert_eq!(cfg.font_size, FONT_SIZE_MIN);
+        assert_eq!(cfg.line_height, LINE_HEIGHT_MAX);
+
+        let mut cfg = Config {
+            font_size: 1_000.0,
+            line_height: 0.0,
+            ..Config::default()
+        };
+        cfg.sanitize();
+        assert_eq!(cfg.font_size, FONT_SIZE_MAX, "over the top clamps down");
+        assert!(cfg.line_height > 0.0, "a degenerate line height resets");
     }
 
     #[test]

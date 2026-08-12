@@ -484,6 +484,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsThemePanelLight => "Choose the theme for light mode.",
         L10nKey::SettingsThemePanelDark => "Choose the theme for dark mode.",
         L10nKey::SettingsCustom => "Custom",
+        L10nKey::SettingsCustomValue => "Custom ({value})",
         L10nKey::SettingsBuiltIn => "Built-in",
         L10nKey::SettingsDark => "Dark",
         L10nKey::SettingsLight => "Light",

@@ -105,6 +105,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a retired copy of the whole table behind for every keystroke to walk. A
   config.json that does not parse keeps the keys it was already dispatching,
   since the reload that fails never reaches the rebuild (#548).
+- **The font-size and line-height steppers no longer push a hand-set value
+  the wrong way** — the settings steppers and the `Ctrl+=`/`Ctrl+-` keys
+  clamped to a narrower range (font 6–48, line height 1.0–2.0) than the
+  config file allows (4–256, 0.5–4.0), so `font_size: 50` shrank to 48 on
+  "+" and wrote that back, permanently changing a value it only meant to
+  nudge. The steppers and `sanitize` now share one range, defined next to the
+  validation. The scrollback and notify-threshold preset rows got the matching
+  fix: a value between two buckets no longer lights up the nearest one
+  (`scrollback_limit: 5000` highlighted "10,000", and clicking that cell
+  silently overwrote it) — it shows a "Custom (N)" cell that names the real
+  value and is not a button (#550).
 
 ## [26.8.3] - 2026-08-12
 
