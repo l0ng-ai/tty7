@@ -557,15 +557,18 @@ mod windows {
     use std::process::{Child, Command, ExitStatus, Stdio};
     use std::ptr::null_mut;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use smol::io::AsyncReadExt as _;
 
+    use tty7_core::daemon::install::outcome::UpdateOutcome;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, HANDLE, WAIT_FAILED,
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, GetLastError, HANDLE, LocalFree,
+        WAIT_FAILED, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO, VerQueryValueW,
+        CreateDirectoryW, GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO,
+        VerQueryValueW,
     };
     use windows_sys::Win32::System::Threading::{
         INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
@@ -661,6 +664,7 @@ mod windows {
                     log,
                     stage,
                     result_file: options.result_file,
+                    expected_sha256: None,
                 })
             }
             "install-portable" => {
@@ -698,6 +702,89 @@ mod windows {
                 fs::remove_dir_all(&stage)
                     .map_err(|error| format!("removing {}: {error}", stage.display()))
             }
+            "capabilities" => {
+                reject_extra(args)?;
+                // One token per line. The GUI reads this to learn whether the
+                // *installed* updater — the binary a UAC prompt would point
+                // at — speaks the elevation verbs; a build that predates them
+                // exits with the usage error above instead, which is the same
+                // answer (#504).
+                for capability in ELEVATION_CAPABILITIES {
+                    println!("{capability}");
+                }
+                Ok(())
+            }
+            "elevated-stage" => {
+                let gui_pid = next_string(&mut args)?
+                    .parse::<u32>()
+                    .map_err(|_| "gui pid is not an unsigned integer".to_string())?;
+                let installer = next_path(&mut args)?;
+                let asset_name = next_string(&mut args)?;
+                let install_dir = next_path(&mut args)?;
+                let expected_version = next_string(&mut args)?;
+                let log = next_path(&mut args)?;
+                let stage = next_path(&mut args)?;
+                let options = tail_options(args)?;
+                options.apply();
+                let (Some(expected_sha256), Some(status_file)) =
+                    (options.expected_sha256, options.status_file)
+                else {
+                    return Err(usage());
+                };
+                elevated_stage(ElevatedStagePlan {
+                    gui_pid,
+                    installer,
+                    asset_name,
+                    install_dir,
+                    expected_version,
+                    log,
+                    stage,
+                    expected_sha256,
+                    status_file,
+                    result_file: options.result_file,
+                    config_dir: options.config_dir,
+                })
+            }
+            "install-elevated" => {
+                let parent_pid = next_string(&mut args)?
+                    .parse::<u32>()
+                    .map_err(|_| "parent pid is not an unsigned integer".to_string())?;
+                let installer = next_path(&mut args)?;
+                let checksums = next_path(&mut args)?;
+                let asset_name = next_string(&mut args)?;
+                let install_dir = next_path(&mut args)?;
+                let expected_version = next_string(&mut args)?;
+                let log = next_path(&mut args)?;
+                let stage = next_path(&mut args)?;
+                let options = tail_options(args)?;
+                options.apply();
+                let Some(expected_sha256) = options.expected_sha256 else {
+                    return Err(usage());
+                };
+                install_elevated(InstallPlan {
+                    parent_pid,
+                    installer,
+                    checksums,
+                    asset_name,
+                    install_dir,
+                    expected_version,
+                    log,
+                    stage,
+                    result_file: options.result_file,
+                    expected_sha256: Some(expected_sha256),
+                })
+            }
+            "relaunch-watcher" => {
+                let options = tail_options(args)?;
+                options.apply();
+                watch(&WatcherPlan {
+                    status_file: options.status_file.ok_or_else(usage)?,
+                    result_file: options.result_file.ok_or_else(usage)?,
+                    app: options.app_path.ok_or_else(usage)?,
+                    log: options.log.ok_or_else(usage)?,
+                    version: options.expected_version.ok_or_else(usage)?,
+                })
+            }
             _ => Err(usage()),
         }
     }
@@ -712,7 +799,18 @@ mod windows {
          or: tty7-updater install-portable <parent-pid> <archive.zip> <checksums.txt> \
          <asset-name> <install-dir> <version> <log-path> <stage-dir> \
          [--config-dir <dir>] [--result-file <path>]\n\
-         or: tty7-updater cleanup <parent-pid> <stage-dir>"
+         or: tty7-updater cleanup <parent-pid> <stage-dir>\n\
+         or: tty7-updater capabilities\n\
+         or: tty7-updater elevated-stage <gui-pid> <setup.exe> <asset-name> \
+         <install-dir> <version> <log-path> <stage-dir> \
+         --expected-sha256 <hex> --status-file <path> \
+         [--config-dir <dir>] [--result-file <path>]\n\
+         or: tty7-updater install-elevated <parent-pid> <setup.exe> <checksums.txt> \
+         <asset-name> <install-dir> <version> <log-path> <stage-dir> \
+         --expected-sha256 <hex> [--config-dir <dir>] [--result-file <path>]\n\
+         or: tty7-updater relaunch-watcher --status-file <path> --result-file <path> \
+         --app-path <tty7-app.exe> --log <path> --expected-version <version> \
+         [--config-dir <dir>]"
             .to_string()
     }
 
@@ -745,6 +843,22 @@ mod windows {
     struct TailOptions {
         config_dir: Option<PathBuf>,
         result_file: Option<PathBuf>,
+        /// The staged package's digest as the release server published it.
+        /// Crosses the elevation boundary on the command line because the
+        /// checksums file beside the package cannot anchor trust there: a
+        /// medium-integrity process can rewrite both together.
+        expected_sha256: Option<String>,
+        /// Where `elevated-stage` tells the watcher which pid names the
+        /// install chain.
+        status_file: Option<PathBuf>,
+        /// The `tty7-app.exe` the watcher relaunches.
+        app_path: Option<PathBuf>,
+        /// Log override for the verbs that take no positional log path (the
+        /// watcher).
+        log: Option<PathBuf>,
+        /// The version being installed, for the watcher's synthesized
+        /// outcomes.
+        expected_version: Option<String>,
     }
 
     fn tail_options(mut args: impl Iterator<Item = OsString>) -> Result<TailOptions, String> {
@@ -753,6 +867,15 @@ mod windows {
             match arg.to_str() {
                 Some("--config-dir") => options.config_dir = Some(next_path(&mut args)?),
                 Some("--result-file") => options.result_file = Some(next_path(&mut args)?),
+                Some("--expected-sha256") => {
+                    options.expected_sha256 = Some(next_string(&mut args)?)
+                }
+                Some("--status-file") => options.status_file = Some(next_path(&mut args)?),
+                Some("--app-path") => options.app_path = Some(next_path(&mut args)?),
+                Some("--log") => options.log = Some(next_path(&mut args)?),
+                Some("--expected-version") => {
+                    options.expected_version = Some(next_string(&mut args)?)
+                }
                 _ => return Err(usage()),
             }
         }
@@ -809,6 +932,9 @@ mod windows {
         log: PathBuf,
         stage: PathBuf,
         result_file: Option<PathBuf>,
+        /// Set on the elevated path, where the digest — not the checksums
+        /// file it was copied with — is the trust anchor (#504).
+        expected_sha256: Option<String>,
     }
 
     struct PortableInstallPlan {
@@ -823,8 +949,23 @@ mod windows {
         result_file: Option<PathBuf>,
     }
 
+    /// How an install ends. The distinction exists because an elevated
+    /// process must never spawn `tty7-app.exe`: the app it launched would
+    /// inherit the elevation — and under an over-the-shoulder prompt it
+    /// would even be the *administrator's* app, with the wrong account's
+    /// config. The elevated chain reports instead, and the medium-integrity
+    /// watcher relaunches.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Completion {
+        /// Today's path: this process relaunches the app itself.
+        RelaunchHere,
+        /// Elevated path: release the guard, write the outcome, leave the
+        /// relaunch to the watcher.
+        ReportToWatcher,
+    }
+
     fn install(plan: InstallPlan) -> Result<(), String> {
-        let result = install_inner(&plan);
+        let result = install_inner(&plan, Completion::RelaunchHere);
         report_outcome(
             plan.result_file.as_deref(),
             &plan.log,
@@ -834,19 +975,39 @@ mod windows {
         result
     }
 
-    fn install_inner(plan: &InstallPlan) -> Result<(), String> {
+    fn install_elevated(plan: InstallPlan) -> Result<(), String> {
+        let result = install_inner(&plan, Completion::ReportToWatcher);
+        report_outcome(
+            plan.result_file.as_deref(),
+            &plan.log,
+            &plan.expected_version,
+            &result,
+        );
+        result
+    }
+
+    fn install_inner(plan: &InstallPlan, completion: Completion) -> Result<(), String> {
         log_line(&plan.log, "waiting for the tty7 GUI to exit");
         if let Err(error) = wait_for_exit(plan.parent_pid) {
-            return recover_from_failed_update(plan, error);
+            return recover_from_failed_update(plan, error, completion);
         }
         log_line(&plan.log, "re-verifying the staged Windows installer");
-        if let Err(error) = verify_update(
-            &plan.installer,
-            &plan.checksums,
-            &plan.asset_name,
-            &plan.expected_version,
-        ) {
-            return recover_from_failed_update(plan, error);
+        let verification = match &plan.expected_sha256 {
+            Some(digest) => verify_update_digest(
+                &plan.installer,
+                &plan.asset_name,
+                &plan.expected_version,
+                digest,
+            ),
+            None => verify_update(
+                &plan.installer,
+                &plan.checksums,
+                &plan.asset_name,
+                &plan.expected_version,
+            ),
+        };
+        if let Err(error) = verification {
+            return recover_from_failed_update(plan, error, completion);
         }
 
         // Setup's own PrepareToInstall repeats this, but doing it here first
@@ -859,26 +1020,36 @@ mod windows {
         );
         // From here until the relaunch, a `tty7` CLI call or a manual launch
         // must not spawn a daemon that relocks the files Setup is replacing.
-        // launch_app releases the guard on every path out of this function.
+        // Every path out of this function releases the guard — `launch_app`
+        // on the relaunch-here paths, an explicit clear on the elevated ones.
         tty7_core::daemon::update_guard::hold();
         if let Err(error) = tty7_core::daemon::spawn::stop_for_update(&plan.install_dir) {
-            return recover_from_failed_update(plan, error);
+            return recover_from_failed_update(plan, error, completion);
         }
 
         log_line(&plan.log, "running the tty7 Windows installer");
         let status = match run_installer(&plan.installer, &plan.log) {
             Ok(status) => status,
             Err(error) => {
-                return recover_from_failed_update(plan, error);
+                return recover_from_failed_update(plan, error, completion);
             }
         };
         if !status.success() {
             let error = format!("the Windows installer exited with {status}");
-            return recover_from_failed_update(plan, error);
+            return recover_from_failed_update(plan, error, completion);
         }
 
         if let Err(error) = verify_installed_payload(&plan.install_dir, &plan.expected_version) {
-            return recover_from_failed_update(plan, error);
+            return recover_from_failed_update(plan, error, completion);
+        }
+        if completion == Completion::ReportToWatcher {
+            tty7_core::daemon::update_guard::clear();
+            log_line(
+                &plan.log,
+                "the Windows update completed; the watcher relaunches tty7",
+            );
+            queue_cleanup(&plan.install_dir, &plan.stage);
+            return Ok(());
         }
         log_line(&plan.log, "the Windows update completed; relaunching tty7");
         let result = launch_app(&plan.install_dir);
@@ -891,8 +1062,460 @@ mod windows {
 
     /// Records one terminal update failure and restores the same recovery
     /// behavior for every step that can fail after the GUI starts shutting down.
-    fn recover_from_failed_update(plan: &InstallPlan, error: String) -> Result<(), String> {
+    fn recover_from_failed_update(
+        plan: &InstallPlan,
+        error: String,
+        completion: Completion,
+    ) -> Result<(), String> {
+        if completion == Completion::ReportToWatcher {
+            // The relaunch belongs to the watcher on this path — an elevated
+            // process spawning the app is the one thing the chain must never
+            // do, failure recovery included. The guard still ends here: the
+            // installation is no longer being replaced.
+            log_line(&plan.log, &error);
+            tty7_core::daemon::update_guard::clear();
+            queue_cleanup(&plan.install_dir, &plan.stage);
+            return Err(error);
+        }
         recover_without_replacement(&plan.log, &plan.install_dir, &plan.stage, error)
+    }
+
+    // ---------------------------------------------------------------------
+    // The elevated chain (#504): one UAC prompt, two elevated stages, and a
+    // watcher that never elevates. The GUI points the prompt at the
+    // *installed* updater — the one binary a medium-integrity process cannot
+    // have replaced — running `elevated-stage`; that stage re-stages the
+    // payload under an admin-only directory and runs `install-elevated` from
+    // it; the install stage reports through the outcome file instead of
+    // relaunching the app; and the `relaunch-watcher`, spawned by the GUI
+    // before the prompt as the original user, relaunches it.
+
+    /// What `capabilities` prints, one per line — the verbs the GUI requires
+    /// before it points a UAC prompt at the installed updater. The GUI keeps
+    /// its own copy of this list (see `updater_speaks_elevation` in
+    /// `core::update`); an updater that predates the verbs never prints them.
+    const ELEVATION_CAPABILITIES: [&str; 3] =
+        ["elevated-stage", "install-elevated", "relaunch-watcher"];
+
+    struct ElevatedStagePlan {
+        gui_pid: u32,
+        installer: PathBuf,
+        asset_name: String,
+        install_dir: PathBuf,
+        expected_version: String,
+        log: PathBuf,
+        stage: PathBuf,
+        expected_sha256: String,
+        status_file: PathBuf,
+        result_file: Option<PathBuf>,
+        config_dir: Option<PathBuf>,
+    }
+
+    fn elevated_stage(plan: ElevatedStagePlan) -> Result<(), String> {
+        let result = elevated_stage_inner(&plan);
+        if let Err(error) = &result
+            && plan
+                .result_file
+                .as_deref()
+                .is_some_and(|path| !path.exists())
+        {
+            // The install stage writes the outcome itself once it runs, so a
+            // failure before that — a digest mismatch, a staging error — has
+            // to be reported here, or the watcher waits out its status grace
+            // for a chain that never started.
+            report_outcome(
+                plan.result_file.as_deref(),
+                &plan.log,
+                &plan.expected_version,
+                &Err(error.clone()),
+            );
+        }
+        result
+    }
+
+    fn elevated_stage_inner(plan: &ElevatedStagePlan) -> Result<(), String> {
+        log_line(&plan.log, "preparing the elevated update staging");
+        // The digest arrived on the command line — the one value a
+        // medium-integrity process cannot have forged, because the GUI read
+        // it from the release server over HTTPS. Everything this chain
+        // executes or installs is checked against it, before use and again
+        // after every copy.
+        verify_digest(
+            &plan.installer,
+            &plan.expected_sha256,
+            "staged Windows installer",
+        )?;
+        // The staged helper copy runs a process tree higher than it was
+        // written, so it is pinned to the installed image first — the one
+        // file a medium-integrity process cannot have replaced.
+        pin_helper_to_installed(&plan.stage.join("tty7-updater.exe"), &plan.install_dir)?;
+
+        let staging = create_protected_staging()?;
+        let result = run_install_stage(plan, &staging);
+        // Whatever happened, the admin-only staging goes with this process. A
+        // removal failure strands it for the next elevated run's sweep.
+        let _ = fs::remove_dir_all(&staging);
+        result
+    }
+
+    fn run_install_stage(plan: &ElevatedStagePlan, staging: &Path) -> Result<(), String> {
+        let staged_installer = staging.join(&plan.asset_name);
+        let staged_checksums = staging.join("checksums.txt");
+        let staged_updater = staging.join("tty7-updater.exe");
+        fs::copy(&plan.installer, &staged_installer).map_err(|error| {
+            format!(
+                "copying {} into the protected staging: {error}",
+                plan.installer.display()
+            )
+        })?;
+        fs::copy(plan.stage.join("checksums.txt"), &staged_checksums).map_err(|error| {
+            format!("copying the checksums into the protected staging: {error}")
+        })?;
+        fs::copy(plan.stage.join("tty7-updater.exe"), &staged_updater)
+            .map_err(|error| format!("copying the updater into the protected staging: {error}"))?;
+        // Re-verified at their new home: the copy, not just the source, is
+        // what stage 2 executes and installs.
+        verify_digest(
+            &staged_installer,
+            &plan.expected_sha256,
+            "re-staged Windows installer",
+        )?;
+        pin_helper_to_installed(&staged_updater, &plan.install_dir)?;
+
+        // Name this process to the watcher as late as possible: it waits on
+        // the install stage below, so its one pid covers the whole chain.
+        if let Some(parent) = plan.status_file.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::write(&plan.status_file, std::process::id().to_string())
+            .map_err(|error| format!("writing {}: {error}", plan.status_file.display()))?;
+
+        log_line(&plan.log, "running the elevated install stage");
+        let mut command = Command::new(&staged_updater);
+        command
+            .arg("install-elevated")
+            .arg(plan.gui_pid.to_string())
+            .arg(&staged_installer)
+            .arg(&staged_checksums)
+            .arg(&plan.asset_name)
+            .arg(&plan.install_dir)
+            .arg(&plan.expected_version)
+            .arg(&plan.log)
+            .arg(&plan.stage)
+            .arg("--expected-sha256")
+            .arg(&plan.expected_sha256);
+        if let Some(result_file) = &plan.result_file {
+            command.arg("--result-file").arg(result_file);
+        }
+        if let Some(config_dir) = &plan.config_dir {
+            command.arg("--config-dir").arg(config_dir);
+        }
+        let status = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .and_then(|mut child| child.wait())
+            .map_err(|error| format!("running the elevated install stage: {error}"))?;
+        if !status.success() {
+            return Err(format!("the elevated install stage exited with {status}"));
+        }
+        Ok(())
+    }
+
+    /// `%ProgramData%\tty7\update-<pid>`, created with a DACL that lets no
+    /// standard user in. Between the digest check and the install the payload
+    /// sits in this directory, and one any medium-integrity process could
+    /// write would hand it a swap-in window across exactly that gap.
+    fn create_protected_staging() -> Result<PathBuf, String> {
+        let program_data = std::env::var_os("ProgramData")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+        let root = program_data.join("tty7");
+        fs::create_dir_all(&root)
+            .map_err(|error| format!("creating {}: {error}", root.display()))?;
+        // Leftovers of chains that died mid-install. Removing a live chain's
+        // staging fails on its locked files, which is the only guard needed.
+        sweep_protected_staging(&root);
+        let staging = root.join(format!("update-{}", std::process::id()));
+        create_dir_admin_only(&staging)?;
+        Ok(staging)
+    }
+
+    fn sweep_protected_staging(root: &Path) {
+        let Ok(entries) = fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let named = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("update-"));
+            if named {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+    }
+
+    fn create_dir_admin_only(dir: &Path) -> Result<(), String> {
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        // Owner Administrators, group SYSTEM, and a protected DACL granting
+        // full control to exactly those two — not even read to Users.
+        const SDDL: &str = "O:BAG:SYD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)";
+        let mut descriptor: *mut c_void = null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide_string(SDDL).as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                null_mut(),
+            )
+        } == 0
+        {
+            return Err(format!(
+                "translating the staging DACL: OS error {}",
+                unsafe { GetLastError() }
+            ));
+        }
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        let created = unsafe { CreateDirectoryW(wide_path(dir).as_ptr(), &attributes) };
+        let _ = unsafe { LocalFree(descriptor) };
+        if created == 0 {
+            return Err(format!("creating {}: OS error {}", dir.display(), unsafe {
+                GetLastError()
+            }));
+        }
+        Ok(())
+    }
+
+    /// The staged helper copy runs elevated, so it may only be the exact
+    /// bytes of the installed one: the installation directory is the trust
+    /// root a medium-integrity process cannot write, and the staged copy is
+    /// pinned to it before any use.
+    fn pin_helper_to_installed(staged: &Path, install_dir: &Path) -> Result<(), String> {
+        let installed = install_dir.join("tty7-updater.exe");
+        if file_digest(staged)? != file_digest(&installed)? {
+            return Err(format!(
+                "the staged updater at {} does not match the installed {} — \
+                 refusing to run it elevated",
+                staged.display(),
+                installed.display()
+            ));
+        }
+        Ok(())
+    }
+
+    fn file_digest(path: &Path) -> Result<String, String> {
+        let bytes =
+            fs::read(path).map_err(|error| format!("reading {}: {error}", path.display()))?;
+        Ok(tty7_core::daemon::install::checksums::hex(
+            &tty7_core::daemon::install::checksums::sha256(&bytes),
+        ))
+    }
+
+    fn verify_digest(file: &Path, expected_hex: &str, label: &str) -> Result<(), String> {
+        let actual = file_digest(file)?;
+        if !actual.eq_ignore_ascii_case(expected_hex) {
+            return Err(format!(
+                "the {label} failed sha256 verification: expected {expected_hex}, got {actual}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The elevated path's replacement for `verify_update`: same filename and
+    /// version checks, but the digest comes from the command line — the value
+    /// the GUI read from the release server — not from a checksums file that
+    /// crossed the medium-integrity staging directory beside the installer.
+    fn verify_update_digest(
+        installer: &Path,
+        asset_name: &str,
+        expected_version: &str,
+        expected_sha256: &str,
+    ) -> Result<(), String> {
+        if installer.file_name() != Some(OsStr::new(asset_name)) {
+            return Err(format!(
+                "the staged installer filename does not match the release asset {asset_name:?}"
+            ));
+        }
+        verify_digest(installer, expected_sha256, "staged Windows installer")?;
+        // Same reasoning as the manifest path: corruption or replacement
+        // while the helper waited is caught here, after the GUI exited.
+        verify_file_version(installer, expected_version, "staged Windows installer")
+    }
+
+    struct WatcherPlan {
+        status_file: PathBuf,
+        result_file: PathBuf,
+        app: PathBuf,
+        log: PathBuf,
+        version: String,
+    }
+
+    /// How often the watcher looks at the status and outcome files.
+    const WATCH_POLL: Duration = Duration::from_secs(1);
+    /// How long the watcher waits for the chain to first report in. Covers a
+    /// UAC prompt left open on the secure desktop — not a slow install, which
+    /// `WATCH_TIMEOUT` bounds once the chain has reported.
+    const WATCH_STATUS_GRACE: Duration = Duration::from_secs(15 * 60);
+    /// Bounds the whole install once the chain reported in. An install still
+    /// running past it (an antivirus rescanning every replaced file) is left
+    /// to finish on its own: the watcher stops waiting rather than relaunch
+    /// the app into a directory that may still be mid-replace.
+    const WATCH_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+    /// Between the chain's pid dying and giving up on its outcome: the write
+    /// is the last thing the chain does, so it lands within seconds.
+    const WATCH_RESULT_GRACE: Duration = Duration::from_secs(10);
+
+    fn watch(plan: &WatcherPlan) -> Result<(), String> {
+        let started = Instant::now();
+        let mut chain_seen = false;
+        let outcome = loop {
+            if let Some(outcome) = read_outcome_lossy(plan) {
+                break outcome;
+            }
+            match status_pid(&plan.status_file) {
+                Some(pid) if pid_alive(pid) => {
+                    chain_seen = true;
+                    if started.elapsed() > WATCH_TIMEOUT {
+                        log_line(
+                            &plan.log,
+                            "the elevated update did not finish within the hour; \
+                             leaving it to complete on its own",
+                        );
+                        return Ok(());
+                    }
+                }
+                // A dead pid — whether or not it was ever seen alive (a fast
+                // chain can complete between two polls) — or a status file
+                // that vanished after the chain was seen: the chain is over,
+                // and its outcome is the last thing it writes.
+                Some(_) => {
+                    break await_final_outcome(plan);
+                }
+                None if chain_seen => {
+                    break await_final_outcome(plan);
+                }
+                None => {
+                    if started.elapsed() > WATCH_STATUS_GRACE {
+                        log_line(
+                            &plan.log,
+                            "no elevated updater ever reported in; the prompt was \
+                             likely never answered",
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+            thread::sleep(WATCH_POLL);
+        };
+        finish_watch(plan, outcome)
+    }
+
+    /// The chain is gone; its outcome should already be on its way to disk.
+    fn await_final_outcome(plan: &WatcherPlan) -> UpdateOutcome {
+        let deadline = Instant::now() + WATCH_RESULT_GRACE;
+        loop {
+            if let Some(outcome) = read_outcome_lossy(plan) {
+                return outcome;
+            }
+            if Instant::now() >= deadline {
+                return UpdateOutcome {
+                    version: plan.version.clone(),
+                    ok: false,
+                    detail: Some(
+                        "the elevated updater exited without recording a result".to_string(),
+                    ),
+                };
+            }
+            thread::sleep(WATCH_POLL);
+        }
+    }
+
+    /// The watcher's read of the outcome file: a parse failure is an outcome
+    /// — something wrote it — not a reason to keep waiting.
+    fn read_outcome_lossy(plan: &WatcherPlan) -> Option<UpdateOutcome> {
+        match tty7_core::daemon::install::outcome::read_outcome(&plan.result_file) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let detail = format!(
+                    "the update result at {} could not be read: {error}",
+                    plan.result_file.display()
+                );
+                log_line(&plan.log, &detail);
+                Some(UpdateOutcome {
+                    version: plan.version.clone(),
+                    ok: false,
+                    detail: Some(detail),
+                })
+            }
+        }
+    }
+
+    fn finish_watch(plan: &WatcherPlan, outcome: UpdateOutcome) -> Result<(), String> {
+        let _ = fs::remove_file(&plan.status_file);
+        // Success or failure, the binary at the app path is the one to run:
+        // the new version after a completed install, the previous one after
+        // a recovery. Spawned from this never-elevated process, so the app
+        // comes back as the original user whatever the chain ran as.
+        let health = Command::new(&plan.app)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("launching {}: {error}", plan.app.display()))
+            .and_then(|mut child| healthy_after_grace(&mut child));
+        if let Err(error) = health {
+            // "Installed but nothing came back" is a failure the user must
+            // see, so it replaces the outcome the chain recorded.
+            let detail = match &outcome.detail {
+                Some(previous) => format!("{previous}; and the relaunch failed: {error}"),
+                None => format!("the update installed but the relaunch failed: {error}"),
+            };
+            let _ = tty7_core::daemon::install::outcome::write_outcome(
+                &plan.result_file,
+                &UpdateOutcome {
+                    version: outcome.version.clone(),
+                    ok: false,
+                    detail: Some(detail.clone()),
+                },
+            );
+            log_line(&plan.log, &detail);
+            return Err(detail);
+        }
+        if outcome.ok {
+            Ok(())
+        } else {
+            Err(outcome.detail.unwrap_or_default())
+        }
+    }
+
+    /// Whether the pid names a live process, from an account that may not be
+    /// allowed to open it: under an over-the-shoulder elevation the chain
+    /// runs as the administrator, and `ERROR_ACCESS_DENIED` is exactly the
+    /// "alive" answer that boundary gives.
+    fn pid_alive(pid: u32) -> bool {
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if handle.is_null() {
+            return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
+        }
+        let handle = OwnedHandle(handle);
+        // OpenProcess succeeds for an exited process while a handle remains;
+        // the zero wait tells running from merely remembered.
+        let wait = unsafe { WaitForSingleObject(handle.0, 0) };
+        wait == WAIT_TIMEOUT
+    }
+
+    fn status_pid(status_file: &Path) -> Option<u32> {
+        fs::read_to_string(status_file).ok()?.trim().parse().ok()
     }
 
     fn install_portable(plan: PortableInstallPlan) -> Result<(), String> {

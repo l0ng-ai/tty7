@@ -125,7 +125,12 @@ Name: "{autodesktop}\tty7"; Filename: "{app}\tty7-app.exe"; Tasks: desktopicon; 
 ; reads those same keys to decide whether an existing registration still points
 ; at this install, and two hand-kept copies of the layout would drift. Runs
 ; before the launch entry below so a first start already sees the final state.
-Filename: "{app}\tty7-app.exe"; Parameters: "--register-explorer-menu"; Tasks: explorermenu; Flags: runhidden waituntilterminated
+; skipifsilent because a silent run *is* the elevated in-place update (#504):
+; launching the app there would run it elevated, and under over-the-shoulder
+; elevation the menu would land in the administrator's hive, not the user's.
+; Skipping loses nothing: an upgrade keeps the install path, so the HKCU keys
+; a ticked first install wrote still point at the right executable.
+Filename: "{app}\tty7-app.exe"; Parameters: "--register-explorer-menu"; Tasks: explorermenu; Flags: runhidden waituntilterminated skipifsilent
 Filename: "{app}\tty7-app.exe"; Description: "{cm:LaunchProgram,tty7}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]

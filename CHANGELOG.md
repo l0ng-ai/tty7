@@ -326,6 +326,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A Windows install for all users now updates itself** — previously an
+  in-place update was refused there (replacing files under `C:\Program Files`
+  takes administrator rights, and a silent installer launched unelevated would
+  either install a second copy per-user or raise a bare UAC prompt from a
+  temporary directory). The update now runs as one announced UAC prompt that
+  covers both privileged stages, and the app itself never runs elevated: a
+  helper running as the signed-in user waits the install out and relaunches
+  tty7 with the user's own token. The update dialog says the prompt is coming
+  before the app quits, and "Install on Next Launch" is not offered — nobody
+  would be there to answer. Declining the prompt is not an error: the staged
+  package simply waits in Settings. Everything the elevated half needs crosses
+  as command-line arguments (an elevated child does not inherit the
+  environment), the package's checksum travels from the release server in the
+  GUI's memory rather than from a file the download could have rewritten, and
+  the privileged stages always run the *installed* updater — a medium-integrity
+  process cannot swap the binary that gets elevated. The staged copy lives in
+  an administrator-only `%ProgramData%` directory while the chain runs (#504).
+  Installations updated by an updater that predates the chain still fall back
+  to the manual download page, so the first release carrying this updates the
+  way it always did; the one after it updates itself.
+
 - **Every confirmation answers the way the platform taught you it would** — the
   action button is on the right and Cancel on the left, through one shared
   helper. Answer 0 is drawn rightmost and takes Return, so the old

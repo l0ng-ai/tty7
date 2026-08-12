@@ -617,6 +617,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::UpdateDialogCannotSelfUpdate => "This installation cannot update itself.",
         L10nKey::UpdateDialogLater => "Later",
         L10nKey::UpdateDialogNextLaunch => "Install on Next Launch",
+        L10nKey::UpdateDialogNeedsElevation => {
+            "This copy of tty7 is installed for all users, so Windows will ask for administrator approval once before the install begins. tty7 itself never runs elevated — it comes back as you."
+        }
         L10nKey::SettingsUpdateCheckFailed => "Could not check for updates: {error}",
         L10nKey::SettingsUpdatePrepareFailed => "Update failed: {error}",
         L10nKey::SettingsUpdateLaunchFailed => "Could not start the installer: {error}",

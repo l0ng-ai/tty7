@@ -147,6 +147,11 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    # ConvertStringSecurityDescriptorToSecurityDescriptorW + SECURITY_ATTRIBUTES:
+    # the elevated updater's %ProgramData% staging directory gets an explicit
+    # admin-only DACL (see `create_dir_admin_only` in tty7-updater).
+    "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_System_Registry",
     "Wdk_System_SystemServices",
     "Win32_System_SystemInformation",

@@ -103,7 +103,27 @@ pub struct AvailableUpdate {
     pub version: String,
     pub installable: bool,
     pub install_hint: Option<UpdateInstallHint>,
+    /// Windows, all-users Inno layout: installable, but the install raises
+    /// one UAC prompt (#504). The dialog says so up front — a prompt the
+    /// user was told about is consent; one that appears uninvited is not.
+    #[cfg(target_os = "windows")]
+    pub needs_elevation: bool,
     asset: Option<ReleaseAsset>,
+}
+
+impl AvailableUpdate {
+    /// Whether installing this package raises a UAC prompt. A method rather
+    /// than the field so dialog code stays cross-platform: no other layout
+    /// ever elevates.
+    #[cfg(target_os = "windows")]
+    fn needs_elevation(&self) -> bool {
+        self.needs_elevation
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn needs_elevation(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -324,6 +344,8 @@ fn spawn_check_inner(report_failure: bool, cx: &mut App) {
             version: version.clone(),
             installable: selection.asset.is_some(),
             install_hint: selection.reason,
+            #[cfg(target_os = "windows")]
+            needs_elevation: selection.needs_elevation,
             asset: selection.asset,
         };
         log::info!("update available: {version} (running {current})");
@@ -447,9 +469,16 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
                 ("current", current_version()),
             ],
         );
-        match hint.as_deref() {
-            Some(note) => format!("{base} {note}"),
-            None => base,
+        // The elevation warning outranks any other note: it is the one thing
+        // the user must know *before* the app quits, because the next thing
+        // they see is a UAC prompt (#504).
+        if update.needs_elevation() {
+            format!("{base} {}", t(L10nKey::UpdateDialogNeedsElevation))
+        } else {
+            match hint.as_deref() {
+                Some(note) => format!("{base} {note}"),
+                None => base,
+            }
         }
     } else {
         t_fmt(
@@ -471,11 +500,17 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
     // people should have to reach for — it lives in Settings, not one stray
     // keystroke away.
     let buttons: Vec<gpui::PromptButton> = if update.installable {
-        vec![
-            gpui::PromptButton::ok(t(L10nKey::SettingsUpdateAndRelaunch)),
-            gpui::PromptButton::ok(t(L10nKey::UpdateDialogNextLaunch)),
-            gpui::PromptButton::cancel(t(L10nKey::UpdateDialogLater)),
-        ]
+        let mut buttons = vec![gpui::PromptButton::ok(t(
+            L10nKey::SettingsUpdateAndRelaunch,
+        ))];
+        // An unattended next-launch install is a promise an elevation-needing
+        // package cannot keep: nobody is there to answer UAC before the first
+        // window (#504). The only honest offer is "now".
+        if !update.needs_elevation() {
+            buttons.push(gpui::PromptButton::ok(t(L10nKey::UpdateDialogNextLaunch)));
+        }
+        buttons.push(gpui::PromptButton::cancel(t(L10nKey::UpdateDialogLater)));
+        buttons
     } else {
         vec![
             gpui::PromptButton::ok(t(L10nKey::SettingsUpdateViewRelease)),
@@ -492,12 +527,15 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
     let update = update.clone();
     cx.spawn(async move |cx| {
         let installable = update.installable;
+        // With elevation in play, button 1 *is* "Later" — only a layout that
+        // offered "next launch" may treat index 1 as that answer.
+        let offered_next_launch = installable && !update.needs_elevation();
         match answer.await {
             Ok(0) if installable => {
                 cx.update(install_available);
             }
             Ok(0) => open_releases_page(),
-            Ok(1) if installable => {
+            Ok(1) if offered_next_launch => {
                 cx.update(|cx| stage_for_next_launch(update, cx));
             }
             // "Later" — index 1 or 2 depending on the shape — plus a dropped
@@ -596,6 +634,15 @@ pub fn install_available(cx: &mut App) {
 /// is the option that costs the user nothing: no interrupted work now, and no
 /// decision to make later either.
 pub fn stage_for_next_launch(update: AvailableUpdate, cx: &mut App) {
+    #[cfg(target_os = "windows")]
+    if update.needs_elevation {
+        // "Next launch" promises an unattended install, which an
+        // elevation-needing package cannot keep — there is nobody to answer a
+        // UAC prompt before the first window exists (#504). Offer the one
+        // path that works instead: install now, with the user present.
+        install_available(cx);
+        return;
+    }
     APPLY_ON_LAUNCH.store(true, Ordering::Relaxed);
     // Overrides a pending "install as soon as it lands": choosing next launch
     // is choosing not to be restarted now.
@@ -804,6 +851,10 @@ fn spawn_progress_pump(cx: &mut App) {
 
 fn launch_pending(pending: PendingUpdate, cx: &mut App) {
     update_status(cx, |status| status.phase = UpdatePhase::Installing);
+    #[cfg(target_os = "windows")]
+    if pending.needs_elevation {
+        return launch_pending_elevated(pending, cx);
+    }
     match pending.launch() {
         Ok(()) => {
             // The updater owns the staging directory from here. Forgetting it
@@ -825,6 +876,45 @@ fn launch_pending(pending: PendingUpdate, cx: &mut App) {
     }
 }
 
+/// Starts the elevated install chain (#504): a de-elevated watcher that will
+/// relaunch the app, then a single UAC prompt covering the two privileged
+/// stages.
+///
+/// Success looks exactly like a plain install from here — this process quits
+/// and the watcher, not the GUI, owns the relaunch. Declining the UAC prompt
+/// is not a failure: nothing ever ran elevated, nothing needs recording, and
+/// the staged package is still usable, so the plan stays put and the app
+/// stays up. Settings still shows it as ready to install.
+#[cfg(target_os = "windows")]
+fn launch_pending_elevated(pending: PendingUpdate, cx: &mut App) {
+    match pending.launch_elevated() {
+        Ok(ElevationStart::Started) => {
+            // The watcher owns the staging directory from here. Forgetting it
+            // now is what stops a relaunch from trying to install it twice.
+            let mut state = UpdateState::load();
+            state.pending = None;
+            state.last_prompted = None;
+            state.save();
+            cx.quit();
+        }
+        Ok(ElevationStart::Declined) => {
+            log::info!(
+                "administrator approval for the {} update was declined; the package stays staged",
+                pending.version
+            );
+            update_status(cx, |status| status.phase = UpdatePhase::Idle);
+        }
+        Err(error) => {
+            let detail = format!("{error:#}");
+            log::error!("could not start the elevated install: {detail}");
+            record_failure(&pending.version, &detail, cx);
+            update_status(cx, |status| {
+                status.phase = UpdatePhase::Failed(UpdateFailure::Launch(detail));
+            });
+        }
+    }
+}
+///
 /// Records a failure where the user can still find it tomorrow, and lets the
 /// version prompt again.
 ///
@@ -904,6 +994,19 @@ pub fn apply_pending_at_launch() -> bool {
         state.pending = None;
         state.save();
         let _ = std::fs::remove_dir_all(&pending.stage);
+        return false;
+    }
+
+    #[cfg(target_os = "windows")]
+    if pending.needs_elevation {
+        // An unattended start has nobody to approve a UAC prompt, and raising
+        // one before the first window — unsigned path and all — reads as
+        // malware. The plan stays staged; once the app is up, Settings offers
+        // the install with the window behind it (#504).
+        log::info!(
+            "the staged {} update needs administrator approval; leaving it for an interactive install",
+            pending.version
+        );
         return false;
     }
 
@@ -1229,6 +1332,13 @@ fn human_bytes(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / MB)
 }
 
+/// The shape of a persisted [`PendingUpdate`]. A plan written by a build
+/// whose updater invocation differs from this one's is discarded rather than
+/// launched: its staged helper is the *old* build's updater and would not
+/// understand this build's arguments. Absent from pre-parameterization
+/// plans, which deserialize as 0 and never match.
+const PLAN_VERSION: u32 = 2;
+
 /// A downloaded, verified package waiting to be installed.
 ///
 /// Splitting "fetch" from "install" is the point of the whole design: it turns
@@ -1245,18 +1355,33 @@ pub struct PendingUpdate {
     /// package that was merely fetched ahead of time: it waits in Settings.
     #[serde(default)]
     pub apply_on_launch: bool,
+    /// See [`PLAN_VERSION`].
+    #[serde(default)]
+    plan_version: u32,
     updater: PathBuf,
     command: String,
     rest: Vec<PathBuf>,
     config_dir: Option<PathBuf>,
     stage: PathBuf,
+    /// Windows, all-users Inno layout: install through the elevated chain
+    /// (#504) rather than by spawning the staged helper directly.
+    #[serde(default)]
+    needs_elevation: bool,
+    /// The staged package's digest as the release server published it. The
+    /// elevated chain's trust anchor: the checksums file beside the package
+    /// cannot serve there, because a medium-integrity process can rewrite
+    /// both together.
+    #[serde(default)]
+    expected_sha256: Option<String>,
 }
 
 impl PendingUpdate {
-    /// Whether the package is still on disk. Staging lives in a temporary
-    /// directory that a cleaner, an antivirus, or a reboot may have taken.
+    /// Whether the package is still on disk and still speaks this build's
+    /// updater protocol. Staging lives in a temporary directory that a
+    /// cleaner, an antivirus, or a reboot may have taken; the plan version
+    /// is the other half — see [`PLAN_VERSION`].
     pub fn is_usable(&self) -> bool {
-        self.updater.is_file() && self.stage.is_dir()
+        self.plan_version == PLAN_VERSION && self.updater.is_file() && self.stage.is_dir()
     }
 
     fn launch(&self) -> Result<()> {
@@ -1266,9 +1391,223 @@ impl PendingUpdate {
             rest: self.rest.clone(),
             config_dir: self.config_dir.clone(),
             stage: self.stage.clone(),
+            needs_elevation: self.needs_elevation,
+            expected_sha256: self.expected_sha256.clone(),
         }
         .launch()
     }
+
+    /// The pieces of a staged Inno plan that the elevated launch needs, read
+    /// out of `rest` by position — the order `prepare_windows_update` pushes
+    /// them. A plan that cannot name every piece is not elevated.
+    #[cfg(target_os = "windows")]
+    fn elevated_parts(&self) -> Option<ElevatedPlanParts> {
+        if !self.needs_elevation || self.command != "install" || self.rest.len() != 7 {
+            return None;
+        }
+        Some(ElevatedPlanParts {
+            installer: self.rest[0].clone(),
+            asset_name: self.rest[2].to_str()?.to_string(),
+            install_dir: self.rest[3].clone(),
+            version: self.rest[4].to_str()?.to_string(),
+            log: self.rest[5].clone(),
+            stage: self.rest[6].clone(),
+            expected_sha256: self.expected_sha256.clone()?,
+        })
+    }
+}
+
+/// See [`PendingUpdate::elevated_parts`].
+#[cfg(target_os = "windows")]
+struct ElevatedPlanParts {
+    installer: PathBuf,
+    asset_name: String,
+    install_dir: PathBuf,
+    version: String,
+    log: PathBuf,
+    stage: PathBuf,
+    expected_sha256: String,
+}
+
+/// How asking Windows to start the privileged half ended. Only `Started`
+/// hands the machine to elevated processes; `Declined` means the user
+/// answered the UAC prompt with "no" and nothing ever ran elevated.
+#[cfg(target_os = "windows")]
+enum ElevationStart {
+    Started,
+    Declined,
+}
+
+#[cfg(target_os = "windows")]
+impl PendingUpdate {
+    /// Spawns the de-elevated relaunch watcher, then raises the single UAC
+    /// prompt that covers both privileged stages (#504).
+    ///
+    /// The watcher goes first so a declined prompt leaves exactly one
+    /// medium-integrity process to reap. The elevated half is always the
+    /// *installed* updater — the trust root a medium-integrity process cannot
+    /// rewrite — and everything it needs arrives as arguments, because an
+    /// elevated child (over-the-shoulder especially) does not inherit this
+    /// process's environment.
+    fn launch_elevated(&self) -> Result<ElevationStart> {
+        use windows_sys::Win32::Foundation::ERROR_CANCELLED;
+
+        let parts = self
+            .elevated_parts()
+            .context("the staged package does not describe an elevated install")?;
+        let Some(status) = update_elevation_status_path() else {
+            anyhow::bail!("no config directory for the elevation status file");
+        };
+        // The watcher requires it: without the outcome file the install's
+        // result would die with the elevated chain (#540).
+        let Some(outcome) = update_outcome_path() else {
+            anyhow::bail!("no config directory for the install outcome file");
+        };
+        let app = std::env::current_exe().context("locating the running app")?;
+        // Stale markers from an earlier attempt have to be gone: the watcher
+        // reads both files, and would otherwise act on a dead attempt's
+        // answer.
+        let _ = std::fs::remove_file(&status);
+        let _ = std::fs::remove_file(&outcome);
+
+        let mut watcher = Command::new(&self.updater);
+        watcher
+            .arg("relaunch-watcher")
+            .arg("--status-file")
+            .arg(&status)
+            .arg("--result-file")
+            .arg(&outcome)
+            .arg("--app-path")
+            .arg(&app)
+            .arg("--log")
+            .arg(&parts.log)
+            .arg("--expected-version")
+            .arg(&parts.version);
+        if let Some(dir) = &self.config_dir {
+            watcher.arg("--config-dir").arg(dir);
+        }
+        let mut watcher = tty7_core::core::proc::hide_console(&mut watcher)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("launching the relaunch watcher")?;
+
+        let installed_updater = parts.install_dir.join("tty7-updater.exe");
+        let parameters =
+            elevated_stage_arguments(&parts, &status, &outcome, self.config_dir.as_deref());
+        match shell_execute_elevated(&installed_updater, &parameters, &parts.install_dir) {
+            Ok(()) => Ok(ElevationStart::Started),
+            Err(code) => {
+                // Whatever the answer was, the watcher must not outlive this
+                // process when no elevated half is coming: it would sit on its
+                // 15-minute grace, then relaunch the app over the one still
+                // running.
+                let _ = watcher.kill();
+                let _ = std::fs::remove_file(&status);
+                if code == ERROR_CANCELLED {
+                    return Ok(ElevationStart::Declined);
+                }
+                Err(anyhow::anyhow!(
+                    "asking Windows to run the install elevated failed (error {code})"
+                ))
+            }
+        }
+    }
+}
+
+/// The command line for the privileged first stage, as a single string:
+/// ShellExecuteEx hands it to the child's CRT argv splitter verbatim, so
+/// every argument is quoted — the install directory typically lives under
+/// `C:\Program Files`. Built as an `OsString` so a path that is not valid
+/// Unicode survives the round trip.
+#[cfg(target_os = "windows")]
+fn elevated_stage_arguments(
+    parts: &ElevatedPlanParts,
+    status_file: &Path,
+    outcome: &Path,
+    config_dir: Option<&Path>,
+) -> std::ffi::OsString {
+    let mut line = std::ffi::OsString::new();
+    let mut push = |arg: &std::ffi::OsStr| {
+        if !line.is_empty() {
+            line.push(" ");
+        }
+        line.push("\"");
+        line.push(arg);
+        line.push("\"");
+    };
+    push(std::ffi::OsStr::new("elevated-stage"));
+    push(std::ffi::OsStr::new(&std::process::id().to_string()));
+    push(parts.installer.as_os_str());
+    push(std::ffi::OsStr::new(&parts.asset_name));
+    push(parts.install_dir.as_os_str());
+    push(std::ffi::OsStr::new(&parts.version));
+    push(parts.log.as_os_str());
+    push(parts.stage.as_os_str());
+    push(std::ffi::OsStr::new("--expected-sha256"));
+    push(std::ffi::OsStr::new(&parts.expected_sha256));
+    push(std::ffi::OsStr::new("--status-file"));
+    push(status_file.as_os_str());
+    if let Some(dir) = config_dir {
+        push(std::ffi::OsStr::new("--config-dir"));
+        push(dir.as_os_str());
+    }
+    push(std::ffi::OsStr::new("--result-file"));
+    push(outcome.as_os_str());
+    line
+}
+
+/// Starts `executable` elevated — the `runas` verb is what turns the request
+/// into exactly one UAC prompt — and returns as soon as Windows answers. The
+/// elevated process is deliberately not tracked by handle: the status file
+/// and the watcher own liveness from here, which is what lets this process
+/// quit immediately.
+///
+/// The error case carries the raw Windows error code so the caller can tell
+/// "the user said no" (`ERROR_CANCELLED`) apart from a genuine launch
+/// failure.
+#[cfg(target_os = "windows")]
+fn shell_execute_elevated(
+    executable: &Path,
+    parameters: &std::ffi::OsStr,
+    working_dir: &Path,
+) -> std::result::Result<(), u32> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::UI::Shell::{SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
+        value.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    let verb = wide(std::ffi::OsStr::new("runas"));
+    let file = wide(executable.as_os_str());
+    let params = wide(parameters);
+    let directory = wide(working_dir.as_os_str());
+    // SAFETY: zero-initializing is valid for this all-POD struct; every field
+    // that matters is set below.
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    // No error dialog from the shell itself: a decline is a normal answer the
+    // caller handles, and a real failure is reported in-process.
+    info.fMask = SEE_MASK_FLAG_NO_UI;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.lpParameters = params.as_ptr();
+    info.lpDirectory = directory.as_ptr();
+    // The updater is a console program; an elevated console window flashing
+    // up beside the GUI reads as a crash.
+    info.nShow = SW_HIDE;
+    // SAFETY: `info` is fully initialized, and every pointer names a
+    // NUL-terminated buffer that outlives the call.
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        // SAFETY: called immediately after the failed call on the same
+        // thread, so the error code is the one ShellExecuteExW set.
+        return Err(unsafe { GetLastError() });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1498,6 +1837,8 @@ struct ReleaseAsset {
 struct AssetSelection {
     asset: Option<ReleaseAsset>,
     reason: Option<UpdateInstallHint>,
+    #[cfg(target_os = "windows")]
+    needs_elevation: bool,
 }
 
 fn select_release_asset(version: &str, assets: &[GitHubAsset]) -> AssetSelection {
@@ -1505,28 +1846,35 @@ fn select_release_asset(version: &str, assets: &[GitHubAsset]) -> AssetSelection
 }
 
 fn select_release_asset_for(
-    package: Result<String, UpdateInstallHint>,
+    package: Result<PackageOffer, UpdateInstallHint>,
     assets: &[GitHubAsset],
 ) -> AssetSelection {
-    let name = match package {
-        Ok(name) => name,
+    let offer = match package {
+        Ok(offer) => offer,
         Err(reason) => {
             return AssetSelection {
                 asset: None,
                 reason: Some(reason),
+                #[cfg(target_os = "windows")]
+                needs_elevation: false,
             };
         }
     };
+    let name = offer.name;
     let Some(asset) = assets.iter().find(|asset| asset.name == name) else {
         return AssetSelection {
             asset: None,
             reason: Some(UpdateInstallHint::MissingPackage(name)),
+            #[cfg(target_os = "windows")]
+            needs_elevation: false,
         };
     };
     let Some(checksums) = assets.iter().find(|asset| asset.name == "checksums.txt") else {
         return AssetSelection {
             asset: None,
             reason: Some(UpdateInstallHint::MissingChecksums),
+            #[cfg(target_os = "windows")]
+            needs_elevation: false,
         };
     };
     AssetSelection {
@@ -1536,12 +1884,33 @@ fn select_release_asset_for(
             checksums_url: checksums.browser_download_url.clone(),
         }),
         reason: None,
+        #[cfg(target_os = "windows")]
+        needs_elevation: offer.needs_elevation,
+    }
+}
+
+/// The release package this installation can replace itself with. Split from
+/// the bare filename so the Windows Inno layout can carry "yes, but the
+/// install needs a UAC prompt" alongside it (#504).
+struct PackageOffer {
+    name: String,
+    #[cfg(target_os = "windows")]
+    needs_elevation: bool,
+}
+
+impl PackageOffer {
+    fn plain(name: String) -> Self {
+        Self {
+            name,
+            #[cfg(target_os = "windows")]
+            needs_elevation: false,
+        }
     }
 }
 
 /// The release package this installation can replace itself with, or the
 /// reason it cannot.
-fn package_for_current_install(version: &str) -> Result<String, UpdateInstallHint> {
+fn package_for_current_install(version: &str) -> Result<PackageOffer, UpdateInstallHint> {
     #[cfg(target_os = "macos")]
     {
         let Some(app) = current_macos_app_bundle() else {
@@ -1557,7 +1926,9 @@ fn package_for_current_install(version: &str) -> Result<String, UpdateInstallHin
         } else {
             return Err(UpdateInstallHint::UnsupportedMacos);
         };
-        return Ok(format!("tty7-{version}-macos-{arch}.zip"));
+        return Ok(PackageOffer::plain(format!(
+            "tty7-{version}-macos-{arch}.zip"
+        )));
     }
     #[cfg(target_os = "linux")]
     {
@@ -1582,11 +1953,25 @@ fn package_for_current_install(version: &str) -> Result<String, UpdateInstallHin
         let Some(layout) = current_windows_update_layout() else {
             return Err(UpdateInstallHint::UnsupportedWindows);
         };
-        windows_layout_is_updatable(&layout)?;
+        let needs_elevation = match windows_layout_updatability(&layout) {
+            WindowsUpdatability::Updatable => false,
+            WindowsUpdatability::NeedsElevation => true,
+            WindowsUpdatability::Unsupported(hint) => return Err(hint),
+        };
         if !layout.directory().join("tty7-updater.exe").is_file() {
             return Err(UpdateInstallHint::UnsupportedWindows);
         }
+        // UAC is pointed at the *installed* updater, so the elevated chain is
+        // only as real as the verbs that binary speaks: one from a release
+        // before the verbs existed keeps today's answer — the release page.
+        if needs_elevation && !updater_speaks_elevation(layout.directory()) {
+            return Err(UpdateInstallHint::WindowsAllUsersInstall);
+        }
         return windows_package_for_layout(version, &layout)
+            .map(|name| PackageOffer {
+                name,
+                needs_elevation,
+            })
             .ok_or(UpdateInstallHint::UnsupportedWindows);
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -1594,6 +1979,38 @@ fn package_for_current_install(version: &str) -> Result<String, UpdateInstallHin
         let _ = version;
         Err(UpdateInstallHint::UnsupportedPlatform)
     }
+}
+
+/// Whether the updater installed beside this app speaks the elevation verbs
+/// (`elevated-stage` / `install-elevated` / `relaunch-watcher`). Probed by
+/// execution rather than version comparison: the capability list is the
+/// contract, and a manually downgraded or side-loaded binary answers for
+/// itself. One short-lived process per check; an updater that predates the
+/// verb exits with its usage error, which is the same "no".
+#[cfg(target_os = "windows")]
+fn updater_speaks_elevation(install_dir: &Path) -> bool {
+    let updater = install_dir.join("tty7-updater.exe");
+    let mut command = Command::new(&updater);
+    command
+        .arg("capabilities")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    let output = tty7_core::core::proc::hide_console(&mut command).output();
+    let Ok(output) = output else { return false };
+    output.status.success() && capabilities_cover_elevation(&output.stdout)
+}
+
+/// The pure half, so the token matching is testable without spawning a real
+/// helper. Mirrors `ELEVATION_CAPABILITIES` in the updater.
+#[cfg(target_os = "windows")]
+fn capabilities_cover_elevation(stdout: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(stdout) else {
+        return false;
+    };
+    let tokens: std::collections::HashSet<&str> = text.lines().map(str::trim).collect();
+    ["elevated-stage", "install-elevated", "relaunch-watcher"]
+        .iter()
+        .all(|capability| tokens.contains(capability))
 }
 
 fn prepare_update(
@@ -1636,6 +2053,11 @@ struct PreparedUpdate {
     rest: Vec<PathBuf>,
     config_dir: Option<PathBuf>,
     stage: PathBuf,
+    /// Windows, all-users Inno layout: launch through the elevated chain
+    /// (#504), not by spawning the staged helper directly.
+    needs_elevation: bool,
+    /// See [`PendingUpdate::expected_sha256`].
+    expected_sha256: Option<String>,
 }
 
 impl PreparedUpdate {
@@ -1654,11 +2076,14 @@ impl PreparedUpdate {
         PendingUpdate {
             version,
             apply_on_launch,
+            plan_version: PLAN_VERSION,
             updater: self.updater,
             command: self.command,
             rest: self.rest,
             config_dir: self.config_dir,
             stage: self.stage,
+            needs_elevation: self.needs_elevation,
+            expected_sha256: self.expected_sha256,
         }
     }
 
@@ -1692,6 +2117,17 @@ impl PreparedUpdate {
 /// into the update state (`absorb_update_outcome_at_launch`).
 fn update_outcome_path() -> Option<PathBuf> {
     crate::core::config::config_path(tty7_core::daemon::install::outcome::OUTCOME_FILE_NAME)
+}
+
+/// The file the privileged first stage writes its pid into so the de-elevated
+/// watcher can tell the chain apart from a UAC prompt nobody has answered
+/// yet. It cannot live in the privileged staging directory (the watcher's
+/// token may not read there), so it sits next to the outcome file: an
+/// administrator can write the user's config directory under every elevation
+/// shape, including over-the-shoulder (#504).
+#[cfg(target_os = "windows")]
+fn update_elevation_status_path() -> Option<PathBuf> {
+    crate::core::config::config_path("update-elevation.status")
 }
 
 /// The named options after the positional arguments. Everything the updater
@@ -1785,6 +2221,8 @@ fn prepare_macos_update(
         ],
         config_dir: crate::core::config::config_dir_path(),
         stage: dir,
+        needs_elevation: false,
+        expected_sha256: None,
     })
 }
 
@@ -1800,11 +2238,32 @@ fn prepare_windows_update(
     // Re-checked here rather than trusting the check that produced the offer:
     // an installation can be relocated, or its privileges changed, between the
     // update check and the user pressing the button.
-    if let Err(hint) = windows_layout_is_updatable(&layout) {
-        anyhow::bail!("{}", hint.english());
-    }
+    let updatability = windows_layout_updatability(&layout);
+    let needs_elevation = match updatability {
+        WindowsUpdatability::Updatable => false,
+        WindowsUpdatability::NeedsElevation => true,
+        WindowsUpdatability::Unsupported(hint) => anyhow::bail!("{}", hint.english()),
+    };
     let install_dir = layout.directory().to_path_buf();
     let bundled = bundled_updater().context("tty7-updater.exe is not bundled with this app")?;
+
+    // The digest the elevated chain trusts, taken from the downloaded
+    // manifest rather than the staged copy of it: the staged file lands in a
+    // user-writable directory, so it cannot anchor its own verification.
+    // Computed for both Inno modes — a plan's elevation answer is re-derived
+    // at launch, and the digest costs one manifest parse.
+    let expected_sha256 = if matches!(layout, WindowsUpdateLayout::Inno(_)) {
+        let manifest =
+            std::str::from_utf8(checksums).context("checksums.txt is not valid UTF-8")?;
+        Some(
+            tty7_core::daemon::install::checksums::expected_digest(manifest, asset_name)
+                .map(|digest| tty7_core::daemon::install::checksums::hex(&digest))
+                .context("reading the staged package's digest from checksums.txt")?,
+        )
+    } else {
+        None
+    };
+
     let staging = system_update_staging_dir()?;
     let dir = staging.path().to_path_buf();
     let package = write_staged_asset(&dir, asset_name, package)?;
@@ -1868,6 +2327,8 @@ fn prepare_windows_update(
         ],
         config_dir: crate::core::config::config_dir_path(),
         stage: dir,
+        needs_elevation,
+        expected_sha256,
     })
 }
 
@@ -1956,22 +2417,36 @@ fn windows_directory_is_writable(directory: &Path) -> bool {
         .is_ok()
 }
 
-/// Rejects the Windows installation layouts that cannot be replaced by this
-/// process, before anything is downloaded.
+/// What this Windows installation layout means for an in-place update.
 #[cfg(target_os = "windows")]
-fn windows_layout_is_updatable(layout: &WindowsUpdateLayout) -> Result<(), UpdateInstallHint> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WindowsUpdatability {
+    /// A per-user Inno install, or a writable portable directory: the
+    /// updater runs as the signed-in user, no prompt involved.
+    Updatable,
+    /// An Inno install replacing it needs administrator rights for (#504):
+    /// the elevated chain handles it — one announced UAC prompt, and the app
+    /// never runs elevated itself.
+    NeedsElevation,
+    Unsupported(UpdateInstallHint),
+}
+
+/// Sorts the Windows installation layouts by what replacing them takes,
+/// before anything is downloaded.
+#[cfg(target_os = "windows")]
+fn windows_layout_updatability(layout: &WindowsUpdateLayout) -> WindowsUpdatability {
     match layout {
         WindowsUpdateLayout::Inno(directory) => {
             if windows_inno_needs_elevation(directory) {
-                return Err(UpdateInstallHint::WindowsAllUsersInstall);
+                return WindowsUpdatability::NeedsElevation;
             }
-            Ok(())
+            WindowsUpdatability::Updatable
         }
         WindowsUpdateLayout::Portable(directory) => {
             if !windows_directory_is_writable(directory) {
-                return Err(UpdateInstallHint::UnsupportedWindows);
+                return WindowsUpdatability::Unsupported(UpdateInstallHint::UnsupportedWindows);
             }
-            Ok(())
+            WindowsUpdatability::Updatable
         }
     }
 }
@@ -2215,7 +2690,7 @@ mod tests {
     fn release_asset_requires_the_platform_package_and_checksums() {
         let name = "tty7-27.1.0-macos-arm64.zip";
         let assets = [github_asset(name), github_asset("checksums.txt")];
-        let selected = select_release_asset_for(Ok(name.to_string()), &assets);
+        let selected = select_release_asset_for(Ok(PackageOffer::plain(name.to_string())), &assets);
         assert_eq!(
             selected.asset,
             Some(ReleaseAsset {
@@ -2230,7 +2705,10 @@ mod tests {
     #[test]
     fn release_without_checksums_is_never_installable() {
         let name = "tty7-27.1.0-macos-arm64.zip";
-        let selected = select_release_asset_for(Ok(name.to_string()), &[github_asset(name)]);
+        let selected = select_release_asset_for(
+            Ok(PackageOffer::plain(name.to_string())),
+            &[github_asset(name)],
+        );
         assert!(selected.asset.is_none());
         assert_eq!(selected.reason, Some(UpdateInstallHint::MissingChecksums));
     }
@@ -2238,7 +2716,9 @@ mod tests {
     #[test]
     fn release_without_the_exact_platform_package_is_never_guessed() {
         let selected = select_release_asset_for(
-            Ok("tty7-27.1.0-macos-arm64.zip".to_string()),
+            Ok(PackageOffer::plain(
+                "tty7-27.1.0-macos-arm64.zip".to_string(),
+            )),
             &[
                 github_asset("tty7-27.1.0-macos-x86_64.zip"),
                 github_asset("checksums.txt"),
@@ -2532,11 +3012,14 @@ mod tests {
             pending: Some(PendingUpdate {
                 version: "27.0.0".into(),
                 apply_on_launch: true,
+                plan_version: PLAN_VERSION,
                 updater: PathBuf::from("/tmp/tty7-updater"),
                 command: "install".into(),
                 rest: vec![PathBuf::from("/tmp/stage/tty7.zip")],
                 config_dir: None,
                 stage: PathBuf::from("/tmp/stage"),
+                needs_elevation: false,
+                expected_sha256: None,
             }),
             ..Default::default()
         }
@@ -2765,6 +3248,8 @@ mod tests {
             rest: vec![PathBuf::from("/tmp/stage/tty7.zip")],
             config_dir: None,
             stage: PathBuf::from("/tmp/stage"),
+            needs_elevation: false,
+            expected_sha256: None,
         };
         let args = prepared.args();
         assert_eq!(args[0], PathBuf::from("install"));
@@ -2866,7 +3351,10 @@ mod tests {
 
         // A writable temp directory is never the all-users installation, so
         // this layout is offered the normal in-place update.
-        assert_eq!(windows_layout_is_updatable(&layout), Ok(()));
+        assert_eq!(
+            windows_layout_updatability(&layout),
+            WindowsUpdatability::Updatable
+        );
 
         assert_eq!(
             select_release_asset_for(Err(UpdateInstallHint::WindowsAllUsersInstall), &[]).reason,
@@ -2884,15 +3372,15 @@ mod tests {
         let directory = root.path().to_path_buf();
         assert!(windows_directory_is_writable(&directory));
         assert_eq!(
-            windows_layout_is_updatable(&WindowsUpdateLayout::Portable(directory)),
-            Ok(())
+            windows_layout_updatability(&WindowsUpdateLayout::Portable(directory)),
+            WindowsUpdatability::Updatable
         );
 
         let missing = root.path().join("gone");
         assert!(!windows_directory_is_writable(&missing));
         assert_eq!(
-            windows_layout_is_updatable(&WindowsUpdateLayout::Portable(missing)),
-            Err(UpdateInstallHint::UnsupportedWindows)
+            windows_layout_updatability(&WindowsUpdateLayout::Portable(missing)),
+            WindowsUpdatability::Unsupported(UpdateInstallHint::UnsupportedWindows)
         );
     }
 
@@ -2911,6 +3399,166 @@ mod tests {
             windows_inno_needs_elevation_for(Some(&path), &path, true),
             "the installed all-users path {} was not recognised",
             path.display()
+        );
+    }
+
+    /// A plan persisted by a build from before the tail-argument protocol
+    /// cannot be carried out by its own staged helper: it relied on the
+    /// environment, which an elevated child never inherits (#504). The plan
+    /// version is what quietly drops those plans at the next launch instead
+    /// of failing weirdly against a helper that does not understand its
+    /// arguments.
+    #[test]
+    fn a_plan_from_another_protocol_version_is_not_usable() {
+        let root = tempfile::tempdir().unwrap();
+        let updater = root.path().join("tty7-updater");
+        std::fs::write(&updater, b"test updater").unwrap();
+        let stage = root.path().join("stage");
+        std::fs::create_dir(&stage).unwrap();
+
+        let plan = |plan_version| PendingUpdate {
+            version: "27.0.0".into(),
+            apply_on_launch: true,
+            plan_version,
+            updater: updater.clone(),
+            command: "install".into(),
+            rest: vec![stage.join("tty7.zip")],
+            config_dir: None,
+            stage: stage.clone(),
+            needs_elevation: false,
+            expected_sha256: None,
+        };
+        assert!(plan(PLAN_VERSION).is_usable());
+        // Plans written before the field existed deserialize it as 0.
+        assert!(!plan(0).is_usable());
+        assert!(!plan(PLAN_VERSION + 1).is_usable());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_elevation_capable_updater_is_recognised_by_its_own_answer() {
+        assert!(capabilities_cover_elevation(
+            b"elevated-stage\ninstall-elevated\nrelaunch-watcher\n"
+        ));
+        // Order and unrelated tokens are the updater's business.
+        assert!(capabilities_cover_elevation(
+            b"install\nrelaunch-watcher\nelevated-stage\ninstall-elevated\n"
+        ));
+        // An old updater exits with a usage error: no tokens, no chain, and
+        // the install falls back to pointing at the release page.
+        assert!(!capabilities_cover_elevation(
+            b"usage: tty7-updater <command> [args]"
+        ));
+        assert!(!capabilities_cover_elevation(b""));
+        // Two of the three verbs is not the chain.
+        assert!(!capabilities_cover_elevation(
+            b"elevated-stage\ninstall-elevated\n"
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_elevated_plan_names_every_piece_the_chain_needs() {
+        let digest = "ab".repeat(32);
+        let stage = PathBuf::from(r"C:\Users\someone\AppData\Local\Temp\tty7-update-x");
+        let plan = |needs_elevation, expected_sha256: Option<&str>| PendingUpdate {
+            version: "27.0.0".into(),
+            apply_on_launch: false,
+            plan_version: PLAN_VERSION,
+            updater: stage.join("tty7-updater.exe"),
+            command: "install".into(),
+            // The order `prepare_windows_update` pushes: installer, checksums,
+            // asset name, install dir, version, log, stage.
+            rest: vec![
+                stage.join("tty7-27.0.0-windows-x86_64-setup.exe"),
+                stage.join("checksums.txt"),
+                PathBuf::from("tty7-27.0.0-windows-x86_64-setup.exe"),
+                PathBuf::from(r"C:\Program Files\tty7"),
+                PathBuf::from("27.0.0"),
+                stage.join("update.log"),
+                stage.clone(),
+            ],
+            config_dir: Some(PathBuf::from(r"C:\Users\someone\.config\tty7")),
+            stage: stage.clone(),
+            needs_elevation,
+            expected_sha256: expected_sha256.map(str::to_string),
+        };
+
+        let parts = plan(true, Some(&digest))
+            .elevated_parts()
+            .expect("a complete elevated plan yields its parts");
+        assert_eq!(
+            parts.installer,
+            stage.join("tty7-27.0.0-windows-x86_64-setup.exe")
+        );
+        assert_eq!(parts.asset_name, "tty7-27.0.0-windows-x86_64-setup.exe");
+        assert_eq!(parts.install_dir, PathBuf::from(r"C:\Program Files\tty7"));
+        assert_eq!(parts.version, "27.0.0");
+        assert_eq!(parts.expected_sha256, digest);
+
+        // Not flagged, or flagged but missing the digest that anchors the
+        // chain's trust, is not an elevated plan at all.
+        assert!(plan(false, Some(&digest)).elevated_parts().is_none());
+        assert!(plan(true, None).elevated_parts().is_none());
+        let mut short = plan(true, Some(&digest));
+        short.rest.truncate(6);
+        assert!(short.elevated_parts().is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_elevated_command_line_quotes_every_argument() {
+        let parts = ElevatedPlanParts {
+            installer: PathBuf::from(r"C:\Users\some one\stage\setup.exe"),
+            asset_name: "tty7-27.0.0-windows-x86_64-setup.exe".into(),
+            install_dir: PathBuf::from(r"C:\Program Files\tty7"),
+            version: "27.0.0".into(),
+            log: PathBuf::from(r"C:\Users\some one\stage\update.log"),
+            stage: PathBuf::from(r"C:\Users\some one\stage"),
+            expected_sha256: "ab".repeat(32),
+        };
+        let line = elevated_stage_arguments(
+            &parts,
+            Path::new(r"C:\Users\some one\.config\tty7\update-elevation.status"),
+            Path::new(r"C:\Users\some one\.config\tty7\update-outcome.json"),
+            Some(Path::new(r"C:\Users\some one\.config\tty7")),
+        )
+        .into_string()
+        .expect("the test paths are valid Unicode");
+
+        assert!(line.starts_with("\"elevated-stage\" "), "{line}");
+        assert!(
+            line.contains(&format!("\"{}\"", std::process::id())),
+            "{line}"
+        );
+        // A space in a path must never reach the CRT splitter unquoted.
+        assert!(line.contains(r#""C:\Program Files\tty7""#), "{line}");
+        assert!(
+            line.contains(r#""C:\Users\some one\stage\setup.exe""#),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!(
+                "\"--expected-sha256\" \"{}\"",
+                parts.expected_sha256
+            )),
+            "{line}"
+        );
+        assert!(
+            line.contains(
+                r#""--status-file" "C:\Users\some one\.config\tty7\update-elevation.status""#
+            ),
+            "{line}"
+        );
+        assert!(
+            line.contains(r#""--config-dir" "C:\Users\some one\.config\tty7""#),
+            "{line}"
+        );
+        assert!(
+            line.contains(
+                r#""--result-file" "C:\Users\some one\.config\tty7\update-outcome.json""#
+            ),
+            "{line}"
         );
     }
 }

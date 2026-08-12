@@ -542,6 +542,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::UpdateDialogCannotSelfUpdate => "这份安装无法自行更新。",
         L10nKey::UpdateDialogLater => "以后再说",
         L10nKey::UpdateDialogNextLaunch => "下次启动时安装",
+        L10nKey::UpdateDialogNeedsElevation => {
+            "这份 tty7 是为所有用户安装的，开始安装前 Windows 会请求一次管理员批准。tty7 本身不会以管理员身份运行——重启后仍以你的身份回来。"
+        }
         L10nKey::SettingsUpdateCheckFailed => "无法检查更新：{error}",
         L10nKey::SettingsUpdatePrepareFailed => "更新失败：{error}",
         L10nKey::SettingsUpdateLaunchFailed => "无法启动安装程序：{error}",

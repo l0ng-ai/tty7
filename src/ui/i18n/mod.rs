@@ -516,6 +516,7 @@ l10n_keys! {
     UpdateDialogCannotSelfUpdate,
     UpdateDialogLater,
     UpdateDialogNextLaunch,
+    UpdateDialogNeedsElevation,
     SettingsUpdateCheckFailed,
     SettingsUpdatePrepareFailed,
     SettingsUpdateLaunchFailed,
