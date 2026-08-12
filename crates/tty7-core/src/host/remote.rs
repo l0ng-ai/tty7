@@ -1037,6 +1037,7 @@ mod tests {
                         program: "/usr/bin/zsh".into(),
                         args: vec!["--no-rcs".into()],
                         args_are_tty7_defaults: false,
+                        user_authored: false,
                     }],
                     default_name: "zsh".into(),
                 })),

@@ -4615,7 +4615,18 @@ impl Tty7App {
         // so the same choice was a menu in one place and a blind text field in
         // the other. The field stays: a shell tty7 did not find still has to be
         // reachable by path.
-        let shells = self.shells.shells.clone();
+        // Detected shells only. A `custom_shells` row is a menu extra rather
+        // than a candidate for the platform default, and this picker hands its
+        // choice on as a program alone — so offering one here would set the
+        // default to a bare program and drop the arguments the user wrote it
+        // for, silently.
+        let shells: Vec<_> = self
+            .shells
+            .shells
+            .iter()
+            .filter(|shell| !shell.user_authored)
+            .cloned()
+            .collect();
         let current_program = program_input.read(cx).value().trim().to_string();
         let platform_default_item: SharedString = if cfg!(windows) {
             "PowerShell".into()

@@ -46,17 +46,21 @@ use tty7_core::core::git::status::DecoStatus;
 use crate::terminal::git_diff::DiffSource;
 use crate::ui::app::{CONTENT_INSET, Tty7App};
 use crate::ui::i18n::{L10nKey, t, t_plural};
-use crate::ui::right_panel::{META, META_MONO, TEXT, TEXT_MONO, git_badge, info_chip};
+use crate::ui::right_panel::{META, META_MONO, ROW_INSET, TEXT, TEXT_MONO, git_badge, info_chip};
 use crate::ui::scm::path::{relative_time, split_display_path};
 use crate::ui::scm::state::{CommitDetailView, RepoKey};
 use crate::ui::scm::status::{status_color, status_glyph};
 
 // A file row, the same height as the working tree's, and inset the same way:
 // the two lists sit in one column and have to read as one grid, so a reader who
-// opens a commit never feels the pitch change under them. Both numbers are
-// `panel.rs`'s, read rather than restated — this file used to hold a matching
-// pair of its own, kept in step by a comment.
-use crate::ui::scm::panel::{ROW_H, ROW_INSET};
+// opens a commit never feels the pitch change under them.
+//
+// The inset is `right_panel`'s, because every tab of the panel is the same list
+// of rows seen from a different angle. The pitch is `panel.rs`'s, because these
+// rows *are* that list pointed at another tree — this file used to restate it
+// with a comment asking the next reader to keep the two in step, which is the
+// same kind of promise that let the panel's type ramp drift.
+use crate::ui::scm::panel::ROW_H;
 
 /// How much of the body is shown before it folds. Four lines is a paragraph;
 /// past that it is a changelog, and the file list is what the reader came for.

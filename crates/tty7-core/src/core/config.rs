@@ -148,6 +148,12 @@ pub struct Config {
     #[serde(default = "default_prefix")]
     pub prefix: String,
     pub shell: Option<ShellConfig>,
+    /// Lenient on purpose: this is a hand-edited key with a nested shape, and a
+    /// typo in one entry must not fail the whole `Config` and hand the user
+    /// back defaults that the next settings write would then persist over what
+    /// they wrote.
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub custom_shells: Vec<CustomShell>,
 
     pub link_url: bool,
     pub link_file_command: Option<String>,
@@ -432,6 +438,21 @@ pub struct ShellConfig {
     pub args: Vec<String>,
 }
 
+/// A launcher the user put in the new-tab menu themselves.
+///
+/// `shell` names the one command that stands in for the platform default;
+/// these are the rest — a distro, a container, a REPL, the same shell against a
+/// different profile. They are launched exactly as written, which is why `args`
+/// crosses as user-authored: tty7 has no defaults to contribute to a command it
+/// did not choose.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CustomShell {
+    pub label: String,
+    pub program: String,
+    pub args: Vec<String>,
+}
+
 pub fn default_font_fallbacks() -> Vec<String> {
     let names: &[&str] = if cfg!(target_os = "macos") {
         &[
@@ -494,6 +515,7 @@ impl Default for Config {
             keybinding_preset: default_preset(),
             prefix: default_prefix(),
             shell: None,
+            custom_shells: Vec::new(),
             link_url: true,
             link_file_command: None,
             ssh_loopback_forward: false,
@@ -1508,6 +1530,29 @@ mod tests {
             cfg.ssh_profiles[0].auth,
             crate::core::ssh_profile::AuthMode::Auto
         );
+    }
+
+    #[test]
+    fn a_mistyped_custom_shell_does_not_cost_the_user_the_rest_of_the_config() {
+        let cfg = Config::default();
+        assert!(cfg.custom_shells.is_empty());
+
+        let cfg: Config =
+            serde_json::from_str(r#"{"font_size": 15.0, "custom_shells": {"Ubuntu": "wsl.exe"}}"#)
+                .expect("a bad custom_shells must not fail the whole config parse");
+        assert!(cfg.custom_shells.is_empty());
+        // The point of the leniency: `Config::load` hands back defaults for a
+        // config that fails to parse, and the next settings write persists them
+        // over the file. Everything the user wrote beside the typo survives.
+        assert_eq!(cfg.font_size, 15.0);
+
+        let cfg: Config = serde_json::from_str(
+            r#"{"custom_shells":[{"label":"Ubuntu","program":"wsl.exe","args":["-d","Ubuntu"]}]}"#,
+        )
+        .expect("a well-formed list parses");
+        assert_eq!(cfg.custom_shells.len(), 1);
+        assert_eq!(cfg.custom_shells[0].program, "wsl.exe");
+        assert_eq!(cfg.custom_shells[0].args, ["-d", "Ubuntu"]);
     }
 
     #[test]

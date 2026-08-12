@@ -393,6 +393,39 @@ pub struct PortEntry {
     pub port: u16,
     pub pid: u32,
     pub name: String,
+    /// The address the socket is bound to, as `lsof` spells it — `*`,
+    /// `0.0.0.0`, `127.0.0.1`, `[::1]`, or a specific interface.
+    ///
+    /// `serde(default)` because a daemon from before this field existed
+    /// answers `QueryProcs` without it, and an empty address is read the same
+    /// way that daemon's callers read every address: as localhost.
+    #[serde(default)]
+    pub addr: String,
+}
+
+impl PortEntry {
+    /// Whether a bound address can be reached on this machine's loopback —
+    /// true for the wildcards and the loopback addresses themselves, false for
+    /// a socket pinned to one specific non-loopback interface.
+    pub fn reaches_loopback(addr: &str) -> bool {
+        matches!(
+            addr,
+            "" | "*" | "0.0.0.0" | "::" | "[::]" | "127.0.0.1" | "::1" | "[::1]" | "localhost"
+        )
+    }
+
+    /// What to copy, and what to open in a browser: `host:port`.
+    ///
+    /// Loopback and wildcard binds are spelled `localhost`, which is what
+    /// anyone typing the address by hand would write. A socket bound to one
+    /// specific interface keeps that interface — the panel presents this as
+    /// the address of the pane's server, and `localhost` would not be it.
+    pub fn authority(&self) -> String {
+        match Self::reaches_loopback(&self.addr) {
+            true => format!("localhost:{}", self.port),
+            false => format!("{}:{}", self.addr, self.port),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

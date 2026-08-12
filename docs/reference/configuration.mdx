@@ -85,6 +85,7 @@ their id from the file name. [More about themes →](/customization/themes)
 | Key | Type | Default | |
 |---|---|---|---|
 | `shell` | object | — | `{"program": "fish", "args": ["-l"]}`. Unset uses the platform default. |
+| `custom_shells` | array | `[]` | Extra entries for the new-tab menu: `[{"label": "Ubuntu", "program": "wsl.exe", "args": ["-d", "Ubuntu"]}]`. Launched exactly as written, listed after the detected shells — which also means tty7 adds no shell integration to one, so a custom entry has no prompt marks, working-directory tracking, or command-finished notifications even where the detected row beside it does. An entry with no `program` is skipped; with no `label` it is named after its program. |
 | `working_directory` | object | `{"strategy":"inherit"}` | `strategy` is `inherit`, `home`, or `custom`; `path` is used when custom. |
 | `env` | object | `{}` | Extra environment variables for every pane. |
 | `scrollback_limit` | number | `10000` | Lines per pane (100–100,000). New panes only. |

@@ -1013,6 +1013,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelAgentDone => "完了",
         L10nKey::PanelRevealInFinder => "Finder で表示",
         L10nKey::PanelOpenFolder => "フォルダを開く",
+        L10nKey::PanelOpenInBrowser => "ブラウザで開く",
         L10nKey::ScmGroupMerge => "マージの競合",
         L10nKey::ScmGroupStaged => "ステージされた変更",
         L10nKey::ScmGroupChanges => "変更",

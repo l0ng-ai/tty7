@@ -740,8 +740,18 @@ impl Tty7App {
                         "ToggleRightPanel",
                         cx,
                     ))
-                    .on_click(cx.listener(|this, _, _window, cx| {
+                    // On macOS this tile is drawn inside the panel's own
+                    // titlebar while the panel is open, so closing from it
+                    // destroys the element holding the focus — and a keymap
+                    // scoped to a focused thing goes quiet with it, leaving the
+                    // ⌘J that would undo this doing nothing. Hand the terminal
+                    // back what it lost, the same way the tab tiles below do.
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let closing = this.right_panel_open(cx);
                         this.toggle_right_panel(cx);
+                        if closing {
+                            this.focus_active(window, cx);
+                        }
                     })),
                 ),
             )
@@ -796,8 +806,28 @@ impl Tty7App {
                         }
                         _ => SharedString::from(t(label_key)),
                     })
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.set_right_panel_tab(tab, cx);
+                    // A tile for another tab switches to it; the lit one puts
+                    // the panel away, the way an activity bar behaves
+                    // everywhere else. Pressing it used to do nothing at all
+                    // — a dead click on the one control in the row that looks
+                    // like it should undo itself. (These tiles only exist
+                    // while the panel is open, so `ToggleRightPanel` and the
+                    // chrome tile beside them are still what brings it back.)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        match this.right_panel_open(cx) && this.right_panel_tab == tab {
+                            true => {
+                                this.toggle_right_panel(cx);
+                                // These tiles live inside the panel, so
+                                // closing from one destroys the element that
+                                // holds the focus and leaves it nowhere —
+                                // and a keymap whose bindings are scoped to a
+                                // focused thing goes quiet with it, so the
+                                // ⌘J that would undo this did nothing at all.
+                                // Hand the terminal back what it lost.
+                                this.focus_active(window, cx);
+                            }
+                            false => this.set_right_panel_tab(tab, cx),
+                        }
                     })),
                 )
                 .into_any_element()
@@ -2073,6 +2103,7 @@ mod tests {
             program: "custom-shell".into(),
             args: vec!["--login".into()],
             args_are_tty7_defaults: false,
+            user_authored: false,
         };
         let spec = shell_spec(&shell);
 

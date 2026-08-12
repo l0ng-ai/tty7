@@ -46,8 +46,6 @@ const ICON: f32 = 16.0;
 
 const KID_INDENT: f32 = 16.0;
 
-const RAIL_X: f32 = ROW_PAD + GUTTER / 2.;
-
 const ROW_PAD: f32 = 8.0;
 
 const TAB_PATH_W: f32 = 160.0;
@@ -1590,7 +1588,7 @@ impl Tty7App {
                 let at = layout.nav.iter().position(|n| *n == item);
                 kids = kids.child(self.render_row(group, &group.rows[*r], picked, at, cx));
             }
-            block = block.child(self.indent(group, kids, cx));
+            block = block.child(div().pl(px(KID_INDENT)).child(kids));
         }
         block.into_any_element()
     }
@@ -1726,25 +1724,6 @@ impl Tty7App {
                             .bg(accent),
                     ),
             )
-    }
-
-    fn indent(&self, group: &Group, kids: impl IntoElement, cx: &mut Context<Self>) -> AnyElement {
-        let rail = cx.theme().border;
-        div()
-            .relative()
-            .child(div().pl(px(KID_INDENT)).child(kids))
-            .when(group.target.is_some(), |wrap| {
-                wrap.child(
-                    div()
-                        .absolute()
-                        .left(px(RAIL_X))
-                        .top(px(0.))
-                        .bottom(px(ROW_H / 2.))
-                        .w(px(1.))
-                        .bg(rail),
-                )
-            })
-            .into_any_element()
     }
 
     fn render_group_header(
