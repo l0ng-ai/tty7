@@ -231,15 +231,29 @@ fn listening_ports(procs: &[ProcEntry]) -> Vec<PortEntry> {
         match tag {
             "p" => current = rest.parse().unwrap_or(0),
             "n" => {
-                let Some(port) = parse_listen_port(rest) else {
+                let Some((addr, port)) = parse_listen_addr(rest) else {
                     continue;
                 };
-                if ports.iter().any(|e| e.port == port && e.pid == current) {
+                // One process listening on the same port over IPv4 and IPv6 is
+                // one port to show. Which of the two lines survives used to be
+                // whichever lsof printed first; now that the address is carried
+                // through to a clickable URL, the reachable one wins — a
+                // process bound to both `192.168.1.5` and `*` is on localhost,
+                // and the row should say so.
+                if let Some(seen) = ports
+                    .iter_mut()
+                    .find(|e| e.port == port && e.pid == current)
+                {
+                    if !PortEntry::reaches_loopback(&seen.addr) && PortEntry::reaches_loopback(addr)
+                    {
+                        seen.addr = addr.to_string();
+                    }
                     continue;
                 }
                 ports.push(PortEntry {
                     port,
                     pid: current,
+                    addr: addr.to_string(),
                     name: by_pid
                         .get(&current)
                         .copied()
@@ -259,10 +273,19 @@ fn listening_ports(_procs: &[ProcEntry]) -> Vec<PortEntry> {
     Vec::new()
 }
 
-fn parse_listen_port(name: &str) -> Option<u16> {
+/// The address and port `lsof -Fn` reports a listener on — `*:3000`,
+/// `127.0.0.1:8080`, `[::1]:5173`.
+///
+/// The address used to be dropped on the floor, which was harmless while the
+/// port was a number to read. It stopped being harmless when the panel started
+/// handing the port over as an address to open: a server bound only to
+/// `172.17.0.1` or a LAN address is not on `localhost`, and offering it as one
+/// sends the browser to a refused connection or, worse, to whatever else holds
+/// that port on loopback.
+fn parse_listen_addr(name: &str) -> Option<(&str, u16)> {
     let name = name.split_whitespace().next()?;
-    let (_, port) = name.rsplit_once(':')?;
-    port.parse().ok()
+    let (addr, port) = name.rsplit_once(':')?;
+    Some((addr, port.parse().ok()?))
 }
 
 #[cfg(test)]
@@ -325,10 +348,35 @@ mod tests {
 
     #[test]
     fn parses_lsof_listen_addresses() {
-        assert_eq!(parse_listen_port("*:3000"), Some(3000));
-        assert_eq!(parse_listen_port("127.0.0.1:8080"), Some(8080));
-        assert_eq!(parse_listen_port("[::1]:5173"), Some(5173));
-        assert_eq!(parse_listen_port("*:5432 (LISTEN)"), Some(5432));
-        assert_eq!(parse_listen_port("/tmp/some.sock"), None);
+        assert_eq!(parse_listen_addr("*:3000"), Some(("*", 3000)));
+        assert_eq!(
+            parse_listen_addr("127.0.0.1:8080"),
+            Some(("127.0.0.1", 8080))
+        );
+        assert_eq!(parse_listen_addr("[::1]:5173"), Some(("[::1]", 5173)));
+        assert_eq!(parse_listen_addr("*:5432 (LISTEN)"), Some(("*", 5432)));
+        assert_eq!(parse_listen_addr("/tmp/some.sock"), None);
+    }
+
+    #[test]
+    fn an_address_only_becomes_localhost_when_localhost_reaches_it() {
+        // What the panel copies and opens. A wildcard or a loopback bind is
+        // spelled the way anyone would type it; an interface-specific bind is
+        // kept, because `localhost` is not that server.
+        let entry = |addr: &str| PortEntry {
+            port: 8080,
+            pid: 1,
+            addr: addr.into(),
+            name: "server".into(),
+        };
+        for addr in ["", "*", "0.0.0.0", "::", "[::]", "127.0.0.1", "[::1]"] {
+            assert_eq!(
+                entry(addr).authority(),
+                "localhost:8080",
+                "{addr} is reachable on loopback"
+            );
+        }
+        assert_eq!(entry("172.17.0.1").authority(), "172.17.0.1:8080");
+        assert_eq!(entry("192.168.1.20").authority(), "192.168.1.20:8080");
     }
 }

@@ -740,8 +740,18 @@ impl Tty7App {
                         "ToggleRightPanel",
                         cx,
                     ))
-                    .on_click(cx.listener(|this, _, _window, cx| {
+                    // On macOS this tile is drawn inside the panel's own
+                    // titlebar while the panel is open, so closing from it
+                    // destroys the element holding the focus — and a keymap
+                    // scoped to a focused thing goes quiet with it, leaving the
+                    // ⌘J that would undo this doing nothing. Hand the terminal
+                    // back what it lost, the same way the tab tiles below do.
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let closing = this.right_panel_open(cx);
                         this.toggle_right_panel(cx);
+                        if closing {
+                            this.focus_active(window, cx);
+                        }
                     })),
                 ),
             )

@@ -506,6 +506,7 @@ mod tests {
             ports: vec![PortEntry {
                 port: 3000,
                 pid: 200,
+                addr: "*".into(),
                 name: "node".into(),
             }],
         };

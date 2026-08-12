@@ -39,7 +39,7 @@ use tty7_core::core::git::status::DecoStatus;
 use crate::terminal::git_diff::DiffSource;
 use crate::ui::app::{CONTENT_INSET, Tty7App};
 use crate::ui::i18n::{L10nKey, t, t_plural};
-use crate::ui::right_panel::{git_badge, info_chip};
+use crate::ui::right_panel::{ROW_INSET, git_badge, info_chip};
 use crate::ui::scm::path::{relative_time, split_display_path};
 use crate::ui::scm::state::{CommitDetailView, RepoKey};
 use crate::ui::scm::status::{status_color, status_glyph};
@@ -50,14 +50,11 @@ use crate::ui::scm::status::{status_color, status_glyph};
 /// Both numbers are a 12px row's. gpui leads a plain `div` at phi, so the row's
 /// mono name occupies `round(12 × 1.618) = 19px`, and 24 gives that line 2.5px
 /// of air on each side — dense, which is what a 260px column of paths wants.
-/// The text lands on `CONTENT_INSET` whatever `ROW_INSET` is, since the list
-/// subtracts it outside the row and the row adds it back inside.
-///
-/// Both have to equal `panel.rs`'s pair. That file carries the same two
-/// constants for the same reason, and a reader who opens a commit must not
-/// feel the pitch change under them.
+/// The text lands on `CONTENT_INSET` whatever [`ROW_INSET`] is, since the list
+/// subtracts it outside the row and the row adds it back inside — which is why
+/// the inset itself is the panel-wide constant rather than a third copy here: a
+/// reader who opens a commit must not feel the pitch change under them.
 const ROW_H: f32 = 24.;
-const ROW_INSET: f32 = 4.;
 
 /// How much of the body is shown before it folds. Four lines is a paragraph;
 /// past that it is a changelog, and the file list is what the reader came for.

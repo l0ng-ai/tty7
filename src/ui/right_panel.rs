@@ -593,17 +593,23 @@ impl Tty7App {
         let mut rows: Vec<InfoRow> = Vec::new();
         let mut pane_id: Option<u64> = None;
         let mut forwards_pane: Option<u64> = None;
+        // Whether the ports below are this machine's. They are listed by the
+        // daemon that owns the pane, so what decides it is which machine that
+        // daemon runs on — not whether the shell has since ssh'd somewhere,
+        // which would hide the browser tile on a `ssh -L` pane whose forwarded
+        // listener is on this machine and reachable.
         let mut local_pane = false;
         // Where the `changes` row's counts lead. Same source as the sidebar's,
         // and gated on the same setting, so turning the preview off turns it
         // off in both places rather than in one of them.
         let mut diff_target: Option<(crate::ui::host_ops::HostId, PathBuf)> = None;
+        let mut git: Option<crate::terminal::git_status::GitStatus> = None;
 
         if let Some(tab) = self.tabs.get(self.active) {
             if let Some(leaf) = tab.detail_pane(window, cx) {
                 let view = leaf.read(cx);
                 pane_id = Some(view.pane_id);
-                local_pane = view.remote_context().is_none();
+                local_pane = view.host_id().is_local();
                 diff_target = crate::ui::tab_sidebar::diff_click_cwd(
                     cx.global::<Config>(),
                     view.git_status_cwd()
@@ -639,8 +645,15 @@ impl Tty7App {
                 if connected_ssh || view.workspace().is_some() {
                     forwards_pane = Some(view.pane_id);
                 }
+                git = view.git_status(cx);
             }
-            if let Some(git) = tab.git_status(Some(window), cx) {
+            // Read off the same pane the rows above describe, rather than off
+            // `Tab::git_status`, which resolves a split tab to its *first* leaf
+            // while `detail_pane` resolves it to the *last focused* one. The
+            // two agreed while the row was inert text; now that the counts open
+            // a diff, disagreeing means a click that opens a repository other
+            // than the one whose numbers were clicked.
+            if let Some(git) = git {
                 rows.push(InfoRow::text(t(L10nKey::PanelBranch), git.branch.clone()).copyable());
                 rows.push(InfoRow {
                     label: t(L10nKey::PanelChangesRow),
@@ -727,6 +740,7 @@ impl Tty7App {
         let mono = cx.theme().mono_font_family.clone();
         let id = gpui::SharedString::from(format!("panel-info-row-{i}"));
         let interactive = row.interactive();
+        let tiles_wide = usize::from(row.reveal.is_some()) + usize::from(row.copy.is_some());
         // "Copy" is honest on a branch or a host, but on the working directory
         // it is the file tree's *Copy Path*, and the two live a right-click
         // apart from each other. Say the same words for the same act.
@@ -768,9 +782,13 @@ impl Tty7App {
                 open,
             } => {
                 let clean = added == 0 && removed == 0;
+                // Sized to the two numbers, not to the row: `flex_1` here made
+                // the whole rest of the line a button, so a click on the empty
+                // half of the row opened the overlay and a pointer crossing it
+                // underlined counts it was nowhere near. The slack belongs to
+                // the value slot around this, which is what holds it.
                 let counts = h_flex()
-                    .flex_1()
-                    .min_w_0()
+                    .flex_none()
                     .items_baseline()
                     .gap(px(6.))
                     .text_size(rems(TEXT_MONO))
@@ -831,15 +849,33 @@ impl Tty7App {
                     div()
                         .min_w_0()
                         .truncate()
-                        .when(dot.is_some(), |d| d.pl(px(PIP_SIZE + 7.)))
+                        .when(dot.is_some(), |d| d.pl(rems(PIP_SIZE + PIP_GAP)))
                         .text_size(rems(TEXT_MONO))
                         .font_family(mono.clone())
                         .text_color(cx.theme().foreground)
                         .child(text),
                 )
-                .children(dot.map(|rgb| status_pip(rgb, hollow)))
+                .children(dot.map(|rgb| {
+                    status_pip(rgb, hollow, crate::ui::theme::workspace_surface_color(cx))
+                }))
                 .into_any_element(),
         };
+
+        // The strip is opaque and pinned to the row's right edge, so whatever
+        // sits under it is unreadable for as long as the pointer is on the row
+        // — and on the working-directory row what sits there is the leaf, the
+        // one segment the head-first elision exists to keep. Hold that much
+        // width back from the value for good rather than only while hovered:
+        // taking it on hover would re-elide the path under the pointer, which
+        // is the pixel-shifting the strip is absolutely positioned to avoid.
+        let value = h_flex()
+            .flex_1()
+            .min_w_0()
+            .items_baseline()
+            .when(tiles_wide > 0, |this| {
+                this.pr(px(tiles_wide as f32 * (TILE_SIZE_XS + 1.) + 4.))
+            })
+            .child(value);
 
         let mut tiles = action_strip(&id, sf.hover);
         let mut has_tiles = false;
@@ -1008,10 +1044,13 @@ impl Tty7App {
 
     /// The listening ports of the pane's processes.
     ///
-    /// `local` is whether the pane's processes are on this machine, and it is
-    /// what decides whether the browser tile appears: `localhost:8765` means
-    /// the far machine's 8765 when the pane is a remote one, and opening this
-    /// machine's is not a near miss, it is a different service.
+    /// `local` is whether the daemon that listed these ports is this machine's,
+    /// and it is what decides whether the browser tile appears: a port on a
+    /// remote host is not this machine's port, and opening it here is not a
+    /// near miss, it is a different service. It is deliberately about the
+    /// *host* and not about whether the shell has ssh'd somewhere — the ports
+    /// come from the pane's own process tree either way, so a `ssh -L` pane's
+    /// forwarded listener really is on this machine and really does open.
     fn ports_section(
         &self,
         pane_id: Option<u64>,
@@ -1025,19 +1064,28 @@ impl Tty7App {
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let mono = cx.theme().mono_font_family.clone();
         let mut list = v_flex().px(px(CONTENT_INSET - ROW_INSET)).py(px(1.));
-        for p in ports {
+        for (i, p) in ports.iter().enumerate() {
             // "What is this pane serving, and where" is the question the
             // section answers, and the next thing anyone does with the answer
             // is go there — so the row hands over an address instead of making
             // it something to read off the screen and retype.
-            let authority = format!("localhost:{}", p.port);
-            let id = gpui::SharedString::from(format!("panel-port-{}", p.port));
+            let authority = p.authority();
+            // Keyed by the row, not by the port: `listening_ports` drops a
+            // duplicate only when the port *and* the pid match, so a
+            // pre-forking server — nginx, gunicorn, a node cluster — puts one
+            // row per worker on screen, all on port 8000. Sharing an id makes
+            // gpui hand them one interactive state between them, and a click on
+            // the last row lights up the tooltip and the pressed fill on all
+            // the others.
+            let id = gpui::SharedString::from(format!("panel-port-{}-{}", p.port, p.pid));
+            let mut tiles_wide = 1;
             let mut actions = action_strip(&id, sf.hover);
             if local {
+                tiles_wide += 1;
                 let url = format!("http://{authority}");
                 actions = actions.child(
                     self.info_tile(
-                        ("panel-port-open", p.port as usize),
+                        ("panel-port-open", i),
                         IconName::Globe,
                         t(L10nKey::PanelOpenInBrowser),
                         cx,
@@ -1047,7 +1095,7 @@ impl Tty7App {
             }
             actions = actions.child(
                 self.info_tile(
-                    ("panel-port-copy", p.port as usize),
+                    ("panel-port-copy", i),
                     IconName::Copy,
                     t(L10nKey::CmdCopy),
                     cx,
@@ -1081,6 +1129,10 @@ impl Tty7App {
                             .flex_1()
                             .min_w_0()
                             .truncate()
+                            // Room held back for the strip, so the process name
+                            // ends where the buttons begin instead of under
+                            // them. Same reservation the Info rows make.
+                            .pr(px(tiles_wide as f32 * (TILE_SIZE_XS + 1.) + 4.))
                             .text_size(rems(TEXT_MONO))
                             .font_family(mono.clone())
                             .text_color(cx.theme().muted_foreground)
@@ -1254,34 +1306,46 @@ pub(crate) fn git_badge(letter: &str, color: gpui::Hsla, mono: &gpui::SharedStri
         .into_any_element()
 }
 
-/// Diameter of the agent dot in the Info panel.
+/// Diameter of the agent dot in the Info panel, and the gap between it and the
+/// word it qualifies.
 ///
-/// Seven, because a dot on a line of text has to survive being read at a
-/// glance without becoming a bullet: below this the hollow variant loses its
-/// hole to the 2px ring, and above it the dot starts to outweigh the word it
-/// is qualifying.
-const PIP_SIZE: f32 = 7.;
+/// Seven sixteenths of a rem — seven pixels at the default interface size,
+/// because a dot on a line of text has to survive being read at a glance
+/// without becoming a bullet, and a rem rather than a pixel because the line it
+/// sits in is sized in rems: pinned in pixels it slid towards the cap height of
+/// its own row the moment the interface font scale moved off 100%.
+const PIP_SIZE: f32 = 7. * STEP;
+const PIP_GAP: f32 = 7. * STEP;
+
+/// How far down the value box the dot starts, again as a fraction of the text
+/// it is centred in rather than a pixel count.
+const PIP_TOP: f32 = 6. * STEP;
 
 /// The dot a tab wears for its agent's state, at the size a line of panel text
 /// can carry it.
 ///
 /// Same colours and the same hollow-for-Waiting rule as the sidebar's, because
 /// it is the same fact: a reader who has learned that amber-with-a-hole means
-/// "it wants you" on a tab must not have to learn it a second time here.
-///
-/// Positioned absolutely by its caller, which is what keeps it out of the
-/// row's baseline arithmetic; `top` centres it on the x-height of the line
-/// rather than on the line box, so it reads as sitting *in* the text.
-fn status_pip(rgb: u32, hollow: bool) -> AnyElement {
+/// "it wants you" on a tab must not have to learn it a second time here. Same
+/// *shape*, too — [`Tty7App::status_dot`] punches a small hole out of a filled
+/// dot, so drawing this one as a thin ring would have been a second dialect of
+/// the one rule the doc above promises is shared. `hole` is the colour behind
+/// the dot, which is what a hole in it has to be painted in; the agent row is
+/// never interactive, so that colour is the panel's own and does not move
+/// under the pointer.
+fn status_pip(rgb: u32, hollow: bool, hole: gpui::Hsla) -> AnyElement {
     div()
         .absolute()
         .left_0()
-        .top(px(6.))
-        .size(px(PIP_SIZE))
+        .top(rems(PIP_TOP))
+        .size(rems(PIP_SIZE))
         .rounded_full()
-        .map(|d| match hollow {
-            true => d.border(px(2.)).border_color(gpui::rgb(rgb)),
-            false => d.bg(gpui::rgb(rgb)),
+        .bg(gpui::rgb(rgb))
+        .when(hollow, |dot| {
+            dot.flex()
+                .items_center()
+                .justify_center()
+                .child(div().size(rems(PIP_SIZE * 0.36)).rounded_full().bg(hole))
         })
         .into_any_element()
 }
