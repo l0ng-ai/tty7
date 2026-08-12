@@ -95,8 +95,11 @@ share kept by the *existing* pane. Prints `%NN`. JSON: `{"pane"}`.
 
 Types `TEXT` into the pane as keystrokes; `--enter` appends CR. With one
 argument the text is the argument and the pane comes from `$TTY7_PANE` — but a
-lone `%42` is rejected as a missing-text error rather than typed, unless a
-`--key` gives it something to do.
+lone `%42` (or bare `42`, the shape `pane ls --json` prints) is rejected as a
+missing-text error rather than typed, unless a `--key` gives it something to
+do. A `%`-or-digit-led token that still doesn't parse (`%3x`) is an address
+error, never text for your own pane — while text that merely starts with `%`
+(`%s/foo/bar/`, `%!sort`) types as given.
 
 `--key` presses a key instead of typing characters, which is what a pane wants
 once something is already running in it: answering a prompt that only takes
@@ -221,13 +224,14 @@ candidates.
 | `ws tree [WORKSPACE]` | One workspace as a tree: tabs, split axes and ratios, panes with cwds | The whole workspace object: `{"id","name","last_active","active_tab","tabs":[{"id","name","sidebar_group","root",…}]}` |
 | `ws new [NAME]` | An empty workspace (no tab, no pane) | `{"id","name"}` |
 | `ws rename WORKSPACE NAME` | Name or rename | `{"id","name"}` |
-| `ws rm WORKSPACE` | Delete the workspace | `{"removed"}` |
+| `ws rm WORKSPACE` | Delete the workspace and hang up its panes | `{"removed"}` |
 | `ws attach WORKSPACE` | Become its controlling client | `{"attached","took_over_from"}` |
 | `ws detach WORKSPACE` | Let go without interrupting anything | `{"detached"}` |
 
 <Warning>
-  `ws rm` does **not** kill the panes it held — they keep running as orphans
-  with no workspace. Find them with `pane ls --all` and close them one by one.
+  `ws rm` hangs up the panes the workspace held. If the command reports that
+  some panes could not be hung up, they keep running as orphans with no
+  workspace — find them with `pane ls --all` and close them one by one.
 </Warning>
 
 Prefer `tty7 new <path>` over `ws new` when you want something usable: `ws new`
@@ -274,7 +278,8 @@ a stand-in.
 `--all` is the one that shows leaks. Each entry is
 `{"pane","workspace","orphan","owner","title","cwd","live"}`: `owner` is the id
 of the workspace that owns the pane, and `orphan: true` means no workspace holds
-it. An interrupted `run` and a removed workspace both leave orphans here.
+it. An interrupted `run` leaves orphans here, as does a `ws rm` that reported
+panes it could not hang up.
 
 `--orphans` is the reaper for exactly those. It closes what `pane ls --all`
 lists as orphaned and nothing else — panes a workspace holds are untouched —

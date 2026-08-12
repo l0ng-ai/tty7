@@ -376,7 +376,7 @@ pub enum WsCmd {
         ws: String,
     },
 
-    #[command(about = "Delete the workspace")]
+    #[command(about = "Delete the workspace and hang up its panes")]
     Rm {
         #[arg(value_name = "WORKSPACE")]
         ws: String,

@@ -102,8 +102,11 @@ share kept by the *existing* pane. Prints `%NN`. JSON: `{"pane"}`.
 ### `tty7 send [%PANE] [TEXT] [--enter] [--key KEY]…`
 Types `TEXT` into the pane as keystrokes; `--enter` appends CR. With one
 argument the text is the argument and the pane comes from `$TTY7_PANE` — but a
-lone `%42` is rejected as a missing-text error rather than typed, unless a
-`--key` gives it something to do.
+lone `%42` (or bare `42`, the shape `pane ls --json` prints) is rejected as a
+missing-text error rather than typed, unless a `--key` gives it something to
+do. A `%`-or-digit-led token that still doesn't parse (`%3x`) is an address
+error, never text for your own pane — while text that merely starts with `%`
+(`%s/foo/bar/`, `%!sort`) types as given.
 JSON: `{"pane","sent","enter","keys"}`.
 
 `--key` presses a key instead of typing characters — the arrow keys a
@@ -252,13 +255,15 @@ lists the candidates.
 | `ws tree [WORKSPACE]` | one workspace as a tree: tabs, split axes and ratios, panes with cwds | the whole workspace object: `{"id","name","last_active","tabs":[{"id","name","sidebar_group","root",...}]}`, where `root` is the nested split tree |
 | `ws new [NAME]` | an empty workspace (no tab, no pane) | `{"id","name"}` |
 | `ws rename WORKSPACE NAME` | name or rename | `{"id","name"}` |
-| `ws rm WORKSPACE` | delete the workspace | `{"removed"}` |
+| `ws rm WORKSPACE` | delete the workspace and hang up its panes | `{"removed"}` |
 | `ws attach WORKSPACE` | become its controlling client | `{"attached","took_over_from"}` |
 | `ws detach WORKSPACE` | let go without interrupting anything | `{"detached"}` |
 
 `ws rm` hangs up the panes the workspace held, so removing a scratch workspace
-is enough on its own. What does leak is an interrupted `tty7 run`: that pane
-keeps running with nothing referencing it. `pane ls --all` finds those.
+is enough on its own; if it reports panes it could not hang up, those keep
+running and show up as orphans in `pane ls --all`. What else leaks is an
+interrupted `tty7 run`: that pane keeps running with nothing referencing it.
+`pane ls --all` finds those.
 
 Prefer `tty7 new <path>` over `ws new` when you want something usable: `ws new`
 leaves you with an empty workspace you then have to populate, while

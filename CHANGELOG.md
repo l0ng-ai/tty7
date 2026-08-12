@@ -57,6 +57,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reload path say what happened and where the copy is. A file that simply
   cannot be *read* logs a warning now too — it used to fall to defaults with
   no trace at all. (#537)
+- **A mistyped `tty7 send` address no longer types itself into your own
+  pane** — `tty7 send %3x --key C-c` used to degrade the unparseable `%3x`
+  into text aimed at the pane the caller was sitting in, then deliver the
+  Ctrl-C there too, interrupting whatever was in front of them. A `%` (or
+  bare digit) led token that still fails to parse is now the address error it
+  looks like, while text that merely starts with `%` — vim's `%s/foo/bar/`,
+  `%!sort` — keeps typing as given. The explicit address slot also accepts
+  the bare ids `tty7 pane ls --json` prints, so `tty7 send 83 --key C-c`
+  addresses pane 83 instead of needing `"%${TTY7_PANE#%}"` contortions
+  (#538).
+- **The `ws rm` docs now say the panes are hung up, not orphaned** — the CLI
+  reference claimed removing a workspace leaves its panes running as orphans
+  to be found with `pane ls --all`, when the code has hung them up since the
+  command exists; only a *failed* hang-up (which `ws rm` reports by pane id)
+  leaves orphans behind. The site reference, the bundled skill reference, and
+  `ws rm --help` all read the same way now (#539).
 
 ## [26.8.3] - 2026-08-12
 

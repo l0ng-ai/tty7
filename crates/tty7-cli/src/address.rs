@@ -42,12 +42,15 @@ pub enum WorkspaceAddress {
 }
 
 pub fn parse_pane(s: &str) -> Result<u64> {
-    let digits = s
-        .strip_prefix('%')
-        .ok_or_else(|| anyhow!("'{s}' is not a pane address — panes look like %42"))?;
+    // The `%` is optional: `tty7 pane ls --json` hands back bare ids, so a
+    // copied `83` must address the same pane as `%83` — refusing it sent
+    // people to workarounds uglier than the typo this guard exists to catch
+    // (#538). `pane_from_env` already read both shapes; this aligns the
+    // explicit slot with it.
+    let digits = s.strip_prefix('%').unwrap_or(s);
     digits
         .parse()
-        .map_err(|_| anyhow!("'%{digits}' is not a pane address — panes look like %42"))
+        .map_err(|_| anyhow!("'{s}' is not a pane address — panes look like %42"))
 }
 
 pub fn parse_tab(s: &str) -> Result<TabAddress> {
@@ -92,6 +95,8 @@ pub fn pane_or_context(explicit: Option<&str>, ctx: &Context) -> Result<u64> {
 }
 
 fn pane_from_env(v: &str) -> Result<u64> {
+    // Same both-shapes read as parse_pane; the error names the variable
+    // instead, because "pass %pane" cannot fix an inherited env value.
     let digits = v.strip_prefix('%').unwrap_or(v);
     digits.parse().map_err(|_| {
         anyhow!("{ENV_PANE}='{v}' is not a pane id; unset it or pass %pane explicitly")
@@ -145,8 +150,16 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_pane_id_addresses_the_same_pane_as_the_marked_one() {
+        // `tty7 pane ls --json` prints bare ids; refusing them here pushed
+        // people into "%${TTY7_PANE#%}" contortions (#538).
+        assert_eq!(parse_pane("42").unwrap(), 42);
+        assert_eq!(parse_pane("%42").unwrap(), 42);
+    }
+
+    #[test]
     fn malformed_addresses_say_what_they_should_look_like() {
-        let err = parse_pane("42").unwrap_err().to_string();
+        let err = parse_pane("abc").unwrap_err().to_string();
         assert!(err.contains("%42"), "the fix is shown: {err}");
         let err = parse_pane("%abc").unwrap_err().to_string();
         assert!(err.contains("%42"), "{err}");
