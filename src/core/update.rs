@@ -935,6 +935,84 @@ pub fn apply_pending_at_launch() -> bool {
     }
 }
 
+/// Folds the outcome the updater recorded for the install attempt that
+/// produced this launch into the on-disk update state, then removes the file.
+///
+/// This is what a failed install used to lack (#540): the GUI quits as soon
+/// as the helper is spawned, so without the outcome file a failure lived only
+/// in `update.log` — and because launching the helper had already cleared the
+/// prompt state, the next check simply offered the same version again. Runs
+/// before any window exists; `spawn_check`'s hydration carries the result
+/// into Settings.
+pub fn absorb_update_outcome_at_launch() {
+    use tty7_core::daemon::install::outcome::{UpdateOutcome, read_outcome};
+
+    let Some(path) = update_outcome_path() else {
+        return;
+    };
+    let outcome = match read_outcome(&path) {
+        Ok(Some(outcome)) => outcome,
+        Ok(None) => return,
+        // A result that exists but cannot be read is itself a result: an
+        // updater ran, and what it left is unusable.
+        Err(error) => UpdateOutcome {
+            version: current_version().to_string(),
+            ok: false,
+            detail: Some(format!(
+                "the update result at {} could not be read: {error}",
+                path.display()
+            )),
+        },
+    };
+    // Consumed either way: an outcome describes the attempt that already ran,
+    // never the next one.
+    let _ = std::fs::remove_file(&path);
+
+    let mut state = UpdateState::load();
+    if outcome.ok {
+        if outcome.version == current_version() {
+            log::info!("the update to {} completed", outcome.version);
+            // A failure recorded by an earlier attempt at this same version
+            // is finished business now.
+            if state
+                .last_failure
+                .as_ref()
+                .is_some_and(|failure| failure.version == outcome.version)
+            {
+                state.last_failure = None;
+                state.save();
+            }
+        } else {
+            // The helper said the install went in, yet this process is a
+            // different version — someone reinstalled by hand in between.
+            // Nothing to show, but the log should have it.
+            log::warn!(
+                "the updater reported installing {} but this is {}; ignoring the stale outcome",
+                outcome.version,
+                current_version()
+            );
+        }
+        return;
+    }
+
+    let detail = outcome
+        .detail
+        .unwrap_or_else(|| "the update failed without recording a reason".to_string());
+    log::error!("the update to {} failed: {detail}", outcome.version);
+    state.last_failure = Some(FailureRecord {
+        version: outcome.version.clone(),
+        detail,
+    });
+    // Unlike an in-process launch failure (`record_failure`, which clears
+    // `last_prompted` so the version asks again), this attempt already
+    // restarted the app once. Clearing the prompt state here is what turned
+    // one failed install into the same dialog on every check (#540). The
+    // failure sits in Settings until the user acts on it.
+    state.last_prompted = Some(outcome.version);
+    state.remind_after = None;
+    state.save();
+}
+
 /// Removes staging directories belonging to a run that died before its updater
 /// could clean up — quitting mid-download is the usual cause.
 ///
@@ -1587,8 +1665,15 @@ impl PreparedUpdate {
     fn launch(&self) -> Result<()> {
         let mut command = Command::new(&self.updater);
         command.args(self.args());
-        if let Some(config_dir) = &self.config_dir {
-            command.env("TTY7_CONFIG_DIR", config_dir);
+        let outcome = update_outcome_path();
+        for arg in updater_tail_args(self.config_dir.as_deref(), outcome.as_deref()) {
+            command.arg(arg);
+        }
+        if let Some(outcome) = &outcome {
+            // A result from an earlier attempt has to be gone before this one
+            // starts: a helper that dies before writing its own would
+            // otherwise be read as having written *that* one.
+            let _ = std::fs::remove_file(outcome);
         }
         tty7_core::core::proc::hide_console(&mut command)
             .stdin(Stdio::null())
@@ -1601,6 +1686,32 @@ impl PreparedUpdate {
             .context("launching tty7-updater")?;
         Ok(())
     }
+}
+
+/// Where the updater records how the install ended; the next launch merges it
+/// into the update state (`absorb_update_outcome_at_launch`).
+fn update_outcome_path() -> Option<PathBuf> {
+    crate::core::config::config_path(tty7_core::daemon::install::outcome::OUTCOME_FILE_NAME)
+}
+
+/// The named options after the positional arguments. Everything the updater
+/// must know about this process's configuration crosses as arguments, never
+/// the environment: on Windows an elevated (UAC) child does not inherit the
+/// spawning process's environment, so a `TTY7_CONFIG_DIR` set there would
+/// fall back to the administrator's config directory exactly in the case
+/// that needs the caller's (#504). The updater re-exports the variable for
+/// the children it spawns itself.
+fn updater_tail_args(config_dir: Option<&Path>, outcome: Option<&Path>) -> Vec<std::ffi::OsString> {
+    let mut args = Vec::new();
+    if let Some(dir) = config_dir {
+        args.push(std::ffi::OsString::from("--config-dir"));
+        args.push(dir.as_os_str().to_os_string());
+    }
+    if let Some(outcome) = outcome {
+        args.push(std::ffi::OsString::from("--result-file"));
+        args.push(outcome.as_os_str().to_os_string());
+    }
+    args
 }
 
 #[cfg(target_os = "macos")]
@@ -2400,6 +2511,7 @@ mod tests {
 
     #[test]
     fn update_state_round_trips_and_defaults() {
+        let _lock = UPDATE_STATE_LOCK.lock().unwrap();
         crate::core::config::pin_test_config_dir();
         let path = UpdateState::path().expect("config dir pinned");
 
@@ -2485,6 +2597,155 @@ mod tests {
             state.remind_after = None;
         }
         assert!(should_prompt(&state, "27.0.0"));
+    }
+
+    /// Serializes the tests that touch the real `update.json` under the
+    /// pinned per-process config dir (the pattern `update_guard`'s tests
+    /// document: one shared state file, parallel tests, one lock).
+    static UPDATE_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn updater_tail_args_carry_config_and_outcome_as_arguments() {
+        assert_eq!(
+            updater_tail_args(
+                Some(Path::new(r"C:\cfg")),
+                Some(Path::new(r"C:\cfg\update-outcome.json")),
+            ),
+            [
+                std::ffi::OsString::from("--config-dir"),
+                std::ffi::OsString::from(r"C:\cfg"),
+                std::ffi::OsString::from("--result-file"),
+                std::ffi::OsString::from(r"C:\cfg\update-outcome.json"),
+            ]
+        );
+        // Each flag stands alone; a machine with no resolvable config dir
+        // simply passes neither, which is the updater's pre-existing default.
+        assert!(updater_tail_args(None, None).is_empty());
+        assert_eq!(
+            updater_tail_args(None, Some(Path::new("/tmp/outcome.json"))),
+            [
+                std::ffi::OsString::from("--result-file"),
+                std::ffi::OsString::from("/tmp/outcome.json"),
+            ]
+        );
+    }
+
+    /// The whole outcome-file lifecycle in one test: the file and
+    /// `update.json` are per-process global state, and parallel tests
+    /// writing both would race each other.
+    #[test]
+    fn an_updater_outcome_is_absorbed_exactly_once() {
+        use tty7_core::daemon::install::outcome::{UpdateOutcome, write_outcome};
+
+        let _lock = UPDATE_STATE_LOCK.lock().unwrap();
+        crate::core::config::pin_test_config_dir();
+        let state_path = UpdateState::path().expect("config dir pinned");
+        let outcome_path = update_outcome_path().expect("config dir pinned");
+        let _ = std::fs::remove_file(&state_path);
+        let _ = std::fs::remove_file(&outcome_path);
+
+        // No outcome: nothing changes, nothing is invented.
+        absorb_update_outcome_at_launch();
+        let state = UpdateState::load();
+        assert!(state.last_failure.is_none() && state.last_prompted.is_none());
+
+        // A failure lands in the state and — the #540 half — must not set
+        // the version up to prompt again on its own.
+        write_outcome(
+            &outcome_path,
+            &UpdateOutcome {
+                version: "27.0.0".into(),
+                ok: false,
+                detail: Some("the installer exited with code 5".into()),
+            },
+        )
+        .unwrap();
+        absorb_update_outcome_at_launch();
+        let state = UpdateState::load();
+        assert_eq!(
+            state.last_failure,
+            Some(FailureRecord {
+                version: "27.0.0".into(),
+                detail: "the installer exited with code 5".into(),
+            })
+        );
+        assert!(!should_prompt(&state, "27.0.0"));
+        assert!(state.remind_after.is_none());
+        assert!(!outcome_path.exists(), "the outcome is consumed once");
+
+        // A later launch finds no file and changes nothing.
+        absorb_update_outcome_at_launch();
+        assert_eq!(
+            UpdateState::load()
+                .last_failure
+                .as_ref()
+                .map(|f| &f.version),
+            Some(&"27.0.0".to_string())
+        );
+
+        // A success retires the failure recorded for that same version. The
+        // two name the running version here because the crate version is the
+        // only "current" a test can have.
+        write_outcome(
+            &outcome_path,
+            &UpdateOutcome {
+                version: current_version().to_string(),
+                ok: false,
+                detail: Some("first attempt failed".into()),
+            },
+        )
+        .unwrap();
+        absorb_update_outcome_at_launch();
+        assert_eq!(
+            UpdateState::load()
+                .last_failure
+                .as_ref()
+                .map(|f| &f.version),
+            Some(&current_version().to_string())
+        );
+        write_outcome(
+            &outcome_path,
+            &UpdateOutcome {
+                version: current_version().to_string(),
+                ok: true,
+                detail: None,
+            },
+        )
+        .unwrap();
+        absorb_update_outcome_at_launch();
+        assert_eq!(UpdateState::load().last_failure, None);
+        assert!(!outcome_path.exists());
+
+        // A success naming some other version is stale (a hand-installed
+        // rollback in between): dropped, never shown.
+        write_outcome(
+            &outcome_path,
+            &UpdateOutcome {
+                version: "99.0.0".into(),
+                ok: true,
+                detail: None,
+            },
+        )
+        .unwrap();
+        absorb_update_outcome_at_launch();
+        assert_eq!(UpdateState::load().last_failure, None);
+
+        // Garbage is an outcome too: a failure with an odd detail beats
+        // silence about an attempt that definitely ran.
+        std::fs::write(&outcome_path, b"not json").unwrap();
+        absorb_update_outcome_at_launch();
+        let state = UpdateState::load();
+        assert!(
+            state
+                .last_failure
+                .as_ref()
+                .is_some_and(|failure| failure.detail.contains("could not be read")),
+            "{:?}",
+            state.last_failure
+        );
+        assert!(!outcome_path.exists());
+
+        let _ = std::fs::remove_file(&state_path);
     }
 
     #[test]

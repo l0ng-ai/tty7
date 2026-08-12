@@ -478,6 +478,10 @@ fn main() {
     if crate::core::update::apply_pending_at_launch() {
         return;
     }
+    // If this launch *is* the relaunch an updater just performed, its outcome
+    // file is waiting; fold it into the update state before the first window
+    // reads it. Also covers the recovery relaunch after a failed install.
+    crate::core::update::absorb_update_outcome_at_launch();
 
     let (config, config_outcome) = crate::core::config::Config::load_with_outcome();
     let gui_language = config.gui_language.clone();

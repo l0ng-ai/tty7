@@ -943,6 +943,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer hands the cursor back to the arrow the moment the drag it
   advertised begins.
 
+- **A failed update install says so instead of asking again** — the GUI hands
+  the install to the `tty7-updater` helper and quits, so a failure inside the
+  helper used to reach only `update.log`: the old version relaunched with no
+  word about it, and because the prompt state had already been cleared, the
+  next check offered the very same version again — and again. The helper now
+  records the terminal outcome of every attempt (`update-outcome.json` next
+  to `update.json`), the relaunched GUI folds it into the update state, and
+  Settings shows the failure with the installer's own reason until it is
+  dismissed. A version whose install failed is not offered again on its own.
+  The same channel carries the success case, so a failure an earlier attempt
+  recorded is retired by the update that did land. As part of this the helper
+  takes the config directory as a `--config-dir` argument rather than through
+  the environment, which an elevated child process would not inherit (#540).
+
 ## [26.8.2] - 2026-08-09
 
 ### Added

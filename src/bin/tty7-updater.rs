@@ -46,7 +46,8 @@ mod macos {
                 let stage = next_path(&mut args)?;
                 let expected_version = next_string(&mut args)?;
                 let log = next_path(&mut args)?;
-                reject_extra(args)?;
+                let options = tail_options(args)?;
+                options.apply();
                 install(InstallPlan {
                     parent_pid,
                     current,
@@ -56,6 +57,7 @@ mod macos {
                     stage,
                     expected_version,
                     log,
+                    result_file: options.result_file,
                 })
             }
             _ => Err(usage()),
@@ -66,7 +68,8 @@ mod macos {
         "usage: tty7-updater verify <current.app> <archive.zip> <checksums.txt> \
          <asset-name> <stage-dir> <version>\n\
          or: tty7-updater install <parent-pid> <current.app> <archive.zip> <checksums.txt> \
-         <asset-name> <stage-dir> <version> <log-path>"
+         <asset-name> <stage-dir> <version> <log-path> \
+         [--config-dir <dir>] [--result-file <path>]"
             .to_string()
     }
 
@@ -88,6 +91,65 @@ mod macos {
         }
     }
 
+    /// The named options an install verb takes after its positional
+    /// arguments. See the Windows half of this file for why these are
+    /// arguments and not the environment.
+    #[derive(Default)]
+    struct TailOptions {
+        config_dir: Option<PathBuf>,
+        result_file: Option<PathBuf>,
+    }
+
+    fn tail_options(
+        mut args: impl Iterator<Item = std::ffi::OsString>,
+    ) -> Result<TailOptions, String> {
+        let mut options = TailOptions::default();
+        while let Some(arg) = args.next() {
+            match arg.to_str() {
+                Some("--config-dir") => options.config_dir = Some(next_path(&mut args)?),
+                Some("--result-file") => options.result_file = Some(next_path(&mut args)?),
+                _ => return Err(usage()),
+            }
+        }
+        Ok(options)
+    }
+
+    impl TailOptions {
+        fn apply(&self) {
+            let Some(dir) = &self.config_dir else { return };
+            tty7_core::core::config::set_config_dir(dir.clone());
+            // Re-exported so the relaunched app — a child of this process —
+            // keeps answering for the same config directory. Safe here:
+            // argument parsing runs before any thread exists.
+            unsafe { std::env::set_var("TTY7_CONFIG_DIR", dir) };
+        }
+    }
+
+    /// The terminal outcome of the attempt, for the next GUI launch to merge
+    /// into the update state (#540). Best-effort, like every log line here.
+    fn report_outcome(
+        result_file: Option<&Path>,
+        log: &Path,
+        version: &str,
+        result: &Result<(), String>,
+    ) {
+        let Some(path) = result_file else { return };
+        let outcome = tty7_core::daemon::install::outcome::UpdateOutcome {
+            version: version.to_string(),
+            ok: result.is_ok(),
+            detail: result.as_ref().err().cloned(),
+        };
+        if let Err(error) = tty7_core::daemon::install::outcome::write_outcome(path, &outcome) {
+            log_line(
+                log,
+                &format!(
+                    "could not record the update outcome at {}: {error}",
+                    path.display()
+                ),
+            );
+        }
+    }
+
     struct InstallPlan {
         parent_pid: u32,
         current: PathBuf,
@@ -97,9 +159,21 @@ mod macos {
         stage: PathBuf,
         expected_version: String,
         log: PathBuf,
+        result_file: Option<PathBuf>,
     }
 
     fn install(plan: InstallPlan) -> Result<(), String> {
+        let result = install_inner(&plan);
+        report_outcome(
+            plan.result_file.as_deref(),
+            &plan.log,
+            &plan.expected_version,
+            &result,
+        );
+        result
+    }
+
+    fn install_inner(plan: &InstallPlan) -> Result<(), String> {
         let replacement = plan.stage.join("unpacked/tty7.app");
         wait_for_exit(plan.parent_pid);
         log_line(&plan.log, "re-verifying staged tty7 update");
@@ -575,7 +649,8 @@ mod windows {
                 let expected_version = next_string(&mut args)?;
                 let log = next_path(&mut args)?;
                 let stage = next_path(&mut args)?;
-                reject_extra(args)?;
+                let options = tail_options(args)?;
+                options.apply();
                 install(InstallPlan {
                     parent_pid,
                     installer,
@@ -585,6 +660,7 @@ mod windows {
                     expected_version,
                     log,
                     stage,
+                    result_file: options.result_file,
                 })
             }
             "install-portable" => {
@@ -598,7 +674,8 @@ mod windows {
                 let expected_version = next_string(&mut args)?;
                 let log = next_path(&mut args)?;
                 let stage = next_path(&mut args)?;
-                reject_extra(args)?;
+                let options = tail_options(args)?;
+                options.apply();
                 install_portable(PortableInstallPlan {
                     parent_pid,
                     archive,
@@ -608,6 +685,7 @@ mod windows {
                     expected_version,
                     log,
                     stage,
+                    result_file: options.result_file,
                 })
             }
             "cleanup" => {
@@ -627,11 +705,13 @@ mod windows {
     fn usage() -> String {
         "usage: tty7-updater verify <setup.exe> <checksums.txt> <asset-name> <version>\n\
          or: tty7-updater install <parent-pid> <setup.exe> <checksums.txt> <asset-name> \
-         <install-dir> <version> <log-path> <stage-dir>\n\
+         <install-dir> <version> <log-path> <stage-dir> \
+         [--config-dir <dir>] [--result-file <path>]\n\
          or: tty7-updater verify-portable <archive.zip> <checksums.txt> <asset-name> \
          <version> <stage-dir>\n\
          or: tty7-updater install-portable <parent-pid> <archive.zip> <checksums.txt> \
-         <asset-name> <install-dir> <version> <log-path> <stage-dir>\n\
+         <asset-name> <install-dir> <version> <log-path> <stage-dir> \
+         [--config-dir <dir>] [--result-file <path>]\n\
          or: tty7-updater cleanup <parent-pid> <stage-dir>"
             .to_string()
     }
@@ -654,6 +734,71 @@ mod windows {
         }
     }
 
+    /// The named options an install verb takes after its positional arguments.
+    ///
+    /// Everything the caller needs this process to know travels this way —
+    /// never through the environment. An elevated (UAC) child does not
+    /// inherit the spawning GUI's environment, so a `TTY7_CONFIG_DIR` set
+    /// there would silently fall back to the *administrator's* config
+    /// directory under an over-the-shoulder elevation (#504).
+    #[derive(Default)]
+    struct TailOptions {
+        config_dir: Option<PathBuf>,
+        result_file: Option<PathBuf>,
+    }
+
+    fn tail_options(mut args: impl Iterator<Item = OsString>) -> Result<TailOptions, String> {
+        let mut options = TailOptions::default();
+        while let Some(arg) = args.next() {
+            match arg.to_str() {
+                Some("--config-dir") => options.config_dir = Some(next_path(&mut args)?),
+                Some("--result-file") => options.result_file = Some(next_path(&mut args)?),
+                _ => return Err(usage()),
+            }
+        }
+        Ok(options)
+    }
+
+    impl TailOptions {
+        fn apply(&self) {
+            let Some(dir) = &self.config_dir else { return };
+            tty7_core::core::config::set_config_dir(dir.clone());
+            // The override above covers this process; the variable is
+            // re-exported so the helper children this process spawns — the
+            // payload's `--stop-daemon`, the relaunched app — keep answering
+            // for the same config directory. Safe here: argument parsing runs
+            // before any thread exists.
+            unsafe { std::env::set_var("TTY7_CONFIG_DIR", dir) };
+        }
+    }
+
+    /// The terminal outcome of the attempt, for the next GUI launch to merge
+    /// into the update state (#540). Best-effort: the install already ended
+    /// by the time this runs, and a result that cannot be recorded goes to
+    /// the log like every other updater detail.
+    fn report_outcome(
+        result_file: Option<&Path>,
+        log: &Path,
+        version: &str,
+        result: &Result<(), String>,
+    ) {
+        let Some(path) = result_file else { return };
+        let outcome = tty7_core::daemon::install::outcome::UpdateOutcome {
+            version: version.to_string(),
+            ok: result.is_ok(),
+            detail: result.as_ref().err().cloned(),
+        };
+        if let Err(error) = tty7_core::daemon::install::outcome::write_outcome(path, &outcome) {
+            log_line(
+                log,
+                &format!(
+                    "could not record the update outcome at {}: {error}",
+                    path.display()
+                ),
+            );
+        }
+    }
+
     struct InstallPlan {
         parent_pid: u32,
         installer: PathBuf,
@@ -663,6 +808,7 @@ mod windows {
         expected_version: String,
         log: PathBuf,
         stage: PathBuf,
+        result_file: Option<PathBuf>,
     }
 
     struct PortableInstallPlan {
@@ -674,12 +820,24 @@ mod windows {
         expected_version: String,
         log: PathBuf,
         stage: PathBuf,
+        result_file: Option<PathBuf>,
     }
 
     fn install(plan: InstallPlan) -> Result<(), String> {
+        let result = install_inner(&plan);
+        report_outcome(
+            plan.result_file.as_deref(),
+            &plan.log,
+            &plan.expected_version,
+            &result,
+        );
+        result
+    }
+
+    fn install_inner(plan: &InstallPlan) -> Result<(), String> {
         log_line(&plan.log, "waiting for the tty7 GUI to exit");
         if let Err(error) = wait_for_exit(plan.parent_pid) {
-            return recover_from_failed_update(&plan, error);
+            return recover_from_failed_update(plan, error);
         }
         log_line(&plan.log, "re-verifying the staged Windows installer");
         if let Err(error) = verify_update(
@@ -688,7 +846,7 @@ mod windows {
             &plan.asset_name,
             &plan.expected_version,
         ) {
-            return recover_from_failed_update(&plan, error);
+            return recover_from_failed_update(plan, error);
         }
 
         // Setup's own PrepareToInstall repeats this, but doing it here first
@@ -704,23 +862,23 @@ mod windows {
         // launch_app releases the guard on every path out of this function.
         tty7_core::daemon::update_guard::hold();
         if let Err(error) = tty7_core::daemon::spawn::stop_for_update(&plan.install_dir) {
-            return recover_from_failed_update(&plan, error);
+            return recover_from_failed_update(plan, error);
         }
 
         log_line(&plan.log, "running the tty7 Windows installer");
         let status = match run_installer(&plan.installer, &plan.log) {
             Ok(status) => status,
             Err(error) => {
-                return recover_from_failed_update(&plan, error);
+                return recover_from_failed_update(plan, error);
             }
         };
         if !status.success() {
             let error = format!("the Windows installer exited with {status}");
-            return recover_from_failed_update(&plan, error);
+            return recover_from_failed_update(plan, error);
         }
 
         if let Err(error) = verify_installed_payload(&plan.install_dir, &plan.expected_version) {
-            return recover_from_failed_update(&plan, error);
+            return recover_from_failed_update(plan, error);
         }
         log_line(&plan.log, "the Windows update completed; relaunching tty7");
         let result = launch_app(&plan.install_dir);
@@ -738,6 +896,17 @@ mod windows {
     }
 
     fn install_portable(plan: PortableInstallPlan) -> Result<(), String> {
+        let result = install_portable_inner(&plan);
+        report_outcome(
+            plan.result_file.as_deref(),
+            &plan.log,
+            &plan.expected_version,
+            &result,
+        );
+        result
+    }
+
+    fn install_portable_inner(plan: &PortableInstallPlan) -> Result<(), String> {
         log_line(&plan.log, "waiting for the tty7 GUI to exit");
         if let Err(error) = wait_for_exit(plan.parent_pid) {
             return recover_without_replacement(&plan.log, &plan.install_dir, &plan.stage, error);
@@ -1720,6 +1889,71 @@ mod windows {
                     .collect::<Vec<_>>(),
             );
             assert!(arguments.contains(&expected));
+        }
+
+        #[test]
+        fn tail_options_parse_named_arguments_in_any_order() {
+            let options = tail_options(
+                [
+                    OsString::from("--result-file"),
+                    OsString::from(r"C:\config\update-outcome.json"),
+                    OsString::from("--config-dir"),
+                    OsString::from(r"C:\config"),
+                ]
+                .into_iter(),
+            )
+            .unwrap();
+            assert_eq!(options.config_dir.as_deref(), Some(Path::new(r"C:\config")));
+            assert_eq!(
+                options.result_file.as_deref(),
+                Some(Path::new(r"C:\config\update-outcome.json"))
+            );
+
+            let none = tail_options(Vec::new().into_iter()).unwrap();
+            assert!(none.config_dir.is_none() && none.result_file.is_none());
+
+            // Anything unrecognized — including the positionals of an old or
+            // new caller whose plans do not match this build — stays an error.
+            assert!(tail_options([OsString::from("--surprise")].into_iter()).is_err());
+            assert!(tail_options([OsString::from("stray")].into_iter()).is_err());
+            // A flag missing its value is an error, not an empty path.
+            assert!(tail_options([OsString::from("--config-dir")].into_iter()).is_err());
+        }
+
+        #[test]
+        fn report_outcome_records_the_terminal_result_for_the_next_gui() {
+            let root = tempfile::tempdir().unwrap();
+            let outcome_path = root.path().join("update-outcome.json");
+            let log = root.path().join("update.log");
+
+            report_outcome(None, &log, "27.0.0", &Ok(()));
+            assert!(
+                !outcome_path.exists(),
+                "a caller without --result-file gets today's behavior"
+            );
+
+            report_outcome(Some(&outcome_path), &log, "27.0.0", &Ok(()));
+            let outcome = tty7_core::daemon::install::outcome::read_outcome(&outcome_path).unwrap();
+            assert_eq!(
+                outcome,
+                Some(tty7_core::daemon::install::outcome::UpdateOutcome {
+                    version: "27.0.0".to_string(),
+                    ok: true,
+                    detail: None,
+                })
+            );
+
+            let failure: Result<(), String> = Err("the installer exited with code 5".to_string());
+            report_outcome(Some(&outcome_path), &log, "27.0.0", &failure);
+            let outcome = tty7_core::daemon::install::outcome::read_outcome(&outcome_path).unwrap();
+            assert_eq!(
+                outcome,
+                Some(tty7_core::daemon::install::outcome::UpdateOutcome {
+                    version: "27.0.0".to_string(),
+                    ok: false,
+                    detail: Some("the installer exited with code 5".to_string()),
+                })
+            );
         }
 
         #[test]

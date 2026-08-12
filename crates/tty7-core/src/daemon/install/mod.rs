@@ -6,6 +6,7 @@ pub mod asset;
 pub mod checksums;
 #[cfg(feature = "remote-install")]
 pub mod download;
+pub mod outcome;
 #[cfg(feature = "remote-install")]
 pub mod proxy;
 pub mod ssh_ops;
