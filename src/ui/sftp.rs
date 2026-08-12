@@ -2182,6 +2182,7 @@ mod gpui_tests {
 
     #[gpui::test]
     fn toggle_sftp_opens_files_then_closes_the_panel(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
         let (app, mut vcx) = harness(cx);
 
         app.update_in(&mut vcx, |app, window, cx| {
@@ -2199,6 +2200,7 @@ mod gpui_tests {
 
     #[gpui::test]
     fn toggle_sftp_switches_tabs_before_it_closes(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
         let (app, mut vcx) = harness(cx);
         app.update_in(&mut vcx, |app, window, cx| {
             app.set_right_panel_tab(RightPanelTab::Info, cx);

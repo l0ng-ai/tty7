@@ -1,0 +1,104 @@
+# cargo-nextest's configuration. `.github/workflows/ci.yml` selects `--profile
+# ci`; a bare `cargo nextest run` locally uses `default` and inherits everything
+# not overridden below.
+
+[profile.default]
+# `tty7-cli`'s cli_e2e is `harness = false` (see crates/tty7-cli/Cargo.toml), and
+# deliberately so: the test binary *is* `fn main()`, and it re-execs itself as
+# the daemon under test (`TTY7_CLI_E2E_DAEMON=1`) and as a raw-mode TUI fixture
+# (`--tty7-e2e-paste-aware-fixture`), then runs its cases in order against the
+# one daemon it started. nextest can only drive a libtest harness — it enumerates
+# tests with `--list`, which that `main` ignores, so leaving it in fails the run
+# before a single test executes.
+#
+# Excluding it here rather than teaching it the libtest protocol is the right
+# trade: converting it would mean giving up the shared daemon and the self-exec,
+# which is the whole design of the file. CI keeps running it, under plain
+# `cargo test`, in its own step — see the `CLI end-to-end` step in ci.yml. Keep
+# the two in sync: dropping the step would silently retire thirteen tests.
+#
+# This lives on `default` rather than on `ci` so a local `cargo nextest run`
+# behaves the same way instead of erroring out.
+default-filter = "not binary_id(tty7-cli::cli_e2e)"
+
+[profile.ci]
+# One failure must not hide the rest. On CI the value of a run is the complete
+# list of what broke, and re-running to discover the second failure costs another
+# six minutes of runner time.
+fail-fast = false
+
+# This is as much the reason for using nextest as the speed is.
+#
+# The suite intermittently hangs — roughly one run in ten, on any branch, while
+# the same commit passes on a re-run (seen on Windows three times and on Linux
+# once). Under `cargo test` the only backstop was the *step* timeout, and that
+# kills the whole process tree: the job fails having said nothing about which
+# test was stuck, because GitHub tears the step down before the log can be read.
+# See the `Test` step's comment in ci.yml for the full history.
+#
+# nextest runs each test in its own process, so it can time out the individual
+# test instead of the run: `SLOW` is reported at 60s while everything else keeps
+# going, and a test still running at three minutes is terminated and named in the
+# summary as TIMEOUT. The step timeout stays as the outer backstop, but it should
+# now never be the thing that trips.
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# Keep the slow tests in the summary even on a fully green run. That list is the
+# targeting data for the next round of "why does tty7-core take 44s on Windows
+# and 10s on Linux".
+final-status-level = "slow"
+
+# ---------------------------------------------------------------------------
+# Serialization
+#
+# The suite carries nine `static Mutex` guards that exist purely to keep tests
+# out of each other's way under libtest, where every test shares one process:
+# `serial()` in ui::scm::panel, ui::scm::graph and ui::file_tree;
+# `lock_config_file`, `lock_session_file`, `responder_lock`, `pin_dir`,
+# `claim_mailbox`, and windows_env's `SCRATCH`.
+#
+# nextest gives each test its own process, so most of those become no-ops — and
+# for seven of the nine that is strictly *better* than the lock they replace,
+# because what they were protecting is process-global state that is now simply
+# not shared:
+#
+#   - lock_config_file / lock_session_file / pin_dir all guard `set_config_dir`,
+#     which is process-wide, over a scratch dir already keyed by `process::id()`.
+#     Separate processes get separate dirs and separate globals.
+#   - responder_lock guards `AUTH_RESPONDER`, a `static OnceLock`.
+#   - claim_mailbox guards `AUTH_MAILBOX`, a `static Mutex<Vec<_>>`.
+#
+# The two that are not covered by process isolation get a group below. Leave the
+# mutexes in place regardless: they are what makes `cargo test` correct, and CI
+# still runs one target that way (tty7-cli's cli_e2e).
+
+[test-groups]
+# Frame-accounting tests: they drive a gpui window to quiescence and then assert
+# that an idle panel draws *zero* further frames. That is a claim about a quiet
+# machine, not about mutual exclusion — an unrelated test hogging a core is
+# enough to make a stray frame land and the count come back 1. Under libtest the
+# three `serial()` mutexes gave them a calm-enough process; `max-threads = 1`
+# across all of them is the equivalent, and stricter, since the three locks were
+# independent of each other and these tests never needed to overlap.
+render-idle = { max-threads = 1 }
+
+# windows_env's live-registry tests write one shared value name
+# (`TTY7_ISSUE333_PROBE`) into `HKCU\Environment`. HKCU belongs to the *user*,
+# not the process, so this is the one lock here that process isolation does not
+# subsume: without a group, one test's cleanup deletes the value another is
+# still reading, exactly as the `SCRATCH` mutex's own comment describes.
+#
+# Unverifiable from a macOS dev machine — these are `#[cfg(windows)]`, so
+# `nextest show-config test-groups` reports "no matches" here and the Windows CI
+# job is the filter's first real exercise. A filter that matches nothing is not
+# an error, so the pattern below is deliberately loose about what sits between
+# the module and the mod name rather than pinning the exact nesting.
+windows-registry = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(/render_idle_gpui_tests::/) or test(/drop_gpui_tests::/)'
+test-group = 'render-idle'
+
+[[profile.default.overrides]]
+filter = 'test(/windows_env::.*live_registry::/)'
+test-group = 'windows-registry'

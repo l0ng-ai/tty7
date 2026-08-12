@@ -1223,12 +1223,29 @@ mod detail_gpui_tests {
         // What the graph hands over: a row it already holds. The subject is
         // deliberately not the real one, so a `git show` behind our back would
         // overwrite it and show up here.
-        let mut seed = tty7_core::core::git::log::load_commit(
-            &*tty7_core::host::local::LocalHost::new(),
-            &root,
-            &head,
-        )
-        .expect("the scratch repo answers");
+        //
+        // Loaded on a worker thread because `load_commit` is a Host call and
+        // `host::guard_off_ui` rejects those on the UI thread — which is exactly
+        // where a `#[gpui::test]` body runs. The real caller reaches it off the
+        // UI thread too, so this is also the honest shape for the seed.
+        //
+        // That assert was inert here until the suite gained process isolation:
+        // `UI_THREAD` is a process-wide `OnceLock`, so whichever gpui test
+        // registered first owned it and every later test's thread compared
+        // unequal, which made the guard silently pass for all of them.
+        let mut seed = {
+            let (root, head) = (root.clone(), head.clone());
+            std::thread::spawn(move || {
+                tty7_core::core::git::log::load_commit(
+                    &*tty7_core::host::local::LocalHost::new(),
+                    &root,
+                    &head,
+                )
+                .expect("the scratch repo answers")
+            })
+            .join()
+            .expect("the seed load thread")
+        };
         seed.summary = "what the graph already knew".into();
         app.update_in(&mut vcx, |app, _, cx| {
             app.open_commit_detail(repo.clone(), head.clone(), Some(seed), cx)

@@ -71,6 +71,17 @@ jobs:
     # hung test runs to GitHub's six-hour job limit, which is how a 90-second
     # step turned into a six-hour one three times in a day.
     timeout-minutes: 60
+    env:
+      # Two thirds of this job is compiling, and a measurable slice of that is
+      # emitting debug info nothing here consumes: no debugger ever attaches on a
+      # runner, and the one thing CI needs from a panic is the `file:line` in the
+      # backtrace, which `line-tables-only` keeps. `[profile.dev]` in Cargo.toml
+      # stays at `debug = "limited"` for local development — this narrows it for
+      # CI only.
+      #
+      # Note for whoever changes this next: Swatinem/rust-cache hashes `CARGO_*`
+      # into its cache key, so editing this line makes exactly one run cold.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - name: Checkout tty7
         uses: actions/checkout@v4
@@ -110,44 +121,80 @@ jobs:
         timeout-minutes: 30
         run: cargo build --locked --target ${{ matrix.target }}
 
-      # `cargo test` has no timeout of its own, so one hung test is
-      # indistinguishable from a slow suite until the job hits GitHub's six-hour
-      # limit. The suite intermittently hangs here — roughly one run in ten, on
-      # any branch, while the same commit passes on a re-run — and every time it
-      # did, the job held a runner slot for hours and reported nothing.
+      # nextest rather than `cargo test`, for two reasons.
       #
-      # Seen on Windows three times and on Linux once, so it is not a
-      # platform-specific test: `Build` succeeds, `Test` starts, and nothing
-      # further is ever written.
+      # Speed: `cargo test` runs the sixteen test binaries strictly one after
+      # another, and paying each one's process startup separately is most of the
+      # cost on Windows — the per-binary times reported there added up to 59s
+      # against 98s of wall clock (run 31499772887). nextest schedules every
+      # test from every binary through one pool, so that gap closes.
       #
-      # The step's honest budget is small: ~75s warm and ~3.5 min when this step
-      # also has to compile the test targets, on every platform. 20 minutes is
-      # pure headroom, so a trip means a hang, not a slow runner.
+      # Diagnosis, which matters more: `cargo test` has no timeout of its own, so
+      # one hung test was indistinguishable from a slow suite until the job hit
+      # GitHub's six-hour limit. The suite intermittently hangs — roughly one run
+      # in ten, on any branch, while the same commit passes on a re-run, seen on
+      # Windows three times and on Linux once — and every time it did, the job
+      # held a runner slot for hours and reported nothing: `Build` succeeded,
+      # `Test` started, and nothing further was ever written.
+      #
+      # An earlier attempt at that problem was a post-mortem step that dumped the
+      # process table on failure. It cannot work, and that is worth recording:
+      # GitHub kills the step's whole process tree when `timeout-minutes` trips,
+      # *before* the next step runs, so on the one failure that matters the dump
+      # comes back empty — verified on run 30526538997, where it printed two
+      # headers and nothing between them.
+      #
+      # nextest fixes it at the right level instead: each test is its own
+      # process, so the *test* times out and gets named in the summary while the
+      # rest of the suite finishes normally (see `.config/nextest.toml`). The
+      # 20-minute step timeout below stays as the outer backstop, but it should
+      # now never be the thing that trips — if it does, the hang is in the
+      # harness rather than in a test.
+      #
+      # The step's honest budget is small: ~75s warm and ~3.5 min when it also
+      # has to compile the test targets. 20 minutes is pure headroom.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Test
         timeout-minutes: 20
-        run: cargo test --locked --target ${{ matrix.target }}
+        run: cargo nextest run --locked --profile ci --target ${{ matrix.target }}
 
       - name: Test desktop updater
         if: runner.os == 'macOS' || runner.os == 'Windows'
         timeout-minutes: 10
-        run: cargo test --locked --features updater --bin tty7-updater --target ${{ matrix.target }}
+        run: cargo nextest run --locked --profile ci --features updater --bin tty7-updater --target ${{ matrix.target }}
 
-      # There is deliberately no post-mortem step here, and that is worth
-      # recording, because an earlier version of this file had one: on failure it
-      # dumped the process table to find the surviving test binary.
+      # tty7-cli's cli_e2e is `harness = false` — the test binary is its own
+      # `fn main()`, re-execs itself as the daemon under test and as a raw-mode
+      # TUI fixture, and runs its cases in order against the single daemon it
+      # started. nextest drives libtest harnesses only, so `.config/nextest.toml`
+      # filters this binary out of the run above and it stays on `cargo test`.
       #
-      # It does not work, and cannot. GitHub kills the step's whole process tree
-      # when `timeout-minutes` trips, *before* the next step runs, so on the one
-      # failure that matters the dump comes back empty — verified on run
-      # 30526538997, where it printed two headers and nothing between them.
+      # Deleting this step would not fail anything — it would silently retire
+      # thirteen end-to-end tests.
+      - name: CLI end-to-end
+        timeout-minutes: 15
+        run: cargo test --locked -p tty7-cli --test cli_e2e --target ${{ matrix.target }}
+
+      # nextest does not run doctests, so on its own the switch above would let a
+      # doctest be added and silently never run. There are none in the tree today
+      # — the only fenced block in a doc comment is a `text` lane diagram in
+      # tty7-core's git log code — so this is a guard, not a workload.
       #
-      # Nor is it needed. libtest already prints "<test> has been running for
-      # over 60 seconds" for a test that has not returned, and that line was
-      # sitting in every hung run all along. The obstacle was never the
-      # diagnostic: a job's log cannot be fetched while the job is in progress
-      # (the API 404s), and nobody cancels a six-hour run to read one. The `Test`
-      # timeout above is what fixes that — the step *fails*, so the log lands,
-      # with the name in it.
+      # Linux only, deliberately: doctests are platform-independent, and the
+      # Linux job finishes in under half the Windows job's time, so putting the
+      # rustdoc pass there keeps it off the critical path entirely.
+      - name: Doc tests
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: cargo test --locked --doc --target ${{ matrix.target }}
+
+      # There is still deliberately no post-mortem step here — see the `Test`
+      # step's comment for why one cannot work, and why naming the hung test is
+      # nextest's job rather than a later step's.
 
   # Static musl builds of the headless server binary that remote workspaces push
   # onto the far machine (decision D10).
