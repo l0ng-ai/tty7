@@ -971,6 +971,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmUnrepresentablePath => "该路径不是合法的 UTF-8，无法传给 git —— 仅可查看。",
         L10nKey::ScmPublishBranch => "发布分支",
         L10nKey::ScmDetached => "游离头指针",
+        L10nKey::ScmPushDetached => "HEAD 游离——请先切换到一个分支再推送",
+        L10nKey::ScmPushNoCommits => "还没有可推送的提交",
         L10nKey::ScmAmendBadge => "修订",
         L10nKey::ScmSync => "同步更改",
         L10nKey::ScmPush => "推送",

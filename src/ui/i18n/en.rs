@@ -1024,6 +1024,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::ScmPublishBranch => "Publish Branch",
         L10nKey::ScmDetached => "detached",
+        L10nKey::ScmPushDetached => "Detached HEAD — check out a branch to push",
+        L10nKey::ScmPushNoCommits => "No commits to push yet",
         L10nKey::ScmAmendBadge => "amend",
         L10nKey::ScmSync => "Sync Changes",
         L10nKey::ScmPush => "Push",

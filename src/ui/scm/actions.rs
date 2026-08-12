@@ -7,7 +7,6 @@
 use gpui::{Context, PromptLevel, Window};
 
 use tty7_core::core::git::ops::{Destructive, GitOp, PullMode};
-use tty7_core::core::git::status::HeadState;
 
 use crate::core::config::DiffViewMode;
 use crate::ui::app::Tty7App;
@@ -338,14 +337,23 @@ impl Tty7App {
         let Some(status) = crate::terminal::git_data::status_of(cx, repo.host, &repo.root) else {
             return;
         };
-        let HeadState::Branch { name, .. } = &status.head else {
-            // A detached HEAD has no branch to push, and pushing a bare sha
-            // needs a refspec the panel has no way to ask for.
-            return;
+        let name = match crate::ui::scm::panel::pushable_branch(&status.head) {
+            Ok(name) => name.to_string(),
+            Err(reason) => {
+                // "A swallowed click on Push looks exactly like a push that
+                // finished instantly" — git_data.rs says it out loud about
+                // the busy slot, and the same holds here. The tile and the
+                // menu disable themselves, but the key binding, the palette
+                // and the follow-up half of "Commit and Push" all land in
+                // this guard, so the toast is the only place they can say
+                // why nothing moved (#545).
+                gpui_component::WindowExt::push_notification(window, t(reason).to_string(), cx);
+                return;
+            }
         };
         let (remote, branch) = match status.upstream.as_deref().and_then(split_upstream) {
             Some((remote, branch)) => (remote.to_string(), branch.to_string()),
-            None => ("origin".to_string(), name.clone()),
+            None => ("origin".to_string(), name),
         };
         let set_upstream = status.upstream.is_none();
         self.scm_op(

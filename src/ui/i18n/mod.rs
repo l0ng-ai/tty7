@@ -787,6 +787,8 @@ l10n_keys! {
     ScmUnrepresentablePath,
     ScmPublishBranch,
     ScmDetached,
+    ScmPushDetached,
+    ScmPushNoCommits,
     ScmAmendBadge,
     ScmSync,
     ScmPush,

@@ -401,8 +401,17 @@ impl Tty7App {
                     cx,
                 )
                 .rounded_md()
-                .disabled(busy)
-                .tooltip(if status.upstream.is_some() {
+                // Detached, the tile could only ever lose (#545): upstream
+                // is None there by definition, so sync degenerates into
+                // scm_push, which has no branch to move. Say that on the
+                // tooltip instead of promising "Publish Branch" — the one
+                // thing a detached HEAD cannot do — and let the key binding,
+                // palette and compound-verb paths toast the same reason from
+                // inside scm_push.
+                .disabled(busy || detached)
+                .tooltip(if detached {
+                    t(L10nKey::ScmPushDetached)
+                } else if status.upstream.is_some() {
                     t(L10nKey::ScmSync)
                 } else {
                     t(L10nKey::ScmPublishBranch)
@@ -503,6 +512,7 @@ impl Tty7App {
             .map(|(_, names)| names.clone())
             .unwrap_or_default();
         let others = self.scm_repo_choices();
+        let detached = matches!(status.head, HeadState::Detached { .. });
 
         move |menu, _window, _cx| {
             let mut menu = menu.min_w(px(200.));
@@ -547,12 +557,20 @@ impl Tty7App {
                 (L10nKey::ScmPull, ScmIntent::Pull),
                 (L10nKey::ScmPush, ScmIntent::Push),
             ] {
-                menu = menu.item(PopupMenuItem::new(t(label)).on_click({
-                    let app = app.clone();
-                    move |_, window, cx| {
-                        let _ = app.update(cx, |this, cx| this.run_scm_action(intent, window, cx));
-                    }
-                }));
+                menu = menu.item(
+                    PopupMenuItem::new(t(label))
+                        // Fetch works from any HEAD, and Pull fails loud out
+                        // of git itself; a Push at a detached HEAD is the one
+                        // item that could only die in scm_push's guard (#545).
+                        .disabled(detached && matches!(intent, ScmIntent::Push))
+                        .on_click({
+                            let app = app.clone();
+                            move |_, window, cx| {
+                                let _ = app
+                                    .update(cx, |this, cx| this.run_scm_action(intent, window, cx));
+                            }
+                        }),
+                );
             }
             if others.len() > 1 {
                 menu = menu
@@ -1911,6 +1929,22 @@ pub(crate) fn commit_stages_everything(status: &WorkingTreeStatus, amend: bool) 
     !amend && status.staged().next().is_none()
 }
 
+/// The branch a push would move, or why there is no push to make.
+///
+/// Both dead ends used to die in the same silent `let-else` in `scm_push`
+/// (#545): a detached HEAD has no branch to push — and pushing a bare sha
+/// needs a refspec the panel has no way to ask for — while an unborn branch
+/// has a name but no commits to send yet. The key binding, the palette and
+/// the follow-up half of "Commit and Push" all land in that guard, so the
+/// reason is a key the caller can toast, not a log line.
+pub(crate) fn pushable_branch(head: &HeadState) -> Result<&str, L10nKey> {
+    match head {
+        HeadState::Branch { name, .. } => Ok(name),
+        HeadState::Detached { .. } => Err(L10nKey::ScmPushDetached),
+        HeadState::Unborn { .. } => Err(L10nKey::ScmPushNoCommits),
+    }
+}
+
 /// What a row's buttons do. Named rather than inlined because the same verb
 /// appears on the row, on its group header and in its context menu, and the
 /// three must not drift into meaning different things.
@@ -2366,6 +2400,29 @@ mod tests {
             "amending with no message keeps HEAD's own with --no-edit"
         );
         assert!(!commit_plan(&clean, false, "msg").enabled);
+    }
+
+    #[test]
+    fn a_head_without_a_pushable_branch_says_why() {
+        let branch = HeadState::Branch {
+            name: "main".into(),
+            oid: "1111111".into(),
+        };
+        assert_eq!(pushable_branch(&branch), Ok("main"));
+        // The two states the old let-else in scm_push swallowed without a
+        // word (#545): the toast now names each one.
+        assert_eq!(
+            pushable_branch(&HeadState::Detached {
+                oid: "1111111".into()
+            }),
+            Err(L10nKey::ScmPushDetached)
+        );
+        assert_eq!(
+            pushable_branch(&HeadState::Unborn {
+                branch: "main".into()
+            }),
+            Err(L10nKey::ScmPushNoCommits)
+        );
     }
 
     #[test]

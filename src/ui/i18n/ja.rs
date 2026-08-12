@@ -1078,6 +1078,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::ScmPublishBranch => "ブランチを公開",
         L10nKey::ScmDetached => "デタッチ",
+        L10nKey::ScmPushDetached => {
+            "HEAD がデタッチされています — ブランチをチェックアウトしてからプッシュしてください"
+        }
+        L10nKey::ScmPushNoCommits => "プッシュするコミットがまだありません",
         L10nKey::ScmAmendBadge => "修正",
         L10nKey::ScmSync => "変更を同期",
         L10nKey::ScmPush => "プッシュ",
