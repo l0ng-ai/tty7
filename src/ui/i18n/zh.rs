@@ -1200,8 +1200,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherOpen => "已打开",
         L10nKey::SwitcherDisconnect => "断开连接",
         L10nKey::SwitcherEditHost => "编辑主机…",
-        L10nKey::NewTabMenuShells => "Shell",
-        L10nKey::NewTabMenuSearch => "搜索 shell 和主机…",
         L10nKey::SwitcherSaveAsHost => "保存为 SSH 主机…",
         L10nKey::SshSaveDroppedJumpHost => {
             "跳板机没有带过来 —— 主机配置的跳板必须是另一个已保存的主机。"

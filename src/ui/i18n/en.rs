@@ -1284,8 +1284,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherOpen => "open",
         L10nKey::SwitcherDisconnect => "Disconnect",
         L10nKey::SwitcherEditHost => "Edit Host…",
-        L10nKey::NewTabMenuShells => "Shells",
-        L10nKey::NewTabMenuSearch => "Search shells and hosts…",
         L10nKey::SwitcherSaveAsHost => "Save as SSH Host…",
         L10nKey::SshSaveDroppedJumpHost => {
             "The jump host was left out — a saved host reaches its jump through another saved host."

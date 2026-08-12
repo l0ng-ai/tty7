@@ -1036,8 +1036,6 @@ l10n_keys! {
     SwitcherOpen,
     SwitcherDisconnect,
     SwitcherEditHost,
-    NewTabMenuShells,
-    NewTabMenuSearch,
     SwitcherSaveAsHost,
     SshSaveDroppedJumpHost,
     SwitcherOpenInNewWindow,
