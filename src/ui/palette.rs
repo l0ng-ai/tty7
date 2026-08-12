@@ -101,6 +101,7 @@ pub enum CommandKind {
     ActivateTab(usize),
     ConnectSavedProfile(Uuid),
     EditSavedProfile(Uuid),
+    SaveSshSessionAsHost,
     QuickConnect(String),
     SaveQuickConnect(String),
     OpenSshProfiles,
@@ -198,6 +199,7 @@ impl CommandKind {
             OpenThemePicker => "change-theme",
             OpenSshConnectInput => "ssh-add-connection",
             OpenSshProfiles => "ssh-manage-profiles",
+            SaveSshSessionAsHost => "ssh-save-connection",
             OpenSshConnect(_)
             | CheckoutBranch(_)
             | SetTheme(_)
@@ -307,6 +309,7 @@ impl CommandKind {
             | ActivateTab(_)
             | ConnectSavedProfile(_)
             | EditSavedProfile(_)
+            | SaveSshSessionAsHost
             | QuickConnect(_)
             | SaveQuickConnect(_) => return None,
         };
@@ -1077,6 +1080,21 @@ impl PaletteView {
             previewing: None,
             _sub,
         }
+    }
+
+    /// Open straight on the "type an address" input, for the routes that mean
+    /// SSH and nothing else — the New Tab menu's own SSH row. Escape still
+    /// backs out to the root list, exactly as it does when the same input is
+    /// reached from inside the palette.
+    pub fn new_ssh_connect(
+        commands: Vec<Command>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut view = Self::new(commands, window, cx);
+        view.menu = PaletteMenu::SshConnect;
+        view.show_ssh_connect(window, cx);
+        view
     }
 
     fn build_list(

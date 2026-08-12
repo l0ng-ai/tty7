@@ -87,6 +87,9 @@ pub struct NativeSshParts {
     persist: Box<crate::daemon::protocol::NativeSshSpec>,
 }
 
+/// What a pane is called when nothing running in it has said otherwise.
+pub(crate) const DEFAULT_TITLE: &str = "tty7";
+
 pub struct ShellParts {
     terminal: RemoteTerminal,
     pub(crate) pane_id: u64,
@@ -172,6 +175,11 @@ pub struct TerminalView {
     scroll_anim_epoch: u64,
     gesture_until: Option<std::time::Instant>,
     pub title: String,
+    /// What the pane is called before anything running in it says otherwise —
+    /// and what it goes back to when the program resets the title or the
+    /// session ends. "tty7" for a local shell; for an SSH pane it is the host
+    /// it dialled, so a window full of them is still readable (#438).
+    pub(super) default_title: String,
     pub marked_text: String,
     last_mouse_cell: Option<(usize, usize)>,
     last_hover_cell: Option<(usize, usize)>,
@@ -1002,6 +1010,16 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self::with_terminal(parts.terminal, parts.pane_id, window, cx);
+        if let Some(name) = parts
+            .persist
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            view.default_title = name.to_string();
+            view.title = name.to_string();
+        }
         view.ssh_spec = Some(parts.persist);
         view
     }
@@ -1175,7 +1193,8 @@ impl TerminalView {
             scroll_anim: None,
             scroll_anim_epoch: 0,
             gesture_until: None,
-            title: "tty7".to_string(),
+            title: DEFAULT_TITLE.to_string(),
+            default_title: DEFAULT_TITLE.to_string(),
             marked_text: String::new(),
             last_mouse_cell: None,
             report_mouse,
@@ -1377,7 +1396,7 @@ impl TerminalView {
     ) -> anyhow::Result<()> {
         self.terminal
             .adopt_relink(stream, route, size, cell_w, cell_h)?;
-        self.title = "tty7".to_string();
+        self.title = self.default_title.clone();
         cx.notify();
         Ok(())
     }
@@ -1545,16 +1564,15 @@ impl TerminalView {
                 cx.notify();
             }
             AlacEvent::ResetTitle => {
-                self.title = "tty7".to_string();
+                self.title = self.default_title.clone();
                 cx.notify();
             }
             AlacEvent::PtyWrite(text) => self.terminal.write(text.into_bytes()),
             AlacEvent::ChildExit(_) | AlacEvent::Exit => {
                 self.terminal.exited = true;
-                self.title = if self.workspace().is_some() && !self.terminal.child_exited() {
-                    "tty7 — disconnected".to_string()
-                } else {
-                    "tty7 — process exited".to_string()
+                self.title = match self.workspace().is_some() && !self.terminal.child_exited() {
+                    true => format!("{} — disconnected", self.default_title),
+                    false => format!("{} — process exited", self.default_title),
                 };
                 if self.terminal.child_exited() {
                     cx.emit(ChildExited);
@@ -8520,6 +8538,29 @@ mod gpui_tests {
                 assert_eq!(view.title, "vim — main.rs");
                 view.handle_event(AlacEvent::ResetTitle, cx);
                 assert_eq!(view.title, "tty7");
+            })
+            .unwrap();
+    }
+
+    /// An SSH pane answers to the host it dialled, and keeps answering to it
+    /// after the remote program hands the title back (#438). Before this every
+    /// SSH tab in the window read "tty7" until — and only if — the far shell
+    /// had integration enough to title itself.
+    #[gpui::test]
+    fn an_ssh_pane_is_named_after_its_host(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.default_title = "prod-web".into();
+                view.title = "prod-web".into();
+
+                view.handle_event(AlacEvent::Title("vim — main.rs".into()), cx);
+                assert_eq!(view.title, "vim — main.rs");
+                view.handle_event(AlacEvent::ResetTitle, cx);
+                assert_eq!(
+                    view.title, "prod-web",
+                    "a reset goes back to the host, not to the app's own name"
+                );
             })
             .unwrap();
     }

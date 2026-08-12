@@ -269,6 +269,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSocks5ProxyDesc => "host:port（留空 = 无）。",
         L10nKey::SettingsHttpProxy => "HTTP 代理",
         L10nKey::SettingsHttpProxyDesc => "host:port（留空 = 无）。",
+        L10nKey::SettingsProxyOverridden => "不会生效：优先用{winner}。",
         L10nKey::SettingsProxyPortInvalid => "端口必须在 1-65535 之间——只写主机则使用默认端口。",
         L10nKey::SettingsKexAlgorithms => "KEX 算法",
         L10nKey::SettingsKexAlgorithmsDesc => "逗号分隔（留空 = 库默认值）。",
@@ -1184,6 +1185,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherThisWindow => "当前窗口",
         L10nKey::SwitcherOpen => "已打开",
         L10nKey::SwitcherDisconnect => "断开连接",
+        L10nKey::SwitcherEditHost => "编辑主机…",
+        L10nKey::SwitcherSaveAsHost => "保存为 SSH 主机…",
+        L10nKey::SshSaveDroppedJumpHost => {
+            "跳板机没有带过来 —— 主机配置的跳板必须是另一个已保存的主机。"
+        }
         L10nKey::SwitcherOpenInNewWindow => "在新窗口中打开",
         L10nKey::SwitcherRename => "重命名…",
         L10nKey::SwitcherPickAWorkspace => "选一个工作区查看它的标签页。",
@@ -1303,6 +1309,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdSshReconnect => "SSH：重新连接",
         L10nKey::CmdSshRemoteFiles => "SSH：远程文件",
         L10nKey::CmdSshPortForwarding => "SSH：端口转发",
+        L10nKey::CmdSshSaveConnection => "SSH：将当前连接保存为主机…",
+        L10nKey::CmdSshSaveConnectionSubtitle => "把这条连接存成一个主机配置。",
         L10nKey::CmdSshConnectWithInput => "SSH：连接 {input}",
         L10nKey::CmdAgentSendSelection => "Agent：发送选区",
         L10nKey::CmdAgentSendSelectionSubtitle => "选区 → 运行中的编码 agent",

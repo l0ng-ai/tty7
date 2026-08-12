@@ -308,6 +308,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSocks5ProxyDesc => "host:port（空欄 = なし）",
         L10nKey::SettingsHttpProxy => "HTTP プロキシ",
         L10nKey::SettingsHttpProxyDesc => "host:port（空欄 = なし）",
+        L10nKey::SettingsProxyOverridden => "使われません：{winner} が優先されます",
         L10nKey::SettingsProxyPortInvalid => {
             "ポートは 1-65535 の範囲です — ホストだけならデフォルトポートを使います"
         }
@@ -1302,6 +1303,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherThisWindow => "このウィンドウ",
         L10nKey::SwitcherOpen => "開く",
         L10nKey::SwitcherDisconnect => "切断",
+        L10nKey::SwitcherEditHost => "ホストを編集…",
+        L10nKey::SwitcherSaveAsHost => "SSH ホストとして保存…",
+        L10nKey::SshSaveDroppedJumpHost => {
+            "踏み台ホストは引き継がれません — 保存済みホストの踏み台は別の保存済みホストである必要があります"
+        }
         L10nKey::SwitcherOpenInNewWindow => "新しいウィンドウで開く",
         L10nKey::SwitcherRename => "名前を変更…",
         L10nKey::SwitcherPickAWorkspace => "ワークスペースを選ぶとタブが表示されます",
@@ -1424,6 +1430,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdSshReconnect => "SSH: 再接続",
         L10nKey::CmdSshRemoteFiles => "SSH: リモートファイル",
         L10nKey::CmdSshPortForwarding => "SSH: ポートフォワーディング",
+        L10nKey::CmdSshSaveConnection => "SSH: この接続をホストとして保存…",
+        L10nKey::CmdSshSaveConnectionSubtitle => "この接続を保存済みホストとして残します",
         L10nKey::CmdSshConnectWithInput => "SSH: {input} に接続",
         L10nKey::CmdAgentSendSelection => "エージェント: 選択範囲を送信",
         L10nKey::CmdAgentSendSelectionSubtitle => "選択範囲 → 実行中のコーディングエージェント",

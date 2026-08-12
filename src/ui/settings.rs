@@ -1258,6 +1258,57 @@ fn field_error(message: impl Into<String>, cx: &App) -> Div {
         .child(message.into())
 }
 
+/// The same line in the muted colour, for a field that is filled in and
+/// legal but will not be the one used. Not an error: nothing is wrong with
+/// what was typed, it is just not what the connection will do.
+fn field_note(message: impl Into<String>, cx: &App) -> Div {
+    div()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(message.into())
+}
+
+/// Which of the three proxy fields a connection would actually go through.
+/// They read as three independent settings and are not: `map_proxy` picks the
+/// first one filled, in this order, and ignores the rest without a word.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ProxyPick {
+    Command,
+    Socks,
+    Http,
+}
+
+impl ProxyPick {
+    fn of(command: bool, socks: bool, http: bool) -> Option<Self> {
+        match (command, socks, http) {
+            (true, _, _) => Some(Self::Command),
+            (_, true, _) => Some(Self::Socks),
+            (_, _, true) => Some(Self::Http),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Command => t(L10nKey::SettingsProxyCommand),
+            Self::Socks => t(L10nKey::SettingsSocks5Proxy),
+            Self::Http => t(L10nKey::SettingsHttpProxy),
+        }
+    }
+
+    /// The note this field carries when it holds an address that another one
+    /// outranks. An empty field has nothing to be overridden.
+    fn overridden_by(self, filled: bool, winner: Option<Self>) -> Option<String> {
+        let winner = winner?;
+        (filled && winner != self).then(|| {
+            t_fmt(
+                L10nKey::SettingsProxyOverridden,
+                &[("winner", winner.label())],
+            )
+        })
+    }
+}
+
 fn forward_row_inputs(row: &ForwardRuleForm) -> [&Entity<InputState>; 5] {
     [
         &row.bind_host,
@@ -4431,15 +4482,21 @@ impl Tty7App {
                 cx,
             )
         };
-        // The two proxy addresses are the only advanced fields with a rule of
-        // their own, so they carry room for the complaint under the control.
+        // The three proxy fields are the only advanced ones with rules of
+        // their own, so they carry room for a line under the control: a
+        // complaint when the address is wrong, and otherwise a word about
+        // which of them the connection is actually going to use.
         let proxy_row = |this: &Self,
                          label: &str,
                          desc: &str,
                          input: &Entity<InputState>,
                          error: Option<&SshFieldError>,
+                         note: Option<String>,
                          cx: &mut Context<Self>| {
-            let line = error.map(|e| field_error(e.message(), cx));
+            let line = match error {
+                Some(e) => Some(field_error(e.message(), cx)),
+                None => note.map(|n| field_note(n, cx)),
+            };
             this.settings_row(
                 label.to_string(),
                 desc.to_string(),
@@ -4453,6 +4510,16 @@ impl Tty7App {
                 cx,
             )
         };
+
+        // Filling in two of these has always meant one of them doing nothing.
+        // Which one was left for the user to find out by connecting (#438).
+        let filled = |input: &Entity<InputState>| !input.read(cx).value().trim().is_empty();
+        let (cmd_set, socks_set, http_set) = (
+            filled(&form.proxy_command),
+            filled(&form.socks),
+            filled(&form.http),
+        );
+        let pick = ProxyPick::of(cmd_set, socks_set, http_set);
 
         let on_off = |b: bool| {
             if b {
@@ -4500,11 +4567,13 @@ impl Tty7App {
                 ),
             )
             .child(self.subgroup_header(L10nKey::SettingsGroupProxies, cx))
-            .child(text_row(
+            .child(proxy_row(
                 self,
                 t(L10nKey::SettingsProxyCommand),
                 t(L10nKey::SettingsProxyCommandDesc),
                 &form.proxy_command,
+                None,
+                ProxyPick::Command.overridden_by(cmd_set, pick),
                 cx,
             ))
             .child(proxy_row(
@@ -4513,6 +4582,7 @@ impl Tty7App {
                 t(L10nKey::SettingsSocks5ProxyDesc),
                 &form.socks,
                 errors.socks.as_ref(),
+                ProxyPick::Socks.overridden_by(socks_set, pick),
                 cx,
             ))
             .child(proxy_row(
@@ -4521,6 +4591,7 @@ impl Tty7App {
                 t(L10nKey::SettingsHttpProxyDesc),
                 &form.http,
                 errors.http.as_ref(),
+                ProxyPick::Http.overridden_by(http_set, pick),
                 cx,
             ))
             .child(self.subgroup_header(L10nKey::SettingsGroupAlgorithms, cx))
@@ -6811,6 +6882,42 @@ impl Tty7App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three proxy fields look independent and are not — one connection
+    /// goes through one proxy. The note under the losing field is the only
+    /// thing saying so, so it has to name the same winner `map_proxy` picks
+    /// when the profile is dialled, and has to stay quiet where there is no
+    /// contest.
+    #[test]
+    fn a_proxy_field_says_when_another_one_outranks_it() {
+        crate::ui::i18n::set_locale("en");
+        let note = |me: ProxyPick, filled: bool, (c, s, h): (bool, bool, bool)| {
+            me.overridden_by(filled, ProxyPick::of(c, s, h))
+        };
+
+        assert_eq!(ProxyPick::of(true, true, true), Some(ProxyPick::Command));
+        assert_eq!(ProxyPick::of(false, true, true), Some(ProxyPick::Socks));
+        assert_eq!(ProxyPick::of(false, false, true), Some(ProxyPick::Http));
+        assert_eq!(ProxyPick::of(false, false, false), None);
+
+        assert!(
+            note(ProxyPick::Socks, true, (true, true, false)).is_some(),
+            "a proxy command outranks a SOCKS address"
+        );
+        assert!(
+            note(ProxyPick::Http, true, (false, true, true)).is_some(),
+            "so does a SOCKS address over an HTTP one"
+        );
+        assert!(
+            note(ProxyPick::Command, true, (true, true, true)).is_none(),
+            "the field being used has nothing to apologise for"
+        );
+        assert!(
+            note(ProxyPick::Http, false, (true, false, false)).is_none(),
+            "an empty field is not being overridden, it is just empty"
+        );
+        assert!(note(ProxyPick::Socks, true, (false, true, false)).is_none());
+    }
 
     /// The row keeps its side-by-side shape while both halves fit, and stacks
     /// once they do not. The SSH page reaches that point first — it spends its

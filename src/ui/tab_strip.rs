@@ -36,6 +36,11 @@ pub(crate) const GRAB_HANDLE_W: f32 = 80.;
 
 const KEEP_SEGMENTS: usize = 3;
 
+/// How many saved hosts the New Tab menu lists before it stops. The menu is a
+/// shortcut, not the host list — anyone with more than a handful wants the
+/// palette or Settings, both one row further down.
+const NEW_TAB_MENU_HOSTS: usize = 5;
+
 /// Builds a launch specification without recomputing argument ownership locally.
 /// The inventory may originate from a remote host, so only its transported
 /// metadata can distinguish tty7 launch defaults from user-authored arguments.
@@ -1010,7 +1015,7 @@ impl Tty7App {
         // Workspace, More, Hide Sidebar. The three New Tab buttons that come
         // through here were the ones left silent.
         let button = button.tooltip(chord_hint(t(L10nKey::AppMenuNewTab), "NewTab", cx));
-        button.dropdown_menu(move |menu, _window, _cx| {
+        button.dropdown_menu(move |menu, _window, menu_cx| {
             let mut menu = menu.min_w(px(220.));
             for shell in &shells {
                 let spec = shell_spec(shell);
@@ -1051,7 +1056,57 @@ impl Tty7App {
                     },
                 ));
             }
-            menu
+
+            // A new tab on another machine is the same intent as a new tab on
+            // this one, so it belongs in the same menu. Opening one used to
+            // mean crossing the workspace switcher, its host dialog and the
+            // settings list first (#438).
+            menu = menu.separator();
+            for profile in crate::ui::ssh_connect::ssh_profiles_by_frecency(menu_cx)
+                .into_iter()
+                .take(NEW_TAB_MENU_HOSTS)
+            {
+                let id = profile.id;
+                let open = app.clone();
+                let address: SharedString =
+                    crate::core::ssh_profile::to_connect_string(&profile).into();
+                let name: SharedString = match profile.name.trim() {
+                    "" => address.clone(),
+                    named => named.to_string().into(),
+                };
+                // The address earns its place only when it says something the
+                // name does not — a host named after itself would read twice.
+                let subtitle = (name != address).then(|| address.clone());
+                menu = menu.item(
+                    PopupMenuItem::element(move |_window, cx| {
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(name.clone())
+                            .children(subtitle.clone().map(|address| {
+                                div().text_color(cx.theme().muted_foreground).child(address)
+                            }))
+                    })
+                    .on_click(move |_, window, cx| {
+                        if let Some(app) = open.upgrade() {
+                            app.update(cx, |this, cx| this.connect_ssh_profile(id, window, cx));
+                        }
+                    }),
+                );
+            }
+
+            let connect = app.clone();
+            menu.item(
+                PopupMenuItem::new(t(L10nKey::CmdSshAddConnection)).on_click(
+                    move |_, window, cx| {
+                        if let Some(app) = connect.upgrade() {
+                            app.update(cx, |this, cx| this.open_ssh_connect_input(window, cx));
+                        }
+                    },
+                ),
+            )
         })
     }
 
@@ -1704,6 +1759,15 @@ mod tests {
             super::short_title("/home/deploy/app", None),
             "/home/deploy/app"
         );
+    }
+
+    /// The name a freshly dialled SSH pane wears until the remote shell says
+    /// otherwise. Cutting at the colon left the tab reading "2222" (#438).
+    #[test]
+    fn short_title_keeps_an_ssh_address_whole() {
+        assert_eq!(short_title("deploy@10.0.0.5:2222"), "deploy@10.0.0.5:2222");
+        assert_eq!(short_title("root@prod"), "root@prod");
+        assert_eq!(short_title("prod-web"), "prod-web");
     }
 
     #[test]

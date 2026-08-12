@@ -305,6 +305,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSocks5ProxyDesc => "host:port (blank = none).",
         L10nKey::SettingsHttpProxy => "HTTP proxy",
         L10nKey::SettingsHttpProxyDesc => "host:port (blank = none).",
+        L10nKey::SettingsProxyOverridden => "Not used: {winner} comes first.",
         L10nKey::SettingsProxyPortInvalid => {
             "Port must be 1-65535 — the host on its own takes the default port."
         }
@@ -1266,6 +1267,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherThisWindow => "this window",
         L10nKey::SwitcherOpen => "open",
         L10nKey::SwitcherDisconnect => "Disconnect",
+        L10nKey::SwitcherEditHost => "Edit Host…",
+        L10nKey::SwitcherSaveAsHost => "Save as SSH Host…",
+        L10nKey::SshSaveDroppedJumpHost => {
+            "The jump host was left out — a saved host reaches its jump through another saved host."
+        }
         L10nKey::SwitcherOpenInNewWindow => "Open in New Window",
         L10nKey::SwitcherRename => "Rename…",
         L10nKey::SwitcherPickAWorkspace => "Pick a workspace to see its tabs.",
@@ -1388,6 +1394,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdSshReconnect => "SSH: Reconnect",
         L10nKey::CmdSshRemoteFiles => "SSH: Remote Files",
         L10nKey::CmdSshPortForwarding => "SSH: Port Forwarding",
+        L10nKey::CmdSshSaveConnection => "SSH: Save Connection as Host…",
+        L10nKey::CmdSshSaveConnectionSubtitle => "Keep this connection as a saved host.",
         L10nKey::CmdSshConnectWithInput => "SSH: Connect {input}",
         L10nKey::CmdAgentSendSelection => "Agent: Send Selection",
         L10nKey::CmdAgentSendSelectionSubtitle => "selection → running coding agent",

@@ -4010,7 +4010,7 @@ impl Tty7App {
         cx.notify();
     }
 
-    fn palette_commands(&self, cx: &App) -> Vec<Command> {
+    fn palette_commands(&self, window: &Window, cx: &App) -> Vec<Command> {
         let mut commands = Command::base_commands(
             cx,
             ChromeState {
@@ -4019,24 +4019,23 @@ impl Tty7App {
             },
         );
 
-        let cfg = cx.global::<Config>();
-        let now = crate::core::config::unix_now();
-        let mut profiles: Vec<&crate::core::ssh_profile::SshProfile> =
-            cfg.ssh_profiles.iter().collect();
-        profiles.sort_by(|a, b| {
-            let score = |p: &crate::core::ssh_profile::SshProfile| {
-                cfg.ssh_profile_frecency
-                    .get(&p.id)
-                    .map(|u| u.score(now))
-                    .unwrap_or(0.0)
-            };
-            score(b)
-                .partial_cmp(&score(a))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        });
-        for p in profiles {
-            let subtitle = crate::core::ssh_profile::to_connect_string(p);
+        // Offered only where it would do something. A connection opened from a
+        // saved host has nothing to save, and a pane that is not an SSH one has
+        // no connection at all — either would be a row that quietly did nothing
+        // (#549).
+        if self.unsaved_ssh_session(window, cx).is_some() {
+            commands.push(
+                Command::localized(
+                    L10nKey::CmdSshSaveConnection,
+                    CommandKind::SaveSshSessionAsHost,
+                )
+                .with_subtitle(t(L10nKey::CmdSshSaveConnectionSubtitle))
+                .in_group(CommandGroup::Ssh),
+            );
+        }
+
+        for p in crate::ui::ssh_connect::ssh_profiles_by_frecency(cx) {
+            let subtitle = crate::core::ssh_profile::to_connect_string(&p);
             let title = if p.name.is_empty() {
                 subtitle.clone()
             } else {
@@ -4068,12 +4067,27 @@ impl Tty7App {
         commands
     }
 
+    /// The palette, open on the address input rather than on the command list.
+    /// The typed route is the fastest way to a host — it takes `-p`, `-J` and
+    /// `~/.ssh/config` aliases — and it used to be reachable only by knowing
+    /// which palette row led to it (#438).
+    pub(crate) fn open_ssh_connect_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            self.close_palette(window, cx);
+        }
+        let commands = self.palette_commands(window, cx);
+        let view = cx.new(|cx| PaletteView::new_ssh_connect(commands, window, cx));
+        self.palette_sub = Some(cx.subscribe_in(&view, window, Self::on_palette_event));
+        self.palette = Some(view);
+        cx.notify();
+    }
+
     fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() {
             self.close_palette(window, cx);
             return;
         }
-        let commands = self.palette_commands(cx);
+        let commands = self.palette_commands(window, cx);
         let view = cx.new(|cx| PaletteView::new(commands, window, cx));
         self.palette_sub = Some(cx.subscribe_in(&view, window, Self::on_palette_event));
         self.palette = Some(view);
@@ -4249,6 +4263,7 @@ impl Tty7App {
                 }
             }
             SaveQuickConnect(target) => self.open_ssh_profile_new_from_target(target, window, cx),
+            SaveSshSessionAsHost => self.save_ssh_session_as_host(window, cx),
             OpenSshProfiles => self.open_settings_section(SettingsSection::Ssh, window, cx),
             SendSelectionToAgent => self.send_selection_to_agent(window, cx),
             SendGitDiffToAgent => self.send_git_diff_to_agent(window, cx),

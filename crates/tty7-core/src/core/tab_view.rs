@@ -62,12 +62,21 @@ pub enum TabLabel<'a> {
 /// an agent's, which is prose — comes back untouched, and so does a bare
 /// `host:`: that is a drive letter on Windows.
 ///
+/// The head only counts when a path — or nothing at all, which is a shell that
+/// has not worked out where it is yet — follows it. `deploy@10.0.0.5:2222` is
+/// an address, not a titled directory, and cutting it left the tab of a freshly
+/// dialled SSH pane labelled with nothing but a port number (#438).
+///
 /// Here rather than in either renderer because both of them need it and they
 /// have to agree: the GUI abbreviates the path that comes out, the CLI takes its
 /// last segment, and neither can start by guessing where the path begins.
 pub fn strip_host_prefix(raw: &str) -> &str {
     match raw.split_once(':') {
-        Some((head, tail)) if head.contains('@') => tail,
+        Some((head, tail))
+            if head.contains('@') && (tail.is_empty() || tail.starts_with(['/', '~'])) =>
+        {
+            tail
+        }
         _ => raw,
     }
 }
@@ -255,5 +264,23 @@ mod tests {
             Some("✳ fixing the switcher"),
             "the agent's pane names the tab, not the shell in front of it"
         );
+    }
+
+    #[test]
+    fn a_host_prefix_is_only_cut_when_a_path_follows_it() {
+        assert_eq!(strip_host_prefix("user@host:~/work"), "~/work");
+        assert_eq!(strip_host_prefix("user@host:/srv/app"), "/srv/app");
+        assert_eq!(
+            strip_host_prefix("deploy@10.0.0.5:2222"),
+            "deploy@10.0.0.5:2222",
+            "an address is the name, not a head to cut off it"
+        );
+        assert_eq!(
+            strip_host_prefix("user@host:"),
+            "",
+            "a shell that has not placed itself yet leaves nothing to show"
+        );
+        assert_eq!(strip_host_prefix("C:/src"), "C:/src");
+        assert_eq!(strip_host_prefix("vim — main.rs"), "vim — main.rs");
     }
 }
