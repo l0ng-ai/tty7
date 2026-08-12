@@ -4067,6 +4067,37 @@ impl Tty7App {
         commands
     }
 
+    /// Every saved host as its own palette row, in the order the New Tab menu
+    /// lists the first few — the search box over the whole list, for when the
+    /// host wanted is not among those few (#438).
+    pub(crate) fn open_ssh_host_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            self.close_palette(window, cx);
+        }
+        let hosts = self.ssh_host_commands(cx);
+        let commands = self.palette_commands(window, cx);
+        let view = cx.new(|cx| PaletteView::new_ssh_hosts(commands, hosts, window, cx));
+        self.palette_sub = Some(cx.subscribe_in(&view, window, Self::on_palette_event));
+        self.palette = Some(view);
+        cx.notify();
+    }
+
+    fn ssh_host_commands(&self, cx: &App) -> Vec<Command> {
+        crate::ui::ssh_connect::ssh_profiles_by_frecency(cx)
+            .into_iter()
+            .map(|p| {
+                let subtitle = crate::core::ssh_profile::to_connect_string(&p);
+                let title = match p.name.trim() {
+                    "" => subtitle.clone(),
+                    named => named.to_string(),
+                };
+                Command::new(title, CommandKind::ConnectSavedProfile(p.id))
+                    .with_subtitle(subtitle)
+                    .in_group(CommandGroup::Ssh)
+            })
+            .collect()
+    }
+
     /// The palette, open on the address input rather than on the command list.
     /// The typed route is the fastest way to a host — it takes `-p`, `-J` and
     /// `~/.ssh/config` aliases — and it used to be reachable only by knowing
@@ -4082,7 +4113,7 @@ impl Tty7App {
         cx.notify();
     }
 
-    fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() {
             self.close_palette(window, cx);
             return;

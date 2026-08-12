@@ -309,6 +309,22 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsHttpProxy => "HTTP プロキシ",
         L10nKey::SettingsHttpProxyDesc => "host:port（空欄 = なし）",
         L10nKey::SettingsProxyOverridden => "使われません：{winner} が優先されます",
+        L10nKey::SettingsTestConnection => "テスト",
+        L10nKey::SettingsTestRunning => "接続をテスト中…",
+        L10nKey::SettingsTestReached => "接続と認証に成功しました（{time}）",
+        L10nKey::SettingsTestNeedsPassword => {
+            "サーバーに到達しました — パスワードを求められています。接続して入力してください"
+        }
+        L10nKey::SettingsTestNeedsPassphrase => {
+            "サーバーに到達しました — 秘密鍵のパスフレーズを求められています。接続して入力してください"
+        }
+        L10nKey::SettingsTestNeedsInteractive => {
+            "サーバーに到達しました — キーボードインタラクティブ認証を求められています。接続して応答してください"
+        }
+        L10nKey::SettingsTestNeedsHostKey => {
+            "サーバーに到達しました — ホストキーがまだ承認されていません。一度接続して確認してください"
+        }
+        L10nKey::SettingsTestFailed => "接続できませんでした: {reason}",
         L10nKey::SettingsProxyPortInvalid => {
             "ポートは 1-65535 の範囲です — ホストだけならデフォルトポートを使います"
         }
@@ -1304,6 +1320,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherOpen => "開く",
         L10nKey::SwitcherDisconnect => "切断",
         L10nKey::SwitcherEditHost => "ホストを編集…",
+        L10nKey::NewTabMenuFindHost => "ホストを検索…",
         L10nKey::SwitcherSaveAsHost => "SSH ホストとして保存…",
         L10nKey::SshSaveDroppedJumpHost => {
             "踏み台ホストは引き継がれません — 保存済みホストの踏み台は別の保存済みホストである必要があります"

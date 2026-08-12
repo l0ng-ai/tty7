@@ -710,7 +710,13 @@ pub struct PaletteDelegate {
     commands: Vec<Command>,
     sections: Vec<Section>,
     input: Option<PaletteInput>,
+    /// Whether a typed address offers to connect to it. True for the root list
+    /// and for the host picker; both are places where an address is a
+    /// reasonable thing to type.
     quick_connect_root: bool,
+    /// Whether an empty query falls back to the grouped command list. Only the
+    /// root does — a list that is all one kind of thing has nothing to group.
+    grouped_root: bool,
     selected: Option<IndexPath>,
 }
 
@@ -729,6 +735,7 @@ impl PaletteDelegate {
             commands,
             input: None,
             quick_connect_root: false,
+            grouped_root: false,
             selected: Some(IndexPath::default()),
         }
     }
@@ -736,10 +743,21 @@ impl PaletteDelegate {
     pub fn root(commands: Vec<Command>, cx: &App) -> Self {
         let mut this = Self {
             quick_connect_root: true,
+            grouped_root: true,
             ..Self::new(commands)
         };
         this.sections = this.grouped_sections(cx);
         this
+    }
+
+    /// Every saved host, filtered by the same search box the palette uses, with
+    /// a typed address still good for a connection. The New Tab menu lists only
+    /// a handful, so this is where the rest of them are.
+    fn ssh_hosts(commands: Vec<Command>) -> Self {
+        Self {
+            quick_connect_root: true,
+            ..Self::new(commands)
+        }
     }
 
     fn grouped_sections(&self, cx: &App) -> Vec<Section> {
@@ -819,6 +837,7 @@ impl PaletteDelegate {
             }],
             input: Some(PaletteInput::SshConnect),
             quick_connect_root: false,
+            grouped_root: false,
             selected: Some(IndexPath::default()),
         }
     }
@@ -867,7 +886,7 @@ impl ListDelegate for PaletteDelegate {
                 commands: vec![Command::ssh_connect_command(query)],
             }];
         } else if query.trim().is_empty() {
-            self.sections = if self.quick_connect_root {
+            self.sections = if self.grouped_root {
                 self.grouped_sections(cx)
             } else {
                 vec![Section {
@@ -1057,6 +1076,7 @@ enum PaletteMenu {
     Root,
     Theme,
     SshConnect,
+    SshHosts,
 }
 
 pub struct PaletteView {
@@ -1094,6 +1114,22 @@ impl PaletteView {
         let mut view = Self::new(commands, window, cx);
         view.menu = PaletteMenu::SshConnect;
         view.show_ssh_connect(window, cx);
+        view
+    }
+
+    /// Open on the list of saved hosts, filterable, with a typed address still
+    /// good for an ad-hoc connection. Escape backs out to the root list.
+    pub fn new_ssh_hosts(
+        commands: Vec<Command>,
+        hosts: Vec<Command>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut view = Self::new(commands, window, cx);
+        view.menu = PaletteMenu::SshHosts;
+        let list = Self::build_list_with_delegate(PaletteDelegate::ssh_hosts(hosts), window, cx);
+        view._sub = cx.subscribe_in(&list, window, Self::on_list_event);
+        view.list = list;
         view
     }
 
@@ -1162,6 +1198,7 @@ impl PaletteView {
     fn search_placeholder(&self) -> &'static str {
         match self.menu {
             PaletteMenu::SshConnect => "user@host [-p 2222 -J jump]",
+            PaletteMenu::SshHosts => t(crate::ui::i18n::L10nKey::FilterHosts),
             PaletteMenu::Root => t(crate::ui::i18n::L10nKey::SearchCommandsOrHost),
             PaletteMenu::Theme => t(crate::ui::i18n::L10nKey::SearchTheme),
         }

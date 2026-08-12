@@ -270,6 +270,20 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsHttpProxy => "HTTP 代理",
         L10nKey::SettingsHttpProxyDesc => "host:port（留空 = 无）。",
         L10nKey::SettingsProxyOverridden => "不会生效：优先用{winner}。",
+        L10nKey::SettingsTestConnection => "测试",
+        L10nKey::SettingsTestRunning => "正在测试连接…",
+        L10nKey::SettingsTestReached => "已连接并通过认证，用时 {time}。",
+        L10nKey::SettingsTestNeedsPassword => "已连到服务器 —— 它要求输入密码，点连接后再输入。",
+        L10nKey::SettingsTestNeedsPassphrase => {
+            "已连到服务器 —— 私钥要求输入口令，点连接后再输入。"
+        }
+        L10nKey::SettingsTestNeedsInteractive => {
+            "已连到服务器 —— 它要求交互式验证（如 2FA），点连接后再作答。"
+        }
+        L10nKey::SettingsTestNeedsHostKey => {
+            "已连到服务器 —— 它的主机密钥还没被接受，先连一次确认。"
+        }
+        L10nKey::SettingsTestFailed => "没连上：{reason}",
         L10nKey::SettingsProxyPortInvalid => "端口必须在 1-65535 之间——只写主机则使用默认端口。",
         L10nKey::SettingsKexAlgorithms => "KEX 算法",
         L10nKey::SettingsKexAlgorithmsDesc => "逗号分隔（留空 = 库默认值）。",
@@ -1186,6 +1200,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherOpen => "已打开",
         L10nKey::SwitcherDisconnect => "断开连接",
         L10nKey::SwitcherEditHost => "编辑主机…",
+        L10nKey::NewTabMenuFindHost => "查找主机…",
         L10nKey::SwitcherSaveAsHost => "保存为 SSH 主机…",
         L10nKey::SshSaveDroppedJumpHost => {
             "跳板机没有带过来 —— 主机配置的跳板必须是另一个已保存的主机。"

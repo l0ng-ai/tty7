@@ -1016,7 +1016,10 @@ impl Tty7App {
         // through here were the ones left silent.
         let button = button.tooltip(chord_hint(t(L10nKey::AppMenuNewTab), "NewTab", cx));
         button.dropdown_menu(move |menu, _window, menu_cx| {
-            let mut menu = menu.min_w(px(220.));
+            // Every shell on the machine plus a handful of hosts is already
+            // taller than a short window, and `PopupMenu` only scrolls itself
+            // past 20 items — under that it just runs off the screen edge.
+            let mut menu = menu.min_w(px(220.)).scrollable(true);
             for shell in &shells {
                 let spec = shell_spec(shell);
                 let open = app.clone();
@@ -1062,10 +1065,9 @@ impl Tty7App {
             // mean crossing the workspace switcher, its host dialog and the
             // settings list first (#438).
             menu = menu.separator();
-            for profile in crate::ui::ssh_connect::ssh_profiles_by_frecency(menu_cx)
-                .into_iter()
-                .take(NEW_TAB_MENU_HOSTS)
-            {
+            let saved = crate::ui::ssh_connect::ssh_profiles_by_frecency(menu_cx);
+            let more_than_fits = saved.len() > NEW_TAB_MENU_HOSTS;
+            for profile in saved.into_iter().take(NEW_TAB_MENU_HOSTS) {
                 let id = profile.id;
                 let open = app.clone();
                 let address: SharedString =
@@ -1095,6 +1097,20 @@ impl Tty7App {
                         }
                     }),
                 );
+            }
+
+            // Past the handful this menu lists, the rest are one row away: a
+            // filter box over every saved host, rather than a dropdown that
+            // grows without limit.
+            if more_than_fits {
+                let search = app.clone();
+                menu = menu.item(PopupMenuItem::new(t(L10nKey::NewTabMenuFindHost)).on_click(
+                    move |_, window, cx| {
+                        if let Some(app) = search.upgrade() {
+                            app.update(cx, |this, cx| this.open_ssh_host_picker(window, cx));
+                        }
+                    },
+                ));
             }
 
             let connect = app.clone();

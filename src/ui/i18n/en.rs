@@ -306,6 +306,22 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsHttpProxy => "HTTP proxy",
         L10nKey::SettingsHttpProxyDesc => "host:port (blank = none).",
         L10nKey::SettingsProxyOverridden => "Not used: {winner} comes first.",
+        L10nKey::SettingsTestConnection => "Test",
+        L10nKey::SettingsTestRunning => "Testing the connection…",
+        L10nKey::SettingsTestReached => "Connected and authenticated in {time}.",
+        L10nKey::SettingsTestNeedsPassword => {
+            "Reached the server — it asked for a password. Connect to type it."
+        }
+        L10nKey::SettingsTestNeedsPassphrase => {
+            "Reached the server — the private key asked for its passphrase. Connect to type it."
+        }
+        L10nKey::SettingsTestNeedsInteractive => {
+            "Reached the server — it asked for a keyboard-interactive answer. Connect to give it."
+        }
+        L10nKey::SettingsTestNeedsHostKey => {
+            "Reached the server — its host key has not been accepted yet. Connect once to review it."
+        }
+        L10nKey::SettingsTestFailed => "Did not connect: {reason}",
         L10nKey::SettingsProxyPortInvalid => {
             "Port must be 1-65535 — the host on its own takes the default port."
         }
@@ -1268,6 +1284,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherOpen => "open",
         L10nKey::SwitcherDisconnect => "Disconnect",
         L10nKey::SwitcherEditHost => "Edit Host…",
+        L10nKey::NewTabMenuFindHost => "Find a Host…",
         L10nKey::SwitcherSaveAsHost => "Save as SSH Host…",
         L10nKey::SshSaveDroppedJumpHost => {
             "The jump host was left out — a saved host reaches its jump through another saved host."
