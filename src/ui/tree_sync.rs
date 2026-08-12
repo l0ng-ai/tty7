@@ -1906,6 +1906,52 @@ pub(crate) fn resync_window_from_tree(cx: &mut App, client_ws: WorkspaceId) {
     hydrate(cx, client_ws, Adopt::Replace);
 }
 
+/// Records the daemon process a link is talking to, answering "did the server
+/// behind this link just become a *different* process?".
+///
+/// `seen` is the instance last recorded for this link, empty when unknown. A
+/// first sighting is not a restart (there is nothing on screen to be wrong
+/// about yet), and an empty instance means the server predates the field —
+/// it neither reports nor overwrites what was seen before. Shared by the
+/// remote path (`remote_workspace::server_restarted`, keyed per host) and the
+/// local link (single daemon), which needs the same comparison to notice the
+/// daemon it lost came back as another process (#553).
+pub(crate) fn note_instance(seen: &mut String, instance: &str) -> bool {
+    if instance.is_empty() {
+        return false;
+    }
+    let before = std::mem::replace(seen, instance.to_string());
+    if !before.is_empty() && before != instance {
+        log::info!(
+            "the tty7-server on this machine is a new process ({before} → {instance}); \
+             its panes are gone"
+        );
+        return true;
+    }
+    false
+}
+
+/// Rebuilds every local window from the machine tree after the daemon behind
+/// the local link changed — it died and the reconnect found a new process
+/// whose registry knows nothing about the panes on screen (#553).
+///
+/// The invalidate half comes first on purpose: the link may still hand out
+/// the client that just went quiet, and a pull sent down it dies on a dead
+/// socket before the reader notices. With it dropped, `hydrate` waits for the
+/// reconnect `LocalLink::tick` is already driving and pulls the layout the
+/// daemon actually has. When no daemon ever answers, the windows owe a
+/// rehydration instead (`owe_rehydration`) — which is also the guard that
+/// keeps the emptied windows from being pushed back up as "close every tab".
+pub(crate) fn resync_after_local_daemon_change(cx: &mut App) {
+    crate::ui::local_link::LocalLink::invalidate(cx);
+    for (workspace, _) in crate::ui::windows::WindowRegistry::open_windows(cx) {
+        if WorkspaceStore::host_of(cx, workspace) != HostId::LOCAL {
+            continue;
+        }
+        resync_window_from_tree(cx, workspace);
+    }
+}
+
 impl Tty7App {
     pub(crate) fn apply_layout_delta(
         &mut self,
@@ -2135,6 +2181,40 @@ fn set_gui_ratio(pane: &mut Pane, path: &[Side], ratio: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_instance_reports_only_a_real_change() {
+        let mut seen = String::new();
+
+        assert!(
+            !note_instance(&mut seen, "abc"),
+            "a first sighting is not a restart"
+        );
+        assert!(
+            !note_instance(&mut seen, "abc"),
+            "the same process is not a restart"
+        );
+        assert!(note_instance(&mut seen, "def"), "a new process is");
+        assert!(!note_instance(&mut seen, "def"));
+    }
+
+    #[test]
+    fn note_instance_ignores_a_server_that_predates_the_field() {
+        let mut seen = String::from("abc");
+
+        assert!(
+            !note_instance(&mut seen, ""),
+            "an unknown instance is never a restart"
+        );
+        assert_eq!(seen, "abc", "and it must not overwrite what was seen");
+
+        let mut fresh = String::new();
+        assert!(!note_instance(&mut fresh, ""));
+        assert!(
+            !note_instance(&mut fresh, "abc"),
+            "the first real instance after an unknown one is a first sighting"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

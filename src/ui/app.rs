@@ -1519,11 +1519,13 @@ impl Tty7App {
             let _ = this.update_in(cx, |this, window, cx| {
                 match &restarted {
                     Ok(()) => {
-                        // The link we held pointed at the server we just killed. Drop it
-                        // before asking for the tree, or the pull goes out on a dead
-                        // socket and the window is left empty on the home page.
-                        crate::ui::local_link::LocalLink::invalidate(cx);
-                        crate::ui::tree_sync::resync_window_from_tree(cx, this.workspace);
+                        // The link we held pointed at the server we just killed;
+                        // the reconnect finds a new process whose registry knows
+                        // nothing about these panes. The helper drops the dead
+                        // link first — a pull sent down it dies on a dead socket
+                        // before the reader notices — and rebuilds every local
+                        // window from the tree.
+                        crate::ui::tree_sync::resync_after_local_daemon_change(cx);
                     }
                     Err(e) => {
                         // The user asked for this and lands on an empty home

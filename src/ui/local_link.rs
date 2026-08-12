@@ -8,6 +8,12 @@ use crate::ui::remote_workspace::Backoff;
 #[derive(Default)]
 pub struct LocalLink {
     client: Option<Arc<ControlClient>>,
+    /// The daemon process the current link is talking to, by its hello
+    /// instance — empty until the first connect records one. Survives
+    /// `invalidate` on purpose: forgetting it there would make every
+    /// reconnect a first sighting, and a daemon that came back as a
+    /// *different* process would never be noticed (#553).
+    instance: String,
     backoff: Backoff,
     next_attempt: Option<std::time::Instant>,
     attempting: bool,
@@ -49,6 +55,11 @@ impl LocalLink {
     /// for a moment after we kill the daemon ourselves the dead link still
     /// hands itself out and every call on it fails. Callers that know the far
     /// end is gone say so here, and the next tick reconnects.
+    ///
+    /// The remembered hello `instance` deliberately survives: the reconnect
+    /// compares against it to tell "same daemon, link hiccuped" from "new
+    /// daemon process" (#553), and forgetting it here — the restart path's
+    /// own first move — would blind exactly that comparison.
     pub fn invalidate(cx: &mut App) {
         let link = cx.default_global::<LocalLink>();
         if link.client.take().is_some() {
@@ -95,6 +106,26 @@ impl LocalLink {
                 match connected {
                     Ok(client) => {
                         log::info!("control link to the local daemon is up");
+                        // A daemon that died and came back is a *new process*
+                        // whose registry knows nothing about the panes this
+                        // window is showing — and from the client's side a
+                        // killed daemon is indistinguishable from one whose
+                        // shells all exited at once (its DeathReporter says
+                        // nothing while it shuts down, and a kill says nothing
+                        // ever), so the panes on screen are probably lying
+                        // about being alive. The instance id in the hello is
+                        // the only way to tell "same daemon, link hiccuped"
+                        // from "new daemon": compare before syncing, or
+                        // `on_link_up` would push the window of dead panes up
+                        // as the new daemon's truth (#553).
+                        let restarted = {
+                            let link = cx.default_global::<LocalLink>();
+                            crate::ui::tree_sync::note_instance(
+                                &mut link.instance,
+                                &client.hello().instance,
+                            )
+                        };
+                        let link = cx.default_global::<LocalLink>();
                         link.client = Some(client);
                         link.backoff.reset();
                         link.next_attempt = None;
@@ -102,7 +133,11 @@ impl LocalLink {
                             cx,
                             tty7_core::host::HostId::LOCAL,
                         );
-                        crate::ui::tree_sync::on_link_up(cx, tty7_core::host::HostId::LOCAL);
+                        if restarted {
+                            crate::ui::tree_sync::resync_after_local_daemon_change(cx);
+                        } else {
+                            crate::ui::tree_sync::on_link_up(cx, tty7_core::host::HostId::LOCAL);
+                        }
                     }
                     Err(e) => match dialect_refusal(&e) {
                         // Retrying will not talk this server round, and the
