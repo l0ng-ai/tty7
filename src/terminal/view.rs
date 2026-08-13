@@ -10938,6 +10938,75 @@ mod gpui_tests {
             .unwrap();
     }
 
+    /// The selection that seeds the search query is the thing being searched
+    /// for — opening the bar must not erase it, and closing the bar must not
+    /// either (#584). Only *changing* the query retires it.
+    #[gpui::test]
+    fn the_search_bar_opens_and_closes_around_a_grid_selection(cx: &mut TestAppContext) {
+        let (window, view, mut daemon) = rooted_harness(cx);
+
+        DaemonMsg::Output(b"some needle in the haystack\r\n".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        for _ in 0..200 {
+            let ready = cx.update(|cx| {
+                let v = view.read(cx);
+                let term = v.terminal.term.lock();
+                let grid = term.grid();
+                (0..grid.screen_lines() as i32)
+                    .any(|l| (0..grid.columns()).any(|c| grid[Line(l)][Column(c)].c == 'n'))
+            });
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| {
+                    // Select "needle" (row 0, columns 5..=10 — the end side
+                    // includes its cell) — the seed the bar picks up.
+                    let mut sel = Selection::new(
+                        SelectionType::Simple,
+                        Point::new(Line(0), Column(5)),
+                        Side::Left,
+                    );
+                    sel.update(Point::new(Line(0), Column(10)), Side::Right);
+                    v.terminal.term.lock().selection = Some(sel);
+
+                    v.open_search(window, cx);
+                    assert_eq!(
+                        v.search.as_ref().unwrap().input.read(cx).value(),
+                        "needle",
+                        "the bar opens on the selection as its query"
+                    );
+                    assert!(
+                        v.terminal.term.lock().selection.is_some(),
+                        "opening the bar must not eat the selection that seeded it"
+                    );
+
+                    v.close_search(window, cx);
+                    assert!(
+                        v.terminal.term.lock().selection.is_some(),
+                        "closing the bar must not eat it either"
+                    );
+
+                    // But a query the user *changed* retires the old selection:
+                    // it no longer names what the search is about.
+                    v.open_search(window, cx);
+                    let input = v.search.as_ref().unwrap().input.clone();
+                    input.update(cx, |s, cx| s.set_value("haystack", window, cx));
+                    v.recompute_matches(cx);
+                    assert!(
+                        v.terminal.term.lock().selection.is_none(),
+                        "a changed query retires the stale selection"
+                    );
+                });
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn output_under_an_open_search_bar_is_searched_too(cx: &mut TestAppContext) {
         let (window, view, mut daemon) = rooted_harness(cx);

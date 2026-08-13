@@ -50,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **Opening and closing the search bar no longer erases the grid
+  selection.** The selection that seeds the query is the thing being
+  searched for, yet opening the bar ran the same unconditional clear as
+  *changing* the query, and closing cleared it again — select text, press
+  Ctrl+F then Esc, and the selection was gone. The seeded selection is now
+  kept through the open, and closing keeps whatever selection the grid
+  holds; only an actual query change retires it, the discipline the output
+  rescan path already stated (#584).
 - **Search highlights follow the text when the pane is resized.** A match
   point is an absolute (line, column) against the width it was scanned at,
   so narrowing a pane reflowed the text out from under every highlight until
