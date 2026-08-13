@@ -101,6 +101,8 @@ pub mod mock {
         pub runs: Vec<RunSpec>,
         pub run_exit: Option<i32>,
         pub events: Vec<ControlEvent>,
+        /// Set to make `hello` fail — doctor's unreachable-server branch.
+        pub unreachable: bool,
     }
 
     impl Default for MockBackend {
@@ -124,6 +126,7 @@ pub mod mock {
                 runs: Vec::new(),
                 run_exit: Some(0),
                 events: Vec::new(),
+                unreachable: false,
             }
         }
     }
@@ -148,6 +151,9 @@ pub mod mock {
         }
 
         fn hello(&mut self) -> Result<ControlHelloOk> {
+            if self.unreachable {
+                anyhow::bail!("connect: no server is listening");
+            }
             Ok(ControlHelloOk {
                 control_version: CONTROL_VERSION,
                 protocol_version: PROTOCOL_VERSION,

@@ -1419,9 +1419,9 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
             "\nnot inside a tty7 shell — address commands need an explicit %pane/@tab/workspace\n",
         );
     }
-    report(
+    let report = Report {
         human,
-        json!({
+        json: json!({
             "context": {
                 "config_dir": ctx.config_dir.is_some(),
                 "workspace": ctx.ws.is_some(),
@@ -1430,7 +1430,16 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
             "server": server,
             "hooks": hooks_json(&hooks),
         }),
-    )
+    };
+    if report.json["server"]["reachable"] == false {
+        // doctor is the verb people run when something is not working, so an
+        // unreachable server is *the* finding — not a row to exit 0 over:
+        // `tty7 doctor || alert` has to fire (#592). The table and JSON go
+        // out all the same, and stderr carries the headline under `-q`.
+        eprintln!("tty7: doctor: the server is unreachable");
+        return Ok(Outcome::Exit(1, report));
+    }
+    Ok(Outcome::Report(report))
 }
 
 /// Where every installable status hook stands on this machine.
@@ -3549,5 +3558,29 @@ mod tests {
             &mut doctor_backend(),
         ));
         assert!(out.contains("unknown"), "{out}");
+    }
+
+    /// An unreachable server is *the* finding doctor exists for, so the verb
+    /// exits non-zero over it — `tty7 doctor || alert` has to fire — while
+    /// still printing the full report (#592).
+    #[test]
+    fn doctor_exits_nonzero_when_the_server_is_unreachable() {
+        let mut backend = mock();
+        backend.unreachable = true;
+        let out = run_cli(&["tty7", "doctor"], &Context::default(), &mut backend);
+        let Outcome::Exit(1, r) = out else {
+            panic!("an unreachable server is an exit 1, not a plain report: {out:?}");
+        };
+        assert_eq!(r.json["server"]["reachable"], serde_json::json!(false));
+        // The rest of the report still goes out — the context rows are the
+        // other half of what doctor is for.
+        assert!(r.human.contains("TTY7_CONFIG_DIR"), "{}", r.human);
+        assert!(r.human.contains("unreachable"), "{}", r.human);
+        // No Status/Routes round-trips happen once hello has failed.
+        assert!(
+            backend.control_calls.is_empty(),
+            "{:?}",
+            backend.control_calls
+        );
     }
 }

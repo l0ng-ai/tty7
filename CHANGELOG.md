@@ -50,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **`tty7 doctor` exits 1 when the server is unreachable.** Doctor is the
+  verb people run when something is not working, so an unreachable server is
+  *the* finding — not a row to exit 0 over while `tty7 doctor || alert`
+  never fires. The full table and JSON still go out, and stderr carries the
+  headline under `-q` (#592).
 - **The `owner` field of `pane ls --all` is documented the same way in both
   references** — the bundled skill reference still claimed the CLI stamps a
   literal `"tty7-cli"` owner, the behaviour that was removed because an owner
