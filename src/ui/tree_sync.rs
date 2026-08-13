@@ -2480,6 +2480,74 @@ mod tests {
         });
     }
 
+    /// #554: Restart Server empties the window *before* it tries the handoff,
+    /// and a refused handoff leaves the daemon exactly as it was, still serving
+    /// every pane the window just dropped.
+    ///
+    /// What makes that recoverable is the window giving up its claim to speak
+    /// for the machine the moment the failure lands. An emptied window that is
+    /// still `informed` over a `Primed` mirror is the dangerous shape: the next
+    /// sync diffs it into "close every tab", and closing the window authorizes
+    /// a `WorkspaceRemove` outright — the shells stay alive, but their records
+    /// go, and nothing tree-driven can ever reach them again.
+    ///
+    /// Tested on `resync_window_from_tree`, which is the per-window step both
+    /// [`resync_after_local_daemon_change`] and [`resync_local_windows_from_tree`]
+    /// do their work through — the pair above it only decides whether the link
+    /// is dropped first and which windows are walked, neither of which is what
+    /// keeps the emptied window quiet.
+    #[gpui::test]
+    fn a_failed_daemon_change_stops_the_emptied_window_speaking_for_the_machine(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            let tab = TabId::new();
+            {
+                let state = cx
+                    .default_global::<TreeSync>()
+                    .windows
+                    .entry(ws)
+                    .or_default();
+                state.informed = true;
+                // The mirror the emptied window would have been diffed against,
+                // already drained the way `save_session` drains it on the way
+                // out of a window that has no tabs left.
+                state.sync = SyncPhase::Primed(WsMirror {
+                    tabs: vec![],
+                    active: None,
+                });
+                state
+                    .queue
+                    .push_back(ControlRequest::TabClose { workspace: ws, tab });
+            }
+            assert!(
+                workspace_is_disposable(cx, ws),
+                "the shape #554 leaves behind: an emptied window that still speaks for a \
+                 machine holding live panes, and may delete the workspace off it"
+            );
+
+            resync_window_from_tree(cx, ws);
+
+            assert!(
+                !workspace_is_disposable(cx, ws),
+                "this is the regression: closing the window after a refused handoff sent \
+                 WorkspaceRemove and took the whole workspace, live panes and all"
+            );
+            let state = &cx.default_global::<TreeSync>().windows[&ws];
+            assert!(
+                matches!(state.sync, SyncPhase::Unprimed { .. }),
+                "the mirror the emptied window would diff into 'close every tab' has to be \
+                 dropped, not carried into the next sync"
+            );
+            assert!(
+                state.queue.is_empty(),
+                "operations queued from the emptied window speak for a layout that is being \
+                 pulled again; sending them would close the tabs it is pulling"
+            );
+        });
+    }
+
     #[gpui::test]
     fn a_hydration_that_died_on_a_stale_link_is_owed_back(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
