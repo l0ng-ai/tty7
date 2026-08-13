@@ -202,7 +202,11 @@ pub struct SendArgs {
     #[arg(value_name = "TEXT")]
     pub second: Option<String>,
 
-    #[arg(long, help = "Press Enter after the text")]
+    #[arg(
+        long,
+        help = "Press Enter after the text, or on its own when there is none \
+                (= --key enter)"
+    )]
     pub enter: bool,
 
     // Text covers "type this command"; it cannot express the keystrokes a pane

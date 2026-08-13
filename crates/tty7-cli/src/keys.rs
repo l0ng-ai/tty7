@@ -86,6 +86,10 @@ pub fn send_long_help() -> String {
          --key sends a keystroke rather than characters, which is what a pane wants once \
          something is already running in it: answering a prompt that only takes arrow keys, \
          closing a TUI with escape, stopping a build with C-c. Repeat it for a sequence.\n\n\
+         --enter is shorthand for --key enter: it presses Enter after TEXT, or on its own \
+         when there is none, so `send %42 --enter` runs whatever is already typed in pane 42. \
+         An unmarked id is not a target for it — `send 83 --enter` is refused, because it \
+         reads just as much like typing 83 into your own pane; write %83 to mean the pane.\n\n\
          Keys: {}. Aliases: {}.",
         vocabulary(),
         aliases.join(", ")

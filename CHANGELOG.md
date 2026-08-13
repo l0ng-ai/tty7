@@ -140,6 +140,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the arguments that need it, and a value whose quotes do not close is refused
   with an explanation under the input rather than saved as fragments. A path
   spelled with backslashes still means itself. (#551)
+- **`tty7 send --enter` now presses Enter when there is nothing to type** —
+  `--enter` is shorthand for `--key enter`, but it was never counted as a key,
+  so `tty7 send %42 --enter` answered "needs TEXT … or a --key to press"
+  instead of running what pane 42 already had typed. It counts now, with an
+  address or without one (`tty7 send --enter` presses Enter in your own pane).
+  An *unmarked* id is deliberately left out: `tty7 send 83 --enter` reads as
+  much like typing "83" where you are sitting as like pressing Enter in pane
+  83, so it stays a loud error that names both spellings (`send %83 --enter`,
+  `send %PANE 83 --enter`) rather than quietly retargeting the keystroke
+  (#581).
 
 ## [26.8.3] - 2026-08-12
 

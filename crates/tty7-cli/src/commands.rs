@@ -484,11 +484,25 @@ fn pane_split(args: SplitArgs, ctx: &Context, backend: &mut dyn Backend) -> Resu
 fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     const KEY_GAP: Duration = Duration::from_millis(200);
 
+    // `--enter` is the same thing as `--key enter`, and predates it. Keeping it
+    // as sugar rather than deprecating it: it reads better for the overwhelming
+    // case, which is typing one command and running it. Going through the same
+    // parser leaves one definition of what Enter puts on the wire — and the list
+    // is built here, before the dispatch, because the dispatch has to count it:
+    // `send %42 --enter` used to report "needs TEXT … or a --key to press" while
+    // the docs called `--enter` shorthand for exactly such a key (#581).
+    let mut pressed = args.keys.clone();
+    if args.enter {
+        pressed.push(crate::keys::parse("enter").expect("enter is in the vocabulary"));
+    }
+
     // Three shapes reach here, and only the address is ever ambiguous:
     // `send %3 "text"`, `send "text"` (this pane), and — new with --key —
     // `send %3 --key C-c`, where there is no text at all and the lone
     // positional is therefore an address rather than the missing-text error it
-    // has to stay in every other case.
+    // has to stay in every other case. `send %3 --enter` is that third shape
+    // too, with the one carve-out below: only a marked address is promoted by
+    // `--enter` alone.
     //
     // The address-shaped-but-broken case must not fall through to "type it":
     // `send %3x --key C-c` used to type `%3x` into the *caller's own* pane and
@@ -501,10 +515,24 @@ fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
         (Some(first), Some(text)) => (Some(first.as_str()), Some(text.as_str())),
         (Some(first), None) => match address::parse_pane(first) {
             Ok(_) => {
-                if args.keys.is_empty() {
+                if pressed.is_empty() {
                     bail!(
                         "send needs TEXT after the pane address, or a --key to press \
                          — to type '{first}' literally, name the pane too: send %PANE {first}"
+                    );
+                }
+                // A `--key` is always an explicit "press this", so it promotes
+                // either spelling of the address. `--enter` is not, for an
+                // *unmarked* id: `send 2 --enter` reads as "type 2 and run it"
+                // far more often than "press Enter in pane 2", and #538 was
+                // about never quietly retargeting a keystroke. The `%` is what
+                // says which was meant, so it stays the loud error it is today.
+                if args.keys.is_empty() && !first.starts_with('%') {
+                    bail!(
+                        "'{first}' is a bare pane id and --enter has nothing to type \
+                         — to press Enter in pane {first}: send %{first} --enter; \
+                         to type '{first}' and press Enter, name the pane too: \
+                         send %PANE {first} --enter"
                     );
                 }
                 (Some(first.as_str()), None)
@@ -515,7 +543,7 @@ fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
             Err(_) => (None, Some(first.as_str())),
         },
         (None, _) => {
-            if args.keys.is_empty() {
+            if pressed.is_empty() {
                 bail!("send needs TEXT to type or a --key to press");
             }
             (None, None)
@@ -527,14 +555,6 @@ fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
     if let Some(text) = text {
         backend.send_input(pane, text.as_bytes().to_vec())?;
         already_wrote = true;
-    }
-    // `--enter` is the same thing as `--key enter`, and predates it. Keeping it
-    // as sugar rather than deprecating it: it reads better for the overwhelming
-    // case, which is typing one command and running it. Going through the same
-    // parser leaves one definition of what Enter puts on the wire.
-    let mut pressed = args.keys.clone();
-    if args.enter {
-        pressed.push(crate::keys::parse("enter").expect("enter is in the vocabulary"));
     }
     for key in &pressed {
         // Raw-mode TUIs detect a fast stream as pasted input and intentionally
@@ -2250,29 +2270,78 @@ mod tests {
     /// A lone bare id now reads as an address, so `send 83` no longer types
     /// "83" into the caller's pane — it says it has nothing to send. That is
     /// the one behaviour this change takes away, and it has to fail loudly
-    /// rather than quietly press keys somewhere else: `--enter` is not a
-    /// `--key`, so it does not turn the id into a target either.
+    /// rather than quietly press keys somewhere else: `--enter` presses a key
+    /// now (#581), but it still does not turn an unmarked id into a target.
     #[test]
     fn a_lone_bare_id_refuses_loudly_rather_than_retargeting() {
         let ctx = Context {
             pane: Some("5".into()),
             ..Context::default()
         };
-        for args in [
-            vec!["tty7", "send", "83"],
-            vec!["tty7", "send", "83", "--enter"],
-        ] {
-            let mut backend = mock();
-            let err =
-                execute(cli(&args), &ctx, &mut backend).expect_err("a bare id has nothing to send");
-            assert!(err.to_string().contains("needs TEXT"), "{err}");
-            // The escape hatch for typing it anyway is in the message.
-            assert!(err.to_string().contains("send %PANE 83"), "{err}");
-            assert!(
-                backend.sent.is_empty(),
-                "no keystroke reached pane 83 or pane 5"
-            );
-        }
+        let mut backend = mock();
+        let err = execute(cli(&["tty7", "send", "83"]), &ctx, &mut backend)
+            .expect_err("a bare id has nothing to send");
+        assert!(err.to_string().contains("needs TEXT"), "{err}");
+        // The escape hatch for typing it anyway is in the message.
+        assert!(err.to_string().contains("send %PANE 83"), "{err}");
+        assert!(
+            backend.sent.is_empty(),
+            "no keystroke reached pane 83 or pane 5"
+        );
+
+        // `--enter` counts as the keystroke it always was (#581) — but not
+        // enough to promote an *unmarked* id, or `send 2 --enter` meaning "type
+        // 2 and run it" would press Enter in pane 2 instead. Both ways out are
+        // named, because either could have been meant.
+        let mut backend = mock();
+        let err = execute(cli(&["tty7", "send", "83", "--enter"]), &ctx, &mut backend)
+            .expect_err("--enter alone does not make a bare id a target");
+        assert!(err.to_string().contains("send %83 --enter"), "{err}");
+        assert!(err.to_string().contains("send %PANE 83 --enter"), "{err}");
+        assert!(
+            backend.sent.is_empty(),
+            "no keystroke reached pane 83 or pane 5"
+        );
+    }
+
+    /// `--enter` is documented as shorthand for `--key enter`, so it has to
+    /// give a lone address something to do exactly as `--key` does — it used to
+    /// report "needs TEXT … or a --key to press" and press nothing (#581).
+    #[test]
+    fn enter_alone_presses_enter_at_the_address_it_was_given() {
+        let mut backend = mock();
+        let json = json_of(run_cli(
+            &["tty7", "send", "%42", "--enter"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(backend.sent, vec![(42, b"\r".to_vec())]);
+        assert_eq!(json["sent"], "", "nothing was typed");
+        assert_eq!(json["keys"], serde_json::json!(["enter"]));
+        assert_eq!(json["enter"], true);
+
+        // With no address at all it is the caller's own pane, the same as
+        // `send --key enter` already was.
+        let ctx = Context {
+            pane: Some("5".into()),
+            ..Context::default()
+        };
+        let mut backend = mock();
+        run_cli(&["tty7", "send", "--enter"], &ctx, &mut backend);
+        assert_eq!(backend.sent, vec![(5, b"\r".to_vec())]);
+
+        // The long way round stays open for a bare id, and means the same
+        // thing: an explicit `--key` promotes either spelling.
+        let mut backend = mock();
+        run_cli(
+            &["tty7", "send", "83", "--key", "enter"],
+            &ctx,
+            &mut backend,
+        );
+        assert_eq!(backend.sent, vec![(83, b"\r".to_vec())]);
+        let mut backend = mock();
+        run_cli(&["tty7", "send", "%83", "--enter"], &ctx, &mut backend);
+        assert_eq!(backend.sent, vec![(83, b"\r".to_vec())]);
     }
 
     /// The narrowing has to leave real text alone: `%` followed by a non-digit
