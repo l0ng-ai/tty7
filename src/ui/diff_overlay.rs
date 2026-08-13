@@ -2414,7 +2414,10 @@ mod overlay_gpui_tests {
 /// The way in is ordinary: switch branches anywhere outside tty7 — another
 /// terminal, an editor, a worktree command — and the cached branch is a branch
 /// the repository has left. That is what the stale entry below stands for.
-#[cfg(test)]
+///
+/// Unix-gated like every other window harness in this tree: `harness_with_tabs`
+/// hands back a `std::os::unix::net::UnixStream` for the pane.
+#[cfg(all(test, unix))]
 mod render_idle_gpui_tests {
     use super::*;
     use crate::terminal::git_status::{GitStatusCache, RepoSnapshot};
