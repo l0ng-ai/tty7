@@ -323,6 +323,16 @@ jobs:
         working-directory: tty7
         run: cargo build --release --locked -p tty7-server --target ${{ matrix.target }}
 
+      # Ad-hoc — no identity, no secrets, and nothing to do with the notarized
+      # signing the GUI bundles get. It is what the arm64 kernel requires before
+      # it will execute a binary at all: the linker signs the arm64 slice
+      # itself, x86_64 comes out bare, and x86_64 is what a Rosetta shell on an
+      # Apple Silicon Mac asks for. `--force` makes it idempotent across both.
+      - name: Ad-hoc sign the binary
+        if: steps.probe.outputs.present == 'true'
+        working-directory: tty7
+        run: codesign --force --sign - "target/${{ matrix.target }}/release/tty7-server"
+
       - name: Assert the binary is self-contained
         if: steps.probe.outputs.present == 'true'
         working-directory: tty7

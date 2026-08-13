@@ -31,7 +31,13 @@ otool -l "$BIN" | grep -A 4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX' || true
 
 fail=0
 
-if ! file "$BIN" | grep -q "Mach-O 64-bit executable ${WANT_ARCH}"; then
+# Each probe is captured into a variable and matched afterwards, never piped
+# into `grep -q`. Under `pipefail` that pipeline is a coin toss: -q exits on the
+# first match, the writer takes SIGPIPE, and the pipeline reports failure — so a
+# binary that passes would be reported as failing, on the runs where grep
+# happened to win the race.
+FILE_SAYS=$(file "$BIN")
+if [[ "$FILE_SAYS" != *"Mach-O 64-bit executable ${WANT_ARCH}"* ]]; then
   echo "::error::$BIN is not a 64-bit Mach-O executable for ${WANT_ARCH}"
   fail=1
 fi
@@ -53,11 +59,17 @@ fi
 
 # arm64 refuses to execute an unsigned binary outright, so an unsigned build
 # would not fail here but on the user's Mac, as "killed: 9" with no explanation.
-# The linker applies an ad-hoc signature on its own; this asserts it is there
-# rather than adding one, so a toolchain that stops doing it gets caught.
-if ! codesign -dv "$BIN" 2>&1 | grep -q 'Signature='; then
+#
+# Asserted for both slices, not just arm64. The linker ad-hoc signs arm64 on its
+# own and leaves x86_64 bare — which would be fine on an Intel Mac, but the
+# x86_64 server is also what an Apple Silicon box gets when it asks through a
+# Rosetta shell (`uname -sm` = "Darwin x86_64"), and that is not a machine to
+# hand an unsigned binary to on a guess. The workflow signs it; this catches the
+# day it stops.
+SIGNING=$(codesign -dv "$BIN" 2>&1 || true)
+if [[ "$SIGNING" != *"Signature="* ]]; then
   echo "::error::$BIN carries no code signature — arm64 macOS will refuse to run it"
-  codesign -dv "$BIN" 2>&1 || true
+  echo "$SIGNING"
   fail=1
 fi
 

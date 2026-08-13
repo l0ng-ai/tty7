@@ -370,6 +370,14 @@ jobs:
         working-directory: tty7
         run: cargo build --release -p tty7-server --target ${{ matrix.target }}
 
+      # Ad-hoc, for the reason release.yml spells out: it is what arm64 requires
+      # before it will execute anything, the linker only applies it to the arm64
+      # slice, and x86_64 is what a Rosetta shell asks for.
+      - name: Ad-hoc sign the binary
+        if: steps.probe.outputs.present == 'true'
+        working-directory: tty7
+        run: codesign --force --sign - "target/${{ matrix.target }}/release/tty7-server"
+
       - name: Assert the binary is self-contained
         if: steps.probe.outputs.present == 'true'
         working-directory: tty7
