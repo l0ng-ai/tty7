@@ -89,28 +89,42 @@ impl GitStatusCache {
         }
     }
 
-    /// Corrects a repo's line counts from a working-tree diff that was just
-    /// read.
+    /// Corrects a repo's branch and line counts from a diff that was just read.
     ///
-    /// The counts here are refreshed on an edge — a command finishing, the
+    /// The status here is refreshed on an edge — a command finishing, the
     /// directory changing, the window coming back — and a diff read by the
     /// Changes panel or the diff overlay is a fresher answer to the same
     /// question. Without this the sidebar can say +27 −8 while the overlay it
-    /// opens says +3 −1. Only the numbers move; the branch, the root and the
-    /// probe's own schedule are left alone.
-    pub fn note_counts(&mut self, host: HostId, root: &Path, added: u32, removed: u32) -> bool {
+    /// opens says +3 −1. The root and the probe's own schedule are left alone.
+    ///
+    /// The branch moves with the numbers, and has to. A diff snapshot names the
+    /// branch from the same `git branch_name` call the status probe uses, so
+    /// the two are the same answer read at different moments — but the overlay
+    /// treats a disagreement between them as "the repository changed under me"
+    /// and re-probes. Leaving the branch behind made that disagreement
+    /// permanent whenever anything switched branches outside tty7: the overlay
+    /// re-read the diff, published it, woke every watcher of this cache, found
+    /// the same disagreement, and went round again — two `git` processes per
+    /// lap, forever, with `refreshing…` pinned to the header.
+    pub fn note_diff_read(
+        &mut self,
+        host: HostId,
+        root: &Path,
+        branch: &str,
+        added: u32,
+        removed: u32,
+    ) -> bool {
         let Some(status) = self.status.get(host, root) else {
             return false;
         };
-        if status.added == added && status.removed == removed {
+        if status.branch == branch && status.added == added && status.removed == removed {
             return false;
         }
-        let branch = status.branch.clone();
         self.status.insert(
             host,
             root.to_path_buf(),
             GitStatus {
-                branch,
+                branch: branch.to_string(),
                 added,
                 removed,
             },
@@ -182,18 +196,37 @@ mod tests {
         }
     }
     #[test]
-    fn a_diff_read_corrects_the_counts_without_touching_the_branch() {
+    fn a_diff_read_corrects_the_counts() {
         let mut cache = GitStatusCache::default();
         let cwd = Path::new("/repo/sub");
         cache.finish_probe(L, cwd, Some(snap("/repo", "main", Some((27, 8)))));
 
-        assert!(cache.note_counts(L, Path::new("/repo"), 3, 1));
+        assert!(cache.note_diff_read(L, Path::new("/repo"), "main", 3, 1));
         let got = cache.status_for(L, cwd).unwrap();
         assert_eq!((got.added, got.removed), (3, 1));
-        assert_eq!(got.branch, "main", "only the numbers move");
+        assert_eq!(got.branch, "main");
 
         // Nothing to say when the diff agrees with what is already there.
-        assert!(!cache.note_counts(L, Path::new("/repo"), 3, 1));
+        assert!(!cache.note_diff_read(L, Path::new("/repo"), "main", 3, 1));
+    }
+
+    /// A branch switched outside tty7 leaves the cached status naming the old
+    /// one. The diff overlay compares its snapshot's branch against this cache
+    /// to decide whether the repository moved under it, so a disagreement the
+    /// diff read cannot settle is a re-probe that never stops. The read settles
+    /// it: the second call has nothing left to say.
+    #[test]
+    fn a_diff_read_settles_a_branch_the_cache_has_stale() {
+        let mut cache = GitStatusCache::default();
+        let cwd = Path::new("/repo");
+        cache.finish_probe(L, cwd, Some(snap("/repo", "main", Some((0, 0)))));
+
+        assert!(cache.note_diff_read(L, cwd, "feat/x", 0, 0));
+        assert_eq!(cache.status_for(L, cwd).unwrap().branch, "feat/x");
+        assert!(
+            !cache.note_diff_read(L, cwd, "feat/x", 0, 0),
+            "the same answer twice is not news — this is what breaks the loop"
+        );
     }
 
     #[test]
@@ -202,7 +235,7 @@ mod tests {
         // is no row to correct, and inventing an entry would leave it with no
         // branch to show.
         let mut cache = GitStatusCache::default();
-        assert!(!cache.note_counts(L, Path::new("/elsewhere"), 3, 1));
+        assert!(!cache.note_diff_read(L, Path::new("/elsewhere"), "main", 3, 1));
         assert!(cache.status_for(L, Path::new("/elsewhere")).is_none());
     }
 

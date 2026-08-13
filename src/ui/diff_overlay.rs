@@ -289,10 +289,11 @@ impl Tty7App {
         snap: Option<Arc<DiffSnapshot>>,
         cx: &mut Context<Self>,
     ) {
-        // A diff read is a fresher answer to the question the sidebar's
-        // +N −N asks, and it is the one the reader is looking at. Hand the
-        // numbers back before anything renders, or the row can disagree with
-        // the overlay it just opened.
+        // A diff read is a fresher answer to the question the sidebar's branch
+        // and +N −N ask, and it is the one the reader is looking at. Hand the
+        // branch and the numbers back before anything renders, or the row can
+        // disagree with the overlay it just opened — and `maybe_refresh` reads
+        // that disagreement as a reason to probe again.
         //
         // A read that failed is not an answer at all: its totals are whatever
         // got parsed before git gave up, usually zero. Publishing those wipes
@@ -301,9 +302,10 @@ impl Tty7App {
         let mut landed = if let Some(snap) = snap.as_ref().filter(|s| !s.read_failed) {
             let (added, removed) = snap.totals();
             let root = snap.root.clone();
+            let branch = snap.branch.clone();
             cx.default_global::<crate::terminal::git_status::GitStatusCache>();
             cx.update_global::<crate::terminal::git_status::GitStatusCache, _>(|cache, _| {
-                cache.note_counts(host, &root, added, removed)
+                cache.note_diff_read(host, &root, &branch, added, removed)
             })
         } else {
             false
@@ -2315,5 +2317,127 @@ mod overlay_gpui_tests {
         app.update_in(&mut vcx, |app, _, _| {
             assert!(app.tabs[app.active].diff_overlay.is_none());
         });
+    }
+}
+
+/// An overlay that has read its patch has to stop reading it.
+///
+/// `maybe_refresh_diff_overlay` calls a `Head` overlay stale when the cached
+/// git status disagrees with the snapshot on screen, and every landed probe
+/// wakes that check by touching the status cache. So a disagreement the probe
+/// cannot settle is not a stale badge — it is a loop: read the diff, publish
+/// it, wake the watchers, find the same disagreement, read it again. Two `git`
+/// processes a lap, `refreshing…` pinned to the header, and a window that
+/// costs 7% of a core sitting still.
+///
+/// The way in is ordinary: switch branches anywhere outside tty7 — another
+/// terminal, an editor, a worktree command — and the cached branch is a branch
+/// the repository has left. That is what the stale entry below stands for.
+#[cfg(test)]
+mod render_idle_gpui_tests {
+    use super::*;
+    use crate::terminal::git_status::{GitStatusCache, RepoSnapshot};
+    use crate::ui::app::{render_probe, test_window};
+    use crate::ui::host_ops::HostId;
+    use gpui::TestAppContext;
+
+    const BUDGET: u64 = 200;
+
+    fn git(root: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    #[gpui::test]
+    fn an_overlay_over_a_stale_branch_reaches_render_idle(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("tty7-diff-idle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        git(&root, &["init", "--quiet"]);
+        std::fs::write(root.join("a.rs"), "fn main() {}\n").unwrap();
+        git(&root, &["add", "a.rs"]);
+        git(
+            &root,
+            &[
+                "-c",
+                "user.email=t@x",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "one",
+            ],
+        );
+        // Something for the overlay to actually show, so it settles on a
+        // snapshot rather than on the empty state.
+        std::fs::write(root.join("a.rs"), "fn main() { /* edited */ }\n").unwrap();
+
+        let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
+
+        // The cache as a branch switch outside tty7 leaves it: a branch this
+        // repository is no longer on, and counts from before the switch.
+        let stale = root.clone();
+        app.update_in(&mut vcx, |_, _, cx| {
+            cx.default_global::<GitStatusCache>();
+            cx.update_global::<GitStatusCache, _>(|cache, _| {
+                cache.finish_probe(
+                    HostId::LOCAL,
+                    &stale,
+                    Some(RepoSnapshot {
+                        root: stale.clone(),
+                        home: stale.clone(),
+                        branch: "a-branch-this-repo-has-left".into(),
+                        counts: Some((99, 99)),
+                    }),
+                );
+            });
+        });
+
+        let open = root.clone();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_diff_overlay(HostId::LOCAL, open, DiffSource::Head, None, window, cx);
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            vcx.background_executor.run_until_parked();
+            let ready = app.update_in(&mut vcx, |app, _, _| {
+                app.tabs[app.active]
+                    .diff_overlay
+                    .as_ref()
+                    .is_some_and(|o| matches!(o.load, DiffLoad::Ready(_)) && !o.loading)
+            });
+            if ready {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the overlay never landed a snapshot"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        test_window::quiesce(&mut vcx, Some(&root));
+        render_probe::arm(BUDGET);
+        vcx.background_executor.run_until_parked();
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_secs(3));
+        vcx.background_executor.run_until_parked();
+        render_probe::arm(BUDGET);
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_secs(9));
+        vcx.background_executor.run_until_parked();
+
+        assert_eq!(
+            render_probe::draws(),
+            0,
+            "a settled overlay must stop re-reading its own diff"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
