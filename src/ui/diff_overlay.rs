@@ -300,12 +300,15 @@ impl Tty7App {
         // the counts the sidebar already had right — the overlay says so in
         // words a few lines below, and the row would silently disagree.
         let mut landed = if let Some(snap) = snap.as_ref().filter(|s| !s.read_failed) {
-            let (added, removed) = snap.totals();
+            // Only a HEAD snapshot counts what the sidebar counts. A worktree
+            // or staged patch is a smaller answer to a different question, and
+            // a commit or a range is not about the working tree at all.
+            let counts = matches!(snap.source, DiffSource::Head).then(|| snap.totals());
             let root = snap.root.clone();
             let branch = snap.branch.clone();
             cx.default_global::<crate::terminal::git_status::GitStatusCache>();
             cx.update_global::<crate::terminal::git_status::GitStatusCache, _>(|cache, _| {
-                cache.note_diff_read(host, &root, &branch, added, removed)
+                cache.note_diff_read(host, &root, &branch, counts)
             })
         } else {
             false
@@ -1202,9 +1205,17 @@ impl Tty7App {
                     .text_color(cx.theme().muted_foreground)
                     .child(t_plural(L10nKey::DiffUntrackedHeader, total, &[])),
             );
-        for path in untracked {
+        for (i, path) in untracked.iter().enumerate() {
+            // An untracked file has no patch in the snapshot, so it cannot be
+            // expanded in place the way the cards above it are — its contents
+            // are read one file at a time and shown on their own. The row
+            // asks for that read, which until now only the Source Control
+            // panel could: in the overlay these rows were the only files in a
+            // list of files that did nothing when clicked.
+            let for_focus = path.clone();
             section = section.child(
                 h_flex()
+                    .id(("diff-untracked", i))
                     .w_full()
                     .items_center()
                     .gap_2()
@@ -1212,6 +1223,26 @@ impl Tty7App {
                     .py_1()
                     .text_xs()
                     .font_family(self.font_family.clone())
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().secondary))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let Some((host, cwd, source)) = this
+                            .tabs
+                            .get(this.active)
+                            .and_then(|t| t.diff_overlay.as_ref())
+                            .map(|o| (o.host_id, o.cwd.clone(), o.source.clone()))
+                        else {
+                            return;
+                        };
+                        this.open_diff_overlay(
+                            host,
+                            cwd,
+                            source,
+                            Some(for_focus.clone()),
+                            window,
+                            cx,
+                        );
+                    }))
                     .child(
                         div()
                             .flex_shrink_0()
@@ -1375,12 +1406,20 @@ fn untracked_focus<'a>(snap: &DiffSnapshot, focus: Option<&'a str>) -> Option<&'
     snap.untracked.iter().any(|u| u == path).then_some(path)
 }
 
+/// The file the overlay is focused on, for the header's way back to the list.
+///
+/// An untracked file is focused like any other but has no entry in `files` —
+/// its card is synthesized from the file's own bytes — so reading only `files`
+/// left the one view with no way out of it: the breadcrumb never drew, and the
+/// list was reachable again only by closing the overlay and reopening it.
 fn focused_name(overlay: &DiffOverlayState) -> Option<String> {
     let DiffLoad::Ready(snap) = &overlay.load else {
         return None;
     };
-    let idx = focused_file(snap, overlay)?;
-    Some(snap.files[idx].path.clone())
+    if let Some(idx) = focused_file(snap, overlay) {
+        return Some(snap.files[idx].path.clone());
+    }
+    untracked_focus(snap, overlay.focus.as_deref()).map(str::to_string)
 }
 
 fn empty_snapshot(snap: &DiffSnapshot) -> bool {
@@ -2294,6 +2333,48 @@ mod overlay_gpui_tests {
 
         app.update_in(&mut vcx, |app, _, cx| app.toggle_diff_view_mode(cx));
         assert_eq!(mode(&mut vcx), DiffViewMode::Split, "and back again");
+    }
+
+    /// Focusing an untracked file has to leave a way back to the list.
+    ///
+    /// Its card is synthesized from the file's own bytes, so it has no entry in
+    /// `files` — and the header's breadcrumb read only `files`. The one view
+    /// that could be entered was the one view that could not be left except by
+    /// closing the overlay and opening it again.
+    #[gpui::test]
+    fn a_focused_untracked_file_still_has_a_way_back(cx: &mut TestAppContext) {
+        let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
+        let cwd = std::path::PathBuf::from("/no/such/tty7/repo");
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_diff_overlay(
+                HostId::LOCAL,
+                cwd.clone(),
+                DiffSource::Worktree,
+                Some("scratch.txt".to_string()),
+                window,
+                cx,
+            );
+            let active = app.active;
+            let overlay = app.tabs[active].diff_overlay.as_mut().unwrap();
+            overlay.loading = false;
+            overlay.load = DiffLoad::Ready(Arc::new(DiffSnapshot {
+                source: DiffSource::Worktree,
+                branch: "main".into(),
+                untracked: vec!["scratch.txt".to_string()],
+                untracked_total: 1,
+                ..Default::default()
+            }));
+        });
+
+        app.update_in(&mut vcx, |app, _, _| {
+            let overlay = app.tabs[app.active].diff_overlay.as_ref().unwrap();
+            assert_eq!(
+                focused_name(overlay).as_deref(),
+                Some("scratch.txt"),
+                "the breadcrumb is the way back"
+            );
+        });
     }
 
     /// The same source and the same focus still toggles the overlay shut.
