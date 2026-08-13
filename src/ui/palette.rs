@@ -710,13 +710,9 @@ pub struct PaletteDelegate {
     commands: Vec<Command>,
     sections: Vec<Section>,
     input: Option<PaletteInput>,
-    /// Whether a typed address offers to connect to it. True for the root list
-    /// and for the host picker; both are places where an address is a
-    /// reasonable thing to type.
+    /// Whether this is the root list: a typed address offers to connect to it,
+    /// and an empty query falls back to the grouped command list.
     quick_connect_root: bool,
-    /// Whether an empty query falls back to the grouped command list. Only the
-    /// root does — a list that is all one kind of thing has nothing to group.
-    grouped_root: bool,
     selected: Option<IndexPath>,
 }
 
@@ -735,7 +731,6 @@ impl PaletteDelegate {
             commands,
             input: None,
             quick_connect_root: false,
-            grouped_root: false,
             selected: Some(IndexPath::default()),
         }
     }
@@ -743,7 +738,6 @@ impl PaletteDelegate {
     pub fn root(commands: Vec<Command>, cx: &App) -> Self {
         let mut this = Self {
             quick_connect_root: true,
-            grouped_root: true,
             ..Self::new(commands)
         };
         this.sections = this.grouped_sections(cx);
@@ -827,7 +821,6 @@ impl PaletteDelegate {
             }],
             input: Some(PaletteInput::SshConnect),
             quick_connect_root: false,
-            grouped_root: false,
             selected: Some(IndexPath::default()),
         }
     }
@@ -876,7 +869,7 @@ impl ListDelegate for PaletteDelegate {
                 commands: vec![Command::ssh_connect_command(query)],
             }];
         } else if query.trim().is_empty() {
-            self.sections = if self.grouped_root {
+            self.sections = if self.quick_connect_root {
                 self.grouped_sections(cx)
             } else {
                 vec![Section {
