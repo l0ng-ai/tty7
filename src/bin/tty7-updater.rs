@@ -2520,6 +2520,12 @@ mod windows {
         }
     }
 
+    /// How long a parent that can only be *observed*, not waited on, is
+    /// given to finish quitting. See `wait_for_exit_across_accounts`: past
+    /// this, a recycled pid is indistinguishable from a process that never
+    /// exits, and failing closed beats installing over locked files.
+    const CROSS_ACCOUNT_EXIT_WAIT: Duration = Duration::from_secs(120);
+
     fn wait_for_exit(pid: u32) -> Result<(), String> {
         // Opening the handle before the GUI exits makes PID reuse irrelevant:
         // the kernel handle continues to name the original process object.
@@ -2528,6 +2534,9 @@ mod windows {
             let error = unsafe { GetLastError() };
             if error == ERROR_INVALID_PARAMETER {
                 return Ok(());
+            }
+            if error == ERROR_ACCESS_DENIED {
+                return wait_for_exit_across_accounts(pid);
             }
             return Err(format!("opening parent process {pid}: OS error {error}"));
         }
@@ -2538,6 +2547,34 @@ mod windows {
                 "waiting for parent process {pid}: OS error {}",
                 unsafe { GetLastError() }
             ));
+        }
+        Ok(())
+    }
+
+    /// The wait when the parent's process object refuses this account a
+    /// handle: under an over-the-shoulder elevation the chain runs as the
+    /// administrator, and the signed-in user's GUI answers its `OpenProcess`
+    /// with `ERROR_ACCESS_DENIED` — the same boundary `pid_alive` documents
+    /// from the watcher's side. The pid is still observable across it, so
+    /// the wait degrades to polling the pid until it stops answering.
+    ///
+    /// Bounded where the handle wait is not: without a handle, a pid
+    /// recycled after the GUI exited cannot be told from a GUI that never
+    /// exits, and the GUI was already quitting when this process was
+    /// spawned. Running out the budget fails the attempt closed — the
+    /// recovery path reports it and the watcher brings the app back —
+    /// rather than letting Setup fight a window that may still hold locks.
+    fn wait_for_exit_across_accounts(pid: u32) -> Result<(), String> {
+        let deadline = Instant::now() + CROSS_ACCOUNT_EXIT_WAIT;
+        while pid_alive(pid) {
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "parent process {pid} was still running {} seconds after the \
+                     install began",
+                    CROSS_ACCOUNT_EXIT_WAIT.as_secs()
+                ));
+            }
+            thread::sleep(WATCH_POLL);
         }
         Ok(())
     }
