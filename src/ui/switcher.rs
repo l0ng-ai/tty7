@@ -189,11 +189,60 @@ pub(crate) struct HostSnapshot {
     pub rows: Vec<RemoteWorkspaceRow>,
 }
 
+/// A pane the daemon runs that no workspace holds — what an interrupted
+/// `tty7 run` leaves behind, and what `tty7 pane ls --all` points the CLI's
+/// reaper at. The switcher is where a GUI user finds and closes one (#596).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OrphanPane {
+    pub pane_id: u64,
+    pub title: String,
+    pub cwd: Option<String>,
+    pub owner: Option<String>,
+}
+
+/// Every pane id the local machine's workspaces hold — what the registry
+/// listing is measured against to find the orphans (#596).
+fn held_local_pane_ids(cx: &App) -> HashSet<u64> {
+    crate::ui::machine_mirror::MachineMirrors::machine(cx, crate::core::session::HostId::LOCAL)
+        .map(|machine| {
+            machine
+                .workspaces
+                .iter()
+                .flat_map(|ws| ws.tabs.iter())
+                .flat_map(|tab| tab.root.pane_ids())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The registry's live panes minus the ones a workspace holds. Dead entries
+/// drop out too: a corpse the daemon has not reaped yet is not something the
+/// user can act on.
+pub(crate) fn orphan_panes_of(
+    listed: Vec<tty7_core::daemon::protocol::PaneInfo>,
+    held: &HashSet<u64>,
+) -> Vec<OrphanPane> {
+    listed
+        .into_iter()
+        .filter(|info| info.alive && !held.contains(&info.pane_id))
+        .map(|info| OrphanPane {
+            pane_id: info.pane_id,
+            title: info.title,
+            cwd: info.cwd.map(|p| p.display().to_string()),
+            owner: info.owner,
+        })
+        .collect()
+}
+
 pub(crate) struct Switcher {
     pub query: Entity<InputState>,
     collapsed: HashSet<String>,
     show_others: bool,
     renaming: Option<(WorkspaceId, Entity<InputState>)>,
+    /// Panes the local daemon runs that no workspace holds (#596). Filled
+    /// asynchronously after the panel opens; empty both while the listing is
+    /// in flight and when there is nothing to reap.
+    orphans: Vec<OrphanPane>,
     column: Column,
     left_sel: usize,
     right_sel: usize,
@@ -316,6 +365,7 @@ impl Tty7App {
             collapsed: HashSet::new(),
             show_others: false,
             renaming: None,
+            orphans: Vec::new(),
             column,
             left_sel: 0,
             right_sel: 0,
@@ -338,7 +388,67 @@ impl Tty7App {
         {
             sw.left_sel = at;
         }
+        self.refresh_orphan_panes(cx);
         cx.notify();
+    }
+
+    /// List the local daemon's panes and keep the ones no workspace holds.
+    /// The query is blocking daemon I/O, so it runs off the UI thread; the
+    /// filter runs back on it, where the machine mirror lives.
+    ///
+    /// Local on purpose: a remote machine's orphans belong to its own daemon,
+    /// and routing a listing per host is what the CLI's reaper already does.
+    fn refresh_orphan_panes(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let listed = cx
+                .background_spawn(async move { tty7_core::client::PaneClient::local().list() })
+                .await;
+            let listed = match listed {
+                Ok(listed) => listed,
+                Err(e) => {
+                    log::warn!(target: "tty7::switcher", "orphan pane listing failed: {e}");
+                    return;
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                let held = held_local_pane_ids(cx);
+                if let Some(sw) = this.switcher.as_mut() {
+                    sw.orphans = orphan_panes_of(listed, &held);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Hang up one orphan pane and show what is left. The kill is
+    /// fire-and-forget, so the refresh that follows is also the confirmation:
+    /// a pane that survived it simply stays on the list.
+    fn close_orphan_pane(&mut self, pane_id: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let listed = cx
+                .background_spawn(async move {
+                    let client = tty7_core::client::PaneClient::local();
+                    client.kill(pane_id)?;
+                    client.list()
+                })
+                .await;
+            let listed = match listed {
+                Ok(listed) => listed,
+                Err(e) => {
+                    log::warn!(target: "tty7::switcher", "closing orphan %{pane_id} failed: {e}");
+                    return;
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                let held = held_local_pane_ids(cx);
+                if let Some(sw) = this.switcher.as_mut() {
+                    sw.orphans = orphan_panes_of(listed, &held);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Ctrl+Tab. The first press raises the panel on the tab column with the
@@ -1609,7 +1719,84 @@ impl Tty7App {
             }
             block = block.child(div().pl(px(KID_INDENT)).child(kids));
         }
+        // Orphan panes belong to the machine, not to a workspace, so they are
+        // not rows and join no navigation — the local group's body is simply
+        // where a user looking for them finds them (#596). A search narrows
+        // the panel to workspaces, and the box steps out of the way for one.
+        if group.target.is_none()
+            && column == Column::Left
+            && self
+                .switcher
+                .as_ref()
+                .is_some_and(|sw| !sw.orphans.is_empty() && sw.text(cx).is_empty())
+        {
+            block = block.child(self.render_orphan_panes(cx));
+        }
         block.into_any_element()
+    }
+
+    /// The orphan block under the local group (#596): one line per pane no
+    /// window holds — id, owner, where it runs — and the way to stop it.
+    fn render_orphan_panes(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let Some(switcher) = self.switcher.as_ref() else {
+            return v_flex();
+        };
+        let mut list = v_flex().gap(px(2.));
+        for orphan in &switcher.orphans {
+            let mut bits = vec![format!("%{}", orphan.pane_id)];
+            if let Some(owner) = &orphan.owner {
+                bits.push(owner.clone());
+            }
+            if let Some(cwd) = &orphan.cwd {
+                bits.push(cwd.clone());
+            } else if !orphan.title.is_empty() {
+                bits.push(orphan.title.clone());
+            }
+            let pane_id = orphan.pane_id;
+            list = list.child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.foreground)
+                            .child(bits.join(" · ")),
+                    )
+                    .child(
+                        Button::new(gpui::SharedString::from(format!(
+                            "switcher-close-orphan:{pane_id}"
+                        )))
+                        .label(t(L10nKey::Close))
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                this.close_orphan_pane(pane_id, cx);
+                            },
+                        )),
+                    ),
+            );
+        }
+        v_flex()
+            .gap(px(4.))
+            .ml(px(KID_INDENT))
+            .mr(px(4.))
+            .mb(px(2.))
+            .px(px(10.))
+            .py(px(8.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(t(L10nKey::SwitcherOrphanPanes)),
+            )
+            .child(list)
     }
 
     /// The parked group's notice (#485): no retry button — nothing it could
@@ -2954,6 +3141,35 @@ mod tests {
             parked: false,
             rows,
         }
+    }
+
+    #[test]
+    fn orphan_panes_of_keeps_only_live_panes_no_workspace_holds() {
+        use tty7_core::daemon::protocol::PaneInfo;
+
+        fn info(pane_id: u64, alive: bool) -> PaneInfo {
+            PaneInfo {
+                pane_id,
+                cwd: Some(PathBuf::from("/tmp/x")),
+                title: "zsh".to_string(),
+                osc_title: None,
+                alive,
+                owner: Some("tty7-cli".to_string()),
+            }
+        }
+
+        let held: HashSet<u64> = [2].into_iter().collect();
+        let orphans = orphan_panes_of(vec![info(1, true), info(2, true), info(3, false)], &held);
+        assert_eq!(
+            orphans,
+            vec![OrphanPane {
+                pane_id: 1,
+                title: "zsh".to_string(),
+                cwd: Some("/tmp/x".to_string()),
+                owner: Some("tty7-cli".to_string()),
+            }],
+            "%2 is held by a workspace and %3 is dead — neither is a leak to reap (#596)"
+        );
     }
 
     #[test]

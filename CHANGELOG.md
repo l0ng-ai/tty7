@@ -50,6 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **Orphan panes are visible in the GUI, and closable from it.** A shell
+  left running after its workspace went away — what an interrupted `tty7
+  run` leaves behind — showed up nowhere in the GUI; only the CLI's `tty7
+  pane ls --all` could see it, and only `pane close --orphans` could stop
+  it. The workspace switcher's local machine group now lists those
+  background panes with their owner and working directory, each with a
+  Close button (#596).
 - **A launch that restores one of several windows says what it left behind.**
   Quitting with several windows open and starting again restored only the
   most recent one; the rest were marked detached — panes alive, nothing on

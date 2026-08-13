@@ -1035,6 +1035,7 @@ l10n_keys! {
     SwitcherTabsAfterOpening,
     SwitcherOpenToManage,
     SwitcherConnectToUse,
+    SwitcherOrphanPanes,
     SwitcherTabCount,
     SwitcherTabCountOne,
     SwitcherActiveTab,
