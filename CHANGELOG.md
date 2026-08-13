@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **`tty7 pane close %99` fails when no pane 99 exists.** The orphan path
+  hangs the pane up directly, and that kill is fire-and-forget — the daemon
+  never says whether it knew the pane — so a typo'd id printed
+  `{"closed":[99]}` and exited 0, telling a reaper script the leak it was
+  chasing was gone. Close now checks the id against the running-pane
+  registry first and reports the miss under `failed` with exit 1 (#588).
 - **cd Here and Insert Path quote for the shell the pane runs.** Both used
   to wrap a path with spaces in POSIX single quotes whatever the pane's
   shell was, and cmd.exe — where a single quote is an ordinary character —

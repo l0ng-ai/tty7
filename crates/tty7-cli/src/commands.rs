@@ -852,6 +852,11 @@ fn pane_close(
     // the state the caller was trying to fix.
     let mut closed = Vec::new();
     let mut failures = Vec::new();
+    // The running-pane registry, read lazily on the first direct kill: the
+    // direct path is fire-and-forget (the daemon never says whether it knew
+    // the pane), so the registry is the only way `%99` can fail instead of
+    // reporting `{"closed":[99]}` for a pane that never existed (#588).
+    let mut running: Option<Vec<u64>> = None;
     for pane in panes {
         let outcome = match resolve::workspace_of_pane(&machine, pane) {
             Ok(ws) => {
@@ -864,7 +869,24 @@ fn pane_close(
             // No workspace holds it, so PaneClose has nothing to route through.
             // Hang it up directly instead of refusing — this is exactly the
             // orphan `pane ls --all` points the user at.
-            Err(_) => backend.kill_pane(pane),
+            Err(_) => {
+                if running.is_none() {
+                    running = Some(
+                        backend
+                            .list_panes()?
+                            .iter()
+                            .map(|info| info.pane_id)
+                            .collect(),
+                    );
+                }
+                if running.as_ref().is_some_and(|ids| ids.contains(&pane)) {
+                    // A pane that exits between the listing and the kill is
+                    // gone either way, which is what closing it wanted.
+                    backend.kill_pane(pane)
+                } else {
+                    Err(anyhow::anyhow!("no such pane"))
+                }
+            }
         };
         match outcome {
             Ok(()) => closed.push(pane),
@@ -1628,6 +1650,9 @@ mod tests {
     #[test]
     fn closing_an_orphan_falls_back_to_hanging_the_pane_up() {
         let mut backend = mock();
+        // The registry must know %77: a direct kill is fire-and-forget, so
+        // close verifies existence against it first (#588).
+        backend.registry = vec![pane_info(77, Some("tty7-cli"))];
         run_cli(
             &["tty7", "pane", "close", "%77"],
             &Context::default(),
@@ -1660,6 +1685,38 @@ mod tests {
                 .any(|c| matches!(c, ControlRequest::PaneClose { pane: 1, .. })),
             "{:?}",
             backend.control_calls
+        );
+    }
+
+    #[test]
+    fn closing_a_pane_that_never_existed_is_a_failure_not_a_ghost_success() {
+        // %99 is in no workspace and in no registry — exactly the typo a
+        // reaper script makes. Closing it used to print {"closed":[99]} and
+        // exit 0, telling the script the leak it was chasing was gone (#588).
+        let mut backend = mock();
+        backend.registry = vec![pane_info(77, Some("tty7-cli"))];
+        let out = execute(
+            cli(&["tty7", "pane", "close", "%99"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect("a ghost close is an exit code, not an error");
+        let Outcome::Exit(1, r) = out else {
+            panic!("closing a pane that does not exist has to fail: {out:?}");
+        };
+        assert_eq!(r.json["closed"], serde_json::json!([]));
+        assert!(
+            r.json["failed"]
+                .as_array()
+                .expect("the failures are a list")
+                .iter()
+                .any(|f| f.as_str().is_some_and(|f| f.contains("%99"))),
+            "{}",
+            r.json
+        );
+        assert!(
+            backend.killed.is_empty(),
+            "no kill may be sent for a pane the registry does not hold"
         );
     }
 
