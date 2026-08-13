@@ -1004,7 +1004,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmCommitNotFound => "本仓库中没有这个提交。",
         L10nKey::ScmTooManyChanges => "改动过多，仅显示前 {shown} 项（共 {total} 项）。",
         L10nKey::ScmOpenChanges => "查看改动",
-        L10nKey::ScmDiscardAllConfirm => "放弃本仓库的全部改动？此操作无法撤销。",
+        L10nKey::ScmDiscardAllConfirm => {
+            "放弃所有未暂存的改动和未跟踪的文件？已暂存的改动会保留。此操作无法撤销。"
+        }
         L10nKey::ScmAmendConfirm => {
             "修补上一次提交？它会被一个新提交取代，已经拿到旧提交的人需要自行处理。"
         }

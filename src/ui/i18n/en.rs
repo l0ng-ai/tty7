@@ -1058,7 +1058,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ScmTooManyChanges => "Showing the first {shown} of {total} changes.",
         L10nKey::ScmOpenChanges => "Open Changes",
         L10nKey::ScmDiscardAllConfirm => {
-            "Discard every change in this repository? This cannot be undone."
+            "Discard all unstaged and untracked changes? Staged changes are kept. \
+             This cannot be undone."
         }
         L10nKey::ScmAmendConfirm => {
             "Amend the last commit? It will be replaced by a new one, so anyone who already has it has to reconcile."

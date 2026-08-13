@@ -1114,7 +1114,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::ScmOpenChanges => "変更を開く",
         L10nKey::ScmDiscardAllConfirm => {
-            "このリポジトリのすべての変更を破棄しますか？元に戻せません。"
+            "未ステージの変更と未追跡ファイルをすべて破棄しますか？ステージ済みの変更は残ります。元に戻せません。"
         }
         L10nKey::ScmAmendConfirm => {
             "直前のコミットを修正しますか？新しいコミットに置き換わるため、すでに取得した人は対応が必要になります。"

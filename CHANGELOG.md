@@ -50,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **The SCM panel's "discard all" confirmation no longer overstates what it
+  does.** The prompt asked to "discard every change in this repository" while
+  the operation has always left staged changes alone — it sweeps only unstaged
+  edits and untracked files. The prompt now says exactly that, in all three
+  languages (#594).
 - **A local daemon that dies and comes back no longer leaves a window of dead
   panes looking live** — from the client's side a killed daemon is
   indistinguishable from one whose shells all exited at once, so the window
