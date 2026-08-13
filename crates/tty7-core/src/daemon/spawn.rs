@@ -83,10 +83,11 @@ fn note_local_daemon(version: Option<DaemonVersion>) {
 /// behind, since the GUI is replaced while the daemon keeps serving every pane
 /// from the old binary.
 ///
-/// `PROTOCOL_VERSION` moves only when the wire format does (it has been 5 since
-/// July), so this is the *common* case after an update, not a rare one: the
-/// user sees a new version number while `pane.rs`, `shell_integration.rs` and
-/// the whole ssh stack still run last release's code.
+/// `PROTOCOL_VERSION` moves only when the wire format does, and it has not
+/// moved since July, so this is the *common* case after an update, not a rare
+/// one: the user sees a new version number while `pane.rs`,
+/// `shell_integration.rs` and the whole ssh stack still run last release's
+/// code.
 ///
 /// Deliberately not a prompt and not an automatic restart. Restarting the
 /// daemon ends every process it owns — the shells, the agents, the SSH

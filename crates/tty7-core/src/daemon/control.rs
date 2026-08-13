@@ -9,7 +9,26 @@ use serde::{Deserialize, Serialize};
 
 use super::protocol::{MAX_FRAME, read_frame, write_frame};
 
-pub const CONTROL_VERSION: u32 = 5;
+/// The control dialect this build speaks. A peer that answers the hello with a
+/// different number is refused outright, and the number is half of the remote
+/// server's filename (`tty7-server-c{control}p{protocol}`), so moving it also
+/// makes a client install the server that matches instead of trusting the one
+/// already sitting at that path.
+///
+/// Move it whenever a variant is added to or removed from [`ControlRequest`],
+/// [`ReplyOk`] or [`ControlEvent`]. The [`feature`] strings cover only what a
+/// peer can safely ignore — a field added to a message it already decodes. A
+/// request it has never heard of is not ignorable: the frame fails to decode
+/// and the read loop that failed on it takes the whole link down, which is how
+/// a remote workspace opens with no tabs and a git detail pane never fills.
+///
+/// v6 pays off the drift since v5, which was most of the dialect: the machine
+/// tree replaced `WorkspaceList`/`Get`/`Put`/`Delete` with `WorkspaceTree`,
+/// `MachineGet` and the tab/pane verbs, `GitStream` arrived with its chunk and
+/// end events, and `ReplyOk::Attached` and `FileMeta` went away. All of it
+/// shipped against a number that never moved, so every one of those servers
+/// still answers the hello and then drops the link on the first call.
+pub const CONTROL_VERSION: u32 = 6;
 
 const DIALECT_MARKER: &str = "speaks control v";
 
