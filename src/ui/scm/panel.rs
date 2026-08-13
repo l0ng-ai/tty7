@@ -303,6 +303,9 @@ impl Tty7App {
         let theme = cx.theme();
         let (warning, muted, fg) = (theme.warning, theme.muted_foreground, theme.foreground);
         let detached = matches!(status.head, HeadState::Detached { .. });
+        // The same helper `scm_push`'s guard asks, so the tile and the toast
+        // cannot answer differently about the same HEAD.
+        let unpushable = pushable_branch(&status.head).err();
         let busy = self.scm_network_busy(repo, cx);
         let others = self.scm_other_repos(repo);
 
@@ -401,20 +404,18 @@ impl Tty7App {
                     cx,
                 )
                 .rounded_md()
-                // Detached, the tile could only ever lose (#545): upstream
-                // is None there by definition, so sync degenerates into
-                // scm_push, which has no branch to move. Say that on the
-                // tooltip instead of promising "Publish Branch" — the one
-                // thing a detached HEAD cannot do — and let the key binding,
-                // palette and compound-verb paths toast the same reason from
-                // inside scm_push.
-                .disabled(busy || detached)
-                .tooltip(if detached {
-                    t(L10nKey::ScmPushDetached)
-                } else if status.upstream.is_some() {
-                    t(L10nKey::ScmSync)
-                } else {
-                    t(L10nKey::ScmPublishBranch)
+                // With no branch to move the tile could only ever lose (#545):
+                // upstream is None at a detached or unborn HEAD by definition,
+                // so sync degenerates into scm_push, which has nothing to
+                // send. Say that on the tooltip instead of promising "Publish
+                // Branch" — the one thing a detached HEAD cannot do — and let
+                // the key binding, palette and compound-verb paths toast the
+                // same reason from inside scm_push.
+                .disabled(busy || unpushable.is_some())
+                .tooltip(match unpushable {
+                    Some(reason) => t(reason),
+                    None if status.upstream.is_some() => t(L10nKey::ScmSync),
+                    None => t(L10nKey::ScmPublishBranch),
                 })
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.run_scm_action(ScmIntent::Sync, window, cx);
@@ -512,7 +513,7 @@ impl Tty7App {
             .map(|(_, names)| names.clone())
             .unwrap_or_default();
         let others = self.scm_repo_choices();
-        let detached = matches!(status.head, HeadState::Detached { .. });
+        let unpushable = pushable_branch(&status.head).is_err();
 
         move |menu, _window, _cx| {
             let mut menu = menu.min_w(px(200.));
@@ -560,9 +561,10 @@ impl Tty7App {
                 menu = menu.item(
                     PopupMenuItem::new(t(label))
                         // Fetch works from any HEAD, and Pull fails loud out
-                        // of git itself; a Push at a detached HEAD is the one
-                        // item that could only die in scm_push's guard (#545).
-                        .disabled(detached && matches!(intent, ScmIntent::Push))
+                        // of git itself; a Push from a HEAD with no branch to
+                        // move is the one item that could only die in
+                        // scm_push's guard (#545).
+                        .disabled(unpushable && matches!(intent, ScmIntent::Push))
                         .on_click({
                             let app = app.clone();
                             move |_, window, cx| {
