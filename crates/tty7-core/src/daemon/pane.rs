@@ -538,6 +538,26 @@ fn apply_common_command_setup(
 ) {
     if let Some(dir) = initial_cwd {
         cmd.cwd(dir);
+        // A new pane inherits the directory the last one *reported*, which is
+        // the logical path its shell was showing — `/tmp/x`, not the
+        // `/private/tmp/x` the kernel resolves it to. Handing that to `cwd()`
+        // alone loses the distinction: the child starts in the resolved
+        // directory and its shell falls back to `getcwd()`, so one tab read
+        // `/tmp/x` while every tab opened from it read `/private/tmp/x` — the
+        // same directory under two names, side by side in the sidebar.
+        //
+        // `PWD` is how a shell is told which of a directory's names it arrived
+        // by; it is what `cd` sets, and what Terminal.app and iTerm2 pass for
+        // this reason. POSIX has the shell verify it — a `PWD` that does not
+        // name the directory the process is really in is discarded, confirmed
+        // here against zsh, bash, sh and fish — so this can correct the name
+        // and cannot invent one.
+        //
+        // Unix only: a Windows shell that reads `PWD` at all wants it in its
+        // own idiom (`/c/x` under Git Bash), so a native path would just be
+        // discarded by the same check.
+        #[cfg(unix)]
+        cmd.env("PWD", dir);
     }
     let extra_env = crate::core::config::extra_env();
 
@@ -2995,6 +3015,29 @@ fn proc_name(pid: i32) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A pane inherits the directory the last one *reported* — the logical
+    /// path, `/tmp/x` and not the `/private/tmp/x` the kernel resolves it to.
+    /// `cwd()` alone loses that: the shell falls back to `getcwd()` and one
+    /// tab reads `/tmp/x` while the tab opened from it reads `/private/tmp/x`.
+    /// `PWD` is what carries the name across, and what the shell checks.
+    #[cfg(unix)]
+    #[test]
+    fn an_inherited_directory_keeps_the_name_it_was_reached_by() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        // `CommandBuilder` starts from this process's environment, so `PWD`
+        // already names wherever the daemon happens to be. The pane's own
+        // directory has to win over it.
+        let inherited = cmd.get_env("PWD").map(std::ffi::OsStr::to_owned);
+        let dir = Some(std::path::PathBuf::from("/tmp"));
+        apply_common_command_setup(&mut cmd, &dir, 1, None, "sh");
+        assert_ne!(cmd.get_env("PWD").map(std::ffi::OsStr::to_owned), inherited);
+        assert_eq!(
+            cmd.get_env("PWD"),
+            Some(std::ffi::OsStr::new("/tmp")),
+            "the shell is told which name it arrived by"
+        );
+    }
     use super::*;
     use crate::core::kitty_graphics::ImageDelete;
     use std::path::Path;
