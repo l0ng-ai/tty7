@@ -50,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **A half-typed tab rename survives other tabs closing and the strip
+  reordering.** The rename box tracked its tab by index, so any unrelated
+  tab event forced it closed to keep the commit from landing on the wrong
+  tab — and even then, a reorder mid-rename left a window where the name
+  went to the tab that had taken the index over. The box now tracks its tab
+  by tree id: only closing the renaming tab itself ends the rename, and the
+  commit lands on the tab the box was opened on wherever it has moved
+  (#598).
 - **A zoomed pane stays zoomed when you leave its tab and come back.** Zoom
   was a window-level value that activating any tab cleared, so looking at
   another tab and returning restored the split layout — while a zoom is a

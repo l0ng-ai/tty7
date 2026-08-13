@@ -451,7 +451,7 @@ impl Tty7App {
                 let rename_input = self
                     .renaming
                     .as_ref()
-                    .filter(|r| r.index == i)
+                    .filter(|r| r.tab == tab.tree_id.get())
                     .map(|r| r.input.clone());
 
                 let shown = SidebarRowShown {

@@ -434,7 +434,11 @@ impl Tab {
 }
 
 pub(crate) struct Renaming {
-    pub(crate) index: usize,
+    /// The tab being renamed, by tree id rather than index: an index drifts
+    /// the moment any other tab closes or the strip reorders, which used to
+    /// force every unrelated tab event to throw the half-typed name away —
+    /// and left a window where the commit landed on the wrong tab (#598).
+    pub(crate) tab: tty7_core::core::machine::TabId,
     pub(crate) input: Entity<InputState>,
     _subs: Vec<Subscription>,
 }
@@ -3450,7 +3454,6 @@ impl Tty7App {
             return;
         }
         self.maximized = None;
-        self.renaming = None;
         let worktree_cwd = self.tab_host_cwd(index, window, cx);
         let snapshot = tab_to_session(&self.tabs[index], cx);
         self.closed.push(snapshot);
@@ -3461,6 +3464,15 @@ impl Tty7App {
             kill_pane_off_thread(leaf.read(cx).pane_route(), leaf.read(cx).pane_id, cx);
         }
         self.tabs.remove(index);
+        // Only losing the renaming tab itself ends the rename — closing an
+        // unrelated tab must not throw the half-typed name away (#598).
+        if self
+            .renaming
+            .as_ref()
+            .is_some_and(|r| !self.tabs.iter().any(|t| t.tree_id.get() == r.tab))
+        {
+            self.renaming = None;
+        }
         if self.tabs.is_empty() {
             self.active = 0;
         } else if self.active >= self.tabs.len() {
@@ -3914,7 +3926,8 @@ impl Tty7App {
         if order.len() != self.tabs.len() || order.iter().enumerate().all(|(i, &o)| i == o) {
             return;
         }
-        self.renaming = None;
+        // The rename box rides out a reorder: it tracks its tab by tree id,
+        // so the drift that once forced it closed here is gone (#598).
         let was_active = self.active;
         let mut slots: Vec<Option<Tab>> = std::mem::take(&mut self.tabs)
             .into_iter()
@@ -3958,7 +3971,7 @@ impl Tty7App {
             },
         )];
         self.renaming = Some(Renaming {
-            index,
+            tab: self.tabs[index].tree_id.get(),
             input,
             _subs: subs,
         });
@@ -4001,7 +4014,11 @@ impl Tty7App {
             return;
         };
         let value = renaming.input.read(cx).value().trim().to_string();
-        if let Some(tab) = self.tabs.get_mut(renaming.index) {
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.tree_id.get() == renaming.tab)
+        {
             tab.name = if value.is_empty() { None } else { Some(value) };
         }
         self.save_session(cx);
@@ -8673,6 +8690,52 @@ mod rename_gpui_tests {
                 end..end,
                 "typing has to continue {value:?}, not land in front of it"
             );
+        });
+    }
+    #[gpui::test]
+    fn a_rename_rides_out_other_tabs_closing_and_the_strip_reordering(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.start_rename(2, window, cx);
+            let target = app.tabs[2].tree_id.get();
+            let input = app.renaming.as_ref().expect("the box is up").input.clone();
+            input.update(cx, |s, cx| s.set_value("mine", window, cx));
+
+            // An unrelated close used to throw the half-typed name away
+            // (#598).
+            app.close_tab_inner(0, true, window, cx);
+            assert!(
+                app.renaming.is_some(),
+                "closing another tab keeps the rename box"
+            );
+
+            // So did a drag-reorder — and the index the commit once landed
+            // on had by then drifted onto a different tab.
+            let order: Vec<usize> = (0..app.tabs.len()).rev().collect();
+            app.apply_tab_order(&order, cx);
+            assert!(app.renaming.is_some(), "a reorder keeps the rename box");
+
+            app.commit_rename(window, cx);
+            let named: Vec<_> = app
+                .tabs
+                .iter()
+                .filter(|t| t.name.as_deref() == Some("mine"))
+                .collect();
+            assert_eq!(named.len(), 1, "the name landed on exactly one tab");
+            assert_eq!(
+                named[0].tree_id.get(),
+                target,
+                "and that tab is the one the box was opened on"
+            );
+        });
+
+        // Closing the renaming tab itself still ends the rename.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.start_rename(0, window, cx);
+            assert!(app.renaming.is_some());
+            app.close_tab_inner(0, true, window, cx);
+            assert!(app.renaming.is_none(), "losing its own tab closes the box");
         });
     }
 }
