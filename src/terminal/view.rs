@@ -11802,4 +11802,104 @@ mod gpui_tests {
             })
             .unwrap();
     }
+
+    /// #541: the history menu floats over live grid cells, and a `div` that
+    /// carries no handler of its own inserts no hitbox — so the press went
+    /// straight through to the grid behind the menu, which cleared the
+    /// selection, dragged out a new one, or (with the link modifier held)
+    /// opened whatever link the menu was covering.
+    ///
+    /// The second half is the other side of the pair `src/ui/app.rs` keeps for
+    /// the resize handle: with the menu gone the very same press must still
+    /// reach the grid, or this would pass on a pane that never sees a mouse.
+    #[gpui::test]
+    fn a_press_on_the_history_menu_never_reaches_the_grid(cx: &mut TestAppContext) {
+        use gpui::{MouseMoveEvent, PlatformInput};
+
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        prompt_ready(&window, cx, &mut daemon);
+        wait_for_input_active(&window, cx);
+
+        window
+            .update(cx, |view, window, cx| {
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
+                view.history = vec!["echo one".to_string(), "echo two".to_string()];
+                view.history_frecency = vec![1.0, 1.0];
+                view.start_reverse_search();
+                cx.notify();
+            })
+            .unwrap();
+
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+
+        // The menu is laid out one row under the cursor, plus the gap
+        // `render_reverse_search_menu` leaves; this lands in the middle of its
+        // first row, where a candidate is drawn.
+        let lh = window.update(cx, |view, _, _| view.line_height).unwrap();
+        let at = point(
+            px(GRID_PAD_X) + px(10.),
+            px(GRID_PAD_Y) + lh * 2.0 + px(10.),
+        );
+
+        let press = |vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|window, cx| {
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position: at,
+                        pressed_button: None,
+                        modifiers: Modifiers::none(),
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    PlatformInput::MouseDown(MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: at,
+                        modifiers: Modifiers::none(),
+                        click_count: 1,
+                        first_mouse: false,
+                    }),
+                    cx,
+                );
+            });
+            vcx.run_until_parked();
+        };
+
+        press(&mut vcx);
+        window
+            .update(cx, |view, _, _| {
+                assert!(
+                    view.reverse_search.is_some(),
+                    "the press must not have closed the menu either"
+                );
+                assert!(
+                    !view.selecting,
+                    "the menu swallowed the press, so no selection started under it"
+                );
+            })
+            .unwrap();
+
+        window
+            .update(cx, |view, _, cx| {
+                view.reverse_search = None;
+                cx.notify();
+            })
+            .unwrap();
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+
+        press(&mut vcx);
+        window
+            .update(cx, |view, _, _| {
+                assert!(
+                    view.selecting,
+                    "with no menu over it the same press is the grid's to take"
+                );
+            })
+            .unwrap();
+    }
 }
