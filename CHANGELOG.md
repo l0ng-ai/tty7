@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tree pull that has to be retried no longer ends with the window deleting
+  the tabs it was pulling.** A window told to rebuild itself from the machine —
+  a daemon back as a new process, a restart handoff that was refused, a remote
+  server restarted — abandoned that job the moment it had any tabs at all, and
+  in every one of those cases it does: the stale ones on screen are the whole
+  reason it was asked. So the rebuild silently did nothing, and worse, the
+  window went on claiming to speak for the workspace it had never read. Opening
+  one tab over it then diffed into "close every tab" and deleted those panes'
+  records while their shells were still running, with nothing left that could
+  reach them. The retry is now dropped only for a tab the user really did make
+  while the pull was out, and a window waiting on a rebuild adds to its machine
+  without pruning it until the pull lands (#579).
 - **A local daemon that dies and comes back no longer leaves a window of dead
   panes looking live** — from the client's side a killed daemon is
   indistinguishable from one whose shells all exited at once, so the window
