@@ -50,6 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **A zoomed pane stays zoomed when you leave its tab and come back.** Zoom
+  was a window-level value that activating any tab cleared, so looking at
+  another tab and returning restored the split layout — while a zoom is a
+  tab's temporary view state, like its focused pane. It now rides with the
+  tab; the clears that genuinely reshape the layout (drag, split, close)
+  still stand, and a zoom whose pane exited while the tab was away does not
+  come back (#599).
 - **Opening and closing the search bar no longer erases the grid
   selection.** The selection that seeds the query is the thing being
   searched for, yet opening the bar ran the same unconditional clear as

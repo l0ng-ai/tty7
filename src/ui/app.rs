@@ -247,6 +247,11 @@ pub struct Tab {
     pub pane: Pane,
     pub name: Option<String>,
     last_focused: Option<gpui::EntityId>,
+    /// The pane zoomed in this tab, stashed here by `activate` while another
+    /// tab is on screen — zoom is a tab's view state, not the window's, so
+    /// looking at another tab and coming back must not lose it (#599). `None`
+    /// while the tab is active: then the zoom lives in `Tty7App::maximized`.
+    pub(crate) zoomed: Option<Entity<TerminalView>>,
     pub(crate) diff_overlay: Option<crate::ui::diff_overlay::DiffOverlayState>,
     pub(crate) code: Option<Box<crate::ui::code_editor::TabCode>>,
     pub(crate) sidebar_group: std::cell::RefCell<Option<std::path::PathBuf>>,
@@ -270,6 +275,7 @@ impl Tab {
             pane,
             name: None,
             last_focused: None,
+            zoomed: None,
             diff_overlay: None,
             code: None,
             overlay_top: OverlayTop::default(),
@@ -284,6 +290,7 @@ impl Tab {
             pane,
             name: tree.name.clone(),
             last_focused: None,
+            zoomed: None,
             diff_overlay: None,
             code: None,
             overlay_top: OverlayTop::default(),
@@ -1346,6 +1353,7 @@ impl Tty7App {
                 pane,
                 name: st.name,
                 last_focused: None,
+                zoomed: None,
                 diff_overlay: None,
                 code: None,
                 overlay_top: OverlayTop::default(),
@@ -3369,8 +3377,23 @@ impl Tty7App {
     pub(crate) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() && index != self.active {
             self.remember_active_pane(window, cx);
-            self.maximized = None;
+            // Zoom rides with its tab (#599): stash the outgoing tab's zoom
+            // and bring the incoming tab's back. The clears elsewhere (drag,
+            // split, close) still stand — those genuinely reshape what was
+            // zoomed; merely looking at another tab does not.
+            if let Some(outgoing) = self.tabs.get_mut(self.active) {
+                outgoing.zoomed = self.maximized.take();
+            }
             self.active = index;
+            self.maximized = self.tabs[index].zoomed.take().filter(|leaf| {
+                // The zoomed pane may have exited while its tab was away —
+                // a stale entity must not come back as the zoom.
+                self.tabs[index]
+                    .pane
+                    .leaves()
+                    .iter()
+                    .any(|l| l.entity_id() == leaf.entity_id())
+            });
             self.maybe_refresh_diff_overlay(cx);
             self.sidebar_scroll.scroll_to_item(index);
             if self.code_panel_visible() {
@@ -6903,6 +6926,7 @@ fn tabs_from_session(
             pane,
             name: st.name.clone(),
             last_focused: None,
+            zoomed: None,
             diff_overlay: None,
             code: None,
             overlay_top: OverlayTop::default(),
@@ -8648,6 +8672,52 @@ mod rename_gpui_tests {
                 state.selected_range(),
                 end..end,
                 "typing has to continue {value:?}, not land in front of it"
+            );
+        });
+    }
+}
+
+// Zoom is a tab's view state: it rides with the tab across a switch, while a
+// layout change (drag, split, close) still clears it.
+#[cfg(all(test, unix))]
+mod zoom_gpui_tests {
+    use gpui::TestAppContext;
+
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    #[gpui::test]
+    fn a_tabs_zoom_survives_a_round_trip_to_another_tab(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let leaf = app.tabs[0]
+                .pane
+                .first_leaf()
+                .and_then(|slot| slot.terminal().cloned())
+                .expect("tab 0 has a pane");
+            app.maximized = Some(leaf.clone());
+
+            app.activate(1, window, cx);
+            assert!(app.maximized.is_none(), "tab 1 never zoomed anything");
+
+            app.activate(0, window, cx);
+            assert_eq!(
+                app.maximized.as_ref().map(|l| l.entity_id()),
+                Some(leaf.entity_id()),
+                "tab 0's zoom is still where it was left (#599)"
+            );
+
+            // A zoom stashed for a pane that is no longer in the tab does not
+            // come back — it exited (or was closed) while the tab was away.
+            app.maximized = Some(leaf.clone());
+            app.activate(1, window, cx);
+            app.tabs[0].zoomed = Some(leaf);
+            app.tabs[0].pane =
+                crate::ui::pane::Pane::leaf(app.tabs[1].pane.first_leaf().expect("a donor leaf"));
+            app.activate(0, window, cx);
+            assert!(
+                app.maximized.is_none(),
+                "a stashed zoom whose pane is gone stays gone"
             );
         });
     }
