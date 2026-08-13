@@ -83,8 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   came from `tab.agent_status` (the most urgent across the whole tab), so a
   split tab running two agents could show one pane's name beside the other
   pane's state. The row now takes both from the detail pane when it has an
-  agent, falling back to the tab aggregate only when the focused leaf has
-  none — so name and status always describe the same pane (#543).
+  agent, and otherwise from the tab's most urgent agent pane — so the row
+  still holds while focus sits on a plain shell, and its two halves always
+  describe the same pane (#543).
 - **Windows paths in the Info panel shorten to their leaf again** — the cwd
   row split on `/` only, so a backslash-spelled path (any agent-reported cwd,
   a cmd pane, the shell-integration-off case) elided its *tail* and hid the

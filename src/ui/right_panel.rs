@@ -628,7 +628,7 @@ impl Tty7App {
         // The agent row's name and status, read off one leaf (see below).
         let mut agent_row: Option<(
             crate::core::cli_agent::CLIAgent,
-            Option<crate::core::cli_agent::AgentStatus>,
+            crate::core::cli_agent::AgentStatus,
         )> = None;
 
         if let Some(tab) = self.tabs.get(self.active) {
@@ -673,22 +673,24 @@ impl Tty7App {
                 }
                 git = view.git_status(cx);
                 // Name and status come from the *same* leaf: the detail pane's
-                // own agent when it has one, the tab-level aggregate when it
-                // does not (so the row holds while focus sits on a plain
-                // shell). Pairing `tab.agent` with `tab.agent_status` could
-                // splice one pane's name onto another pane's status — a row no
-                // leaf ever had — because the two resolve independently
-                // (#543). Read here, where `view` is in scope; pushed beside
-                // the other rows below.
+                // own agent when it has one, and otherwise the tab's most
+                // urgent agent leaf — which still holds the row while focus
+                // sits on a plain shell, and still colours its dot the way the
+                // tab strip's badge does, but names the pane it took the
+                // status from. Pairing `tab.agent` with `tab.agent_status`
+                // would splice one pane's name onto another pane's status — a
+                // row no leaf ever had — because the two resolve
+                // independently (#543). Read here, where `view` is in scope;
+                // pushed beside the other rows below.
                 agent_row = match view.agent() {
                     Some(agent) => {
                         let status = view
                             .agent_session()
                             .map(|s| s.status)
                             .unwrap_or(crate::core::cli_agent::AgentStatus::Idle);
-                        Some((agent, Some(status)))
+                        Some((agent, status))
                     }
-                    None => tab.agent(cx).map(|agent| (agent, tab.agent_status(cx))),
+                    None => tab.agent_row(cx),
                 };
             }
             // Read off the same pane the rows above describe, rather than off
@@ -720,12 +722,9 @@ impl Tty7App {
                 rows.push(InfoRow {
                     label: t(L10nKey::PanelAgent),
                     value: InfoValue::Agent {
-                        text: match status {
-                            Some(s) => format!("{name} · {}", agent_status_label(s)),
-                            None => name.to_string(),
-                        },
-                        dot: status.and_then(|s| s.dot_rgb()),
-                        hollow: status == Some(crate::core::cli_agent::AgentStatus::Waiting),
+                        text: format!("{name} · {}", agent_status_label(status)),
+                        dot: status.dot_rgb(),
+                        hollow: status == crate::core::cli_agent::AgentStatus::Waiting,
                     },
                     copy: None,
                     reveal: None,

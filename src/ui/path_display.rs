@@ -9,10 +9,11 @@
 //! reports `C:/Users/x/…` while `USERPROFILE` is `C:\Users\x` (#544).
 //!
 //! The comparison below normalizes both sides to `/` and folds case before
-//! comparing, so every spelling of the same directory shortens. What is
-//! returned keeps the path's own spelling — only the matched home prefix is
-//! swapped for `~` — because the rest of the string is what a copy or a
-//! tooltip shows, and it should read the way the pane wrote it.
+//! comparing, so every spelling of the same directory shortens. What comes
+//! back is for reading only — a `~`-rooted path is spelled the way `~` paths
+//! are spelled everywhere, with `/`. Nothing feeds it back to an API: the
+//! Info panel's Copy Path and Reveal both carry the untouched `PathBuf`, and
+//! the tab strip and picker only ever draw it.
 
 use std::borrow::Cow;
 
@@ -20,38 +21,11 @@ use std::borrow::Cow;
 ///
 /// `USERPROFILE` is the fallback rather than the only source on Windows so
 /// the MSYS/Git-Bash environments that do export `HOME` keep working, and
-/// the two agree in every case that matters. In tests the process env is
-/// shared with neighbours that legitimately read the real home (ssh_connect
-/// writes a key into it), so the home is injected rather than mutated.
-fn home_dir() -> Option<std::path::PathBuf> {
-    #[cfg(test)]
-    if let Some(home) = test_home() {
-        return home;
-    }
+/// the two agree in every case that matters.
+fn home_dir() -> Option<std::ffi::OsString> {
     std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .or_else(|| std::env::var_os("USERPROFILE").filter(|h| !h.is_empty()))
-        .map(std::path::PathBuf::from)
-}
-
-/// The home a test has pinned, shared by `home_dir` and `set_test_home`.
-/// `Some(None)` means "no home" — a test for the unset case still needs the
-/// override, or it would read the machine's real one.
-#[cfg(test)]
-fn test_home_slot() -> &'static std::sync::Mutex<Option<Option<std::path::PathBuf>>> {
-    use std::sync::{Mutex, OnceLock};
-    static HOME: OnceLock<Mutex<Option<Option<std::path::PathBuf>>>> = OnceLock::new();
-    HOME.get_or_init(|| Mutex::new(None))
-}
-
-#[cfg(test)]
-fn test_home() -> Option<Option<std::path::PathBuf>> {
-    test_home_slot().lock().unwrap().clone()
-}
-
-#[cfg(test)]
-fn set_test_home(home: Option<std::path::PathBuf>) {
-    *test_home_slot().lock().unwrap() = Some(home);
 }
 
 /// `/`-spelled, case-folded, trailing separators dropped — the form two
@@ -77,8 +51,15 @@ pub(crate) fn abbreviate_home(path: &str) -> Cow<'_, str> {
     let Some(home) = home_dir() else {
         return Cow::Borrowed(path);
     };
-    let home = home.to_string_lossy();
-    let home_norm = normalized(&home);
+    abbreviate_under(path, &home.to_string_lossy())
+}
+
+/// `abbreviate_home` with the home handed in rather than read from the
+/// environment, so the tests below pin one without touching a process-global
+/// the rest of the binary is also reading (`ui::home`'s own test sets `HOME`
+/// and expects to see it, and everything runs in one process).
+fn abbreviate_under<'a>(path: &'a str, home: &str) -> Cow<'a, str> {
+    let home_norm = normalized(home);
     if home_norm.is_empty() {
         return Cow::Borrowed(path);
     }
@@ -107,45 +88,42 @@ pub(crate) fn abbreviate_home(path: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    // The pinned home is process-global, so the tests that set it serialize
-    // on one lock — a neighbour pinning a different home mid-assertion is the
-    // only way these can lie. Tests elsewhere that read the *real* home
-    // (ssh_connect writes a key into it) are untouched: they never call
-    // set_test_home, and home_dir only consults the slot once a test set it.
-    fn home_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
 
     #[test]
     fn a_path_under_home_shortens_to_tilde() {
-        let _g = home_lock();
-        set_test_home(Some(std::path::PathBuf::from("/home/xa")));
-        assert_eq!(abbreviate_home("/home/xa"), "~");
-        assert_eq!(abbreviate_home("/home/xa/work"), "~/work");
-        assert_eq!(abbreviate_home("/home/xavier"), "/home/xavier");
-        assert_eq!(abbreviate_home("/var/tmp"), "/var/tmp");
+        assert_eq!(abbreviate_under("/home/xa", "/home/xa"), "~");
+        assert_eq!(abbreviate_under("/home/xa/work", "/home/xa"), "~/work");
+        // A home recorded with its trailing separator matches the same paths,
+        // and the slice that follows it is found in the *normalized* string,
+        // so the two spellings cannot disagree about where the cut is.
+        assert_eq!(abbreviate_under("/home/xa/work", "/home/xa/"), "~/work");
+        // A longer name that merely starts with home is not under it.
+        assert_eq!(abbreviate_under("/home/xavier", "/home/xa"), "/home/xavier");
+        assert_eq!(abbreviate_under("/var/tmp", "/home/xa"), "/var/tmp");
+        // A home the environment reports as empty leaves every path alone,
+        // rather than turning `/` into `~`.
+        assert_eq!(abbreviate_under("/var/tmp", ""), "/var/tmp");
+        assert_eq!(abbreviate_under("/var/tmp", "/"), "/var/tmp");
     }
 
     #[test]
     fn separators_and_case_do_not_change_what_counts_as_home() {
         // The Windows miss: USERPROFILE spells `C:\Users\xa`, a PowerShell
         // pane reports `C:/Users/xa/…`, and neither matched the other.
-        let _g = home_lock();
-        set_test_home(Some(std::path::PathBuf::from("C:\\Users\\xa")));
-        assert_eq!(abbreviate_home("C:/Users/xa/work"), "~/work");
-        assert_eq!(abbreviate_home("c:\\Users\\XA\\work"), "~/work");
-        assert_eq!(abbreviate_home("C:\\Users\\xa"), "~");
+        let home = "C:\\Users\\xa";
+        assert_eq!(abbreviate_under("C:/Users/xa/work", home), "~/work");
+        assert_eq!(abbreviate_under("c:\\Users\\XA\\work", home), "~/work");
+        assert_eq!(abbreviate_under("C:\\Users\\xa", home), "~");
         // The remainder is re-spelled with `/`, case untouched.
-        assert_eq!(abbreviate_home("C:/Users/xa/Mix\\ed"), "~/Mix/ed");
+        assert_eq!(abbreviate_under("C:/Users/xa/Mix\\ed", home), "~/Mix/ed");
     }
 
     #[test]
-    fn without_a_home_the_path_stands_as_spelled() {
-        let _g = home_lock();
-        set_test_home(None);
-        assert_eq!(abbreviate_home("/any/where"), "/any/where");
+    fn a_non_ascii_component_is_sliced_on_a_character_boundary() {
+        // The cut is taken from the normalized string; `replace` and the
+        // ASCII case fold both preserve byte length, so a multi-byte
+        // component before or after the home prefix cannot move it.
+        assert_eq!(abbreviate_under("/home/日本/work", "/home/日本"), "~/work");
+        assert_eq!(abbreviate_under("/home/xa/日本語", "/home/xa"), "~/日本語");
     }
 }

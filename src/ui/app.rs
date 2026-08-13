@@ -341,7 +341,20 @@ impl Tab {
             .find_map(|l| l.read(cx).agent())
     }
 
-    pub(crate) fn agent_status(&self, cx: &App) -> Option<crate::core::cli_agent::AgentStatus> {
+    /// The tab's most urgent agent leaf, named and reported by that one leaf.
+    ///
+    /// `agent` and `agent_status` answer independently — the *first* leaf
+    /// carrying an agent, and the highest urgency found *anywhere* in the tab
+    /// — so reading them as a pair can put one pane's name beside another
+    /// pane's state, a row no leaf ever had. Anywhere both halves are shown
+    /// at once reads them from here instead (#543).
+    pub(crate) fn agent_row(
+        &self,
+        cx: &App,
+    ) -> Option<(
+        crate::core::cli_agent::CLIAgent,
+        crate::core::cli_agent::AgentStatus,
+    )> {
         use crate::core::cli_agent::AgentStatus;
         let urgency = |s: AgentStatus| match s {
             AgentStatus::Waiting => 3,
@@ -352,14 +365,23 @@ impl Tab {
         self.pane
             .terminals()
             .into_iter()
-            .filter(|l| l.read(cx).agent().is_some())
-            .map(|l| {
-                l.read(cx)
+            .filter_map(|l| {
+                let view = l.read(cx);
+                let agent = view.agent()?;
+                // A pane whose agent is running but has never reported a
+                // session reads as idle, the same reading the badge has always
+                // given it.
+                let status = view
                     .agent_session()
                     .map(|s| s.status)
-                    .unwrap_or(AgentStatus::Idle)
+                    .unwrap_or(AgentStatus::Idle);
+                Some((agent, status))
             })
-            .max_by_key(|s| urgency(*s))
+            .max_by_key(|(_, status)| urgency(*status))
+    }
+
+    pub(crate) fn agent_status(&self, cx: &App) -> Option<crate::core::cli_agent::AgentStatus> {
+        self.agent_row(cx).map(|(_, status)| status)
     }
 
     pub(crate) fn agent_unread_count(&self, cx: &App) -> usize {
