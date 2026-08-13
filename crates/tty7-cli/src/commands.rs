@@ -1081,6 +1081,12 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
                 // Structured even here: a script has to tell "my peer died"
                 // apart from "the daemon is unreachable", and an anyhow error
                 // would leave --json with nothing to read.
+                //
+                // The headline goes to stderr all the same, so `-q` still
+                // reports it — the discipline `pane close` set: a failure is
+                // not "output on success", and an exit code alone says which
+                // wait died nowhere (#590).
+                eprintln!("tty7: pane %{pane} exited before reaching the awaited state");
                 return Ok(Outcome::Exit(
                     1,
                     Report {
@@ -1127,6 +1133,9 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
                      --changed",
                 );
             }
+            // The headline goes to stderr all the same, so `-q` still
+            // reports it — see the sibling exit above for why (#590).
+            eprintln!("tty7: pane %{pane}: still {} — timed out", current.name());
             return Ok(Outcome::Exit(
                 124,
                 Report {

@@ -50,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **A failed `tty7 wait` now says so on stderr even under `-q`.** Timeout and
+  "pane exited first" are structured exits, so they bypassed the anyhow path
+  that prints under quiet mode and left the exit code as the only evidence —
+  against the documented "errors still go to stderr". Both now print a
+  one-line headline to stderr, the discipline `pane close` already set (#590).
 - **A timed-out `tty7 wait` now answers in the same JSON shape as a finished
   one** — `matched`, `stale` and the agent session fields, plus
   `"timed_out": true` — instead of a bare object missing the fields a
