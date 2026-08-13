@@ -8133,4 +8133,31 @@ mod gpui_tests {
         }
         panic!("Tab never reached the cursor-shape segmented group");
     }
+
+    /// The other half of #552: the overlay occludes the mouse, and the focus
+    /// trap is what keeps Tab from walking out of it onto the chrome behind —
+    /// which would paint a focus ring on a workspace the user cannot see.
+    #[gpui::test]
+    fn tab_never_walks_out_of_the_settings_overlay(cx: &mut TestAppContext) {
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Appearance, window, cx);
+        });
+        vcx.simulate_resize(size(px(1100.), px(800.)));
+        vcx.run_until_parked();
+
+        for step in 0..120 {
+            vcx.simulate_keystrokes("tab");
+            let inside = app.update_in(&mut vcx, |app, window, cx| {
+                app.active_settings()
+                    .map(|s| s.focus_handle.contains_focused(window, cx))
+            });
+            assert_eq!(
+                inside,
+                Some(true),
+                "Tab left the settings overlay after {} steps",
+                step + 1,
+            );
+        }
+    }
 }
