@@ -464,8 +464,13 @@ impl HostLinks {
         cx.default_global::<HostLinks>().hosts.get(&id).cloned()
     }
 
-    pub fn home(cx: &mut App, id: HostId) -> Option<PathBuf> {
-        cx.default_global::<HostLinks>().homes.get(&id).cloned()
+    /// The home directory the host reported when the link came up — the only
+    /// thing that can say what a `~` in one of its paths means (#580). Read
+    /// through `try_global` rather than `default_global` so a caller holding
+    /// nothing but `&App` (every renderer that draws a path) can ask; an
+    /// absent table and an empty one are the same answer here.
+    pub fn home(cx: &App, id: HostId) -> Option<PathBuf> {
+        cx.try_global::<HostLinks>()?.homes.get(&id).cloned()
     }
 
     pub fn insert(cx: &mut App, host: Arc<RemoteHost>, home: PathBuf) {

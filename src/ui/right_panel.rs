@@ -642,9 +642,10 @@ impl Tty7App {
                         .map(|cwd| (view.host_id(), cwd.to_path_buf())),
                 );
                 if let Some(cwd) = view.effective_cwd() {
+                    let home = view.display_home(cx);
                     rows.push(InfoRow {
                         label: t(L10nKey::PanelCwd),
-                        value: InfoValue::Path(compact_path(&cwd)),
+                        value: InfoValue::Path(compact_path(&cwd, home.as_deref())),
                         // The compacted `~/…` spelling is for reading; what
                         // goes on the clipboard is the path a shell can use.
                         copy: Some(cwd.display().to_string()),
@@ -1455,8 +1456,11 @@ fn split_path_leaf(s: &str) -> (String, String) {
     }
 }
 
-fn compact_path(path: &std::path::Path) -> String {
-    crate::ui::path_display::abbreviate_home(&path.to_string_lossy()).into_owned()
+/// `home` is the home directory of the machine `path` lives on. A remote
+/// pane's cwd is measured against *its* host's home, never this machine's
+/// (#580) — and against nothing at all while the host has not said.
+fn compact_path(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    crate::ui::path_display::abbreviate_home(&path.to_string_lossy(), home).into_owned()
 }
 
 #[cfg(test)]

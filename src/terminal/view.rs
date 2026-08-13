@@ -1308,6 +1308,21 @@ impl TerminalView {
         self.remote_context().is_none() && self.host_id.is_local()
     }
 
+    /// The directory a `~` in this pane's paths stands for, for anything that
+    /// draws one of them shortened.
+    ///
+    /// The pane's own host answers, never this machine on its behalf (#580).
+    /// A shell that has ssh'd somewhere gets no answer at all: the paths it
+    /// reports are on a third machine tty7 has no link to, and neither this
+    /// laptop's home nor the pane host's describes it — the same reason #568
+    /// stopped resolving file links in those panes.
+    pub fn display_home(&self, cx: &gpui::App) -> Option<std::path::PathBuf> {
+        match self.remote_context().is_some() {
+            true => None,
+            false => crate::ui::path_display::home_for_host(cx, self.host_id),
+        }
+    }
+
     pub fn spawnable_cwd(&self) -> Option<std::path::PathBuf> {
         self.remote_context().is_none().then(|| self.cwd())?
     }

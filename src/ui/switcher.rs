@@ -483,12 +483,17 @@ impl Tty7App {
                     });
                     groups.len() - 1
                 });
+                // A row's path is on the workspace's own machine, so that is
+                // the machine whose home may shorten it (#580).
+                let home = crate::ui::path_display::home_for_host(app, w.host_id());
                 groups[slot].rows.push(Row {
                     id: w.id,
                     name: crate::ui::machine_mirror::display_name(app, w)
                         .unwrap_or_else(|| t(L10nKey::WindowUntitled).to_string()),
                     path: crate::ui::machine_mirror::subject_path(app, w)
-                        .map(|p| crate::ui::home::display_path(std::path::Path::new(&p)))
+                        .map(|p| {
+                            crate::ui::home::display_path(std::path::Path::new(&p), home.as_deref())
+                        })
                         .unwrap_or_default(),
                     when: crate::ui::home::relative_time(now, w.last_active),
                     live: crate::terminal::pane_liveness::liveness_of(app, w),
@@ -585,6 +590,9 @@ impl Tty7App {
                 .flat_map(|g| g.rows.iter().map(|r| r.id))
                 .collect();
             let app: &App = cx;
+            // Unclaimed *local* workspaces: their paths are on this machine,
+            // so this machine's home is the right one to measure them by.
+            let local_home = crate::ui::path_display::local_home();
             let rows: Vec<Row> = crate::ui::machine_mirror::unclaimed_local_workspaces(app)
                 .into_iter()
                 .filter(|ws| !listed.contains(&ws.id))
@@ -593,7 +601,12 @@ impl Tty7App {
                     name: ws.name,
                     path: ws
                         .path
-                        .map(|p| crate::ui::home::display_path(std::path::Path::new(&p)))
+                        .map(|p| {
+                            crate::ui::home::display_path(
+                                std::path::Path::new(&p),
+                                local_home.as_deref(),
+                            )
+                        })
                         .unwrap_or_default(),
                     when: crate::ui::home::relative_time(now, ws.last_active),
                     live: match ws.live {
@@ -709,8 +722,11 @@ impl Tty7App {
                             .pane
                             .terminals()
                             .first()
-                            .and_then(|leaf| leaf.read(cx).cwd())
-                            .map(|p| crate::ui::home::display_path(&p))
+                            .and_then(|leaf| {
+                                let leaf = leaf.read(cx);
+                                Some((leaf.cwd()?, leaf.display_home(cx)))
+                            })
+                            .map(|(p, home)| crate::ui::home::display_path(&p, home.as_deref()))
                             .unwrap_or_default(),
                         agent: tab.agent(cx),
                         status: tab.agent_status(cx),
@@ -738,11 +754,14 @@ impl Tty7App {
             cx.try_global::<crate::terminal::git_status::GitStatusCache>()?
                 .status_for(host, std::path::Path::new(cwd))
         };
+        // These rows describe a workspace on `host`, and the cwds they carry
+        // are that machine's. Only its home may shorten them (#580).
+        let home = host.and_then(|host| crate::ui::path_display::home_for_host(cx, host));
         views
             .into_iter()
             .enumerate()
             .map(|(i, v)| TabRow {
-                label: tab_view_label(&v, i),
+                label: tab_view_label(&v, i, home.as_deref()),
                 // The label only stands in for the path when it came *from* the
                 // path; a name or an agent leaves the location still worth
                 // printing.
@@ -750,7 +769,9 @@ impl Tty7App {
                 path: v
                     .cwd
                     .as_deref()
-                    .map(|p| crate::ui::home::display_path(std::path::Path::new(p)))
+                    .map(|p| {
+                        crate::ui::home::display_path(std::path::Path::new(p), home.as_deref())
+                    })
                     .unwrap_or_default(),
                 agent: v.agent,
                 status: v.status,
@@ -2471,7 +2492,11 @@ impl TabRow {
 /// carries a copy of that title (`PaneRecord::osc_title`), which is what makes
 /// the two columns agree; `PaneRecord::title` is the *foreground process name*
 /// ("zsh") and only stands in when there is no title at all.
-fn tab_view_label(view: &crate::ui::machine_mirror::TabView, index: usize) -> String {
+fn tab_view_label(
+    view: &crate::ui::machine_mirror::TabView,
+    index: usize,
+    home: Option<&std::path::Path>,
+) -> String {
     let unnamed = || {
         t_fmt(
             L10nKey::TabUnnamedShell,
@@ -2480,7 +2505,7 @@ fn tab_view_label(view: &crate::ui::machine_mirror::TabView, index: usize) -> St
     };
     // A path can shorten away to nothing (a bare "user@host:"), and the process
     // name is still worth more than a number.
-    let shortened = |raw: &str| match crate::ui::tab_strip::short_title(raw) {
+    let shortened = |raw: &str| match crate::ui::tab_strip::short_title(raw, home) {
         shortened if !shortened.trim().is_empty() => shortened,
         _ => match view.title.trim() {
             "" => unnamed(),
@@ -3011,48 +3036,52 @@ mod tests {
             live: true,
             panes: 1,
         };
-        assert_eq!(tab_view_label(&view, 0), "build", "a given name wins");
+        assert_eq!(tab_view_label(&view, 0, None), "build", "a given name wins");
 
         view.name = None;
         assert_eq!(
-            tab_view_label(&view, 0),
+            tab_view_label(&view, 0, None),
             "✳ 修复 workspace switcher",
             "then the title the local strip would be showing, verbatim"
         );
 
         view.osc_title = Some("user@host:~/repo/025/tty7".to_string());
         assert_eq!(
-            tab_view_label(&view, 0),
-            crate::ui::tab_strip::short_title("user@host:~/repo/025/tty7"),
+            tab_view_label(&view, 0, None),
+            crate::ui::tab_strip::short_title("user@host:~/repo/025/tty7", None),
             "a shell's title goes through the shortener the strip uses"
         );
 
         view.osc_title = Some("user@host:".to_string());
         assert_eq!(
-            tab_view_label(&view, 0),
+            tab_view_label(&view, 0, None),
             "zsh",
             "a title that shortens away to nothing falls through"
         );
 
         view.osc_title = None;
         assert_eq!(
-            tab_view_label(&view, 0),
+            tab_view_label(&view, 0, None),
             "Claude Code",
             "an agent names a tab that has told us nothing else"
         );
 
         view.agent = None;
         assert_eq!(
-            tab_view_label(&view, 0),
-            crate::ui::tab_strip::short_title("/Users/x/repo/tty7"),
+            tab_view_label(&view, 0, None),
+            crate::ui::tab_strip::short_title("/Users/x/repo/tty7", None),
             "otherwise the directory, put through the same shortener as the strip"
         );
 
         view.cwd = None;
-        assert_eq!(tab_view_label(&view, 0), "zsh", "process name is last");
+        assert_eq!(
+            tab_view_label(&view, 0, None),
+            "zsh",
+            "process name is last"
+        );
 
         view.title = String::new();
-        assert!(tab_view_label(&view, 2).contains('3'));
+        assert!(tab_view_label(&view, 2, None).contains('3'));
     }
     fn refusal(peer: u32, ours: u32) -> String {
         format!(

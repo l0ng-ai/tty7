@@ -313,7 +313,9 @@ impl Tab {
             .and_then(|slot| slot.terminal().cloned())
     }
 
-    pub(crate) fn leaf_title(&self, window: Option<&Window>, cx: &App) -> String {
+    /// The leaf a tab names itself after — its title and, with it, the home
+    /// that title's path is measured against.
+    fn title_leaf(&self, window: Option<&Window>, cx: &App) -> Option<Entity<TerminalView>> {
         let leaf = match window {
             Some(window) => self
                 .pane
@@ -322,8 +324,27 @@ impl Tab {
             None => self.focus_target(),
         };
         leaf.and_then(|l| l.terminal().cloned())
+    }
+
+    pub(crate) fn leaf_title(&self, window: Option<&Window>, cx: &App) -> String {
+        self.title_leaf(window, cx)
             .map(|l| l.read(cx).title.clone())
             .unwrap_or_default()
+    }
+
+    /// [`Self::leaf_title`] together with what a `~` in it would mean — one
+    /// leaf lookup, so the title and the home shortening it can never come
+    /// from different panes (#580).
+    pub(crate) fn leaf_title_and_home(
+        &self,
+        window: Option<&Window>,
+        cx: &App,
+    ) -> (String, Option<std::path::PathBuf>) {
+        let Some(leaf) = self.title_leaf(window, cx) else {
+            return (String::new(), None);
+        };
+        let leaf = leaf.read(cx);
+        (leaf.title.clone(), leaf.display_home(cx))
     }
 
     pub(crate) fn git_status(

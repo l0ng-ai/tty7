@@ -150,6 +150,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   83, so it stays a loud error that names both spellings (`send %83 --enter`,
   `send %PANE 83 --enter`) rather than quietly retargeting the keystroke
   (#581).
+- **A `~` in a path now belongs to the machine that path is on.** The Info
+  panel's cwd, the tab strip and sidebar titles, and the switcher's workspace
+  and tab rows all shortened against *this* machine's `$HOME` whoever the path
+  belonged to, so a server sitting in `/home/deploy/app` read as `~/app` on a
+  laptop that happens to log in as `deploy` and stayed spelled out on one that
+  does not — the `~` naming the wrong machine either way. Each of those rows
+  now measures a path against the home its own host reported when the link
+  came up, and a path on a machine nothing here has a link to — or one a pane's
+  shell has `ssh`'d away to — is shown in full rather than against a home that
+  is not its own. (#580)
 
 ## [26.8.3] - 2026-08-12
 
