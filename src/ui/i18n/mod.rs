@@ -1277,6 +1277,17 @@ l10n_keys! {
     SettingsDaemonStaleDescInPlace,
     SettingsPerPaneHistory,
     SettingsPerPaneHistoryDescription,
+    IntegrationNoticeBlocked,
+    IntegrationNoticeNotEngaged,
+    PaneTitleDisconnected,
+    PaneTitleProcessExited,
+    LoopbackForwardFailed,
+    TrayTooltipAgents,
+    TrayAgentSep,
+    CursorShapeBlock,
+    CursorShapeBar,
+    CursorShapeUnderline,
+    PaletteTryDifferentSearch,
 }
 
 /// The source control strings that are translated but not yet displayed.

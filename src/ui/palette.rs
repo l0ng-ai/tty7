@@ -936,6 +936,14 @@ impl ListDelegate for PaletteDelegate {
         _window: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> impl IntoElement {
+        // The SSH hint only makes sense where typing user@host would actually
+        // connect — the root menu. A theme picker with no matches teaching SSH
+        // is a crossed wire (#602).
+        let hint = if self.quick_connect_root {
+            t(crate::ui::i18n::L10nKey::ConnectSshHint)
+        } else {
+            t(crate::ui::i18n::L10nKey::PaletteTryDifferentSearch)
+        };
         v_flex()
             .py_8()
             .gap_1()
@@ -945,11 +953,7 @@ impl ListDelegate for PaletteDelegate {
             .child(crate::ui::i18n::t(
                 crate::ui::i18n::L10nKey::NoMatchingCommands,
             ))
-            .child(
-                div()
-                    .text_xs()
-                    .child(crate::ui::i18n::t(crate::ui::i18n::L10nKey::ConnectSshHint)),
-            )
+            .child(div().text_xs().child(hint))
     }
 
     fn render_item(

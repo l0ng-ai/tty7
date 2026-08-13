@@ -2123,7 +2123,11 @@ impl Tty7App {
         };
         let cursor_style_control = self.segmented(
             "cursor-style",
-            &["Block", "Bar", "Underline"],
+            &[
+                t(L10nKey::CursorShapeBlock),
+                t(L10nKey::CursorShapeBar),
+                t(L10nKey::CursorShapeUnderline),
+            ],
             cursor_idx,
             cx,
             |this, ix, _w, cx| {

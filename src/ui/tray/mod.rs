@@ -98,7 +98,10 @@ impl TraySnapshot {
         if parts.is_empty() {
             "tty7".to_string()
         } else {
-            format!("tty7 — {}", parts.join(", "))
+            crate::ui::i18n::t_fmt(
+                L10nKey::TrayTooltipAgents,
+                &[("parts", &parts.join(t(L10nKey::TrayAgentSep)))],
+            )
         }
     }
 }

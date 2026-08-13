@@ -1582,6 +1582,25 @@ pub fn translate_en(key: L10nKey) -> &'static str {
              adds is written back when it closes, so nothing is lost. Applies to bash and zsh \
              panes that tty7 can set up; a shell started with your own arguments is left alone."
         }
+        L10nKey::IntegrationNoticeBlocked => {
+            "tty7 shell integration is blocked in this pane — \u{201c}{wrapper}\u{201d} is \
+             intercepting shell reports, so inline completion and the Ctrl+R menu are \
+             unavailable. The shell's own history search still works."
+        }
+        L10nKey::IntegrationNoticeNotEngaged => {
+            "tty7 shell integration hasn't engaged in this pane, so inline completion and the \
+             Ctrl+R menu are unavailable. A PTY wrapper (figterm-style) or an unsupported shell \
+             setup can cause this."
+        }
+        L10nKey::PaneTitleDisconnected => "tty7 — disconnected",
+        L10nKey::PaneTitleProcessExited => "tty7 — process exited",
+        L10nKey::LoopbackForwardFailed => "Couldn't forward :{port} — {error}",
+        L10nKey::TrayTooltipAgents => "tty7 — {parts}",
+        L10nKey::TrayAgentSep => ", ",
+        L10nKey::CursorShapeBlock => "Block",
+        L10nKey::CursorShapeBar => "Bar",
+        L10nKey::CursorShapeUnderline => "Underline",
+        L10nKey::PaletteTryDifferentSearch => "Try a different search.",
         L10nKey::PanelMoreChangedFiles => {
             "… and {count} more changed files — run git diff to see them."
         }

@@ -1632,6 +1632,24 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
              新しいペインは空ではなく既存の履歴から始まり、追加された分はペインを閉じるときに書き戻されるので失われません。\
              tty7 が設定できる bash と zsh のペインが対象で、独自の引数で起動したシェルはそのままです"
         }
+        L10nKey::IntegrationNoticeBlocked => {
+            "このペインでは tty7 シェル統合がブロックされています。“{wrapper}”がシェルレポートを\
+             横取りしているため、インライン補完と Ctrl+R メニューは利用できません。\
+             シェル独自の履歴検索は引き続き使えます。"
+        }
+        L10nKey::IntegrationNoticeNotEngaged => {
+            "このペインでは tty7 シェル統合が有効になっていないため、インライン補完と Ctrl+R \
+             メニューは利用できません。PTY ラッパー（figterm 系）や未対応のシェル設定が原因の可能性があります。"
+        }
+        L10nKey::PaneTitleDisconnected => "tty7 — 切断されました",
+        L10nKey::PaneTitleProcessExited => "tty7 — プロセスが終了しました",
+        L10nKey::LoopbackForwardFailed => ":{port} を転送できませんでした — {error}",
+        L10nKey::TrayTooltipAgents => "tty7: {parts}",
+        L10nKey::TrayAgentSep => "、",
+        L10nKey::CursorShapeBlock => "ブロック",
+        L10nKey::CursorShapeBar => "バー",
+        L10nKey::CursorShapeUnderline => "下線",
+        L10nKey::PaletteTryDifferentSearch => "別のキーワードを試してください。",
         L10nKey::PanelMoreChangedFiles => {
             "… さらに変更されたファイル {count} 個 — 表示するには `git diff` を実行してください"
         }

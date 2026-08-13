@@ -1489,6 +1489,23 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
              新面板会从你已有的历史开始，而不是一片空白；面板关闭时，它新增的部分会写回原来的历史文件，不会丢。\
              只对 tty7 能接管的 bash 和 zsh 面板生效；用你自己参数启动的 shell 不受影响。"
         }
+        L10nKey::IntegrationNoticeBlocked => {
+            "此窗格中的 tty7 shell 集成被拦截——“{wrapper}”截获了 shell 上报，\
+             内联补全和 Ctrl+R 菜单不可用。shell 自带的历史搜索仍可使用。"
+        }
+        L10nKey::IntegrationNoticeNotEngaged => {
+            "此窗格中的 tty7 shell 集成尚未生效，内联补全和 Ctrl+R 菜单不可用。\
+             PTY 包装器（figterm 类）或不受支持的 shell 配置可能导致此问题。"
+        }
+        L10nKey::PaneTitleDisconnected => "tty7 — 已断开",
+        L10nKey::PaneTitleProcessExited => "tty7 — 进程已退出",
+        L10nKey::LoopbackForwardFailed => "无法转发 :{port}——{error}",
+        L10nKey::TrayTooltipAgents => "tty7：{parts}",
+        L10nKey::TrayAgentSep => "、",
+        L10nKey::CursorShapeBlock => "块状",
+        L10nKey::CursorShapeBar => "竖线",
+        L10nKey::CursorShapeUnderline => "下划线",
+        L10nKey::PaletteTryDifferentSearch => "换个关键词试试。",
         L10nKey::PanelMoreChangedFiles => "…还有 {count} 个变更文件——运行 git diff 查看。",
         L10nKey::PanelMoreChangedFiles => "…还有 {count} 个变更文件——运行 `git diff` 查看。",
         L10nKey::ScmFilesChanged => "{count} 个文件改动",

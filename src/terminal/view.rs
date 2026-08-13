@@ -394,15 +394,8 @@ fn known_pty_shim(fg: &str) -> Option<&'static str> {
 
 fn integration_notice_message(wrapper: Option<&str>) -> String {
     match wrapper {
-        Some(w) => format!(
-            "tty7 shell integration is blocked in this pane — \u{201c}{w}\u{201d} is intercepting \
-             shell reports, so inline completion and the Ctrl+R menu are unavailable. \
-             The shell's own history search still works."
-        ),
-        None => "tty7 shell integration hasn't engaged in this pane, so inline completion and \
-                 the Ctrl+R menu are unavailable. A PTY wrapper (figterm-style) or an \
-                 unsupported shell setup can cause this."
-            .to_string(),
+        Some(w) => t_fmt(L10nKey::IntegrationNoticeBlocked, &[("wrapper", w)]),
+        None => t(L10nKey::IntegrationNoticeNotEngaged).to_string(),
     }
 }
 
@@ -1565,9 +1558,9 @@ impl TerminalView {
             AlacEvent::ChildExit(_) | AlacEvent::Exit => {
                 self.terminal.exited = true;
                 self.title = if self.workspace().is_some() && !self.terminal.child_exited() {
-                    "tty7 — disconnected".to_string()
+                    t(L10nKey::PaneTitleDisconnected).to_string()
                 } else {
-                    "tty7 — process exited".to_string()
+                    t(L10nKey::PaneTitleProcessExited).to_string()
                 };
                 if self.terminal.child_exited() {
                     cx.emit(ChildExited);
@@ -4844,7 +4837,13 @@ impl TerminalView {
             Ok(forward) => LoopbackOpen::Forwarded(loopback.forwarded_url(forward.local_port)),
             Err(e) => {
                 log::warn!("failed to forward loopback URL {url}: {e}");
-                LoopbackOpen::ForwardFailed(format!("Couldn't forward :{} — {e}", loopback.port))
+                LoopbackOpen::ForwardFailed(t_fmt(
+                    L10nKey::LoopbackForwardFailed,
+                    &[
+                        ("port", &loopback.port.to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ))
             }
         }
     }

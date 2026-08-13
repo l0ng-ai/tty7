@@ -50,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **Seven hard-coded English strings moved into the language tables.** The
+  shell-integration notice, the pane titles a disconnected or exited pane
+  wears, the loopback forward's failure, the tray tooltip that lists running
+  agents, the cursor-shape choices, the command palette's empty-result hint
+  and the updater's install hint all used to render in English whatever the
+  UI language was; they now follow it, and the palette's hint no longer
+  suggests connecting over SSH in menus that have nothing to do with hosts
+  (#602).
 - **A half-typed tab rename survives other tabs closing and the strip
   reordering.** The rename box tracked its tab by index, so any unrelated
   tab event forced it closed to keep the commit from landing on the wrong
