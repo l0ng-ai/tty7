@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A workspace reads its own name from the first frame, and stops changing
+  under you.** Every workspace a window creates is given a generated name —
+  `keen-marten` — and that is the name `tty7 ws ls` prints and `tty7 ws rename
+  keen-marten …` addresses. The window that created it was never told: a client
+  is left out of the deltas its own edits raise, and both create paths threw
+  away the name the machine sent back, so the chip showed the directory its
+  shells happened to start in. The GUI and the CLI gave two different answers to
+  "what is this workspace called", and the real name arrived later — at the
+  first daemon restart, rebuild or relaunch — looking like the workspace had
+  renamed itself. A window now learns the name along with the layout, so the
+  chip agrees with `ws ls` from the start. A workspace with no name, which is
+  what `tty7 new` leaves behind, still reads the directory it is working in, and
+  a name you chose yourself still wins (#604).
 - **File links open in tty7 instead of leaving it.** A ⌘/Ctrl-clicked file path
   now opens in the built-in editor, on the line and column the link named, and
   the Files panel selects it and scrolls it into view; a directory link opens

@@ -6,7 +6,7 @@ use gpui::{App, Global};
 use gpui_component::WindowExt as _;
 use tty7_core::core::machine::{
     AgentFacts, Axis as TreeAxis, LayoutDelta, Machine, PaneNode, PaneRecord, PaneSeed, Side,
-    Tab as TreeTab, TabId,
+    Tab as TreeTab, TabId, Workspace,
 };
 use tty7_core::daemon::control::{ControlClient, ControlRequest, ReplyOk};
 use tty7_core::host::HostId;
@@ -1081,18 +1081,23 @@ pub(crate) fn fresh_workspace_name(cx: &App, host: HostId) -> String {
     tty7_core::core::codename::unique(|name| taken.iter().any(|t| t == name))
 }
 
+/// This workspace's layout, and the name the machine has for it.
+///
+/// The name comes back even from the create this client asked for, and
+/// especially from that one: a client is left out of the deltas its own ops
+/// raise, so the `WorkspaceCreated` delta carrying the name it just proposed
+/// never arrives. Dropping the name here left the mirror holding the workspace
+/// unnamed until something pulled the whole tree again, and the name it had had
+/// all along then landed on screen looking like a rename (#604).
 fn pull_or_create(
     client: &ControlClient,
     machine_ws: WorkspaceId,
     fresh: String,
-) -> io::Result<WsMirror> {
+) -> io::Result<(WsMirror, Option<String>)> {
     match client.call(ControlRequest::WorkspaceTree {
         workspace: machine_ws,
     }) {
-        Ok(ReplyOk::WorkspaceTree(ws)) => Ok(WsMirror {
-            tabs: ws.tabs,
-            active: ws.active_tab,
-        }),
+        Ok(ReplyOk::WorkspaceTree(ws)) => Ok(primed(*ws)),
         Ok(other) => Err(io::Error::other(format!(
             "WorkspaceTree answered {other:?}"
         ))),
@@ -1101,10 +1106,7 @@ fn pull_or_create(
                 name: Some(fresh),
                 workspace: Some(machine_ws),
             })? {
-                ReplyOk::WorkspaceTree(ws) => Ok(WsMirror {
-                    tabs: ws.tabs,
-                    active: ws.active_tab,
-                }),
+                ReplyOk::WorkspaceTree(ws) => Ok(primed(*ws)),
                 other => Err(io::Error::other(format!(
                     "WorkspaceCreate answered {other:?}"
                 ))),
@@ -1114,7 +1116,22 @@ fn pull_or_create(
     }
 }
 
-fn finish_prime(cx: &mut App, client_ws: WorkspaceId, epoch: u64, outcome: io::Result<WsMirror>) {
+fn primed(ws: Workspace) -> (WsMirror, Option<String>) {
+    (
+        WsMirror {
+            tabs: ws.tabs,
+            active: ws.active_tab,
+        },
+        ws.name,
+    )
+}
+
+fn finish_prime(
+    cx: &mut App,
+    client_ws: WorkspaceId,
+    epoch: u64,
+    outcome: io::Result<(WsMirror, Option<String>)>,
+) {
     let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
         return;
     };
@@ -1124,12 +1141,12 @@ fn finish_prime(cx: &mut App, client_ws: WorkspaceId, epoch: u64, outcome: io::R
     }
     let was_dirty = matches!(state.sync, SyncPhase::Unprimed { dirty: true, .. });
     let landed = match outcome {
-        Ok(mirror) => {
+        Ok((mirror, name)) => {
             state.informed |= mirror.tabs.is_empty();
             // The machine answered, which is the only thing the retry was
             // waiting to find out, so the next failure starts its backoff over.
             state.rehydrate_attempts = 0;
-            let landed = (mirror.tabs.clone(), mirror.active);
+            let landed = (mirror.tabs.clone(), mirror.active, name);
             state.sync = SyncPhase::Primed(mirror);
             landed
         }
@@ -1147,6 +1164,9 @@ fn finish_prime(cx: &mut App, client_ws: WorkspaceId, epoch: u64, outcome: io::R
     crate::ui::machine_mirror::MachineMirrors::note_synced_workspace(
         cx, host, machine_ws, landed.0, landed.1,
     );
+    // The pull above is the only place this window will hear the workspace's
+    // name — it is left out of the deltas its own create raises (#604).
+    crate::ui::machine_mirror::MachineMirrors::note_workspace_name(cx, host, machine_ws, landed.2);
     if !was_dirty {
         return;
     }
@@ -1596,7 +1616,7 @@ fn pull_workspace(
     client: &ControlClient,
     machine_ws: WorkspaceId,
 ) -> io::Result<(Machine, WsMirror, Session)> {
-    let machine = match layout_of(machine_get(client)?, machine_ws) {
+    let mut machine = match layout_of(machine_get(client)?, machine_ws) {
         Ok(pulled) => return Ok(pulled),
         Err(machine) => machine,
     };
@@ -1612,6 +1632,16 @@ fn pull_workspace(
         name: Some(name),
         workspace: Some(machine_ws),
     }) {
+        // The tree read a moment ago predates the workspace this call just
+        // made, and no delta will fill it in: a client is left out of the
+        // deltas its own ops raise. Put the created workspace into the tree
+        // about to be installed, or the mirror holds it unnamed and the name
+        // the machine gave it arrives later looking like a rename (#604).
+        Ok(ReplyOk::WorkspaceTree(created)) => {
+            machine.workspaces.retain(|w| w.id != created.id);
+            machine.workspaces.push(*created);
+            Ok((machine, WsMirror::default(), Session::default()))
+        }
         Ok(_) => Ok((machine, WsMirror::default(), Session::default())),
         // Losing this create is not a failed hydration. Opening a remote
         // workspace runs two pulls at once — this one and `start_prime`'s —
@@ -2736,6 +2766,61 @@ mod tests {
         );
     }
 
+    /// #604: the answer to the create this window asked for is the only place
+    /// it will ever hear the workspace's name — a client is left out of the
+    /// deltas its own ops raise — so priming has to hand that name to the
+    /// mirror. Dropping it left the window showing an unnamed workspace, and
+    /// the name it had had all along arrived with the next full pull looking
+    /// like a rename.
+    #[gpui::test]
+    fn priming_teaches_the_mirror_the_name_the_machine_gave_the_workspace(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            tty7_core::core::config::set_config_dir(
+                std::env::temp_dir().join(format!("tty7-prime-name-{}", std::process::id())),
+            );
+            let view = crate::core::session::WindowView::default();
+            let ws = view.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![view.clone()],
+                    active: Some(ws),
+                },
+            );
+            // A machine this client has pulled, from before the workspace it is
+            // about to create existed on it.
+            crate::ui::machine_mirror::MachineMirrors::install(
+                cx,
+                HostId::LOCAL,
+                Machine::default(),
+            );
+            cx.default_global::<TreeSync>()
+                .windows
+                .entry(ws)
+                .or_default()
+                .sync = SyncPhase::Unprimed {
+                dirty: false,
+                priming: true,
+            };
+            let epoch = cx.default_global::<TreeSync>().windows[&ws].epoch;
+
+            finish_prime(
+                cx,
+                ws,
+                epoch,
+                Ok((WsMirror::default(), Some("keen-marten".to_string()))),
+            );
+
+            assert_eq!(
+                crate::ui::machine_mirror::display_name(cx, &view).as_deref(),
+                Some("keen-marten"),
+                "the window knows what its workspace is called as soon as it exists"
+            );
+        });
+    }
+
     /// The count paces the retry, so it has to mean "failures in a row". Left
     /// standing after the run ends, it makes the next *first* failure wait the
     /// cap on an outage that was already over.
@@ -2781,7 +2866,7 @@ mod tests {
 
             // The machine answered. Whatever it was, it is over.
             unprimed(cx);
-            finish_prime(cx, ws, epoch, Ok(WsMirror::default()));
+            finish_prime(cx, ws, epoch, Ok((WsMirror::default(), None)));
             assert_eq!(
                 attempts(cx),
                 0,
@@ -3037,7 +3122,7 @@ mod tests {
                 state.sync = SyncPhase::Primed(advanced.clone());
             }
 
-            finish_prime(cx, ws, stale_epoch, Ok(WsMirror::default()));
+            finish_prime(cx, ws, stale_epoch, Ok((WsMirror::default(), None)));
 
             match &cx.default_global::<TreeSync>().windows[&ws].sync {
                 SyncPhase::Primed(mirror) => assert_eq!(
