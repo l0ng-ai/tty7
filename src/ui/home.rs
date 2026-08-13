@@ -180,13 +180,17 @@ impl Tty7App {
         for line in head {
             logo = logo.child(*line);
         }
-        logo = logo.child(h_flex().child(*last).child(
-            div().text_color(accent).child("▌").with_animation(
-                "home-cursor-blink",
-                Animation::new(Duration::from_millis(1200)).repeat(),
-                |cursor, delta| cursor.opacity(if delta < 0.5 { 1.0 } else { 0.0 }),
+        // `invisible()` rather than a zero opacity or dropping the child: the
+        // block keeps its width either way, so the logo does not step sideways
+        // twice a second.
+        logo = logo.child(
+            h_flex().child(*last).child(
+                div()
+                    .text_color(accent)
+                    .when(!self.home_cursor_on, |cursor| cursor.invisible())
+                    .child("▌"),
             ),
-        ));
+        );
 
         let closed_hint = self.closed.last().and_then(closed_tab_label);
         let nothing_to_reopen = self.closed.is_empty();

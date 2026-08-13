@@ -117,6 +117,10 @@ pub(crate) const RECORD_COMMIT_DELAY_MS: u64 = 650;
 /// to read what it printed.
 pub(crate) const TERMINAL_MIN_W: f32 = 360.;
 
+/// Half the period of the home page's cursor, near enough the terminal's own
+/// 530ms that the two do not read as different clocks.
+pub(crate) const HOME_CURSOR_BLINK_MS: u64 = 600;
+
 /// How wide one side panel may grow, given the floor under the terminal and the
 /// floor under the *other* panel.
 ///
@@ -560,6 +564,14 @@ pub struct Tty7App {
     pub(crate) mod_hint_gen: u64,
     pub(crate) record_gen: u64,
     pub(crate) home_focus: gpui::FocusHandle,
+    /// Whether the home page's cursor block is on this half-second.
+    ///
+    /// A `bool` a timer flips, not a per-frame animation — the same shape the
+    /// terminal's own cursor uses. `with_animation(...).repeat()` asks for a
+    /// frame sixty times a second to change one glyph's opacity twice, and the
+    /// home page is otherwise perfectly still: it cost more than a live
+    /// terminal did, on a window with nothing open in it.
+    pub(crate) home_cursor_on: bool,
     pub(crate) shells: ShellInventory,
     pub(crate) shells_host: HostId,
     pub(crate) loopback_panel: LoopbackForwardPanelState,
@@ -1120,6 +1132,7 @@ impl Tty7App {
             mod_hint_gen: 0,
             record_gen: 0,
             home_focus: cx.focus_handle(),
+            home_cursor_on: true,
             shells: ShellInventory::default(),
             shells_host: HostId::LOCAL,
             loopback_panel: LoopbackForwardPanelState {
@@ -1195,6 +1208,30 @@ impl Tty7App {
 
         cx.observe_window_bounds(window, |this, window, _cx| {
             this.window_bounds = window.window_bounds().get_bounds();
+        })
+        .detach();
+
+        // The home page's cursor, on the terminal's own schedule. It ticks
+        // whether or not the page is up — a timer that wakes twice a second to
+        // compare a `Vec`'s length against zero costs nothing — but only asks
+        // for a frame when the page is the thing on screen.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(HOME_CURSOR_BLINK_MS))
+                    .await;
+                if this
+                    .update(cx, |this, cx| {
+                        if this.tabs.is_empty() {
+                            this.home_cursor_on = !this.home_cursor_on;
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
         })
         .detach();
 
