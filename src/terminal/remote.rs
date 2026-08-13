@@ -24,7 +24,7 @@ use crate::daemon::protocol::{
     LoopbackForward, LoopbackForwardId, LoopbackForwardInfo, LoopbackForwardRequest,
     ManagedForward, NativeSshSpec, PaneProcs, RemoteContext, RestoreFrom, SftpEntry,
     SftpJobProgress, SftpOp, SftpOpResult, SftpTransferSpec, ShellSpec, SshForwardRule, SshPhase,
-    WinSize, WorkspaceOp, WorkspaceRequest,
+    SshTestReport, WinSize, WorkspaceOp, WorkspaceRequest,
 };
 use crate::daemon::transport::{self, Stream};
 use gpui::EntityId;
@@ -1420,6 +1420,23 @@ impl RemoteTerminal {
             }
         }
         query().unwrap_or_default()
+    }
+
+    /// Ask the daemon to dial this spec and say what happened. Blocking, and
+    /// bounded by the spec's own connect timeout on the far side — call it off
+    /// the UI thread.
+    pub fn test_ssh(spec: Box<NativeSshSpec>) -> SshTestReport {
+        fn query(spec: Box<NativeSshSpec>) -> anyhow::Result<SshTestReport> {
+            let mut stream = connect()?;
+            ClientMsg::TestSsh { spec }.encode(&mut stream)?;
+            match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::SshTestResult(report) => Ok(report),
+                other => Err(anyhow::anyhow!("unexpected reply to TestSsh: {other:?}")),
+            }
+        }
+        query(spec).unwrap_or_else(|e| SshTestReport::Failed {
+            reason: e.to_string(),
+        })
     }
 
     pub fn delete_known_host(id: KnownHostId) -> Vec<KnownHostEntry> {

@@ -58,6 +58,7 @@ impl WorkspaceStore {
             }
         };
         view.open = true;
+        view.synced = false;
         view.touch();
         let claimed = view.id;
         store.views.active = Some(claimed);
@@ -101,7 +102,11 @@ impl WorkspaceStore {
         });
     }
 
-    pub fn restore_one(cx: &mut gpui::App) -> Option<WorkspaceId> {
+    /// Restore the one window a launch reopens, detaching every other that
+    /// was open at quit. The count comes back with the id: those workspaces
+    /// are still running, and silence about them is how they get forgotten
+    /// (#597) — the caller is expected to say something.
+    pub fn restore_one(cx: &mut gpui::App) -> Option<(WorkspaceId, usize)> {
         let store = Self::try_store(cx)?;
         let keep = store.views.workspace_to_restore()?;
         let reattaching = store.views.get(keep).is_some_and(|view| !view.open);
@@ -119,7 +124,7 @@ impl WorkspaceStore {
         } else if detached > 0 {
             log::info!("launch: restoring 1 workspace, left {detached} detached");
         }
-        Some(keep)
+        Some((keep, detached))
     }
 
     pub fn close_window(cx: &mut gpui::App, id: WorkspaceId) {
@@ -190,6 +195,9 @@ impl WorkspaceStore {
                 if let (Some(h), Some(via)) = (view.host.as_mut(), host.via.clone()) {
                     h.via = Some(via);
                 }
+                // Claimed is opened: the reference stops being a mirror of
+                // someone else's listing and becomes this client's own.
+                view.synced = false;
                 view.id
             }
             None => {
@@ -201,6 +209,67 @@ impl WorkspaceStore {
         };
         store.views.save();
         id
+    }
+
+    /// Mirrors one machine's own workspace listing into the store at connect
+    /// time, so the switcher still knows that machine's workspaces after a
+    /// restart, link or no link. Listed workspaces the store has never seen
+    /// get a reference marked `synced` (launch restore skips those); ones it
+    /// has get their label refreshed; unopened references whose workspace has
+    /// left the listing — deleted by another client — are dropped.
+    pub fn sync_remote(
+        cx: &mut gpui::App,
+        target: &RemoteTarget,
+        listing: &[(WorkspaceId, String, u64)],
+    ) {
+        let profiles = cx
+            .try_global::<crate::core::config::Config>()
+            .map(|cfg| cfg.ssh_profiles.clone())
+            .unwrap_or_default();
+        let Some(store) = Self::try_store(cx) else {
+            return;
+        };
+        for (ws, name, last_active) in listing {
+            let label = Some(name.trim().to_string()).filter(|n| !n.is_empty());
+            match store.views.views.iter_mut().find(|w| {
+                w.host
+                    .as_ref()
+                    .is_some_and(|h| &h.target == target && h.workspace == *ws)
+            }) {
+                Some(view) => {
+                    if !view.open {
+                        if label.is_some() {
+                            view.label = label;
+                        }
+                        // The machine's clock only drives entries this client
+                        // has never used; a used one keeps meaning "when *I*
+                        // last had it open".
+                        if view.synced {
+                            view.last_active = *last_active;
+                        }
+                    }
+                }
+                None => {
+                    let mut host = RemoteRef::new(target.clone(), *ws);
+                    host.refresh_via(&profiles);
+                    let mut view = WindowView::on_remote(host);
+                    view.open = false;
+                    view.synced = true;
+                    view.label = label;
+                    view.last_active = *last_active;
+                    store.views.views.push(view);
+                }
+            }
+        }
+        let listed: std::collections::HashSet<WorkspaceId> =
+            listing.iter().map(|(ws, ..)| *ws).collect();
+        store.views.views.retain(|w| {
+            let Some(host) = w.host.as_ref() else {
+                return true;
+            };
+            &host.target != target || w.open || listed.contains(&host.workspace)
+        });
+        store.views.save();
     }
 }
 
@@ -252,6 +321,38 @@ mod tests {
         assert!(!crosses_machines(b1, b2));
         assert!(crosses_machines(l, b1));
         assert!(crosses_machines(b1, g));
+    }
+
+    #[gpui::test]
+    fn restore_one_keeps_one_window_and_reports_the_rest(cx: &mut gpui::TestAppContext) {
+        // `restore_one` saves, and a test has no business writing the real views.
+        let _ = tty7_core::core::config::set_config_dir(
+            std::env::temp_dir().join(format!("tty7-session-test-{}", std::process::id())),
+        );
+        cx.update(|cx| {
+            WorkspaceStore::install_for_test(cx, WindowViews::default());
+            let first = WorkspaceStore::claim(cx, None);
+            let _second = WorkspaceStore::claim(cx, None);
+            let third = WorkspaceStore::claim(cx, None);
+
+            let (kept, detached) =
+                WorkspaceStore::restore_one(cx).expect("three open windows restore one");
+            assert_eq!(kept, third, "the most recently active window wins");
+            assert_eq!(
+                detached, 2,
+                "the other two are still running — the launch has to say so (#597)"
+            );
+            let views = WorkspaceStore::all(cx);
+            assert!(!views.get(first).expect("first survives").open);
+            assert!(views.get(third).expect("third survives").open);
+
+            // Restoring again with the other two already detached reports
+            // nothing: the notification is for the launch that did the
+            // detaching, not every launch after it.
+            let (_, detached) =
+                WorkspaceStore::restore_one(cx).expect("the open window restores again");
+            assert_eq!(detached, 0);
+        });
     }
 
     #[gpui::test]
@@ -365,5 +466,76 @@ mod tests {
         assert_ne!(a.host_id(), c.host_id());
         assert_eq!(local.host_id(), HostId::LOCAL);
         assert_ne!(a.host_id(), HostId::LOCAL);
+    }
+
+    #[gpui::test]
+    fn connect_time_sync_mirrors_the_machines_listing(cx: &mut gpui::TestAppContext) {
+        // `sync_remote` saves; a test has no business writing the real views.
+        let _ = tty7_core::core::config::set_config_dir(
+            std::env::temp_dir().join(format!("tty7-session-test-{}", std::process::id())),
+        );
+        cx.update(|cx| {
+            WorkspaceStore::install_for_test(cx, WindowViews::default());
+            let target = RemoteTarget::direct("me", "devbox", 22);
+            let elsewhere = RemoteTarget::direct("me", "gpu-lab", 22);
+            let (a, b, c) = (WorkspaceId::new(), WorkspaceId::new(), WorkspaceId::new());
+
+            // A workspace on another machine must never be touched by this
+            // machine's sync.
+            let kept = WorkspaceStore::claim_remote(cx, RemoteRef::new(elsewhere, c));
+
+            WorkspaceStore::sync_remote(
+                cx,
+                &target,
+                &[(a, "api".into(), 30), (b, "web".into(), 20)],
+            );
+            let synced: Vec<_> = WorkspaceStore::all(cx)
+                .views
+                .iter()
+                .filter(|w| w.synced)
+                .collect();
+            assert_eq!(synced.len(), 2, "both listed workspaces gain a reference");
+            assert!(
+                synced.iter().all(|w| !w.open),
+                "a mirrored reference is not an open window"
+            );
+
+            // The next listing dropped `b` (deleted by another client) and
+            // renamed `a`: the reference set follows the machine.
+            WorkspaceStore::sync_remote(cx, &target, &[(a, "api-v2".into(), 50)]);
+            let store = WorkspaceStore::all(cx);
+            let of_target: Vec<_> = store
+                .views
+                .iter()
+                .filter(|w| w.host.as_ref().is_some_and(|h| h.workspace == a))
+                .collect();
+            assert_eq!(of_target.len(), 1);
+            assert_eq!(of_target[0].label.as_deref(), Some("api-v2"));
+            assert_eq!(of_target[0].last_active, 50, "a synced clock follows");
+            assert!(
+                !store
+                    .views
+                    .iter()
+                    .any(|w| w.host.as_ref().is_some_and(|h| h.workspace == b)),
+                "a workspace the machine no longer lists is dropped"
+            );
+            assert!(
+                store.get(kept).is_some(),
+                "another machine's entries are not this sync's to prune"
+            );
+
+            // Claiming the reference makes it this client's own: the mark
+            // clears, and later syncs stop driving its clock.
+            let local = WorkspaceStore::claim_remote(cx, RemoteRef::new(target.clone(), a));
+            assert!(!WorkspaceStore::all(cx).get(local).expect("claimed").synced);
+            WorkspaceStore::sync_remote(cx, &target, &[(a, "api-v3".into(), 99)]);
+            let view = WorkspaceStore::all(cx).get(local).expect("still there");
+            assert_eq!(
+                view.label.as_deref(),
+                Some("api-v3"),
+                "the name still follows the machine"
+            );
+            assert_eq!(view.last_active, 50, "the clock is now this client's own");
+        });
     }
 }

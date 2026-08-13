@@ -305,6 +305,11 @@ pub fn open_from_cli(cx: &mut App, path: Option<std::path::PathBuf>) {
     });
 }
 
+/// What a launch reopens: the workspace, and how many other open windows the
+/// restore left detached. Their panes are still running — the count exists so
+/// the launch can say so instead of letting them be forgotten (#597).
+pub type RestoreTarget = (WorkspaceId, usize);
+
 /// The workspace a launch reopens, if any.
 ///
 /// A launch that carries a directory restores the last layout exactly like a
@@ -318,7 +323,7 @@ pub fn open_from_cli(cx: &mut App, path: Option<std::path::PathBuf>) {
 /// machine. The requested directory is a path on this computer and a remote
 /// workspace has no business spawning it, so that case starts a fresh local
 /// workspace — which is what every path-carrying launch used to do.
-pub fn restore_target(cx: &mut App, path: Option<&std::path::Path>) -> Option<WorkspaceId> {
+pub fn restore_target(cx: &mut App, path: Option<&std::path::Path>) -> Option<RestoreTarget> {
     if path.is_some() {
         let views = WorkspaceStore::all(cx);
         let candidate = views.workspace_to_restore()?;
@@ -327,6 +332,28 @@ pub fn restore_target(cx: &mut App, path: Option<&std::path::Path>) -> Option<Wo
         }
     }
     WorkspaceStore::restore_one(cx)
+}
+
+/// Tell the user about the workspaces a launch restored away. A desktop toast
+/// would work, but the window is right there — and the notification names the
+/// place the workspaces can be got back from.
+pub fn announce_detached_at_launch(cx: &mut App, restored: Option<RestoreTarget>) {
+    let Some((workspace, detached)) = restored else {
+        return;
+    };
+    if detached == 0 {
+        return;
+    }
+    let Some(handle) = WindowRegistry::window_for(cx, workspace) else {
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        gpui_component::WindowExt::push_notification(
+            window,
+            t_plural(L10nKey::LaunchWorkspacesLeftRunning, detached, &[]),
+            cx,
+        );
+    });
 }
 
 /// Opens a window after CLI routing reaches a GUI process with no live windows.
@@ -339,7 +366,8 @@ fn open_missing_cli_window_with(
     open: impl FnOnce(&mut App, Option<WorkspaceId>, Option<std::path::PathBuf>),
 ) {
     let restore = restore_target(cx, path.as_deref());
-    open(cx, restore, path);
+    open(cx, restore.map(|(id, _)| id), path);
+    announce_detached_at_launch(cx, restore);
 }
 
 pub fn refresh_menu(cx: &mut App) {

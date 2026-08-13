@@ -20,7 +20,7 @@ use crate::core::actions::{
 use crate::core::config::RightPanelTab;
 use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
-use crate::ui::app::{TILE_GLYPH, TILE_GLYPH_LINE, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
+use crate::ui::app::{TILE_GLYPH, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
@@ -52,26 +52,21 @@ fn shell_spec(shell: &DetectedShell) -> ShellSpec {
 /// same titles.
 pub(crate) use tty7_core::core::tab_view::strip_host_prefix;
 
-pub(crate) fn abbreviate_home(path: &str) -> std::borrow::Cow<'_, str> {
+/// `home` is the home directory of the machine `path` is on, from
+/// [`Tab::leaf_title_and_home`](crate::ui::app::Tab::leaf_title_and_home) or
+/// the workspace's host; `None` leaves the path spelled out (#580).
+pub(crate) fn abbreviate_home<'a>(
+    path: &'a str,
+    home: Option<&std::path::Path>,
+) -> std::borrow::Cow<'a, str> {
     use std::borrow::Cow;
     if path.starts_with('~') {
         return Cow::Borrowed(path);
     }
-    let Some(home) = std::env::var_os("HOME") else {
-        return Cow::Borrowed(path);
-    };
-    let home = home.to_string_lossy();
-    let home = home.trim_end_matches('/');
-    if home.is_empty() {
-        return Cow::Borrowed(path);
-    }
-    if path == home {
-        return Cow::Owned("~".to_string());
-    }
-    match path.strip_prefix(home) {
-        Some(rest) if rest.starts_with('/') => Cow::Owned(format!("~{rest}")),
-        _ => Cow::Borrowed(path),
-    }
+    // The shared comparison: separators normalized, case folded — a Windows
+    // pane whose cwd spells itself `C:/Users/…` shortens under a
+    // `C:\Users\…` home too (#544).
+    crate::ui::path_display::abbreviate_home(path, home)
 }
 
 /// The separator a path spells itself with. A path carrying a single `\` is
@@ -86,7 +81,7 @@ fn join_segments(segments: &[&str], sep: char) -> String {
     segments.join(sep.encode_utf8(&mut [0u8; 4]) as &str)
 }
 
-pub(crate) fn short_title(raw: &str) -> String {
+pub(crate) fn short_title(raw: &str, home: Option<&std::path::Path>) -> String {
     let raw = raw.trim();
     if raw.is_empty() {
         return String::new();
@@ -96,7 +91,7 @@ pub(crate) fn short_title(raw: &str) -> String {
     if after_host.is_empty() {
         return String::new();
     }
-    let abbreviated = abbreviate_home(after_host);
+    let abbreviated = abbreviate_home(after_host, home);
     let path: &str = abbreviated.as_ref();
 
     enum Kind {
@@ -842,7 +837,15 @@ impl Tty7App {
         hollow: bool,
     ) -> gpui::AnyElement {
         let d = (size * 0.42).max(7.);
-        let bg = ring;
+        // The halo was the surface itself, which is only a ring while the
+        // surface is light — on a dark theme it went near-black and read as a
+        // notch bitten out of the avatar rather than a badge sitting on it.
+        // Light themes already ring the dot in white; give the dark ones the
+        // same white edge, and the hollow Waiting dot the same white hole.
+        let bg = match crate::ui::presets::surface_is_dark(ring) {
+            true => gpui::white(),
+            false => ring,
+        };
         if unread > 0 {
             let nd = (size * 0.72).max(13.0);
             let label = unread.min(9).to_string();
@@ -968,12 +971,14 @@ impl Tty7App {
         if tab.name.as_ref().is_some_and(|n| !n.trim().is_empty()) {
             return None;
         }
-        let raw = tab.leaf_title(window, cx);
+        let (raw, home) = tab.leaf_title_and_home(window, cx);
         let raw = raw.trim();
         if raw.is_empty() || raw == self.tab_label(tab, index, window, cx) {
             return None;
         }
-        Some(SharedString::from(abbreviate_home(raw).into_owned()))
+        Some(SharedString::from(
+            abbreviate_home(raw, home.as_deref()).into_owned(),
+        ))
     }
 
     pub(crate) fn tab_label(
@@ -989,8 +994,8 @@ impl Tty7App {
                 return trimmed.to_string();
             }
         }
-        let raw = tab.leaf_title(window, cx);
-        let label = short_title(&raw);
+        let (raw, home) = tab.leaf_title_and_home(window, cx);
+        let label = short_title(&raw, home.as_deref());
         if label.trim().is_empty() {
             t_fmt(
                 L10nKey::TabUnnamedShell,
@@ -1334,7 +1339,7 @@ impl Tty7App {
             let rename_input = self
                 .renaming
                 .as_ref()
-                .filter(|r| r.index == i)
+                .filter(|r| r.tab == tab.tree_id.get())
                 .map(|r| r.input.clone());
             let label_region = match rename_input {
                 Some(input) => div()
@@ -1530,10 +1535,8 @@ impl Tty7App {
 
         let add_button = div().occlude().flex_shrink_0().child(
             self.attach_new_tab_menu(
-                chrome_tile_sized(
+                chrome_tile(
                     Button::new("tab-add").icon(Icon::new(IconName::Plus)),
-                    TILE_SIZE,
-                    TILE_GLYPH_LINE,
                     false,
                     cx,
                 )
@@ -1562,11 +1565,9 @@ impl Tty7App {
                 .child(
                     div().occlude().flex_shrink_0().child(
                         self.attach_new_tab_menu(
-                            chrome_tile_sized(
+                            chrome_tile(
                                 Button::new("titlebar-add-collapsed")
                                     .icon(Icon::new(IconName::Plus)),
-                                TILE_SIZE,
-                                TILE_GLYPH_LINE,
                                 false,
                                 cx,
                             )
@@ -1628,7 +1629,17 @@ impl Tty7App {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+    use std::path::Path;
     use unicode_segmentation::UnicodeSegmentation;
+
+    /// Most of these tests are about where a title is *cut*, not about what
+    /// `~` means: the paths they pass either already start with `~` or are
+    /// nowhere near anybody's home. Naming no home keeps the assertions off
+    /// the process environment — and is what a title of unknown provenance
+    /// gets in the app too (#580).
+    fn short_title(raw: &str) -> String {
+        super::short_title(raw, None)
+    }
 
     #[test]
     fn every_visible_agent_state_has_words_for_it() {
@@ -1676,8 +1687,45 @@ mod tests {
     #[test]
     fn short_title_strips_user_host_and_shows_shallow_path_in_full() {
         assert_eq!(short_title("user@host:~/projects/app"), "~/projects/app");
+        // Debian's stock bash title, which spaces the path off the colon.
+        assert_eq!(short_title("user@host: ~/projects/app"), "~/projects/app");
         assert_eq!(short_title("/usr/local/bin"), "/usr/local/bin");
         assert_eq!(short_title("plain"), "plain");
+    }
+
+    /// A title shortens under the home of the machine it came from, and
+    /// under no other (#580).
+    #[test]
+    fn short_title_shortens_under_the_home_it_was_given() {
+        let server = Path::new("/home/deploy");
+        assert_eq!(
+            super::short_title("/home/deploy/app", Some(server)),
+            "~/app"
+        );
+        // This machine's home is not a stand-in for the server's: the same
+        // path stays whole when the home naming it is somewhere else.
+        assert_eq!(
+            super::short_title("/home/deploy/app", Some(Path::new("/Users/thomas"))),
+            "/home/deploy/app"
+        );
+        // And a pane nothing here can place — no link to its host, or a
+        // shell that has ssh'd on — shortens against nothing.
+        assert_eq!(
+            super::short_title("/home/deploy/app", None),
+            "/home/deploy/app"
+        );
+    }
+
+    /// The name a freshly dialled SSH pane wears until the remote shell says
+    /// otherwise. Cutting at the colon left the tab reading "2222" (#438).
+    #[test]
+    fn short_title_keeps_an_ssh_address_whole() {
+        assert_eq!(short_title("deploy@10.0.0.5:2222"), "deploy@10.0.0.5:2222");
+        assert_eq!(short_title("root@prod"), "root@prod");
+        assert_eq!(short_title("prod-web"), "prod-web");
+        // Only a port stops the cut: a drive letter is still a path, and this
+        // is the title tty7's own pwsh integration writes on Windows.
+        assert_eq!(short_title(r"ann@BOX:C:/Users/app"), r"C:/Users/app");
     }
 
     #[test]

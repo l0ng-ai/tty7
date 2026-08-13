@@ -269,6 +269,24 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSocks5ProxyDesc => "host:port（留空 = 无）。",
         L10nKey::SettingsHttpProxy => "HTTP 代理",
         L10nKey::SettingsHttpProxyDesc => "host:port（留空 = 无）。",
+        L10nKey::SettingsProxyOverridden => "不会生效：优先用{winner}。",
+        L10nKey::SettingsTestConnection => "测试",
+        L10nKey::SettingsTestRunning => "正在测试连接…",
+        L10nKey::SettingsTestReached => "已连接并通过认证，用时 {time}。",
+        L10nKey::SettingsTestNeedsPassword => "已连到服务器 —— 它要求输入密码，点连接后再输入。",
+        L10nKey::SettingsTestNeedsPassphrase => {
+            "已连到服务器 —— 私钥要求输入口令，点连接后再输入。"
+        }
+        L10nKey::SettingsTestNeedsInteractive => {
+            "已连到服务器 —— 它要求交互式验证（如 2FA），点连接后再作答。"
+        }
+        L10nKey::SettingsTestNeedsHostKey => {
+            "已连到服务器 —— 它的主机密钥还没被接受，先连一次确认。"
+        }
+        L10nKey::SettingsTestHostKeyChanged => {
+            "已连到服务器 —— 它的主机密钥和上次不一样了，先连一次核对这次变更。"
+        }
+        L10nKey::SettingsTestFailed => "没连上：{reason}",
         L10nKey::SettingsProxyPortInvalid => "端口必须在 1-65535 之间——只写主机则使用默认端口。",
         L10nKey::SettingsKexAlgorithms => "KEX 算法",
         L10nKey::SettingsKexAlgorithmsDesc => "逗号分隔（留空 = 库默认值）。",
@@ -310,7 +328,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsProgram => "程序",
         L10nKey::SettingsProgramDesc => "PATH 中的可执行文件名或绝对路径，例如 zsh、fish、pwsh。",
         L10nKey::SettingsArguments => "参数",
-        L10nKey::SettingsArgumentsDesc => "以空格分隔的启动参数，例如登录 shell 用 -l。",
+        L10nKey::SettingsArgumentsDesc => {
+            "启动参数，按命令行规则切分——含空格的参数请用引号包住（例如 -l，或 -c \"echo hi\"）。"
+        }
+        L10nKey::SettingsArgumentsInvalid => "引号不配对，该值未保存。",
         L10nKey::SettingsStartIn => "起始目录",
         L10nKey::SettingsStartInDesc => "新 shell 的启动目录：tty7 的启动目录、主目录或固定路径。",
         L10nKey::SettingsCustomPath => "自定义路径",
@@ -318,6 +339,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsWdInherit => "继承",
         L10nKey::SettingsWdHome => "主目录",
         L10nKey::SettingsWdCustom => "自定义",
+        L10nKey::SettingsWdPathInvalid => "这个目录不存在，该值未保存。",
         L10nKey::SettingsShellFooter => {
             "仅适用于没有可继承目录的 shell，例如窗口的第一个标签页。新标签页和分屏仍会继承活动窗格的目录，已经打开的 shell 会继续运行。"
         }
@@ -423,6 +445,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsThemePanelLight => "选择浅色模式的主题。",
         L10nKey::SettingsThemePanelDark => "选择深色模式的主题。",
         L10nKey::SettingsCustom => "自定义",
+        L10nKey::SettingsCustomValue => "自定义 ({value})",
         L10nKey::SettingsBuiltIn => "内置",
         L10nKey::SettingsDark => "深色",
         L10nKey::SettingsLight => "浅色",
@@ -829,6 +852,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpTransferError => "错误",
         L10nKey::SftpTransferListFailed => "无法获取传输状态：{error}",
         L10nKey::SftpImagePasteUploadFailed => "无法将粘贴的图片上传到 {host}：{error}",
+        L10nKey::LinkFileOpenFailed => "无法打开 {path}：{error}",
         L10nKey::ForwardPanelTitle => "端口转发",
         L10nKey::ForwardDisconnected => "已断开",
         L10nKey::ForwardDisconnectedFrom => "与 {host} 的连接已断开",
@@ -970,6 +994,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmUnrepresentablePath => "该路径不是合法的 UTF-8，无法传给 git —— 仅可查看。",
         L10nKey::ScmPublishBranch => "发布分支",
         L10nKey::ScmDetached => "游离头指针",
+        L10nKey::ScmPushDetached => "HEAD 游离——请先切换到一个分支再推送",
+        L10nKey::ScmPushNoCommits => "还没有可推送的提交",
         L10nKey::ScmAmendBadge => "修订",
         L10nKey::ScmSync => "同步更改",
         L10nKey::ScmPush => "推送",
@@ -1003,7 +1029,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmCommitNotFound => "本仓库中没有这个提交。",
         L10nKey::ScmTooManyChanges => "改动过多，仅显示前 {shown} 项（共 {total} 项）。",
         L10nKey::ScmOpenChanges => "查看改动",
-        L10nKey::ScmDiscardAllConfirm => "放弃本仓库的全部改动？此操作无法撤销。",
+        L10nKey::ScmDiscardAllConfirm => {
+            "放弃所有未暂存的改动和未跟踪的文件？已暂存的改动会保留。此操作无法撤销。"
+        }
         L10nKey::ScmAmendConfirm => {
             "修补上一次提交？它会被一个新提交取代，已经拿到旧提交的人需要自行处理。"
         }
@@ -1183,6 +1211,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherThisWindow => "当前窗口",
         L10nKey::SwitcherOpen => "已打开",
         L10nKey::SwitcherDisconnect => "断开连接",
+        L10nKey::SwitcherEditHost => "编辑主机…",
+        L10nKey::SwitcherSaveAsHost => "保存为 SSH 主机…",
+        L10nKey::SshSaveDroppedJumpHost => {
+            "跳板机没有带过来 —— 主机配置的跳板必须是另一个已保存的主机。"
+        }
         L10nKey::SwitcherOpenInNewWindow => "在新窗口中打开",
         L10nKey::SwitcherRename => "重命名…",
         L10nKey::SwitcherPickAWorkspace => "选一个工作区查看它的标签页。",
@@ -1191,11 +1224,20 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherTabsAfterOpening => "打开这个工作区后才能看到它的标签页。",
         L10nKey::SwitcherOpenToManage => "打开这个工作区后才能重命名或停止它。",
         L10nKey::SwitcherConnectToUse => "连接这台机器后才能在上面新建工作区。",
+        L10nKey::SwitcherOrphanPanes => "后台窗格——仍在运行、但不属于任何窗口的 shell：",
         L10nKey::SwitcherTabCount => "{n} 个标签页",
         L10nKey::SwitcherTabCountOne => "1 个标签页",
         L10nKey::SwitcherActiveTab => "当前",
         L10nKey::SwitcherHoldToSwitch => "按 Tab 移动 · 松开切换",
         L10nKey::SwitcherTabToCrossColumns => "按 Tab 换到另一列",
+        L10nKey::SwitcherLocalHost => "本机",
+        L10nKey::SwitcherConnectingTo => "正在连接 {machine}…",
+        L10nKey::SwitcherFormName => "名字",
+        L10nKey::SwitcherFormHost => "主机",
+        L10nKey::SwitcherFormNamePlaceholder => "可选",
+        L10nKey::SwitcherFormBack => "返回",
+        L10nKey::SwitcherFormCreateHint => "Enter 创建 · Esc 返回",
+        L10nKey::SwitcherFormPickHint => "↑↓ 选择 · Enter 确定 · Esc 收起",
         L10nKey::SshPromptPasswordFor => "{user}@{host} 的密码",
         L10nKey::SshPromptPassphraseFor => "{key_path} 的密码短语",
         L10nKey::SshPromptTwoFactor => "双因素认证",
@@ -1302,6 +1344,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdSshReconnect => "SSH：重新连接",
         L10nKey::CmdSshRemoteFiles => "SSH：远程文件",
         L10nKey::CmdSshPortForwarding => "SSH：端口转发",
+        L10nKey::CmdSshSaveConnection => "SSH：将当前连接保存为主机…",
+        L10nKey::CmdSshSaveConnectionSubtitle => "把这条连接存成一个主机配置。",
         L10nKey::CmdSshConnectWithInput => "SSH：连接 {input}",
         L10nKey::CmdAgentSendSelection => "Agent：发送选区",
         L10nKey::CmdAgentSendSelectionSubtitle => "选区 → 运行中的编码 agent",
@@ -1365,6 +1409,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppReopenTabFailed => "无法重新打开标签页：没有启动终端",
         L10nKey::AppOpenTerminalFailed => "无法打开终端：{error}",
         L10nKey::AppTabsNotRestored => "上次的 {count} 个标签页没能重新打开",
+        L10nKey::LaunchWorkspacesLeftRunning => {
+            "只恢复了这个窗口——还有 {count} 个工作区在后台运行，可从侧边栏重新打开。"
+        }
         L10nKey::AppSshConnectionFailed => "SSH 连接失败：{error}",
         L10nKey::AppSshReconnectFailed => "SSH 重新连接失败：{error}",
         L10nKey::AppSplitPaneFailed => "无法拆分窗格：{error}",
@@ -1485,6 +1532,25 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
              新面板会从你已有的历史开始，而不是一片空白；面板关闭时，它新增的部分会写回原来的历史文件，不会丢。\
              只对 tty7 能接管的 bash 和 zsh 面板生效；用你自己参数启动的 shell 不受影响。"
         }
+        L10nKey::IntegrationNoticeBlocked => {
+            "此窗格中的 tty7 shell 集成被拦截——“{wrapper}”截获了 shell 上报，\
+             内联补全和 Ctrl+R 菜单不可用。shell 自带的历史搜索仍可使用。"
+        }
+        L10nKey::IntegrationNoticeNotEngaged => {
+            "此窗格中的 tty7 shell 集成尚未生效，内联补全和 Ctrl+R 菜单不可用。\
+             PTY 包装器（figterm 类）或不受支持的 shell 配置可能导致此问题。"
+        }
+        L10nKey::PaneTitleDisconnected => "{title} — 已断开",
+        L10nKey::PaneTitleProcessExited => "{title} — 进程已退出",
+        L10nKey::LoopbackForwardFailed => "无法转发 :{port}——{error}",
+        L10nKey::TrayTooltipAgents => "tty7：{parts}",
+        L10nKey::TrayAgentSep => "、",
+        L10nKey::CursorShapeBlock => "块状",
+        L10nKey::CursorShapeBar => "竖线",
+        L10nKey::CursorShapeUnderline => "下划线",
+        L10nKey::PaletteTryDifferentSearch => "换个关键词试试。",
+        L10nKey::CompletionListingRemote => "正在列出远程目录…",
+        L10nKey::CompletionRemoteListingFailed => "远程目录列表失败——{error}",
         L10nKey::PanelMoreChangedFiles => "…还有 {count} 个变更文件——运行 git diff 查看。",
         L10nKey::PanelMoreChangedFiles => "…还有 {count} 个变更文件——运行 `git diff` 查看。",
         L10nKey::ScmFilesChanged => "{count} 个文件改动",
@@ -1630,6 +1696,12 @@ pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SftpReplaceBody, "other") => "{names} 在这个文件夹里已经存在，上传会覆盖它们。",
         (L10nKey::AppTabsNotRestored, "one") => "上次的 1 个标签页没能重新打开",
         (L10nKey::AppTabsNotRestored, "other") => "上次的 {count} 个标签页没能重新打开",
+        (L10nKey::LaunchWorkspacesLeftRunning, "one") => {
+            "只恢复了这个窗口——还有 1 个工作区在后台运行，可从侧边栏重新打开。"
+        }
+        (L10nKey::LaunchWorkspacesLeftRunning, "other") => {
+            "只恢复了这个窗口——还有 {count} 个工作区在后台运行，可从侧边栏重新打开。"
+        }
         (L10nKey::PanelMoreChangedFiles, "zero") => "…还有 0 个变更文件——运行 git diff 查看。",
         (L10nKey::PanelMoreChangedFiles, "one") => "…还有 1 个变更文件——运行 git diff 查看。",
         (L10nKey::ScmFilesChanged, "zero") => "没有文件改动",

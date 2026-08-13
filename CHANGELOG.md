@@ -7,17 +7,200 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A host can be proved without spending a tab on it.** **Test** in the SSH
+  host form dials the host exactly as Connect would — proxy, jump host, host
+  key and authentication, all on the daemon — and reports back in place:
+  `Connected and authenticated in 640 ms`, or what the handshake stopped to
+  ask for (a password, a key passphrase, a keyboard-interactive answer, a host
+  key nobody has accepted yet, or one that is not the key the server gave
+  before), or the failure verbatim. A test never rides an existing connection
+  — one would answer for the credentials *that* connection was made with, so a
+  password typed wrong would come back green — and it never enters the
+  connection cache, so it leaves nothing open and holds nothing up. An edit to
+  the form drops the answer, which was about the host as it was typed a moment
+  ago (#438).
+- **The host form is reachable from wherever the machine is on screen.**
+  Right-clicking a machine in the workspace switcher offers **Edit Host…** for
+  a saved host, or **Save as SSH Host…** for one reached by address or by a
+  `~/.ssh/config` alias; the switcher's **Add SSH Host…** now opens the form
+  instead of the settings list you then had to find `+` on. A connection
+  dialled by hand and worth keeping becomes a saved host from the palette —
+  **SSH: Save Connection as Host…**, prefilled from the live session. The one
+  thing that cannot come along is an ad-hoc `-J` hop, and that is said out
+  loud rather than saved broken (#438).
+
 ### Changed
 
+- **An SSH pane is named after its host.** A fresh SSH tab reads the host's
+  name, or its address when the host has none — every host imported from
+  `~/.ssh/config` arrives nameless, and a window full of them all read `tty7`
+  until the far shell happened to title itself. The name survives a title
+  reset and a dropped link (`prod-web — disconnected`), and a tab titled
+  `deploy@10.0.0.5:2222` is shown whole rather than cut down to `2222`: the
+  `user@host:` head is only a head when a path follows it (#438).
+- **The host form's authentication row is a dropdown**, not a six-way
+  segmented control — it was the row that stacked first on a narrow page. And
+  the three proxy fields no longer read as independent: only the first one
+  filled is used, so the losing fields now say `Not used: Proxy command comes
+  first.` instead of leaving it to be discovered by connecting (#438).
+
+- **A workspace reads its own name from the first frame, and stops changing
+  under you.** Every workspace a window creates is given a generated name —
+  `keen-marten` — and that is the name `tty7 ws ls` prints and `tty7 ws rename
+  keen-marten …` addresses. The window that created it was never told: a client
+  is left out of the deltas its own edits raise, and both create paths threw
+  away the name the machine sent back, so the chip showed the directory its
+  shells happened to start in. The GUI and the CLI gave two different answers to
+  "what is this workspace called", and the real name arrived later — at the
+  first daemon restart, rebuild or relaunch — looking like the workspace had
+  renamed itself. A window now learns the name along with the layout, so the
+  chip agrees with `ws ls` from the start. A workspace with no name, which is
+  what `tty7 new` leaves behind, still reads the directory it is working in, and
+  a name you chose yourself still wins (#604).
 - **File links open in tty7 instead of leaving it.** A ⌘/Ctrl-clicked file path
   now opens in the built-in editor, on the line and column the link named, and
   the Files panel selects it and scrolls it into view; a directory link opens
   the panel on that directory. **Settings → Terminal → Links → Open files with**
   picks between the built-in editor, the OS file association and a command of
   your own — anyone who had already set `link_file_command` keeps it.
+- **A pane address may now be written without its `%`** — `tty7 pane ls
+  --json` prints bare ids, so `83` addresses the same pane as `%83`
+  everywhere an address is taken. One behaviour goes with it: a lone `tty7
+  send 83` used to type "83" into the caller's own pane and now reports that
+  it has nothing to send, the same as a lone `send %83` always did. It fails
+  loudly and never presses anything anywhere; to type a number as text, name
+  the pane too (`tty7 send %5 83 --enter`) (#538).
 
 ### Fixed
 
+- **A tree pull that has to be retried no longer ends with the window deleting
+  the tabs it was pulling.** A window told to rebuild itself from the machine —
+  a daemon back as a new process, a restart handoff that was refused, a remote
+  server restarted — abandoned that job the moment it had any tabs at all, and
+  in every one of those cases it does: the stale ones on screen are the whole
+  reason it was asked. So the rebuild silently did nothing, and worse, the
+  window went on claiming to speak for the workspace it had never read. Opening
+  one tab over it then diffed into "close every tab" and deleted those panes'
+  records while their shells were still running, with nothing left that could
+  reach them. The retry is now dropped only for a tab the user really did make
+  while the pull was out, and a window waiting on a rebuild adds to its machine
+  without pruning it until the pull lands (#579).
+- **Installing an update on Windows shows a progress window.** The installer
+  ran `/VERYSILENT`, so from the app quitting to the new build coming up —
+  tens of seconds, longer under an antivirus scan — the screen held nothing
+  at all, and "clicked update, the app vanished" read as a crash. The
+  installer now runs `/SILENT`: still unattended, but Inno's own progress
+  window stays on screen for the gap (#600).
+- **Orphan panes are visible in the GUI, and closable from it.** A shell
+  left running after its workspace went away — what an interrupted `tty7
+  run` leaves behind — showed up nowhere in the GUI; only the CLI's `tty7
+  pane ls --all` could see it, and only `pane close --orphans` could stop
+  it. The workspace switcher's local machine group now lists those
+  background panes with their owner and working directory, each with a
+  Close button (#596).
+- **A launch that restores one of several windows says what it left behind.**
+  Quitting with several windows open and starting again restored only the
+  most recent one; the rest were marked detached — panes alive, nothing on
+  screen, the only trace a log line. The restored window now shows a
+  notification naming how many workspaces are still running in the
+  background and where to reopen them (#597).
+- **`tty7 pane close %99` fails when no pane 99 exists.** The orphan path
+  hangs the pane up directly, and that kill is fire-and-forget — the daemon
+  never says whether it knew the pane — so a typo'd id printed
+  `{"closed":[99]}` and exited 0, telling a reaper script the leak it was
+  chasing was gone. Close now checks the id against the running-pane
+  registry first and reports the miss under `failed` with exit 1 (#588).
+- **cd Here and Insert Path quote for the shell the pane runs.** Both used
+  to wrap a path with spaces in POSIX single quotes whatever the pane's
+  shell was, and cmd.exe — where a single quote is an ordinary character —
+  then split the path at its first space. The quote style now follows the
+  pane's shell: double quotes for cmd.exe, single quotes for PowerShell and
+  every POSIX shell (#593).
+- **Remote path completion says what it's doing.** Tab-completing a path
+  on a remote workspace used to show nothing for the whole network
+  round-trip — a slow link read as a broken Tab key — and a listing that
+  failed ended in exactly the silence an empty directory ends in. A pill
+  over the pane's corner now says the listing is running, and a failed
+  listing reports its error there instead of vanishing (#585).
+- **Seven hard-coded English strings moved into the language tables.** The
+  shell-integration notice, the pane titles a disconnected or exited pane
+  wears, the loopback forward's failure, the tray tooltip that lists running
+  agents, the cursor-shape choices, the command palette's empty-result hint
+  and the updater's install hint all used to render in English whatever the
+  UI language was; they now follow it, and the palette's hint no longer
+  suggests connecting over SSH in menus that have nothing to do with hosts
+  (#602).
+- **A half-typed tab rename survives other tabs closing and the strip
+  reordering.** The rename box tracked its tab by index, so any unrelated
+  tab event forced it closed to keep the commit from landing on the wrong
+  tab — and even then, a reorder mid-rename left a window where the name
+  went to the tab that had taken the index over. The box now tracks its tab
+  by tree id: only closing the renaming tab itself ends the rename, and the
+  commit lands on the tab the box was opened on wherever it has moved
+  (#598).
+- **A zoomed pane stays zoomed when you leave its tab and come back.** Zoom
+  was a window-level value that activating any tab cleared, so looking at
+  another tab and returning restored the split layout — while a zoom is a
+  tab's temporary view state, like its focused pane. It now rides with the
+  tab; the clears that genuinely reshape the layout (drag, split, close)
+  still stand, and a zoom whose pane exited while the tab was away does not
+  come back (#599).
+- **Opening and closing the search bar no longer erases the grid
+  selection.** The selection that seeds the query is the thing being
+  searched for, yet opening the bar ran the same unconditional clear as
+  *changing* the query, and closing cleared it again — select text, press
+  Ctrl+F then Esc, and the selection was gone. The seeded selection is now
+  kept through the open, and closing keeps whatever selection the grid
+  holds; only an actual query change retires it, the discipline the output
+  rescan path already stated (#584).
+- **Search highlights follow the text when the pane is resized.** A match
+  point is an absolute (line, column) against the width it was scanned at,
+  so narrowing a pane reflowed the text out from under every highlight until
+  new output happened to trigger a rescan — and a quiet local pane has none
+  coming. A column change now rescans immediately, with the output path's
+  discipline (the selection and scroll position are left alone); a
+  rows-only change reflows nothing and stays cheap (#586).
+- **A mistyped "Start in" path is refused at save instead of silently
+  rerouting every new pane.** The custom path used to be stored unchecked,
+  and the daemon's picker then skipped it — not a directory — and started
+  each new shell in its own fallback directory, so "new shells don't start
+  in my project" read as a tty7 bug rather than a typo. Settings now marks a
+  non-existent directory in red and does not save it, and a hand-edited
+  `config.json` holding one gets a `log::warn!` naming the path at the
+  moment the fallback engages (#601).
+- **`tty7 doctor` exits 1 when the server is unreachable.** Doctor is the
+  verb people run when something is not working, so an unreachable server is
+  *the* finding — not a row to exit 0 over while `tty7 doctor || alert`
+  never fires. The full table and JSON still go out, and stderr carries the
+  headline under `-q` (#592).
+- **The `owner` field of `pane ls --all` is documented the same way in both
+  references** — the bundled skill reference still claimed the CLI stamps a
+  literal `"tty7-cli"` owner, the behaviour that was removed because an owner
+  names the workspace allowed to attach. Both now describe the workspace id,
+  or its absence while a pane is unfiled (#591).
+- **A failed `tty7 wait` now says so on stderr even under `-q`.** Timeout and
+  "pane exited first" are structured exits, so they bypassed the anyhow path
+  that prints under quiet mode and left the exit code as the only evidence —
+  against the documented "errors still go to stderr". Both now print a
+  one-line headline to stderr, the discipline `pane close` already set (#590).
+- **A timed-out `tty7 wait` now answers in the same JSON shape as a finished
+  one** — `matched`, `stale` and the agent session fields, plus
+  `"timed_out": true` — instead of a bare object missing the fields a
+  consumer's error branch was written against. The schema, including
+  `timed_out`, is now documented (#589).
+- **Cancelling the amend confirmation no longer switches amend off.** The
+  toggle was cleared when Commit was pressed — before the "rewrite the last
+  commit?" prompt — so answering Cancel returned to a panel whose amend mode
+  had silently been dropped, and the next Commit created the brand-new commit
+  the user had just declined to risk. The toggle now switches off only when
+  the commit actually runs (#595).
+- **The SCM panel's "discard all" confirmation no longer overstates what it
+  does.** The prompt asked to "discard every change in this repository" while
+  the operation has always left staged changes alone — it sweeps only unstaged
+  edits and untracked files. The prompt now says exactly that, in all three
+  languages (#594).
 - **A local daemon that dies and comes back no longer leaves a window of dead
   panes looking live** — from the client's side a killed daemon is
   indistinguishable from one whose shells all exited at once, so the window
@@ -57,6 +240,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reload path say what happened and where the copy is. A file that simply
   cannot be *read* logs a warning now too — it used to fall to defaults with
   no trace at all. (#537)
+- **A mistyped `tty7 send` address no longer types itself into your own
+  pane** — `tty7 send %3x --key C-c` used to degrade the unparseable `%3x`
+  into text aimed at the pane the caller was sitting in, then deliver the
+  Ctrl-C there too, interrupting whatever was in front of them. A `%`
+  followed by a digit that still fails to parse is now the address error it
+  looks like, while text that merely starts with `%` — vim's `%s/foo/bar/`,
+  `%!sort` — keeps typing as given, as does anything unmarked that is not a
+  plain number (#538).
+- **The `ws rm` docs now say the panes are hung up, not orphaned** — the CLI
+  reference claimed removing a workspace leaves its panes running as orphans
+  to be found with `pane ls --all`, when the code has hung them up since the
+  command exists; only a *failed* hang-up (which `ws rm` reports by pane id)
+  leaves orphans behind. The site reference, the bundled skill reference, and
+  `ws rm --help` all read the same way now (#539).
+- **The Info panel's agent row reads one pane, not a splice of two** — the
+  name came from `tab.agent` (whichever leaf has an agent) while the status
+  came from `tab.agent_status` (the most urgent across the whole tab), so a
+  split tab running two agents could show one pane's name beside the other
+  pane's state. The row now takes both from the detail pane when it has an
+  agent, and otherwise from the tab's most urgent agent pane — so the row
+  still holds while focus sits on a plain shell, and its two halves always
+  describe the same pane (#543).
+- **Windows paths in the Info panel shorten to their leaf again** — the cwd
+  row split on `/` only, so a backslash-spelled path (any agent-reported cwd,
+  a cmd pane, the shell-integration-off case) elided its *tail* and hid the
+  directory's own name. The split now takes the last of either separator,
+  and the `~` shortening — shared by the Info panel, the tab strip, and the
+  home picker — reads `USERPROFILE` as well as `HOME` and compares with
+  separators normalized and case folded, so a `C:/Users/…` pane shortens
+  under a `C:\Users\…` home (#544).
+- **A hand-edited keybinding takes effect without a restart.** The config
+  watcher reloaded everything except the keymap, so a `keybindings` edit
+  showed up in the settings list off the live global while the key itself
+  stayed dead until the app restarted. The watcher now rebuilds the keymap
+  when the binding config actually changed — `(keybindings,
+  keybinding_preset, prefix)` — so the app's own `save()`, which a sidebar
+  drag or a palette open triggers, does not churn it. The rebuild also
+  replaces the map instead of appending to it, so rebinding no longer leaves
+  a retired copy of the whole table behind for every keystroke to walk. A
+  config.json that does not parse keeps the keys it was already dispatching,
+  since the reload that fails never reaches the rebuild (#548).
+- **The font-size and line-height steppers no longer push a hand-set value
+  the wrong way** — the settings steppers and the `Ctrl+=`/`Ctrl+-` keys
+  clamped to a narrower range (font 6–48, line height 1.0–2.0) than the
+  config file allows (4–256, 0.5–4.0), so `font_size: 50` shrank to 48 on
+  "+" and wrote that back, permanently changing a value it only meant to
+  nudge. The steppers and `sanitize` now share one range, defined next to the
+  validation. The scrollback and notify-threshold preset rows got the matching
+  fix: a value between two buckets no longer lights up the nearest one
+  (`scrollback_limit: 5000` highlighted "10,000", and clicking that cell
+  silently overwrote it) — it shows a "Custom (5,000)" cell that names the
+  real value and is not a button (#550).
+- **A refused in-place daemon restart no longer strands every pane it
+  promised to keep** — Restart Server clears the window before attempting the
+  handoff, and when the handoff failed the window simply stayed empty with an
+  error on the home page. The daemon was still running and serving those
+  panes, but every restore path is driven by the machine tree, and the next
+  sync of the emptied window diffed into "close every tab" against it —
+  deleting the pane records under shells that were still alive, or the whole
+  workspace at once if the user just closed the window, right after the
+  dialog had promised nothing would be interrupted. A failed restart now
+  drops the dead link and pulls the layout back from the tree, reattaching
+  the living panes; where the failure really did take the daemon away, the
+  missed pull leaves a rehydration debt instead, which is what stops the
+  empty window from being pushed up as the layout. (#554)
+- **Settings' Shell Arguments field now splits like a command line, and quotes
+  on the way back.** The field split on raw whitespace, so `-c "echo hi"`
+  reached the new shell as four argv fragments with the quote characters still
+  attached, and the damage was invisible until the pane misbehaved. The round
+  trip was lossy in the other direction too: a perfectly legal
+  `"args": ["-c", "echo hi"]` in `config.json` refilled the field as
+  `-c echo hi` and re-committed as three argv the moment it lost focus, without
+  the user typing a thing. Quoted text is now one argument, the refill quotes
+  the arguments that need it, and a value whose quotes do not close is refused
+  with an explanation under the input rather than saved as fragments. A path
+  spelled with backslashes still means itself. (#551)
+- **`tty7 send --enter` now presses Enter when there is nothing to type** —
+  `--enter` is shorthand for `--key enter`, but it was never counted as a key,
+  so `tty7 send %42 --enter` answered "needs TEXT … or a --key to press"
+  instead of running what pane 42 already had typed. It counts now, with an
+  address or without one (`tty7 send --enter` presses Enter in your own pane).
+  An *unmarked* id is deliberately left out: `tty7 send 83 --enter` reads as
+  much like typing "83" where you are sitting as like pressing Enter in pane
+  83, so it stays a loud error that names both spellings (`send %83 --enter`,
+  `send %PANE 83 --enter`) rather than quietly retargeting the keystroke
+  (#581).
+- **A `~` in a path now belongs to the machine that path is on.** The Info
+  panel's cwd, the tab strip and sidebar titles, and the switcher's workspace
+  and tab rows all shortened against *this* machine's `$HOME` whoever the path
+  belonged to, so a server sitting in `/home/deploy/app` read as `~/app` on a
+  laptop that happens to log in as `deploy` and stayed spelled out on one that
+  does not — the `~` naming the wrong machine either way. Each of those rows
+  now measures a path against the home its own host reported when the link
+  came up, and a path on a machine nothing here has a link to — or one a pane's
+  shell has `ssh`'d away to — is shown in full rather than against a home that
+  is not its own. (#580)
+- **Push at a detached HEAD no longer fails silently** — the sync tile claimed
+  "Publish Branch" (the one thing a detached HEAD cannot do) and swallowed the
+  click, and the key binding, palette and "Commit and Push" follow-up died in
+  the same guard just as quietly. The tile and the branch menu's Push item now
+  disable themselves with a tooltip that says why, every other path gets a
+  toast naming the reason, and an unborn branch — no commits to send yet —
+  gets its own answer instead of sharing the detached one's silence. (#545)
+- **A refused commit says why, not always "Nothing to commit"** — committing
+  from the palette or the key binding with staged work but a blank message was
+  answered with "Nothing to commit", which sends the user staging files they
+  already staged; the toast now carries the plan's actual reason ("Write a
+  commit message first"), the same words the panel's own button shows on its
+  tooltip. (#546)
+- **Terminal pop-up menus no longer leak clicks into the grid behind them** —
+  the completion menu and the reverse-search menu (both the floating panel and
+  the input-bar row) inserted no hitbox of their own, so a press on one fell
+  straight through to the terminal: it cleared whatever was selected and
+  dragged out a new selection, merely moving over a row underlined the text
+  beneath it, and a Ctrl+click opened the link the menu was covering. All
+  three occlude now, so a press on a menu stops at the menu. (#541)
+- **A file link that fails to open says so** — clicking a file path whose
+  opener is missing, or whose `link_file_command` template expands to nothing,
+  used to fail into a logfile line and nothing else; the click now raises the
+  same kind of toast a failed image upload does, naming the path and the
+  error. (#542)
 
 ## [26.8.3] - 2026-08-12
 

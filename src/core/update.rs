@@ -147,10 +147,9 @@ pub enum UpdateInstallHint {
 }
 
 impl UpdateInstallHint {
-    /// The reason in plain English, for an `anyhow` chain that ends up in a log
-    /// or an error string. Anything a user reads goes through
-    /// `localized_update_install_hint` instead.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    /// The reason in plain English, pinned by tests. Anything a user reads
+    /// goes through `localized_update_install_hint` instead (#602).
+    #[cfg_attr(not(test), allow(dead_code))]
     fn english(&self) -> String {
         match self {
             #[cfg(target_os = "macos")]
@@ -2321,7 +2320,12 @@ fn prepare_windows_update(
     let needs_elevation = match updatability {
         WindowsUpdatability::Updatable => false,
         WindowsUpdatability::NeedsElevation => true,
-        WindowsUpdatability::Unsupported(hint) => anyhow::bail!("{}", hint.english()),
+        // This error surfaces in Settings as the update failure — the moment
+        // the user most needs to understand it — so it is the localized hint,
+        // not the English one meant for logs (#602).
+        WindowsUpdatability::Unsupported(hint) => {
+            anyhow::bail!("{}", localized_update_install_hint(&hint))
+        }
     };
     let install_dir = layout.directory().to_path_buf();
     let bundled = bundled_updater().context("tty7-updater.exe is not bundled with this app")?;

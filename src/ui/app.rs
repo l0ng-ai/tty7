@@ -92,14 +92,18 @@ fn hsla_to_u32(color: gpui::Hsla) -> u32 {
     (to(rgba.r) << 16) | (to(rgba.g) << 8) | to(rgba.b)
 }
 
-const FONT_SIZE_MIN: f32 = 6.0;
-const FONT_SIZE_MAX: f32 = 48.0;
+// The steppers clamp to the same range `sanitize` allows, defined in
+// tty7-core next to the validation: a local, narrower pair used to push a
+// config-legal value the wrong way — `font_size: 50` shrank to 48 on "+",
+// and the result was written back to the file (#550).
+pub(crate) use crate::core::config::{
+    FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN,
+};
+
 pub(crate) const FONT_SIZE_STEP: f32 = 1.0;
 
 pub(crate) const UI_FONT_SIZE_STEP: f32 = 1.0;
 
-const LINE_HEIGHT_MIN: f32 = 1.0;
-const LINE_HEIGHT_MAX: f32 = 2.0;
 pub(crate) const LINE_HEIGHT_STEP: f32 = 0.05;
 
 const MAX_CLOSED_TABS: usize = 20;
@@ -128,6 +132,29 @@ pub(crate) const TILE_GLYPH_SM: f32 = TILE_GLYPH;
 pub(crate) const TILE_SIZE_XS: f32 = 18.;
 pub(crate) const TILE_GLYPH_XS: f32 = 11.;
 
+/// The compensation a glyph gets when its art does not fill the box the rest
+/// of the set fills.
+///
+/// Every icon tty7 draws itself sits on the same optical bound — 3.4..20.6 of
+/// a 24 viewBox, 19.3 units of ink once the round caps are counted. Stock
+/// lucide `close` is a bare 6..18 cross, 14 units, so at [`TILE_GLYPH`] it
+/// carries a quarter less ink than the tiles beside it and reads as the one
+/// disabled control in the row. 16 buys that back.
+///
+/// Reach for this only for art we do not own. `plus` used to be here for the
+/// same reason and is not any more: it is ours, so it was redrawn onto the
+/// bound instead of being scaled up at the call site — the fix that also
+/// reaches the 24px tiles, which have no `_LINE` step to grow into.
+///
+/// Note what scaling a glyph up quietly buys along with the extent: 16/13 more
+/// stroke. `plus` had been leaning on that, so moving it to [`TILE_GLYPH`]
+/// thinned it by a fifth even though it got *longer*, and it had to take that
+/// weight back in its own `stroke-width` — a cross is two hairlines with no
+/// fill to hide behind, so it is the one glyph in the set drawn off the
+/// family's weight, by exactly the 16/13 it lost and no more. `ui::assets`'
+/// test carries that arithmetic. Anything else that leaves here owes the same
+/// accounting, in both directions: an asset redrawn for the tiles that scaled
+/// it up is still drawn beside the ones that never did.
 pub(crate) const TILE_GLYPH_LINE: f32 = 16.;
 
 pub(crate) const TILE_PAD: f32 = (TILE_SIZE - TILE_GLYPH) / 2.;
@@ -243,6 +270,11 @@ pub struct Tab {
     pub pane: Pane,
     pub name: Option<String>,
     last_focused: Option<gpui::EntityId>,
+    /// The pane zoomed in this tab, stashed here by `activate` while another
+    /// tab is on screen — zoom is a tab's view state, not the window's, so
+    /// looking at another tab and coming back must not lose it (#599). `None`
+    /// while the tab is active: then the zoom lives in `Tty7App::maximized`.
+    pub(crate) zoomed: Option<Entity<TerminalView>>,
     pub(crate) diff_overlay: Option<crate::ui::diff_overlay::DiffOverlayState>,
     pub(crate) code: Option<Box<crate::ui::code_editor::TabCode>>,
     pub(crate) sidebar_group: std::cell::RefCell<Option<std::path::PathBuf>>,
@@ -266,6 +298,7 @@ impl Tab {
             pane,
             name: None,
             last_focused: None,
+            zoomed: None,
             diff_overlay: None,
             code: None,
             overlay_top: OverlayTop::default(),
@@ -280,6 +313,7 @@ impl Tab {
             pane,
             name: tree.name.clone(),
             last_focused: None,
+            zoomed: None,
             diff_overlay: None,
             code: None,
             overlay_top: OverlayTop::default(),
@@ -309,7 +343,9 @@ impl Tab {
             .and_then(|slot| slot.terminal().cloned())
     }
 
-    pub(crate) fn leaf_title(&self, window: Option<&Window>, cx: &App) -> String {
+    /// The leaf a tab names itself after — its title and, with it, the home
+    /// that title's path is measured against.
+    fn title_leaf(&self, window: Option<&Window>, cx: &App) -> Option<Entity<TerminalView>> {
         let leaf = match window {
             Some(window) => self
                 .pane
@@ -318,8 +354,27 @@ impl Tab {
             None => self.focus_target(),
         };
         leaf.and_then(|l| l.terminal().cloned())
+    }
+
+    pub(crate) fn leaf_title(&self, window: Option<&Window>, cx: &App) -> String {
+        self.title_leaf(window, cx)
             .map(|l| l.read(cx).title.clone())
             .unwrap_or_default()
+    }
+
+    /// [`Self::leaf_title`] together with what a `~` in it would mean — one
+    /// leaf lookup, so the title and the home shortening it can never come
+    /// from different panes (#580).
+    pub(crate) fn leaf_title_and_home(
+        &self,
+        window: Option<&Window>,
+        cx: &App,
+    ) -> (String, Option<std::path::PathBuf>) {
+        let Some(leaf) = self.title_leaf(window, cx) else {
+            return (String::new(), None);
+        };
+        let leaf = leaf.read(cx);
+        (leaf.title.clone(), leaf.display_home(cx))
     }
 
     pub(crate) fn git_status(
@@ -341,7 +396,20 @@ impl Tab {
             .find_map(|l| l.read(cx).agent())
     }
 
-    pub(crate) fn agent_status(&self, cx: &App) -> Option<crate::core::cli_agent::AgentStatus> {
+    /// The tab's most urgent agent leaf, named and reported by that one leaf.
+    ///
+    /// `agent` and `agent_status` answer independently — the *first* leaf
+    /// carrying an agent, and the highest urgency found *anywhere* in the tab
+    /// — so reading them as a pair can put one pane's name beside another
+    /// pane's state, a row no leaf ever had. Anywhere both halves are shown
+    /// at once reads them from here instead (#543).
+    pub(crate) fn agent_row(
+        &self,
+        cx: &App,
+    ) -> Option<(
+        crate::core::cli_agent::CLIAgent,
+        crate::core::cli_agent::AgentStatus,
+    )> {
         use crate::core::cli_agent::AgentStatus;
         let urgency = |s: AgentStatus| match s {
             AgentStatus::Waiting => 3,
@@ -352,14 +420,23 @@ impl Tab {
         self.pane
             .terminals()
             .into_iter()
-            .filter(|l| l.read(cx).agent().is_some())
-            .map(|l| {
-                l.read(cx)
+            .filter_map(|l| {
+                let view = l.read(cx);
+                let agent = view.agent()?;
+                // A pane whose agent is running but has never reported a
+                // session reads as idle, the same reading the badge has always
+                // given it.
+                let status = view
                     .agent_session()
                     .map(|s| s.status)
-                    .unwrap_or(AgentStatus::Idle)
+                    .unwrap_or(AgentStatus::Idle);
+                Some((agent, status))
             })
-            .max_by_key(|s| urgency(*s))
+            .max_by_key(|(_, status)| urgency(*status))
+    }
+
+    pub(crate) fn agent_status(&self, cx: &App) -> Option<crate::core::cli_agent::AgentStatus> {
+        self.agent_row(cx).map(|(_, status)| status)
     }
 
     pub(crate) fn agent_unread_count(&self, cx: &App) -> usize {
@@ -380,7 +457,11 @@ impl Tab {
 }
 
 pub(crate) struct Renaming {
-    pub(crate) index: usize,
+    /// The tab being renamed, by tree id rather than index: an index drifts
+    /// the moment any other tab closes or the strip reorders, which used to
+    /// force every unrelated tab event to throw the half-typed name away —
+    /// and left a window where the commit landed on the wrong tab (#598).
+    pub(crate) tab: tty7_core::core::machine::TabId,
     pub(crate) input: Entity<InputState>,
     _subs: Vec<Subscription>,
 }
@@ -510,6 +591,9 @@ pub struct Tty7App {
     /// Parked switcher groups (#485) whose notice the user dismissed by key —
     /// the entries stay, only the "will not reconnect" block is hidden.
     pub(crate) parked_dismissed: std::collections::HashSet<String>,
+    /// A create asked of a machine that was not connected yet; the connect
+    /// finishing is what completes it (see `Tty7App::finish_connect`).
+    pub(crate) pending_create: Option<crate::ui::switcher::PendingCreate>,
     /// Why the window opened with no terminal in it. Shown on the home screen,
     /// which is otherwise indistinguishable from having closed everything.
     pub(crate) startup_error: Option<gpui::SharedString>,
@@ -1052,6 +1136,7 @@ impl Tty7App {
             host_snapshots: std::collections::HashMap::new(),
             remote_host_errors: std::collections::HashMap::new(),
             parked_dismissed: std::collections::HashSet::new(),
+            pending_create: None,
             startup_error,
         };
         if !cfg!(test) && crate::ui::windows::WindowRegistry::count(cx) == 0 {
@@ -1299,6 +1384,7 @@ impl Tty7App {
                 pane,
                 name: st.name,
                 last_focused: None,
+                zoomed: None,
                 diff_overlay: None,
                 code: None,
                 overlay_top: OverlayTop::default(),
@@ -1528,14 +1614,34 @@ impl Tty7App {
                         crate::ui::tree_sync::resync_after_local_daemon_change(cx);
                     }
                     Err(e) => {
-                        // The user asked for this and lands on an empty home
-                        // page; without a reason there it looks like the
-                        // restart worked and took everything with it.
-                        log::error!("restart background service failed, staying on home page: {e}");
-                        this.startup_error = Some(gpui::SharedString::from(t_fmt(
+                        // A refused handoff leaves the daemon exactly as it was,
+                        // still serving the panes this window just dropped. Leaving
+                        // it at the error here strands them: every restore path is
+                        // tree-driven, and the next sync of this emptied window
+                        // would diff into "close every tab" against the mirror —
+                        // deleting the pane records under the still-running shells,
+                        // or the whole workspace if the user simply closes the
+                        // window first (#554). Pull the layout back instead; where
+                        // the failure really did take the daemon away (an exec that
+                        // never re-listened), the pull misses and the rehydration
+                        // debt keeps the empty window from being pushed up.
+                        //
+                        // The invalidating helper, not the one the reconnect uses:
+                        // nothing here handshaked a link. Half of `hand_off`'s
+                        // failures happen *after* the exec — a daemon that never
+                        // started listening again is gone, and the client we still
+                        // hold points at its socket, which `is_connected` keeps
+                        // calling good until its reader sees the EOF.
+                        log::error!(
+                            "restart background service failed, resyncing from the tree: {e}"
+                        );
+                        let text = t_fmt(
                             L10nKey::AppRestartServerFailed,
                             &[("error", &e.to_string())],
-                        )));
+                        );
+                        this.startup_error = Some(gpui::SharedString::from(text.clone()));
+                        window.push_notification(text, cx);
+                        crate::ui::tree_sync::resync_after_local_daemon_change(cx);
                     }
                 }
                 this.focus_active(window, cx);
@@ -3302,8 +3408,23 @@ impl Tty7App {
     pub(crate) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() && index != self.active {
             self.remember_active_pane(window, cx);
-            self.maximized = None;
+            // Zoom rides with its tab (#599): stash the outgoing tab's zoom
+            // and bring the incoming tab's back. The clears elsewhere (drag,
+            // split, close) still stand — those genuinely reshape what was
+            // zoomed; merely looking at another tab does not.
+            if let Some(outgoing) = self.tabs.get_mut(self.active) {
+                outgoing.zoomed = self.maximized.take();
+            }
             self.active = index;
+            self.maximized = self.tabs[index].zoomed.take().filter(|leaf| {
+                // The zoomed pane may have exited while its tab was away —
+                // a stale entity must not come back as the zoom.
+                self.tabs[index]
+                    .pane
+                    .leaves()
+                    .iter()
+                    .any(|l| l.entity_id() == leaf.entity_id())
+            });
             self.maybe_refresh_diff_overlay(cx);
             self.sidebar_scroll.scroll_to_item(index);
             if self.code_panel_visible() {
@@ -3360,7 +3481,6 @@ impl Tty7App {
             return;
         }
         self.maximized = None;
-        self.renaming = None;
         let worktree_cwd = self.tab_host_cwd(index, window, cx);
         let snapshot = tab_to_session(&self.tabs[index], cx);
         self.closed.push(snapshot);
@@ -3371,6 +3491,15 @@ impl Tty7App {
             kill_pane_off_thread(leaf.read(cx).pane_route(), leaf.read(cx).pane_id, cx);
         }
         self.tabs.remove(index);
+        // Only losing the renaming tab itself ends the rename — closing an
+        // unrelated tab must not throw the half-typed name away (#598).
+        if self
+            .renaming
+            .as_ref()
+            .is_some_and(|r| !self.tabs.iter().any(|t| t.tree_id.get() == r.tab))
+        {
+            self.renaming = None;
+        }
         if self.tabs.is_empty() {
             self.active = 0;
         } else if self.active >= self.tabs.len() {
@@ -3824,7 +3953,8 @@ impl Tty7App {
         if order.len() != self.tabs.len() || order.iter().enumerate().all(|(i, &o)| i == o) {
             return;
         }
-        self.renaming = None;
+        // The rename box rides out a reorder: it tracks its tab by tree id,
+        // so the drift that once forced it closed here is gone (#598).
         let was_active = self.active;
         let mut slots: Vec<Option<Tab>> = std::mem::take(&mut self.tabs)
             .into_iter()
@@ -3868,7 +3998,7 @@ impl Tty7App {
             },
         )];
         self.renaming = Some(Renaming {
-            index,
+            tab: self.tabs[index].tree_id.get(),
             input,
             _subs: subs,
         });
@@ -3911,7 +4041,11 @@ impl Tty7App {
             return;
         };
         let value = renaming.input.read(cx).value().trim().to_string();
-        if let Some(tab) = self.tabs.get_mut(renaming.index) {
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.tree_id.get() == renaming.tab)
+        {
             tab.name = if value.is_empty() { None } else { Some(value) };
         }
         self.save_session(cx);
@@ -3920,7 +4054,7 @@ impl Tty7App {
         cx.notify();
     }
 
-    fn palette_commands(&self, cx: &App) -> Vec<Command> {
+    fn palette_commands(&self, window: &Window, cx: &App) -> Vec<Command> {
         let mut commands = Command::base_commands(
             cx,
             ChromeState {
@@ -3929,24 +4063,23 @@ impl Tty7App {
             },
         );
 
-        let cfg = cx.global::<Config>();
-        let now = crate::core::config::unix_now();
-        let mut profiles: Vec<&crate::core::ssh_profile::SshProfile> =
-            cfg.ssh_profiles.iter().collect();
-        profiles.sort_by(|a, b| {
-            let score = |p: &crate::core::ssh_profile::SshProfile| {
-                cfg.ssh_profile_frecency
-                    .get(&p.id)
-                    .map(|u| u.score(now))
-                    .unwrap_or(0.0)
-            };
-            score(b)
-                .partial_cmp(&score(a))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        });
-        for p in profiles {
-            let subtitle = crate::core::ssh_profile::to_connect_string(p);
+        // Offered only where it would do something. A connection opened from a
+        // saved host has nothing to save, and a pane that is not an SSH one has
+        // no connection at all — either would be a row that quietly did nothing
+        // (#549).
+        if self.unsaved_ssh_session(window, cx).is_some() {
+            commands.push(
+                Command::localized(
+                    L10nKey::CmdSshSaveConnection,
+                    CommandKind::SaveSshSessionAsHost,
+                )
+                .with_subtitle(t(L10nKey::CmdSshSaveConnectionSubtitle))
+                .in_group(CommandGroup::Ssh),
+            );
+        }
+
+        for p in crate::ui::ssh_connect::ssh_profiles_by_frecency(cx) {
+            let subtitle = crate::core::ssh_profile::to_connect_string(&p);
             let title = if p.name.is_empty() {
                 subtitle.clone()
             } else {
@@ -3983,7 +4116,7 @@ impl Tty7App {
             self.close_palette(window, cx);
             return;
         }
-        let commands = self.palette_commands(cx);
+        let commands = self.palette_commands(window, cx);
         let view = cx.new(|cx| PaletteView::new(commands, window, cx));
         self.palette_sub = Some(cx.subscribe_in(&view, window, Self::on_palette_event));
         self.palette = Some(view);
@@ -4048,7 +4181,7 @@ impl Tty7App {
         self.bump_command_frecency(&kind, cx);
         match kind {
             NewTab => self.new_tab(window, cx),
-            NewWorkspace => self.switch_workspace(None, window, cx),
+            NewWorkspace => self.open_workspace_form(window, cx),
             OpenWorkspacePicker => self.open_switcher(window, cx),
             StopWorkspace => self.stop_workspace(self.workspace, window, cx),
             DeleteWorkspace => self.delete_workspace(self.workspace, window, cx),
@@ -4159,6 +4292,7 @@ impl Tty7App {
                 }
             }
             SaveQuickConnect(target) => self.open_ssh_profile_new_from_target(target, window, cx),
+            SaveSshSessionAsHost => self.save_ssh_session_as_host(window, cx),
             OpenSshProfiles => self.open_settings_section(SettingsSection::Ssh, window, cx),
             SendSelectionToAgent => self.send_selection_to_agent(window, cx),
             SendGitDiffToAgent => self.send_git_diff_to_agent(window, cx),
@@ -4663,7 +4797,14 @@ impl Tty7App {
     ) -> (Entity<InputState>, Entity<InputState>, Entity<InputState>) {
         let cfg = cx.global::<Config>();
         let (shell_program, shell_args) = match &cfg.shell {
-            Some(s) => (s.program.clone(), s.args.join(" ")),
+            // Quote each argument back into field text rather than joining on
+            // spaces: `join(" ")` cannot spell an argument that contains one,
+            // so a perfectly legal `"args": ["-c", "echo hi"]` in config.json
+            // refilled as three words and re-committed as three argv the moment
+            // the field lost focus — the user never typed a thing (#551).
+            // `join_shell_args` quotes only what needs it, and `commit_shell`'s
+            // matching `split_shell_args` parses it back losslessly.
+            Some(s) => (s.program.clone(), join_shell_args(&s.args)),
             None => (String::new(), String::new()),
         };
         let wd_path = cfg.working_directory.path.clone();
@@ -5090,13 +5231,28 @@ impl Tty7App {
             .value()
             .trim()
             .to_string();
-        let args: Vec<String> = settings
-            .shell_args_input
-            .read(cx)
-            .value()
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
+        // Split the way a command line splits, not on raw whitespace: the text
+        // goes on to become argv verbatim, and `split_whitespace` kept the
+        // quote characters while tearing the quoted string apart — `-c "echo
+        // hi"` reached the shell as `["-c", "\"echo", "hi\""]` (#551).
+        let raw_args = settings.shell_args_input.read(cx).value();
+        let args: Vec<String> = match split_shell_args(&raw_args) {
+            Ok(args) => args,
+            // A quote that never closes names no argv at all, so this text
+            // cannot go into `config.json` — the proxy row's pattern: leave the
+            // stored arguments alone and let the row explain why under the
+            // input after this notify. The rest of the row still commits: the
+            // Program the user just typed, or picked from the menu, is not
+            // theirs to lose over the field below it.
+            Err(_) => {
+                cx.notify();
+                let cfg = cx.global::<Config>();
+                cfg.shell
+                    .as_ref()
+                    .map(|s| s.args.clone())
+                    .unwrap_or_default()
+            }
+        };
         let shell = if program.is_empty() {
             None
         } else {
@@ -5136,6 +5292,16 @@ impl Tty7App {
         else {
             return;
         };
+        // A typo here is not a directory, and the daemon then silently falls
+        // back to its own cwd for every new pane — "new shells don't start in
+        // my project" reads as a tty7 bug rather than a typo (#601). Refuse
+        // to save, the proxy row's pattern (#551): the field keeps the text,
+        // the settings row explains in red, and the last good value stays in
+        // config.json.
+        if !wd_path_saveable(&path) {
+            cx.notify();
+            return;
+        }
         let cfg = cx.global_mut::<Config>();
         if cfg.working_directory.path == path {
             return;
@@ -6325,7 +6491,7 @@ impl Render for Tty7App {
                     this.delete_workspace(id, window, cx);
                 }))
                 .on_action(cx.listener(|this, _: &NewWorkspace, window, cx| {
-                    this.switch_workspace(None, window, cx);
+                    this.open_workspace_form(window, cx);
                 }))
                 .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                     if !this.editor_close_active_if_focused(window, cx) {
@@ -6804,6 +6970,7 @@ fn tabs_from_session(
             pane,
             name: st.name.clone(),
             last_focused: None,
+            zoomed: None,
             diff_overlay: None,
             code: None,
             overlay_top: OverlayTop::default(),
@@ -7099,6 +7266,121 @@ pub(crate) fn new_terminal_native(
     watch_open_file_requests(&view, window, cx);
     watch_pane_focus(&view, window, cx);
     Ok(view)
+}
+
+/// Reads the Settings "Shell Arguments" field as a command line (#551).
+///
+/// The field is one line of text standing in for the `shell.args` array, so
+/// this and [`join_shell_args`] have to be exact inverses of each other — the
+/// field is refilled from the array every time Settings opens, and committed
+/// back on every blur. Quoting rules are the smallest set that can spell any
+/// argv: single quotes take everything literally, double quotes take everything
+/// literally except `\"` and `\\`, and whitespace outside quotes separates
+/// words.
+///
+/// A lone backslash outside quotes is *not* an escape, unlike a POSIX shell:
+/// these arguments are handed to the process as argv without a shell in
+/// between, and `--dir C:\Users\me` has to keep its backslashes on the platform
+/// where that is how a path is spelled. `#` starts no comment here either, for
+/// the same reason: nothing in an argv list is a comment, and swallowing the
+/// rest of the line would be the silent rewrite this whole change exists to
+/// stop.
+///
+/// Returns `Err` when a quote never closes: that text names no argv at all.
+pub(crate) fn split_shell_args(input: &str) -> Result<Vec<String>, ()> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    // A word can be empty and still be a word — `''` is a real argument that
+    // whitespace splitting cannot spell, so emptiness alone cannot end one.
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            // Only inside double quotes, and only for the two characters that
+            // would otherwise be unspellable there.
+            (Some('"'), '\\') => match chars.clone().next() {
+                Some(next @ ('"' | '\\')) => {
+                    chars.next();
+                    current.push(next);
+                }
+                _ => current.push('\\'),
+            },
+            (Some(_), c) => current.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(ch);
+                started = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if started {
+                    words.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            (None, c) => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return Err(());
+    }
+    if started {
+        words.push(current);
+    }
+    Ok(words)
+}
+
+/// Writes an argv array back into the Settings "Shell Arguments" field (#551).
+///
+/// The exact inverse of [`split_shell_args`], and quotes only what it must:
+/// `join(" ")` cannot spell an argument that contains a space, so a legal
+/// `"args": ["-c", "echo hi"]` used to refill as three words and re-commit as
+/// three argv on the next blur. Arguments that need no quoting are written
+/// bare, so the common `--login --color=auto` still reads as the user typed it.
+pub(crate) fn join_shell_args(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| quote_shell_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quote_shell_arg(arg: &str) -> String {
+    if !arg.is_empty()
+        && !arg
+            .chars()
+            .any(|c| c.is_whitespace() || c == '\'' || c == '"')
+    {
+        return arg.to_string();
+    }
+    // Single quotes need no escapes at all, so they are the first choice; an
+    // argument containing one falls back to double quotes, which can escape.
+    if !arg.contains('\'') {
+        return format!("'{arg}'");
+    }
+    let mut quoted = String::with_capacity(arg.len() + 2);
+    quoted.push('"');
+    for c in arg.chars() {
+        if c == '"' || c == '\\' {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// The one rule the "Start in" custom path lives by (#601): empty means unset
+/// and saves; anything else must name a directory that exists, because the
+/// daemon's picker skips a path that is not one and every new pane then
+/// silently starts somewhere else. Settings refuses to save such a value and
+/// marks it red — both decide through this, so the red line and the not-saved
+/// config always agree. Local on purpose: this is the local daemon's config.
+pub(crate) fn wd_path_saveable(path: &str) -> bool {
+    let path = path.trim();
+    path.is_empty() || std::path::Path::new(path).is_dir()
 }
 
 pub(crate) fn parse_ssh_option_words(input: &str) -> Result<Vec<String>, ()> {
@@ -7485,10 +7767,30 @@ mod window_drag_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseReason, TabAgentSession, clear_window_override_values, close_prompt,
+        CloseReason, TabAgentSession, clear_window_override_values, close_prompt, join_shell_args,
         leaf_shares_the_window_daemon, mru_order, pane_free_for, parse_ssh_connect_input,
-        parse_ssh_option_words,
+        parse_ssh_option_words, split_shell_args, wd_path_saveable,
     };
+
+    #[test]
+    fn a_start_in_path_saves_only_when_it_names_a_real_directory() {
+        // Empty is "unset", not a broken path.
+        assert!(wd_path_saveable(""));
+        assert!(wd_path_saveable("   "));
+        let real = std::env::temp_dir();
+        let real = real.to_str().expect("temp dir is utf-8 here");
+        assert!(wd_path_saveable(real), "{real} exists");
+        assert!(
+            wd_path_saveable(&format!("  {real}  ")),
+            "the commit trims, so the check trims too"
+        );
+        assert!(!wd_path_saveable("/definitely/not/a/real/dir"));
+        // A file is not a directory the shell can start in.
+        let file = std::env::temp_dir().join("tty7-wd-saveable-probe");
+        std::fs::write(&file, b"x").expect("write probe file");
+        assert!(!wd_path_saveable(file.to_str().expect("utf-8")));
+        let _ = std::fs::remove_file(&file);
+    }
 
     #[test]
     fn the_close_question_names_what_it_is_about_to_end() {
@@ -7779,6 +8081,92 @@ mod tests {
         assert!(parse_ssh_connect_input("ssh -- dev").is_err());
         assert!(parse_ssh_connect_input("ssh 'host").is_err());
         assert!(parse_ssh_connect_input("ssh host -p 0").is_err());
+    }
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| (*w).to_string()).collect()
+    }
+
+    /// The invariant #551 is fixed with: what `build_shell_inputs` writes into
+    /// the Arguments field must parse back to exactly the argv it came from, so
+    /// that opening Settings and clicking away cannot rewrite `config.json`.
+    #[test]
+    fn shell_arguments_round_trip_between_field_text_and_argv() {
+        for case in [
+            &["-l"][..],
+            &["-c", "echo hi"],
+            // A space-join cannot even spell these three.
+            &[""],
+            &["don't"],
+            &["--say", "it's \"quoted\""],
+            // Backslashes are how a path is spelled on Windows, and the field
+            // has to be able to carry one either bare or inside quotes.
+            &[r"--dir", r"C:\Users\me"],
+            &[r"--dir", r"C:\Program Files\tty7"],
+            &["--tag", "#1"],
+        ] {
+            let argv = argv(case);
+            let field_text = join_shell_args(&argv);
+            assert_eq!(
+                split_shell_args(&field_text).expect("tty7's own refill must parse"),
+                argv,
+                "round trip through {field_text:?}"
+            );
+        }
+        // Nothing that does not need quoting acquires any: the everyday field
+        // still reads exactly like the user typed it.
+        assert_eq!(
+            join_shell_args(&argv(&["-l", "--color=auto", r"C:\Users\me", "#1"])),
+            r"-l --color=auto C:\Users\me #1"
+        );
+        assert_eq!(join_shell_args(&[]), "");
+    }
+
+    /// What the user types has to reach argv meaning what it says: quoted text
+    /// is one argument, and nothing outside quotes is an escape or a comment.
+    #[test]
+    fn shell_arguments_split_the_way_the_field_promises() {
+        assert_eq!(
+            split_shell_args("--login -c \"echo hi\"").expect("balanced quotes parse"),
+            argv(&["--login", "-c", "echo hi"])
+        );
+        assert_eq!(
+            split_shell_args("-c 'echo  hi'").expect("single quotes parse"),
+            argv(&["-c", "echo  hi"])
+        );
+        // A backslash outside quotes is a character, not an escape: there is no
+        // shell between this field and argv, and POSIX rules would quietly turn
+        // a Windows path into `C:Usersme`.
+        assert_eq!(
+            split_shell_args(r"--dir C:\Users\me").expect("a bare path parses"),
+            argv(&["--dir", r"C:\Users\me"])
+        );
+        // `#` starts no comment either — swallowing the rest of the line is the
+        // silent rewrite this change exists to stop.
+        assert_eq!(
+            split_shell_args("--tag #1 --verbose").expect("a hash parses"),
+            argv(&["--tag", "#1", "--verbose"])
+        );
+        // Inside double quotes, and only there, `\"` and `\\` stand for
+        // themselves — that is how `join_shell_args` spells an argument that
+        // carries both kinds of quote.
+        assert_eq!(
+            split_shell_args("\"it's \\\"quoted\\\"\"").expect("escapes parse"),
+            argv(&["it's \"quoted\""])
+        );
+        assert_eq!(
+            split_shell_args("'' -l").expect("an empty argument parses"),
+            argv(&["", "-l"])
+        );
+    }
+
+    /// The other half of the #551 contract: a value that cannot become argv is
+    /// refused, not shredded into fragments that happen to contain quotes.
+    #[test]
+    fn unbalanced_quotes_are_refused_not_shredded() {
+        assert!(split_shell_args("-c \"echo hi").is_err());
+        assert!(split_shell_args("--name 'tty7").is_err());
+        assert!(split_shell_args("\"a\\\"").is_err());
     }
 }
 
@@ -8328,6 +8716,98 @@ mod rename_gpui_tests {
                 state.selected_range(),
                 end..end,
                 "typing has to continue {value:?}, not land in front of it"
+            );
+        });
+    }
+    #[gpui::test]
+    fn a_rename_rides_out_other_tabs_closing_and_the_strip_reordering(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.start_rename(2, window, cx);
+            let target = app.tabs[2].tree_id.get();
+            let input = app.renaming.as_ref().expect("the box is up").input.clone();
+            input.update(cx, |s, cx| s.set_value("mine", window, cx));
+
+            // An unrelated close used to throw the half-typed name away
+            // (#598).
+            app.close_tab_inner(0, true, window, cx);
+            assert!(
+                app.renaming.is_some(),
+                "closing another tab keeps the rename box"
+            );
+
+            // So did a drag-reorder — and the index the commit once landed
+            // on had by then drifted onto a different tab.
+            let order: Vec<usize> = (0..app.tabs.len()).rev().collect();
+            app.apply_tab_order(&order, cx);
+            assert!(app.renaming.is_some(), "a reorder keeps the rename box");
+
+            app.commit_rename(window, cx);
+            let named: Vec<_> = app
+                .tabs
+                .iter()
+                .filter(|t| t.name.as_deref() == Some("mine"))
+                .collect();
+            assert_eq!(named.len(), 1, "the name landed on exactly one tab");
+            assert_eq!(
+                named[0].tree_id.get(),
+                target,
+                "and that tab is the one the box was opened on"
+            );
+        });
+
+        // Closing the renaming tab itself still ends the rename.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.start_rename(0, window, cx);
+            assert!(app.renaming.is_some());
+            app.close_tab_inner(0, true, window, cx);
+            assert!(app.renaming.is_none(), "losing its own tab closes the box");
+        });
+    }
+}
+
+// Zoom is a tab's view state: it rides with the tab across a switch, while a
+// layout change (drag, split, close) still clears it.
+#[cfg(all(test, unix))]
+mod zoom_gpui_tests {
+    use gpui::TestAppContext;
+
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    #[gpui::test]
+    fn a_tabs_zoom_survives_a_round_trip_to_another_tab(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let leaf = app.tabs[0]
+                .pane
+                .first_leaf()
+                .and_then(|slot| slot.terminal().cloned())
+                .expect("tab 0 has a pane");
+            app.maximized = Some(leaf.clone());
+
+            app.activate(1, window, cx);
+            assert!(app.maximized.is_none(), "tab 1 never zoomed anything");
+
+            app.activate(0, window, cx);
+            assert_eq!(
+                app.maximized.as_ref().map(|l| l.entity_id()),
+                Some(leaf.entity_id()),
+                "tab 0's zoom is still where it was left (#599)"
+            );
+
+            // A zoom stashed for a pane that is no longer in the tab does not
+            // come back — it exited (or was closed) while the tab was away.
+            app.maximized = Some(leaf.clone());
+            app.activate(1, window, cx);
+            app.tabs[0].zoomed = Some(leaf);
+            app.tabs[0].pane =
+                crate::ui::pane::Pane::leaf(app.tabs[1].pane.first_leaf().expect("a donor leaf"));
+            app.activate(0, window, cx);
+            assert!(
+                app.maximized.is_none(),
+                "a stashed zoom whose pane is gone stays gone"
             );
         });
     }

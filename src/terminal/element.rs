@@ -1624,8 +1624,15 @@ impl Element for TerminalElement {
             .floor()
             .max(1.0) as usize;
 
-        self.view.update(cx, |view, _cx| {
-            view.set_grid_size(cols, rows, cell_width, line_height, window.scale_factor());
+        self.view.update(cx, |view, cx| {
+            view.set_grid_size(
+                cols,
+                rows,
+                cell_width,
+                line_height,
+                window.scale_factor(),
+                cx,
+            );
         });
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);

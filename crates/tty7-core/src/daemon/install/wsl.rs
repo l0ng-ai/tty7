@@ -1273,23 +1273,23 @@ mod tests {
 
         let source = BundledServerBinary::in_dirs(vec![tmp.join("nope"), tmp.clone()]);
         let err = source
-            .load("26.7.5", super::super::asset::ASSET_X86_64)
+            .load("26.7.5", super::super::asset::ASSET_LINUX_X86_64)
             .expect_err("nothing bundled yet");
         let msg = err.to_string();
         assert!(msg.contains("tty7-server-linux-x86_64-musl"), "{msg}");
         assert!(msg.contains(&tmp.display().to_string()), "{msg}");
         assert!(matches!(err, InstallError::MissingBundled { .. }));
 
-        let path = tmp.join(super::super::asset::ASSET_X86_64);
+        let path = tmp.join(super::super::asset::ASSET_LINUX_X86_64);
         std::fs::write(&path, b"").unwrap();
         let err = source
-            .load("26.7.5", super::super::asset::ASSET_X86_64)
+            .load("26.7.5", super::super::asset::ASSET_LINUX_X86_64)
             .expect_err("empty is not a binary");
         assert!(err.to_string().contains("empty file"), "{err}");
 
         std::fs::write(&path, b"\x7fELF-not-really").unwrap();
         let loaded = source
-            .load("26.7.5", super::super::asset::ASSET_X86_64)
+            .load("26.7.5", super::super::asset::ASSET_LINUX_X86_64)
             .unwrap();
         assert_eq!(loaded.bytes, b"\x7fELF-not-really");
         assert_eq!(loaded.origin, path.display().to_string());
@@ -1451,7 +1451,7 @@ mod tests {
 
     fn bundled(dir: &Path, bytes: &[u8]) -> BundledServerBinary {
         std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(dir.join(super::super::asset::ASSET_X86_64), bytes).unwrap();
+        std::fs::write(dir.join(super::super::asset::ASSET_LINUX_X86_64), bytes).unwrap();
         BundledServerBinary::in_dirs(vec![dir.to_path_buf()])
     }
 
@@ -1504,7 +1504,7 @@ mod tests {
         assert_eq!(asked.len(), 1);
         assert_eq!(
             asked[0].source_url,
-            dir.join(super::super::asset::ASSET_X86_64)
+            dir.join(super::super::asset::ASSET_LINUX_X86_64)
                 .display()
                 .to_string()
         );
@@ -1635,7 +1635,11 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("linux-aarch64-musl"), "{msg}");
 
-        std::fs::write(dir.join(super::super::asset::ASSET_AARCH64), b"\x7fELF arm").unwrap();
+        std::fs::write(
+            dir.join(super::super::asset::ASSET_LINUX_AARCH64),
+            b"\x7fELF arm",
+        )
+        .unwrap();
         let source = BundledServerBinary::in_dirs(vec![dir.clone()]);
         let report = Installer::with_source(&ops, &source, &confirm, host_label("Ubuntu"))
             .with_version("26.7.5")

@@ -42,12 +42,21 @@ pub enum WorkspaceAddress {
 }
 
 pub fn parse_pane(s: &str) -> Result<u64> {
-    let digits = s
-        .strip_prefix('%')
-        .ok_or_else(|| anyhow!("'{s}' is not a pane address — panes look like %42"))?;
-    digits
-        .parse()
-        .map_err(|_| anyhow!("'%{digits}' is not a pane address — panes look like %42"))
+    // The `%` is optional: `tty7 pane ls --json` hands back bare ids, so a
+    // copied `83` must address the same pane as `%83` — refusing it sent
+    // people to workarounds uglier than the typo this guard exists to catch
+    // (#538). `pane_from_env` already read both shapes; this aligns the
+    // explicit slot with it.
+    let digits = s.strip_prefix('%').unwrap_or(s);
+    let not_an_address = || anyhow!("'{s}' is not a pane address — panes look like %42");
+    // Digits and nothing else. `u64::from_str` also accepts a leading `+`, and
+    // now that the `%` is optional that would quietly turn a `send +5` meant as
+    // text into a keystroke aimed at pane 5.
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(not_an_address());
+    }
+    // Still parsed, not just counted: an id past u64 is no pane either.
+    digits.parse().map_err(|_| not_an_address())
 }
 
 pub fn parse_tab(s: &str) -> Result<TabAddress> {
@@ -92,8 +101,10 @@ pub fn pane_or_context(explicit: Option<&str>, ctx: &Context) -> Result<u64> {
 }
 
 fn pane_from_env(v: &str) -> Result<u64> {
-    let digits = v.strip_prefix('%').unwrap_or(v);
-    digits.parse().map_err(|_| {
+    // The same read as parse_pane, delegated rather than repeated so the two
+    // cannot drift; only the error differs, because "pass %pane" cannot fix an
+    // inherited env value.
+    parse_pane(v).map_err(|_| {
         anyhow!("{ENV_PANE}='{v}' is not a pane id; unset it or pass %pane explicitly")
     })
 }
@@ -145,8 +156,30 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_pane_id_addresses_the_same_pane_as_the_marked_one() {
+        // `tty7 pane ls --json` prints bare ids; refusing them here pushed
+        // people into "%${TTY7_PANE#%}" contortions (#538).
+        assert_eq!(parse_pane("42").unwrap(), 42);
+        assert_eq!(parse_pane("%42").unwrap(), 42);
+    }
+
+    #[test]
+    fn an_address_is_digits_and_nothing_else() {
+        // `u64::from_str` takes a leading `+`; an address must not, or a bare
+        // `+5` handed to `send` as text would address pane 5 instead (#538).
+        for not_a_pane in ["+5", "%+5", "-5", " 5", "5 ", "", "%", "5.0"] {
+            assert!(
+                parse_pane(not_a_pane).is_err(),
+                "'{not_a_pane}' must not read as an address"
+            );
+        }
+        // Past u64 is no pane either, however digit-shaped.
+        assert!(parse_pane("99999999999999999999999").is_err());
+    }
+
+    #[test]
     fn malformed_addresses_say_what_they_should_look_like() {
-        let err = parse_pane("42").unwrap_err().to_string();
+        let err = parse_pane("abc").unwrap_err().to_string();
         assert!(err.contains("%42"), "the fix is shown: {err}");
         let err = parse_pane("%abc").unwrap_err().to_string();
         assert!(err.contains("%42"), "{err}");

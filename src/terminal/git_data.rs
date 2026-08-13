@@ -1041,10 +1041,13 @@ impl Tty7App {
 
         // Armed at dispatch, not when the button was pressed: a confirmation
         // the user cancels must leave nothing armed, or the next unrelated
-        // HEAD move would clear a message that was never committed. See
-        // `scm_commit_landed`.
+        // HEAD move would clear a message that was never committed. The amend
+        // toggle follows the same rule — it switches off when the commit
+        // actually runs, so cancelling the amend prompt leaves the user in
+        // the mode they had chosen. See `scm_commit_landed`.
         let was_commit = matches!(op, GitOp::Commit { .. });
         if let GitOp::Commit { message, .. } = &op {
+            self.scm.amend = false;
             self.scm.committing = Some((
                 crate::ui::scm::state::RepoKey {
                     host: id,

@@ -484,22 +484,66 @@ fn pane_split(args: SplitArgs, ctx: &Context, backend: &mut dyn Backend) -> Resu
 fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     const KEY_GAP: Duration = Duration::from_millis(200);
 
+    // `--enter` is the same thing as `--key enter`, and predates it. Keeping it
+    // as sugar rather than deprecating it: it reads better for the overwhelming
+    // case, which is typing one command and running it. Going through the same
+    // parser leaves one definition of what Enter puts on the wire — and the list
+    // is built here, before the dispatch, because the dispatch has to count it:
+    // `send %42 --enter` used to report "needs TEXT … or a --key to press" while
+    // the docs called `--enter` shorthand for exactly such a key (#581).
+    let mut pressed = args.keys.clone();
+    if args.enter {
+        pressed.push(crate::keys::parse("enter").expect("enter is in the vocabulary"));
+    }
+
     // Three shapes reach here, and only the address is ever ambiguous:
     // `send %3 "text"`, `send "text"` (this pane), and — new with --key —
     // `send %3 --key C-c`, where there is no text at all and the lone
     // positional is therefore an address rather than the missing-text error it
-    // has to stay in every other case.
+    // has to stay in every other case. `send %3 --enter` is that third shape
+    // too, with the one carve-out below: only a marked address is promoted by
+    // `--enter` alone.
+    //
+    // The address-shaped-but-broken case must not fall through to "type it":
+    // `send %3x --key C-c` used to type `%3x` into the *caller's own* pane and
+    // then interrupt whatever was in front of them (#538). The guard is kept
+    // narrow on purpose — `%` followed by a digit means "tried to write an
+    // address", so the parse error propagates; `%` followed by anything else
+    // (`%s/foo/bar/` driving vim's ex, `%!sort`) stays text, because refusing
+    // it would break a use that was never ambiguous.
     let (target, text) = match (&args.first, &args.second) {
         (Some(first), Some(text)) => (Some(first.as_str()), Some(text.as_str())),
-        (Some(first), None) if first.starts_with('%') && address::parse_pane(first).is_ok() => {
-            if args.keys.is_empty() {
-                bail!("send needs TEXT after the pane address, or a --key to press");
+        (Some(first), None) => match address::parse_pane(first) {
+            Ok(_) => {
+                if pressed.is_empty() {
+                    bail!(
+                        "send needs TEXT after the pane address, or a --key to press \
+                         — to type '{first}' literally, name the pane too: send %PANE {first}"
+                    );
+                }
+                // A `--key` is always an explicit "press this", so it promotes
+                // either spelling of the address. `--enter` is not, for an
+                // *unmarked* id: `send 2 --enter` reads as "type 2 and run it"
+                // far more often than "press Enter in pane 2", and #538 was
+                // about never quietly retargeting a keystroke. The `%` is what
+                // says which was meant, so it stays the loud error it is today.
+                if args.keys.is_empty() && !first.starts_with('%') {
+                    bail!(
+                        "'{first}' is a bare pane id and --enter has nothing to type \
+                         — to press Enter in pane {first}: send %{first} --enter; \
+                         to type '{first}' and press Enter, name the pane too: \
+                         send %PANE {first} --enter"
+                    );
+                }
+                (Some(first.as_str()), None)
             }
-            (Some(first.as_str()), None)
-        }
-        (Some(first), None) => (None, Some(first.as_str())),
+            // `%` then a digit is someone writing an address, so the parse
+            // error is the answer. Anything else is text and always was.
+            Err(error) if tried_to_write_an_address(first) => return Err(error),
+            Err(_) => (None, Some(first.as_str())),
+        },
         (None, _) => {
-            if args.keys.is_empty() {
+            if pressed.is_empty() {
                 bail!("send needs TEXT to type or a --key to press");
             }
             (None, None)
@@ -511,14 +555,6 @@ fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
     if let Some(text) = text {
         backend.send_input(pane, text.as_bytes().to_vec())?;
         already_wrote = true;
-    }
-    // `--enter` is the same thing as `--key enter`, and predates it. Keeping it
-    // as sugar rather than deprecating it: it reads better for the overwhelming
-    // case, which is typing one command and running it. Going through the same
-    // parser leaves one definition of what Enter puts on the wire.
-    let mut pressed = args.keys.clone();
-    if args.enter {
-        pressed.push(crate::keys::parse("enter").expect("enter is in the vocabulary"));
     }
     for key in &pressed {
         // Raw-mode TUIs detect a fast stream as pasted input and intentionally
@@ -541,6 +577,17 @@ fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
             "keys": pressed.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
         }),
     )
+}
+
+/// Whether a lone positional that failed to parse was reaching for an address
+/// rather than being text. Only `%` followed by a digit qualifies: it is the
+/// shape every pane address has, so `%3x` is a typo worth refusing, while
+/// `%s/foo/bar/` and `%!sort` are the ex commands they look like. A bare `3x`
+/// is not included — nothing marks it as an address, and it has always typed.
+fn tried_to_write_an_address(s: &str) -> bool {
+    s.strip_prefix('%')
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| c.is_ascii_digit())
 }
 
 fn capture(args: CaptureArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
@@ -805,6 +852,11 @@ fn pane_close(
     // the state the caller was trying to fix.
     let mut closed = Vec::new();
     let mut failures = Vec::new();
+    // The running-pane registry, read lazily on the first direct kill: the
+    // direct path is fire-and-forget (the daemon never says whether it knew
+    // the pane), so the registry is the only way `%99` can fail instead of
+    // reporting `{"closed":[99]}` for a pane that never existed (#588).
+    let mut running: Option<Vec<u64>> = None;
     for pane in panes {
         let outcome = match resolve::workspace_of_pane(&machine, pane) {
             Ok(ws) => {
@@ -817,7 +869,24 @@ fn pane_close(
             // No workspace holds it, so PaneClose has nothing to route through.
             // Hang it up directly instead of refusing — this is exactly the
             // orphan `pane ls --all` points the user at.
-            Err(_) => backend.kill_pane(pane),
+            Err(_) => {
+                if running.is_none() {
+                    running = Some(
+                        backend
+                            .list_panes()?
+                            .iter()
+                            .map(|info| info.pane_id)
+                            .collect(),
+                    );
+                }
+                if running.as_ref().is_some_and(|ids| ids.contains(&pane)) {
+                    // A pane that exits between the listing and the kill is
+                    // gone either way, which is what closing it wanted.
+                    backend.kill_pane(pane)
+                } else {
+                    Err(anyhow::anyhow!("no such pane"))
+                }
+            }
         };
         match outcome {
             Ok(()) => closed.push(pane),
@@ -1034,6 +1103,12 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
                 // Structured even here: a script has to tell "my peer died"
                 // apart from "the daemon is unreachable", and an anyhow error
                 // would leave --json with nothing to read.
+                //
+                // The headline goes to stderr all the same, so `-q` still
+                // reports it — the discipline `pane close` set: a failure is
+                // not "output on success", and an exit code alone says which
+                // wait died nowhere (#590).
+                eprintln!("tty7: pane %{pane} exited before reaching the awaited state");
                 return Ok(Outcome::Exit(
                     1,
                     Report {
@@ -1080,11 +1155,30 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
                      --changed",
                 );
             }
+            // The headline goes to stderr all the same, so `-q` still
+            // reports it — see the sibling exit above for why (#590).
+            eprintln!("tty7: pane %{pane}: still {} — timed out", current.name());
             return Ok(Outcome::Exit(
                 124,
                 Report {
                     human,
-                    json: json!({ "pane": pane, "status": current.name(), "timed_out": true }),
+                    // The same shape as a finished wait, plus the flag that
+                    // says the deadline ended it: a consumer written against
+                    // the success path must not find its fields missing on
+                    // exactly the branch it wrote error handling for (#589).
+                    json: {
+                        let session = entry.as_ref().map(|e| &e.state);
+                        json!({
+                            "pane": pane,
+                            "status": current.name(),
+                            "matched": false,
+                            "stale": !changed,
+                            "timed_out": true,
+                            "activity": session.map(|s| s.activity),
+                            "message": session.and_then(|s| s.message.clone()),
+                            "session_id": session.and_then(|s| s.session_id.clone()),
+                        })
+                    },
                 },
             ));
         }
@@ -1347,9 +1441,9 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
             "\nnot inside a tty7 shell — address commands need an explicit %pane/@tab/workspace\n",
         );
     }
-    report(
+    let report = Report {
         human,
-        json!({
+        json: json!({
             "context": {
                 "config_dir": ctx.config_dir.is_some(),
                 "workspace": ctx.ws.is_some(),
@@ -1358,7 +1452,16 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
             "server": server,
             "hooks": hooks_json(&hooks),
         }),
-    )
+    };
+    if report.json["server"]["reachable"] == false {
+        // doctor is the verb people run when something is not working, so an
+        // unreachable server is *the* finding — not a row to exit 0 over:
+        // `tty7 doctor || alert` has to fire (#592). The table and JSON go
+        // out all the same, and stderr carries the headline under `-q`.
+        eprintln!("tty7: doctor: the server is unreachable");
+        return Ok(Outcome::Exit(1, report));
+    }
+    Ok(Outcome::Report(report))
 }
 
 /// Where every installable status hook stands on this machine.
@@ -1547,6 +1650,9 @@ mod tests {
     #[test]
     fn closing_an_orphan_falls_back_to_hanging_the_pane_up() {
         let mut backend = mock();
+        // The registry must know %77: a direct kill is fire-and-forget, so
+        // close verifies existence against it first (#588).
+        backend.registry = vec![pane_info(77, Some("tty7-cli"))];
         run_cli(
             &["tty7", "pane", "close", "%77"],
             &Context::default(),
@@ -1579,6 +1685,38 @@ mod tests {
                 .any(|c| matches!(c, ControlRequest::PaneClose { pane: 1, .. })),
             "{:?}",
             backend.control_calls
+        );
+    }
+
+    #[test]
+    fn closing_a_pane_that_never_existed_is_a_failure_not_a_ghost_success() {
+        // %99 is in no workspace and in no registry — exactly the typo a
+        // reaper script makes. Closing it used to print {"closed":[99]} and
+        // exit 0, telling the script the leak it was chasing was gone (#588).
+        let mut backend = mock();
+        backend.registry = vec![pane_info(77, Some("tty7-cli"))];
+        let out = execute(
+            cli(&["tty7", "pane", "close", "%99"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect("a ghost close is an exit code, not an error");
+        let Outcome::Exit(1, r) = out else {
+            panic!("closing a pane that does not exist has to fail: {out:?}");
+        };
+        assert_eq!(r.json["closed"], serde_json::json!([]));
+        assert!(
+            r.json["failed"]
+                .as_array()
+                .expect("the failures are a list")
+                .iter()
+                .any(|f| f.as_str().is_some_and(|f| f.contains("%99"))),
+            "{}",
+            r.json
+        );
+        assert!(
+            backend.killed.is_empty(),
+            "no kill may be sent for a pane the registry does not hold"
         );
     }
 
@@ -2182,6 +2320,178 @@ mod tests {
         let err = execute(cli(&["tty7", "send"]), &Context::default(), &mut backend)
             .expect_err("send with no arguments has nothing to do");
         assert!(err.to_string().contains("--key"), "{err}");
+    }
+
+    /// A mistyped address must not degrade into text aimed at the caller's
+    /// own pane: `send %3x --key C-c` used to type `%3x` where you sat and
+    /// then interrupt whatever was in front of you. The guard only fires when
+    /// the `%` is followed by a digit — "tried to write an address" — so vim's
+    /// `%s/…` and `%!sort` keep working as text. The `Context::default()`
+    /// every other send test uses can never reach this branch: without
+    /// $TTY7_PANE the fallback errors OUTSIDE_SHELL before the guard matters
+    /// (#538).
+    #[test]
+    fn a_broken_address_errors_instead_of_typing_into_the_callers_pane() {
+        let ctx = Context {
+            pane: Some("5".into()),
+            ..Context::default()
+        };
+
+        let mut backend = mock();
+        let err = execute(
+            cli(&["tty7", "send", "%3x", "--key", "C-c"]),
+            &ctx,
+            &mut backend,
+        )
+        .expect_err("a broken address is an error, not text for your own pane");
+        assert!(err.to_string().contains("pane address"), "{err}");
+        assert!(
+            backend.sent.is_empty(),
+            "nothing reached any pane — not the text, not the key"
+        );
+
+        // Any digit after the `%` is the same reach for an address.
+        let mut backend = mock();
+        let err = execute(cli(&["tty7", "send", "%42a"]), &ctx, &mut backend)
+            .expect_err("still an address-shaped error, not text");
+        assert!(err.to_string().contains("pane address"), "{err}");
+        assert!(backend.sent.is_empty());
+    }
+
+    /// A lone bare id now reads as an address, so `send 83` no longer types
+    /// "83" into the caller's pane — it says it has nothing to send. That is
+    /// the one behaviour this change takes away, and it has to fail loudly
+    /// rather than quietly press keys somewhere else: `--enter` presses a key
+    /// now (#581), but it still does not turn an unmarked id into a target.
+    #[test]
+    fn a_lone_bare_id_refuses_loudly_rather_than_retargeting() {
+        let ctx = Context {
+            pane: Some("5".into()),
+            ..Context::default()
+        };
+        let mut backend = mock();
+        let err = execute(cli(&["tty7", "send", "83"]), &ctx, &mut backend)
+            .expect_err("a bare id has nothing to send");
+        assert!(err.to_string().contains("needs TEXT"), "{err}");
+        // The escape hatch for typing it anyway is in the message.
+        assert!(err.to_string().contains("send %PANE 83"), "{err}");
+        assert!(
+            backend.sent.is_empty(),
+            "no keystroke reached pane 83 or pane 5"
+        );
+
+        // `--enter` counts as the keystroke it always was (#581) — but not
+        // enough to promote an *unmarked* id, or `send 2 --enter` meaning "type
+        // 2 and run it" would press Enter in pane 2 instead. Both ways out are
+        // named, because either could have been meant.
+        let mut backend = mock();
+        let err = execute(cli(&["tty7", "send", "83", "--enter"]), &ctx, &mut backend)
+            .expect_err("--enter alone does not make a bare id a target");
+        assert!(err.to_string().contains("send %83 --enter"), "{err}");
+        assert!(err.to_string().contains("send %PANE 83 --enter"), "{err}");
+        assert!(
+            backend.sent.is_empty(),
+            "no keystroke reached pane 83 or pane 5"
+        );
+    }
+
+    /// `--enter` is documented as shorthand for `--key enter`, so it has to
+    /// give a lone address something to do exactly as `--key` does — it used to
+    /// report "needs TEXT … or a --key to press" and press nothing (#581).
+    #[test]
+    fn enter_alone_presses_enter_at_the_address_it_was_given() {
+        let mut backend = mock();
+        let json = json_of(run_cli(
+            &["tty7", "send", "%42", "--enter"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(backend.sent, vec![(42, b"\r".to_vec())]);
+        assert_eq!(json["sent"], "", "nothing was typed");
+        assert_eq!(json["keys"], serde_json::json!(["enter"]));
+        assert_eq!(json["enter"], true);
+
+        // With no address at all it is the caller's own pane, the same as
+        // `send --key enter` already was.
+        let ctx = Context {
+            pane: Some("5".into()),
+            ..Context::default()
+        };
+        let mut backend = mock();
+        run_cli(&["tty7", "send", "--enter"], &ctx, &mut backend);
+        assert_eq!(backend.sent, vec![(5, b"\r".to_vec())]);
+
+        // The long way round stays open for a bare id, and means the same
+        // thing: an explicit `--key` promotes either spelling.
+        let mut backend = mock();
+        run_cli(
+            &["tty7", "send", "83", "--key", "enter"],
+            &ctx,
+            &mut backend,
+        );
+        assert_eq!(backend.sent, vec![(83, b"\r".to_vec())]);
+        let mut backend = mock();
+        run_cli(&["tty7", "send", "%83", "--enter"], &ctx, &mut backend);
+        assert_eq!(backend.sent, vec![(83, b"\r".to_vec())]);
+    }
+
+    /// The narrowing has to leave real text alone: `%` followed by a non-digit
+    /// is nobody's idea of a pane address, and driving vim's ex commands is a
+    /// documented use of `send`.
+    #[test]
+    fn percent_led_text_still_types_into_the_current_pane() {
+        let ctx = Context {
+            pane: Some("5".into()),
+            ..Context::default()
+        };
+        let mut backend = mock();
+        run_cli(&["tty7", "send", "%s/a/b/"], &ctx, &mut backend);
+        assert_eq!(backend.sent, vec![(5, b"%s/a/b/".to_vec())]);
+
+        let mut backend = mock();
+        run_cli(&["tty7", "send", "%!sort", "--enter"], &ctx, &mut backend);
+        assert_eq!(
+            backend.sent,
+            vec![(5, b"%!sort".to_vec()), (5, b"\r".to_vec())]
+        );
+
+        // Nothing marks these as addresses, so the narrowing must leave them
+        // typing: `3x` has no `%`, and `+5` only looked numeric to
+        // `u64::from_str`.
+        for text in ["3x", "+5", "50%"] {
+            let mut backend = mock();
+            run_cli(&["tty7", "send", text], &ctx, &mut backend);
+            assert_eq!(
+                backend.sent,
+                vec![(5, text.as_bytes().to_vec())],
+                "'{text}' is text, not an address"
+            );
+        }
+    }
+
+    /// The explicit address slot takes the bare id `pane ls --json` prints,
+    /// not only the `%`-marked spelling (#538).
+    #[test]
+    fn a_bare_id_works_as_an_explicit_address() {
+        let mut backend = mock();
+        run_cli(
+            &["tty7", "send", "83", "--key", "C-c"],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(backend.sent, vec![(83, vec![0x03])]);
+
+        // A lone bare id with nothing to press is the missing-text error, same
+        // as a lone `%83` — parseable address, nothing to do with it.
+        let mut backend = mock();
+        let err = execute(
+            cli(&["tty7", "send", "83"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect_err("a bare address sends nothing and must say so");
+        assert!(err.to_string().contains("needs TEXT"), "{err}");
+        assert!(backend.sent.is_empty());
     }
 
     #[test]
@@ -2891,10 +3201,15 @@ mod tests {
             &mut backend,
         )
         .expect("a timeout is an exit code, not an error");
-        assert!(
-            matches!(out, Outcome::Exit(124, _)),
-            "a pane that was free all along has not run anything"
-        );
+        let Outcome::Exit(124, r) = out else {
+            panic!("a pane that was free all along has not run anything");
+        };
+        // A timeout answers in the success path's own shape, plus the flag —
+        // a consumer's error branch must not meet missing fields (#589).
+        assert_eq!(r.json["timed_out"], true);
+        assert_eq!(r.json["matched"], false);
+        assert_eq!(r.json["stale"], true, "nothing ran while we watched");
+        assert!(r.json.get("session_id").is_some());
 
         // Free → busy → free is the real shape, and it must wake.
         let mut backend = mock();
@@ -3300,5 +3615,29 @@ mod tests {
             &mut doctor_backend(),
         ));
         assert!(out.contains("unknown"), "{out}");
+    }
+
+    /// An unreachable server is *the* finding doctor exists for, so the verb
+    /// exits non-zero over it — `tty7 doctor || alert` has to fire — while
+    /// still printing the full report (#592).
+    #[test]
+    fn doctor_exits_nonzero_when_the_server_is_unreachable() {
+        let mut backend = mock();
+        backend.unreachable = true;
+        let out = run_cli(&["tty7", "doctor"], &Context::default(), &mut backend);
+        let Outcome::Exit(1, r) = out else {
+            panic!("an unreachable server is an exit 1, not a plain report: {out:?}");
+        };
+        assert_eq!(r.json["server"]["reachable"], serde_json::json!(false));
+        // The rest of the report still goes out — the context rows are the
+        // other half of what doctor is for.
+        assert!(r.human.contains("TTY7_CONFIG_DIR"), "{}", r.human);
+        assert!(r.human.contains("unreachable"), "{}", r.human);
+        // No Status/Routes round-trips happen once hello has failed.
+        assert!(
+            backend.control_calls.is_empty(),
+            "{:?}",
+            backend.control_calls
+        );
     }
 }

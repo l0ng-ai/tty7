@@ -239,3 +239,78 @@ jobs:
       - name: Assert the binary is static
         if: steps.probe.outputs.present == 'true'
         run: bash .github/scripts/assert-static.sh "target/${{ matrix.target }}/release/tty7-server"
+
+  # The same headless server for remote Macs. A second job rather than more rows
+  # in `server-musl`: that one exists to cross-compile from Linux with zig, and
+  # neither half of it applies here — an Apple target needs an Apple runner for
+  # the SDK, and there is no musl to link.
+  #
+  # Both slices come off one arm64 runner. Cross-compiling to x86_64 needs
+  # nothing but the rustup target: the Xcode SDK carries both architectures, and
+  # the linker is the same one.
+  #
+  # Compile-only, like `server-musl` — release.yml and nightly.yml carry the
+  # same job with an upload step. Non-required until it has a few weeks of
+  # green, for the branch-protection reason spelled out above.
+  server-macos:
+    name: tty7-server macOS (${{ matrix.target }})
+    runs-on: macos-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+          - target: x86_64-apple-darwin
+            arch: x86_64
+    env:
+      RUSTFLAGS: -C strip=symbols
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Look for the tty7-server package
+        id: probe
+        run: |
+          set -euo pipefail
+          if cargo metadata --no-deps --format-version 1 \
+              | jq -e '[.packages[].name] | index("tty7-server")' >/dev/null; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::tty7-server is not a workspace member yet (crate split, M1) — nothing to build"
+          fi
+
+      # `-p tty7-server` for the same two reasons as the musl job: it addresses
+      # the package by name whatever the layout, and it keeps the GUI's `gssapi`
+      # feature out of the unified feature set. That feature does resolve on
+      # macOS, unlike under musl, but linking Heimdal into a binary that gets
+      # pushed to someone else's Mac is exactly the kind of dependency
+      # assert-macho.sh is there to refuse.
+      - name: Build tty7-server
+        if: steps.probe.outputs.present == 'true'
+        run: cargo build --release --locked -p tty7-server --target ${{ matrix.target }}
+
+      # Ad-hoc, so it needs no identity and no secrets — this is not the code
+      # signing the GUI bundles get, and it buys nothing with Gatekeeper. It is
+      # the signature the arm64 kernel requires before it will execute anything
+      # at all. The linker already applies one to the arm64 slice; x86_64 comes
+      # out bare, and that is the slice a Rosetta shell on an Apple Silicon Mac
+      # asks for. `--force` makes this idempotent across both.
+      - name: Ad-hoc sign the binary
+        if: steps.probe.outputs.present == 'true'
+        run: codesign --force --sign - "target/${{ matrix.target }}/release/tty7-server"
+
+      - name: Assert the binary is self-contained
+        if: steps.probe.outputs.present == 'true'
+        run: |
+          bash .github/scripts/assert-macho.sh \
+            "target/${{ matrix.target }}/release/tty7-server" "${{ matrix.arch }}"

@@ -2484,7 +2484,14 @@ mod windows {
         log_argument.push(log);
         vec![
             OsString::from("/SP-"),
-            OsString::from("/VERYSILENT"),
+            // /SILENT, not /VERYSILENT: the install runs unattended either
+            // way, but between the app quitting for the update and the
+            // watcher bringing the new build up — tens of seconds, longer
+            // under an antivirus scan — a very-silent install shows nothing
+            // at all, and "clicked update, the app vanished" reads as a crash
+            // (#600). /SILENT still asks no questions; it only keeps Inno's
+            // own progress window on screen for the gap.
+            OsString::from("/SILENT"),
             OsString::from("/SUPPRESSMSGBOXES"),
             OsString::from("/NORESTART"),
             OsString::from("/CLOSEAPPLICATIONS"),
@@ -2862,7 +2869,15 @@ mod windows {
         fn silent_installer_arguments_keep_the_log_path_native() {
             let log = Path::new(r"C:\Users\测试 User\tty7 update.log");
             let arguments = installer_arguments(log);
-            assert!(arguments.contains(&OsString::from("/VERYSILENT")));
+            assert!(
+                arguments.contains(&OsString::from("/SILENT")),
+                "the install is unattended, but Inno's progress window stays \
+                 on screen for the gap between quit and relaunch (#600)"
+            );
+            assert!(
+                !arguments.contains(&OsString::from("/VERYSILENT")),
+                "a very-silent install leaves the screen empty for tens of seconds"
+            );
             let expected: OsString = OsString::from_wide(
                 &OsStr::new(r"/LOG=C:\Users\测试 User\tty7 update.log")
                     .encode_wide()

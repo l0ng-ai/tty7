@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, MouseButton, MouseDownEvent, Subscription,
@@ -24,6 +23,13 @@ use crate::ui::remote_workspace::{ConnectFlow, MachineStatus, RemoteLinks};
 
 const CARD_W: f32 = 840.0;
 
+/// The create form's card. Narrower than the list — it is a form, not a
+/// browser.
+const FORM_W: f32 = 480.0;
+
+/// The host dropdown shows about eight rows before it scrolls.
+const FORM_LIST_H: f32 = 8.5 * (ROW_H + 8.0);
+
 const LEFT_W: f32 = 340.0;
 
 const CARD_TOP: f32 = 120.0;
@@ -43,8 +49,6 @@ const HOST_H: f32 = 34.0;
 const GUTTER: f32 = 26.0;
 
 const ICON: f32 = 16.0;
-
-const KID_INDENT: f32 = 16.0;
 
 const ROW_PAD: f32 = 8.0;
 
@@ -116,7 +120,6 @@ struct Group {
     endpoint: String,
     target: Option<RemoteTarget>,
     link: Link,
-    home: Option<PathBuf>,
     error: Option<String>,
     installing: Option<InstallPhase>,
     /// Another client is holding at least one workspace of this machine. The
@@ -135,6 +138,8 @@ struct Row {
     name: String,
     path: String,
     when: String,
+    /// Raw timestamp behind `when` — what the flat list sorts by.
+    last_active: u64,
     live: Liveness,
     open: bool,
     current: bool,
@@ -174,26 +179,103 @@ pub(crate) enum Column {
     Right,
 }
 
-/// A selectable line in the left column. Rendering and keyboard navigation walk
-/// the same list so an arrow key can never land somewhere the eye cannot see.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Nav {
-    Host(usize),
-    Row(usize, usize),
-    OthersHeader,
-    Other(usize),
-}
+/// A selectable line in the left column: `(group, row)` into `Layout::groups`.
+/// The list is flat — one workspace per line, machines told apart by the badge
+/// on the row itself — and rendering and keyboard navigation walk the same
+/// list so an arrow key can never land somewhere the eye cannot see.
+type Nav = (usize, usize);
 
 pub(crate) struct HostSnapshot {
     pub target: RemoteTarget,
     pub rows: Vec<RemoteWorkspaceRow>,
 }
 
+/// A pane the daemon runs that no workspace holds — what an interrupted
+/// `tty7 run` leaves behind, and what `tty7 pane ls --all` points the CLI's
+/// reaper at. The switcher is where a GUI user finds and closes one (#596).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OrphanPane {
+    pub pane_id: u64,
+    pub title: String,
+    pub cwd: Option<String>,
+    pub owner: Option<String>,
+}
+
+/// Every pane id the local machine's workspaces hold — what the registry
+/// listing is measured against to find the orphans (#596).
+fn held_local_pane_ids(cx: &App) -> HashSet<u64> {
+    crate::ui::machine_mirror::MachineMirrors::machine(cx, crate::core::session::HostId::LOCAL)
+        .map(|machine| {
+            machine
+                .workspaces
+                .iter()
+                .flat_map(|ws| ws.tabs.iter())
+                .flat_map(|tab| tab.root.pane_ids())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The registry's live panes minus the ones a workspace holds. Dead entries
+/// drop out too: a corpse the daemon has not reaped yet is not something the
+/// user can act on.
+pub(crate) fn orphan_panes_of(
+    listed: Vec<tty7_core::daemon::protocol::PaneInfo>,
+    held: &HashSet<u64>,
+) -> Vec<OrphanPane> {
+    listed
+        .into_iter()
+        .filter(|info| info.alive && !held.contains(&info.pane_id))
+        .map(|info| OrphanPane {
+            pane_id: info.pane_id,
+            title: info.title,
+            cwd: info.cwd.map(|p| p.display().to_string()),
+            owner: info.owner,
+        })
+        .collect()
+}
+
+/// Which face the card is showing: the workspace list, or the create form.
+pub(crate) enum Page {
+    List,
+    Create(CreateForm),
+}
+
+/// The "New Workspace" form: a name prefilled with what the workspace would
+/// have called itself anyway, and a host picked from a combobox that folds
+/// however many machines are configured into one row.
+pub(crate) struct CreateForm {
+    name: Entity<InputState>,
+    /// The combobox's filter text. Only meaningful while `open`.
+    host: Entity<InputState>,
+    /// Whether the host dropdown is unfolded.
+    open: bool,
+    /// Cursor into the dropdown's item list.
+    sel: usize,
+    /// The picked host. `None` is this computer.
+    chosen: Option<HostChoice>,
+    /// What the name box was prefilled with. While its value still says this
+    /// (or nothing), picking another host refills it; one keystroke of the
+    /// user's own and it is theirs.
+    prefill: String,
+}
+
+/// A create the user asked for on a machine that was not connected yet: the
+/// connect has to land first, because only a live link knows the home
+/// directory a fresh workspace is rooted at. `finish_connect` consumes it.
+pub(crate) struct PendingCreate {
+    pub target: RemoteTarget,
+    pub name: Option<String>,
+}
+
 pub(crate) struct Switcher {
     pub query: Entity<InputState>,
-    collapsed: HashSet<String>,
-    show_others: bool,
+    page: Page,
     renaming: Option<(WorkspaceId, Entity<InputState>)>,
+    /// Panes the local daemon runs that no workspace holds (#596). Filled
+    /// asynchronously after the panel opens; empty both while the listing is
+    /// in flight and when there is nothing to reap.
+    orphans: Vec<OrphanPane>,
     column: Column,
     left_sel: usize,
     right_sel: usize,
@@ -219,44 +301,88 @@ impl Switcher {
     fn text(&self, cx: &App) -> String {
         self.query.read(cx).value().trim().to_lowercase()
     }
-
-    pub(crate) fn expand(&mut self, key: &str) {
-        self.collapsed.remove(key);
-    }
 }
 
-/// Everything the panel needs for one frame: the groups, which of their rows
-/// survived the search, and the flattened left column.
+/// Everything the panel needs for one frame: the groups (one per machine,
+/// still the unit that carries link state and errors), and the flat,
+/// most-recently-used-first left column the arrow keys walk.
 struct Layout {
     groups: Vec<Group>,
-    /// Per group, the row indices the search left visible. `None` hides the
-    /// whole group.
-    shown: Vec<Option<Vec<usize>>>,
-    others: Vec<HostChoice>,
-    other_hits: Vec<usize>,
-    others_expanded: bool,
     nav: Vec<Nav>,
 }
 
 impl Layout {
-    /// Which workspace row the tab column is showing. A host header borrows its
-    /// group's first workspace so walking past a header does not blank the
-    /// column.
+    /// Which workspace row the tab column is showing.
     fn subject(&self, sel: usize) -> Option<(usize, usize)> {
-        match self.nav.get(sel)? {
-            Nav::Row(g, r) => Some((*g, *r)),
-            Nav::Host(g) => self.shown[*g]
-                .as_ref()
-                .and_then(|rows| rows.first())
-                .map(|r| (*g, *r)),
-            _ => None,
-        }
+        self.nav.get(sel).copied()
     }
 
     fn subject_row(&self, sel: usize) -> Option<&Row> {
         let (g, r) = self.subject(sel)?;
         self.groups[g].rows.get(r)
     }
+}
+
+/// The flat left column: every row the query leaves visible, one line per
+/// workspace, most recently used first with this window's own workspace on
+/// top. A query matching a machine's name keeps all of that machine's rows —
+/// searching "devbox" is how the old per-machine grouping is asked for now.
+fn flatten(groups: &[Group], query: &str) -> Vec<Nav> {
+    let mut nav: Vec<Nav> = Vec::new();
+    for (g, group) in groups.iter().enumerate() {
+        let matched_host = group.label.to_lowercase().contains(query);
+        for (r, row) in group.rows.iter().enumerate() {
+            if query.is_empty() || matched_host || row.matches(query) {
+                nav.push((g, r));
+            }
+        }
+    }
+    nav.sort_by(|&(ga, ra), &(gb, rb)| {
+        let (a, b) = (&groups[ga].rows[ra], &groups[gb].rows[rb]);
+        b.current
+            .cmp(&a.current)
+            .then_with(|| b.last_active.cmp(&a.last_active))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    nav
+}
+
+/// One line of the create form's host dropdown.
+enum HostItem {
+    /// This computer — first, while it matches the filter.
+    Local,
+    Host(HostChoice),
+    /// Pinned last, filter or no filter: the way out when the machine wanted
+    /// is not configured yet.
+    AddHost,
+}
+
+/// What the form's name box starts out saying: the same codename a workspace
+/// created without one would have been given anyway (`fresh_workspace_name` —
+/// "quiet-otter"), rolled against the chosen machine so it stays unique
+/// there. Editable before it is spent; clearing the box creates a nameless
+/// workspace that shows its directory, the old fallback.
+fn default_workspace_name(chosen: Option<&HostChoice>, cx: &App) -> String {
+    let host = match chosen {
+        None => tty7_core::host::HostId::LOCAL,
+        Some(choice) => choice.target.host_id(),
+    };
+    crate::ui::tree_sync::fresh_workspace_name(cx, host)
+}
+
+fn host_items(hosts: Vec<HostChoice>, query: &str, local_label: &str) -> Vec<HostItem> {
+    let query = query.trim();
+    let mut items: Vec<HostItem> = Vec::new();
+    if query.is_empty() || crate::ui::palette::fuzzy_score(query, local_label).is_some() {
+        items.push(HostItem::Local);
+    }
+    items.extend(
+        remote_connect::filter_hosts(&hosts, query)
+            .into_iter()
+            .map(HostItem::Host),
+    );
+    items.push(HostItem::AddHost);
+    items
 }
 
 impl Tty7App {
@@ -294,16 +420,10 @@ impl Tty7App {
             |this, _input, ev: &InputEvent, _window, cx| {
                 if matches!(ev, InputEvent::Change) {
                     // A narrower list can strand the cursor past its end. Land
-                    // it on the first workspace rather than a machine header so
-                    // the tab column shows the hits straight away.
-                    let layout = this.switcher_layout(cx);
-                    let at = layout
-                        .nav
-                        .iter()
-                        .position(|n| matches!(n, Nav::Row(..)))
-                        .unwrap_or(0);
+                    // it on the first hit so the tab column shows the hits
+                    // straight away.
                     if let Some(sw) = this.switcher.as_mut() {
-                        sw.left_sel = at;
+                        sw.left_sel = 0;
                         sw.right_sel = 0;
                     }
                     cx.notify();
@@ -313,9 +433,9 @@ impl Tty7App {
         let (left_scroll, right_scroll) = (gpui::ScrollHandle::new(), gpui::ScrollHandle::new());
         self.switcher = Some(Switcher {
             query,
-            collapsed: HashSet::new(),
-            show_others: false,
+            page: Page::List,
             renaming: None,
+            orphans: Vec::new(),
             column,
             left_sel: 0,
             right_sel: 0,
@@ -331,14 +451,75 @@ impl Tty7App {
         // opens on something useful.
         let layout = self.switcher_layout(cx);
         let here = self.workspace;
-        if let Some(at) = layout.nav.iter().position(|item| match item {
-            Nav::Row(g, r) => layout.groups[*g].rows[*r].id == here,
-            _ => false,
-        }) && let Some(sw) = self.switcher.as_mut()
+        if let Some(at) = layout
+            .nav
+            .iter()
+            .position(|&(g, r)| layout.groups[g].rows[r].id == here)
+            && let Some(sw) = self.switcher.as_mut()
         {
             sw.left_sel = at;
         }
+        self.refresh_orphan_panes(cx);
         cx.notify();
+    }
+
+    /// List the local daemon's panes and keep the ones no workspace holds.
+    /// The query is blocking daemon I/O, so it runs off the UI thread; the
+    /// filter runs back on it, where the machine mirror lives.
+    ///
+    /// Local on purpose: a remote machine's orphans belong to its own daemon,
+    /// and routing a listing per host is what the CLI's reaper already does.
+    fn refresh_orphan_panes(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let listed = cx
+                .background_spawn(async move { tty7_core::client::PaneClient::local().list() })
+                .await;
+            let listed = match listed {
+                Ok(listed) => listed,
+                Err(e) => {
+                    log::warn!(target: "tty7::switcher", "orphan pane listing failed: {e}");
+                    return;
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                let held = held_local_pane_ids(cx);
+                if let Some(sw) = this.switcher.as_mut() {
+                    sw.orphans = orphan_panes_of(listed, &held);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Hang up one orphan pane and show what is left. The kill is
+    /// fire-and-forget, so the refresh that follows is also the confirmation:
+    /// a pane that survived it simply stays on the list.
+    fn close_orphan_pane(&mut self, pane_id: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let listed = cx
+                .background_spawn(async move {
+                    let client = tty7_core::client::PaneClient::local();
+                    client.kill(pane_id)?;
+                    client.list()
+                })
+                .await;
+            let listed = match listed {
+                Ok(listed) => listed,
+                Err(e) => {
+                    log::warn!(target: "tty7::switcher", "closing orphan %{pane_id} failed: {e}");
+                    return;
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                let held = held_local_pane_ids(cx);
+                if let Some(sw) = this.switcher.as_mut() {
+                    sw.orphans = orphan_panes_of(listed, &held);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Ctrl+Tab. The first press raises the panel on the tab column with the
@@ -474,7 +655,6 @@ impl Tty7App {
                         endpoint,
                         target,
                         link: Link::Offline,
-                        home: None,
                         error: None,
                         installing: None,
                         preempted: false,
@@ -483,14 +663,20 @@ impl Tty7App {
                     });
                     groups.len() - 1
                 });
+                // A row's path is on the workspace's own machine, so that is
+                // the machine whose home may shorten it (#580).
+                let home = crate::ui::path_display::home_for_host(app, w.host_id());
                 groups[slot].rows.push(Row {
                     id: w.id,
                     name: crate::ui::machine_mirror::display_name(app, w)
                         .unwrap_or_else(|| t(L10nKey::WindowUntitled).to_string()),
                     path: crate::ui::machine_mirror::subject_path(app, w)
-                        .map(|p| crate::ui::home::display_path(std::path::Path::new(&p)))
+                        .map(|p| {
+                            crate::ui::home::display_path(std::path::Path::new(&p), home.as_deref())
+                        })
                         .unwrap_or_default(),
                     when: crate::ui::home::relative_time(now, w.last_active),
+                    last_active: w.last_active,
                     live: crate::terminal::pane_liveness::liveness_of(app, w),
                     open: w.open,
                     current: w.id == current,
@@ -514,7 +700,6 @@ impl Tty7App {
                 endpoint: String::new(),
                 target: Some(target),
                 link: Link::Offline,
-                home: None,
                 error: None,
                 installing: None,
                 preempted: false,
@@ -532,7 +717,6 @@ impl Tty7App {
                     endpoint: String::new(),
                     target: None,
                     link: Link::Offline,
-                    home: None,
                     error: None,
                     installing: None,
                     preempted: false,
@@ -560,6 +744,7 @@ impl Tty7App {
                         .unwrap_or_else(|| t(L10nKey::WindowUntitled).to_string()),
                     path: String::new(),
                     when: crate::ui::home::relative_time(now, now),
+                    last_active: now,
                     live: Liveness::Alive,
                     open: true,
                     current: true,
@@ -585,6 +770,9 @@ impl Tty7App {
                 .flat_map(|g| g.rows.iter().map(|r| r.id))
                 .collect();
             let app: &App = cx;
+            // Unclaimed *local* workspaces: their paths are on this machine,
+            // so this machine's home is the right one to measure them by.
+            let local_home = crate::ui::path_display::local_home();
             let rows: Vec<Row> = crate::ui::machine_mirror::unclaimed_local_workspaces(app)
                 .into_iter()
                 .filter(|ws| !listed.contains(&ws.id))
@@ -593,9 +781,15 @@ impl Tty7App {
                     name: ws.name,
                     path: ws
                         .path
-                        .map(|p| crate::ui::home::display_path(std::path::Path::new(&p)))
+                        .map(|p| {
+                            crate::ui::home::display_path(
+                                std::path::Path::new(&p),
+                                local_home.as_deref(),
+                            )
+                        })
                         .unwrap_or_default(),
                     when: crate::ui::home::relative_time(now, ws.last_active),
+                    last_active: ws.last_active,
                     live: match ws.live {
                         true => Liveness::Alive,
                         false => Liveness::Stopped,
@@ -611,14 +805,9 @@ impl Tty7App {
             groups[slot].rows.extend(rows);
         }
 
-        for group in &mut groups {
-            group.rows.sort_by(|a, b| {
-                b.current
-                    .cmp(&a.current)
-                    .then_with(|| b.open.cmp(&a.open))
-                    .then_with(|| a.name.cmp(&b.name))
-            });
-        }
+        // Row order is `flatten`'s business now — the left column is one flat
+        // most-recently-used list. Groups keep local-first order only so the
+        // trouble banners under the list come out in a stable order.
         groups.sort_by(|a, b| a.key.is_empty().cmp(&b.key.is_empty()).reverse());
 
         let configured = remote_connect::available_hosts(cx);
@@ -677,7 +866,6 @@ impl Tty7App {
             {
                 group.installing = reported;
             }
-            group.home = remote_connect::HostLinks::home(cx, id);
             if let Some(snapshot) = self.host_snapshots.get(&id) {
                 group.merge(&snapshot.rows, now);
             }
@@ -709,8 +897,11 @@ impl Tty7App {
                             .pane
                             .terminals()
                             .first()
-                            .and_then(|leaf| leaf.read(cx).cwd())
-                            .map(|p| crate::ui::home::display_path(&p))
+                            .and_then(|leaf| {
+                                let leaf = leaf.read(cx);
+                                Some((leaf.cwd()?, leaf.display_home(cx)))
+                            })
+                            .map(|(p, home)| crate::ui::home::display_path(&p, home.as_deref()))
                             .unwrap_or_default(),
                         agent: tab.agent(cx),
                         status: tab.agent_status(cx),
@@ -738,11 +929,14 @@ impl Tty7App {
             cx.try_global::<crate::terminal::git_status::GitStatusCache>()?
                 .status_for(host, std::path::Path::new(cwd))
         };
+        // These rows describe a workspace on `host`, and the cwds they carry
+        // are that machine's. Only its home may shorten them (#580).
+        let home = host.and_then(|host| crate::ui::path_display::home_for_host(cx, host));
         views
             .into_iter()
             .enumerate()
             .map(|(i, v)| TabRow {
-                label: tab_view_label(&v, i),
+                label: tab_view_label(&v, i, home.as_deref()),
                 // The label only stands in for the path when it came *from* the
                 // path; a name or an agent leaves the location still worth
                 // printing.
@@ -750,7 +944,9 @@ impl Tty7App {
                 path: v
                     .cwd
                     .as_deref()
-                    .map(|p| crate::ui::home::display_path(std::path::Path::new(p)))
+                    .map(|p| {
+                        crate::ui::home::display_path(std::path::Path::new(p), home.as_deref())
+                    })
                     .unwrap_or_default(),
                 agent: v.agent,
                 status: v.status,
@@ -764,74 +960,17 @@ impl Tty7App {
             .collect()
     }
 
-    /// Builds one frame's worth of panel: the groups, what the search left
-    /// visible, and the flattened left column the arrow keys walk.
+    /// Builds one frame's worth of panel: the groups, and the flat left
+    /// column the arrow keys walk.
     fn switcher_layout(&self, cx: &mut Context<Self>) -> Layout {
         let groups = self.switcher_groups(cx);
-        let others = self.other_hosts(&groups, cx);
         let query = self
             .switcher
             .as_ref()
             .map(|sw| sw.text(cx))
             .unwrap_or_default();
-
-        let mut shown: Vec<Option<Vec<usize>>> = Vec::with_capacity(groups.len());
-        let mut nav: Vec<Nav> = Vec::new();
-        for (g, group) in groups.iter().enumerate() {
-            let matched_host = group.label.to_lowercase().contains(&query);
-            let rows: Vec<usize> = group
-                .rows
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| query.is_empty() || matched_host || r.matches(&query))
-                .map(|(i, _)| i)
-                .collect();
-            if !query.is_empty() && !matched_host && rows.is_empty() {
-                shown.push(None);
-                continue;
-            }
-            nav.push(Nav::Host(g));
-            let collapsed = self
-                .switcher
-                .as_ref()
-                .is_some_and(|sw| sw.collapsed.contains(&group.key));
-            let expanded = (!collapsed || !query.is_empty()) && group.link != Link::Offline;
-            if expanded {
-                nav.extend(rows.iter().map(|r| Nav::Row(g, *r)));
-            }
-            shown.push(Some(if expanded { rows } else { Vec::new() }));
-        }
-
-        let other_hits: Vec<usize> = match (others.is_empty(), query.is_empty()) {
-            (true, _) => Vec::new(),
-            (false, true) => (0..others.len()).collect(),
-            (false, false) => {
-                let hits = remote_connect::filter_hosts(&others, &query);
-                others
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, h)| hits.iter().any(|x| x.target == h.target))
-                    .map(|(i, _)| i)
-                    .collect()
-            }
-        };
-        let others_expanded = self.switcher.as_ref().is_some_and(|sw| sw.show_others)
-            || (!query.is_empty() && !other_hits.is_empty());
-        if !other_hits.is_empty() {
-            nav.push(Nav::OthersHeader);
-            if others_expanded {
-                nav.extend(other_hits.iter().map(|i| Nav::Other(*i)));
-            }
-        }
-
-        Layout {
-            groups,
-            shown,
-            others,
-            other_hits,
-            others_expanded,
-            nav,
-        }
+        let nav = flatten(&groups, &query);
+        Layout { groups, nav }
     }
 
     fn pending_machines(&self) -> Vec<RemoteTarget> {
@@ -854,37 +993,6 @@ impl Tty7App {
     ) -> Link {
         let has_link = remote_connect::HostLinks::get(cx, target.host_id()).is_some();
         link_from(self.connect.as_ref(), target, supervised, has_link)
-    }
-
-    fn other_hosts(&self, groups: &[Group], cx: &App) -> Vec<HostChoice> {
-        let known: HashSet<&str> = groups.iter().map(|g| g.key.as_str()).collect();
-        remote_connect::available_hosts(cx)
-            .into_iter()
-            .filter(|h| !known.contains(h.target.to_string().as_str()))
-            .collect()
-    }
-
-    fn switcher_toggle_host(&mut self, group: &GroupRef, cx: &mut Context<Self>) {
-        if group.link == Link::Offline
-            && let Some(target) = group.target.clone()
-        {
-            let choice = HostChoice {
-                target,
-                label: group.label.clone(),
-                detail: String::new(),
-            };
-            self.connect_to_host(choice, cx);
-            if let Some(sw) = self.switcher.as_mut() {
-                sw.collapsed.remove(&group.key);
-            }
-            return;
-        }
-        if let Some(sw) = self.switcher.as_mut() {
-            if !sw.collapsed.remove(&group.key) {
-                sw.collapsed.insert(group.key.clone());
-            }
-        }
-        cx.notify();
     }
 
     fn switcher_open(
@@ -948,16 +1056,224 @@ impl Tty7App {
         {
             self.connect = None;
         }
+        // A create still waiting on this machine's link dies with the link:
+        // calling the connect off is calling the create off, or the next
+        // successful connect would grow a workspace nobody asked it for.
+        if self
+            .pending_create
+            .as_ref()
+            .is_some_and(|p| &p.target == target)
+        {
+            self.pending_create = None;
+        }
         cx.notify();
     }
 
-    fn switcher_new(&mut self, group: &GroupRef, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_switcher(window, cx);
-        match (group.target.clone(), group.home.clone()) {
-            (Some(target), Some(home)) => self.create_remote_workspace(target, home, window, cx),
-            (Some(_), None) => {}
-            (None, _) => self.switch_workspace(None, window, cx),
+    /// `⌘⇧N` and the footer button. Raises the switcher if it is down and
+    /// flips the card to the create form, host defaulting to this computer —
+    /// so `⌘⇧N` then Enter is still "a fresh local workspace", two keys.
+    pub(crate) fn open_workspace_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.switcher.is_none() {
+            self.open_switcher(window, cx);
         }
+        self.switcher_to_form(None, window, cx);
+    }
+
+    fn switcher_to_form(
+        &mut self,
+        chosen: Option<HostChoice>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prefill = default_workspace_name(chosen.as_ref(), cx);
+        let name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(t(L10nKey::SwitcherFormNamePlaceholder))
+                .default_value(prefill.clone())
+        });
+        let host = cx.new(|cx| InputState::new(window, cx).placeholder(t(L10nKey::FilterHosts)));
+        // Retyping the filter moves the dropdown cursor back onto the first hit.
+        let sub = cx.subscribe_in(
+            &host,
+            window,
+            |this, _input, ev: &InputEvent, _window, cx| {
+                if matches!(ev, InputEvent::Change)
+                    && let Some(sw) = this.switcher.as_mut()
+                    && let Page::Create(form) = &mut sw.page
+                {
+                    form.sel = 0;
+                    cx.notify();
+                }
+            },
+        );
+        name.update(cx, |state, cx| state.focus(window, cx));
+        if let Some(sw) = self.switcher.as_mut() {
+            sw.page = Page::Create(CreateForm {
+                name,
+                host,
+                open: false,
+                sel: 0,
+                chosen,
+                prefill,
+            });
+            sw._subs.push(sub);
+        }
+        cx.notify();
+    }
+
+    fn switcher_back_to_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(sw) = self.switcher.as_mut() {
+            sw.page = Page::List;
+            let query = sw.query.clone();
+            query.update(cx, |state, cx| state.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// The host dropdown's lines for the filter text currently in the box.
+    fn form_items(&self, form: &CreateForm, cx: &App) -> Vec<HostItem> {
+        let query = form.host.read(cx).value().trim().to_string();
+        host_items(
+            remote_connect::available_hosts(cx),
+            &query,
+            t(L10nKey::SwitcherThisComputer),
+        )
+    }
+
+    fn switcher_form_open_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(sw) = self.switcher.as_mut()
+            && let Page::Create(form) = &mut sw.page
+        {
+            form.open = true;
+            form.sel = 0;
+            let host = form.host.clone();
+            host.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+                state.focus(window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn switcher_form_close_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(sw) = self.switcher.as_mut()
+            && let Page::Create(form) = &mut sw.page
+        {
+            form.open = false;
+            let name = form.name.clone();
+            name.update(cx, |state, cx| state.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn switcher_form_pick(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let item = {
+            let Some(sw) = self.switcher.as_ref() else {
+                return;
+            };
+            let Page::Create(form) = &sw.page else {
+                return;
+            };
+            let mut items = self.form_items(form, cx);
+            if at >= items.len() {
+                return;
+            }
+            items.swap_remove(at)
+        };
+        match item {
+            HostItem::Local => self.switcher_form_choose(None, window, cx),
+            HostItem::Host(choice) => self.switcher_form_choose(Some(choice), window, cx),
+            HostItem::AddHost => {
+                self.close_switcher(window, cx);
+                self.open_new_ssh_host(window, cx);
+            }
+        }
+    }
+
+    fn switcher_form_choose(
+        &mut self,
+        chosen: Option<HostChoice>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prefill = default_workspace_name(chosen.as_ref(), cx);
+        if let Some(sw) = self.switcher.as_mut()
+            && let Page::Create(form) = &mut sw.page
+        {
+            form.chosen = chosen;
+            form.open = false;
+            form.sel = 0;
+            let (host, name) = (form.host.clone(), form.name.clone());
+            // A name the user has not touched follows the host; one they have
+            // is theirs and stays.
+            let untouched = {
+                let value = name.read(cx).value().trim().to_string();
+                value.is_empty() || value == form.prefill
+            };
+            if untouched {
+                form.prefill = prefill.clone();
+                name.update(cx, |state, cx| state.set_value(&prefill, window, cx));
+            }
+            host.update(cx, |state, cx| state.set_value("", window, cx));
+            name.update(cx, |state, cx| state.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Enter on the form. Local and already-connected machines create on the
+    /// spot; a machine with no live link has to connect first — the create is
+    /// parked on the app and `finish_connect` completes it, because only a
+    /// live link knows the home directory a fresh workspace is rooted at.
+    fn switcher_form_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (name, chosen) = {
+            let Some(sw) = self.switcher.as_ref() else {
+                return;
+            };
+            let Page::Create(form) = &sw.page else {
+                return;
+            };
+            let name = form.name.read(cx).value().trim().to_string();
+            ((!name.is_empty()).then_some(name), form.chosen.clone())
+        };
+        match chosen {
+            None => {
+                self.close_switcher(window, cx);
+                self.switch_workspace(None, window, cx);
+                self.name_fresh_workspace(name, window, cx);
+            }
+            Some(choice) => match remote_connect::HostLinks::home(cx, choice.target.host_id()) {
+                Some(home) => {
+                    self.close_switcher(window, cx);
+                    self.create_remote_workspace(choice.target.clone(), home, window, cx);
+                    self.name_fresh_workspace(name, window, cx);
+                }
+                None => {
+                    self.pending_create = Some(PendingCreate {
+                        target: choice.target.clone(),
+                        name,
+                    });
+                    // Back to the list, where the connect has somewhere to be
+                    // seen while it works.
+                    self.switcher_back_to_list(window, cx);
+                    self.connect_to_host(choice, cx);
+                }
+            },
+        }
+    }
+
+    /// Names the workspace this window just created and switched to.
+    pub(crate) fn name_fresh_workspace(
+        &mut self,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = name else {
+            return;
+        };
+        crate::ui::tree_sync::rename_workspace(cx, self.workspace, Some(name));
+        crate::ui::windows::refresh_menu(cx);
+        self.sync_window_title(window, cx);
     }
 
     /// Arrow keys and Enter for the panel. These run ahead of the text input's
@@ -972,6 +1288,10 @@ impl Tty7App {
         let Some(sw) = self.switcher.as_ref() else {
             return;
         };
+        if matches!(sw.page, Page::Create(_)) {
+            self.on_form_key(ev, window, cx);
+            return;
+        }
         let (key, mods) = (ev.keystroke.key.as_str(), ev.keystroke.modifiers);
         if key == "escape" {
             cx.stop_propagation();
@@ -1030,6 +1350,69 @@ impl Tty7App {
                 cx.stop_propagation();
                 self.switcher_confirm(&layout, new_window, window, cx);
             }
+        }
+    }
+
+    /// The create form's keys. Characters fall through to whichever input is
+    /// focused; everything structural is decided here, ahead of the inputs'
+    /// own bindings, so it has to stop propagating whatever it handles.
+    fn on_form_key(
+        &mut self,
+        ev: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (open, sel, n) = {
+            let Some(sw) = self.switcher.as_ref() else {
+                return;
+            };
+            let Page::Create(form) = &sw.page else {
+                return;
+            };
+            (form.open, form.sel, self.form_items(form, cx).len())
+        };
+        let (key, mods) = (ev.keystroke.key.as_str(), ev.keystroke.modifiers);
+        let bare = !mods.alt && !mods.function && !mods.control && !mods.secondary();
+        match key {
+            // The dropdown is the smaller thing to back out of; the form only
+            // folds back into the list on a second press.
+            "escape" => {
+                cx.stop_propagation();
+                match open {
+                    true => self.switcher_form_close_hosts(window, cx),
+                    false => self.switcher_back_to_list(window, cx),
+                }
+            }
+            "tab" if bare || mods.shift => {
+                cx.stop_propagation();
+                match open {
+                    true => self.switcher_form_close_hosts(window, cx),
+                    false => self.switcher_form_open_hosts(window, cx),
+                }
+            }
+            "up" | "down" if bare => {
+                cx.stop_propagation();
+                match open {
+                    true if n > 0 => {
+                        if let Some(sw) = self.switcher.as_mut()
+                            && let Page::Create(form) = &mut sw.page
+                        {
+                            form.sel = step(sel.min(n - 1), n, key == "down");
+                        }
+                        cx.notify();
+                    }
+                    false if key == "down" => self.switcher_form_open_hosts(window, cx),
+                    _ => {}
+                }
+            }
+            "enter" if bare => {
+                cx.stop_propagation();
+                match open {
+                    true => self.switcher_form_pick(sel, window, cx),
+                    false => self.switcher_form_create(window, cx),
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1154,28 +1537,10 @@ impl Tty7App {
             self.switcher_open_tab(ws, id, index, new_window, window, cx);
             return;
         }
-        match layout.nav.get(sel) {
-            Some(Nav::Row(g, r)) => {
-                let group = &layout.groups[*g];
-                let row = RowRef::of(group, &group.rows[*r]);
-                self.switcher_open(row, new_window, window, cx);
-            }
-            Some(Nav::Host(g)) => {
-                let group = GroupRef::of(&layout.groups[*g]);
-                self.switcher_toggle_host(&group, cx);
-            }
-            Some(Nav::OthersHeader) => {
-                if let Some(sw) = self.switcher.as_mut() {
-                    sw.show_others = !sw.show_others;
-                }
-                cx.notify();
-            }
-            Some(Nav::Other(i)) => {
-                if let Some(choice) = layout.others.get(*i).cloned() {
-                    self.connect_to_host(choice, cx);
-                }
-            }
-            None => {}
+        if let Some(&(g, r)) = layout.nav.get(sel) {
+            let group = &layout.groups[g];
+            let row = RowRef::of(group, &group.rows[r]);
+            self.switcher_open(row, new_window, window, cx);
         }
     }
 
@@ -1214,28 +1579,57 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let sw = self.switcher.as_ref()?;
+        let scrim = crate::ui::presets::scrim_fill(cx);
+        let card = match &sw.page {
+            Page::Create(form) => self.render_create_card(form, window, cx),
+            Page::List => self.render_list_card(window, cx),
+        };
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_start()
+                .justify_center()
+                .pt(px(CARD_TOP))
+                .bg(scrim)
+                .key_context("Switcher")
+                .on_action(cx.listener(|this, _: &SwitcherAcross, window, cx| {
+                    let layout = this.switcher_layout(cx);
+                    this.switcher_step_right(&layout, true, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &SwitcherAcrossBack, window, cx| {
+                    let layout = this.switcher_layout(cx);
+                    this.switcher_step_right(&layout, false, window, cx);
+                }))
+                .on_key_down(cx.listener(Self::on_switcher_key))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        this.close_switcher(window, cx)
+                    }),
+                )
+                .child(div().occlude().child(card))
+                .into_any_element(),
+        )
+    }
+
+    fn render_list_card(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let sw = self.switcher.as_ref().expect("only rendered while up");
         let (sel, column) = (sw.left_sel, sw.column);
         let (left_scroll, right_scroll) = (sw.left_scroll.clone(), sw.right_scroll.clone());
         let layout = self.switcher_layout(cx);
 
         let theme = cx.theme();
         let (border, card_bg) = (theme.border, theme.popover);
-        let scrim = crate::ui::presets::scrim_fill(cx);
 
-        let mut list = v_flex().gap(px(6.));
-        let mut shown = 0usize;
-        for g in 0..layout.groups.len() {
-            if layout.shown[g].is_none() {
-                continue;
-            }
-            shown += 1;
-            list = list.child(self.render_group(&layout, g, sel, column, cx));
+        let mut list = v_flex().gap(px(1.));
+        for (at, &(g, r)) in layout.nav.iter().enumerate() {
+            let picked = sel == at && column == Column::Left;
+            let group = &layout.groups[g];
+            list = list.child(self.render_row(group, &group.rows[r], picked, Some(at), cx));
         }
-        if let Some(band) = self.render_other_hosts(&layout, sel, column, cx) {
-            shown += 1;
-            list = list.child(band);
-        }
-        if shown == 0 {
+        if layout.nav.is_empty() {
             list = list.child(
                 div()
                     .px(px(ROW_PAD))
@@ -1244,6 +1638,14 @@ impl Tty7App {
                     .text_color(cx.theme().muted_foreground)
                     .child(t(L10nKey::SwitcherNoMatch)),
             );
+        }
+        // Orphan panes belong to the machine, not to a workspace, so they are
+        // not rows and join no navigation — the bottom of the workspace list
+        // is simply where a user looking for them finds them (#596). A search
+        // narrows the panel to workspaces, and the box steps out of the way
+        // for one.
+        if !sw.orphans.is_empty() && sw.text(cx).is_empty() {
+            list = list.child(self.render_orphan_panes(cx));
         }
 
         // Fixed height, not fit-to-content: the tab column changes length every
@@ -1302,7 +1704,7 @@ impl Tty7App {
                     )),
             );
 
-        let card = v_flex()
+        v_flex()
             .w(px(card_w))
             .bg(card_bg)
             .border_1()
@@ -1312,36 +1714,9 @@ impl Tty7App {
             .overflow_hidden()
             .child(self.render_search(cx))
             .child(body)
-            .child(self.render_footer(cx));
-
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_start()
-                .justify_center()
-                .pt(px(CARD_TOP))
-                .bg(scrim)
-                .key_context("Switcher")
-                .on_action(cx.listener(|this, _: &SwitcherAcross, window, cx| {
-                    let layout = this.switcher_layout(cx);
-                    this.switcher_step_right(&layout, true, window, cx);
-                }))
-                .on_action(cx.listener(|this, _: &SwitcherAcrossBack, window, cx| {
-                    let layout = this.switcher_layout(cx);
-                    this.switcher_step_right(&layout, false, window, cx);
-                }))
-                .on_key_down(cx.listener(Self::on_switcher_key))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        this.close_switcher(window, cx)
-                    }),
-                )
-                .child(div().occlude().child(card))
-                .into_any_element(),
-        )
+            .children(self.render_banners(&layout, cx))
+            .child(self.render_footer(cx))
+            .into_any_element()
     }
 
     fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1390,7 +1765,7 @@ impl Tty7App {
             .p(px(6.))
             .child(
                 h_flex()
-                    .id("switcher-add-host")
+                    .id("switcher-new-workspace")
                     .items_center()
                     .gap(px(8.))
                     .h(px(ROW_H))
@@ -1404,14 +1779,9 @@ impl Tty7App {
                         GUTTER,
                         Icon::new(IconName::Plus).size(px(ICON)).text_color(dim),
                     ))
-                    .child(t(L10nKey::AddSshHost))
+                    .child(t(L10nKey::AppMenuNewWorkspace))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.close_switcher(window, cx);
-                        this.open_settings_section(
-                            crate::ui::settings::SettingsSection::Ssh,
-                            window,
-                            cx,
-                        );
+                        this.switcher_to_form(None, window, cx);
                     })),
             )
             .child(
@@ -1440,155 +1810,233 @@ impl Tty7App {
             )
     }
 
-    fn render_group(
-        &self,
-        layout: &Layout,
-        g: usize,
-        sel: usize,
-        column: Column,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let group = &layout.groups[g];
-        let rows: &[usize] = layout.shown[g].as_deref().unwrap_or(&[]);
-        // The layout only lists rows for an expanded group, so a group with a
-        // collapsed or offline body comes through with none.
-        let expanded = !rows.is_empty()
-            || (group.rows.is_empty()
-                && group.link != Link::Offline
-                && !self
-                    .switcher
-                    .as_ref()
-                    .is_some_and(|sw| sw.collapsed.contains(&group.key)));
-
-        let mut block = v_flex().gap(px(1.));
-        block = block.child(self.render_group_header(
-            group,
-            expanded,
-            layout.nav.get(sel) == Some(&Nav::Host(g)) && column == Column::Left,
-            layout.nav.iter().position(|n| *n == Nav::Host(g)),
-            cx,
-        ));
-        if let Some(phase) = group.installing {
-            block = block.child(self.render_install_progress(phase, cx));
-        }
-        if group.parked && !self.parked_dismissed.contains(&group.key) && group.installing.is_none()
-        {
-            block = block.child(self.render_parked_notice(group, cx));
-        } else if let Some(error) = group.error.as_ref().filter(|_| group.installing.is_none()) {
-            let retry = GroupRef::of(group);
-            let replace = retry.clone();
-            let retry_key = group.key.clone();
-            let replace_key = group.key.clone();
-            let dismiss_key = group.key.clone();
-            let dismiss_target = group.target.clone();
-            let shown = dialect_complaint(error, &group.label).unwrap_or_else(|| error.clone());
-            let theme = cx.theme();
-            block =
-                block.child(
-                    v_flex()
-                        .gap(px(4.))
-                        .ml(px(KID_INDENT))
-                        .mr(px(4.))
-                        .mb(px(2.))
-                        .px(px(10.))
-                        .py(px(8.))
-                        .rounded(px(6.))
-                        .border_1()
-                        .border_color(theme.danger.opacity(0.4))
+    /// The machine-trouble bands between the list and the footer: install
+    /// progress, a failed connect with its retry, a parked route (#485), or a
+    /// connect still in flight. With the per-machine headers gone this is
+    /// where a machine's state gets to speak; a healthy machine says nothing
+    /// here — its state dot rides on its workspace rows.
+    fn render_banners(&self, layout: &Layout, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut out: Vec<AnyElement> = Vec::new();
+        for group in &layout.groups {
+            if group.target.is_none() {
+                continue;
+            }
+            if let Some(phase) = group.installing {
+                out.push(
+                    self.render_install_progress(&group.label, phase, cx)
+                        .into_any_element(),
+                );
+            } else if group.parked
+                && !self.parked_dismissed.contains(&group.key)
+                && !group.rows.is_empty()
+            {
+                out.push(self.render_parked_notice(group, cx).into_any_element());
+            } else if let Some(error) = group.error.clone() {
+                out.push(self.render_error_band(group, &error, cx));
+            } else if matches!(group.link, Link::Connecting | Link::Reconnecting { .. }) {
+                let theme = cx.theme();
+                out.push(
+                    h_flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .px(px(12.))
+                        .py(px(6.))
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .size(px(6.))
+                                .rounded_full()
+                                .bg(theme.warning),
+                        )
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
-                                .child(shown),
+                                .truncate()
+                                .child(t_fmt(
+                                    L10nKey::SwitcherConnectingTo,
+                                    &[("machine", &group.label)],
+                                )),
                         )
-                        .child(
-                            h_flex()
-                                .gap(px(4.))
-                                .child(
-                                    Button::new(gpui::SharedString::from(format!(
-                                        "switcher-retry:{}",
-                                        group.key
-                                    )))
-                                    .label(t(L10nKey::TryAgain))
-                                    .ghost()
-                                    .xsmall()
-                                    .on_click(cx.listener(move |this, _, _window, cx| {
-                                        this.remote_host_errors.remove(&retry_key);
-                                        if let Some(target) = retry.target.clone() {
-                                            this.connect_to_host(
-                                                HostChoice {
-                                                    target,
-                                                    label: retry.label.clone(),
-                                                    detail: String::new(),
-                                                },
+                        .into_any_element(),
+                );
+            }
+        }
+        out
+    }
+
+    fn render_error_band(&self, group: &Group, error: &str, cx: &mut Context<Self>) -> AnyElement {
+        let retry = GroupRef::of(group);
+        let replace = retry.clone();
+        let retry_key = group.key.clone();
+        let replace_key = group.key.clone();
+        let dismiss_key = group.key.clone();
+        let dismiss_target = group.target.clone();
+        // The band no longer sits under a machine header, so plain errors
+        // carry the machine's name themselves; the dialect restatement
+        // already names it.
+        let shown = dialect_complaint(error, &group.label)
+            .unwrap_or_else(|| format!("{}: {error}", group.label));
+        let theme = cx.theme();
+        v_flex()
+            .gap(px(4.))
+            .px(px(12.))
+            .py(px(8.))
+            .border_t_1()
+            .border_color(theme.danger.opacity(0.4))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(shown),
+            )
+            .child(
+                h_flex()
+                    .gap(px(4.))
+                    .child(
+                        Button::new(gpui::SharedString::from(format!(
+                            "switcher-retry:{}",
+                            group.key
+                        )))
+                        .label(t(L10nKey::TryAgain))
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                this.remote_host_errors.remove(&retry_key);
+                                if let Some(target) = retry.target.clone() {
+                                    this.connect_to_host(
+                                        HostChoice {
+                                            target,
+                                            label: retry.label.clone(),
+                                            detail: String::new(),
+                                        },
+                                        cx,
+                                    );
+                                }
+                            },
+                        )),
+                    )
+                    .when(
+                        crate::daemon::control::is_dialect_refusal(error)
+                            && replace.target.is_some(),
+                        |row| {
+                            row.child(
+                                Button::new(gpui::SharedString::from(format!(
+                                    "switcher-replace:{}",
+                                    group.key
+                                )))
+                                .label(t(L10nKey::RemoteMismatchReplaceServer))
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.remote_host_errors.remove(&replace_key);
+                                        if let Some(target) = replace.target.clone() {
+                                            this.confirm_replace_remote_server(
+                                                target,
+                                                replace.label.clone(),
+                                                window,
                                                 cx,
                                             );
                                         }
-                                    })),
-                                )
-                                .when(
-                                    crate::daemon::control::is_dialect_refusal(error)
-                                        && replace.target.is_some(),
-                                    |row| {
-                                        row.child(
-                                            Button::new(gpui::SharedString::from(format!(
-                                                "switcher-replace:{}",
-                                                group.key
-                                            )))
-                                            .label(t(L10nKey::RemoteMismatchReplaceServer))
-                                            .ghost()
-                                            .xsmall()
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.remote_host_errors.remove(&replace_key);
-                                                if let Some(target) = replace.target.clone() {
-                                                    this.confirm_replace_remote_server(
-                                                        target,
-                                                        replace.label.clone(),
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }
-                                            })),
-                                        )
                                     },
-                                )
-                                .child(
-                                    Button::new(gpui::SharedString::from(format!(
-                                        "switcher-dismiss:{}",
-                                        group.key
-                                    )))
-                                    .label(t(L10nKey::Dismiss))
-                                    .ghost()
-                                    .xsmall()
-                                    .on_click(cx.listener(move |this, _, _window, cx| {
-                                        this.remote_host_errors.remove(&dismiss_key);
-                                        // The other half of this block can come from a
-                                        // failed connect. Retire that too, but only when
-                                        // it is this host's failure — a connect to
-                                        // anywhere else is still in flight.
-                                        if let Some(ConnectFlow::Failed { choice, .. }) =
-                                            &this.connect
-                                            && Some(&choice.target) == dismiss_target.as_ref()
-                                        {
-                                            this.connect = None;
-                                        }
-                                        cx.notify();
-                                    })),
-                                ),
-                        ),
-                );
-        }
-        if !rows.is_empty() {
-            let mut kids = v_flex().gap(px(1.));
-            for r in rows {
-                let item = Nav::Row(g, *r);
-                let picked = layout.nav.get(sel) == Some(&item) && column == Column::Left;
-                let at = layout.nav.iter().position(|n| *n == item);
-                kids = kids.child(self.render_row(group, &group.rows[*r], picked, at, cx));
+                                )),
+                            )
+                        },
+                    )
+                    .child(
+                        Button::new(gpui::SharedString::from(format!(
+                            "switcher-dismiss:{}",
+                            group.key
+                        )))
+                        .label(t(L10nKey::Dismiss))
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                this.remote_host_errors.remove(&dismiss_key);
+                                // The other half of this block can come from a
+                                // failed connect. Retire that too, but only when
+                                // it is this host's failure — a connect to
+                                // anywhere else is still in flight.
+                                if let Some(ConnectFlow::Failed { choice, .. }) = &this.connect
+                                    && Some(&choice.target) == dismiss_target.as_ref()
+                                {
+                                    this.connect = None;
+                                }
+                                cx.notify();
+                            },
+                        )),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The orphan block under the local group (#596): one line per pane no
+    /// window holds — id, owner, where it runs — and the way to stop it.
+    fn render_orphan_panes(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let Some(switcher) = self.switcher.as_ref() else {
+            return v_flex();
+        };
+        let mut list = v_flex().gap(px(2.));
+        for orphan in &switcher.orphans {
+            let mut bits = vec![format!("%{}", orphan.pane_id)];
+            if let Some(owner) = &orphan.owner {
+                bits.push(owner.clone());
             }
-            block = block.child(div().pl(px(KID_INDENT)).child(kids));
+            if let Some(cwd) = &orphan.cwd {
+                bits.push(cwd.clone());
+            } else if !orphan.title.is_empty() {
+                bits.push(orphan.title.clone());
+            }
+            let pane_id = orphan.pane_id;
+            list = list.child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.foreground)
+                            .child(bits.join(" · ")),
+                    )
+                    .child(
+                        Button::new(gpui::SharedString::from(format!(
+                            "switcher-close-orphan:{pane_id}"
+                        )))
+                        .label(t(L10nKey::Close))
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                this.close_orphan_pane(pane_id, cx);
+                            },
+                        )),
+                    ),
+            );
         }
-        block.into_any_element()
+        v_flex()
+            .gap(px(4.))
+            .mx(px(4.))
+            .mt(px(6.))
+            .mb(px(2.))
+            .px(px(10.))
+            .py(px(8.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(t(L10nKey::SwitcherOrphanPanes)),
+            )
+            .child(list)
     }
 
     /// The parked group's notice (#485): no retry button — nothing it could
@@ -1602,19 +2050,19 @@ impl Tty7App {
         let entries: Vec<WorkspaceId> = group.rows.iter().map(|r| r.id).collect();
         v_flex()
             .gap(px(4.))
-            .ml(px(KID_INDENT))
-            .mr(px(4.))
-            .mb(px(2.))
-            .px(px(10.))
+            .px(px(12.))
             .py(px(8.))
-            .rounded(px(6.))
-            .border_1()
+            .border_t_1()
             .border_color(theme.border)
             .child(
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(t(L10nKey::RemoteRouteParkedHint)),
+                    .child(format!(
+                        "{} — {}",
+                        group.label,
+                        t(L10nKey::RemoteRouteParkedHint)
+                    )),
             )
             .child(
                 h_flex()
@@ -1671,6 +2119,7 @@ impl Tty7App {
 
     fn render_install_progress(
         &self,
+        label: &str,
         phase: InstallPhase,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -1697,16 +2146,15 @@ impl Tty7App {
 
         v_flex()
             .gap(px(6.))
-            .ml(px(KID_INDENT))
-            .mr(px(4.))
-            .mb(px(2.))
-            .px(px(10.))
+            .px(px(12.))
             .py(px(8.))
+            .border_t_1()
+            .border_color(theme.border)
             .child(
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(caption),
+                    .child(format!("{label} — {caption}")),
             )
             .child(
                 div()
@@ -1723,217 +2171,6 @@ impl Tty7App {
                     ),
             )
     }
-
-    fn render_group_header(
-        &self,
-        group: &Group,
-        expanded: bool,
-        picked: bool,
-        nav_at: Option<usize>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme();
-        let (fg, muted, dim) = (
-            theme.foreground,
-            theme.muted_foreground,
-            theme.muted_foreground.opacity(0.7),
-        );
-        let hover = hover_fill(cx);
-        let gref = GroupRef::of(group);
-        let menu_ref = gref.clone();
-        let ctx_ref = gref.clone();
-        let app = cx.entity().downgrade();
-        let app2 = app.clone();
-
-        let glyph = match group.target {
-            None => "icons/machine-local.svg",
-            Some(_) => "icons/machine-remote.svg",
-        };
-
-        let (dot, word): (Option<gpui::Hsla>, Option<&'static str>) = match group.link {
-            Link::Local => (None, None),
-            Link::Connected => (Some(gpui::rgb(crate::ui::tab_strip::LIVE_DOT).into()), None),
-            Link::Connecting if matches!(group.installing, Some(InstallPhase::Restarting)) => (
-                Some(theme.warning),
-                Some(t(L10nKey::SwitcherStatusRestarting)),
-            ),
-            Link::Connecting if group.installing.is_some() => (
-                Some(theme.warning),
-                Some(t(L10nKey::SwitcherStatusInstalling)),
-            ),
-            Link::Connecting => (
-                Some(theme.warning),
-                Some(t(L10nKey::SwitcherStatusConnecting)),
-            ),
-            Link::Reconnecting { .. } => (
-                Some(theme.warning),
-                Some(t(L10nKey::SwitcherStatusReconnecting)),
-            ),
-            Link::Failed => (
-                Some(theme.danger),
-                Some(t(L10nKey::SwitcherStatusConnectFailed)),
-            ),
-            Link::Offline => (
-                Some(gpui::rgb(crate::ui::tab_strip::UNKNOWN_DOT).into()),
-                Some(t(L10nKey::SwitcherStatusNotConnected)),
-            ),
-        };
-        // A takeover leaves the link untouched, so a machine whose workspace
-        // someone else is holding would otherwise draw as plain Connected.
-        let (dot, word) = match group.preempted && matches!(group.link, Link::Connected) {
-            true => (
-                Some(theme.warning),
-                Some(t(L10nKey::SwitcherStatusTakenOver)),
-            ),
-            false => (dot, word),
-        };
-        let word_color = match group.link {
-            _ if group.preempted => theme.warning,
-            Link::Connecting | Link::Reconnecting { .. } => theme.warning,
-            Link::Failed => theme.danger,
-            _ => muted,
-        };
-
-        // Two lines rather than one, like the workspace rows below: the name
-        // is the main line, and the endpoint is the line under it. The
-        // endpoint keeps its natural width and the link status word — the
-        // trailing piece — truncates into whatever room is left, so neither
-        // the name nor the address can be crowded off the row.
-        let head = h_flex()
-            .id(gpui::SharedString::from(format!(
-                "switcher-host:{}",
-                group.key
-            )))
-            .items_center()
-            .gap(px(8.))
-            .min_h(px(HOST_H))
-            .py(px(4.))
-            .px(px(ROW_PAD))
-            .rounded(px(6.))
-            .overflow_hidden()
-            .cursor_pointer()
-            .when(picked, |r| r.bg(gpui::rgb(rungs(cx).pressed)))
-            .anchor_scroll(self.switcher_anchor(Column::Left, picked))
-            .hover(move |r| r.bg(hover))
-            .child(glyph_col(
-                GUTTER,
-                Icon::empty()
-                    .path(glyph)
-                    .size(px(ICON))
-                    .text_color(if group.link == Link::Local { muted } else { fg }),
-            ))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(1.))
-                    .child(
-                        div()
-                            .truncate()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(fg)
-                            .child(group.label.clone()),
-                    )
-                    .when(
-                        !group.endpoint.is_empty() || dot.is_some() || word.is_some(),
-                        |col| {
-                            col.child(
-                                h_flex()
-                                    .items_center()
-                                    .gap(px(5.))
-                                    .child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .max_w(gpui::relative(1.0))
-                                            .truncate()
-                                            .text_xs()
-                                            .text_color(dim)
-                                            .child(group.endpoint.clone()),
-                                    )
-                                    .children(dot.map(|c| {
-                                        div().flex_shrink_0().size(px(6.)).rounded_full().bg(c)
-                                    }))
-                                    .children(word.map(|w| {
-                                        div()
-                                            .flex_shrink_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_xs()
-                                            .text_color(word_color)
-                                            .child(w)
-                                    })),
-                            )
-                        },
-                    ),
-            )
-            .when(!group.rows.is_empty(), |head| {
-                head.child(
-                    div()
-                        .flex_shrink_0()
-                        .text_xs()
-                        .text_color(dim)
-                        .child(format!("{}", group.rows.len())),
-                )
-            })
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        crate::ui::tab_strip::hit_target(
-                            Button::new(gpui::SharedString::from(format!(
-                                "switcher-host-more:{}",
-                                group.key
-                            )))
-                            .icon(IconName::Ellipsis)
-                            .ghost()
-                            .xsmall(),
-                        )
-                        .tooltip(t(L10nKey::TabTooltipMore))
-                        .dropdown_menu(move |menu, _window, _cx| {
-                            group_menu(menu, &menu_ref, app.clone())
-                        }),
-                    ),
-            )
-            .child(
-                Icon::new(if expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .size(px(ICON))
-                .text_color(dim),
-            )
-            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                if let Some(at) = nav_at {
-                    this.switcher_point_at(at, cx);
-                }
-                this.switcher_toggle_host(&gref, cx)
-            }));
-
-        // While Ctrl is held for the switch gesture, macOS turns every left
-        // click into a right click. Keeping the context menu attached would put
-        // it in the way of simply picking something, so it goes away and the
-        // right-button press becomes the pick.
-        match self.switcher.as_ref().is_some_and(|sw| sw.hold.is_some()) {
-            true => head
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
-                        cx.stop_propagation();
-                        if let Some(at) = nav_at {
-                            this.switcher_point_at(at, cx);
-                        }
-                    }),
-                )
-                .into_any_element(),
-            false => head
-                .context_menu(move |menu, _window, _cx| group_menu(menu, &ctx_ref, app2.clone()))
-                .into_any_element(),
-        }
-    }
-
     fn render_row(
         &self,
         group: &Group,
@@ -1971,10 +2208,16 @@ impl Tty7App {
         let click_ref = rref.clone();
         let menu_ref = rref.clone();
         let ctx_ref = rref.clone();
+        let gref = GroupRef::of(group);
+        let menu_host = gref.clone();
+        let ctx_host = gref;
         let app = cx.entity().downgrade();
         let app2 = app.clone();
         let key = row.id.element_key() as usize;
         let holding = self.switcher.as_ref().is_some_and(|sw| sw.hold.is_some());
+        // A machine with no link cannot show this row's panes right now; the
+        // row stays, muted, and opening it is what asks for the connection.
+        let unlit = group.target.is_some() && matches!(group.link, Link::Offline | Link::Failed);
 
         // "Open" is what this workspace would say either way, and it is the
         // wrong word for one another client is driving.
@@ -1990,10 +2233,24 @@ impl Tty7App {
 
         // Two lines rather than one: the left column is only LEFT_W wide, and a
         // workspace name plus path plus badge plus timestamp on one row pushes
-        // the trailing pieces straight out over the divider.
-        let under = match row.path.is_empty() {
+        // the trailing pieces straight out over the divider. The second line
+        // leads with the machine the workspace lives on — the flat list's only
+        // grouping — with its link state as the dot's color.
+        let when_path = match row.path.is_empty() {
             true => row.when.clone(),
             false => format!("{} · {}", row.path, row.when),
+        };
+        let host_dot: Option<gpui::Hsla> = match group.link {
+            Link::Local => None,
+            Link::Connected if group.preempted => Some(warn),
+            Link::Connected => Some(gpui::rgb(crate::ui::tab_strip::LIVE_DOT).into()),
+            Link::Connecting | Link::Reconnecting { .. } => Some(warn),
+            Link::Failed => Some(theme.danger),
+            Link::Offline => Some(gpui::rgb(crate::ui::tab_strip::UNKNOWN_DOT).into()),
+        };
+        let host_label = match group.target.is_some() {
+            true => group.label.clone(),
+            false => t(L10nKey::SwitcherLocalHost).to_string(),
         };
 
         let line = h_flex()
@@ -2023,12 +2280,46 @@ impl Tty7App {
                             .truncate()
                             .text_sm()
                             .when(row.current, |d| d.font_weight(gpui::FontWeight::MEDIUM))
-                            .text_color(fg)
+                            .text_color(match unlit {
+                                true => muted,
+                                false => fg,
+                            })
                             .child(row.name.clone()),
                     )
-                    .when(!under.is_empty(), |col| {
-                        col.child(div().truncate().text_xs().text_color(dim).child(under))
-                    }),
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(dim)
+                            .child(match host_dot {
+                                Some(color) => div()
+                                    .flex_shrink_0()
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(color)
+                                    .into_any_element(),
+                                None => gpui::svg()
+                                    .path("icons/machine-local.svg")
+                                    .flex_shrink_0()
+                                    .size(px(10.))
+                                    .text_color(dim)
+                                    .into_any_element(),
+                            })
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .max_w(px(120.))
+                                    .truncate()
+                                    .text_color(muted)
+                                    .child(host_label),
+                            )
+                            .when(!when_path.is_empty(), |line| {
+                                line.child(div().flex_shrink_0().child("·"))
+                                    .child(div().min_w_0().truncate().child(when_path))
+                            }),
+                    ),
             )
             .children(badge.map(|(label, here)| {
                 div()
@@ -2060,7 +2351,7 @@ impl Tty7App {
                         )
                         .tooltip(t(L10nKey::TabTooltipMore))
                         .dropdown_menu(move |menu, _window, _cx| {
-                            row_menu(menu, &menu_ref, app.clone())
+                            row_menu(menu, &menu_ref, &menu_host, app.clone())
                         }),
                     ),
             )
@@ -2076,9 +2367,9 @@ impl Tty7App {
                 }
             }));
 
-        // See `render_group_header`: a held Ctrl makes every click a right
-        // click on macOS. Drop the menu and take the right-button press as the
-        // pick instead, or clicking during the gesture does nothing at all.
+        // A held Ctrl makes every click a right click on macOS. Drop the menu
+        // and take the right-button press as the pick instead, or clicking
+        // during the gesture does nothing at all.
         match holding {
             true => line
                 .on_mouse_down(
@@ -2092,131 +2383,286 @@ impl Tty7App {
                 )
                 .into_any_element(),
             false => line
-                .context_menu(move |menu, _window, _cx| row_menu(menu, &ctx_ref, app2.clone()))
+                .context_menu(move |menu, _window, _cx| {
+                    row_menu(menu, &ctx_ref, &ctx_host, app2.clone())
+                })
                 .into_any_element(),
         }
     }
 
-    fn render_other_hosts(
+    /// The "New Workspace" form: a name, and one combobox row that folds
+    /// however many machines are configured into a searchable dropdown.
+    fn render_create_card(
         &self,
-        layout: &Layout,
-        sel: usize,
-        column: Column,
+        form: &CreateForm,
+        window: &Window,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if layout.other_hits.is_empty() {
-            return None;
-        }
-        let (others, expanded) = (&layout.others, layout.others_expanded);
-        let at = |item: Nav| layout.nav.get(sel) == Some(&item) && column == Column::Left;
-
+    ) -> AnyElement {
         let theme = cx.theme();
-        let (muted, dim) = (theme.muted_foreground, theme.muted_foreground.opacity(0.7));
-        let hover = hover_fill(cx);
-        let picked = gpui::rgb(rungs(cx).pressed);
-
-        let mut block = v_flex().gap(px(1.)).child(
-            h_flex()
-                .id("switcher-others")
-                .items_center()
-                .gap(px(8.))
-                .h(px(HOST_H))
-                .px(px(ROW_PAD))
-                .rounded(px(6.))
-                .cursor_pointer()
-                .when(at(Nav::OthersHeader), |r| r.bg(picked))
-                .anchor_scroll(self.switcher_anchor(Column::Left, at(Nav::OthersHeader)))
-                .hover(move |r| r.bg(hover))
-                .child(glyph_col(
-                    GUTTER,
-                    Icon::new(IconName::Globe).size(px(ICON)).text_color(dim),
-                ))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(t(L10nKey::OtherMachines)),
-                )
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(dim)
-                        .child(format!("{}", others.len())),
-                )
-                .child(
-                    Icon::new(if expanded {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .size(px(ICON))
-                    .text_color(dim),
-                )
-                .on_click(cx.listener(|this, _, _window, cx| {
-                    if let Some(sw) = this.switcher.as_mut() {
-                        sw.show_others = !sw.show_others;
-                    }
-                    cx.notify();
-                })),
+        let (border, card_bg) = (theme.border, theme.popover);
+        let (fg, muted, dim) = (
+            theme.foreground,
+            theme.muted_foreground,
+            theme.muted_foreground.opacity(0.7),
         );
+        let sf = rungs(cx);
+        let (hover, picked_bg) = (gpui::rgb(sf.hover), gpui::rgb(sf.pressed));
+        let viewport = window.viewport_size();
+        let card_w = FORM_W
+            .min(viewport.width.as_f32() - 2. * CARD_MARGIN)
+            .max(320.);
 
-        if expanded {
-            let mut kids = v_flex().gap(px(1.));
-            for i in &layout.other_hits {
-                let (i, host) = (*i, &others[*i]);
-                let choice = host.clone();
-                kids = kids.child(
-                    h_flex()
-                        .id(("switcher-other", i))
-                        .items_center()
-                        .gap(px(8.))
-                        .min_h(px(ROW_H))
-                        .py(px(4.))
-                        .px(px(ROW_PAD))
-                        .rounded(px(6.))
-                        .overflow_hidden()
-                        .cursor_pointer()
-                        .when(at(Nav::Other(i)), |r| r.bg(picked))
-                        .anchor_scroll(self.switcher_anchor(Column::Left, at(Nav::Other(i))))
-                        .hover(move |r| r.bg(hover))
-                        .child(glyph_col(
-                            ROW_AVATAR,
-                            Icon::empty()
-                                .path("icons/machine-remote.svg")
-                                .size(px(ICON))
-                                .text_color(dim),
-                        ))
-                        // Same two-line shape as the machine headers: the name
-                        // on top, the address on the line under it.
+        let chosen_label = form
+            .chosen
+            .as_ref()
+            .map(|h| h.label.clone())
+            .unwrap_or_else(|| t(L10nKey::SwitcherThisComputer).to_string());
+        let chosen_local = form.chosen.is_none();
+        let chosen_dot: Option<gpui::Hsla> = form.chosen.as_ref().map(|h| {
+            match remote_connect::HostLinks::get(cx, h.target.host_id()).is_some() {
+                true => gpui::rgb(crate::ui::tab_strip::LIVE_DOT).into(),
+                false => gpui::rgb(crate::ui::tab_strip::UNKNOWN_DOT).into(),
+            }
+        });
+
+        let header = h_flex()
+            .items_center()
+            .gap(px(6.))
+            .h(px(42.))
+            .px(px(8.))
+            .border_b_1()
+            .border_color(border)
+            .child(
+                crate::ui::tab_strip::hit_target(
+                    Button::new("switcher-form-back")
+                        .icon(IconName::ChevronLeft)
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.switcher_back_to_list(window, cx);
+                        })),
+                )
+                .tooltip(t(L10nKey::SwitcherFormBack)),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(fg)
+                    .child(t(L10nKey::AppMenuNewWorkspace)),
+            );
+
+        let label_col = |text: &'static str| {
+            div()
+                .w(px(52.))
+                .flex_shrink_0()
+                .text_sm()
+                .text_color(muted)
+                .child(text)
+        };
+        let field = |inner: gpui::Div| {
+            inner
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap(px(6.))
+                .px(px(8.))
+                .h(px(30.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(border)
+        };
+
+        let name_row = h_flex()
+            .items_center()
+            .gap(px(8.))
+            .child(label_col(t(L10nKey::SwitcherFormName)))
+            .child(field(h_flex()).child(Input::new(&form.name).appearance(false).small()));
+
+        // The trigger: the picked host while folded, the filter box while
+        // open. One row either way, so the form does not jump.
+        let host_glyph = |local: bool, dot: Option<gpui::Hsla>| match dot {
+            Some(color) => div()
+                .flex_shrink_0()
+                .size(px(6.))
+                .rounded_full()
+                .bg(color)
+                .into_any_element(),
+            None if local => gpui::svg()
+                .path("icons/machine-local.svg")
+                .flex_shrink_0()
+                .size(px(12.))
+                .text_color(muted)
+                .into_any_element(),
+            None => gpui::svg()
+                .path("icons/machine-remote.svg")
+                .flex_shrink_0()
+                .size(px(12.))
+                .text_color(muted)
+                .into_any_element(),
+        };
+        let trigger: AnyElement = match form.open {
+            false => field(h_flex())
+                .id("switcher-form-host")
+                .cursor_pointer()
+                .hover(move |r| r.bg(hover))
+                .child(host_glyph(chosen_local, chosen_dot))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .text_color(fg)
+                        .child(chosen_label),
+                )
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(ICON))
+                        .text_color(dim),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.switcher_form_open_hosts(window, cx);
+                }))
+                .into_any_element(),
+            true => field(h_flex())
+                .child(Icon::new(IconName::Search).size(px(14.)).text_color(muted))
+                .child(Input::new(&form.host).appearance(false).small())
+                .into_any_element(),
+        };
+
+        let mut host_block = v_flex().flex_1().min_w_0().gap(px(4.)).child(trigger);
+        if form.open {
+            let items = self.form_items(form, cx);
+            let mut list = v_flex().gap(px(1.)).p(px(4.));
+            for (i, item) in items.iter().enumerate() {
+                let picked = i == form.sel;
+                let base = h_flex()
+                    .id(("switcher-form-item", i))
+                    .items_center()
+                    .gap(px(8.))
+                    .min_h(px(ROW_H))
+                    .py(px(4.))
+                    .px(px(ROW_PAD))
+                    .rounded(px(6.))
+                    .overflow_hidden()
+                    .cursor_pointer()
+                    .when(picked, |r| r.bg(picked_bg))
+                    .hover(move |r| r.bg(hover))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.switcher_form_pick(i, window, cx);
+                    }));
+                let line = match item {
+                    HostItem::Local => base
+                        .child(host_glyph(true, None))
                         .child(
-                            v_flex()
+                            div()
                                 .flex_1()
                                 .min_w_0()
-                                .gap(px(1.))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_sm()
-                                        .text_color(muted)
-                                        .child(host.label.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(dim)
-                                        .child(host.detail.clone()),
-                                ),
+                                .truncate()
+                                .text_sm()
+                                .text_color(fg)
+                                .child(t(L10nKey::SwitcherThisComputer)),
                         )
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.connect_to_host(choice.clone(), cx)
-                        })),
-                );
+                        .into_any_element(),
+                    HostItem::Host(host) => {
+                        let lit =
+                            remote_connect::HostLinks::get(cx, host.target.host_id()).is_some();
+                        base.child(host_glyph(
+                            false,
+                            Some(match lit {
+                                true => gpui::rgb(crate::ui::tab_strip::LIVE_DOT).into(),
+                                false => gpui::rgb(crate::ui::tab_strip::UNKNOWN_DOT).into(),
+                            }),
+                        ))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .max_w(px(180.))
+                                .truncate()
+                                .text_sm()
+                                .text_color(fg)
+                                .child(host.label.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(dim)
+                                .child(host.detail.clone()),
+                        )
+                        .into_any_element()
+                    }
+                    HostItem::AddHost => base
+                        .border_t_1()
+                        .border_color(border)
+                        .rounded_none()
+                        .child(Icon::new(IconName::Plus).size(px(14.)).text_color(dim))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(t(L10nKey::AddSshHost)),
+                        )
+                        .into_any_element(),
+                };
+                list = list.child(line);
             }
-            block = block.child(div().pl(px(KID_INDENT)).child(kids));
+            host_block = host_block.child(
+                div().rounded(px(6.)).border_1().border_color(border).child(
+                    div()
+                        .id("switcher-form-hosts")
+                        .max_h(px(FORM_LIST_H))
+                        .overflow_y_scroll()
+                        .child(list),
+                ),
+            );
         }
-        Some(block.into_any_element())
+
+        let host_row = h_flex()
+            .items_start()
+            .gap(px(8.))
+            .child(
+                label_col(t(L10nKey::SwitcherFormHost))
+                    .h(px(30.))
+                    .flex()
+                    .items_center(),
+            )
+            .child(host_block);
+
+        let footer = h_flex()
+            .items_center()
+            .px(px(12.))
+            .py(px(8.))
+            .border_t_1()
+            .border_color(border)
+            .text_xs()
+            .text_color(dim)
+            .child(match form.open {
+                true => t(L10nKey::SwitcherFormPickHint),
+                false => t(L10nKey::SwitcherFormCreateHint),
+            });
+
+        v_flex()
+            .w(px(card_w))
+            .bg(card_bg)
+            .border_1()
+            .border_color(border)
+            .rounded(px(10.))
+            .shadow_xl()
+            .overflow_hidden()
+            .child(header)
+            .child(
+                v_flex()
+                    .p(px(12.))
+                    .gap(px(10.))
+                    .child(name_row)
+                    .child(host_row),
+            )
+            .child(footer)
+            .into_any_element()
     }
 
     /// The right-hand column: the tabs of whichever workspace the left column
@@ -2248,7 +2694,10 @@ impl Tty7App {
             return note(t(L10nKey::SwitcherPickAWorkspace).to_string());
         };
         if row.tabs.is_empty() {
-            return note(match row.adopt.is_some() {
+            // A remote workspace this client has never opened has no tab
+            // mirror to read — "no tabs" would be a claim nobody checked.
+            let unseen = row.adopt.is_some() || (row.remote_id.is_some() && !row.open);
+            return note(match unseen {
                 true => t(L10nKey::SwitcherTabsAfterOpening).to_string(),
                 false => t(L10nKey::SwitcherNoTabs).to_string(),
             });
@@ -2471,7 +2920,11 @@ impl TabRow {
 /// carries a copy of that title (`PaneRecord::osc_title`), which is what makes
 /// the two columns agree; `PaneRecord::title` is the *foreground process name*
 /// ("zsh") and only stands in when there is no title at all.
-fn tab_view_label(view: &crate::ui::machine_mirror::TabView, index: usize) -> String {
+fn tab_view_label(
+    view: &crate::ui::machine_mirror::TabView,
+    index: usize,
+    home: Option<&std::path::Path>,
+) -> String {
     let unnamed = || {
         t_fmt(
             L10nKey::TabUnnamedShell,
@@ -2480,7 +2933,7 @@ fn tab_view_label(view: &crate::ui::machine_mirror::TabView, index: usize) -> St
     };
     // A path can shorten away to nothing (a bare "user@host:"), and the process
     // name is still worth more than a number.
-    let shortened = |raw: &str| match crate::ui::tab_strip::short_title(raw) {
+    let shortened = |raw: &str| match crate::ui::tab_strip::short_title(raw, home) {
         shortened if !shortened.trim().is_empty() => shortened,
         _ => match view.title.trim() {
             "" => unnamed(),
@@ -2516,6 +2969,7 @@ impl Group {
                 name: r.name.clone(),
                 path: String::new(),
                 when: crate::ui::home::relative_time(now, r.last_active),
+                last_active: r.last_active,
                 live: Liveness::Stopped,
                 open: false,
                 current: false,
@@ -2532,20 +2986,16 @@ impl Group {
 
 #[derive(Clone)]
 struct GroupRef {
-    key: String,
     label: String,
     target: Option<RemoteTarget>,
-    home: Option<PathBuf>,
     link: Link,
 }
 
 impl GroupRef {
     fn of(g: &Group) -> Self {
         Self {
-            key: g.key.clone(),
             label: g.label.clone(),
             target: g.target.clone(),
-            home: g.home.clone(),
             link: g.link,
         }
     }
@@ -2571,109 +3021,153 @@ impl RowRef {
     }
 }
 
-/// Whether a machine's menu would open with every verb greyed out.
-///
-/// New Workspace needs the machine's home directory, which only a link that
-/// has come up once supplies; Disconnect needs a live link; Restart Server is
-/// offered to SSH alone. A WSL or stdio machine that has never connected fails
-/// all three, and the menu opened with every row greyed and nothing to say for
-/// itself. One line about the link beats three dead verbs.
-fn group_menu_is_empty_handed(group: &GroupRef) -> bool {
-    let Some(target) = group.target.as_ref() else {
-        // A local machine can always take a new workspace.
-        return false;
-    };
-    group.home.is_none() && !link_is_engaged(group.link) && !target.is_ssh()
-}
-
-fn group_menu(
-    menu: gpui_component::menu::PopupMenu,
-    group: &GroupRef,
-    app: gpui::WeakEntity<Tty7App>,
-) -> gpui_component::menu::PopupMenu {
-    let (a1, a2, a3) = (app.clone(), app.clone(), app);
-    let gref = group.clone();
-    let can_create = group.target.is_none() || group.home.is_some();
-    if group_menu_is_empty_handed(group) {
-        return menu.item(PopupMenuItem::label(t(L10nKey::SwitcherConnectToUse)));
+/// What the machine menu's host row says, or `None` for a machine that has no
+/// SSH host behind it at all — WSL and the local stdio server are configured
+/// nowhere this form could edit.
+fn host_form_label(target: &RemoteTarget) -> Option<&'static str> {
+    match target {
+        RemoteTarget::Profile { .. } => Some(t(L10nKey::SwitcherEditHost)),
+        RemoteTarget::Alias { .. } | RemoteTarget::Direct { .. } => {
+            Some(t(L10nKey::SwitcherSaveAsHost))
+        }
+        RemoteTarget::Wsl { .. } | RemoteTarget::LocalStdio { .. } => None,
     }
-    let menu = menu.item(
-        PopupMenuItem::new(t(L10nKey::AppMenuNewWorkspace))
-            .disabled(!can_create)
-            .on_click(move |_, window, cx| {
-                let _ = a1.update(cx, |this, cx| this.switcher_new(&gref, window, cx));
-            }),
-    );
-    let Some(target) = group.target.clone() else {
-        return menu;
-    };
-    let connected = link_is_engaged(group.link);
-    let restartable = target.hosts_our_server();
-    let (label, for_restart) = (group.label.clone(), target.clone());
-    let menu = menu.separator().item(
-        PopupMenuItem::new(t(L10nKey::SwitcherDisconnect))
-            .disabled(!connected)
-            .on_click(move |_, _window, cx| {
-                let _ = a2.update(cx, |this, cx| this.switcher_disconnect(&target, cx));
-            }),
-    );
-    if !restartable {
-        return menu;
-    }
-    menu.item(
-        PopupMenuItem::new(t(L10nKey::AppMenuRestartServer)).on_click(move |_, window, cx| {
-            let _ = a3.update(cx, |this, cx| {
-                this.confirm_restart_remote_server(for_restart.clone(), label.clone(), window, cx);
-            });
-        }),
-    )
 }
 
 fn row_menu(
     menu: gpui_component::menu::PopupMenu,
     row: &RowRef,
+    host: &GroupRef,
     app: gpui::WeakEntity<Tty7App>,
 ) -> gpui_component::menu::PopupMenu {
-    let (a1, a2, a3, a4) = (app.clone(), app.clone(), app.clone(), app);
+    let (a1, a2, a3, a4) = (app.clone(), app.clone(), app.clone(), app.clone());
     let (id, adopt) = (row.id, row.adopt.is_some());
     let stoppable = row.live;
-    // Every verb below addresses a workspace by its local id, and a remote
-    // this client has never adopted has none yet. That greyed all four out at
-    // once: the menu opened with nothing to press and no word about why, which
-    // reads as broken rather than as not-yet. Say what would make them work,
-    // the way the tab pane already says it for the same rows.
-    if adopt {
-        return menu.item(PopupMenuItem::label(t(L10nKey::SwitcherOpenToManage)));
-    }
-    menu.item(
-        PopupMenuItem::new(t(L10nKey::SwitcherRename)).on_click(move |_, window, cx| {
-            let _ = a1.update(cx, |this, cx| this.switcher_rename(id, window, cx));
-        }),
-    )
-    .item(
-        PopupMenuItem::new(t(L10nKey::SwitcherOpenInNewWindow)).on_click(move |_, window, cx| {
-            let _ = a2.update(cx, |this, cx| {
-                this.close_switcher(window, cx);
-                crate::ui::windows::open(cx, Some(id));
+    // Every workspace verb addresses the row by its local id, and a remote
+    // this client has never adopted has none yet. That greyed them all out at
+    // once, which reads as broken rather than as not-yet. Say what would make
+    // them work, the way the tab pane already says it for the same rows.
+    let menu = match adopt {
+        true => menu.item(PopupMenuItem::label(t(L10nKey::SwitcherOpenToManage))),
+        false => menu
+            .item(
+                PopupMenuItem::new(t(L10nKey::SwitcherRename)).on_click(move |_, window, cx| {
+                    let _ = a1.update(cx, |this, cx| this.switcher_rename(id, window, cx));
+                }),
+            )
+            .item(
+                PopupMenuItem::new(t(L10nKey::SwitcherOpenInNewWindow)).on_click(
+                    move |_, window, cx| {
+                        let _ = a2.update(cx, |this, cx| {
+                            this.close_switcher(window, cx);
+                            crate::ui::windows::open(cx, Some(id));
+                        });
+                    },
+                ),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new(t(L10nKey::AppMenuStopWorkspace))
+                    .disabled(!stoppable)
+                    .on_click(move |_, window, cx| {
+                        let _ = a3.update(cx, |this, cx| {
+                            this.close_switcher(window, cx);
+                            this.stop_workspace(id, window, cx);
+                        });
+                    }),
+            )
+            .item(
+                PopupMenuItem::new(t(L10nKey::AppMenuDeleteWorkspace)).on_click(
+                    move |_, window, cx| {
+                        let _ = a4.update(cx, |this, cx| {
+                            this.close_switcher(window, cx);
+                            this.delete_workspace(id, window, cx);
+                        });
+                    },
+                ),
+            ),
+    };
+    host_menu(menu, host, app)
+}
+
+/// The machine verbs that used to live on the group headers, now appended
+/// under the machine's own name to every one of its rows. Local rows carry
+/// none — the footer's New Workspace covers this computer.
+fn host_menu(
+    menu: gpui_component::menu::PopupMenu,
+    host: &GroupRef,
+    app: gpui::WeakEntity<Tty7App>,
+) -> gpui_component::menu::PopupMenu {
+    let Some(target) = host.target.clone() else {
+        return menu;
+    };
+    let (a1, a2, a3, a4) = (app.clone(), app.clone(), app.clone(), app);
+    let menu = menu
+        .separator()
+        .item(PopupMenuItem::label(host.label.clone()));
+    let engaged = link_is_engaged(host.link);
+    let create_choice = HostChoice {
+        target: target.clone(),
+        label: host.label.clone(),
+        detail: String::new(),
+    };
+    let menu = menu.item(
+        PopupMenuItem::new(t(L10nKey::AppMenuNewWorkspace)).on_click(move |_, window, cx| {
+            let _ = a1.update(cx, |this, cx| {
+                this.switcher_to_form(Some(create_choice.clone()), window, cx);
             });
         }),
-    )
-    .separator()
-    .item(
-        PopupMenuItem::new(t(L10nKey::AppMenuStopWorkspace))
-            .disabled(!stoppable)
-            .on_click(move |_, window, cx| {
-                let _ = a3.update(cx, |this, cx| {
+    );
+    // The host as it is configured, reachable from the one place it is on
+    // screen. A machine dialled by address has no profile yet, so the same
+    // row offers to make one instead (#438).
+    let menu = match host_form_label(&target) {
+        Some(label) => {
+            let for_edit = target.clone();
+            menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                let for_edit = for_edit.clone();
+                let _ = a4.update(cx, |this, cx| {
                     this.close_switcher(window, cx);
-                    this.stop_workspace(id, window, cx);
+                    this.edit_ssh_host_of_target(&for_edit, window, cx);
                 });
-            }),
-    )
-    .item(
-        PopupMenuItem::new(t(L10nKey::AppMenuDeleteWorkspace)).on_click(move |_, window, cx| {
-            let _ = a4.update(cx, |this, cx| {
-                this.close_switcher(window, cx);
-                this.delete_workspace(id, window, cx);
+            }))
+        }
+        None => menu,
+    };
+    let menu = match engaged {
+        true => {
+            let for_disconnect = target.clone();
+            menu.item(PopupMenuItem::new(t(L10nKey::SwitcherDisconnect)).on_click(
+                move |_, _window, cx| {
+                    let _ = a2.update(cx, |this, cx| this.switcher_disconnect(&for_disconnect, cx));
+                },
+            ))
+        }
+        false => {
+            let connect_choice = HostChoice {
+                target: target.clone(),
+                label: host.label.clone(),
+                detail: String::new(),
+            };
+            menu.item(
+                PopupMenuItem::new(t(L10nKey::Connect))
+                    .disabled(matches!(host.link, Link::Connecting))
+                    .on_click(move |_, _window, cx| {
+                        let _ = a2.update(cx, |this, cx| {
+                            this.connect_to_host(connect_choice.clone(), cx)
+                        });
+                    }),
+            )
+        }
+    };
+    if !target.hosts_our_server() {
+        return menu;
+    }
+    let (label, for_restart) = (host.label.clone(), target);
+    menu.item(
+        PopupMenuItem::new(t(L10nKey::AppMenuRestartServer)).on_click(move |_, window, cx| {
+            let _ = a3.update(cx, |this, cx| {
+                this.confirm_restart_remote_server(for_restart.clone(), label.clone(), window, cx);
             });
         }),
     )
@@ -2764,70 +3258,44 @@ fn glyph_col(w: f32, child: impl IntoElement) -> impl IntoElement {
 mod tests {
     use super::*;
 
-    fn group_ref(target: Option<RemoteTarget>, home: Option<&str>, link: Link) -> GroupRef {
-        GroupRef {
-            key: "k".into(),
-            label: "l".into(),
-            target,
-            home: home.map(PathBuf::from),
-            link,
-        }
-    }
-
-    /// A menu that opens with every row greyed and no word about why reads as
-    /// broken rather than as not-yet, so the one state that reaches it has to
-    /// stay pinned as the verbs and their conditions move around.
+    /// A wrong hostname or a stale password used to be fixable only by
+    /// finding the same machine again in Settings (#438). The machine is on
+    /// screen here, so its host row is too — worded for what the row can
+    /// actually do, since a machine reached by address has no profile to open.
     #[test]
-    fn only_an_unconnected_non_ssh_machine_has_nothing_to_offer() {
-        let wsl = || {
-            Some(RemoteTarget::Wsl {
-                distro: "Ubuntu".into(),
-            })
-        };
-        let ssh = || RemoteTarget::direct("me", "host", 22);
-
-        // The case: never connected, so no home, and not SSH, so no restart.
-        assert!(group_menu_is_empty_handed(&group_ref(
-            wsl(),
+    fn every_ssh_machine_offers_its_host_form_and_nothing_else_does() {
+        crate::ui::i18n::set_locale("en");
+        assert_eq!(
+            host_form_label(&RemoteTarget::Profile {
+                id: uuid::Uuid::new_v4()
+            }),
+            Some("Edit Host…")
+        );
+        assert_eq!(
+            host_form_label(&RemoteTarget::Alias {
+                alias: "prod".into()
+            }),
+            Some("Save as SSH Host…"),
+            "an alias lives in ~/.ssh/config, which this form does not write"
+        );
+        assert_eq!(
+            host_form_label(&RemoteTarget::direct("me", "10.0.0.5", 22)),
+            Some("Save as SSH Host…")
+        );
+        assert_eq!(
+            host_form_label(&RemoteTarget::Wsl {
+                distro: "Ubuntu".into()
+            }),
             None,
-            Link::Offline
-        )));
-        assert!(group_menu_is_empty_handed(&group_ref(
-            wsl(),
-            None,
-            Link::Failed
-        )));
-
-        // A home from an earlier link still allows a new workspace.
-        assert!(!group_menu_is_empty_handed(&group_ref(
-            wsl(),
-            Some("/home/me"),
-            Link::Offline
-        )));
-        // A live link still allows Disconnect.
-        assert!(!group_menu_is_empty_handed(&group_ref(
-            wsl(),
-            None,
-            Link::Connected
-        )));
-        // SSH always keeps Restart Server.
-        assert!(!group_menu_is_empty_handed(&group_ref(
-            Some(ssh()),
-            None,
-            Link::Offline
-        )));
-        // This machine is never short of verbs.
-        assert!(!group_menu_is_empty_handed(&group_ref(
-            None,
-            None,
-            Link::Local
-        )));
-        // A machine the supervisor is retrying still has a retry to call off.
-        assert!(!group_menu_is_empty_handed(&group_ref(
-            wsl(),
-            None,
-            Link::Reconnecting { attempt: 2 }
-        )));
+            "a WSL distro is configured nowhere this form could reach"
+        );
+        assert_eq!(
+            host_form_label(&RemoteTarget::LocalStdio {
+                program: "tty7-server".into(),
+                args: Vec::new()
+            }),
+            None
+        );
     }
 
     /// The switcher used to read the `HostLinks` table and nothing else, which
@@ -2905,6 +3373,7 @@ mod tests {
             name: name.to_string(),
             path: "~/code".to_string(),
             when: String::new(),
+            last_active: 0,
             live: Liveness::Alive,
             open: true,
             current: false,
@@ -2915,6 +3384,11 @@ mod tests {
         }
     }
 
+    fn aged(mut r: Row, last_active: u64) -> Row {
+        r.last_active = last_active;
+        r
+    }
+
     fn group(rows: Vec<Row>) -> Group {
         Group {
             key: String::new(),
@@ -2922,13 +3396,51 @@ mod tests {
             endpoint: String::new(),
             target: None,
             link: Link::Local,
-            home: None,
             error: None,
             installing: None,
             preempted: false,
             parked: false,
             rows,
         }
+    }
+
+    fn named_group(label: &str, rows: Vec<Row>) -> Group {
+        Group {
+            key: label.to_lowercase(),
+            label: label.to_string(),
+            target: Some(RemoteTarget::direct("me", label, 22)),
+            link: Link::Offline,
+            ..group(rows)
+        }
+    }
+
+    #[test]
+    fn orphan_panes_of_keeps_only_live_panes_no_workspace_holds() {
+        use tty7_core::daemon::protocol::PaneInfo;
+
+        fn info(pane_id: u64, alive: bool) -> PaneInfo {
+            PaneInfo {
+                pane_id,
+                cwd: Some(std::path::PathBuf::from("/tmp/x")),
+                title: "zsh".to_string(),
+                osc_title: None,
+                alive,
+                owner: Some("tty7-cli".to_string()),
+            }
+        }
+
+        let held: HashSet<u64> = [2].into_iter().collect();
+        let orphans = orphan_panes_of(vec![info(1, true), info(2, true), info(3, false)], &held);
+        assert_eq!(
+            orphans,
+            vec![OrphanPane {
+                pane_id: 1,
+                title: "zsh".to_string(),
+                cwd: Some("/tmp/x".to_string()),
+                owner: Some("tty7-cli".to_string()),
+            }],
+            "%2 is held by a workspace and %3 is dead — neither is a leak to reap (#596)"
+        );
     }
 
     #[test]
@@ -2962,30 +3474,96 @@ mod tests {
     }
 
     #[test]
-    fn a_host_header_borrows_the_first_workspace_of_its_group() {
-        let layout = Layout {
-            groups: vec![group(vec![row("a", vec![]), row("b", vec![])])],
-            shown: vec![Some(vec![0, 1])],
-            others: Vec::new(),
-            other_hits: Vec::new(),
-            others_expanded: false,
-            nav: vec![Nav::Host(0), Nav::Row(0, 0), Nav::Row(0, 1)],
-        };
-        assert_eq!(layout.subject(0), Some((0, 0)));
-        assert_eq!(layout.subject(2), Some((0, 1)));
+    fn the_flat_list_is_most_recently_used_first_across_machines() {
+        // Two machines, interleaved activity: the list must interleave too —
+        // grouping by machine is exactly what this design retired.
+        let groups = vec![
+            group(vec![
+                aged(row("old-local", vec![]), 10),
+                aged(row("fresh-local", vec![]), 40),
+            ]),
+            named_group("devbox", vec![aged(row("remote", vec![]), 30)]),
+        ];
+        let names: Vec<&str> = flatten(&groups, "")
+            .into_iter()
+            .map(|(g, r)| groups[g].rows[r].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["fresh-local", "remote", "old-local"]);
     }
 
     #[test]
-    fn a_collapsed_host_header_has_no_workspace_to_show() {
+    fn this_windows_workspace_outranks_everything_however_stale() {
+        let mut here = aged(row("here", vec![]), 1);
+        here.current = true;
+        let groups = vec![group(vec![aged(row("busy", vec![]), 99), here])];
+        let first = flatten(&groups, "")[0];
+        assert_eq!(groups[first.0].rows[first.1].name, "here");
+    }
+
+    #[test]
+    fn a_query_matching_a_machines_name_keeps_all_of_its_rows() {
+        // Searching "devbox" is how the retired per-machine grouping is asked
+        // for now, so a host-name hit must surface every row of that machine
+        // and nothing of the others.
+        let groups = vec![
+            group(vec![row("local-notes", vec![])]),
+            named_group("devbox", vec![row("api", vec![]), row("web", vec![])]),
+        ];
+        let hits = flatten(&groups, "devbox");
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|&(g, _)| g == 1));
+    }
+
+    #[test]
+    fn the_tab_column_follows_the_flat_cursor() {
         let layout = Layout {
-            groups: vec![group(vec![row("a", vec![])])],
-            shown: vec![Some(Vec::new())],
-            others: Vec::new(),
-            other_hits: Vec::new(),
-            others_expanded: false,
-            nav: vec![Nav::Host(0)],
+            groups: vec![group(vec![row("a", vec![]), row("b", vec![])])],
+            nav: vec![(0, 1), (0, 0)],
         };
-        assert_eq!(layout.subject(0), None);
+        assert_eq!(layout.subject(0), Some((0, 1)));
+        assert_eq!(layout.subject(1), Some((0, 0)));
+        assert_eq!(layout.subject(2), None, "past the end is nothing");
+    }
+
+    fn host(label: &str) -> HostChoice {
+        HostChoice {
+            target: RemoteTarget::direct("me", label, 22),
+            label: label.to_string(),
+            detail: format!("me@{label}:22"),
+        }
+    }
+
+    #[test]
+    fn the_host_dropdown_leads_local_and_pins_add_host_last() {
+        let items = host_items(vec![host("devbox")], "", "This Computer");
+        assert!(matches!(items.first(), Some(HostItem::Local)));
+        assert!(matches!(items.last(), Some(HostItem::AddHost)));
+        assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn filtering_the_dropdown_narrows_hosts_but_never_loses_the_way_out() {
+        let items = host_items(
+            vec![host("devbox"), host("staging")],
+            "stag",
+            "This Computer",
+        );
+        // "stag" matches neither the local label nor devbox.
+        assert_eq!(items.len(), 2);
+        assert!(
+            matches!(&items[0], HostItem::Host(h) if h.label == "staging"),
+            "the one matching machine survives"
+        );
+        assert!(
+            matches!(items.last(), Some(HostItem::AddHost)),
+            "Add SSH Host… is pinned, filter or no filter"
+        );
+    }
+
+    #[test]
+    fn the_local_row_answers_to_its_own_name() {
+        let items = host_items(vec![host("devbox")], "this comp", "This Computer");
+        assert!(matches!(items.first(), Some(HostItem::Local)));
     }
 
     #[test]
@@ -3011,48 +3589,52 @@ mod tests {
             live: true,
             panes: 1,
         };
-        assert_eq!(tab_view_label(&view, 0), "build", "a given name wins");
+        assert_eq!(tab_view_label(&view, 0, None), "build", "a given name wins");
 
         view.name = None;
         assert_eq!(
-            tab_view_label(&view, 0),
+            tab_view_label(&view, 0, None),
             "✳ 修复 workspace switcher",
             "then the title the local strip would be showing, verbatim"
         );
 
         view.osc_title = Some("user@host:~/repo/025/tty7".to_string());
         assert_eq!(
-            tab_view_label(&view, 0),
-            crate::ui::tab_strip::short_title("user@host:~/repo/025/tty7"),
+            tab_view_label(&view, 0, None),
+            crate::ui::tab_strip::short_title("user@host:~/repo/025/tty7", None),
             "a shell's title goes through the shortener the strip uses"
         );
 
         view.osc_title = Some("user@host:".to_string());
         assert_eq!(
-            tab_view_label(&view, 0),
+            tab_view_label(&view, 0, None),
             "zsh",
             "a title that shortens away to nothing falls through"
         );
 
         view.osc_title = None;
         assert_eq!(
-            tab_view_label(&view, 0),
+            tab_view_label(&view, 0, None),
             "Claude Code",
             "an agent names a tab that has told us nothing else"
         );
 
         view.agent = None;
         assert_eq!(
-            tab_view_label(&view, 0),
-            crate::ui::tab_strip::short_title("/Users/x/repo/tty7"),
+            tab_view_label(&view, 0, None),
+            crate::ui::tab_strip::short_title("/Users/x/repo/tty7", None),
             "otherwise the directory, put through the same shortener as the strip"
         );
 
         view.cwd = None;
-        assert_eq!(tab_view_label(&view, 0), "zsh", "process name is last");
+        assert_eq!(
+            tab_view_label(&view, 0, None),
+            "zsh",
+            "process name is last"
+        );
 
         view.title = String::new();
-        assert!(tab_view_label(&view, 2).contains('3'));
+        assert!(tab_view_label(&view, 2, None).contains('3'));
     }
     fn refusal(peer: u32, ours: u32) -> String {
         format!(
@@ -3234,6 +3816,51 @@ mod gpui_tests {
                 app.switcher.as_ref().is_some_and(|sw| sw.hold.is_some()),
                 "the render path drops the menus while this is set"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn the_new_workspace_gesture_raises_the_create_form(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_workspace_form(window, cx)
+        });
+
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("the switcher is up");
+            let super::Page::Create(form) = &sw.page else {
+                panic!("the card shows the create form");
+            };
+            assert!(
+                form.chosen.is_none(),
+                "the host defaults to this computer, so Enter alone creates locally"
+            );
+            assert!(!form.open, "the dropdown starts folded");
+            assert!(
+                !form.name.read(cx).value().trim().is_empty(),
+                "the name box starts prefilled with the generated default"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn the_form_folds_back_into_the_list_rather_than_closing(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_workspace_form(window, cx)
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.switcher_back_to_list(window, cx)
+        });
+
+        app.update(cx, |app, _| {
+            let sw = app
+                .switcher
+                .as_ref()
+                .expect("still up — Esc backs out one step");
+            assert!(matches!(sw.page, super::Page::List));
         });
     }
 

@@ -46,6 +46,19 @@ pub(crate) const META_MONO: f32 = META - STEP;
 /// sidebar's group headings, which are the same thing one panel over.
 pub(crate) const HEADING: f32 = 11. * STEP;
 
+/// The leading glyph on a panel row — the file tree's folder and file marks.
+///
+/// Pixels, not rems, because glyphs in this window are sized off the tile
+/// ladder in `app.rs` (`TILE_GLYPH` 13, `TILE_GLYPH_XS` 11) rather than off the
+/// text ramp above. A row that reached for gpui-component's rem sizes instead
+/// could never agree with the tab tiles it sits under: at the default
+/// `ui_font_size` of 16 that ladder offers `xsmall` 12 and `small` 14 and
+/// nothing between, so the tree's glyph came out either a step under the
+/// chrome — reading as a speck beside a 14px name — or a step over it, which
+/// puts a row of content above the navigation that owns it. 13 is the tab
+/// tile's own glyph size, so the two agree by construction.
+pub(crate) const ROW_GLYPH: f32 = crate::ui::app::TILE_GLYPH;
+
 // The right panel's type ramp: four steps, a point apart, that the Info and
 // Source Control tabs both draw from so switching between them does not change
 // the apparent size of the panel. The Files tab, in `file_tree.rs`, reaches the
@@ -625,6 +638,11 @@ impl Tty7App {
         // off in both places rather than in one of them.
         let mut diff_target: Option<(crate::ui::host_ops::HostId, PathBuf)> = None;
         let mut git: Option<crate::terminal::git_status::GitStatus> = None;
+        // The agent row's name and status, read off one leaf (see below).
+        let mut agent_row: Option<(
+            crate::core::cli_agent::CLIAgent,
+            crate::core::cli_agent::AgentStatus,
+        )> = None;
 
         if let Some(tab) = self.tabs.get(self.active) {
             if let Some(leaf) = tab.detail_pane(window, cx) {
@@ -637,9 +655,10 @@ impl Tty7App {
                         .map(|cwd| (view.host_id(), cwd.to_path_buf())),
                 );
                 if let Some(cwd) = view.effective_cwd() {
+                    let home = view.display_home(cx);
                     rows.push(InfoRow {
                         label: t(L10nKey::PanelCwd),
-                        value: InfoValue::Path(compact_path(&cwd)),
+                        value: InfoValue::Path(compact_path(&cwd, home.as_deref())),
                         // The compacted `~/…` spelling is for reading; what
                         // goes on the clipboard is the path a shell can use.
                         copy: Some(cwd.display().to_string()),
@@ -667,6 +686,26 @@ impl Tty7App {
                     forwards_pane = Some(view.pane_id);
                 }
                 git = view.git_status(cx);
+                // Name and status come from the *same* leaf: the detail pane's
+                // own agent when it has one, and otherwise the tab's most
+                // urgent agent leaf — which still holds the row while focus
+                // sits on a plain shell, and still colours its dot the way the
+                // tab strip's badge does, but names the pane it took the
+                // status from. Pairing `tab.agent` with `tab.agent_status`
+                // would splice one pane's name onto another pane's status — a
+                // row no leaf ever had — because the two resolve
+                // independently (#543). Read here, where `view` is in scope;
+                // pushed beside the other rows below.
+                agent_row = match view.agent() {
+                    Some(agent) => {
+                        let status = view
+                            .agent_session()
+                            .map(|s| s.status)
+                            .unwrap_or(crate::core::cli_agent::AgentStatus::Idle);
+                        Some((agent, status))
+                    }
+                    None => tab.agent_row(cx),
+                };
             }
             // Read off the same pane the rows above describe, rather than off
             // `Tab::git_status`, which resolves a split tab to its *first* leaf
@@ -691,18 +730,15 @@ impl Tty7App {
                     reveal: None,
                 });
             }
-            if let Some(agent) = tab.agent(cx) {
+            // Name and status were read off one leaf above; push the row.
+            if let Some((agent, status)) = agent_row {
                 let name = agent.display_name();
-                let status = tab.agent_status(cx);
                 rows.push(InfoRow {
                     label: t(L10nKey::PanelAgent),
                     value: InfoValue::Agent {
-                        text: match status {
-                            Some(s) => format!("{name} · {}", agent_status_label(s)),
-                            None => name.to_string(),
-                        },
-                        dot: status.and_then(|s| s.dot_rgb()),
-                        hollow: status == Some(crate::core::cli_agent::AgentStatus::Waiting),
+                        text: format!("{name} · {}", agent_status_label(status)),
+                        dot: status.dot_rgb(),
+                        hollow: status == crate::core::cli_agent::AgentStatus::Waiting,
                     },
                     copy: None,
                     reveal: None,
@@ -1419,19 +1455,25 @@ fn agent_status_label(status: crate::core::cli_agent::AgentStatus) -> &'static s
 /// Splits a path into everything-but-the-last-segment and the last segment,
 /// so a row can shrink the first and keep the second.
 fn split_path_leaf(s: &str) -> (String, String) {
-    match s.rfind('/') {
+    // The larger of the two separator positions, not cfg-gated by platform:
+    // the Info panel shows remote paths too, so a Windows build describes
+    // Unix paths and vice versa — and a mixed-spelling path (`C:\Users\dev/
+    // project`, which agent-reported cwds arrive as) still cuts at its true
+    // leaf (#544). A Unix filename containing a literal `\` loses a shorter
+    // leaf; head + leaf still rejoins exactly, so the cost is decorative.
+    let leaf_at = s.rfind('/').max(s.rfind('\\'));
+    match leaf_at {
         // Keep the separator with the head: "~/a/b/" + "c" rejoins exactly.
         Some(i) if i + 1 < s.len() => (s[..=i].to_string(), s[i + 1..].to_string()),
         _ => (String::new(), s.to_string()),
     }
 }
 
-fn compact_path(path: &std::path::Path) -> String {
-    let s = path.to_string_lossy().to_string();
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && s.starts_with(&home) => s.replacen(&home, "~", 1),
-        _ => s,
-    }
+/// `home` is the home directory of the machine `path` lives on. A remote
+/// pane's cwd is measured against *its* host's home, never this machine's
+/// (#580) — and against nothing at all while the host has not said.
+fn compact_path(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    crate::ui::path_display::abbreviate_home(&path.to_string_lossy(), home).into_owned()
 }
 
 #[cfg(test)]
@@ -1526,6 +1568,9 @@ mod tests {
             "/",
             "relative",
             "",
+            "C:\\Users\\dev\\project",
+            "C:\\Users\\dev/project",
+            "\\\\server\\share\\dir",
         ] {
             let (head, leaf) = split_path_leaf(p);
             assert_eq!(format!("{head}{leaf}"), p, "rejoining {p:?}");
@@ -1542,5 +1587,35 @@ mod tests {
         // Root is one segment with nothing before it.
         let (head, leaf) = split_path_leaf("/");
         assert_eq!((head.as_str(), leaf.as_str()), ("", "/"));
+    }
+
+    #[test]
+    fn the_leaf_survives_windows_and_mixed_spellings() {
+        // Backslash-native, the shape an agent-reported cwd arrives in.
+        let (head, leaf) = split_path_leaf("C:\\Users\\dev\\project");
+        assert_eq!(
+            (head.as_str(), leaf.as_str()),
+            ("C:\\Users\\dev\\", "project")
+        );
+        // Mixed separators cut at the *last* one of either kind.
+        let (head, leaf) = split_path_leaf("C:\\Users\\dev/project");
+        assert_eq!(
+            (head.as_str(), leaf.as_str()),
+            ("C:\\Users\\dev/", "project")
+        );
+        let (head, leaf) = split_path_leaf("C:/Users/dev\\project");
+        assert_eq!(
+            (head.as_str(), leaf.as_str()),
+            ("C:/Users/dev\\", "project")
+        );
+        // A drive root has no leaf to keep.
+        let (head, leaf) = split_path_leaf("C:\\");
+        assert_eq!((head.as_str(), leaf.as_str()), ("", "C:\\"));
+        // A UNC path splits at its last component, head keeping the share.
+        let (head, leaf) = split_path_leaf("\\\\server\\share\\dir");
+        assert_eq!(
+            (head.as_str(), leaf.as_str()),
+            ("\\\\server\\share\\", "dir")
+        );
     }
 }

@@ -118,8 +118,10 @@ read -r WS PANE < <(tty7 new --json /path/to/repo \
 ```
 
 `send` types text into the pane exactly as a keyboard would; `--enter` appends
-the carriage return. It does not wait and it does not tell you what happened —
-reading is a separate step, and waiting is `tty7 wait`.
+the carriage return, or presses Enter on its own when you give it no text
+(`tty7 send "$PANE" --enter` runs what is already typed there). It does not
+wait and it does not tell you what happened — reading is a separate step, and
+waiting is `tty7 wait`.
 
 For keystrokes rather than characters — Ctrl-C, Escape, the arrow keys — use
 `--key` (see [Answering a prompt](#answering-a-prompt)). Typing `^C` as text

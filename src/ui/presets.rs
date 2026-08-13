@@ -438,6 +438,13 @@ pub(crate) fn needs_edge(fill: u32, surface: Hsla) -> bool {
     contrast(fill, packed) < 1.25
 }
 
+/// Whether a surface is dark enough that a halo cut in its own colour stops
+/// reading as a ring and starts reading as a hole.
+pub(crate) fn surface_is_dark(surface: Hsla) -> bool {
+    let rgb = crate::terminal::palette::hsla_to_rgb(surface);
+    is_dark((rgb.r as u32) << 16 | (rgb.g as u32) << 8 | rgb.b as u32)
+}
+
 pub(crate) fn mix(a: u32, b: u32, t: f32) -> u32 {
     let (ar, ag, ab) = (a >> 16 & 0xff, a >> 8 & 0xff, a & 0xff);
     let (br, bg, bb) = (b >> 16 & 0xff, b >> 8 & 0xff, b & 0xff);

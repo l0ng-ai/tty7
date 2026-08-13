@@ -308,6 +308,26 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSocks5ProxyDesc => "host:port（空欄 = なし）",
         L10nKey::SettingsHttpProxy => "HTTP プロキシ",
         L10nKey::SettingsHttpProxyDesc => "host:port（空欄 = なし）",
+        L10nKey::SettingsProxyOverridden => "使われません：{winner} が優先されます",
+        L10nKey::SettingsTestConnection => "テスト",
+        L10nKey::SettingsTestRunning => "接続をテスト中…",
+        L10nKey::SettingsTestReached => "接続と認証に成功しました（{time}）",
+        L10nKey::SettingsTestNeedsPassword => {
+            "サーバーに到達しました — パスワードを求められています。接続して入力してください"
+        }
+        L10nKey::SettingsTestNeedsPassphrase => {
+            "サーバーに到達しました — 秘密鍵のパスフレーズを求められています。接続して入力してください"
+        }
+        L10nKey::SettingsTestNeedsInteractive => {
+            "サーバーに到達しました — キーボードインタラクティブ認証を求められています。接続して応答してください"
+        }
+        L10nKey::SettingsTestNeedsHostKey => {
+            "サーバーに到達しました — ホストキーがまだ承認されていません。一度接続して確認してください"
+        }
+        L10nKey::SettingsTestHostKeyChanged => {
+            "サーバーに到達しました — ホストキーが以前のものと異なります。一度接続して変更内容を確認してください"
+        }
+        L10nKey::SettingsTestFailed => "接続できませんでした: {reason}",
         L10nKey::SettingsProxyPortInvalid => {
             "ポートは 1-65535 の範囲です — ホストだけならデフォルトポートを使います"
         }
@@ -357,7 +377,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "PATH 上の実行可能ファイル名または絶対パス。例: zsh、fish、pwsh"
         }
         L10nKey::SettingsArguments => "引数",
-        L10nKey::SettingsArgumentsDesc => "スペース区切りの起動フラグ。例: ログインシェル用の -l",
+        L10nKey::SettingsArgumentsDesc => {
+            "コマンドラインと同じ規則で分割される起動フラグ。空白を含むものはクォートしてください（例: -l、-c \"echo hi\"）"
+        }
+        L10nKey::SettingsArgumentsInvalid => {
+            "引用符が対応していないため、この値は保存されませんでした"
+        }
         L10nKey::SettingsStartIn => "初期作業ディレクトリ",
         L10nKey::SettingsStartInDesc => {
             "新しいシェルの開始場所: tty7 の起動ディレクトリ、ホームフォルダ、または固定パス"
@@ -367,6 +392,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsWdInherit => "継承",
         L10nKey::SettingsWdHome => "ホーム",
         L10nKey::SettingsWdCustom => "カスタム",
+        L10nKey::SettingsWdPathInvalid => {
+            "このディレクトリは存在しないため、この値は保存されませんでした"
+        }
         L10nKey::SettingsShellFooter => {
             "継承元のないシェルに適用されます。ウィンドウの最初のタブなどです。新しいタブと分割はアクティブなペインのディレクトリを引き継ぎ、開いているシェルは動き続けます"
         }
@@ -489,6 +517,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsThemePanelLight => "ライトモード用のテーマを選択",
         L10nKey::SettingsThemePanelDark => "ダークモード用のテーマを選択",
         L10nKey::SettingsCustom => "カスタム",
+        L10nKey::SettingsCustomValue => "カスタム ({value})",
         L10nKey::SettingsBuiltIn => "組み込み",
         L10nKey::SettingsDark => "ダーク",
         L10nKey::SettingsLight => "ライト",
@@ -919,6 +948,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpImagePasteUploadFailed => {
             "貼り付けた画像を {host} にアップロードできませんでした: {error}"
         }
+        L10nKey::LinkFileOpenFailed => "{path} を開けませんでした: {error}",
         L10nKey::ForwardPanelTitle => "ポートフォワード",
         L10nKey::ForwardDisconnected => "切断済み",
         L10nKey::ForwardDisconnectedFrom => "{host} から切断されました",
@@ -1075,6 +1105,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::ScmPublishBranch => "ブランチを公開",
         L10nKey::ScmDetached => "デタッチ",
+        L10nKey::ScmPushDetached => {
+            "HEAD がデタッチされています — ブランチをチェックアウトしてからプッシュしてください"
+        }
+        L10nKey::ScmPushNoCommits => "プッシュするコミットがまだありません",
         L10nKey::ScmAmendBadge => "修正",
         L10nKey::ScmSync => "変更を同期",
         L10nKey::ScmPush => "プッシュ",
@@ -1111,7 +1145,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::ScmOpenChanges => "変更を開く",
         L10nKey::ScmDiscardAllConfirm => {
-            "このリポジトリのすべての変更を破棄しますか？元に戻せません。"
+            "未ステージの変更と未追跡ファイルをすべて破棄しますか？ステージ済みの変更は残ります。元に戻せません。"
         }
         L10nKey::ScmAmendConfirm => {
             "直前のコミットを修正しますか？新しいコミットに置き換わるため、すでに取得した人は対応が必要になります。"
@@ -1299,6 +1333,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherThisWindow => "このウィンドウ",
         L10nKey::SwitcherOpen => "開く",
         L10nKey::SwitcherDisconnect => "切断",
+        L10nKey::SwitcherEditHost => "ホストを編集…",
+        L10nKey::SwitcherSaveAsHost => "SSH ホストとして保存…",
+        L10nKey::SshSaveDroppedJumpHost => {
+            "踏み台ホストは引き継がれません — 保存済みホストの踏み台は別の保存済みホストである必要があります"
+        }
         L10nKey::SwitcherOpenInNewWindow => "新しいウィンドウで開く",
         L10nKey::SwitcherRename => "名前を変更…",
         L10nKey::SwitcherPickAWorkspace => "ワークスペースを選ぶとタブが表示されます",
@@ -1307,11 +1346,22 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherTabsAfterOpening => "このワークスペースを開くとタブが表示されます",
         L10nKey::SwitcherOpenToManage => "このワークスペースを開くと名前の変更や停止ができます",
         L10nKey::SwitcherConnectToUse => "このマシンに接続するとワークスペースを作成できます",
+        L10nKey::SwitcherOrphanPanes => {
+            "バックグラウンドペイン — どのウィンドウにも属さずに実行中のシェル:"
+        }
         L10nKey::SwitcherTabCount => "{n} 個のタブ",
         L10nKey::SwitcherTabCountOne => "1 個のタブ",
         L10nKey::SwitcherActiveTab => "アクティブ",
         L10nKey::SwitcherHoldToSwitch => "Tab で移動 · 離して切り替え",
         L10nKey::SwitcherTabToCrossColumns => "Tab で列を移動",
+        L10nKey::SwitcherLocalHost => "ローカル",
+        L10nKey::SwitcherConnectingTo => "{machine} に接続中…",
+        L10nKey::SwitcherFormName => "名前",
+        L10nKey::SwitcherFormHost => "ホスト",
+        L10nKey::SwitcherFormNamePlaceholder => "任意",
+        L10nKey::SwitcherFormBack => "戻る",
+        L10nKey::SwitcherFormCreateHint => "Enter で作成 · Esc で戻る",
+        L10nKey::SwitcherFormPickHint => "↑↓ で選択 · Enter で決定 · Esc で閉じる",
         L10nKey::SshPromptPasswordFor => "{user}@{host} のパスワード",
         L10nKey::SshPromptPassphraseFor => "{key_path} のパスフレーズ",
         L10nKey::SshPromptTwoFactor => "二要素認証",
@@ -1421,6 +1471,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdSshReconnect => "SSH: 再接続",
         L10nKey::CmdSshRemoteFiles => "SSH: リモートファイル",
         L10nKey::CmdSshPortForwarding => "SSH: ポートフォワーディング",
+        L10nKey::CmdSshSaveConnection => "SSH: この接続をホストとして保存…",
+        L10nKey::CmdSshSaveConnectionSubtitle => "この接続を保存済みホストとして残します",
         L10nKey::CmdSshConnectWithInput => "SSH: {input} に接続",
         L10nKey::CmdAgentSendSelection => "エージェント: 選択範囲を送信",
         L10nKey::CmdAgentSendSelectionSubtitle => "選択範囲 → 実行中のコーディングエージェント",
@@ -1488,6 +1540,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppReopenTabFailed => "タブを開き直せませんでした: ターミナルが起動しませんでした",
         L10nKey::AppOpenTerminalFailed => "ターミナルを開けませんでした: {error}",
         L10nKey::AppTabsNotRestored => "前回のタブ {count} 個を開き直せませんでした",
+        L10nKey::LaunchWorkspacesLeftRunning => {
+            "このウィンドウだけを復元しました — あと {count} 個のワークスペースがバックグラウンドで実行中です。サイドバーから開き直せます。"
+        }
         L10nKey::AppSshConnectionFailed => "SSH 接続に失敗しました: {error}",
         L10nKey::AppSshReconnectFailed => "SSH 再接続に失敗しました: {error}",
         L10nKey::AppSplitPaneFailed => "ペインを分割できませんでした: {error}",
@@ -1626,6 +1681,26 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
              新しいペインは空ではなく既存の履歴から始まり、追加された分はペインを閉じるときに書き戻されるので失われません。\
              tty7 が設定できる bash と zsh のペインが対象で、独自の引数で起動したシェルはそのままです"
         }
+        L10nKey::IntegrationNoticeBlocked => {
+            "このペインでは tty7 シェル統合がブロックされています。“{wrapper}”がシェルレポートを\
+             横取りしているため、インライン補完と Ctrl+R メニューは利用できません。\
+             シェル独自の履歴検索は引き続き使えます。"
+        }
+        L10nKey::IntegrationNoticeNotEngaged => {
+            "このペインでは tty7 シェル統合が有効になっていないため、インライン補完と Ctrl+R \
+             メニューは利用できません。PTY ラッパー（figterm 系）や未対応のシェル設定が原因の可能性があります。"
+        }
+        L10nKey::PaneTitleDisconnected => "{title} — 切断されました",
+        L10nKey::PaneTitleProcessExited => "{title} — プロセスが終了しました",
+        L10nKey::LoopbackForwardFailed => ":{port} を転送できませんでした — {error}",
+        L10nKey::TrayTooltipAgents => "tty7: {parts}",
+        L10nKey::TrayAgentSep => "、",
+        L10nKey::CursorShapeBlock => "ブロック",
+        L10nKey::CursorShapeBar => "バー",
+        L10nKey::CursorShapeUnderline => "下線",
+        L10nKey::PaletteTryDifferentSearch => "別のキーワードを試してください。",
+        L10nKey::CompletionListingRemote => "リモートを一覧しています…",
+        L10nKey::CompletionRemoteListingFailed => "リモートの一覧に失敗しました — {error}",
         L10nKey::PanelMoreChangedFiles => {
             "… さらに変更されたファイル {count} 個 — 表示するには `git diff` を実行してください"
         }
@@ -1782,6 +1857,12 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         }
         (L10nKey::AppTabsNotRestored, "one") => "前回のタブ 1 個を開き直せませんでした",
         (L10nKey::AppTabsNotRestored, "other") => "前回のタブ {count} 個を開き直せませんでした",
+        (L10nKey::LaunchWorkspacesLeftRunning, "one") => {
+            "このウィンドウだけを復元しました — あと 1 個のワークスペースがバックグラウンドで実行中です。サイドバーから開き直せます。"
+        }
+        (L10nKey::LaunchWorkspacesLeftRunning, "other") => {
+            "このウィンドウだけを復元しました — あと {count} 個のワークスペースがバックグラウンドで実行中です。サイドバーから開き直せます。"
+        }
         (L10nKey::ScmFilesChanged, "zero") => "変更されたファイルはありません",
         (L10nKey::ScmFilesChanged, "one") => "1 個のファイルが変更されました",
         (L10nKey::ScmFilesChanged, "other") => "{count} 個のファイルが変更されました",

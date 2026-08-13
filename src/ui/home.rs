@@ -102,14 +102,14 @@ pub(crate) fn relative_time(now: u64, then: u64) -> String {
     }
 }
 
-pub(crate) fn display_path(path: &std::path::Path) -> String {
+/// `home` belongs to the machine the workspace is on — every row here can
+/// name a directory on another one, and this machine's home says nothing
+/// about those (#580). `None` shows the path in full.
+pub(crate) fn display_path(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
     let text = path.to_string_lossy();
-    let shortened = match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && text.starts_with(&home) => {
-            format!("~{}", &text[home.len()..])
-        }
-        _ => text.to_string(),
-    };
+    // Same home-abbreviation the Info panel and tab strip use: separators
+    // normalized, case folded (#544).
+    let shortened = crate::ui::path_display::abbreviate_home(&text, home).into_owned();
     if shortened.chars().count() <= PICKER_PATH_MAX {
         return shortened;
     }
@@ -437,18 +437,16 @@ mod tests {
 
     #[test]
     fn display_path_collapses_home_and_elides_from_the_front() {
-        let saved = std::env::var("HOME").ok();
-        unsafe { std::env::set_var("HOME", "/Users/tester") };
+        // The home is handed in rather than set in the environment: the row
+        // being drawn may belong to a workspace on another machine, so the
+        // caller names the home and nothing here reads `$HOME` (#580).
+        let home = Some(std::path::Path::new("/Users/tester"));
+        let shown = |p: &str| display_path(std::path::Path::new(p), home);
 
-        assert_eq!(
-            display_path(std::path::Path::new("/Users/tester/repo/tty7")),
-            "~/repo/tty7"
-        );
-        assert_eq!(display_path(std::path::Path::new("/opt/work")), "/opt/work");
+        assert_eq!(shown("/Users/tester/repo/tty7"), "~/repo/tty7");
+        assert_eq!(shown("/opt/work"), "/opt/work");
 
-        let long = display_path(std::path::Path::new(
-            "/Users/tester/very/deeply/nested/projects/area/thing",
-        ));
+        let long = shown("/Users/tester/very/deeply/nested/projects/area/thing");
         assert!(long.starts_with('…'), "{long} should be front-elided");
         assert!(long.ends_with("thing"), "{long} must keep the tail");
         // Snapping to a separator can only shorten what the char budget kept.
@@ -456,15 +454,25 @@ mod tests {
 
         // A cut that lands mid-name drops the fragment rather than passing it
         // off as a directory.
-        let midname = display_path(std::path::Path::new(
-            "/Users/tester/verylongish/deeply/nested/projects/area/thing",
-        ));
+        let midname = shown("/Users/tester/verylongish/deeply/nested/projects/area/thing");
         assert_eq!(midname, "…/deeply/nested/projects/area/thing");
+    }
 
-        match saved {
-            Some(home) => unsafe { std::env::set_var("HOME", home) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
+    /// A workspace on another machine is elided the same way, but only its
+    /// own host's home may put a `~` on it (#580).
+    #[test]
+    fn display_path_does_not_measure_another_machine_by_this_one() {
+        let remote = std::path::Path::new("/home/deploy/app");
+        assert_eq!(
+            display_path(remote, Some(std::path::Path::new("/home/deploy"))),
+            "~/app"
+        );
+        assert_eq!(
+            display_path(remote, Some(std::path::Path::new("/Users/tester"))),
+            "/home/deploy/app"
+        );
+        // No link to that host yet, so nothing here knows what `~` is there.
+        assert_eq!(display_path(remote, None), "/home/deploy/app");
     }
 
     /// The fragment only goes when the rest of the path can stand without it.

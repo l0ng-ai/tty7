@@ -305,6 +305,26 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSocks5ProxyDesc => "host:port (blank = none).",
         L10nKey::SettingsHttpProxy => "HTTP proxy",
         L10nKey::SettingsHttpProxyDesc => "host:port (blank = none).",
+        L10nKey::SettingsProxyOverridden => "Not used: {winner} comes first.",
+        L10nKey::SettingsTestConnection => "Test",
+        L10nKey::SettingsTestRunning => "Testing the connection…",
+        L10nKey::SettingsTestReached => "Connected and authenticated in {time}.",
+        L10nKey::SettingsTestNeedsPassword => {
+            "Reached the server — it asked for a password. Connect to type it."
+        }
+        L10nKey::SettingsTestNeedsPassphrase => {
+            "Reached the server — the private key asked for its passphrase. Connect to type it."
+        }
+        L10nKey::SettingsTestNeedsInteractive => {
+            "Reached the server — it asked for a keyboard-interactive answer. Connect to give it."
+        }
+        L10nKey::SettingsTestNeedsHostKey => {
+            "Reached the server — its host key has not been accepted yet. Connect once to review it."
+        }
+        L10nKey::SettingsTestHostKeyChanged => {
+            "Reached the server — its host key is not the one it gave before. Connect once to review the change."
+        }
+        L10nKey::SettingsTestFailed => "Did not connect: {reason}",
         L10nKey::SettingsProxyPortInvalid => {
             "Port must be 1-65535 — the host on its own takes the default port."
         }
@@ -353,7 +373,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsArguments => "Arguments",
         L10nKey::SettingsArgumentsDesc => {
-            "Space-separated launch flags (e.g. -l for a login shell)."
+            "Launch flags, split like a command line — quote anything containing spaces (e.g. -l, or -c \"echo hi\")."
+        }
+        L10nKey::SettingsArgumentsInvalid => {
+            "The quotes do not balance — this value was not saved."
         }
         L10nKey::SettingsStartIn => "Start in",
         L10nKey::SettingsStartInDesc => {
@@ -364,6 +387,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsWdInherit => "Inherit",
         L10nKey::SettingsWdHome => "Home",
         L10nKey::SettingsWdCustom => "Custom",
+        L10nKey::SettingsWdPathInvalid => {
+            "That directory does not exist — the value was not saved."
+        }
         L10nKey::SettingsShellFooter => {
             "Applies to shells with nothing to inherit — like the first tab of a window. New tabs and splits keep inheriting the active pane's directory, and shells already open keep running."
         }
@@ -484,6 +510,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsThemePanelLight => "Choose the theme for light mode.",
         L10nKey::SettingsThemePanelDark => "Choose the theme for dark mode.",
         L10nKey::SettingsCustom => "Custom",
+        L10nKey::SettingsCustomValue => "Custom ({value})",
         L10nKey::SettingsBuiltIn => "Built-in",
         L10nKey::SettingsDark => "Dark",
         L10nKey::SettingsLight => "Light",
@@ -871,6 +898,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SftpImagePasteUploadFailed => {
             "Could not upload the pasted image to {host}: {error}"
         }
+        L10nKey::LinkFileOpenFailed => "Could not open {path}: {error}",
         L10nKey::ForwardPanelTitle => "Forwards",
         L10nKey::ForwardDisconnected => "Disconnected",
         L10nKey::ForwardDisconnectedFrom => "Disconnected from {host}",
@@ -1023,6 +1051,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::ScmPublishBranch => "Publish Branch",
         L10nKey::ScmDetached => "detached",
+        L10nKey::ScmPushDetached => "Detached HEAD — check out a branch to push",
+        L10nKey::ScmPushNoCommits => "No commits to push yet",
         L10nKey::ScmAmendBadge => "amend",
         L10nKey::ScmSync => "Sync Changes",
         L10nKey::ScmPush => "Push",
@@ -1057,7 +1087,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ScmTooManyChanges => "Showing the first {shown} of {total} changes.",
         L10nKey::ScmOpenChanges => "Open Changes",
         L10nKey::ScmDiscardAllConfirm => {
-            "Discard every change in this repository? This cannot be undone."
+            "Discard all unstaged and untracked changes? Staged changes are kept. \
+             This cannot be undone."
         }
         L10nKey::ScmAmendConfirm => {
             "Amend the last commit? It will be replaced by a new one, so anyone who already has it has to reconcile."
@@ -1265,6 +1296,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherThisWindow => "this window",
         L10nKey::SwitcherOpen => "open",
         L10nKey::SwitcherDisconnect => "Disconnect",
+        L10nKey::SwitcherEditHost => "Edit Host…",
+        L10nKey::SwitcherSaveAsHost => "Save as SSH Host…",
+        L10nKey::SshSaveDroppedJumpHost => {
+            "The jump host was left out — a saved host reaches its jump through another saved host."
+        }
         L10nKey::SwitcherOpenInNewWindow => "Open in New Window",
         L10nKey::SwitcherRename => "Rename…",
         L10nKey::SwitcherPickAWorkspace => "Pick a workspace to see its tabs.",
@@ -1273,11 +1309,22 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherTabsAfterOpening => "Open this workspace to see its tabs.",
         L10nKey::SwitcherOpenToManage => "Open this workspace to rename or stop it.",
         L10nKey::SwitcherConnectToUse => "Connect to this machine to open a workspace on it.",
+        L10nKey::SwitcherOrphanPanes => {
+            "Background panes — shells still running outside any window:"
+        }
         L10nKey::SwitcherTabCount => "{n} tabs",
         L10nKey::SwitcherTabCountOne => "1 tab",
         L10nKey::SwitcherActiveTab => "active",
         L10nKey::SwitcherHoldToSwitch => "Tab to move · release to switch",
         L10nKey::SwitcherTabToCrossColumns => "Tab to cross columns",
+        L10nKey::SwitcherLocalHost => "local",
+        L10nKey::SwitcherConnectingTo => "Connecting to {machine}…",
+        L10nKey::SwitcherFormName => "Name",
+        L10nKey::SwitcherFormHost => "Host",
+        L10nKey::SwitcherFormNamePlaceholder => "Optional",
+        L10nKey::SwitcherFormBack => "Back",
+        L10nKey::SwitcherFormCreateHint => "Enter to create · Esc to go back",
+        L10nKey::SwitcherFormPickHint => "↑↓ to choose · Enter to select · Esc to close",
         L10nKey::SshPromptPasswordFor => "Password for {user}@{host}",
         L10nKey::SshPromptPassphraseFor => "Passphrase for {key_path}",
         L10nKey::SshPromptTwoFactor => "Two-factor authentication",
@@ -1387,6 +1434,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdSshReconnect => "SSH: Reconnect",
         L10nKey::CmdSshRemoteFiles => "SSH: Remote Files",
         L10nKey::CmdSshPortForwarding => "SSH: Port Forwarding",
+        L10nKey::CmdSshSaveConnection => "SSH: Save Connection as Host…",
+        L10nKey::CmdSshSaveConnectionSubtitle => "Keep this connection as a saved host.",
         L10nKey::CmdSshConnectWithInput => "SSH: Connect {input}",
         L10nKey::CmdAgentSendSelection => "Agent: Send Selection",
         L10nKey::CmdAgentSendSelectionSubtitle => "selection → running coding agent",
@@ -1450,6 +1499,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppReopenTabFailed => "Could not reopen the tab: no terminal started",
         L10nKey::AppOpenTerminalFailed => "Could not open a terminal: {error}",
         L10nKey::AppTabsNotRestored => "{count} tabs from last time could not be reopened",
+        L10nKey::LaunchWorkspacesLeftRunning => {
+            "Only this window was restored — {count} workspaces are still running in the background. Reopen them from the sidebar."
+        }
         L10nKey::AppSshConnectionFailed => "SSH connection failed: {error}",
         L10nKey::AppSshReconnectFailed => "SSH reconnect failed: {error}",
         L10nKey::AppSplitPaneFailed => "Could not split the pane: {error}",
@@ -1577,6 +1629,27 @@ pub fn translate_en(key: L10nKey) -> &'static str {
              adds is written back when it closes, so nothing is lost. Applies to bash and zsh \
              panes that tty7 can set up; a shell started with your own arguments is left alone."
         }
+        L10nKey::IntegrationNoticeBlocked => {
+            "tty7 shell integration is blocked in this pane — \u{201c}{wrapper}\u{201d} is \
+             intercepting shell reports, so inline completion and the Ctrl+R menu are \
+             unavailable. The shell's own history search still works."
+        }
+        L10nKey::IntegrationNoticeNotEngaged => {
+            "tty7 shell integration hasn't engaged in this pane, so inline completion and the \
+             Ctrl+R menu are unavailable. A PTY wrapper (figterm-style) or an unsupported shell \
+             setup can cause this."
+        }
+        L10nKey::PaneTitleDisconnected => "{title} — disconnected",
+        L10nKey::PaneTitleProcessExited => "{title} — process exited",
+        L10nKey::LoopbackForwardFailed => "Couldn't forward :{port} — {error}",
+        L10nKey::TrayTooltipAgents => "tty7 — {parts}",
+        L10nKey::TrayAgentSep => ", ",
+        L10nKey::CursorShapeBlock => "Block",
+        L10nKey::CursorShapeBar => "Bar",
+        L10nKey::CursorShapeUnderline => "Underline",
+        L10nKey::PaletteTryDifferentSearch => "Try a different search.",
+        L10nKey::CompletionListingRemote => "listing remote…",
+        L10nKey::CompletionRemoteListingFailed => "remote listing failed — {error}",
         L10nKey::PanelMoreChangedFiles => {
             "… and {count} more changed files — run git diff to see them."
         }
@@ -1735,6 +1808,12 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::AppTabsNotRestored, "one") => "1 tab from last time could not be reopened",
         (L10nKey::AppTabsNotRestored, "other") => {
             "{count} tabs from last time could not be reopened"
+        }
+        (L10nKey::LaunchWorkspacesLeftRunning, "one") => {
+            "Only this window was restored — 1 workspace is still running in the background. Reopen it from the sidebar."
+        }
+        (L10nKey::LaunchWorkspacesLeftRunning, "other") => {
+            "Only this window was restored — {count} workspaces are still running in the background. Reopen them from the sidebar."
         }
         (L10nKey::ScmFilesChanged, "zero") => "No files changed",
         (L10nKey::ScmFilesChanged, "one") => "1 file changed",

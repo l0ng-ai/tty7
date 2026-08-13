@@ -515,6 +515,17 @@ if (-not $env:TTY7_SHELL_INTEGRATION) {
   # Gates the D marker so the first prompt (no command yet) emits no bogus exit.
   $global:__Tty7CmdActive = $false
 
+  # Who and where, for the OSC 7 host and the OSC 0 title. Read through .NET
+  # rather than the USERNAME / COMPUTERNAME / USERPROFILE environment variables:
+  # those spellings exist only on Windows, and on macOS and Linux all three come
+  # back empty, which left every pwsh pane there titled `@:` followed by a full
+  # un-abbreviated path (issue #583). $HOME is PowerShell's own automatic
+  # variable and is right on every platform. Resolved once — none of the three
+  # changes within a session.
+  $global:__Tty7User = [Environment]::UserName
+  $global:__Tty7Host = [Environment]::MachineName
+  $global:__Tty7Home = if ($HOME) { $HOME.Replace('\', '/').TrimEnd('/') } else { '' }
+
   function global:prompt {
     # $? first: an assignment sets $? to true, so read it before anything else.
     $ok = $?
@@ -538,21 +549,24 @@ if (-not $env:TTY7_SHELL_INTEGRATION) {
       # expects — while a POSIX path keeps its single slash instead of doubling it.
       $p = $fsPath.Replace('%', '%25').Replace('\', '/')
       if (-not $p.StartsWith('/')) { $p = '/' + $p }
-      Write-Host -NoNewline "$($global:__Tty7Esc)]7;file://$($env:COMPUTERNAME)$p$($global:__Tty7Bel)"
+      Write-Host -NoNewline "$($global:__Tty7Esc)]7;file://$($global:__Tty7Host)$p$($global:__Tty7Bel)"
 
-      # OSC 0 window/tab title "user@host:dir". PowerShell profiles don't set a
-      # title the way macOS's default zsh does, so without this every tty7 tab on
-      # Windows stays generic. Forward slashes (so tty7's tab-label parser can take
-      # the last path segment) and home shown as `~`. Re-emitted each prompt so it
-      # tracks cwd; a full-screen app's own title still overrides it while it runs.
+      # OSC 0 window/tab title "user@host:dir". Neither a PowerShell profile nor
+      # pwsh itself sets a useful title — on macOS pwsh emits an *empty* OSC 0 —
+      # so without this every tty7 tab running PowerShell stays generic, on every
+      # platform. Forward slashes (so tty7's tab-label parser can take the last
+      # path segment) and home shown as `~`. Re-emitted each prompt so it tracks
+      # cwd; a full-screen app's own title still overrides it while it runs.
+      #
+      # The home match needs the separator, not just the prefix: with a home of
+      # `/Users/ann`, a bare StartsWith also swallows `/Users/annex`, retitling it
+      # `~ex`.
       $titlePath = $fsPath.Replace('\', '/')
-      if ($env:USERPROFILE) {
-        $userHome = $env:USERPROFILE.Replace('\', '/')
-        if ($titlePath.StartsWith($userHome)) {
-          $titlePath = '~' + $titlePath.Substring($userHome.Length)
-        }
+      if ($global:__Tty7Home -and ($titlePath -eq $global:__Tty7Home -or
+          $titlePath.StartsWith($global:__Tty7Home + '/'))) {
+        $titlePath = '~' + $titlePath.Substring($global:__Tty7Home.Length)
       }
-      Write-Host -NoNewline "$($global:__Tty7Esc)]0;$($env:USERNAME)@$($env:COMPUTERNAME):$titlePath$($global:__Tty7Bel)"
+      Write-Host -NoNewline "$($global:__Tty7Esc)]0;$($global:__Tty7User)@$($global:__Tty7Host):$titlePath$($global:__Tty7Bel)"
     }
 
     # Restore the captured status so the user's own prompt sees the real result,
@@ -1381,11 +1395,21 @@ mod tests {
     /// shell that could not find `false`) and `133;D;130` (interrupted) — a
     /// bootstrap that never ran the command at all would pass every assertion
     /// below. Matching through the terminator pins the status whole.
-    #[cfg(windows)]
     const FAILED_COMMAND_MARK: &str = "133;D;1\u{7}";
 
-    #[cfg(windows)]
-    fn prompt_cycle_over_pty(program: &str, injection: &Injection) -> String {
+    /// Type `keys` at a freshly spawned shell and return everything it wrote back.
+    ///
+    /// `keys` carries its own Enter because the two families disagree about which
+    /// byte that is. A line-discipline shell gets `\n` (the pty's ICRNL would
+    /// accept `\r` too); PSReadLine puts the tty in raw mode and reads keys
+    /// itself, so only a real `\r` submits — `\n` just sits in the buffer and the
+    /// command never runs.
+    fn prompt_cycle_over_pty(
+        program: &str,
+        injection: &Injection,
+        keys: &[u8],
+        cwd: Option<&Path>,
+    ) -> String {
         use portable_pty::{CommandBuilder, PtySize, native_pty_system};
         use std::io::{Read, Write};
 
@@ -1402,12 +1426,13 @@ mod tests {
         for (k, v) in &injection.env {
             cmd.env(k, v);
         }
+        if let Some(dir) = cwd {
+            cmd.cwd(dir);
+        }
         let mut child = pty.slave.spawn_command(cmd).expect("spawn shell");
 
         let mut writer = pty.master.take_writer().expect("writer");
         let mut reader = pty.master.try_clone_reader().expect("reader");
-        writer.write_all(b"false\n").expect("write");
-        writer.flush().expect("flush");
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -1421,27 +1446,65 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let mut out = Vec::new();
+        let mut answered = 0usize;
+        let mut typed = false;
         while std::time::Instant::now() < deadline {
             match rx.recv_timeout(std::time::Duration::from_millis(200)) {
                 Ok(chunk) => out.extend_from_slice(&chunk),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
+            let text = String::from_utf8_lossy(&out);
+
+            // Play terminal for the one query that blocks: PSReadLine asks where
+            // the cursor is (`CSI 6n`) before it will draw anything, and waits for
+            // the answer. Nothing is behind this pty to give one, so an unanswered
+            // report means pwsh never echoes a keystroke and the whole test times
+            // out. The position itself does not matter here — only that a reply
+            // arrives. A line-discipline shell never asks, so this is inert for
+            // the Git Bash and WSL cases.
+            let asked = text.matches("\u{1b}[6n").count();
+            if asked > answered {
+                for _ in answered..asked {
+                    let _ = writer.write_all(b"\x1b[1;1R");
+                }
+                let _ = writer.flush();
+                answered = asked;
+            }
+
+            // Type only once the first prompt is fully drawn (B is its last act).
+            // Writing at spawn time instead puts the keystrokes ahead of the
+            // cursor-position reply in the same input stream, and pwsh — still
+            // waiting on that reply — eats `false\r` as the answer to its own
+            // query. The command then never runs, and the failure reads as a
+            // missing C mark rather than as the race it is.
+            if !typed && text.contains("133;B") {
+                writer.write_all(keys).expect("write");
+                writer.flush().expect("flush");
+                typed = true;
+            }
+
             // Stop only once the typed command's own D report lands. A shell can
             // emit an unpaired D while drawing its first prompt, and breaking on
             // that would sample the transcript before the prompt cycle under test
             // has run at all.
-            if String::from_utf8_lossy(&out).contains(FAILED_COMMAND_MARK) {
+            if typed && text.contains(FAILED_COMMAND_MARK) {
                 break;
             }
         }
+        // Reap before asserting: a panic here would otherwise leave the shell
+        // holding the pty open for the rest of the test run.
         let _ = child.kill();
         let _ = child.wait();
         drop(pty.master);
+        assert!(
+            typed,
+            "no prompt-end mark ever arrived, so nothing was typed; got:\n{}",
+            String::from_utf8_lossy(&out)
+        );
         String::from_utf8_lossy(&out).into_owned()
     }
 
-    #[cfg(windows)]
     fn reported_cwd(text: &str) -> PathBuf {
         let payload = text
             .split("\u{1b}]")
@@ -1461,7 +1524,7 @@ mod tests {
         };
         let bash = bash.to_string_lossy().into_owned();
         let injection = setup(Some(&bash), &[], false).expect("bash integration");
-        let text = prompt_cycle_over_pty(&bash, &injection);
+        let text = prompt_cycle_over_pty(&bash, &injection, b"false\n", None);
 
         for mark in ["133;A", "133;B", "133;C", FAILED_COMMAND_MARK] {
             assert!(
@@ -1491,7 +1554,7 @@ mod tests {
             "~".into(),
         ];
         let injection = setup(Some("wsl.exe"), &args, false).expect("wsl integration");
-        let text = prompt_cycle_over_pty("wsl.exe", &injection);
+        let text = prompt_cycle_over_pty("wsl.exe", &injection, b"false\n", None);
 
         for mark in ["133;A", "133;B", "133;C", FAILED_COMMAND_MARK] {
             assert!(
@@ -1503,6 +1566,85 @@ mod tests {
         assert!(
             cwd.to_string_lossy().starts_with('/'),
             "expected the distro's own absolute path, got {cwd:?}"
+        );
+    }
+
+    /// The OSC 0 title the shell settled on, as `user@host:dir`.
+    fn reported_title(text: &str) -> String {
+        text.split("\u{1b}]")
+            .filter_map(|s| s.strip_prefix("0;"))
+            .filter_map(|s| s.split(['\u{7}', '\u{1b}']).next())
+            // pwsh emits an empty OSC 0 of its own just before ours; the one
+            // under test is whatever is left after dropping those.
+            .filter(|t| !t.is_empty())
+            .last()
+            .unwrap_or_else(|| panic!("expected a non-empty OSC 0 title; got:\n{text}"))
+            .to_string()
+    }
+
+    #[cfg(unix)]
+    fn pwsh_on_path() -> Option<String> {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join("pwsh"))
+            .find(|p| p.is_file())
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// Guards the Unix half of the PowerShell integration, which had no coverage
+    /// at all until #583 — every pty round-trip here used to be `#[cfg(windows)]`,
+    /// so a script written against `$env:USERNAME` / `$env:COMPUTERNAME` /
+    /// `$env:USERPROFILE` shipped for two platforms where all three are empty.
+    #[cfg(unix)]
+    #[test]
+    fn pwsh_reports_the_full_prompt_cycle_over_a_real_pty_on_unix() {
+        let Some(pwsh) = pwsh_on_path() else {
+            eprintln!("skipping: pwsh not installed");
+            return;
+        };
+        let injection = setup(Some(&pwsh), &[], false).expect("powershell integration");
+        // From $HOME, so the title's `~` abbreviation is exercised rather than
+        // assumed — it is the half that silently did nothing on Unix.
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME"));
+        let text = prompt_cycle_over_pty(&pwsh, &injection, b"false\r", Some(&home));
+
+        for mark in ["133;A", "133;B", "133;C", FAILED_COMMAND_MARK] {
+            assert!(
+                text.contains(mark),
+                "pwsh must report {mark:?}; got:\n{text}"
+            );
+        }
+
+        let cwd = reported_cwd(&text);
+        assert_eq!(
+            cwd,
+            home.canonicalize().unwrap_or(home.clone()),
+            "OSC 7 must name the pane's real cwd"
+        );
+
+        // Asserted by shape, not against $USER: a CI runner does not reliably
+        // export it, and the bug being guarded is emptiness — `@:` — not which
+        // name lands there. When the environment does name the user, pin it.
+        let title = reported_title(&text);
+        let (who, path) = title.split_once(':').expect("title is `user@host:dir`");
+        let (user, host) = who.split_once('@').expect("title is `user@host:dir`");
+        assert!(
+            !user.is_empty(),
+            "the title must name the user — `$env:USERNAME` is empty on Unix, \
+             which is what left it starting with a bare `@`; got {title:?}"
+        );
+        assert!(
+            !host.is_empty(),
+            "the title must name the host — `$env:COMPUTERNAME` is empty on Unix; \
+             got {title:?}"
+        );
+        if let Ok(expected) = std::env::var("USER") {
+            assert_eq!(user, expected, "the title named the wrong user");
+        }
+        assert_eq!(
+            path, "~",
+            "$HOME must abbreviate to `~` — the old check keyed off \
+             `$env:USERPROFILE`, which does not exist on Unix; got {title:?}"
         );
     }
 
@@ -2236,9 +2378,39 @@ mod tests {
     #[test]
     fn powershell_integration_sets_an_osc_title() {
         let s = POWERSHELL_INTEGRATION;
-        assert!(s.contains("]0;$($env:USERNAME)@$($env:COMPUTERNAME):"));
+        assert!(s.contains("]0;$($global:__Tty7User)@$($global:__Tty7Host):"));
         assert!(s.contains("$titlePath = '~'"));
         assert!(s.contains("$titlePath = $fsPath.Replace('\\', '/')"));
+    }
+
+    /// `$env:USERNAME`, `$env:COMPUTERNAME` and `$env:USERPROFILE` are Windows-only
+    /// spellings that are simply empty on macOS and Linux — reaching for any of
+    /// them is what titled every Unix pwsh pane `@:` plus a raw absolute path
+    /// (#583). The script runs unchanged on all three platforms, so the cheapest
+    /// guard is to keep those names out of it entirely.
+    #[test]
+    fn powershell_integration_reads_identity_platform_neutrally() {
+        let s = POWERSHELL_INTEGRATION;
+        for windows_only in ["$env:USERNAME", "$env:COMPUTERNAME", "$env:USERPROFILE"] {
+            assert!(
+                !s.contains(windows_only),
+                "{windows_only} is empty on macOS and Linux; use the .NET \
+                 equivalent so the one script is right on every platform"
+            );
+        }
+        assert!(s.contains("[Environment]::UserName"));
+        assert!(s.contains("[Environment]::MachineName"));
+        assert!(s.contains("$global:__Tty7Home = if ($HOME)"));
+    }
+
+    /// A bare `StartsWith($home)` also matches the sibling directory whose name
+    /// merely begins with the home directory's, so `/Users/annex` used to be
+    /// retitled `~ex`. The separator has to be part of the match.
+    #[test]
+    fn powershell_home_abbreviation_requires_a_path_separator() {
+        let s = POWERSHELL_INTEGRATION;
+        assert!(s.contains("$titlePath.StartsWith($global:__Tty7Home + '/')"));
+        assert!(s.contains("$titlePath -eq $global:__Tty7Home"));
     }
 
     #[test]

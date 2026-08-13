@@ -7,7 +7,6 @@
 use gpui::{Context, PromptLevel, Window};
 
 use tty7_core::core::git::ops::{Destructive, GitOp, PullMode};
-use tty7_core::core::git::status::HeadState;
 
 use crate::core::config::DiffViewMode;
 use crate::ui::app::Tty7App;
@@ -211,20 +210,25 @@ impl Tty7App {
         let message = self.scm_message(&repo, cx);
         let plan = crate::ui::scm::panel::commit_plan(&status, amend, &message);
         if !plan.enabled {
-            gpui_component::WindowExt::push_notification(
-                window,
-                t(L10nKey::ScmNothingToCommit).to_string(),
-                cx,
-            );
+            // The panel's own button exposes this through disabled + tooltip;
+            // the palette and the key binding have no tooltip to hover, so
+            // the toast has to carry the reason itself — "write a message
+            // first" and "nothing to commit" call for opposite actions, and
+            // answering the first with the second sends the user staging
+            // files they already staged (#546).
+            gpui_component::WindowExt::push_notification(window, t(plan.reason).to_string(), cx);
             // The follow-up dies with the commit: "commit and push" with
             // nothing to commit must not push whatever the branch holds.
             return;
         }
         let all = crate::ui::scm::panel::commit_stages_everything(&status, amend);
-        self.scm.amend = false;
-        // `run_git_op` arms `scm.committing` when the commit is actually
-        // dispatched — after the amend confirmation, not before it — so a
-        // cancelled prompt leaves nothing armed. See `scm_commit_landed`.
+        // The amend toggle is *not* cleared here: `run_git_op` clears it
+        // where it arms `scm.committing`, at dispatch — after the amend
+        // confirmation, not before it — so a cancelled prompt leaves the
+        // toggle and the armed flag exactly as the user set them. Clearing
+        // here made Cancel quietly switch amend off, and the next Commit
+        // became the new-commit the user had just declined to risk. See
+        // `scm_commit_landed`.
         self.scm_op_then(
             repo,
             GitOp::Commit {
@@ -338,14 +342,23 @@ impl Tty7App {
         let Some(status) = crate::terminal::git_data::status_of(cx, repo.host, &repo.root) else {
             return;
         };
-        let HeadState::Branch { name, .. } = &status.head else {
-            // A detached HEAD has no branch to push, and pushing a bare sha
-            // needs a refspec the panel has no way to ask for.
-            return;
+        let name = match crate::ui::scm::panel::pushable_branch(&status.head) {
+            Ok(name) => name.to_string(),
+            Err(reason) => {
+                // "A swallowed click on Push looks exactly like a push that
+                // finished instantly" — git_data.rs says it out loud about
+                // the busy slot, and the same holds here. The tile and the
+                // menu disable themselves, but the key binding, the palette
+                // and the follow-up half of "Commit and Push" all land in
+                // this guard, so the toast is the only place they can say
+                // why nothing moved (#545).
+                gpui_component::WindowExt::push_notification(window, t(reason).to_string(), cx);
+                return;
+            }
         };
         let (remote, branch) = match status.upstream.as_deref().and_then(split_upstream) {
             Some((remote, branch)) => (remote.to_string(), branch.to_string()),
-            None => ("origin".to_string(), name.clone()),
+            None => ("origin".to_string(), name),
         };
         let set_upstream = status.upstream.is_none();
         self.scm_op(

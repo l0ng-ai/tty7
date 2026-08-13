@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use super::*;
-use crate::daemon::install::asset::{ASSET_X86_64, CHECKSUMS_ASSET};
+use crate::daemon::install::asset::{ASSET_LINUX_X86_64, CHECKSUMS_ASSET};
 
 const VERSION: &str = "26.7.5";
 const CONTROL: u32 = 3;
@@ -339,7 +339,7 @@ impl FakeRelease {
 
     fn manifest(&self) -> String {
         format!(
-            "{}  {ASSET_X86_64}\n{}  checksums-are-not-self-describing\n",
+            "{}  {ASSET_LINUX_X86_64}\n{}  checksums-are-not-self-describing\n",
             checksums::hex(&checksums::sha256(&self.manifest_of)),
             checksums::hex(&checksums::sha256(b"noise")),
         )
@@ -359,7 +359,7 @@ impl AssetFetcher for FakeRelease {
         if url.ends_with(CHECKSUMS_ASSET) {
             return Ok(self.manifest().into_bytes());
         }
-        if url.ends_with(ASSET_X86_64) {
+        if url.ends_with(ASSET_LINUX_X86_64) {
             return Ok(self.asset_bytes.clone());
         }
         Err(format!("404: {url}"))
@@ -418,7 +418,7 @@ fn first_install_runs_all_six_steps() {
         .run()
         .expect("a clean install must succeed");
 
-    assert_eq!(report.asset, ASSET_X86_64);
+    assert_eq!(report.asset, ASSET_LINUX_X86_64);
     assert_eq!(report.paths.binary, BINARY);
     assert!(report.installed, "bytes were transferred");
     assert!(report.confirmed, "a new machine is confirmed once");
@@ -442,7 +442,9 @@ fn first_install_runs_all_six_steps() {
         release.fetched(),
         vec![
             format!("https://github.com/l0ng-ai/tty7/releases/download/v{VERSION}/checksums.txt"),
-            format!("https://github.com/l0ng-ai/tty7/releases/download/v{VERSION}/{ASSET_X86_64}"),
+            format!(
+                "https://github.com/l0ng-ai/tty7/releases/download/v{VERSION}/{ASSET_LINUX_X86_64}"
+            ),
         ]
     );
 }
@@ -587,14 +589,14 @@ fn the_confirmation_states_path_size_and_origin() {
     let request = &asked[0];
     assert_eq!(request.host, "me@fresh-box:22");
     assert_eq!(request.remote_path, BINARY);
-    assert_eq!(request.asset, ASSET_X86_64);
+    assert_eq!(request.asset, ASSET_LINUX_X86_64);
     assert_eq!(
         request.size_bytes,
         SERVER_BYTES.len() as u64,
         "the size quoted is the verified byte count, not a Content-Length promise"
     );
     assert!(request.source_url.contains("github.com"));
-    assert!(request.source_url.contains(ASSET_X86_64));
+    assert!(request.source_url.contains(ASSET_LINUX_X86_64));
     assert_eq!(
         request.sha256,
         checksums::hex(&checksums::sha256(SERVER_BYTES))
@@ -625,7 +627,7 @@ fn the_default_confirmation_declines() {
     let request = InstallRequest {
         host: "me@somewhere:22".into(),
         version: VERSION.into(),
-        asset: ASSET_X86_64,
+        asset: ASSET_LINUX_X86_64,
         source_url: "https://example/x".into(),
         remote_path: BINARY.into(),
         size_bytes: 42,
@@ -694,7 +696,14 @@ fn a_present_but_unexecutable_binary_is_reinstalled() {
 
 #[test]
 fn an_unsupported_machine_is_refused_before_any_work() {
-    for (uname, expect_linux) in [("Linux armv7l", true), ("Darwin arm64", false)] {
+    // A machine we publish nothing for on a system we do, on both systems we
+    // do, and a system we do not — the three ways this can end, none of which
+    // may touch the network or the remote box.
+    for (uname, expect_unknown_machine) in [
+        ("Linux armv7l", true),
+        ("Darwin i386", true),
+        ("FreeBSD amd64", false),
+    ] {
         let mut remote = FakeRemote::new();
         remote.uname = format!("{uname}\n");
         let release = FakeRelease::new();
@@ -708,7 +717,8 @@ fn an_unsupported_machine_is_refused_before_any_work() {
                 assert_eq!(target.raw(), uname);
                 assert_eq!(
                     matches!(target, UnsupportedTarget::UnknownMachine { .. }),
-                    expect_linux
+                    expect_unknown_machine,
+                    "{uname} was refused as {target:?}"
                 );
             }
             other => panic!("{uname} must be refused, got {other}"),
@@ -982,7 +992,9 @@ fn without_a_bundle_the_source_is_the_plain_download() {
         bundled: None,
         fallback_on_missing: false,
     };
-    let loaded = source.load("26.7.5", ASSET_X86_64).expect("downloads");
+    let loaded = source
+        .load("26.7.5", ASSET_LINUX_X86_64)
+        .expect("downloads");
     assert_eq!(loaded.bytes, SERVER_BYTES);
     assert_eq!(
         release.fetched().len(),
@@ -996,7 +1008,7 @@ fn a_bundle_is_used_instead_of_downloading() {
     let dir = std::env::temp_dir().join(format!("tty7-bundle-src-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join(ASSET_X86_64), b"\x7fELF local build").unwrap();
+    std::fs::write(dir.join(ASSET_LINUX_X86_64), b"\x7fELF local build").unwrap();
 
     let release = FakeRelease::new();
     let source = BundledOrRelease {
@@ -1004,7 +1016,9 @@ fn a_bundle_is_used_instead_of_downloading() {
         bundled: Some(wsl::BundledServerBinary::in_dirs(vec![dir.clone()])),
         fallback_on_missing: false,
     };
-    let loaded = source.load("26.7.5", ASSET_X86_64).expect("loads locally");
+    let loaded = source
+        .load("26.7.5", ASSET_LINUX_X86_64)
+        .expect("loads locally");
     assert_eq!(loaded.bytes, b"\x7fELF local build");
     assert!(
         release.fetched().is_empty(),
@@ -1030,7 +1044,9 @@ fn a_bundle_that_lacks_the_asset_does_not_fall_back_to_the_network() {
         bundled: Some(wsl::BundledServerBinary::in_dirs(vec![dir.clone()])),
         fallback_on_missing: false,
     };
-    let err = source.load("26.7.5", ASSET_X86_64).expect_err("no binary");
+    let err = source
+        .load("26.7.5", ASSET_LINUX_X86_64)
+        .expect_err("no binary");
     assert!(matches!(err, InstallError::MissingBundled { .. }), "{err}");
     assert!(
         err.to_string().contains(&dir.display().to_string()),
@@ -1056,7 +1072,7 @@ fn discover_falls_back_to_release_when_bundled_is_missing() {
         fallback_on_missing: true,
     };
     let loaded = source
-        .load("26.7.5", ASSET_X86_64)
+        .load("26.7.5", ASSET_LINUX_X86_64)
         .expect("falls back to release");
     assert_eq!(loaded.bytes, SERVER_BYTES);
     assert_eq!(
@@ -1075,7 +1091,7 @@ fn discover_uses_bundled_when_it_is_present() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join(ASSET_X86_64), b"\x7fELF discovered build").unwrap();
+    std::fs::write(dir.join(ASSET_LINUX_X86_64), b"\x7fELF discovered build").unwrap();
 
     let release = FakeRelease::new();
     let source = BundledOrRelease {
@@ -1083,7 +1099,9 @@ fn discover_uses_bundled_when_it_is_present() {
         bundled: Some(wsl::BundledServerBinary::in_dirs(vec![dir.clone()])),
         fallback_on_missing: true,
     };
-    let loaded = source.load("26.7.5", ASSET_X86_64).expect("loads locally");
+    let loaded = source
+        .load("26.7.5", ASSET_LINUX_X86_64)
+        .expect("loads locally");
     assert_eq!(loaded.bytes, b"\x7fELF discovered build");
     assert!(
         release.fetched().is_empty(),

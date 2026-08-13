@@ -20,7 +20,7 @@ Set inside every tty7 pane, inherited by anything launched from one.
 | Variable | Meaning |
 |---|---|
 | `TTY7_PANE` | This pane's id, e.g. `71` or `%71` (both accepted). Default target of `split`, `send`, `capture`, `procs`, `wait`, `pane close`. |
-| `TTY7_WS` | This pane's workspace id. Default for `run --keep`, `tab new`, `ws tree`. |
+| `TTY7_WS` | This pane's workspace id. Default for `run --keep`, `tab new`, `tab ls`, `ws tree`. |
 | `TTY7_CONFIG_DIR` | The server's config dir — how the CLI finds the right server. You never pass a socket path. |
 
 Outside a tty7 shell, address-taking verbs fail with
@@ -89,14 +89,25 @@ it the workspace still appears in the switcher; it just waits to be opened.
 Alias of `pane split`. Splits `%PANE` (default `$TTY7_PANE`), spawning a shell
 in the same cwd. Exactly one axis is required — `--v`/`--vertical` puts the new
 pane below, `--h`/`--horizontal` to the right. `--ratio` (default `0.5`) is the
-share kept by the *existing* pane. Prints `%NN`. JSON: `{"pane"}`.
+share kept by the *existing* pane, clamped to `0.05`–`0.95` — a `--ratio 70`
+silently becomes `0.95`, not an error. Prints `%NN`. JSON: `{"pane"}`.
 
 ### `tty7 send [%PANE] [TEXT] [--enter] [--key KEY]…`
 
-Types `TEXT` into the pane as keystrokes; `--enter` appends CR. With one
-argument the text is the argument and the pane comes from `$TTY7_PANE` — but a
-lone `%42` is rejected as a missing-text error rather than typed, unless a
-`--key` gives it something to do.
+Types `TEXT` into the pane as keystrokes; `--enter` is shorthand for `--key
+enter` — it appends CR to the text, or presses Enter on its own when there is
+none, so `tty7 send %42 --enter` runs whatever pane 42 already has typed. With
+one argument the text is the argument and the pane comes from `$TTY7_PANE` —
+but a lone `%42` (or bare `42`, the shape `pane ls --json` prints) is rejected
+as a missing-text error rather than typed, unless a `--key` gives it something
+to do. `--enter` is that key only for the `%`-marked spelling: `tty7 send 83
+--enter` is refused, because it reads as much like typing `83` into your own
+pane as like pressing Enter in pane 83, and the error names both ways to say
+which (`send %83 --enter`, `send %PANE 83 --enter`). A `%` followed by a digit
+that still doesn't parse (`%3x`) is an address error, never text for your own
+pane — while text that merely starts with `%` (`%s/foo/bar/`, `%!sort`) types
+as given, as does anything unmarked that is not a plain number (`3x`, `+5`). To
+type an address-shaped string, name the pane as well: `tty7 send %42 %3x`.
 
 `--key` presses a key instead of typing characters, which is what a pane wants
 once something is already running in it: answering a prompt that only takes
@@ -107,11 +118,14 @@ for a sequence, and it composes with `TEXT` — the text goes first.
 |---|---|
 | Named | `enter` `escape` `tab` `backtab` `space` `backspace` `delete` `up` `down` `right` `left` `home` `end` `pageup` `pagedown` |
 | Chords | `C-<char>` (Ctrl, e.g. `C-c`), `M-<char>` (Alt) |
-| Aliases | `return` `cr` `esc` `del` `bs` `shift-tab` `pgup` `pgdn` |
+| Aliases | `return` `cr` `esc` `del` `bs` `shift-tab` `pgup` `pgdn` `pgdown` |
 
 Names are case-insensitive, and an unknown one is a usage error (exit `2`)
 raised before anything is sent — half a key sequence in a live pane is worse
-than none. Each keystroke is delivered as its own event, 200 ms apart, so a
+than none. One case exception: Alt is a prefixed ESC, so its character goes
+out exactly as written and `M-X` is not `M-x` (Ctrl is unaffected — `C-c`
+and `C-C` are the same byte). Each keystroke is delivered as its own event,
+200 ms apart, so a
 raw-mode TUI reads a sequence as a sequence rather than as a paste.
 
 JSON: `{"pane","sent","enter","keys"}`.
@@ -138,7 +152,9 @@ The process tree inside the pane, indented by depth, `*` on the foreground
 process — then a second table of ports those processes are listening on. Prints
 `nothing running in this pane` when both are empty.
 
-JSON: `{"procs":[{"pid","name","depth","foreground"}],"ports":[{"port","pid","name"}]}`.
+JSON: `{"procs":[{"pid","name","depth","foreground"}],"ports":[{"port","pid","name","addr"}]}` —
+`addr` is the address the socket is bound to (`*`, `0.0.0.0`, `127.0.0.1`,
+`[::1]`, or a specific interface).
 
 ### `tty7 agents`
 
@@ -178,6 +194,11 @@ want directly after a `send`; a command quick enough to finish inside one
 
 The reply carries the agent's message and native session id. The JSON's `stale`
 flag says whether the answer might belong to the previous turn.
+
+JSON: `{"pane","status","matched","stale","activity","message","session_id"}`.
+A timeout exits `124` with the same object plus `"timed_out": true` —
+`matched` is `false` there, and `stale` still says whether the pane moved
+while you watched.
 [Orchestration →](/agents/orchestration)
 
 ### `tty7 events`
@@ -221,13 +242,14 @@ candidates.
 | `ws tree [WORKSPACE]` | One workspace as a tree: tabs, split axes and ratios, panes with cwds | The whole workspace object: `{"id","name","last_active","active_tab","tabs":[{"id","name","sidebar_group","root",…}]}` |
 | `ws new [NAME]` | An empty workspace (no tab, no pane) | `{"id","name"}` |
 | `ws rename WORKSPACE NAME` | Name or rename | `{"id","name"}` |
-| `ws rm WORKSPACE` | Delete the workspace | `{"removed"}` |
+| `ws rm WORKSPACE` | Delete the workspace and hang up its panes | `{"removed"}` |
 | `ws attach WORKSPACE` | Become its controlling client | `{"attached","took_over_from"}` |
 | `ws detach WORKSPACE` | Let go without interrupting anything | `{"detached"}` |
 
 <Warning>
-  `ws rm` does **not** kill the panes it held — they keep running as orphans
-  with no workspace. Find them with `pane ls --all` and close them one by one.
+  `ws rm` hangs up the panes the workspace held. If the command reports that
+  some panes could not be hung up, they keep running as orphans with no
+  workspace — find them with `pane ls --all` and close them one by one.
 </Warning>
 
 Prefer `tty7 new <path>` over `ws new` when you want something usable: `ws new`
@@ -273,8 +295,9 @@ a stand-in.
 
 `--all` is the one that shows leaks. Each entry is
 `{"pane","workspace","orphan","owner","title","cwd","live"}`: `owner` is the id
-of the workspace that owns the pane, and `orphan: true` means no workspace holds
-it. An interrupted `run` and a removed workspace both leave orphans here.
+of the workspace that may attach to the pane (absent when none may), and
+`orphan: true` means no workspace holds it. An interrupted `run` leaves orphans
+here, as does a `ws rm` that reported panes it could not hang up.
 
 `--orphans` is the reaper for exactly those. It closes what `pane ls --all`
 lists as orphaned and nothing else — panes a workspace holds are untouched —

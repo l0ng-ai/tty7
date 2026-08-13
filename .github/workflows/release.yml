@@ -265,14 +265,107 @@ jobs:
           path: tty7/dist/${{ matrix.asset }}
           if-no-files-found: error
 
-  # Single assembly step, after all four platforms succeed. The release object is
+  # The same server for remote Macs, published under the same contract: flat,
+  # version-free names that `install::asset` derives from `uname -sm`. Separate
+  # from `server-musl` because an Apple target needs an Apple runner, and both
+  # slices come off one arm64 runner — the Xcode SDK carries both. See ci.yml's
+  # `server-macos` for the rest of the reasoning; keep the three in sync.
+  #
+  # Not code-signed or notarized, and deliberately: this binary is never
+  # downloaded by the destination Mac. The client fetches it, verifies it against
+  # checksums.txt and writes it over SFTP, which sets no quarantine attribute, so
+  # Gatekeeper is not in the path at all. The ad-hoc signature the linker applies
+  # is all arm64 asks for, and `assert-macho.sh` checks it is there.
+  server-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+            asset: tty7-server-macos-aarch64
+          - target: x86_64-apple-darwin
+            arch: x86_64
+            asset: tty7-server-macos-x86_64
+    runs-on: macos-latest
+    env:
+      RUSTFLAGS: -C strip=symbols
+    steps:
+      - name: Checkout tty7
+        uses: actions/checkout@v4
+        with:
+          path: tty7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tty7
+          key: ${{ matrix.target }}
+
+      - name: Look for the tty7-server package
+        id: probe
+        working-directory: tty7
+        run: |
+          set -euo pipefail
+          if cargo metadata --no-deps --format-version 1 \
+              | jq -e '[.packages[].name] | index("tty7-server")' >/dev/null; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::tty7-server is not a workspace member yet — this release will carry no macOS remote-server assets"
+          fi
+
+      - name: Build tty7-server
+        if: steps.probe.outputs.present == 'true'
+        working-directory: tty7
+        run: cargo build --release --locked -p tty7-server --target ${{ matrix.target }}
+
+      # Ad-hoc — no identity, no secrets, and nothing to do with the notarized
+      # signing the GUI bundles get. It is what the arm64 kernel requires before
+      # it will execute a binary at all: the linker signs the arm64 slice
+      # itself, x86_64 comes out bare, and x86_64 is what a Rosetta shell on an
+      # Apple Silicon Mac asks for. `--force` makes it idempotent across both.
+      - name: Ad-hoc sign the binary
+        if: steps.probe.outputs.present == 'true'
+        working-directory: tty7
+        run: codesign --force --sign - "target/${{ matrix.target }}/release/tty7-server"
+
+      - name: Assert the binary is self-contained
+        if: steps.probe.outputs.present == 'true'
+        working-directory: tty7
+        run: |
+          bash .github/scripts/assert-macho.sh \
+            "target/${{ matrix.target }}/release/tty7-server" "${{ matrix.arch }}"
+
+      - name: Stage the asset
+        if: steps.probe.outputs.present == 'true'
+        working-directory: tty7
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/tty7-server" \
+             "dist/${{ matrix.asset }}"
+          chmod +x "dist/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v7
+        if: steps.probe.outputs.present == 'true'
+        with:
+          name: release-${{ matrix.asset }}
+          path: tty7/dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  # Single assembly step, after every GUI platform and every server slice
+  # succeeds. The release object is
   # created as a **draft** and left that way: a draft is invisible to both
   # /releases/latest and the releases page, so nothing can prompt a user to
   # download a version whose asset set is incomplete or whose notes are still
   # empty. Publishing is the release skill's job — it verifies the platform assets and
   # writes the body first, then flips the draft. See .claude/skills/release/SKILL.md.
   draft-release:
-    needs: [build, server-musl]
+    needs: [build, server-musl, server-macos]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     env:

@@ -500,6 +500,36 @@ pub struct NativeSshSpec {
     pub profile_id: Option<String>,
 }
 
+/// What a connection test found. The daemon reports the outcome, never the
+/// wording: the sentence a user reads is localized, and the daemon has no
+/// locale.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SshTestReport {
+    /// Transport, host key and authentication all went through. The connection
+    /// was dropped immediately afterwards.
+    Authenticated { elapsed_ms: u32 },
+    /// The server answered and the handshake got as far as needing something
+    /// only a person can supply. Reaching this point already proves the address,
+    /// the port, the proxy chain and the jump host.
+    NeedsInput { need: SshTestNeed, elapsed_ms: u32 },
+    /// Never got that far. The reason is the connect path's own message, which
+    /// is what the pane would have printed.
+    Failed { reason: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SshTestNeed {
+    Password,
+    KeyPassphrase,
+    KeyboardInteractive,
+    /// The server's host key is one nobody here has accepted yet.
+    HostKeyDecision,
+    /// The server presented a *different* key than the one on file. Kept apart
+    /// from `HostKeyDecision` because "not accepted yet" and "not the key it
+    /// gave last time" are not the same news.
+    HostKeyChanged,
+}
+
 impl NativeSshSpec {
     #[allow(dead_code)]
     pub fn without_secrets(&self) -> NativeSshSpec {
@@ -716,6 +746,11 @@ pub enum ClientMsg {
     },
     ListKnownHosts,
     DeleteKnownHost(KnownHostId),
+    /// Open this connection, report what happened, and drop it. Answered with
+    /// exactly one [`DaemonMsg::SshTestResult`].
+    TestSsh {
+        spec: Box<NativeSshSpec>,
+    },
     SftpList {
         pane_id: u64,
         path: String,
@@ -795,6 +830,7 @@ pub enum DaemonMsg {
         phase: SshPhase,
     },
     KnownHostsList(Vec<KnownHostEntry>),
+    SshTestResult(SshTestReport),
     SftpEntries(Vec<SftpEntry>),
     SftpOpResult(SftpOpResult),
     SftpTransferStarted {
@@ -824,6 +860,7 @@ mod kind {
     pub const AUTH_RESPONSE: u8 = 15;
     pub const LIST_KNOWN_HOSTS: u8 = 16;
     pub const DELETE_KNOWN_HOST: u8 = 17;
+    pub const TEST_SSH: u8 = 18;
     pub const SFTP_LIST: u8 = 30;
     pub const SFTP_OP: u8 = 31;
     pub const SFTP_TRANSFER_START: u8 = 32;
@@ -855,6 +892,7 @@ mod kind {
     pub const AUTH_PROMPT: u8 = 13;
     pub const SSH_STATUS: u8 = 14;
     pub const KNOWN_HOSTS_LIST: u8 = 15;
+    pub const SSH_TEST_RESULT: u8 = 16;
     pub const SFTP_ENTRIES: u8 = 30;
     pub const SFTP_OP_RESULT: u8 = 31;
     pub const SFTP_TRANSFER_STARTED: u8 = 32;
@@ -1050,6 +1088,7 @@ impl ClientMsg {
             ClientMsg::DeleteKnownHost(id) => {
                 write_frame(w, kind::DELETE_KNOWN_HOST, &to_json(id)?)
             }
+            ClientMsg::TestSsh { spec } => write_frame(w, kind::TEST_SSH, &to_json(spec)?),
             ClientMsg::SftpList { pane_id, path } => {
                 write_frame(w, kind::SFTP_LIST, &to_json(&(pane_id, path))?)
             }
@@ -1164,6 +1203,9 @@ impl ClientMsg {
             }
             kind::LIST_KNOWN_HOSTS => ClientMsg::ListKnownHosts,
             kind::DELETE_KNOWN_HOST => ClientMsg::DeleteKnownHost(from_json(&payload)?),
+            kind::TEST_SSH => ClientMsg::TestSsh {
+                spec: from_json(&payload)?,
+            },
             kind::SFTP_LIST => {
                 let (pane_id, path) = from_json(&payload)?;
                 ClientMsg::SftpList { pane_id, path }
@@ -1249,6 +1291,9 @@ impl DaemonMsg {
             DaemonMsg::KnownHostsList(list) => {
                 write_frame(w, kind::KNOWN_HOSTS_LIST, &to_json(list)?)
             }
+            DaemonMsg::SshTestResult(report) => {
+                write_frame(w, kind::SSH_TEST_RESULT, &to_json(report)?)
+            }
             DaemonMsg::SftpEntries(entries) => {
                 write_frame(w, kind::SFTP_ENTRIES, &to_json(entries)?)
             }
@@ -1307,6 +1352,7 @@ impl DaemonMsg {
                 phase: from_json(&payload)?,
             },
             kind::KNOWN_HOSTS_LIST => DaemonMsg::KnownHostsList(from_json(&payload)?),
+            kind::SSH_TEST_RESULT => DaemonMsg::SshTestResult(from_json(&payload)?),
             kind::SFTP_ENTRIES => DaemonMsg::SftpEntries(from_json(&payload)?),
             kind::SFTP_OP_RESULT => DaemonMsg::SftpOpResult(from_json(&payload)?),
             kind::SFTP_TRANSFER_STARTED => DaemonMsg::SftpTransferStarted {
@@ -1658,6 +1704,14 @@ mod tests {
                     keyblob: "AAAAC3Nz".into(),
                 },
             }]),
+            DaemonMsg::SshTestResult(SshTestReport::Authenticated { elapsed_ms: 640 }),
+            DaemonMsg::SshTestResult(SshTestReport::NeedsInput {
+                need: SshTestNeed::HostKeyDecision,
+                elapsed_ms: 91,
+            }),
+            DaemonMsg::SshTestResult(SshTestReport::Failed {
+                reason: "connect to 10.0.0.5:2222 failed: Connection refused".into(),
+            }),
             DaemonMsg::SftpEntries(vec![
                 SftpEntry {
                     name: "src".into(),
@@ -2220,6 +2274,9 @@ mod tests {
                     accept: true,
                     remember: true,
                 },
+            },
+            ClientMsg::TestSsh {
+                spec: Box::new(sample_native_spec()),
             },
         ];
         let mut buf = Vec::new();

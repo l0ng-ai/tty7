@@ -109,10 +109,19 @@ fn anchor_row(history: usize, point: &Point) -> i64 {
 impl TerminalView {
     pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let fresh = self.search.is_none();
+        // When the query is seeded from the grid selection, that selection is
+        // the thing being searched for — not a casualty of opening the bar.
+        // `recompute_matches` clears it because its other callers are the user
+        // *changing* the query (typing, toggles), where the old selection no
+        // longer names anything; here the query IS the selection, so it is
+        // put back after the scan (#584).
+        let mut seeded_selection = None;
         if fresh {
-            let seed = self
-                .selected_search_seed()
-                .unwrap_or_else(|| self.search_last_query.clone());
+            let seed = self.selected_search_seed();
+            if seed.is_some() {
+                seeded_selection = self.terminal.term.lock().selection.clone();
+            }
+            let seed = seed.unwrap_or_else(|| self.search_last_query.clone());
             let input = cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder(t(L10nKey::SearchFind))
@@ -136,6 +145,9 @@ impl TerminalView {
         }
         if fresh {
             self.recompute_matches(cx);
+            if let Some(selection) = seeded_selection {
+                self.terminal.term.lock().selection = Some(selection);
+            }
         }
         cx.notify();
     }
@@ -157,7 +169,9 @@ impl TerminalView {
         self.search = None;
         self.search_focused = false;
         self.search_regex_error = false;
-        self.terminal.term.lock().selection = None;
+        // The grid selection stays: it is the user's, not the bar's. The same
+        // discipline `refresh_matches_after_output` states — the search bar
+        // opening and closing around a selection must not erase it (#584).
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }

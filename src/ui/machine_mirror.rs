@@ -111,6 +111,29 @@ impl MachineMirrors {
         ws.active_tab = active;
     }
 
+    /// The name the machine has for a workspace, from a pull that saw it.
+    ///
+    /// A window is left out of the deltas its own ops raise, so the name it
+    /// proposed at creation comes back in nothing it is sent — this is where it
+    /// learns the name of the workspace it is showing, and without it the chip
+    /// read the directory until some later full pull produced the name and
+    /// looked like a rename (#604). `None` is an answer too: a workspace made
+    /// by `tty7 new` really has no name, and reads its directory on purpose.
+    pub fn note_workspace_name(
+        cx: &mut App,
+        host: HostId,
+        machine_ws: WorkspaceId,
+        name: Option<String>,
+    ) {
+        let Some(machine) = cx.default_global::<Self>().machines.get_mut(&host) else {
+            return;
+        };
+        if let Some(ws) = machine.workspaces.iter_mut().find(|w| w.id == machine_ws) {
+            ws.name = name;
+        }
+        cx.refresh_windows();
+    }
+
     pub fn note_workspace_op(cx: &mut App, host: HostId, request: &ControlRequest) {
         let Some(machine) = cx.default_global::<Self>().machines.get_mut(&host) else {
             return;
@@ -444,6 +467,73 @@ mod tests {
                 Some("web"),
                 "which is what the next save stamps"
             );
+        });
+    }
+
+    /// #604: a window is left out of the deltas its own ops raise, so the name
+    /// the machine gave the workspace it just created reaches it only through
+    /// the answer to that create. Once it has, the full tree a rebuild pulls
+    /// says the same thing and nothing on screen moves; until it did, the chip
+    /// read the directory and the first full pull looked like a rename.
+    #[gpui::test]
+    fn a_named_workspace_reads_the_same_before_and_after_a_full_pull(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::session::{WindowView, WindowViews, WorkspaceStore};
+
+        cx.update(|cx| {
+            let entry = WindowView::default();
+            let id = entry.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![entry.clone()],
+                    active: None,
+                },
+            );
+
+            // What the window knows the moment its create is answered: a
+            // workspace of its own, and the name the machine put on it.
+            MachineMirrors::install(cx, HostId::LOCAL, Machine::default());
+            MachineMirrors::note_synced_workspace(cx, HostId::LOCAL, id, vec![leaf_tab(1)], None);
+            MachineMirrors::note_workspace_name(
+                cx,
+                HostId::LOCAL,
+                id,
+                Some("keen-marten".to_string()),
+            );
+            assert_eq!(display_name(cx, &entry).as_deref(), Some("keen-marten"));
+
+            // The rebuild, pulling the whole tree: the same answer.
+            let pulled = |name: Option<&str>| Machine {
+                workspaces: vec![Workspace {
+                    id,
+                    name: name.map(str::to_string),
+                    tabs: vec![leaf_tab(1)],
+                    ..Workspace::default()
+                }],
+                panes: vec![PaneRecord {
+                    cwd: Some("/work/verify-main".into()),
+                    ..PaneRecord::new(1)
+                }],
+            };
+            MachineMirrors::install(cx, HostId::LOCAL, pulled(Some("keen-marten")));
+            assert_eq!(
+                display_name(cx, &entry).as_deref(),
+                Some("keen-marten"),
+                "the rebuild has nothing new to say, so nothing renames itself"
+            );
+
+            // A name the user chose outranks the one they were given.
+            MachineMirrors::install(cx, HostId::LOCAL, pulled(Some("deploy")));
+            assert_eq!(display_name(cx, &entry).as_deref(), Some("deploy"));
+
+            // And "the machine has no name for it" is an answer too — that is
+            // what `tty7 new` leaves behind, and it reads as its directory.
+            MachineMirrors::install(cx, HostId::LOCAL, pulled(None));
+            assert_eq!(display_name(cx, &entry).as_deref(), Some("verify-main"));
+            MachineMirrors::note_workspace_name(cx, HostId::LOCAL, id, None);
+            assert_eq!(display_name(cx, &entry).as_deref(), Some("verify-main"));
         });
     }
 
