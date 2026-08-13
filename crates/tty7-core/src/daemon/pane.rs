@@ -259,6 +259,20 @@ fn initial_working_directory(cwd: Option<PathBuf>) -> Option<PathBuf> {
         .filter(|d| d != std::path::Path::new("/"))
         .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from));
     let forced = crate::core::config::working_directory_base();
+    // A configured "Start in" path that is not a directory can never win the
+    // pick below, so every new pane silently lands on the fallback and the
+    // mistyped path reads as a tty7 bug (#601). Settings refuses to save one
+    // now, but a hand-edited config.json can still hold one — name it, with
+    // the reason, at the moment it actually costs something (an explicit cwd
+    // that resolves never consults the config, so that case stays quiet).
+    if let Some(dir) = &forced {
+        if !dir.is_dir() && cwd.as_ref().is_none_or(|d| !d.is_dir()) {
+            log::warn!(
+                "configured working directory {} is not a directory; new panes fall back",
+                dir.display()
+            );
+        }
+    }
     [cwd, forced, fallback]
         .into_iter()
         .flatten()

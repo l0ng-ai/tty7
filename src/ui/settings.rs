@@ -4831,10 +4831,21 @@ impl Tty7App {
             },
         );
         let wd_path_control = if wd_strategy == WdStrategy::Custom {
-            div()
+            // Same pattern as the Arguments row above, with its caveat: the
+            // input commits on Enter/blur and this parent renders on that
+            // commit, so a half-typed path is never marked wrong
+            // mid-keystroke. `commit_working_directory_path` refuses the same
+            // value through the same predicate, so the red line and the
+            // not-saved config always agree (#601).
+            let wd_path_value = wd_path_input.read(cx).value();
+            let wd_path_error = (!crate::ui::app::wd_path_saveable(&wd_path_value))
+                .then(|| field_error(t(L10nKey::SettingsWdPathInvalid), cx));
+            v_flex()
+                .gap_1()
                 .w(px(260.))
                 .max_w_full()
                 .child(Input::new(&wd_path_input).small())
+                .when_some(wd_path_error, |this, line| this.child(line))
                 .into_any_element()
         } else {
             div().into_any_element()

@@ -50,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **A mistyped "Start in" path is refused at save instead of silently
+  rerouting every new pane.** The custom path used to be stored unchecked,
+  and the daemon's picker then skipped it — not a directory — and started
+  each new shell in its own fallback directory, so "new shells don't start
+  in my project" read as a tty7 bug rather than a typo. Settings now marks a
+  non-existent directory in red and does not save it, and a hand-edited
+  `config.json` holding one gets a `log::warn!` naming the path at the
+  moment the fallback engages (#601).
 - **`tty7 doctor` exits 1 when the server is unreachable.** Doctor is the
   verb people run when something is not working, so an unreachable server is
   *the* finding — not a row to exit 0 over while `tty7 doctor || alert`

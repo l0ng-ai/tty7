@@ -5225,6 +5225,16 @@ impl Tty7App {
         else {
             return;
         };
+        // A typo here is not a directory, and the daemon then silently falls
+        // back to its own cwd for every new pane — "new shells don't start in
+        // my project" reads as a tty7 bug rather than a typo (#601). Refuse
+        // to save, the proxy row's pattern (#551): the field keeps the text,
+        // the settings row explains in red, and the last good value stays in
+        // config.json.
+        if !wd_path_saveable(&path) {
+            cx.notify();
+            return;
+        }
         let cfg = cx.global_mut::<Config>();
         if cfg.working_directory.path == path {
             return;
@@ -7294,6 +7304,17 @@ fn quote_shell_arg(arg: &str) -> String {
     quoted
 }
 
+/// The one rule the "Start in" custom path lives by (#601): empty means unset
+/// and saves; anything else must name a directory that exists, because the
+/// daemon's picker skips a path that is not one and every new pane then
+/// silently starts somewhere else. Settings refuses to save such a value and
+/// marks it red — both decide through this, so the red line and the not-saved
+/// config always agree. Local on purpose: this is the local daemon's config.
+pub(crate) fn wd_path_saveable(path: &str) -> bool {
+    let path = path.trim();
+    path.is_empty() || std::path::Path::new(path).is_dir()
+}
+
 pub(crate) fn parse_ssh_option_words(input: &str) -> Result<Vec<String>, ()> {
     let mut words = Vec::new();
     let mut current = String::new();
@@ -7680,8 +7701,28 @@ mod tests {
     use super::{
         CloseReason, TabAgentSession, clear_window_override_values, close_prompt, join_shell_args,
         leaf_shares_the_window_daemon, mru_order, pane_free_for, parse_ssh_connect_input,
-        parse_ssh_option_words, split_shell_args,
+        parse_ssh_option_words, split_shell_args, wd_path_saveable,
     };
+
+    #[test]
+    fn a_start_in_path_saves_only_when_it_names_a_real_directory() {
+        // Empty is "unset", not a broken path.
+        assert!(wd_path_saveable(""));
+        assert!(wd_path_saveable("   "));
+        let real = std::env::temp_dir();
+        let real = real.to_str().expect("temp dir is utf-8 here");
+        assert!(wd_path_saveable(real), "{real} exists");
+        assert!(
+            wd_path_saveable(&format!("  {real}  ")),
+            "the commit trims, so the check trims too"
+        );
+        assert!(!wd_path_saveable("/definitely/not/a/real/dir"));
+        // A file is not a directory the shell can start in.
+        let file = std::env::temp_dir().join("tty7-wd-saveable-probe");
+        std::fs::write(&file, b"x").expect("write probe file");
+        assert!(!wd_path_saveable(file.to_str().expect("utf-8")));
+        let _ = std::fs::remove_file(&file);
+    }
 
     #[test]
     fn the_close_question_names_what_it_is_about_to_end() {

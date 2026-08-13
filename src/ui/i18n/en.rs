@@ -367,6 +367,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsWdInherit => "Inherit",
         L10nKey::SettingsWdHome => "Home",
         L10nKey::SettingsWdCustom => "Custom",
+        L10nKey::SettingsWdPathInvalid => {
+            "That directory does not exist — the value was not saved."
+        }
         L10nKey::SettingsShellFooter => {
             "Applies to shells with nothing to inherit — like the first tab of a window. New tabs and splits keep inheriting the active pane's directory, and shells already open keep running."
         }

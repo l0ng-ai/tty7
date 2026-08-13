@@ -347,6 +347,7 @@ l10n_keys! {
     SettingsWdInherit,
     SettingsWdHome,
     SettingsWdCustom,
+    SettingsWdPathInvalid,
     SettingsShellFooter,
     SettingsScrolling,
     SettingsScrollback,

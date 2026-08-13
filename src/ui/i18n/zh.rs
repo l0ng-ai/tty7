@@ -321,6 +321,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsWdInherit => "继承",
         L10nKey::SettingsWdHome => "主目录",
         L10nKey::SettingsWdCustom => "自定义",
+        L10nKey::SettingsWdPathInvalid => "这个目录不存在，该值未保存。",
         L10nKey::SettingsShellFooter => {
             "仅适用于没有可继承目录的 shell，例如窗口的第一个标签页。新标签页和分屏仍会继承活动窗格的目录，已经打开的 shell 会继续运行。"
         }

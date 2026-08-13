@@ -372,6 +372,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsWdInherit => "継承",
         L10nKey::SettingsWdHome => "ホーム",
         L10nKey::SettingsWdCustom => "カスタム",
+        L10nKey::SettingsWdPathInvalid => {
+            "このディレクトリは存在しないため、この値は保存されませんでした"
+        }
         L10nKey::SettingsShellFooter => {
             "継承元のないシェルに適用されます。ウィンドウの最初のタブなどです。新しいタブと分割はアクティブなペインのディレクトリを引き継ぎ、開いているシェルは動き続けます"
         }
