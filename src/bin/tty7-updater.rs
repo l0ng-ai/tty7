@@ -2727,6 +2727,27 @@ mod windows {
             assert!(tail_options([OsString::from("--config-dir")].into_iter()).is_err());
         }
 
+        /// The elevated stage pins the helper it is about to run against the
+        /// installed one, so the directory that comparison reads must come
+        /// from this process's own image. Taken from `<install-dir>` instead,
+        /// both sides of the comparison would belong to whoever wrote the
+        /// command line — and the caller sits below the integrity boundary.
+        #[test]
+        fn the_installed_root_is_the_running_image_not_an_argument() {
+            let exe = std::env::current_exe().unwrap();
+            assert_eq!(installed_root().unwrap(), exe.parent().unwrap());
+
+            // Only the log ever asks this, so case is all it has to forgive.
+            assert!(same_directory(
+                Path::new(r"C:\Program Files\tty7"),
+                Path::new(r"c:\program files\TTY7")
+            ));
+            assert!(!same_directory(
+                Path::new(r"C:\Program Files\tty7"),
+                Path::new(r"C:\Users\mallory\tty7")
+            ));
+        }
+
         #[test]
         fn report_outcome_records_the_terminal_result_for_the_next_gui() {
             let root = tempfile::tempdir().unwrap();
