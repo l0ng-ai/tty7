@@ -106,17 +106,26 @@ impl GitStatusCache {
     /// re-read the diff, published it, woke every watcher of this cache, found
     /// the same disagreement, and went round again — two `git` processes per
     /// lap, forever, with `refreshing…` pinned to the header.
+    ///
+    /// `counts` is `None` when the diff that was read is not the one these
+    /// numbers are: they mean `git diff --numstat HEAD`, so only a snapshot of
+    /// HEAD is comparable to them. An unstaged or staged patch is a different
+    /// question with a smaller answer, and publishing it as if it were this one
+    /// silently wrong-footed the sidebar — opening an untracked file from the
+    /// Source Control panel takes the worktree's source, and a repository with
+    /// two lines staged went from `+8 −6` to `+6 −6` on the click. The branch
+    /// still lands: it is the same answer whatever was diffed.
     pub fn note_diff_read(
         &mut self,
         host: HostId,
         root: &Path,
         branch: &str,
-        added: u32,
-        removed: u32,
+        counts: Option<(u32, u32)>,
     ) -> bool {
         let Some(status) = self.status.get(host, root) else {
             return false;
         };
+        let (added, removed) = counts.unwrap_or((status.added, status.removed));
         if status.branch == branch && status.added == added && status.removed == removed {
             return false;
         }
@@ -201,13 +210,39 @@ mod tests {
         let cwd = Path::new("/repo/sub");
         cache.finish_probe(L, cwd, Some(snap("/repo", "main", Some((27, 8)))));
 
-        assert!(cache.note_diff_read(L, Path::new("/repo"), "main", 3, 1));
+        assert!(cache.note_diff_read(L, Path::new("/repo"), "main", Some((3, 1))));
         let got = cache.status_for(L, cwd).unwrap();
         assert_eq!((got.added, got.removed), (3, 1));
         assert_eq!(got.branch, "main");
 
         // Nothing to say when the diff agrees with what is already there.
-        assert!(!cache.note_diff_read(L, Path::new("/repo"), "main", 3, 1));
+        assert!(!cache.note_diff_read(L, Path::new("/repo"), "main", Some((3, 1))));
+    }
+
+    /// These counts mean `git diff --numstat HEAD`. A worktree or staged patch
+    /// answers a smaller question, so it may correct the branch and must leave
+    /// the numbers alone — opening an untracked file from the Source Control
+    /// panel takes the worktree's source, and used to knock the staged lines
+    /// off the sidebar's total on the way past.
+    #[test]
+    fn a_diff_of_something_other_than_head_leaves_the_counts_alone() {
+        let mut cache = GitStatusCache::default();
+        let cwd = Path::new("/repo");
+        cache.finish_probe(L, cwd, Some(snap("/repo", "main", Some((8, 6)))));
+
+        assert!(!cache.note_diff_read(L, cwd, "main", None), "nothing moved");
+        let got = cache.status_for(L, cwd).unwrap();
+        assert_eq!(
+            (got.added, got.removed),
+            (8, 6),
+            "the worktree's own +6 −6 is not this number"
+        );
+
+        // The branch still lands: it is the same answer whatever was diffed.
+        assert!(cache.note_diff_read(L, cwd, "feat/x", None));
+        let got = cache.status_for(L, cwd).unwrap();
+        assert_eq!(got.branch, "feat/x");
+        assert_eq!((got.added, got.removed), (8, 6));
     }
 
     /// A branch switched outside tty7 leaves the cached status naming the old
@@ -221,10 +256,10 @@ mod tests {
         let cwd = Path::new("/repo");
         cache.finish_probe(L, cwd, Some(snap("/repo", "main", Some((0, 0)))));
 
-        assert!(cache.note_diff_read(L, cwd, "feat/x", 0, 0));
+        assert!(cache.note_diff_read(L, cwd, "feat/x", Some((0, 0))));
         assert_eq!(cache.status_for(L, cwd).unwrap().branch, "feat/x");
         assert!(
-            !cache.note_diff_read(L, cwd, "feat/x", 0, 0),
+            !cache.note_diff_read(L, cwd, "feat/x", Some((0, 0))),
             "the same answer twice is not news — this is what breaks the loop"
         );
     }
@@ -235,7 +270,7 @@ mod tests {
         // is no row to correct, and inventing an entry would leave it with no
         // branch to show.
         let mut cache = GitStatusCache::default();
-        assert!(!cache.note_diff_read(L, Path::new("/elsewhere"), "main", 3, 1));
+        assert!(!cache.note_diff_read(L, Path::new("/elsewhere"), "main", Some((3, 1))));
         assert!(cache.status_for(L, Path::new("/elsewhere")).is_none());
     }
 
