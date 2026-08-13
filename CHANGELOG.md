@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **A launch that restores one of several windows says what it left behind.**
+  Quitting with several windows open and starting again restored only the
+  most recent one; the rest were marked detached — panes alive, nothing on
+  screen, the only trace a log line. The restored window now shows a
+  notification naming how many workspaces are still running in the
+  background and where to reopen them (#597).
 - **`tty7 pane close %99` fails when no pane 99 exists.** The orphan path
   hangs the pane up directly, and that kill is fire-and-forget — the daemon
   never says whether it knew the pane — so a typo'd id printed

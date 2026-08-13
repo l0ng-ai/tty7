@@ -1494,6 +1494,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppReopenTabFailed => "タブを開き直せませんでした: ターミナルが起動しませんでした",
         L10nKey::AppOpenTerminalFailed => "ターミナルを開けませんでした: {error}",
         L10nKey::AppTabsNotRestored => "前回のタブ {count} 個を開き直せませんでした",
+        L10nKey::LaunchWorkspacesLeftRunning => {
+            "このウィンドウだけを復元しました — あと {count} 個のワークスペースがバックグラウンドで実行中です。サイドバーから開き直せます。"
+        }
         L10nKey::AppSshConnectionFailed => "SSH 接続に失敗しました: {error}",
         L10nKey::AppSshReconnectFailed => "SSH 再接続に失敗しました: {error}",
         L10nKey::AppSplitPaneFailed => "ペインを分割できませんでした: {error}",
@@ -1808,6 +1811,12 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         }
         (L10nKey::AppTabsNotRestored, "one") => "前回のタブ 1 個を開き直せませんでした",
         (L10nKey::AppTabsNotRestored, "other") => "前回のタブ {count} 個を開き直せませんでした",
+        (L10nKey::LaunchWorkspacesLeftRunning, "one") => {
+            "このウィンドウだけを復元しました — あと 1 個のワークスペースがバックグラウンドで実行中です。サイドバーから開き直せます。"
+        }
+        (L10nKey::LaunchWorkspacesLeftRunning, "other") => {
+            "このウィンドウだけを復元しました — あと {count} 個のワークスペースがバックグラウンドで実行中です。サイドバーから開き直せます。"
+        }
         (L10nKey::ScmFilesChanged, "zero") => "変更されたファイルはありません",
         (L10nKey::ScmFilesChanged, "one") => "1 個のファイルが変更されました",
         (L10nKey::ScmFilesChanged, "other") => "{count} 個のファイルが変更されました",

@@ -562,7 +562,8 @@ fn main() {
             crate::ui::local_link::LocalLink::install(cx);
 
             let reopen = crate::ui::windows::restore_target(cx, open_path.as_deref());
-            crate::ui::windows::open_at(cx, reopen, open_path);
+            crate::ui::windows::open_at(cx, reopen.map(|(id, _)| id), open_path);
+            crate::ui::windows::announce_detached_at_launch(cx, reopen);
             if config_outcome.failed() {
                 notify_config_load_failed(cx, config_outcome, true);
             }

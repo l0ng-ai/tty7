@@ -1455,6 +1455,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppReopenTabFailed => "Could not reopen the tab: no terminal started",
         L10nKey::AppOpenTerminalFailed => "Could not open a terminal: {error}",
         L10nKey::AppTabsNotRestored => "{count} tabs from last time could not be reopened",
+        L10nKey::LaunchWorkspacesLeftRunning => {
+            "Only this window was restored — {count} workspaces are still running in the background. Reopen them from the sidebar."
+        }
         L10nKey::AppSshConnectionFailed => "SSH connection failed: {error}",
         L10nKey::AppSshReconnectFailed => "SSH reconnect failed: {error}",
         L10nKey::AppSplitPaneFailed => "Could not split the pane: {error}",
@@ -1761,6 +1764,12 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::AppTabsNotRestored, "one") => "1 tab from last time could not be reopened",
         (L10nKey::AppTabsNotRestored, "other") => {
             "{count} tabs from last time could not be reopened"
+        }
+        (L10nKey::LaunchWorkspacesLeftRunning, "one") => {
+            "Only this window was restored — 1 workspace is still running in the background. Reopen it from the sidebar."
+        }
+        (L10nKey::LaunchWorkspacesLeftRunning, "other") => {
+            "Only this window was restored — {count} workspaces are still running in the background. Reopen them from the sidebar."
         }
         (L10nKey::ScmFilesChanged, "zero") => "No files changed",
         (L10nKey::ScmFilesChanged, "one") => "1 file changed",

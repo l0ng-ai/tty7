@@ -1369,6 +1369,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppReopenTabFailed => "无法重新打开标签页：没有启动终端",
         L10nKey::AppOpenTerminalFailed => "无法打开终端：{error}",
         L10nKey::AppTabsNotRestored => "上次的 {count} 个标签页没能重新打开",
+        L10nKey::LaunchWorkspacesLeftRunning => {
+            "只恢复了这个窗口——还有 {count} 个工作区在后台运行，可从侧边栏重新打开。"
+        }
         L10nKey::AppSshConnectionFailed => "SSH 连接失败：{error}",
         L10nKey::AppSshReconnectFailed => "SSH 重新连接失败：{error}",
         L10nKey::AppSplitPaneFailed => "无法拆分窗格：{error}",
@@ -1653,6 +1656,12 @@ pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SftpReplaceBody, "other") => "{names} 在这个文件夹里已经存在，上传会覆盖它们。",
         (L10nKey::AppTabsNotRestored, "one") => "上次的 1 个标签页没能重新打开",
         (L10nKey::AppTabsNotRestored, "other") => "上次的 {count} 个标签页没能重新打开",
+        (L10nKey::LaunchWorkspacesLeftRunning, "one") => {
+            "只恢复了这个窗口——还有 1 个工作区在后台运行，可从侧边栏重新打开。"
+        }
+        (L10nKey::LaunchWorkspacesLeftRunning, "other") => {
+            "只恢复了这个窗口——还有 {count} 个工作区在后台运行，可从侧边栏重新打开。"
+        }
         (L10nKey::PanelMoreChangedFiles, "zero") => "…还有 0 个变更文件——运行 git diff 查看。",
         (L10nKey::PanelMoreChangedFiles, "one") => "…还有 1 个变更文件——运行 git diff 查看。",
         (L10nKey::ScmFilesChanged, "zero") => "没有文件改动",
