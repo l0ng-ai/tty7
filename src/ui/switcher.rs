@@ -946,6 +946,16 @@ impl Tty7App {
         {
             self.connect = None;
         }
+        // A create still waiting on this machine's link dies with the link:
+        // calling the connect off is calling the create off, or the next
+        // successful connect would grow a workspace nobody asked it for.
+        if self
+            .pending_create
+            .as_ref()
+            .is_some_and(|p| &p.target == target)
+        {
+            self.pending_create = None;
+        }
         cx.notify();
     }
 
