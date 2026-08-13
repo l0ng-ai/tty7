@@ -1288,6 +1288,8 @@ l10n_keys! {
     CursorShapeBar,
     CursorShapeUnderline,
     PaletteTryDifferentSearch,
+    CompletionListingRemote,
+    CompletionRemoteListingFailed,
 }
 
 /// The source control strings that are translated but not yet displayed.

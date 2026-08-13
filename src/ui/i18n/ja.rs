@@ -1650,6 +1650,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CursorShapeBar => "バー",
         L10nKey::CursorShapeUnderline => "下線",
         L10nKey::PaletteTryDifferentSearch => "別のキーワードを試してください。",
+        L10nKey::CompletionListingRemote => "リモートを一覧しています…",
+        L10nKey::CompletionRemoteListingFailed => "リモートの一覧に失敗しました — {error}",
         L10nKey::PanelMoreChangedFiles => {
             "… さらに変更されたファイル {count} 個 — 表示するには `git diff` を実行してください"
         }

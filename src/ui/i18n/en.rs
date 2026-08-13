@@ -1601,6 +1601,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CursorShapeBar => "Bar",
         L10nKey::CursorShapeUnderline => "Underline",
         L10nKey::PaletteTryDifferentSearch => "Try a different search.",
+        L10nKey::CompletionListingRemote => "listing remote…",
+        L10nKey::CompletionRemoteListingFailed => "remote listing failed — {error}",
         L10nKey::PanelMoreChangedFiles => {
             "… and {count} more changed files — run git diff to see them."
         }

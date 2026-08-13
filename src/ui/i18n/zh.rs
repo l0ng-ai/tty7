@@ -1506,6 +1506,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CursorShapeBar => "竖线",
         L10nKey::CursorShapeUnderline => "下划线",
         L10nKey::PaletteTryDifferentSearch => "换个关键词试试。",
+        L10nKey::CompletionListingRemote => "正在列出远程目录…",
+        L10nKey::CompletionRemoteListingFailed => "远程目录列表失败——{error}",
         L10nKey::PanelMoreChangedFiles => "…还有 {count} 个变更文件——运行 git diff 查看。",
         L10nKey::PanelMoreChangedFiles => "…还有 {count} 个变更文件——运行 `git diff` 查看。",
         L10nKey::ScmFilesChanged => "{count} 个文件改动",

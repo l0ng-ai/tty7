@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **Remote path completion says what it's doing.** Tab-completing a path
+  on a remote workspace used to show nothing for the whole network
+  round-trip — a slow link read as a broken Tab key — and a listing that
+  failed ended in exactly the silence an empty directory ends in. A pill
+  over the pane's corner now says the listing is running, and a failed
+  listing reports its error there instead of vanishing (#585).
 - **Seven hard-coded English strings moved into the language tables.** The
   shell-integration notice, the pane titles a disconnected or exited pane
   wears, the loopback forward's failure, the tray tooltip that lists running

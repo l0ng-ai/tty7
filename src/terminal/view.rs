@@ -247,6 +247,11 @@ pub struct TerminalView {
     pending_history: Option<PendingHistory>,
     completion: Option<CompletionSession>,
     remote_completion_inflight: bool,
+    /// Why the last remote listing produced nothing, when it failed: "no
+    /// candidates" and "the listing itself failed" used to end in the same
+    /// silence, and only one of them is normal (#585). Dismissed by the next
+    /// keystroke, like the integration notice.
+    remote_completion_notice: Option<String>,
     completion_generation: u64,
     editor_handoff: Option<u64>,
     editor_handoff_interrupt_seq: Option<u64>,
@@ -1227,6 +1232,7 @@ impl TerminalView {
             editor_handoff: None,
             editor_handoff_interrupt_seq: None,
             remote_completion_inflight: false,
+            remote_completion_notice: None,
             reverse_search: None,
             integration_notice: None,
             integration_notice_shown: false,
@@ -1626,6 +1632,11 @@ impl TerminalView {
             return;
         }
         if self.integration_notice.take().is_some() {
+            cx.notify();
+        }
+        // The remote-listing failure pill goes away on the next keystroke
+        // too — by then the user has seen it (#585).
+        if self.remote_completion_notice.take().is_some() {
             cx.notify();
         }
         let reshaped = if cfg!(target_os = "macos") {
@@ -4016,22 +4027,40 @@ impl TerminalView {
             return true;
         }
         self.remote_completion_inflight = true;
+        // The listing takes a network round-trip the menu says nothing about
+        // — paint the "listing…" pill now, or a slow link reads as a broken
+        // Tab key (#585).
+        cx.notify();
         let route = crate::ui::sftp::SftpRoute::new(self.pane_id, self.workspace.clone());
         let dir = req.dir.clone();
         let line = line.to_string();
         log::debug!(target: "tty7::completion", "listing {dir} over the remote's own connection");
         cx.spawn(async move |this, cx| {
             let listed = cx.background_spawn(async move { route.list(&dir) }).await;
-            let entries = listed.unwrap_or_else(|e| {
-                log::warn!(
-                    target: "tty7::completion",
-                    "remote listing failed, treating it as no candidates: {e}"
-                );
-                Vec::new()
-            });
+            let (entries, failed) = match listed {
+                Ok(entries) => (entries, None),
+                Err(e) => {
+                    // A failure is not an empty directory: the two used to
+                    // end in the same silence (#585).
+                    log::warn!(
+                        target: "tty7::completion",
+                        "remote listing failed, treating it as no candidates: {e}"
+                    );
+                    (Vec::new(), Some(e.to_string()))
+                }
+            };
             let _ = this.update(cx, |view, cx| {
                 view.remote_completion_inflight = false;
+                if let Some(error) = failed {
+                    view.remote_completion_notice = Some(t_fmt(
+                        L10nKey::CompletionRemoteListingFailed,
+                        &[("error", &error)],
+                    ));
+                }
                 view.remote_path_results(req, &line, cursor, entries, forward, cx);
+                // An empty listing closes the menu without one — the pill
+                // still has to come down.
+                cx.notify();
             });
         })
         .detach();
@@ -5611,23 +5640,45 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
         let text = self.integration_notice.clone()?;
+        Some(Self::notice_pill(text, cx))
+    }
+
+    /// The one-row pill that floats over the pane's bottom-right corner.
+    fn notice_pill(text: String, cx: &App) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        Some(
-            div()
-                .absolute()
-                .bottom(px(GRID_PAD_Y))
-                .right(px(GRID_PAD_X))
-                .max_w(px(560.))
-                .px_3()
-                .py_1()
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.border)
-                .rounded(px(6.))
-                .text_size(px(12.))
-                .text_color(theme.muted_foreground)
-                .child(text),
-        )
+        div()
+            .absolute()
+            .bottom(px(GRID_PAD_Y))
+            .right(px(GRID_PAD_X))
+            .max_w(px(560.))
+            .px_3()
+            .py_1()
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(px(6.))
+            .text_size(px(12.))
+            .text_color(theme.muted_foreground)
+            .child(text)
+    }
+
+    /// What the remote-completion pill should say right now, if anything:
+    /// the listing's failure once it has one, "listing…" while it runs, and
+    /// nothing at all the rest of the time (#585).
+    fn remote_completion_notice_text(&self) -> Option<String> {
+        if let Some(notice) = &self.remote_completion_notice {
+            return Some(notice.clone());
+        }
+        self.remote_completion_inflight
+            .then(|| t(L10nKey::CompletionListingRemote).to_string())
+    }
+
+    fn render_remote_completion_notice(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let text = self.remote_completion_notice_text()?;
+        Some(Self::notice_pill(text, cx))
     }
 
     fn kind_color(&self, kind: TokenKind, cx: &App) -> gpui::Hsla {
@@ -5726,6 +5777,7 @@ impl Render for TerminalView {
             .then(|| self.render_reverse_search_menu(cx))
             .flatten();
         let integration_notice = self.render_integration_notice(cx);
+        let remote_completion_notice = self.render_remote_completion_notice(cx);
 
         let menu_focus = self.focus_handle.clone();
         let has_selection = self.any_selection();
@@ -5810,6 +5862,7 @@ impl Render for TerminalView {
             .children(completion_menu)
             .children(reverse_search_menu)
             .children(integration_notice)
+            .children(remote_completion_notice)
             .context_menu(move |menu, window, cx| {
                 // Suppressing the popup means handing back an item-less menu:
                 // gpui-component's `ContextMenu` element skips rendering the
@@ -10517,6 +10570,29 @@ mod gpui_tests {
             None,
             "not one byte reached the wire"
         );
+    }
+
+    #[gpui::test]
+    fn a_remote_listing_says_so_while_it_runs_and_when_it_fails(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                assert!(view.remote_completion_notice_text().is_none());
+                view.remote_completion_inflight = true;
+                assert_eq!(
+                    view.remote_completion_notice_text().as_deref(),
+                    Some("listing remote…"),
+                    "a slow link must not read as a broken Tab key (#585)"
+                );
+                view.remote_completion_inflight = false;
+                view.remote_completion_notice = Some("remote listing failed — boom".to_string());
+                assert_eq!(
+                    view.remote_completion_notice_text().as_deref(),
+                    Some("remote listing failed — boom"),
+                    "a failed listing is not the same silence as an empty one"
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]
