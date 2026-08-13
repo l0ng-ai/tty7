@@ -221,10 +221,13 @@ impl Tty7App {
             return;
         }
         let all = crate::ui::scm::panel::commit_stages_everything(&status, amend);
-        self.scm.amend = false;
-        // `run_git_op` arms `scm.committing` when the commit is actually
-        // dispatched — after the amend confirmation, not before it — so a
-        // cancelled prompt leaves nothing armed. See `scm_commit_landed`.
+        // The amend toggle is *not* cleared here: `run_git_op` clears it
+        // where it arms `scm.committing`, at dispatch — after the amend
+        // confirmation, not before it — so a cancelled prompt leaves the
+        // toggle and the armed flag exactly as the user set them. Clearing
+        // here made Cancel quietly switch amend off, and the next Commit
+        // became the new-commit the user had just declined to risk. See
+        // `scm_commit_landed`.
         self.scm_op_then(
             repo,
             GitOp::Commit {

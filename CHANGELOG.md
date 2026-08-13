@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **Cancelling the amend confirmation no longer switches amend off.** The
+  toggle was cleared when Commit was pressed — before the "rewrite the last
+  commit?" prompt — so answering Cancel returned to a panel whose amend mode
+  had silently been dropped, and the next Commit created the brand-new commit
+  the user had just declined to risk. The toggle now switches off only when
+  the commit actually runs (#595).
 - **The SCM panel's "discard all" confirmation no longer overstates what it
   does.** The prompt asked to "discard every change in this repository" while
   the operation has always left staged changes alone — it sweeps only unstaged
