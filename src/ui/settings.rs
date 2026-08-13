@@ -696,11 +696,44 @@ fn entry_matches(entry: &SearchEntry, query: &str) -> bool {
         || t(entry.keywords).to_lowercase().contains(query)
 }
 
+/// Whether one keybinding row answers the query.
+///
+/// The label is what the page shows and what someone searching for a feature
+/// will type; the action name is what the docs and `keybindings.json` spell, so
+/// `ScmSync` finds the row a reader arrived from the configuration page with.
+pub(crate) fn keybinding_matches_query(action: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return false;
+    }
+    let (_, label) = crate::ui::keymap::action_entry(action);
+    label.to_lowercase().contains(query) || action.to_lowercase().contains(query)
+}
+
+/// The Keybindings page is the one page whose rows are not in the search index
+/// above: there are eighty-odd of them, they are generated from the binding
+/// table, and their labels are already localized there. Counting them here is
+/// what puts an `(n)` on the nav item and lets `best_matching_section` land on
+/// the page — without it, searching for a feature by name found the settings
+/// that mention it and never the shortcut named exactly that (#444).
+fn keybinding_match_count(query: &str) -> usize {
+    if query.is_empty() {
+        return 0;
+    }
+    crate::ui::keymap::default_bindings()
+        .into_iter()
+        .filter(|(action, _)| keybinding_matches_query(action, query))
+        .count()
+}
+
 pub(crate) fn section_match_count(section: SettingsSection, query: &str) -> usize {
-    settings_search_entries()
+    let indexed = settings_search_entries()
         .iter()
         .filter(|e| e.section == section && entry_matches(e, query))
-        .count()
+        .count();
+    match section {
+        SettingsSection::Keybindings => indexed + keybinding_match_count(query),
+        _ => indexed,
+    }
 }
 
 /// Whether a rendered row is one of the ones the section's `(n)` badge counted.
@@ -6311,6 +6344,11 @@ impl Tty7App {
     }
 
     fn render_settings_keybindings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let section = SettingsSection::Keybindings;
+        let query = self
+            .active_settings()
+            .map(|s| s.search.read(cx).value().trim().to_lowercase())
+            .unwrap_or_default();
         let (foreground, muted, border, kbd_bg, accent) = {
             let t = cx.theme();
             (
@@ -6430,11 +6468,23 @@ impl Tty7App {
         // be written. Read them in the same seven sections the command palette
         // uses, so a shortcut is found by where it belongs rather than by
         // scrolling.
+        //
+        // With a query that this page answers, the page *is* the answer: the
+        // rows that match, and nothing else. Every other page greys its misses
+        // instead, which works when a page is a dozen rows and does not when it
+        // is eighty-nine — the reader would still be scrolling for the grey to
+        // stop. Filtering also takes the preset control and the destructive
+        // "restore all" button out of a view that is a search result and not a
+        // page anyone is configuring.
+        let filtering = !query.is_empty() && section_match_count(section, &query) > 0;
         let mut grouped: Vec<(
             crate::ui::palette::CommandGroup,
             Vec<(String, String, String)>,
         )> = Vec::new();
         for (action, key) in effective {
+            if filtering && !keybinding_matches_query(&action, &query) {
+                continue;
+            }
             let (group, label) = crate::ui::keymap::action_entry(&action);
             let slot = match grouped.iter_mut().find(|(g, _)| *g == group) {
                 Some(slot) => slot,
@@ -6603,30 +6653,37 @@ impl Tty7App {
                 t(L10nKey::SettingsKeybindingsIntroDesc),
                 cx,
             ))
-            .child(preset_row)
-            .when(tmux, |v| v.child(prefix_row))
-            .when(tmux, |v| {
-                v.child(
-                    div()
-                        .py_1()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(t(L10nKey::SettingsPrefixNote)),
-                )
+            .when(!filtering, |v| {
+                v.child(preset_row)
+                    .when(tmux, |v| v.child(prefix_row))
+                    .when(tmux, |v| {
+                        v.child(
+                            div()
+                                .py_1()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(t(L10nKey::SettingsPrefixNote)),
+                        )
+                    })
             })
+            // The rebinding note is the answer to something the reader just
+            // did, so it outlives the filter that a stale query would hide it
+            // behind.
             .when_some(note, |v, note| {
                 v.child(div().py_1().text_xs().text_color(accent).child(note))
             })
-            .child(
-                h_flex().justify_end().py_2().child(
-                    Button::new("kb-restore-all")
-                        .label(t(L10nKey::SettingsRestoreAllDefaults))
-                        .small()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.restore_default_keybindings(window, cx)
-                        })),
-                ),
-            )
+            .when(!filtering, |v| {
+                v.child(
+                    h_flex().justify_end().py_2().child(
+                        Button::new("kb-restore-all")
+                            .label(t(L10nKey::SettingsRestoreAllDefaults))
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.restore_default_keybindings(window, cx)
+                            })),
+                    ),
+                )
+            })
             .child(list)
             .into_any_element()
     }
@@ -7056,6 +7113,41 @@ impl Tty7App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shortcut is the first thing someone searching a settings window for a
+    /// feature by name is after, and the Keybindings page was the one page the
+    /// search could not see into: searching "split" found the settings that
+    /// merely mention splits and never the row labelled exactly that (#444).
+    #[test]
+    fn searching_for_a_feature_finds_its_shortcut() {
+        crate::ui::i18n::set_locale("en");
+        let kb = SettingsSection::Keybindings;
+
+        // Split Right and Split Down, at least — the index carries no entry
+        // for either, so before this every one of these counts was zero.
+        assert!(
+            section_match_count(kb, "split") >= 2,
+            "got {}",
+            section_match_count(kb, "split")
+        );
+        assert!(keybinding_matches_query("SplitRight", "split right"));
+
+        // The action name is what the docs and `keybindings.json` spell, so a
+        // reader arriving from either finds the row they read about.
+        assert!(keybinding_matches_query("ScmSync", "scmsync"));
+
+        // An empty query matches no row, or clearing the box would filter the
+        // page down to nothing rather than back to every row. (The count above
+        // it answers `contains("")` for the one indexed entry this section has
+        // always carried, which is why the page gates on the query itself
+        // before it consults either.)
+        assert!(!keybinding_matches_query("SplitRight", ""));
+        assert_eq!(keybinding_match_count(""), 0);
+
+        // A query this page cannot answer leaves it alone — the page only
+        // filters itself when it has something to show.
+        assert_eq!(section_match_count(kb, "no such action anywhere"), 0);
+    }
 
     /// Every outcome of a test has a line of its own, and the timing reads as
     /// a number a person can compare rather than four digits of milliseconds.
