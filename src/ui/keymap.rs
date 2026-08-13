@@ -183,22 +183,6 @@ fn action_bindings(effective: &[(String, String)]) -> Vec<KeyBinding> {
     bindings
 }
 
-/// The keystroke and context of every binding `action_bindings` installs.
-/// The rebind used to keep this in a global to retire the previous set one
-/// `NoAction` at a time; a rebuild replaces the whole map instead, so this is
-/// now only the tests' way of asking what a config would install.
-#[cfg(test)]
-fn bound_keystrokes(effective: &[(String, String)]) -> Vec<(String, Option<&'static str>)> {
-    let extras = extra_keystrokes(effective);
-    effective
-        .iter()
-        .map(|(a, k)| (a.as_str(), k.as_str()))
-        .chain(extras.iter().map(|(a, k)| (*a, *k)))
-        .filter(|(_, k)| !k.is_empty() && keystroke_is_valid(k))
-        .map(|(a, k)| (k.to_string(), action_context(a)))
-        .collect()
-}
-
 fn per_platform(mac: &'static str, other: &'static str) -> &'static str {
     if cfg!(target_os = "macos") {
         mac
@@ -1057,6 +1041,30 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::Action as _;
+
+    /// The actions a keymap built from `action_bindings` dispatches for `keys`
+    /// typed in `context`, in precedence order — the same lookup gpui performs
+    /// on a real keypress.
+    ///
+    /// Bindings are asserted through this rather than through a mirror of the
+    /// table, so a chord the app would not really install, or would install in
+    /// another context, cannot pass.
+    fn dispatched(effective: &[(String, String)], keys: &str, context: &str) -> Vec<&'static str> {
+        let mut keymap = gpui::Keymap::default();
+        keymap.add_bindings(action_bindings(effective));
+        let input: Vec<Keystroke> = keys
+            .split(' ')
+            .map(|k| Keystroke::parse(k).expect("the typed keystroke parses"))
+            .collect();
+        let context = [gpui::KeyContext::parse(context).expect("the context parses")];
+        keymap
+            .bindings_for_input(&input, &context)
+            .0
+            .iter()
+            .map(|b| b.action().name())
+            .collect()
+    }
 
     #[test]
     fn every_dispatchable_action_has_a_slot_to_bind_it_in() {
@@ -1226,10 +1234,9 @@ mod tests {
         assert!(extra_keystrokes(&effective).contains(&("InsertNewline", "alt-enter")));
         for key in ["shift-enter", "alt-enter"] {
             assert!(keystroke_is_valid(key), "{key} does not parse");
-            assert!(make_binding("InsertNewline", key).is_some());
             assert!(
-                bound_keystrokes(&effective).iter().any(|(k, _)| k == key),
-                "{key} is not remembered as installed"
+                dispatched(&effective, key, "Terminal").contains(&InsertNewline::name_for_type()),
+                "{key} does not reach InsertNewline in a terminal"
             );
         }
         assert_eq!(key_tokens("shift-enter"), vec![SHIFT, "⏎"]);
@@ -1313,10 +1320,12 @@ mod tests {
         assert!(extra_keystrokes(&effective).contains(&("PasteText", "shift-insert")));
         for key in ["ctrl-shift-v", "shift-insert"] {
             assert!(
-                bound_keystrokes(&effective)
-                    .iter()
-                    .any(|(k, c)| k == key && *c == Some("Terminal")),
-                "{key} must be installed in the Terminal context and remembered for rebind"
+                dispatched(&effective, key, "Terminal").contains(&PasteText::name_for_type()),
+                "{key} must paste in a terminal"
+            );
+            assert!(
+                !dispatched(&effective, key, "Workspace").contains(&PasteText::name_for_type()),
+                "{key} is a terminal chord and must not paste outside one"
             );
         }
         let rebound = vec![("PasteText".to_string(), "ctrl-alt-v".to_string())];
@@ -1333,9 +1342,16 @@ mod tests {
         let effective = vec![("InsertNewline".to_string(), "ctrl-o".to_string())];
         assert!(extra_keystrokes(&effective).is_empty());
         assert_eq!(
-            bound_keystrokes(&effective),
-            vec![("ctrl-o".to_string(), Some("Terminal"))]
+            dispatched(&effective, "ctrl-o", "Terminal"),
+            vec![InsertNewline::name_for_type()],
+            "the chord the config asks for is the one the keymap dispatches"
         );
+        for retired in ["shift-enter", "alt-enter"] {
+            assert!(
+                dispatched(&effective, retired, "Terminal").is_empty(),
+                "{retired} is off the action now and must dispatch nothing"
+            );
+        }
 
         let unbound = vec![("InsertNewline".to_string(), String::new())];
         assert!(extra_keystrokes(&unbound).is_empty());
@@ -1343,19 +1359,36 @@ mod tests {
     }
 
     #[test]
-    fn bound_keystrokes_remember_the_context_each_binding_was_installed_in() {
+    fn each_binding_lands_in_the_context_its_action_is_scoped_to() {
         let effective = vec![
             ("InsertNewline".to_string(), "shift-enter".to_string()),
             ("NewTab".to_string(), "secondary-t".to_string()),
         ];
+        // The newline is a terminal chord, and its default ships the fallback
+        // beside it; both are scoped, so neither reaches the rest of the app.
+        let mut newline = dispatched(&effective, "shift-enter", "Terminal");
+        newline.sort_unstable();
         assert_eq!(
-            bound_keystrokes(&effective),
+            newline,
             vec![
-                ("shift-enter".to_string(), Some("Terminal")),
-                ("secondary-t".to_string(), None),
-                ("alt-enter".to_string(), Some("Terminal")),
+                InsertNewline::name_for_type(),
+                InsertNewlineFallback::name_for_type(),
             ]
         );
+        assert!(dispatched(&effective, "shift-enter", "Workspace").is_empty());
+        assert_eq!(
+            dispatched(&effective, "alt-enter", "Terminal"),
+            vec![InsertNewline::name_for_type()],
+            "the extra chord follows its action's scope"
+        );
+        // A window action has no context: it has to work from a terminal too.
+        for context in ["Terminal", "Workspace"] {
+            assert_eq!(
+                dispatched(&effective, "secondary-t", context),
+                vec![NewTab::name_for_type()],
+                "NewTab must not be scoped to {context}"
+            );
+        }
     }
 
     #[test]
