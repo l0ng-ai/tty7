@@ -347,7 +347,9 @@ impl Tty7App {
                 .background_executor()
                 .spawn(async move { remote_connect::connect_blocking(&target, header, &label) })
                 .await;
-            let _ = this.update(cx, |this, cx| this.finish_connect(result, cx));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.finish_connect(result, window, cx)
+            });
         })
         .detach();
     }
@@ -386,6 +388,7 @@ impl Tty7App {
     fn finish_connect(
         &mut self,
         result: Result<remote_connect::Connected, String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(choice) = self.connect.as_ref().and_then(ConnectFlow::choice).cloned() else {
@@ -404,11 +407,39 @@ impl Tty7App {
                     },
                 );
                 remote_connect::HostLinks::insert(cx, connected.host, home.clone());
+                // The listing outlives the link: mirrored into the store so
+                // the switcher still knows this machine's workspaces after a
+                // restart, without a connection.
+                let listing: Vec<(WorkspaceId, String, u64)> = rows
+                    .iter()
+                    .map(|r| (r.id, r.name.clone(), r.last_active))
+                    .collect();
+                WorkspaceStore::sync_remote(cx, &choice.target, &listing);
                 self.prompt_remote_daemon_mismatch_later(cx);
                 self.connect = None;
+                // A create that was waiting on this link (the switcher's form,
+                // asked of a machine that was not connected yet) can now run:
+                // the link just told us the home directory to root it at.
+                if self
+                    .pending_create
+                    .as_ref()
+                    .is_some_and(|p| p.target == choice.target)
+                {
+                    let pending = self.pending_create.take().expect("checked above");
+                    self.close_switcher(window, cx);
+                    self.create_remote_workspace(pending.target, home, window, cx);
+                    self.name_fresh_workspace(pending.name, window, cx);
+                }
             }
             Err(error) => {
                 log::warn!("connect to {} failed: {error}", choice.label);
+                if self
+                    .pending_create
+                    .as_ref()
+                    .is_some_and(|p| p.target == choice.target)
+                {
+                    self.pending_create = None;
+                }
                 self.connect = Some(ConnectFlow::Failed { choice, error });
             }
         }
@@ -711,9 +742,8 @@ impl Tty7App {
         // The grouped report is only visible while the switcher is open. Anywhere
         // else — the window menu's "restart server", or a mismatch raised mid-connect
         // — the modal is the only thing the user would see, so keep it.
-        if let (Some(target), Some(switcher)) = (target, self.switcher.as_mut()) {
+        if let (Some(target), true) = (target, self.switcher.is_some()) {
             let key = target.to_string();
-            switcher.expand(&key);
             self.remote_host_errors.insert(key, error.to_string());
             cx.notify();
             return;

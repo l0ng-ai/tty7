@@ -536,6 +536,9 @@ pub struct Tty7App {
     /// Parked switcher groups (#485) whose notice the user dismissed by key —
     /// the entries stay, only the "will not reconnect" block is hidden.
     pub(crate) parked_dismissed: std::collections::HashSet<String>,
+    /// A create asked of a machine that was not connected yet; the connect
+    /// finishing is what completes it (see `Tty7App::finish_connect`).
+    pub(crate) pending_create: Option<crate::ui::switcher::PendingCreate>,
     /// Why the window opened with no terminal in it. Shown on the home screen,
     /// which is otherwise indistinguishable from having closed everything.
     pub(crate) startup_error: Option<gpui::SharedString>,
@@ -1078,6 +1081,7 @@ impl Tty7App {
             host_snapshots: std::collections::HashMap::new(),
             remote_host_errors: std::collections::HashMap::new(),
             parked_dismissed: std::collections::HashSet::new(),
+            pending_create: None,
             startup_error,
         };
         if !cfg!(test) && crate::ui::windows::WindowRegistry::count(cx) == 0 {
@@ -4094,7 +4098,7 @@ impl Tty7App {
         self.bump_command_frecency(&kind, cx);
         match kind {
             NewTab => self.new_tab(window, cx),
-            NewWorkspace => self.switch_workspace(None, window, cx),
+            NewWorkspace => self.open_workspace_form(window, cx),
             OpenWorkspacePicker => self.open_switcher(window, cx),
             StopWorkspace => self.stop_workspace(self.workspace, window, cx),
             DeleteWorkspace => self.delete_workspace(self.workspace, window, cx),
@@ -6393,7 +6397,7 @@ impl Render for Tty7App {
                     this.delete_workspace(id, window, cx);
                 }))
                 .on_action(cx.listener(|this, _: &NewWorkspace, window, cx| {
-                    this.switch_workspace(None, window, cx);
+                    this.open_workspace_form(window, cx);
                 }))
                 .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                     if !this.editor_close_active_if_focused(window, cx) {

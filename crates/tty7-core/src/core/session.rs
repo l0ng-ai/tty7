@@ -369,6 +369,11 @@ pub struct WindowView {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    /// A reference mirrored off its machine's own listing at connect time —
+    /// this client has never opened it. Launch restore skips these (its clock
+    /// is another client's activity, not ours); opening one clears the mark.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub synced: bool,
 }
 
 impl Default for WindowView {
@@ -381,6 +386,7 @@ impl Default for WindowView {
             host: None,
             label: None,
             subject: None,
+            synced: false,
         }
     }
 }
@@ -471,8 +477,12 @@ impl WindowViews {
                     .map(|w| w.id)
             })
             .or_else(|| {
+                // Never a synced reference: its clock is another client's
+                // activity, and "restore" landing on a workspace this client
+                // has never opened would dial a machine unasked at launch.
                 self.views
                     .iter()
+                    .filter(|w| !w.synced)
                     .max_by_key(|w| w.last_active)
                     .map(|w| w.id)
             })
@@ -953,6 +963,39 @@ mod tests {
         assert_eq!(
             all.open_views().map(|w| w.id).collect::<Vec<_>>(),
             vec![open_id]
+        );
+    }
+
+    #[test]
+    fn launch_restore_never_lands_on_a_synced_reference() {
+        // A synced entry's clock is another client's activity; restoring it
+        // would dial its machine unasked at launch.
+        let mut synced = view();
+        synced.open = false;
+        synced.synced = true;
+        synced.last_active = 999;
+        let mut mine = view();
+        mine.open = false;
+        mine.last_active = 10;
+        let mine_id = mine.id;
+
+        let all = WindowViews {
+            active: None,
+            views: vec![synced, mine],
+        };
+        assert_eq!(all.workspace_to_restore(), Some(mine_id));
+
+        let mut only_synced = view();
+        only_synced.open = false;
+        only_synced.synced = true;
+        let all = WindowViews {
+            active: None,
+            views: vec![only_synced],
+        };
+        assert_eq!(
+            all.workspace_to_restore(),
+            None,
+            "nothing of this client's own to restore starts fresh instead"
         );
     }
 

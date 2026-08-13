@@ -17,14 +17,17 @@ Nothing is synced or copied. The repository stays where it is.
 ## Connecting
 
 <Steps>
-  <Step title="Open the switcher">
-    <kbd>⌘ ⇧ O</kbd>. Machines are listed alongside your local workspaces —
-    *This Computer* first, then every saved SSH profile and, on Windows, every
-    WSL distribution.
+  <Step title="Open the New Workspace form">
+    <kbd>⌘ ⇧ N</kbd>, or the button at the bottom of the switcher
+    (<kbd>⌘ ⇧ O</kbd>). The form's host dropdown lists *This Computer*, every
+    saved SSH profile, your `~/.ssh/config` aliases and, on Windows, every WSL
+    distribution — type to filter when the list is long.
   </Step>
   <Step title="Pick a machine">
     tty7 connects over the same SSH stack as everything else, so profiles,
-    keychain credentials, and jump hosts all apply.
+    keychain credentials, and jump hosts all apply. A machine that is not
+    connected yet connects first, then creates the workspace in its home
+    directory.
   </Step>
   <Step title="Approve the server install, once">
     The first connection asks:
@@ -37,8 +40,9 @@ Nothing is synced or copied. The repository stays where it is.
     agree. Later upgrades on that machine install silently.
   </Step>
   <Step title="Open a workspace">
-    From then on the machine's workspaces are in the switcher, and a new one
-    opens like a local one.
+    From then on the machine's workspaces sit in the switcher's flat list next
+    to your local ones, each row carrying the machine's name and link state,
+    and a new one opens like a local one.
   </Step>
 </Steps>
 
