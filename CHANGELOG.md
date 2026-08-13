@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **Installing an update on Windows shows a progress window.** The installer
+  ran `/VERYSILENT`, so from the app quitting to the new build coming up —
+  tens of seconds, longer under an antivirus scan — the screen held nothing
+  at all, and "clicked update, the app vanished" read as a crash. The
+  installer now runs `/SILENT`: still unattended, but Inno's own progress
+  window stays on screen for the gap (#600).
 - **Orphan panes are visible in the GUI, and closable from it.** A shell
   left running after its workspace went away — what an interrupted `tty7
   run` leaves behind — showed up nowhere in the GUI; only the CLI's `tty7
