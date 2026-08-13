@@ -1832,12 +1832,12 @@ impl Tty7App {
             .when(picked, |r| r.bg(gpui::rgb(rungs(cx).pressed)))
             .anchor_scroll(self.switcher_anchor(Column::Left, picked))
             .hover(move |r| r.bg(hover))
+            // One weight for every machine, this computer included. Its name is
+            // full strength like all the others, so a paler glyph beside it read
+            // as a disabled row rather than as the machine you are on.
             .child(glyph_col(
                 GUTTER,
-                Icon::empty()
-                    .path(glyph)
-                    .size(px(ICON))
-                    .text_color(if group.link == Link::Local { muted } else { fg }),
+                Icon::empty().path(glyph).size(px(ICON)).text_color(fg),
             ))
             .child(
                 v_flex()
