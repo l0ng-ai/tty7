@@ -31,7 +31,7 @@ Set inside every tty7 pane, inherited by anything you launch from one.
 | Variable | Meaning |
 |---|---|
 | `TTY7_PANE` | This pane's id, e.g. `71` or `%71` (both forms are accepted). The default target of `split`, `send`, `capture`, `procs`, `wait`, `pane close`. |
-| `TTY7_WS` | This pane's workspace id. The default for `run --keep`, `tab new`, `ws tree`. |
+| `TTY7_WS` | This pane's workspace id. The default for `run --keep`, `tab new`, `tab ls`, `ws tree`. |
 | `TTY7_CONFIG_DIR` | The server's config dir. How the CLI finds the right server's sockets — you never pass a socket path. |
 
 Outside a tty7 shell the address-taking verbs fail with
@@ -97,7 +97,8 @@ is still listed in the GUI's switcher; it just waits there to be opened.
 Alias of `pane split`. Splits `%PANE` (default `$TTY7_PANE`), spawning a shell
 in the same cwd. Exactly one axis is required — `--v`/`--vertical` puts the new
 pane below, `--h`/`--horizontal` to the right. `--ratio` (default 0.5) is the
-share kept by the *existing* pane. Prints `%NN`. JSON: `{"pane"}`.
+share kept by the *existing* pane, clamped to 0.05–0.95 — a `--ratio 70`
+silently becomes 0.95, not an error. Prints `%NN`. JSON: `{"pane"}`.
 
 ### `tty7 send [%PANE] [TEXT] [--enter] [--key KEY]…`
 Types `TEXT` into the pane as keystrokes; `--enter` is shorthand for `--key
@@ -124,9 +125,12 @@ build. Repeatable, delivered in order, and composable with `TEXT` (text first).
 |---|---|
 | Named | `enter` `escape` `tab` `backtab` `space` `backspace` `delete` `up` `down` `right` `left` `home` `end` `pageup` `pagedown` |
 | Chords | `C-<char>` (Ctrl: `C-c`, `C-d`, `C-z`, also `C-@ C-[ C-\ C-] C-^ C-_ C-?`), `M-<char>` (Alt = prefixed ESC) |
-| Aliases | `return` `cr` `esc` `del` `bs` `shift-tab` `pgup` `pgdn` |
+| Aliases | `return` `cr` `esc` `del` `bs` `shift-tab` `pgup` `pgdn` `pgdown` |
 
-Case-insensitive. An unknown name is a usage error (exit 2) raised before
+Case-insensitive — with one exception: Alt is a prefixed ESC, so its character
+goes out exactly as written and `M-X` is not `M-x` (Ctrl is unaffected: `C-c`
+and `C-C` are the same byte). An unknown name is a usage error (exit 2) raised
+before
 anything is written, so a bad key never lands half a sequence in a live pane.
 Each keystroke goes out as its own event 200 ms after the last, which is what
 keeps a raw-mode TUI from reading the sequence as a paste; the first write is
@@ -168,7 +172,9 @@ The process tree inside the pane, indented by depth, `*` on the foreground
 process — then a second table of ports those processes are listening on.
 Prints `nothing running in this pane` when both are empty.
 
-JSON: `{"procs":[{"pid","name","depth","foreground"}],"ports":[{"port","pid","name"}]}`.
+JSON: `{"procs":[{"pid","name","depth","foreground"}],"ports":[{"port","pid","name","addr"}]}`,
+where `addr` is the address the socket is bound to (`*`, `0.0.0.0`, `127.0.0.1`,
+`[::1]`, or a specific interface).
 
 Nothing below the depth-0 shell means the foreground command has exited — but
 you rarely need to check that by hand, because that is exactly what

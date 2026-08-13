@@ -20,7 +20,7 @@ Set inside every tty7 pane, inherited by anything launched from one.
 | Variable | Meaning |
 |---|---|
 | `TTY7_PANE` | This pane's id, e.g. `71` or `%71` (both accepted). Default target of `split`, `send`, `capture`, `procs`, `wait`, `pane close`. |
-| `TTY7_WS` | This pane's workspace id. Default for `run --keep`, `tab new`, `ws tree`. |
+| `TTY7_WS` | This pane's workspace id. Default for `run --keep`, `tab new`, `tab ls`, `ws tree`. |
 | `TTY7_CONFIG_DIR` | The server's config dir — how the CLI finds the right server. You never pass a socket path. |
 
 Outside a tty7 shell, address-taking verbs fail with
@@ -89,7 +89,8 @@ it the workspace still appears in the switcher; it just waits to be opened.
 Alias of `pane split`. Splits `%PANE` (default `$TTY7_PANE`), spawning a shell
 in the same cwd. Exactly one axis is required — `--v`/`--vertical` puts the new
 pane below, `--h`/`--horizontal` to the right. `--ratio` (default `0.5`) is the
-share kept by the *existing* pane. Prints `%NN`. JSON: `{"pane"}`.
+share kept by the *existing* pane, clamped to `0.05`–`0.95` — a `--ratio 70`
+silently becomes `0.95`, not an error. Prints `%NN`. JSON: `{"pane"}`.
 
 ### `tty7 send [%PANE] [TEXT] [--enter] [--key KEY]…`
 
@@ -117,11 +118,14 @@ for a sequence, and it composes with `TEXT` — the text goes first.
 |---|---|
 | Named | `enter` `escape` `tab` `backtab` `space` `backspace` `delete` `up` `down` `right` `left` `home` `end` `pageup` `pagedown` |
 | Chords | `C-<char>` (Ctrl, e.g. `C-c`), `M-<char>` (Alt) |
-| Aliases | `return` `cr` `esc` `del` `bs` `shift-tab` `pgup` `pgdn` |
+| Aliases | `return` `cr` `esc` `del` `bs` `shift-tab` `pgup` `pgdn` `pgdown` |
 
 Names are case-insensitive, and an unknown one is a usage error (exit `2`)
 raised before anything is sent — half a key sequence in a live pane is worse
-than none. Each keystroke is delivered as its own event, 200 ms apart, so a
+than none. One case exception: Alt is a prefixed ESC, so its character goes
+out exactly as written and `M-X` is not `M-x` (Ctrl is unaffected — `C-c`
+and `C-C` are the same byte). Each keystroke is delivered as its own event,
+200 ms apart, so a
 raw-mode TUI reads a sequence as a sequence rather than as a paste.
 
 JSON: `{"pane","sent","enter","keys"}`.
@@ -148,7 +152,9 @@ The process tree inside the pane, indented by depth, `*` on the foreground
 process — then a second table of ports those processes are listening on. Prints
 `nothing running in this pane` when both are empty.
 
-JSON: `{"procs":[{"pid","name","depth","foreground"}],"ports":[{"port","pid","name"}]}`.
+JSON: `{"procs":[{"pid","name","depth","foreground"}],"ports":[{"port","pid","name","addr"}]}` —
+`addr` is the address the socket is bound to (`*`, `0.0.0.0`, `127.0.0.1`,
+`[::1]`, or a specific interface).
 
 ### `tty7 agents`
 
