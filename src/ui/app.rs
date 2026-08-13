@@ -150,10 +150,11 @@ pub(crate) const TILE_GLYPH_XS: f32 = 11.;
 /// stroke. `plus` had been leaning on that, so moving it to [`TILE_GLYPH`]
 /// thinned it by a fifth even though it got *longer*, and it had to take that
 /// weight back in its own `stroke-width` — a cross is two hairlines with no
-/// fill to hide behind, so it is the one glyph in the set whose weight had to
-/// be settled by looking rather than by arithmetic. `ui::assets`' test carries
-/// the band it landed in and what was rejected either side. Anything else that
-/// leaves here owes the same accounting.
+/// fill to hide behind, so it is the one glyph in the set drawn off the
+/// family's weight, by exactly the 16/13 it lost and no more. `ui::assets`'
+/// test carries that arithmetic. Anything else that leaves here owes the same
+/// accounting, in both directions: an asset redrawn for the tiles that scaled
+/// it up is still drawn beside the ones that never did.
 pub(crate) const TILE_GLYPH_LINE: f32 = 16.;
 
 pub(crate) const TILE_PAD: f32 = (TILE_SIZE - TILE_GLYPH) / 2.;
