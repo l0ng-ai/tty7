@@ -709,7 +709,12 @@ fn rollback_write(
     children.remove(host, &dir.to_path_buf());
 }
 
-pub(crate) fn shell_quote(path: &Path) -> String {
+/// Quote a path for the shell the pane is actually running. cmd.exe only
+/// treats double quotes as quoting — a single quote is an ordinary character
+/// there, so the POSIX form would split the path at its first space
+/// (#593). PowerShell and every POSIX shell take the single-quoted form, so
+/// an unknown shell keeps it too.
+pub(crate) fn shell_quote_for(path: &Path, shell_program: Option<&str>) -> String {
     let s = path.to_string_lossy();
     if !s.is_empty()
         && s.chars()
@@ -717,7 +722,19 @@ pub(crate) fn shell_quote(path: &Path) -> String {
     {
         return s.into_owned();
     }
-    format!("'{}'", s.replace('\'', r"'\''"))
+    let is_cmd = shell_program
+        .map(|p| {
+            let base = p.rsplit(['\\', '/']).next().unwrap_or(p);
+            base.eq_ignore_ascii_case("cmd") || base.eq_ignore_ascii_case("cmd.exe")
+        })
+        .unwrap_or(false);
+    if is_cmd {
+        // Windows paths cannot contain a double quote, so there is nothing
+        // to escape inside the quotes.
+        format!("\"{s}\"")
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
 }
 
 impl Tty7App {
@@ -1473,8 +1490,9 @@ impl Tty7App {
         else {
             return;
         };
+        let program = leaf.read(cx).shell_spec().map(|spec| spec.program);
         leaf.read(cx)
-            .run_command_line(&format!("cd {}", shell_quote(dir)));
+            .run_command_line(&format!("cd {}", shell_quote_for(dir, program.as_deref())));
         self.focus_active(window, cx);
     }
 
@@ -1951,7 +1969,10 @@ impl Tty7App {
                                 .get(this.active)
                                 .and_then(|t| t.pane.focused_or_first(window, cx))
                             {
-                                leaf.update(cx, |view, cx| view.paste(shell_quote(&p), cx));
+                                leaf.update(cx, |view, cx| {
+                                    let program = view.shell_spec().map(|spec| spec.program);
+                                    view.paste(shell_quote_for(&p, program.as_deref()), cx);
+                                });
                             }
                         });
                     }
@@ -2629,9 +2650,37 @@ mod tests {
 
     #[test]
     fn shell_quote_leaves_safe_paths_and_quotes_the_rest() {
-        assert_eq!(shell_quote(Path::new("/a/b.txt")), "/a/b.txt");
-        assert_eq!(shell_quote(Path::new("/a dir/f")), "'/a dir/f'");
-        assert_eq!(shell_quote(Path::new("/a'b")), r"'/a'\''b'");
+        assert_eq!(shell_quote_for(Path::new("/a/b.txt"), None), "/a/b.txt");
+        assert_eq!(shell_quote_for(Path::new("/a dir/f"), None), "'/a dir/f'");
+        assert_eq!(shell_quote_for(Path::new("/a'b"), None), r"'/a'\''b'");
+    }
+
+    #[test]
+    fn shell_quote_for_picks_double_quotes_only_for_cmd() {
+        let spaced = Path::new("/a dir/f");
+        assert_eq!(shell_quote_for(spaced, Some("cmd.exe")), "\"/a dir/f\"");
+        assert_eq!(
+            shell_quote_for(spaced, Some("C:\\Windows\\System32\\cmd.exe")),
+            "\"/a dir/f\"",
+            "a full path to cmd still names cmd"
+        );
+        assert_eq!(shell_quote_for(spaced, Some("CMD.EXE")), "\"/a dir/f\"");
+        assert_eq!(
+            shell_quote_for(spaced, Some("powershell.exe")),
+            "'/a dir/f'"
+        );
+        assert_eq!(shell_quote_for(spaced, Some("pwsh")), "'/a dir/f'");
+        assert_eq!(shell_quote_for(spaced, Some("/bin/bash")), "'/a dir/f'");
+        assert_eq!(
+            shell_quote_for(spaced, None),
+            "'/a dir/f'",
+            "an unknown shell keeps the POSIX form"
+        );
+        assert_eq!(
+            shell_quote_for(Path::new("/plain"), Some("cmd.exe")),
+            "/plain",
+            "a path that needs no quoting stays bare under cmd too"
+        );
     }
 
     #[test]

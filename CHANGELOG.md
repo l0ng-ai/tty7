@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **cd Here and Insert Path quote for the shell the pane runs.** Both used
+  to wrap a path with spaces in POSIX single quotes whatever the pane's
+  shell was, and cmd.exe — where a single quote is an ordinary character —
+  then split the path at its first space. The quote style now follows the
+  pane's shell: double quotes for cmd.exe, single quotes for PowerShell and
+  every POSIX shell (#593).
 - **Remote path completion says what it's doing.** Tab-completing a path
   on a remote workspace used to show nothing for the whole network
   round-trip — a slow link read as a broken Tab key — and a listing that
