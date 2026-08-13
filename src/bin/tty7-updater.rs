@@ -1200,6 +1200,23 @@ mod windows {
 
     fn elevated_stage_inner(plan: &ElevatedStagePlan) -> Result<(), String> {
         log_line(&plan.log, "preparing the elevated update staging");
+        // Every path this stage trusts is derived from its own image, never
+        // taken from the caller: the caller sits below the integrity
+        // boundary, and `<install-dir>` is what the helper pinning below
+        // compares against. Believing the argument would put both halves of
+        // that comparison in the hands of whoever wrote the command line.
+        let install_dir = installed_root()?;
+        if !same_directory(&install_dir, &plan.install_dir) {
+            log_line(
+                &plan.log,
+                &format!(
+                    "the caller named {} as the installation; using {}, which is where \
+                     this updater actually runs from",
+                    plan.install_dir.display(),
+                    install_dir.display()
+                ),
+            );
+        }
         // The digest arrived on the command line — the one value a
         // medium-integrity process cannot have forged, because the GUI read
         // it from the release server over HTTPS. Everything this chain
@@ -1213,17 +1230,43 @@ mod windows {
         // The staged helper copy runs a process tree higher than it was
         // written, so it is pinned to the installed image first — the one
         // file a medium-integrity process cannot have replaced.
-        pin_helper_to_installed(&plan.stage.join("tty7-updater.exe"), &plan.install_dir)?;
+        pin_helper_to_installed(&plan.stage.join("tty7-updater.exe"), &install_dir)?;
 
         let staging = create_protected_staging()?;
-        let result = run_install_stage(plan, &staging);
+        let result = run_install_stage(plan, &install_dir, &staging);
         // Whatever happened, the admin-only staging goes with this process. A
-        // removal failure strands it for the next elevated run's sweep.
+        // removal failure strands it for the next elevated run to clear.
         let _ = fs::remove_dir_all(&staging);
         result
     }
 
-    fn run_install_stage(plan: &ElevatedStagePlan, staging: &Path) -> Result<(), String> {
+    /// The installation this process was started from. UAC pointed the prompt
+    /// at `{app}\tty7-updater.exe`, so this process's own image names the
+    /// directory a medium-integrity process cannot write — the only trust
+    /// root the chain has before the payload is signed.
+    fn installed_root() -> Result<PathBuf, String> {
+        let exe = std::env::current_exe()
+            .map_err(|error| format!("locating the running updater: {error}"))?;
+        exe.parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| format!("{} names no directory", exe.display()))
+    }
+
+    /// Only for telling the log that the caller's `<install-dir>` disagreed
+    /// with the image path. Deliberately not a gate: the derived directory is
+    /// used either way, and a cosmetic difference (case, a short path) must
+    /// not fail an update the user is watching.
+    fn same_directory(left: &Path, right: &Path) -> bool {
+        left.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+    }
+
+    fn run_install_stage(
+        plan: &ElevatedStagePlan,
+        install_dir: &Path,
+        staging: &Path,
+    ) -> Result<(), String> {
         let staged_installer = staging.join(&plan.asset_name);
         let staged_checksums = staging.join("checksums.txt");
         let staged_updater = staging.join("tty7-updater.exe");
@@ -1245,7 +1288,7 @@ mod windows {
             &plan.expected_sha256,
             "re-staged Windows installer",
         )?;
-        pin_helper_to_installed(&staged_updater, &plan.install_dir)?;
+        pin_helper_to_installed(&staged_updater, install_dir)?;
 
         // Name this process to the watcher as late as possible: it waits on
         // the install stage below, so its one pid covers the whole chain.
@@ -1263,7 +1306,7 @@ mod windows {
             .arg(&staged_installer)
             .arg(&staged_checksums)
             .arg(&plan.asset_name)
-            .arg(&plan.install_dir)
+            .arg(install_dir)
             .arg(&plan.expected_version)
             .arg(&plan.log)
             .arg(&plan.stage)
@@ -1297,30 +1340,46 @@ mod windows {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
         let root = program_data.join("tty7");
-        fs::create_dir_all(&root)
-            .map_err(|error| format!("creating {}: {error}", root.display()))?;
-        // Leftovers of chains that died mid-install. Removing a live chain's
-        // staging fails on its locked files, which is the only guard needed.
-        sweep_protected_staging(&root);
+        claim_protected_root(&root)?;
         let staging = root.join(format!("update-{}", std::process::id()));
         create_dir_admin_only(&staging)?;
         Ok(staging)
     }
 
-    fn sweep_protected_staging(root: &Path) {
-        let Ok(entries) = fs::read_dir(root) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let named = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("update-"));
-            if named {
-                let _ = fs::remove_dir_all(&path);
+    /// Claims `%ProgramData%\tty7` itself with the admin-only DACL, taking
+    /// down whatever holds the name first.
+    ///
+    /// `%ProgramData%` lets a standard user create directories, and the
+    /// creator owns what it creates. A root left to exist as somebody's
+    /// pre-created directory would hand its owner delete-child over the
+    /// "admin-only" staging inside it — enough to rename the verified
+    /// staging aside and drop an identically named one of their own into the
+    /// gap between the digest check and the execute, which is the exact
+    /// window the protected DACL exists to close. Creating the root here
+    /// makes it as unwritable as the staging: `CreateDirectoryW` applies the
+    /// descriptor only when it is the one creating the directory, so
+    /// succeeding *is* the proof.
+    ///
+    /// Nothing else lives under it — it holds staging directories and
+    /// nothing more — so removing it costs at most a dead chain's leftovers.
+    /// A holder that cannot be cleared (a live chain's locked image, an
+    /// attacker sitting on an open handle) fails the update closed.
+    fn claim_protected_root(root: &Path) -> Result<(), String> {
+        // A standard user racing the removal can only lose the name back to
+        // us; three tries is more than that race needs.
+        let mut failure = String::new();
+        for _ in 0..3 {
+            // `remove_path`, not `remove_dir_all`: the name may be held by a
+            // file or by a junction pointing somewhere it would be a
+            // catastrophe to recurse into, and a name that is not there at
+            // all is the ordinary first run.
+            remove_path(root)?;
+            match create_dir_admin_only(root) {
+                Ok(()) => return Ok(()),
+                Err(error) => failure = error,
             }
         }
+        Err(failure)
     }
 
     fn create_dir_admin_only(dir: &Path) -> Result<(), String> {

@@ -1470,9 +1470,21 @@ impl PendingUpdate {
     fn launch_elevated(&self) -> Result<ElevationStart> {
         use windows_sys::Win32::Foundation::ERROR_CANCELLED;
 
-        let parts = self
+        let mut parts = self
             .elevated_parts()
             .context("the staged package does not describe an elevated install")?;
+        // The prompt names the installation this process is running from, not
+        // the one the plan names. `update.json` lives in the user's config
+        // directory: a plan naming some other directory would aim a UAC
+        // prompt — and the elevated half's `<install-dir>` — at a binary of
+        // the plan writer's choosing.
+        let installed_updater =
+            bundled_updater().context("tty7-updater.exe is not installed beside this app")?;
+        let installed_dir = installed_updater
+            .parent()
+            .context("the installed updater names no directory")?
+            .to_path_buf();
+        parts.install_dir = installed_dir.clone();
         let Some(status) = update_elevation_status_path() else {
             anyhow::bail!("no config directory for the elevation status file");
         };
@@ -1511,16 +1523,15 @@ impl PendingUpdate {
             .spawn()
             .context("launching the relaunch watcher")?;
 
-        let installed_updater = parts.install_dir.join("tty7-updater.exe");
         let parameters =
             elevated_stage_arguments(&parts, &status, &outcome, self.config_dir.as_deref());
-        match shell_execute_elevated(&installed_updater, &parameters, &parts.install_dir) {
+        match shell_execute_elevated(&installed_updater, &parameters, &installed_dir) {
             Ok(()) => Ok(ElevationStart::Started),
             Err(code) => {
                 // Whatever the answer was, the watcher must not outlive this
-                // process when no elevated half is coming: it would sit on its
-                // 15-minute grace, then relaunch the app over the one still
-                // running.
+                // process when no elevated half is coming: it would spend its
+                // whole 15-minute grace waiting for a chain that will never
+                // report, while the app it was to relaunch is still running.
                 let _ = watcher.kill();
                 let _ = std::fs::remove_file(&status);
                 if code == ERROR_CANCELLED {
@@ -1547,14 +1558,7 @@ fn elevated_stage_arguments(
     config_dir: Option<&Path>,
 ) -> std::ffi::OsString {
     let mut line = std::ffi::OsString::new();
-    let mut push = |arg: &std::ffi::OsStr| {
-        if !line.is_empty() {
-            line.push(" ");
-        }
-        line.push("\"");
-        line.push(arg);
-        line.push("\"");
-    };
+    let mut push = |arg: &std::ffi::OsStr| push_quoted(&mut line, arg);
     push(std::ffi::OsStr::new("elevated-stage"));
     push(std::ffi::OsStr::new(&std::process::id().to_string()));
     push(parts.installer.as_os_str());
@@ -1574,6 +1578,57 @@ fn elevated_stage_arguments(
     push(std::ffi::OsStr::new("--result-file"));
     push(outcome.as_os_str());
     line
+}
+
+/// Appends one argument the way `CommandLineToArgvW` — and the CRT splitter
+/// the elevated helper is parsed by — reads back verbatim.
+///
+/// Wrapping in quotes is not enough on its own. A backslash is an escape
+/// character only in front of a quote, so a path that *ends* in one
+/// (`--config-dir "D:\tty7\"`) escapes its own closing quote and swallows the
+/// rest of the command line into a single argument; an embedded quote splits
+/// one argument into several. Neither can be reached across the integrity
+/// boundary — every value here comes from this user's own session — but the
+/// receiver runs elevated, and an argument list it can misread is not a thing
+/// to leave to the shape of a path.
+#[cfg(target_os = "windows")]
+fn push_quoted(line: &mut std::ffi::OsString, arg: &std::ffi::OsStr) {
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+
+    const QUOTE: u16 = b'"' as u16;
+    const BACKSLASH: u16 = b'\\' as u16;
+
+    let mut quoted = vec![QUOTE];
+    // The run of backslashes immediately behind the cursor: doubled if a
+    // quote follows it, left alone otherwise.
+    let mut backslashes = 0usize;
+    for unit in arg.encode_wide() {
+        match unit {
+            BACKSLASH => {
+                backslashes += 1;
+                quoted.push(unit);
+            }
+            QUOTE => {
+                quoted.resize(quoted.len() + backslashes, BACKSLASH);
+                quoted.push(BACKSLASH);
+                quoted.push(QUOTE);
+                backslashes = 0;
+            }
+            _ => {
+                backslashes = 0;
+                quoted.push(unit);
+            }
+        }
+    }
+    // The closing quote is a quote like any other: the run in front of it has
+    // to be doubled too.
+    quoted.resize(quoted.len() + backslashes, BACKSLASH);
+    quoted.push(QUOTE);
+
+    if !line.is_empty() {
+        line.push(" ");
+    }
+    line.push(std::ffi::OsString::from_wide(&quoted));
 }
 
 /// Starts `executable` elevated — the `runas` verb is what turns the request
@@ -3588,5 +3643,38 @@ mod tests {
             ),
             "{line}"
         );
+    }
+
+    /// The CRT splitter the elevated helper is parsed by treats a backslash
+    /// as an escape only in front of a quote — so a config directory ending
+    /// in one would otherwise escape its own closing quote and eat every
+    /// argument after it, including `--result-file`, which is the file the
+    /// watcher waits on.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_trailing_backslash_does_not_escape_its_own_closing_quote() {
+        let quote = |value: &str| {
+            let mut line = std::ffi::OsString::new();
+            push_quoted(&mut line, std::ffi::OsStr::new(value));
+            line.into_string().expect("valid Unicode in, valid out")
+        };
+
+        assert_eq!(
+            quote(r"C:\Program Files\tty7"),
+            r#""C:\Program Files\tty7""#
+        );
+        // Doubled only in front of the closing quote.
+        assert_eq!(quote(r"D:\tty7\"), r#""D:\tty7\\""#);
+        assert_eq!(quote(r"D:\tty7\\"), r#""D:\tty7\\\\""#);
+        // An embedded quote is escaped, and the run in front of it doubled.
+        assert_eq!(quote(r#"a"b"#), r#""a\"b""#);
+        assert_eq!(quote(r#"a\"b"#), r#""a\\\"b""#);
+        // Interior backslashes are literal: doubling them would rename paths.
+        assert_eq!(quote(r"a\b"), r#""a\b""#);
+
+        let mut line = std::ffi::OsString::new();
+        push_quoted(&mut line, std::ffi::OsStr::new("one"));
+        push_quoted(&mut line, std::ffi::OsStr::new("two"));
+        assert_eq!(line.into_string().unwrap(), r#""one" "two""#);
     }
 }
