@@ -1667,7 +1667,17 @@ impl Tty7App {
                     // the theme card came to run the width of the window on the
                     // Chinese and Japanese pages while every other row stopped
                     // at the column.
-                    div().w_full().px_10().py_8().child(
+                    //
+                    // `items_center` centres the column across the page's
+                    // cross axis. The cap keeps a description a paragraph
+                    // rather than a line to scan across, but left-aligning what
+                    // it caps put the whole page against the nav: on a window
+                    // as wide as the display it was made for, 640 points of
+                    // settings sat beside 1600 points of nothing. Centred, the
+                    // page is one column with air on both sides at every width,
+                    // and below the cap — where the column is the page — this
+                    // does nothing at all.
+                    v_flex().w_full().items_center().px_10().py_8().child(
                         div()
                             .w_full()
                             .max_w(px(READING_COLUMN * ui_scale))
