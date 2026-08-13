@@ -481,6 +481,12 @@ pub enum InstallError {
     Launch {
         reason: String,
     },
+    /// Asked to restart a server this machine does not have. Nothing was
+    /// stopped — see [`Installer::restart_daemon`].
+    NoServerToRestart {
+        host: String,
+        path: String,
+    },
     DialectMismatch {
         origin: String,
         wanted: RemoteProtocol,
@@ -518,6 +524,11 @@ impl std::fmt::Display for InstallError {
                 write!(f, "could not write {path} on the remote machine: {reason}")
             }
             Self::Launch { reason } => write!(f, "the remote tty7-server did not start: {reason}"),
+            Self::NoServerToRestart { host, path } => write!(
+                f,
+                "{host} has no tty7-server at {path} for this build to start, so nothing was \
+                 stopped; install the matching server there and it will be started as part of that"
+            ),
             Self::DialectMismatch {
                 origin,
                 wanted,
@@ -548,6 +559,7 @@ impl From<InstallError> for io::Error {
         let kind = match &e {
             InstallError::Unsupported(_)
             | InstallError::MissingBundled { .. }
+            | InstallError::NoServerToRestart { .. }
             | InstallError::DialectMismatch { .. } => io::ErrorKind::Unsupported,
             InstallError::Declined { .. } => io::ErrorKind::PermissionDenied,
             InstallError::Checksum(_) => io::ErrorKind::InvalidData,
@@ -656,7 +668,10 @@ impl<'a> Installer<'a> {
             self.install(asset, &paths)?;
         }
 
-        self.restart_daemon()
+        // Straight to the cycle: this is the one caller that has just proved
+        // the binary is there, so `restart_daemon`'s guard would only spend
+        // another round trip re-proving it.
+        self.cycle_daemon(&paths)
     }
 
     fn published_binary_serves_us(&self, paths: &RemotePaths) -> Result<bool, InstallError> {
@@ -962,15 +977,39 @@ impl<'a> Installer<'a> {
         Some(entry)
     }
 
+    /// Stop whatever tty7-server is running over there and start the one this
+    /// build speaks to.
+    ///
+    /// Which is not the same binary: the path is named after *our* dialect
+    /// (`tty7-server-c{control}p{protocol}`), while the kill matches any
+    /// `tty7-server-*` — see [`TERMINATE_RUNNING_COMMAND`]. When
+    /// the far end is a machine we have never installed onto — the other side
+    /// of a dialect bump, most of all — the two are different files and the
+    /// second one is not there. Restarting into it would end every session on
+    /// the machine, including other clients', and then have nothing to launch.
+    /// So look before killing: a machine with no matching server to start is
+    /// left exactly as it was, and told to install one first.
     pub fn restart_daemon(&self) -> Result<(), InstallError> {
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
         let paths = self.paths_for(&home);
+        if !self.published_binary_serves_us(&paths)? {
+            return Err(InstallError::NoServerToRestart {
+                host: self.host.clone(),
+                path: paths.binary.clone(),
+            });
+        }
+        self.cycle_daemon(&paths)
+    }
+
+    /// The restart itself, for callers that have just put the binary there and
+    /// do not need to be told again that it is there.
+    fn cycle_daemon(&self, paths: &RemotePaths) -> Result<(), InstallError> {
         install_progress().report(&self.host, InstallPhase::Restarting);
 
         let _ = self.ops.run(TERMINATE_RUNNING_COMMAND);
 
         let deadline = Instant::now() + REMOTE_SHUTDOWN_TIMEOUT;
-        while self.daemon_is_serving(&paths)? {
+        while self.daemon_is_serving(paths)? {
             if Instant::now() >= deadline {
                 return Err(InstallError::Launch {
                     reason: format!(
@@ -981,10 +1020,10 @@ impl<'a> Installer<'a> {
             std::thread::sleep(self.poll_interval);
         }
 
-        self.launch_daemon(&paths)?;
+        self.launch_daemon(paths)?;
         let deadline = Instant::now() + self.startup_timeout;
         loop {
-            if self.daemon_is_serving(&paths)? {
+            if self.daemon_is_serving(paths)? {
                 return Ok(());
             }
             if Instant::now() >= deadline {

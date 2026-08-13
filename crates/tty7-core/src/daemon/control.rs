@@ -28,7 +28,13 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 /// end events, and `ReplyOk::Attached` and `FileMeta` went away. All of it
 /// shipped against a number that never moved, so every one of those servers
 /// still answers the hello and then drops the link on the first call.
-pub const CONTROL_VERSION: u32 = 6;
+///
+/// v7 changes no message at all. It is here so that the handling of a dialect
+/// refusal — the parked strip, its Update Server button, and the installer
+/// refusing to kill a server it has nothing to replace with — can be exercised
+/// against the v6 servers already deployed. A number is the only way to reach
+/// that path, and a mismatch nobody can reproduce is a mismatch nobody can fix.
+pub const CONTROL_VERSION: u32 = 7;
 
 const DIALECT_MARKER: &str = "speaks control v";
 

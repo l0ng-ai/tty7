@@ -894,6 +894,76 @@ fn restart_replaces_the_running_daemon() {
 }
 
 #[test]
+fn a_restart_with_nothing_to_start_leaves_the_running_daemon_alone() {
+    // The machine on the far side of a dialect bump: a server of the previous
+    // dialect is up and serving, and the binary this build launches has never
+    // been installed. Killing first would have ended every session there —
+    // including other clients' — and then found nothing to run.
+    let old = format!("{BIN_DIR}/tty7-server-c2p3");
+    let remote = FakeRemote::new().serving(&old);
+    remote.preinstall(&old, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let refused = installer(&remote, &release, &user, "me@behind-box:22")
+        .restart_daemon()
+        .expect_err("there is no matching server to restart into");
+
+    assert!(
+        matches!(&refused, InstallError::NoServerToRestart { path, .. } if path == BINARY),
+        "{refused:?}"
+    );
+    assert!(
+        !remote
+            .journal()
+            .iter()
+            .any(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND)),
+        "nothing was stopped: {:?}",
+        remote.journal()
+    );
+    assert!(
+        *remote.daemon_running.lock().unwrap(),
+        "the machine is still serving the build it was serving before"
+    );
+    assert_eq!(
+        remote.running_exe.lock().unwrap().as_deref(),
+        Some(old.as_str())
+    );
+}
+
+#[test]
+fn replacing_installs_the_matching_server_and_then_restarts_into_it() {
+    // The same machine, taken through the action that is actually meant for
+    // it. This is the guard's other half: `replace` may kill, because by then
+    // there is something to launch.
+    let old = format!("{BIN_DIR}/tty7-server-c2p3");
+    let remote = FakeRemote::new().serving(&old);
+    remote.preinstall(&old, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    installer(&remote, &release, &user, "me@behind-box:22")
+        .replace()
+        .expect("replace installs what restart could not find");
+
+    assert!(remote.file(BINARY).is_some(), "the matching server landed");
+    let journal = remote.journal();
+    let killed = journal
+        .iter()
+        .position(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND))
+        .expect("the old daemon is asked to stop");
+    let written = journal
+        .iter()
+        .position(|j| matches!(j, Journal::Rename { to, .. } if to == BINARY))
+        .expect("the new server is put in place");
+    assert!(
+        written < killed,
+        "install before kill, so the window with no server is as short as it can be: {journal:?}"
+    );
+    assert!(*remote.daemon_running.lock().unwrap());
+}
+
+#[test]
 fn the_launch_command_detaches_and_closes_every_stream() {
     let cmd = launch_command("/home/me/.local/share/tty7/bin/tty7-server-26.7.5");
     assert!(cmd.contains("setsid"), "{cmd}");

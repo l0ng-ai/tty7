@@ -255,7 +255,7 @@ impl Tty7App {
         let machine = self.remote_machine_label(cx);
         let status = self.remote_status(cx)?;
         let message = status.strip_message(&machine)?;
-        let action = status.action_label();
+        let action = self.remote_strip_action(&status, cx);
         let theme = cx.theme();
         Some(
             h_flex()
@@ -271,13 +271,15 @@ impl Tty7App {
                 .text_color(theme.muted_foreground)
                 .child(gpui_component::Icon::new(IconName::Globe))
                 .child(message)
-                .when_some(action, |this, label| {
+                .when_some(action, |this, (label, action)| {
                     this.child(
                         Button::new("home-remote-status-action")
                             .label(label)
                             .ghost()
                             .small()
-                            .on_click(cx.listener(|this, _, _window, cx| this.remote_retry(cx)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.run_strip_action(action.clone(), window, cx);
+                            }))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
                     )
                 }),

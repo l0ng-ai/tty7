@@ -44,6 +44,13 @@ pub enum RemoteStatus {
         by: String,
     },
     Failed(String),
+    /// The machine answered, and answered as tty7 — with a server the other
+    /// side of a control-dialect bump. Carries the refusal verbatim so it can
+    /// be restated for a reader. Parked like `RouteLost`, because a retry is
+    /// just as hopeless: nothing about either build changes between attempts.
+    /// Unlike `RouteLost` there is something to do about it, so this one keeps
+    /// a button — the one that updates the server over there.
+    ServerMismatch(String),
     /// The route itself is gone — the profile was deleted or the alias left
     /// the ssh config — so no reconnect can ever succeed (#485). Parked: no
     /// retry button, just the truth plus the way back.
@@ -91,6 +98,19 @@ impl RemoteStatus {
                 L10nKey::RemoteStripFailed,
                 &[("machine", machine), ("error", e)],
             )),
+            // The protocol layer's wording reads like the far end is not tty7
+            // at all, and it is 20 words of dialect numbers. Say which side is
+            // behind instead. The fallback cannot be reached from the pump —
+            // nothing becomes `ServerMismatch` unless the refusal parsed — but
+            // it costs nothing and beats an empty strip.
+            RemoteStatus::ServerMismatch(e) => Some(
+                remote_connect::dialect_complaint(e, machine).unwrap_or_else(|| {
+                    t_fmt(
+                        L10nKey::RemoteStripFailed,
+                        &[("machine", machine), ("error", e)],
+                    )
+                }),
+            ),
             RemoteStatus::RouteLost => Some(t_fmt(
                 L10nKey::RemoteStripRouteLost,
                 &[("machine", machine)],
@@ -113,6 +133,10 @@ impl RemoteStatus {
             RemoteStatus::Preempted { .. } => Some(t(L10nKey::RemoteActionTakeBack)),
             RemoteStatus::Disconnected => Some(t(L10nKey::RemoteActionConnect)),
             RemoteStatus::Failed(_) => Some(t(L10nKey::RemoteActionRetry)),
+            // Not "retry" — retrying is what the strip used to offer here, and
+            // it can only fail the same way. The only move that changes the
+            // answer is installing the server this build speaks to.
+            RemoteStatus::ServerMismatch(_) => Some(t(L10nKey::RemoteMismatchReplaceServer)),
             // A retry on a dead route fails deterministically; the switcher
             // row carries the honest actions (forget the entry, or dismiss).
             RemoteStatus::RouteLost => None,
@@ -126,6 +150,18 @@ impl RemoteStatus {
     pub fn accepts_input(&self) -> bool {
         matches!(self, RemoteStatus::Attached)
     }
+}
+
+/// What the remote strip's button is for, once the status has been read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum StripAction {
+    /// Connect, reconnect, retry, take back — every move that amounts to
+    /// "try the link again now".
+    Retry,
+    UpdateServer {
+        target: RemoteTarget,
+        label: String,
+    },
 }
 
 pub const RECONNECT_FIRST: std::time::Duration = std::time::Duration::from_secs(1);
@@ -305,6 +341,50 @@ impl Tty7App {
         let supervised = RemoteLinks::status_of(cx, self.workspace);
         let resolvable = remote_connect::route_resolvable(cx, &own.target);
         resolve_status(self.connect.as_ref(), &own.target, supervised, resolvable)
+    }
+
+    /// The strip's one button: its label, and what pressing it does.
+    ///
+    /// These used to be decided separately — `action_label` picked the word and
+    /// the button always called `remote_retry` — which is exactly how the one
+    /// state a retry cannot fix ended up wearing a Retry Now button and looping
+    /// on it forever.
+    pub(crate) fn remote_strip_action(
+        &self,
+        status: &RemoteStatus,
+        cx: &gpui::App,
+    ) -> Option<(&'static str, StripAction)> {
+        let label = status.action_label()?;
+        let RemoteStatus::ServerMismatch(_) = status else {
+            return Some((label, StripAction::Retry));
+        };
+        // Only a machine whose server is ours to install can be updated from
+        // here. Anything else — a `--stdio` program, a peer someone else runs —
+        // keeps the explanation and loses the button, which is the truth.
+        let own = WorkspaceStore::remote_ref(cx, self.workspace)?;
+        own.target.hosts_our_server().then(|| {
+            (
+                label,
+                StripAction::UpdateServer {
+                    target: own.target.clone(),
+                    label: self.remote_machine_label(cx),
+                },
+            )
+        })
+    }
+
+    pub(crate) fn run_strip_action(
+        &mut self,
+        action: StripAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            StripAction::Retry => self.remote_retry(cx),
+            StripAction::UpdateServer { target, label } => {
+                self.confirm_replace_remote_server(target, label, window, cx)
+            }
+        }
     }
 
     pub(crate) fn remote_retry(&mut self, cx: &mut Context<Self>) {
@@ -832,6 +912,14 @@ fn resolve_status(
     }
     match mine {
         Some(ConnectFlow::Connecting { .. }) => Some(RemoteStatus::Connecting),
+        // A connect the user ran by hand fails on the dialect exactly as the
+        // supervisor's does, and deserves the same answer — the restatement and
+        // the Update Server button, not a Retry that cannot work.
+        Some(ConnectFlow::Failed { error, .. })
+            if crate::daemon::control::is_dialect_refusal(error) =>
+        {
+            Some(RemoteStatus::ServerMismatch(error.clone()))
+        }
         Some(ConnectFlow::Failed { error, .. }) => Some(RemoteStatus::Failed(error.clone())),
         None => supervised,
     }
@@ -883,6 +971,10 @@ enum LinkState {
     Attached,
     Reconnecting,
     Failed(String),
+    /// The far end refused the control hello over the dialect. The pump leaves
+    /// this one alone — see `pump_tick` — so it is the one state that survives
+    /// a tick without being rewritten to `Reconnecting`.
+    Mismatched(String),
 }
 
 /// What the supervisor knows about one *machine's* link, for readers outside
@@ -992,6 +1084,7 @@ impl RemoteLinks {
                     last_error: link.last_error.clone(),
                 },
                 LinkState::Failed(e) => RemoteStatus::Failed(e.clone()),
+                LinkState::Mismatched(e) => RemoteStatus::ServerMismatch(e.clone()),
             },
             None => RemoteStatus::Disconnected,
         })
@@ -1010,6 +1103,11 @@ impl RemoteLinks {
                 last_error: link.last_error.clone(),
             },
             LinkState::Failed(e) => MachineStatus::Failed(e.clone()),
+            // Failed, as far as the switcher is concerned: a parked machine is
+            // not reachable and not being retried. The refusal travels with it,
+            // which is all the error band needs — it already recognises one and
+            // grows an Update Server button.
+            LinkState::Mismatched(e) => MachineStatus::Failed(e.clone()),
         })
     }
 
@@ -1044,6 +1142,11 @@ impl RemoteLinks {
         });
         link.backoff.reset();
         link.next_attempt = Some(Instant::now());
+        // Someone asked for this by hand, which is also the only way out of a
+        // park — and the reason it was parked is now the *previous* answer, not
+        // the current one. Keeping it would put the old complaint back on the
+        // strip underneath a fresh attempt.
+        link.last_error = None;
         if !link.attempting {
             link.state = LinkState::Reconnecting;
         }
@@ -1168,6 +1271,20 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
             }
         }
         if !resolvable {
+            continue;
+        }
+
+        // Parked on a dialect refusal, for the same reason and in the same
+        // shape as an unresolvable route: the attempt is known to fail. Two
+        // things still get out of it, and both need a human to say so —
+        // `retry_now`, which the Update Server flow ends in, and a manual
+        // connect from the switcher, whose link the `live` branch above adopts
+        // before this ever runs.
+        let parked = cx
+            .try_global::<RemoteLinks>()
+            .and_then(|l| l.machines.get(&host))
+            .is_some_and(|l| matches!(l.state, LinkState::Mismatched(_)));
+        if parked {
             continue;
         }
 
@@ -1554,10 +1671,24 @@ fn finish_attempt(
             log::info!("reconnected to {label}");
         }
         Err(e) => {
-            log::warn!("reconnect to {label} failed: {e}");
+            // A dialect refusal is not a transient failure. Both builds are
+            // fixed, so the next attempt fails identically and the one after
+            // that too; all the backoff buys is a strip that counts to thirty
+            // for the rest of the session. Park it and give the user the move
+            // that actually changes the answer.
+            let parked = crate::daemon::control::is_dialect_refusal(&e);
+            if parked {
+                log::warn!("{label} is served by a build this one cannot speak to: {e}");
+            } else {
+                log::warn!("reconnect to {label} failed: {e}");
+            }
             RemoteLinks::mark(cx, host, |link| {
                 link.attempting = false;
-                link.state = LinkState::Reconnecting;
+                link.state = if parked {
+                    LinkState::Mismatched(e.clone())
+                } else {
+                    LinkState::Reconnecting
+                };
                 link.next_attempt = None;
                 link.last_error = Some(e.clone());
             });
@@ -2066,6 +2197,12 @@ mod tests {
                 Some(t(L10nKey::RemoteNoticeDisconnected)),
                 Some(t(L10nKey::RemoteActionRetry)),
             ),
+            (
+                RemoteStatus::ServerMismatch(a_refusal()),
+                false,
+                Some(t(L10nKey::RemoteNoticeDisconnected)),
+                Some(t(L10nKey::RemoteMismatchReplaceServer)),
+            ),
         ];
         for (status, accepts, notice, action) in cases {
             assert_eq!(status.accepts_input(), accepts, "{status:?}");
@@ -2131,6 +2268,72 @@ mod tests {
             vec![build],
             "closing one machine's window must not resume another"
         );
+    }
+
+    #[gpui::test]
+    fn a_dialect_refusal_parks_the_link_instead_of_counting_attempts(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            crate::core::config::pin_test_config_dir();
+            cx.set_global(crate::core::config::Config::default());
+            crate::ui::windows::WindowRegistry::init(cx);
+
+            let (host, target) = machine("build-box");
+            let mut entry = crate::core::session::WindowView::on_remote(RemoteRef::new(
+                target.clone(),
+                WorkspaceId::new(),
+            ));
+            entry.open = true;
+            let id = entry.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![entry],
+                    active: None,
+                },
+            );
+
+            finish_attempt(cx, host, &target, Err("connection refused".into()));
+            assert!(
+                matches!(
+                    RemoteLinks::status_of(cx, id),
+                    Some(RemoteStatus::Reconnecting { .. })
+                ),
+                "an ordinary failure is worth another go"
+            );
+
+            finish_attempt(cx, host, &target, Err(a_refusal()));
+            let parked = RemoteLinks::status_of(cx, id);
+            assert!(
+                matches!(parked, Some(RemoteStatus::ServerMismatch(_))),
+                "a refusal both builds will repeat verbatim is not a reconnect: {parked:?}"
+            );
+
+            // Whatever the pump does with a parked machine, it must not be to
+            // schedule another attempt — that is the loop this replaced.
+            for _ in 0..4 {
+                pump_tick(cx);
+            }
+            let link = cx.default_global::<RemoteLinks>().machines.get(&host);
+            let link = link.expect("the machine is still known");
+            assert!(
+                matches!(link.state, LinkState::Mismatched(_)),
+                "four ticks later it is still parked, not back on the backoff"
+            );
+            assert!(link.next_attempt.is_none() && !link.attempting);
+            assert_eq!(link.backoff.attempt(), 0, "no attempt was ever scheduled");
+
+            // The one way out, which is what Update Server ends in.
+            RemoteLinks::retry_now(cx, id);
+            assert!(
+                matches!(
+                    RemoteLinks::status_of(cx, id),
+                    Some(RemoteStatus::Reconnecting { .. })
+                ),
+                "asking by hand un-parks it"
+            );
+        });
     }
 
     #[gpui::test]
@@ -2200,6 +2403,64 @@ mod tests {
                     ("error", "connection refused")
                 ]
             ))
+        );
+    }
+
+    /// What `connect_blocking` hands back when the far end answers the hello
+    /// with another dialect, localised wrapper and all.
+    fn a_refusal() -> String {
+        t_fmt(
+            L10nKey::RemoteHostNotTty7,
+            &[
+                ("machine", "build-box"),
+                (
+                    "error",
+                    "control peer (build 26.8.1) speaks control v5, this build speaks v6",
+                ),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_hand_run_connect_refused_on_the_dialect_gets_the_same_answer() {
+        let target = RemoteTarget::Alias {
+            alias: "build-box".into(),
+        };
+        let flow = ConnectFlow::Failed {
+            choice: HostChoice {
+                target: target.clone(),
+                label: "build-box".into(),
+                detail: String::new(),
+            },
+            error: a_refusal(),
+        };
+        assert!(
+            matches!(
+                resolve_status(Some(&flow), &target, None, true),
+                Some(RemoteStatus::ServerMismatch(_))
+            ),
+            "the switcher's own attempt hits the same wall as the supervisor's"
+        );
+    }
+
+    #[test]
+    fn a_server_of_another_dialect_is_named_rather_than_quoted() {
+        crate::ui::i18n::set_locale("en");
+        let shown = RemoteStatus::ServerMismatch(a_refusal())
+            .strip_message("build-box")
+            .expect("a parked link still has something to say");
+        assert!(
+            shown.contains("build-box") && shown.contains("26.8.1"),
+            "which machine, and which build is over there: {shown}"
+        );
+        assert!(
+            !shown.contains("control v"),
+            "the protocol layer's wording never reaches the strip: {shown}"
+        );
+        assert_eq!(
+            shown,
+            crate::ui::remote_connect::dialect_complaint(&a_refusal(), "build-box").unwrap(),
+            "the strip and the switcher's error band say the same thing"
         );
     }
 

@@ -1539,6 +1539,18 @@ impl Tty7App {
             );
             return;
         }
+        // A server the other side of a dialect bump has nothing to restart
+        // *into*: the binary this build launches was never installed over
+        // there, and the installer now refuses rather than killing the one
+        // that is running. Updating is the move that works, so offer that,
+        // under its own name and with its own warning about ending sessions.
+        if matches!(
+            self.remote_status(cx),
+            Some(crate::ui::remote_workspace::RemoteStatus::ServerMismatch(_))
+        ) {
+            self.confirm_replace_remote_server(target, label, window, cx);
+            return;
+        }
         self.confirm_restart_remote_server(target, label, window, cx);
     }
 
@@ -6052,7 +6064,7 @@ impl Tty7App {
         let status = self.remote_status(cx)?;
         let machine = self.remote_machine_label(cx);
         let message = status.strip_message(&machine)?;
-        let action = status.action_label();
+        let action = self.remote_strip_action(&status, cx);
         let theme = cx.theme();
         let bar = gpui_component::h_flex()
             .occlude()
@@ -6074,7 +6086,7 @@ impl Tty7App {
                     .text_color(theme.foreground)
                     .child(message),
             )
-            .when_some(action, |this, label| {
+            .when_some(action, |this, (label, action)| {
                 use gpui_component::Sizable as _;
                 use gpui_component::button::ButtonVariants as _;
                 this.child(
@@ -6082,7 +6094,9 @@ impl Tty7App {
                         .label(label)
                         .primary()
                         .small()
-                        .on_click(cx.listener(|this, _, _window, cx| this.remote_retry(cx))),
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.run_strip_action(action.clone(), window, cx);
+                        })),
                 )
             });
         Some(
