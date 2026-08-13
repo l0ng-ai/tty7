@@ -46,6 +46,19 @@ pub(crate) const META_MONO: f32 = META - STEP;
 /// sidebar's group headings, which are the same thing one panel over.
 pub(crate) const HEADING: f32 = 11. * STEP;
 
+/// The leading glyph on a panel row — the file tree's folder and file marks.
+///
+/// Pixels, not rems, because glyphs in this window are sized off the tile
+/// ladder in `app.rs` (`TILE_GLYPH` 13, `TILE_GLYPH_XS` 11) rather than off the
+/// text ramp above. A row that reached for gpui-component's rem sizes instead
+/// could never agree with the tab tiles it sits under: at the default
+/// `ui_font_size` of 16 that ladder offers `xsmall` 12 and `small` 14 and
+/// nothing between, so the tree's glyph came out either a step under the
+/// chrome — reading as a speck beside a 14px name — or a step over it, which
+/// puts a row of content above the navigation that owns it. 13 is the tab
+/// tile's own glyph size, so the two agree by construction.
+pub(crate) const ROW_GLYPH: f32 = crate::ui::app::TILE_GLYPH;
+
 // The right panel's type ramp: four steps, a point apart, that the Info and
 // Source Control tabs both draw from so switching between them does not change
 // the apparent size of the panel. The Files tab, in `file_tree.rs`, reaches the
@@ -642,9 +655,10 @@ impl Tty7App {
                         .map(|cwd| (view.host_id(), cwd.to_path_buf())),
                 );
                 if let Some(cwd) = view.effective_cwd() {
+                    let home = view.display_home(cx);
                     rows.push(InfoRow {
                         label: t(L10nKey::PanelCwd),
-                        value: InfoValue::Path(compact_path(&cwd)),
+                        value: InfoValue::Path(compact_path(&cwd, home.as_deref())),
                         // The compacted `~/…` spelling is for reading; what
                         // goes on the clipboard is the path a shell can use.
                         copy: Some(cwd.display().to_string()),
@@ -1455,8 +1469,11 @@ fn split_path_leaf(s: &str) -> (String, String) {
     }
 }
 
-fn compact_path(path: &std::path::Path) -> String {
-    crate::ui::path_display::abbreviate_home(&path.to_string_lossy()).into_owned()
+/// `home` is the home directory of the machine `path` lives on. A remote
+/// pane's cwd is measured against *its* host's home, never this machine's
+/// (#580) — and against nothing at all while the host has not said.
+fn compact_path(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    crate::ui::path_display::abbreviate_home(&path.to_string_lossy(), home).into_owned()
 }
 
 #[cfg(test)]

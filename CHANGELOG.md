@@ -7,8 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A host can be proved without spending a tab on it.** **Test** in the SSH
+  host form dials the host exactly as Connect would — proxy, jump host, host
+  key and authentication, all on the daemon — and reports back in place:
+  `Connected and authenticated in 640 ms`, or what the handshake stopped to
+  ask for (a password, a key passphrase, a keyboard-interactive answer, a host
+  key nobody has accepted yet, or one that is not the key the server gave
+  before), or the failure verbatim. A test never rides an existing connection
+  — one would answer for the credentials *that* connection was made with, so a
+  password typed wrong would come back green — and it never enters the
+  connection cache, so it leaves nothing open and holds nothing up. An edit to
+  the form drops the answer, which was about the host as it was typed a moment
+  ago (#438).
+- **The host form is reachable from wherever the machine is on screen.**
+  Right-clicking a machine in the workspace switcher offers **Edit Host…** for
+  a saved host, or **Save as SSH Host…** for one reached by address or by a
+  `~/.ssh/config` alias; the switcher's **Add SSH Host…** now opens the form
+  instead of the settings list you then had to find `+` on. A connection
+  dialled by hand and worth keeping becomes a saved host from the palette —
+  **SSH: Save Connection as Host…**, prefilled from the live session. The one
+  thing that cannot come along is an ad-hoc `-J` hop, and that is said out
+  loud rather than saved broken (#438).
+
 ### Changed
 
+- **An SSH pane is named after its host.** A fresh SSH tab reads the host's
+  name, or its address when the host has none — every host imported from
+  `~/.ssh/config` arrives nameless, and a window full of them all read `tty7`
+  until the far shell happened to title itself. The name survives a title
+  reset and a dropped link (`prod-web — disconnected`), and a tab titled
+  `deploy@10.0.0.5:2222` is shown whole rather than cut down to `2222`: the
+  `user@host:` head is only a head when a path follows it (#438).
+- **The host form's authentication row is a dropdown**, not a six-way
+  segmented control — it was the row that stacked first on a narrow page. And
+  the three proxy fields no longer read as independent: only the first one
+  filled is used, so the losing fields now say `Not used: Proxy command comes
+  first.` instead of leaving it to be discovered by connecting (#438).
+
+- **A workspace reads its own name from the first frame, and stops changing
+  under you.** Every workspace a window creates is given a generated name —
+  `keen-marten` — and that is the name `tty7 ws ls` prints and `tty7 ws rename
+  keen-marten …` addresses. The window that created it was never told: a client
+  is left out of the deltas its own edits raise, and both create paths threw
+  away the name the machine sent back, so the chip showed the directory its
+  shells happened to start in. The GUI and the CLI gave two different answers to
+  "what is this workspace called", and the real name arrived later — at the
+  first daemon restart, rebuild or relaunch — looking like the workspace had
+  renamed itself. A window now learns the name along with the layout, so the
+  chip agrees with `ws ls` from the start. A workspace with no name, which is
+  what `tty7 new` leaves behind, still reads the directory it is working in, and
+  a name you chose yourself still wins (#604).
 - **File links open in tty7 instead of leaving it.** A ⌘/Ctrl-clicked file path
   now opens in the built-in editor, on the line and column the link named, and
   the Files panel selects it and scrolls it into view; a directory link opens
@@ -25,6 +75,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tree pull that has to be retried no longer ends with the window deleting
+  the tabs it was pulling.** A window told to rebuild itself from the machine —
+  a daemon back as a new process, a restart handoff that was refused, a remote
+  server restarted — abandoned that job the moment it had any tabs at all, and
+  in every one of those cases it does: the stale ones on screen are the whole
+  reason it was asked. So the rebuild silently did nothing, and worse, the
+  window went on claiming to speak for the workspace it had never read. Opening
+  one tab over it then diffed into "close every tab" and deleted those panes'
+  records while their shells were still running, with nothing left that could
+  reach them. The retry is now dropped only for a tab the user really did make
+  while the pull was out, and a window waiting on a rebuild adds to its machine
+  without pruning it until the pull lands (#579).
 - **A local daemon that dies and comes back no longer leaves a window of dead
   panes looking live** — from the client's side a killed daemon is
   indistinguishable from one whose shells all exited at once, so the window
@@ -150,6 +212,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   83, so it stays a loud error that names both spellings (`send %83 --enter`,
   `send %PANE 83 --enter`) rather than quietly retargeting the keystroke
   (#581).
+- **A `~` in a path now belongs to the machine that path is on.** The Info
+  panel's cwd, the tab strip and sidebar titles, and the switcher's workspace
+  and tab rows all shortened against *this* machine's `$HOME` whoever the path
+  belonged to, so a server sitting in `/home/deploy/app` read as `~/app` on a
+  laptop that happens to log in as `deploy` and stayed spelled out on one that
+  does not — the `~` naming the wrong machine either way. Each of those rows
+  now measures a path against the home its own host reported when the link
+  came up, and a path on a machine nothing here has a link to — or one a pane's
+  shell has `ssh`'d away to — is shown in full rather than against a home that
+  is not its own. (#580)
+- **Push at a detached HEAD no longer fails silently** — the sync tile claimed
+  "Publish Branch" (the one thing a detached HEAD cannot do) and swallowed the
+  click, and the key binding, palette and "Commit and Push" follow-up died in
+  the same guard just as quietly. The tile and the branch menu's Push item now
+  disable themselves with a tooltip that says why, every other path gets a
+  toast naming the reason, and an unborn branch — no commits to send yet —
+  gets its own answer instead of sharing the detached one's silence. (#545)
+- **A refused commit says why, not always "Nothing to commit"** — committing
+  from the palette or the key binding with staged work but a blank message was
+  answered with "Nothing to commit", which sends the user staging files they
+  already staged; the toast now carries the plan's actual reason ("Write a
+  commit message first"), the same words the panel's own button shows on its
+  tooltip. (#546)
+- **Terminal pop-up menus no longer leak clicks into the grid behind them** —
+  the completion menu and the reverse-search menu (both the floating panel and
+  the input-bar row) inserted no hitbox of their own, so a press on one fell
+  straight through to the terminal: it cleared whatever was selected and
+  dragged out a new selection, merely moving over a row underlined the text
+  beneath it, and a Ctrl+click opened the link the menu was covering. All
+  three occlude now, so a press on a menu stops at the menu. (#541)
+- **A file link that fails to open says so** — clicking a file path whose
+  opener is missing, or whose `link_file_command` template expands to nothing,
+  used to fail into a logfile line and nothing else; the click now raises the
+  same kind of toast a failed image upload does, naming the path and the
+  error. (#542)
 
 ## [26.8.3] - 2026-08-12
 

@@ -308,6 +308,26 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSocks5ProxyDesc => "host:port（空欄 = なし）",
         L10nKey::SettingsHttpProxy => "HTTP プロキシ",
         L10nKey::SettingsHttpProxyDesc => "host:port（空欄 = なし）",
+        L10nKey::SettingsProxyOverridden => "使われません：{winner} が優先されます",
+        L10nKey::SettingsTestConnection => "テスト",
+        L10nKey::SettingsTestRunning => "接続をテスト中…",
+        L10nKey::SettingsTestReached => "接続と認証に成功しました（{time}）",
+        L10nKey::SettingsTestNeedsPassword => {
+            "サーバーに到達しました — パスワードを求められています。接続して入力してください"
+        }
+        L10nKey::SettingsTestNeedsPassphrase => {
+            "サーバーに到達しました — 秘密鍵のパスフレーズを求められています。接続して入力してください"
+        }
+        L10nKey::SettingsTestNeedsInteractive => {
+            "サーバーに到達しました — キーボードインタラクティブ認証を求められています。接続して応答してください"
+        }
+        L10nKey::SettingsTestNeedsHostKey => {
+            "サーバーに到達しました — ホストキーがまだ承認されていません。一度接続して確認してください"
+        }
+        L10nKey::SettingsTestHostKeyChanged => {
+            "サーバーに到達しました — ホストキーが以前のものと異なります。一度接続して変更内容を確認してください"
+        }
+        L10nKey::SettingsTestFailed => "接続できませんでした: {reason}",
         L10nKey::SettingsProxyPortInvalid => {
             "ポートは 1-65535 の範囲です — ホストだけならデフォルトポートを使います"
         }
@@ -922,6 +942,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpImagePasteUploadFailed => {
             "貼り付けた画像を {host} にアップロードできませんでした: {error}"
         }
+        L10nKey::LinkFileOpenFailed => "{path} を開けませんでした: {error}",
         L10nKey::ForwardPanelTitle => "ポートフォワード",
         L10nKey::ForwardDisconnected => "切断済み",
         L10nKey::ForwardDisconnectedFrom => "{host} から切断されました",
@@ -1078,6 +1099,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::ScmPublishBranch => "ブランチを公開",
         L10nKey::ScmDetached => "デタッチ",
+        L10nKey::ScmPushDetached => {
+            "HEAD がデタッチされています — ブランチをチェックアウトしてからプッシュしてください"
+        }
+        L10nKey::ScmPushNoCommits => "プッシュするコミットがまだありません",
         L10nKey::ScmAmendBadge => "修正",
         L10nKey::ScmSync => "変更を同期",
         L10nKey::ScmPush => "プッシュ",
@@ -1302,6 +1327,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherThisWindow => "このウィンドウ",
         L10nKey::SwitcherOpen => "開く",
         L10nKey::SwitcherDisconnect => "切断",
+        L10nKey::SwitcherEditHost => "ホストを編集…",
+        L10nKey::SwitcherSaveAsHost => "SSH ホストとして保存…",
+        L10nKey::SshSaveDroppedJumpHost => {
+            "踏み台ホストは引き継がれません — 保存済みホストの踏み台は別の保存済みホストである必要があります"
+        }
         L10nKey::SwitcherOpenInNewWindow => "新しいウィンドウで開く",
         L10nKey::SwitcherRename => "名前を変更…",
         L10nKey::SwitcherPickAWorkspace => "ワークスペースを選ぶとタブが表示されます",
@@ -1432,6 +1462,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdSshReconnect => "SSH: 再接続",
         L10nKey::CmdSshRemoteFiles => "SSH: リモートファイル",
         L10nKey::CmdSshPortForwarding => "SSH: ポートフォワーディング",
+        L10nKey::CmdSshSaveConnection => "SSH: この接続をホストとして保存…",
+        L10nKey::CmdSshSaveConnectionSubtitle => "この接続を保存済みホストとして残します",
         L10nKey::CmdSshConnectWithInput => "SSH: {input} に接続",
         L10nKey::CmdAgentSendSelection => "エージェント: 選択範囲を送信",
         L10nKey::CmdAgentSendSelectionSubtitle => "選択範囲 → 実行中のコーディングエージェント",

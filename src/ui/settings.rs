@@ -10,12 +10,12 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::link::Link;
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::notification::{Notification, NotificationType};
-use gpui_component::select::{SearchableVec, Select, SelectState};
+use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_component::slider::{Slider, SliderState};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex,
-    v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _,
+    h_flex, v_flex,
 };
 use std::cell::Cell;
 use std::sync::Arc;
@@ -30,6 +30,7 @@ use crate::core::keychain::CredentialRef;
 use crate::core::ssh_profile::{
     Algorithms, AuthMode, ForwardKind, ForwardRule, HostPort, SshProfile, to_connect_string,
 };
+use crate::daemon::protocol::{SshTestNeed, SshTestReport};
 use crate::ui::app::{
     FONT_SIZE_STEP, LINE_HEIGHT_STEP, TILE_GLYPH_LINE, TILE_SIZE, TITLE_BAR_HEIGHT, ThemeEdit,
     Tty7App, UI_FONT_SIZE_STEP,
@@ -886,6 +887,7 @@ pub(crate) struct SshProfileForm {
     port: Entity<InputState>,
     user: Entity<InputState>,
     auth: AuthMode,
+    auth_select: Entity<SelectState<SearchableVec<String>>>,
 
     jump: Entity<InputState>,
 
@@ -912,7 +914,16 @@ pub(crate) struct SshProfileForm {
     verify_host_keys: Option<bool>,
     warn_on_close: Option<bool>,
 
+    /// The last Test Connection on this form, or `None` when there has not
+    /// been one — or when an edit since made the old answer a lie.
+    test: Option<SshTestState>,
+
     _subs: Vec<Subscription>,
+}
+
+pub(crate) enum SshTestState {
+    Running,
+    Done(SshTestReport),
 }
 
 impl SshProfileForm {
@@ -1256,6 +1267,109 @@ fn field_error(message: impl Into<String>, cx: &App) -> Div {
         .text_xs()
         .text_color(cx.theme().danger)
         .child(message.into())
+}
+
+/// A duration as a test result should read it: milliseconds while the number
+/// still means something, seconds once it does not.
+fn human_millis(ms: u32) -> String {
+    match ms < 1000 {
+        true => format!("{ms} ms"),
+        false => format!("{:.1} s", f64::from(ms) / 1000.0),
+    }
+}
+
+/// What the handshake stopped to ask for, as the one line explaining why a
+/// reachable host still is not a connected one.
+fn ssh_test_need_message(need: SshTestNeed) -> L10nKey {
+    match need {
+        SshTestNeed::Password => L10nKey::SettingsTestNeedsPassword,
+        SshTestNeed::KeyPassphrase => L10nKey::SettingsTestNeedsPassphrase,
+        SshTestNeed::KeyboardInteractive => L10nKey::SettingsTestNeedsInteractive,
+        SshTestNeed::HostKeyDecision => L10nKey::SettingsTestNeedsHostKey,
+        SshTestNeed::HostKeyChanged => L10nKey::SettingsTestHostKeyChanged,
+    }
+}
+
+/// The authentication methods in the order the form lists them, and the one
+/// place that order is written down — the labels, the index the dropdown opens
+/// on, and the mode a pick resolves to all read from here.
+pub(crate) const AUTH_MODES: [AuthMode; 6] = [
+    AuthMode::Auto,
+    AuthMode::Gssapi,
+    AuthMode::Password,
+    AuthMode::PublicKey,
+    AuthMode::Agent,
+    AuthMode::KeyboardInteractive,
+];
+
+fn auth_mode_labels() -> Vec<String> {
+    AUTH_MODES.iter().map(|m| auth_mode_label(*m)).collect()
+}
+
+fn auth_mode_label(mode: AuthMode) -> String {
+    match mode {
+        AuthMode::Auto => t(L10nKey::SettingsAuthModeAuto).to_string(),
+        AuthMode::Gssapi => "GSSAPI".to_string(),
+        AuthMode::Password => t(L10nKey::SettingsAuthModePassword).to_string(),
+        AuthMode::PublicKey => t(L10nKey::SettingsAuthModeKey).to_string(),
+        AuthMode::Agent => t(L10nKey::SettingsAuthModeAgent).to_string(),
+        AuthMode::KeyboardInteractive => t(L10nKey::SettingsAuthMode2Fa).to_string(),
+    }
+}
+
+fn auth_mode_index(mode: AuthMode) -> usize {
+    AUTH_MODES.iter().position(|m| *m == mode).unwrap_or(0)
+}
+
+/// The same line in the muted colour, for a field that is filled in and
+/// legal but will not be the one used. Not an error: nothing is wrong with
+/// what was typed, it is just not what the connection will do.
+fn field_note(message: impl Into<String>, cx: &App) -> Div {
+    div()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(message.into())
+}
+
+/// Which of the three proxy fields a connection would actually go through.
+/// They read as three independent settings and are not: `map_proxy` picks the
+/// first one filled, in this order, and ignores the rest without a word.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ProxyPick {
+    Command,
+    Socks,
+    Http,
+}
+
+impl ProxyPick {
+    fn of(command: bool, socks: bool, http: bool) -> Option<Self> {
+        match (command, socks, http) {
+            (true, _, _) => Some(Self::Command),
+            (_, true, _) => Some(Self::Socks),
+            (_, _, true) => Some(Self::Http),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Command => t(L10nKey::SettingsProxyCommand),
+            Self::Socks => t(L10nKey::SettingsSocks5Proxy),
+            Self::Http => t(L10nKey::SettingsHttpProxy),
+        }
+    }
+
+    /// The note this field carries when it holds an address that another one
+    /// outranks. An empty field has nothing to be overridden.
+    fn overridden_by(self, filled: bool, winner: Option<Self>) -> Option<String> {
+        let winner = winner?;
+        (filled && winner != self).then(|| {
+            t_fmt(
+                L10nKey::SettingsProxyOverridden,
+                &[("winner", winner.label())],
+            )
+        })
+    }
 }
 
 fn forward_row_inputs(row: &ForwardRuleForm) -> [&Entity<InputState>; 5] {
@@ -3337,7 +3451,35 @@ impl Tty7App {
         );
         let login_scripts = seed_input(window, cx, &profile.login_scripts.join("\n"), true);
 
+        let auth_select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(auth_mode_labels()),
+                Some(IndexPath::default().row(auth_mode_index(profile.auth))),
+                window,
+                cx,
+            )
+        });
+
         let mut subs = Vec::new();
+        subs.push(cx.subscribe_in(
+            &auth_select,
+            window,
+            |this, _select, ev: &SelectEvent<SearchableVec<String>>, _window, cx| {
+                let SelectEvent::Confirm(Some(label)) = ev else {
+                    return;
+                };
+                let picked = auth_mode_labels().iter().position(|l| l == label);
+                if let (Some(ix), Some(form)) = (picked, this.ssh_form_mut()) {
+                    form.auth = AUTH_MODES[ix];
+                    // The same reason the typed fields drop it: the answer on
+                    // screen was about a handshake this form would no longer
+                    // make. A green line under a changed method reads as a
+                    // method that was proved, and it was not.
+                    form.test = None;
+                    cx.notify();
+                }
+            },
+        ));
         let mut watch = vec![
             &name,
             &host,
@@ -3363,8 +3505,15 @@ impl Tty7App {
         }
         for input in watch {
             subs.push(
-                cx.subscribe_in(input, window, |_this, _i, ev: &InputEvent, _w, cx| {
+                cx.subscribe_in(input, window, |this, _i, ev: &InputEvent, _w, cx| {
                     if matches!(ev, InputEvent::Change) {
+                        // The test answered for the host as it was typed a
+                        // moment ago. Keeping the green line under a changed
+                        // address would be the form vouching for something it
+                        // never dialled.
+                        if let Some(form) = this.ssh_form_mut() {
+                            form.test = None;
+                        }
                         cx.notify();
                     }
                 }),
@@ -3383,6 +3532,7 @@ impl Tty7App {
             port,
             user,
             auth: profile.auth,
+            auth_select,
             jump,
             forwards,
             identity_files,
@@ -3404,6 +3554,7 @@ impl Tty7App {
             shell_integration: profile.shell_integration,
             verify_host_keys: profile.verify_host_keys,
             warn_on_close: profile.warn_on_close,
+            test: None,
             _subs: subs,
         };
         let editing = form.editing;
@@ -3522,6 +3673,41 @@ impl Tty7App {
         cx.spawn_in(window, async move |this, cx| {
             let Ok(0) = answer.await else { return };
             let _ = this.update_in(cx, |this, window, cx| this.close_settings(window, cx));
+        })
+        .detach();
+    }
+
+    /// Dial the host the form is holding — without saving it, and without
+    /// spending a tab on the answer. The daemon does the connecting, so this is
+    /// the same path Connect would take.
+    pub(crate) fn test_ssh_form_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((profile, errors)) = self.ssh_form_collect(cx) else {
+            return;
+        };
+        if !errors.is_empty() {
+            return;
+        }
+        let spec = Box::new(self.native_ssh_spec_for_profile(&profile, cx));
+        let editing = profile.id;
+        if let Some(form) = self.ssh_form_mut() {
+            form.test = Some(SshTestState::Running);
+        }
+        cx.notify();
+
+        let probe = cx
+            .background_executor()
+            .spawn(async move { crate::terminal::RemoteTerminal::test_ssh(spec) });
+        cx.spawn_in(window, async move |this, cx| {
+            let report = probe.await;
+            let _ = this.update(cx, |this, cx| {
+                // The form may have been closed, or moved to another host, in
+                // the seconds the handshake took. An answer about a host nobody
+                // is looking at any more is not worth showing.
+                if let Some(form) = this.ssh_form_mut().filter(|f| f.editing == editing) {
+                    form.test = Some(SshTestState::Done(report));
+                    cx.notify();
+                }
+            });
         })
         .detach();
     }
@@ -3895,14 +4081,26 @@ impl Tty7App {
             (true, true) => t(L10nKey::SettingsNewHost).to_string(),
         };
 
-        let auth_idx = match form.auth {
-            AuthMode::Auto => 0,
-            AuthMode::Gssapi => 1,
-            AuthMode::Password => 2,
-            AuthMode::PublicKey => 3,
-            AuthMode::Agent => 4,
-            AuthMode::KeyboardInteractive => 5,
-        };
+        let testing = matches!(form.test, Some(SshTestState::Running));
+        let test_line = form.test.as_ref().map(|state| match state {
+            SshTestState::Running => field_note(t(L10nKey::SettingsTestRunning), cx),
+            SshTestState::Done(report) => match report {
+                SshTestReport::Authenticated { elapsed_ms } => {
+                    div().text_xs().text_color(success).child(t_fmt(
+                        L10nKey::SettingsTestReached,
+                        &[("time", &human_millis(*elapsed_ms))],
+                    ))
+                }
+                SshTestReport::NeedsInput { need, .. } => {
+                    field_note(t(ssh_test_need_message(*need)), cx)
+                }
+                SshTestReport::Failed { reason } => field_error(
+                    t_fmt(L10nKey::SettingsTestFailed, &[("reason", reason)]),
+                    cx,
+                ),
+            },
+        });
+
         let header = h_flex()
             .items_start()
             .justify_between()
@@ -3944,6 +4142,18 @@ impl Tty7App {
                 h_flex()
                     .flex_shrink_0()
                     .gap_2()
+                    .child(
+                        // Dials the host exactly as Connect would — proxy, jump
+                        // and all — but keeps the answer here instead of
+                        // spending a tab on finding out.
+                        Button::new("ssh-form-test")
+                            .label(t(L10nKey::SettingsTestConnection))
+                            .small()
+                            .disabled(!errors.is_empty() || testing)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.test_ssh_form_connection(window, cx)
+                            })),
+                    )
                     .child(
                         Button::new("ssh-form-save")
                             .label(t(L10nKey::Save))
@@ -4036,41 +4246,31 @@ impl Tty7App {
                     cx,
                 ),
             )
-            .child(self.settings_row(
-                t(L10nKey::SettingsAuth),
-                t(L10nKey::SettingsAuthDesc),
-                self.segmented(
-                    "ssh-form-auth",
-                    &[
-                        t(L10nKey::SettingsAuthModeAuto),
-                        "GSSAPI",
-                        t(L10nKey::SettingsAuthModePassword),
-                        t(L10nKey::SettingsAuthModeKey),
-                        t(L10nKey::SettingsAuthModeAgent),
-                        t(L10nKey::SettingsAuthMode2Fa),
-                    ],
-                    auth_idx,
+            .child(
+                self.settings_row(
+                    t(L10nKey::SettingsAuth),
+                    t(L10nKey::SettingsAuthDesc),
+                    // Six methods is more than a segmented control can label without
+                    // squeezing, and this row is the one that stacks first on a
+                    // narrow page. A dropdown carries the same choice at a fixed
+                    // width, the way the other long-form pickers on this page do.
+                    Select::new(&form.auth_select)
+                        .small()
+                        .w(px(260.))
+                        .max_w_full()
+                        .into_any_element(),
                     cx,
-                    |this, ix, _w, cx| {
-                        if let Some(f) = this.ssh_form_mut() {
-                            f.auth = match ix {
-                                0 => AuthMode::Auto,
-                                1 => AuthMode::Gssapi,
-                                2 => AuthMode::Password,
-                                3 => AuthMode::PublicKey,
-                                4 => AuthMode::Agent,
-                                _ => AuthMode::KeyboardInteractive,
-                            };
-                            cx.notify();
-                        }
-                    },
                 ),
-                cx,
-            ));
+            );
 
         v_flex()
             .gap_4()
             .child(header)
+            // Under the buttons that produced it, on the right, where the eye
+            // already is after pressing Test.
+            .when_some(test_line, |col, line| {
+                col.child(h_flex().w_full().justify_end().child(line))
+            })
             .child(core)
             .child(self.render_ssh_profile_jump_section(form, &errors, cx))
             .child(self.render_ssh_profile_forwards_section(form, cx))
@@ -4431,15 +4631,21 @@ impl Tty7App {
                 cx,
             )
         };
-        // The two proxy addresses are the only advanced fields with a rule of
-        // their own, so they carry room for the complaint under the control.
+        // The three proxy fields are the only advanced ones with rules of
+        // their own, so they carry room for a line under the control: a
+        // complaint when the address is wrong, and otherwise a word about
+        // which of them the connection is actually going to use.
         let proxy_row = |this: &Self,
                          label: &str,
                          desc: &str,
                          input: &Entity<InputState>,
                          error: Option<&SshFieldError>,
+                         note: Option<String>,
                          cx: &mut Context<Self>| {
-            let line = error.map(|e| field_error(e.message(), cx));
+            let line = match error {
+                Some(e) => Some(field_error(e.message(), cx)),
+                None => note.map(|n| field_note(n, cx)),
+            };
             this.settings_row(
                 label.to_string(),
                 desc.to_string(),
@@ -4453,6 +4659,16 @@ impl Tty7App {
                 cx,
             )
         };
+
+        // Filling in two of these has always meant one of them doing nothing.
+        // Which one was left for the user to find out by connecting (#438).
+        let filled = |input: &Entity<InputState>| !input.read(cx).value().trim().is_empty();
+        let (cmd_set, socks_set, http_set) = (
+            filled(&form.proxy_command),
+            filled(&form.socks),
+            filled(&form.http),
+        );
+        let pick = ProxyPick::of(cmd_set, socks_set, http_set);
 
         let on_off = |b: bool| {
             if b {
@@ -4500,11 +4716,13 @@ impl Tty7App {
                 ),
             )
             .child(self.subgroup_header(L10nKey::SettingsGroupProxies, cx))
-            .child(text_row(
+            .child(proxy_row(
                 self,
                 t(L10nKey::SettingsProxyCommand),
                 t(L10nKey::SettingsProxyCommandDesc),
                 &form.proxy_command,
+                None,
+                ProxyPick::Command.overridden_by(cmd_set, pick),
                 cx,
             ))
             .child(proxy_row(
@@ -4513,6 +4731,7 @@ impl Tty7App {
                 t(L10nKey::SettingsSocks5ProxyDesc),
                 &form.socks,
                 errors.socks.as_ref(),
+                ProxyPick::Socks.overridden_by(socks_set, pick),
                 cx,
             ))
             .child(proxy_row(
@@ -4521,6 +4740,7 @@ impl Tty7App {
                 t(L10nKey::SettingsHttpProxyDesc),
                 &form.http,
                 errors.http.as_ref(),
+                ProxyPick::Http.overridden_by(http_set, pick),
                 cx,
             ))
             .child(self.subgroup_header(L10nKey::SettingsGroupAlgorithms, cx))
@@ -6811,6 +7031,91 @@ impl Tty7App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every outcome of a test has a line of its own, and the timing reads as
+    /// a number a person can compare rather than four digits of milliseconds.
+    #[test]
+    fn a_test_result_reads_as_one_line_per_outcome() {
+        crate::ui::i18n::set_locale("en");
+        assert_eq!(human_millis(640), "640 ms");
+        assert_eq!(human_millis(999), "999 ms");
+        assert_eq!(human_millis(1000), "1.0 s");
+        assert_eq!(human_millis(12_400), "12.4 s");
+
+        let needs = [
+            SshTestNeed::Password,
+            SshTestNeed::KeyPassphrase,
+            SshTestNeed::KeyboardInteractive,
+            SshTestNeed::HostKeyDecision,
+            SshTestNeed::HostKeyChanged,
+        ];
+        let lines: Vec<&str> = needs.iter().map(|n| t(ssh_test_need_message(*n))).collect();
+        assert!(lines.iter().all(|l| !l.is_empty()));
+        assert_eq!(
+            lines.iter().collect::<std::collections::HashSet<_>>().len(),
+            lines.len(),
+            "each thing the handshake can stop for gets said differently"
+        );
+    }
+
+    /// The dropdown resolves a pick by its row index, so the row a mode opens
+    /// on and the mode that row saves have to be the same one. A list that
+    /// drifted out of step would quietly save the wrong method.
+    #[test]
+    fn every_auth_mode_opens_on_its_own_row() {
+        crate::ui::i18n::set_locale("en");
+        let labels = auth_mode_labels();
+        assert_eq!(labels.len(), AUTH_MODES.len());
+        for mode in AUTH_MODES {
+            let ix = auth_mode_index(mode);
+            assert_eq!(AUTH_MODES[ix], mode);
+            assert_eq!(labels[ix], auth_mode_label(mode));
+        }
+        assert_eq!(
+            labels
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            labels.len(),
+            "two methods sharing a label would resolve to whichever comes first"
+        );
+    }
+
+    /// The three proxy fields look independent and are not — one connection
+    /// goes through one proxy. The note under the losing field is the only
+    /// thing saying so, so it has to name the same winner `map_proxy` picks
+    /// when the profile is dialled, and has to stay quiet where there is no
+    /// contest.
+    #[test]
+    fn a_proxy_field_says_when_another_one_outranks_it() {
+        crate::ui::i18n::set_locale("en");
+        let note = |me: ProxyPick, filled: bool, (c, s, h): (bool, bool, bool)| {
+            me.overridden_by(filled, ProxyPick::of(c, s, h))
+        };
+
+        assert_eq!(ProxyPick::of(true, true, true), Some(ProxyPick::Command));
+        assert_eq!(ProxyPick::of(false, true, true), Some(ProxyPick::Socks));
+        assert_eq!(ProxyPick::of(false, false, true), Some(ProxyPick::Http));
+        assert_eq!(ProxyPick::of(false, false, false), None);
+
+        assert!(
+            note(ProxyPick::Socks, true, (true, true, false)).is_some(),
+            "a proxy command outranks a SOCKS address"
+        );
+        assert!(
+            note(ProxyPick::Http, true, (false, true, true)).is_some(),
+            "so does a SOCKS address over an HTTP one"
+        );
+        assert!(
+            note(ProxyPick::Command, true, (true, true, true)).is_none(),
+            "the field being used has nothing to apologise for"
+        );
+        assert!(
+            note(ProxyPick::Http, false, (true, false, false)).is_none(),
+            "an empty field is not being overridden, it is just empty"
+        );
+        assert!(note(ProxyPick::Socks, true, (false, true, false)).is_none());
+    }
 
     /// The row keeps its side-by-side shape while both halves fit, and stacks
     /// once they do not. The SSH page reaches that point first — it spends its

@@ -305,6 +305,26 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSocks5ProxyDesc => "host:port (blank = none).",
         L10nKey::SettingsHttpProxy => "HTTP proxy",
         L10nKey::SettingsHttpProxyDesc => "host:port (blank = none).",
+        L10nKey::SettingsProxyOverridden => "Not used: {winner} comes first.",
+        L10nKey::SettingsTestConnection => "Test",
+        L10nKey::SettingsTestRunning => "Testing the connection…",
+        L10nKey::SettingsTestReached => "Connected and authenticated in {time}.",
+        L10nKey::SettingsTestNeedsPassword => {
+            "Reached the server — it asked for a password. Connect to type it."
+        }
+        L10nKey::SettingsTestNeedsPassphrase => {
+            "Reached the server — the private key asked for its passphrase. Connect to type it."
+        }
+        L10nKey::SettingsTestNeedsInteractive => {
+            "Reached the server — it asked for a keyboard-interactive answer. Connect to give it."
+        }
+        L10nKey::SettingsTestNeedsHostKey => {
+            "Reached the server — its host key has not been accepted yet. Connect once to review it."
+        }
+        L10nKey::SettingsTestHostKeyChanged => {
+            "Reached the server — its host key is not the one it gave before. Connect once to review the change."
+        }
+        L10nKey::SettingsTestFailed => "Did not connect: {reason}",
         L10nKey::SettingsProxyPortInvalid => {
             "Port must be 1-65535 — the host on its own takes the default port."
         }
@@ -872,6 +892,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SftpImagePasteUploadFailed => {
             "Could not upload the pasted image to {host}: {error}"
         }
+        L10nKey::LinkFileOpenFailed => "Could not open {path}: {error}",
         L10nKey::ForwardPanelTitle => "Forwards",
         L10nKey::ForwardDisconnected => "Disconnected",
         L10nKey::ForwardDisconnectedFrom => "Disconnected from {host}",
@@ -1024,6 +1045,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::ScmPublishBranch => "Publish Branch",
         L10nKey::ScmDetached => "detached",
+        L10nKey::ScmPushDetached => "Detached HEAD — check out a branch to push",
+        L10nKey::ScmPushNoCommits => "No commits to push yet",
         L10nKey::ScmAmendBadge => "amend",
         L10nKey::ScmSync => "Sync Changes",
         L10nKey::ScmPush => "Push",
@@ -1266,6 +1289,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherThisWindow => "this window",
         L10nKey::SwitcherOpen => "open",
         L10nKey::SwitcherDisconnect => "Disconnect",
+        L10nKey::SwitcherEditHost => "Edit Host…",
+        L10nKey::SwitcherSaveAsHost => "Save as SSH Host…",
+        L10nKey::SshSaveDroppedJumpHost => {
+            "The jump host was left out — a saved host reaches its jump through another saved host."
+        }
         L10nKey::SwitcherOpenInNewWindow => "Open in New Window",
         L10nKey::SwitcherRename => "Rename…",
         L10nKey::SwitcherPickAWorkspace => "Pick a workspace to see its tabs.",
@@ -1396,6 +1424,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdSshReconnect => "SSH: Reconnect",
         L10nKey::CmdSshRemoteFiles => "SSH: Remote Files",
         L10nKey::CmdSshPortForwarding => "SSH: Port Forwarding",
+        L10nKey::CmdSshSaveConnection => "SSH: Save Connection as Host…",
+        L10nKey::CmdSshSaveConnectionSubtitle => "Keep this connection as a saved host.",
         L10nKey::CmdSshConnectWithInput => "SSH: Connect {input}",
         L10nKey::CmdAgentSendSelection => "Agent: Send Selection",
         L10nKey::CmdAgentSendSelectionSubtitle => "selection → running coding agent",

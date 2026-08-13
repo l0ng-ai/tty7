@@ -6,7 +6,7 @@ use gpui::{App, Global};
 use gpui_component::WindowExt as _;
 use tty7_core::core::machine::{
     AgentFacts, Axis as TreeAxis, LayoutDelta, Machine, PaneNode, PaneRecord, PaneSeed, Side,
-    Tab as TreeTab, TabId,
+    Tab as TreeTab, TabId, Workspace,
 };
 use tty7_core::daemon::control::{ControlClient, ControlRequest, ReplyOk};
 use tty7_core::host::HostId;
@@ -710,10 +710,25 @@ struct WsState {
     epoch: u64,
     /// A hydration that failed and still owes this window its layout.
     ///
-    /// The window is sitting empty because of it, so nothing may be pushed
-    /// from it until the pull is retried — an empty window diffs into
-    /// "close every tab" and would wipe the layout off the machine.
+    /// Whatever the window is showing is not the layout it was told to put up,
+    /// so nothing may be pushed from it until the pull is retried — an emptied
+    /// window diffs into "close every tab" and would wipe the layout off the
+    /// machine, and a window full of dead tabs pushes those back up as truth.
     rehydrate: Option<Adopt>,
+    /// The tabs the window held when the pull that is owed was ordered.
+    ///
+    /// A `Replace` retry is dropped once the user has filled the window in
+    /// themselves, and this is what "the user" means. A `Replace` is ordered
+    /// precisely *because* what the window is showing cannot be trusted — dead
+    /// panes left by a daemon that came back as a new process, a window emptied
+    /// for a handoff that was then refused — so the tabs that were already
+    /// there are the very thing it exists to replace, and can never be the
+    /// reason to abandon it. Only a tab this debt never saw says the user moved
+    /// on without us.
+    ///
+    /// Rewritten by every attempt, and only ever read while `rehydrate` is
+    /// outstanding, so it always describes the debt currently standing.
+    owed_over: Vec<TabId>,
     /// How many pulls in a row this window has owed, which paces the retry.
     ///
     /// Counts consecutive failures, so it is cleared by anything that ends the
@@ -757,6 +772,7 @@ impl Default for WsState {
             informed: false,
             epoch: 0,
             rehydrate: None,
+            owed_over: Vec::new(),
             rehydrate_attempts: 0,
             then_open: None,
             said_why_empty: false,
@@ -779,7 +795,8 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
     if crate::ui::remote_workspace::workspace_is_preempted(cx, client_ws) {
         return;
     }
-    if let Some(adopt) = take_rehydrate(cx, client_ws, app.tabs.is_empty()) {
+    let showing: Vec<TabId> = app.tabs.iter().map(|t| t.tree_id.get()).collect();
+    if let Some(adopt) = take_rehydrate(cx, client_ws, &showing) {
         hydrate(cx, client_ws, adopt);
         return;
     }
@@ -832,17 +849,26 @@ pub(crate) fn on_link_up(cx: &mut App, host: HostId) {
 }
 
 /// Claims a hydration owed to `client_ws`, if one is still outstanding.
+/// `showing` is what the window has on screen right now.
 ///
-/// A `Replace` retry is dropped once the window has tabs again: the user moved
-/// on without us, and replaying the machine's older layout over their work
+/// A `Replace` retry is dropped once the user has filled the window in without
+/// us: replaying the machine's older layout over work they did in the meantime
 /// would be worse than never retrying at all.
-fn take_rehydrate(cx: &mut App, client_ws: WorkspaceId, window_is_empty: bool) -> Option<Adopt> {
+///
+/// What counts as "without us" is a tab the debt never saw. Judging it by the
+/// window merely *having* tabs read every resync of a window that kept its own
+/// — a daemon back as a new process, a delta that would not apply, a remote
+/// server restarted — as the user having moved on, when those tabs are the
+/// stale ones the `Replace` was ordered to sweep away. The retry was abandoned
+/// on its first attempt, every time, and the resync silently did nothing.
+fn take_rehydrate(cx: &mut App, client_ws: WorkspaceId, showing: &[TabId]) -> Option<Adopt> {
     let state = cx
         .default_global::<TreeSync>()
         .windows
         .get_mut(&client_ws)?;
     let adopt = state.rehydrate.take()?;
-    if !window_is_empty && adopt == Adopt::Replace {
+    let overtaken = showing.iter().any(|id| !state.owed_over.contains(id));
+    if overtaken && adopt == Adopt::Replace {
         // Abandoned, not paid — but the run of failures is over either way, and
         // a count left standing would make the next window's first failure wait
         // the cap on an outage that has nothing to do with it.
@@ -1055,18 +1081,23 @@ pub(crate) fn fresh_workspace_name(cx: &App, host: HostId) -> String {
     tty7_core::core::codename::unique(|name| taken.iter().any(|t| t == name))
 }
 
+/// This workspace's layout, and the name the machine has for it.
+///
+/// The name comes back even from the create this client asked for, and
+/// especially from that one: a client is left out of the deltas its own ops
+/// raise, so the `WorkspaceCreated` delta carrying the name it just proposed
+/// never arrives. Dropping the name here left the mirror holding the workspace
+/// unnamed until something pulled the whole tree again, and the name it had had
+/// all along then landed on screen looking like a rename (#604).
 fn pull_or_create(
     client: &ControlClient,
     machine_ws: WorkspaceId,
     fresh: String,
-) -> io::Result<WsMirror> {
+) -> io::Result<(WsMirror, Option<String>)> {
     match client.call(ControlRequest::WorkspaceTree {
         workspace: machine_ws,
     }) {
-        Ok(ReplyOk::WorkspaceTree(ws)) => Ok(WsMirror {
-            tabs: ws.tabs,
-            active: ws.active_tab,
-        }),
+        Ok(ReplyOk::WorkspaceTree(ws)) => Ok(primed(*ws)),
         Ok(other) => Err(io::Error::other(format!(
             "WorkspaceTree answered {other:?}"
         ))),
@@ -1075,10 +1106,7 @@ fn pull_or_create(
                 name: Some(fresh),
                 workspace: Some(machine_ws),
             })? {
-                ReplyOk::WorkspaceTree(ws) => Ok(WsMirror {
-                    tabs: ws.tabs,
-                    active: ws.active_tab,
-                }),
+                ReplyOk::WorkspaceTree(ws) => Ok(primed(*ws)),
                 other => Err(io::Error::other(format!(
                     "WorkspaceCreate answered {other:?}"
                 ))),
@@ -1088,7 +1116,22 @@ fn pull_or_create(
     }
 }
 
-fn finish_prime(cx: &mut App, client_ws: WorkspaceId, epoch: u64, outcome: io::Result<WsMirror>) {
+fn primed(ws: Workspace) -> (WsMirror, Option<String>) {
+    (
+        WsMirror {
+            tabs: ws.tabs,
+            active: ws.active_tab,
+        },
+        ws.name,
+    )
+}
+
+fn finish_prime(
+    cx: &mut App,
+    client_ws: WorkspaceId,
+    epoch: u64,
+    outcome: io::Result<(WsMirror, Option<String>)>,
+) {
     let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
         return;
     };
@@ -1098,12 +1141,12 @@ fn finish_prime(cx: &mut App, client_ws: WorkspaceId, epoch: u64, outcome: io::R
     }
     let was_dirty = matches!(state.sync, SyncPhase::Unprimed { dirty: true, .. });
     let landed = match outcome {
-        Ok(mirror) => {
+        Ok((mirror, name)) => {
             state.informed |= mirror.tabs.is_empty();
             // The machine answered, which is the only thing the retry was
             // waiting to find out, so the next failure starts its backoff over.
             state.rehydrate_attempts = 0;
-            let landed = (mirror.tabs.clone(), mirror.active);
+            let landed = (mirror.tabs.clone(), mirror.active, name);
             state.sync = SyncPhase::Primed(mirror);
             landed
         }
@@ -1121,6 +1164,9 @@ fn finish_prime(cx: &mut App, client_ws: WorkspaceId, epoch: u64, outcome: io::R
     crate::ui::machine_mirror::MachineMirrors::note_synced_workspace(
         cx, host, machine_ws, landed.0, landed.1,
     );
+    // The pull above is the only place this window will hear the workspace's
+    // name — it is left out of the deltas its own create raises (#604).
+    crate::ui::machine_mirror::MachineMirrors::note_workspace_name(cx, host, machine_ws, landed.2);
     if !was_dirty {
         return;
     }
@@ -1324,9 +1370,24 @@ enum Adopt {
     Replace,
 }
 
+/// The tree ids of the tabs `client_ws`'s window is showing.
+///
+/// Empty for a workspace no window has — and for a test with no registry at
+/// all, which is the same answer: nothing is on screen to speak for it.
+fn tabs_on_screen(cx: &mut App, client_ws: WorkspaceId) -> Vec<TabId> {
+    if !cx.has_global::<crate::ui::windows::WindowRegistry>() {
+        return Vec::new();
+    }
+    crate::ui::windows::WindowRegistry::app_for(cx, client_ws)
+        .and_then(|app| app.upgrade())
+        .map(|app| app.read(cx).tabs.iter().map(|t| t.tree_id.get()).collect())
+        .unwrap_or_default()
+}
+
 fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
+    let showing = tabs_on_screen(cx, client_ws);
     let (epoch, failures) = {
         let state = cx
             .default_global::<TreeSync>()
@@ -1341,6 +1402,25 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
         state.epoch += 1;
         // This attempt takes over the debt; it re-records it if it fails too.
         state.rehydrate = None;
+        // What the window is showing as this attempt is ordered, so a debt it
+        // has to record can tell that layout apart from one the user builds
+        // while the pull is out.
+        state.owed_over = showing;
+        if adopt == Adopt::Replace {
+            // A `Replace` is the statement that this window no longer speaks
+            // for its workspace, so the licence to prune goes with it — the
+            // same move `on_preempted` makes, for the same reason. Only a pull
+            // that lands hands it back (`settle_hydration`).
+            //
+            // Without this, a `Replace` that failed and was then abandoned left
+            // a window that had never seen the layout still authorised to diff
+            // at `SyncScope::Full`: one tab the user opened over an emptied
+            // window became `TabClose` for every tab on the machine, deleting
+            // the records of panes whose shells were still running (#579). The
+            // window is left additive instead — it writes its own tabs up and
+            // closes nothing it cannot account for.
+            state.informed = false;
+        }
         (state.epoch, state.rehydrate_attempts)
     };
     // How many times in a row this window has already failed, which is what
@@ -1536,7 +1616,7 @@ fn pull_workspace(
     client: &ControlClient,
     machine_ws: WorkspaceId,
 ) -> io::Result<(Machine, WsMirror, Session)> {
-    let machine = match layout_of(machine_get(client)?, machine_ws) {
+    let mut machine = match layout_of(machine_get(client)?, machine_ws) {
         Ok(pulled) => return Ok(pulled),
         Err(machine) => machine,
     };
@@ -1552,6 +1632,16 @@ fn pull_workspace(
         name: Some(name),
         workspace: Some(machine_ws),
     }) {
+        // The tree read a moment ago predates the workspace this call just
+        // made, and no delta will fill it in: a client is left out of the
+        // deltas its own ops raise. Put the created workspace into the tree
+        // about to be installed, or the mirror holds it unnamed and the name
+        // the machine gave it arrives later looking like a rename (#604).
+        Ok(ReplyOk::WorkspaceTree(created)) => {
+            machine.workspaces.retain(|w| w.id != created.id);
+            machine.workspaces.push(*created);
+            Ok((machine, WsMirror::default(), Session::default()))
+        }
         Ok(_) => Ok((machine, WsMirror::default(), Session::default())),
         // Losing this create is not a failed hydration. Opening a remote
         // workspace runs two pulls at once — this one and `start_prime`'s —
@@ -2676,6 +2766,61 @@ mod tests {
         );
     }
 
+    /// #604: the answer to the create this window asked for is the only place
+    /// it will ever hear the workspace's name — a client is left out of the
+    /// deltas its own ops raise — so priming has to hand that name to the
+    /// mirror. Dropping it left the window showing an unnamed workspace, and
+    /// the name it had had all along arrived with the next full pull looking
+    /// like a rename.
+    #[gpui::test]
+    fn priming_teaches_the_mirror_the_name_the_machine_gave_the_workspace(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            tty7_core::core::config::set_config_dir(
+                std::env::temp_dir().join(format!("tty7-prime-name-{}", std::process::id())),
+            );
+            let view = crate::core::session::WindowView::default();
+            let ws = view.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![view.clone()],
+                    active: Some(ws),
+                },
+            );
+            // A machine this client has pulled, from before the workspace it is
+            // about to create existed on it.
+            crate::ui::machine_mirror::MachineMirrors::install(
+                cx,
+                HostId::LOCAL,
+                Machine::default(),
+            );
+            cx.default_global::<TreeSync>()
+                .windows
+                .entry(ws)
+                .or_default()
+                .sync = SyncPhase::Unprimed {
+                dirty: false,
+                priming: true,
+            };
+            let epoch = cx.default_global::<TreeSync>().windows[&ws].epoch;
+
+            finish_prime(
+                cx,
+                ws,
+                epoch,
+                Ok((WsMirror::default(), Some("keen-marten".to_string()))),
+            );
+
+            assert_eq!(
+                crate::ui::machine_mirror::display_name(cx, &view).as_deref(),
+                Some("keen-marten"),
+                "the window knows what its workspace is called as soon as it exists"
+            );
+        });
+    }
+
     /// The count paces the retry, so it has to mean "failures in a row". Left
     /// standing after the run ends, it makes the next *first* failure wait the
     /// cap on an outage that was already over.
@@ -2721,7 +2866,7 @@ mod tests {
 
             // The machine answered. Whatever it was, it is over.
             unprimed(cx);
-            finish_prime(cx, ws, epoch, Ok(WsMirror::default()));
+            finish_prime(cx, ws, epoch, Ok((WsMirror::default(), None)));
             assert_eq!(
                 attempts(cx),
                 0,
@@ -2737,9 +2882,10 @@ mod tests {
                     .get_mut(&ws)
                     .unwrap();
                 state.rehydrate = Some(Adopt::Replace);
+                state.owed_over = Vec::new();
                 state.rehydrate_attempts = 4;
             }
-            assert!(take_rehydrate(cx, ws, false).is_none());
+            assert!(take_rehydrate(cx, ws, &[TabId::new()]).is_none());
             assert_eq!(
                 attempts(cx),
                 0,
@@ -2786,27 +2932,47 @@ mod tests {
     fn a_window_that_filled_up_while_owed_keeps_what_it_has(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let ws = WorkspaceId::new();
-            let arm = |cx: &mut App, adopt| {
-                cx.default_global::<TreeSync>()
+            let stale = [TabId::new(), TabId::new()];
+            let arm = |cx: &mut App, adopt, over: &[TabId]| {
+                let state = cx
+                    .default_global::<TreeSync>()
                     .windows
                     .entry(ws)
-                    .or_default()
-                    .rehydrate = Some(adopt);
+                    .or_default();
+                state.rehydrate = Some(adopt);
+                state.owed_over = over.to_vec();
             };
 
-            arm(cx, Adopt::Replace);
+            arm(cx, Adopt::Replace, &[]);
             assert!(
-                take_rehydrate(cx, ws, true).is_some(),
+                take_rehydrate(cx, ws, &[]).is_some(),
                 "an empty window is exactly the one that still needs its layout"
             );
             assert!(
-                take_rehydrate(cx, ws, true).is_none(),
+                take_rehydrate(cx, ws, &[]).is_none(),
                 "the debt is claimed once"
             );
 
-            arm(cx, Adopt::Replace);
+            // #579: the tabs a `Replace` was ordered over are the ones it exists
+            // to replace. Reading them as "the user moved on" abandoned the
+            // retry on its first attempt for every resync of a window that kept
+            // its tabs — a daemon back as a new process, a remote server
+            // restarted — and the resync silently did nothing at all.
+            arm(cx, Adopt::Replace, &stale);
             assert!(
-                take_rehydrate(cx, ws, false).is_none(),
+                take_rehydrate(cx, ws, &stale).is_some(),
+                "the dead tabs the resync was ordered over cannot be the reason to drop it"
+            );
+
+            arm(cx, Adopt::Replace, &stale);
+            assert!(
+                take_rehydrate(cx, ws, &stale[..1]).is_some(),
+                "closing some of them is not filling the window in either"
+            );
+
+            arm(cx, Adopt::Replace, &stale);
+            assert!(
+                take_rehydrate(cx, ws, &[stale[0], TabId::new()]).is_none(),
                 "replaying an older layout over the user's new tabs is worse than not retrying"
             );
             assert!(
@@ -2816,11 +2982,86 @@ mod tests {
                 "and the dropped retry must not linger"
             );
 
-            arm(cx, Adopt::IfEmpty);
+            arm(cx, Adopt::IfEmpty, &[]);
             assert!(
-                take_rehydrate(cx, ws, false).is_some(),
+                take_rehydrate(cx, ws, &[TabId::new()]).is_some(),
                 "IfEmpty polices that itself, and still owes the mirror a pull"
             );
+        });
+    }
+
+    /// #579: the other half of an abandoned `Replace`. Dropping the retry is a
+    /// decision about what to *put up*; it says nothing about the window having
+    /// learned what belongs in the workspace, and it never did learn — the pull
+    /// it was told to make failed.
+    ///
+    /// Left `informed`, that window went on to diff at `SyncScope::Full`
+    /// against a mirror `start_prime` had just refilled from the machine, so
+    /// the one tab the user opened over an emptied window emitted `TabClose`
+    /// for every other tab on it. Those panes' records went with them while
+    /// their shells kept running, and nothing tree-driven could reach them
+    /// again — the same damage as #554, through a door #554 did not close.
+    #[gpui::test]
+    fn a_resync_takes_back_the_licence_to_prune_until_a_pull_lands(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            {
+                let state = cx
+                    .default_global::<TreeSync>()
+                    .windows
+                    .entry(ws)
+                    .or_default();
+                state.informed = true;
+            }
+
+            resync_window_from_tree(cx, ws);
+            assert!(
+                !cx.default_global::<TreeSync>().windows[&ws].informed,
+                "a window told its contents are not the workspace cannot still speak for it"
+            );
+
+            // The shape the damage needs: the mirror back from the machine,
+            // full of the tabs the window never adopted. Without the licence
+            // the sync is additive, which
+            // `an_additive_diff_never_closes_tabs_the_window_has_not_seen`
+            // pins as closing nothing.
+            {
+                let state = cx
+                    .default_global::<TreeSync>()
+                    .windows
+                    .get_mut(&ws)
+                    .unwrap();
+                state.rehydrate = None;
+                state.sync = SyncPhase::Primed(WsMirror {
+                    tabs: vec![TreeTab::leaf(1), TreeTab::leaf(2)],
+                    active: None,
+                });
+            }
+            assert!(
+                !workspace_is_disposable(cx, ws),
+                "and it cannot delete the workspace out from under those panes either"
+            );
+
+            // A pull that lands is the only thing that hands the licence back.
+            mark_window_informed(cx, ws);
+            assert!(cx.default_global::<TreeSync>().windows[&ws].informed);
+        });
+    }
+
+    /// An `IfEmpty` hydration says the opposite of a `Replace`: keep whatever
+    /// the window has. A window that opened onto a workspace deleted under it
+    /// is put back by writing its own tabs up, and needs the licence to do it.
+    #[gpui::test]
+    fn an_if_empty_pull_leaves_the_licence_where_it_found_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            cx.default_global::<TreeSync>()
+                .windows
+                .entry(ws)
+                .or_default()
+                .informed = true;
+            hydrate_window_from_tree(cx, ws);
+            assert!(cx.default_global::<TreeSync>().windows[&ws].informed);
         });
     }
 
@@ -2881,7 +3122,7 @@ mod tests {
                 state.sync = SyncPhase::Primed(advanced.clone());
             }
 
-            finish_prime(cx, ws, stale_epoch, Ok(WsMirror::default()));
+            finish_prime(cx, ws, stale_epoch, Ok((WsMirror::default(), None)));
 
             match &cx.default_global::<TreeSync>().windows[&ws].sync {
                 SyncPhase::Primed(mirror) => assert_eq!(

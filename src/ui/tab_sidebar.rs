@@ -289,8 +289,9 @@ impl Tty7App {
                         );
                         (shown, Some(full))
                     } else {
-                        let raw_title = tab.leaf_title(Some(window), cx);
-                        let raw = abbreviate_home(strip_host_prefix(raw_title.trim()));
+                        let (raw_title, home) = tab.leaf_title_and_home(Some(window), cx);
+                        let title = strip_host_prefix(raw_title.trim());
+                        let raw = abbreviate_home(title, home.as_deref());
                         if raw.trim().is_empty() {
                             // Nothing to expand: the row is naming an unnamed
                             // shell, not hiding a title behind an ellipsis.
@@ -425,10 +426,14 @@ impl Tty7App {
                     cwd_shown = tab
                         .pane
                         .focused_or_first(window, cx)
-                        .and_then(|leaf| leaf.read(cx).effective_cwd())
-                        .map(|cwd| {
+                        .and_then(|leaf| {
+                            let leaf = leaf.read(cx);
+                            Some((leaf.effective_cwd()?, leaf.display_home(cx)))
+                        })
+                        .map(|(cwd, home)| {
+                            let text = cwd.display().to_string();
                             let full = SharedString::from(
-                                abbreviate_home(&cwd.display().to_string()).into_owned(),
+                                abbreviate_home(&text, home.as_deref()).into_owned(),
                             );
                             let shown = elide_path_keep_tail(
                                 &window.text_system(),
@@ -912,10 +917,8 @@ impl Tty7App {
             .child(
                 div().occlude().flex_shrink_0().child(
                     self.attach_new_tab_menu(
-                        crate::ui::tab_strip::chrome_tile_sized(
+                        crate::ui::tab_strip::chrome_tile(
                             Button::new("sidebar-add").icon(Icon::new(IconName::Plus)),
-                            crate::ui::app::TILE_SIZE,
-                            crate::ui::app::TILE_GLYPH_LINE,
                             false,
                             cx,
                         )
