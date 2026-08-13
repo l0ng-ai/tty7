@@ -797,7 +797,9 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
     }
     let showing: Vec<TabId> = app.tabs.iter().map(|t| t.tree_id.get()).collect();
     if let Some(adopt) = take_rehydrate(cx, client_ws, &showing) {
-        hydrate(cx, client_ws, adopt);
+        // The app is mid-update here, so the tabs it knows it is showing come
+        // from `app` itself, not from reading the entity back.
+        hydrate_with(cx, client_ws, adopt, showing);
         return;
     }
     adopt_tab_ids(app, cx);
@@ -1322,6 +1324,17 @@ pub(crate) fn hydrate_window_from_tree(cx: &mut App, client_ws: WorkspaceId) {
     hydrate(cx, client_ws, Adopt::IfEmpty);
 }
 
+/// Hydrates a window whose on-screen tabs are already known to the caller.
+///
+/// Reading them back with `tabs_on_screen` is illegal while the app's own
+/// update lease is held — gpui aborts on a read of an entity that is already
+/// being updated — and `switch_workspace` runs inside exactly that lease. The
+/// ids are the same ones the read would produce: the tabs the window shows
+/// right now.
+pub(crate) fn hydrate_window_with_tabs(cx: &mut App, client_ws: WorkspaceId, showing: Vec<TabId>) {
+    hydrate_with(cx, client_ws, Adopt::IfEmpty, showing);
+}
+
 /// Pulls this window's layout, then opens `path` as one more tab in it.
 ///
 /// This is what a launch carrying a directory does — Explorer's "Open in tty7",
@@ -1385,9 +1398,13 @@ fn tabs_on_screen(cx: &mut App, client_ws: WorkspaceId) -> Vec<TabId> {
 }
 
 fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
+    let showing = tabs_on_screen(cx, client_ws);
+    hydrate_with(cx, client_ws, adopt, showing);
+}
+
+fn hydrate_with(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt, showing: Vec<TabId>) {
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
-    let showing = tabs_on_screen(cx, client_ws);
     let (epoch, failures) = {
         let state = cx
             .default_global::<TreeSync>()

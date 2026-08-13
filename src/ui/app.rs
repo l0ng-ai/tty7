@@ -1320,7 +1320,11 @@ impl Tty7App {
         crate::ui::windows::WindowRegistry::rebind(cx, previous, claimed);
         crate::ui::remote_workspace::RemoteLinks::supervise(cx, claimed);
         self.adopt_workspace(claimed, Session::default(), window, cx);
-        crate::ui::tree_sync::hydrate_window_from_tree(cx, claimed);
+        // This method runs under the app's own update lease, so the tabs the
+        // pull must see are the ones just adopted here — reading the app back
+        // out of `cx` (as `tabs_on_screen` would) is an abort in gpui.
+        let showing = self.tabs.iter().map(|t| t.tree_id.get()).collect();
+        crate::ui::tree_sync::hydrate_window_with_tabs(cx, claimed, showing);
     }
 
     pub(crate) fn adopt_workspace(
