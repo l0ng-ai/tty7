@@ -269,6 +269,24 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSocks5ProxyDesc => "host:port（留空 = 无）。",
         L10nKey::SettingsHttpProxy => "HTTP 代理",
         L10nKey::SettingsHttpProxyDesc => "host:port（留空 = 无）。",
+        L10nKey::SettingsProxyOverridden => "不会生效：优先用{winner}。",
+        L10nKey::SettingsTestConnection => "测试",
+        L10nKey::SettingsTestRunning => "正在测试连接…",
+        L10nKey::SettingsTestReached => "已连接并通过认证，用时 {time}。",
+        L10nKey::SettingsTestNeedsPassword => "已连到服务器 —— 它要求输入密码，点连接后再输入。",
+        L10nKey::SettingsTestNeedsPassphrase => {
+            "已连到服务器 —— 私钥要求输入口令，点连接后再输入。"
+        }
+        L10nKey::SettingsTestNeedsInteractive => {
+            "已连到服务器 —— 它要求交互式验证（如 2FA），点连接后再作答。"
+        }
+        L10nKey::SettingsTestNeedsHostKey => {
+            "已连到服务器 —— 它的主机密钥还没被接受，先连一次确认。"
+        }
+        L10nKey::SettingsTestHostKeyChanged => {
+            "已连到服务器 —— 它的主机密钥和上次不一样了，先连一次核对这次变更。"
+        }
+        L10nKey::SettingsTestFailed => "没连上：{reason}",
         L10nKey::SettingsProxyPortInvalid => "端口必须在 1-65535 之间——只写主机则使用默认端口。",
         L10nKey::SettingsKexAlgorithms => "KEX 算法",
         L10nKey::SettingsKexAlgorithmsDesc => "逗号分隔（留空 = 库默认值）。",
@@ -831,6 +849,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpTransferError => "错误",
         L10nKey::SftpTransferListFailed => "无法获取传输状态：{error}",
         L10nKey::SftpImagePasteUploadFailed => "无法将粘贴的图片上传到 {host}：{error}",
+        L10nKey::LinkFileOpenFailed => "无法打开 {path}：{error}",
         L10nKey::ForwardPanelTitle => "端口转发",
         L10nKey::ForwardDisconnected => "已断开",
         L10nKey::ForwardDisconnectedFrom => "与 {host} 的连接已断开",
@@ -972,6 +991,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmUnrepresentablePath => "该路径不是合法的 UTF-8，无法传给 git —— 仅可查看。",
         L10nKey::ScmPublishBranch => "发布分支",
         L10nKey::ScmDetached => "游离头指针",
+        L10nKey::ScmPushDetached => "HEAD 游离——请先切换到一个分支再推送",
+        L10nKey::ScmPushNoCommits => "还没有可推送的提交",
         L10nKey::ScmAmendBadge => "修订",
         L10nKey::ScmSync => "同步更改",
         L10nKey::ScmPush => "推送",
@@ -1187,6 +1208,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherThisWindow => "当前窗口",
         L10nKey::SwitcherOpen => "已打开",
         L10nKey::SwitcherDisconnect => "断开连接",
+        L10nKey::SwitcherEditHost => "编辑主机…",
+        L10nKey::SwitcherSaveAsHost => "保存为 SSH 主机…",
+        L10nKey::SshSaveDroppedJumpHost => {
+            "跳板机没有带过来 —— 主机配置的跳板必须是另一个已保存的主机。"
+        }
         L10nKey::SwitcherOpenInNewWindow => "在新窗口中打开",
         L10nKey::SwitcherRename => "重命名…",
         L10nKey::SwitcherPickAWorkspace => "选一个工作区查看它的标签页。",
@@ -1307,6 +1333,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdSshReconnect => "SSH：重新连接",
         L10nKey::CmdSshRemoteFiles => "SSH：远程文件",
         L10nKey::CmdSshPortForwarding => "SSH：端口转发",
+        L10nKey::CmdSshSaveConnection => "SSH：将当前连接保存为主机…",
+        L10nKey::CmdSshSaveConnectionSubtitle => "把这条连接存成一个主机配置。",
         L10nKey::CmdSshConnectWithInput => "SSH：连接 {input}",
         L10nKey::CmdAgentSendSelection => "Agent：发送选区",
         L10nKey::CmdAgentSendSelectionSubtitle => "选区 → 运行中的编码 agent",
@@ -1501,8 +1529,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "此窗格中的 tty7 shell 集成尚未生效，内联补全和 Ctrl+R 菜单不可用。\
              PTY 包装器（figterm 类）或不受支持的 shell 配置可能导致此问题。"
         }
-        L10nKey::PaneTitleDisconnected => "tty7 — 已断开",
-        L10nKey::PaneTitleProcessExited => "tty7 — 进程已退出",
+        L10nKey::PaneTitleDisconnected => "{title} — 已断开",
+        L10nKey::PaneTitleProcessExited => "{title} — 进程已退出",
         L10nKey::LoopbackForwardFailed => "无法转发 :{port}——{error}",
         L10nKey::TrayTooltipAgents => "tty7：{parts}",
         L10nKey::TrayAgentSep => "、",

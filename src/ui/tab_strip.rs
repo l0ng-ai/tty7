@@ -20,7 +20,7 @@ use crate::core::actions::{
 use crate::core::config::RightPanelTab;
 use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
-use crate::ui::app::{TILE_GLYPH, TILE_GLYPH_LINE, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
+use crate::ui::app::{TILE_GLYPH, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
@@ -1527,10 +1527,8 @@ impl Tty7App {
 
         let add_button = div().occlude().flex_shrink_0().child(
             self.attach_new_tab_menu(
-                chrome_tile_sized(
+                chrome_tile(
                     Button::new("tab-add").icon(Icon::new(IconName::Plus)),
-                    TILE_SIZE,
-                    TILE_GLYPH_LINE,
                     false,
                     cx,
                 )
@@ -1559,11 +1557,9 @@ impl Tty7App {
                 .child(
                     div().occlude().flex_shrink_0().child(
                         self.attach_new_tab_menu(
-                            chrome_tile_sized(
+                            chrome_tile(
                                 Button::new("titlebar-add-collapsed")
                                     .icon(Icon::new(IconName::Plus)),
-                                TILE_SIZE,
-                                TILE_GLYPH_LINE,
                                 false,
                                 cx,
                             )
@@ -1683,6 +1679,8 @@ mod tests {
     #[test]
     fn short_title_strips_user_host_and_shows_shallow_path_in_full() {
         assert_eq!(short_title("user@host:~/projects/app"), "~/projects/app");
+        // Debian's stock bash title, which spaces the path off the colon.
+        assert_eq!(short_title("user@host: ~/projects/app"), "~/projects/app");
         assert_eq!(short_title("/usr/local/bin"), "/usr/local/bin");
         assert_eq!(short_title("plain"), "plain");
     }
@@ -1708,6 +1706,18 @@ mod tests {
             super::short_title("/home/deploy/app", None),
             "/home/deploy/app"
         );
+    }
+
+    /// The name a freshly dialled SSH pane wears until the remote shell says
+    /// otherwise. Cutting at the colon left the tab reading "2222" (#438).
+    #[test]
+    fn short_title_keeps_an_ssh_address_whole() {
+        assert_eq!(short_title("deploy@10.0.0.5:2222"), "deploy@10.0.0.5:2222");
+        assert_eq!(short_title("root@prod"), "root@prod");
+        assert_eq!(short_title("prod-web"), "prod-web");
+        // Only a port stops the cut: a drive letter is still a path, and this
+        // is the title tty7's own pwsh integration writes on Windows.
+        assert_eq!(short_title(r"ann@BOX:C:/Users/app"), r"C:/Users/app");
     }
 
     #[test]

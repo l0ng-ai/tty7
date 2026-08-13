@@ -917,10 +917,8 @@ impl Tty7App {
             .child(
                 div().occlude().flex_shrink_0().child(
                     self.attach_new_tab_menu(
-                        crate::ui::tab_strip::chrome_tile_sized(
+                        crate::ui::tab_strip::chrome_tile(
                             Button::new("sidebar-add").icon(Icon::new(IconName::Plus)),
-                            crate::ui::app::TILE_SIZE,
-                            crate::ui::app::TILE_GLYPH_LINE,
                             false,
                             cx,
                         )

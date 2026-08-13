@@ -1538,11 +1538,7 @@ impl Tty7App {
                     .child(t(L10nKey::AddSshHost))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.close_switcher(window, cx);
-                        this.open_settings_section(
-                            crate::ui::settings::SettingsSection::Ssh,
-                            window,
-                            cx,
-                        );
+                        this.open_new_ssh_host(window, cx);
                     })),
             )
             .child(
@@ -2023,12 +2019,12 @@ impl Tty7App {
             .when(picked, |r| r.bg(gpui::rgb(rungs(cx).pressed)))
             .anchor_scroll(self.switcher_anchor(Column::Left, picked))
             .hover(move |r| r.bg(hover))
+            // One weight for every machine, this computer included. Its name is
+            // full strength like all the others, so a paler glyph beside it read
+            // as a disabled row rather than as the machine you are on.
             .child(glyph_col(
                 GUTTER,
-                Icon::empty()
-                    .path(glyph)
-                    .size(px(ICON))
-                    .text_color(if group.link == Link::Local { muted } else { fg }),
+                Icon::empty().path(glyph).size(px(ICON)).text_color(fg),
             ))
             .child(
                 v_flex()
@@ -2798,12 +2794,25 @@ fn group_menu_is_empty_handed(group: &GroupRef) -> bool {
     group.home.is_none() && !link_is_engaged(group.link) && !target.is_ssh()
 }
 
+/// What the machine menu's host row says, or `None` for a machine that has no
+/// SSH host behind it at all — WSL and the local stdio server are configured
+/// nowhere this form could edit.
+fn host_form_label(target: &RemoteTarget) -> Option<&'static str> {
+    match target {
+        RemoteTarget::Profile { .. } => Some(t(L10nKey::SwitcherEditHost)),
+        RemoteTarget::Alias { .. } | RemoteTarget::Direct { .. } => {
+            Some(t(L10nKey::SwitcherSaveAsHost))
+        }
+        RemoteTarget::Wsl { .. } | RemoteTarget::LocalStdio { .. } => None,
+    }
+}
+
 fn group_menu(
     menu: gpui_component::menu::PopupMenu,
     group: &GroupRef,
     app: gpui::WeakEntity<Tty7App>,
 ) -> gpui_component::menu::PopupMenu {
-    let (a1, a2, a3) = (app.clone(), app.clone(), app);
+    let (a1, a2, a3, a4) = (app.clone(), app.clone(), app.clone(), app);
     let gref = group.clone();
     let can_create = group.target.is_none() || group.home.is_some();
     if group_menu_is_empty_handed(group) {
@@ -2818,6 +2827,23 @@ fn group_menu(
     );
     let Some(target) = group.target.clone() else {
         return menu;
+    };
+    // The host as it is configured, reachable from the one place it is on
+    // screen. A machine dialled by address has no profile yet, so the same
+    // row offers to make one instead (#438).
+    let menu = match host_form_label(&target) {
+        Some(label) => {
+            let for_edit = target.clone();
+            menu.separator()
+                .item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                    let for_edit = for_edit.clone();
+                    let _ = a4.update(cx, |this, cx| {
+                        this.close_switcher(window, cx);
+                        this.edit_ssh_host_of_target(&for_edit, window, cx);
+                    });
+                }))
+        }
+        None => menu,
     };
     let connected = link_is_engaged(group.link);
     let restartable = target.hosts_our_server();
@@ -3040,6 +3066,46 @@ mod tests {
             None,
             Link::Reconnecting { attempt: 2 }
         )));
+    }
+
+    /// A wrong hostname or a stale password used to be fixable only by
+    /// finding the same machine again in Settings (#438). The machine is on
+    /// screen here, so its host row is too — worded for what the row can
+    /// actually do, since a machine reached by address has no profile to open.
+    #[test]
+    fn every_ssh_machine_offers_its_host_form_and_nothing_else_does() {
+        crate::ui::i18n::set_locale("en");
+        assert_eq!(
+            host_form_label(&RemoteTarget::Profile {
+                id: uuid::Uuid::new_v4()
+            }),
+            Some("Edit Host…")
+        );
+        assert_eq!(
+            host_form_label(&RemoteTarget::Alias {
+                alias: "prod".into()
+            }),
+            Some("Save as SSH Host…"),
+            "an alias lives in ~/.ssh/config, which this form does not write"
+        );
+        assert_eq!(
+            host_form_label(&RemoteTarget::direct("me", "10.0.0.5", 22)),
+            Some("Save as SSH Host…")
+        );
+        assert_eq!(
+            host_form_label(&RemoteTarget::Wsl {
+                distro: "Ubuntu".into()
+            }),
+            None,
+            "a WSL distro is configured nowhere this form could reach"
+        );
+        assert_eq!(
+            host_form_label(&RemoteTarget::LocalStdio {
+                program: "tty7-server".into(),
+                args: Vec::new()
+            }),
+            None
+        );
     }
 
     /// The switcher used to read the `HostLinks` table and nothing else, which

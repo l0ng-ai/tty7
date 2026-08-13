@@ -101,6 +101,7 @@ pub enum CommandKind {
     ActivateTab(usize),
     ConnectSavedProfile(Uuid),
     EditSavedProfile(Uuid),
+    SaveSshSessionAsHost,
     QuickConnect(String),
     SaveQuickConnect(String),
     OpenSshProfiles,
@@ -198,6 +199,7 @@ impl CommandKind {
             OpenThemePicker => "change-theme",
             OpenSshConnectInput => "ssh-add-connection",
             OpenSshProfiles => "ssh-manage-profiles",
+            SaveSshSessionAsHost => "ssh-save-connection",
             OpenSshConnect(_)
             | CheckoutBranch(_)
             | SetTheme(_)
@@ -307,6 +309,7 @@ impl CommandKind {
             | ActivateTab(_)
             | ConnectSavedProfile(_)
             | EditSavedProfile(_)
+            | SaveSshSessionAsHost
             | QuickConnect(_)
             | SaveQuickConnect(_) => return None,
         };
@@ -707,6 +710,8 @@ pub struct PaletteDelegate {
     commands: Vec<Command>,
     sections: Vec<Section>,
     input: Option<PaletteInput>,
+    /// Whether this is the root list: a typed address offers to connect to it,
+    /// and an empty query falls back to the grouped command list.
     quick_connect_root: bool,
     selected: Option<IndexPath>,
 }

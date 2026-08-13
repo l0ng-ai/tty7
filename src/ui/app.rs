@@ -132,6 +132,29 @@ pub(crate) const TILE_GLYPH_SM: f32 = TILE_GLYPH;
 pub(crate) const TILE_SIZE_XS: f32 = 18.;
 pub(crate) const TILE_GLYPH_XS: f32 = 11.;
 
+/// The compensation a glyph gets when its art does not fill the box the rest
+/// of the set fills.
+///
+/// Every icon tty7 draws itself sits on the same optical bound — 3.4..20.6 of
+/// a 24 viewBox, 19.3 units of ink once the round caps are counted. Stock
+/// lucide `close` is a bare 6..18 cross, 14 units, so at [`TILE_GLYPH`] it
+/// carries a quarter less ink than the tiles beside it and reads as the one
+/// disabled control in the row. 16 buys that back.
+///
+/// Reach for this only for art we do not own. `plus` used to be here for the
+/// same reason and is not any more: it is ours, so it was redrawn onto the
+/// bound instead of being scaled up at the call site — the fix that also
+/// reaches the 24px tiles, which have no `_LINE` step to grow into.
+///
+/// Note what scaling a glyph up quietly buys along with the extent: 16/13 more
+/// stroke. `plus` had been leaning on that, so moving it to [`TILE_GLYPH`]
+/// thinned it by a fifth even though it got *longer*, and it had to take that
+/// weight back in its own `stroke-width` — a cross is two hairlines with no
+/// fill to hide behind, so it is the one glyph in the set drawn off the
+/// family's weight, by exactly the 16/13 it lost and no more. `ui::assets`'
+/// test carries that arithmetic. Anything else that leaves here owes the same
+/// accounting, in both directions: an asset redrawn for the tiles that scaled
+/// it up is still drawn beside the ones that never did.
 pub(crate) const TILE_GLYPH_LINE: f32 = 16.;
 
 pub(crate) const TILE_PAD: f32 = (TILE_SIZE - TILE_GLYPH) / 2.;
@@ -4027,7 +4050,7 @@ impl Tty7App {
         cx.notify();
     }
 
-    fn palette_commands(&self, cx: &App) -> Vec<Command> {
+    fn palette_commands(&self, window: &Window, cx: &App) -> Vec<Command> {
         let mut commands = Command::base_commands(
             cx,
             ChromeState {
@@ -4036,24 +4059,23 @@ impl Tty7App {
             },
         );
 
-        let cfg = cx.global::<Config>();
-        let now = crate::core::config::unix_now();
-        let mut profiles: Vec<&crate::core::ssh_profile::SshProfile> =
-            cfg.ssh_profiles.iter().collect();
-        profiles.sort_by(|a, b| {
-            let score = |p: &crate::core::ssh_profile::SshProfile| {
-                cfg.ssh_profile_frecency
-                    .get(&p.id)
-                    .map(|u| u.score(now))
-                    .unwrap_or(0.0)
-            };
-            score(b)
-                .partial_cmp(&score(a))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        });
-        for p in profiles {
-            let subtitle = crate::core::ssh_profile::to_connect_string(p);
+        // Offered only where it would do something. A connection opened from a
+        // saved host has nothing to save, and a pane that is not an SSH one has
+        // no connection at all — either would be a row that quietly did nothing
+        // (#549).
+        if self.unsaved_ssh_session(window, cx).is_some() {
+            commands.push(
+                Command::localized(
+                    L10nKey::CmdSshSaveConnection,
+                    CommandKind::SaveSshSessionAsHost,
+                )
+                .with_subtitle(t(L10nKey::CmdSshSaveConnectionSubtitle))
+                .in_group(CommandGroup::Ssh),
+            );
+        }
+
+        for p in crate::ui::ssh_connect::ssh_profiles_by_frecency(cx) {
+            let subtitle = crate::core::ssh_profile::to_connect_string(&p);
             let title = if p.name.is_empty() {
                 subtitle.clone()
             } else {
@@ -4090,7 +4112,7 @@ impl Tty7App {
             self.close_palette(window, cx);
             return;
         }
-        let commands = self.palette_commands(cx);
+        let commands = self.palette_commands(window, cx);
         let view = cx.new(|cx| PaletteView::new(commands, window, cx));
         self.palette_sub = Some(cx.subscribe_in(&view, window, Self::on_palette_event));
         self.palette = Some(view);
@@ -4266,6 +4288,7 @@ impl Tty7App {
                 }
             }
             SaveQuickConnect(target) => self.open_ssh_profile_new_from_target(target, window, cx),
+            SaveSshSessionAsHost => self.save_ssh_session_as_host(window, cx),
             OpenSshProfiles => self.open_settings_section(SettingsSection::Ssh, window, cx),
             SendSelectionToAgent => self.send_selection_to_agent(window, cx),
             SendGitDiffToAgent => self.send_git_diff_to_agent(window, cx),

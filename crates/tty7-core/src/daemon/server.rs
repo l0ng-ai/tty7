@@ -872,6 +872,13 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             Ok(())
         }
 
+        ClientMsg::TestSsh { spec } => {
+            let mut w = write_stream;
+            let report = crate::daemon::ssh::SshManager::global().test_connection(&spec);
+            DaemonMsg::SshTestResult(report).encode(&mut w)?;
+            Ok(())
+        }
+
         ClientMsg::DeleteKnownHost(id) => {
             let mut w = write_stream;
             let _ = crate::daemon::ssh::known_hosts::delete(&id);
