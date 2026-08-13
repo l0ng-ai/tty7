@@ -62,22 +62,32 @@ pub enum TabLabel<'a> {
 /// an agent's, which is prose — comes back untouched, and so does a bare
 /// `host:`: that is a drive letter on Windows.
 ///
-/// The head only counts when a path — or nothing at all, which is a shell that
-/// has not worked out where it is yet — follows it. `deploy@10.0.0.5:2222` is
-/// an address, not a titled directory, and cutting it left the tab of a freshly
-/// dialled SSH pane labelled with nothing but a port number (#438).
+/// What stops the head being a head is a *port* after it: a tail of nothing
+/// but digits makes the whole string an address rather than a titled
+/// directory. `deploy@10.0.0.5:2222` is what a freshly dialled SSH pane calls
+/// itself, and cutting it left the tab labelled with nothing but a port
+/// number (#438).
+///
+/// Only a port. Anything else after the colon is a path and is kept, because
+/// the paths that arrive here are not all `/…` or `~/…`: tty7's own PowerShell
+/// integration writes `ann@BOX:C:/src` for a cwd off the home drive, and
+/// Debian's stock bash title is `\u@\h: \w` — a space, which belongs to the
+/// head rather than to the path.
 ///
 /// Here rather than in either renderer because both of them need it and they
 /// have to agree: the GUI abbreviates the path that comes out, the CLI takes its
 /// last segment, and neither can start by guessing where the path begins.
 pub fn strip_host_prefix(raw: &str) -> &str {
-    match raw.split_once(':') {
-        Some((head, tail))
-            if head.contains('@') && (tail.is_empty() || tail.starts_with(['/', '~'])) =>
-        {
-            tail
-        }
-        _ => raw,
+    let Some((head, tail)) = raw.split_once(':') else {
+        return raw;
+    };
+    if !head.contains('@') {
+        return raw;
+    }
+    let is_port = !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit());
+    match is_port {
+        true => raw,
+        false => tail.trim_start(),
     }
 }
 
@@ -270,6 +280,17 @@ mod tests {
     fn a_host_prefix_is_only_cut_when_a_path_follows_it() {
         assert_eq!(strip_host_prefix("user@host:~/work"), "~/work");
         assert_eq!(strip_host_prefix("user@host:/srv/app"), "/srv/app");
+        assert_eq!(
+            strip_host_prefix("user@host: ~/work"),
+            "~/work",
+            "Debian's stock bash title puts a space after the colon"
+        );
+        assert_eq!(
+            strip_host_prefix("ann@BOX:C:/src"),
+            "C:/src",
+            "tty7's own pwsh title names a drive when the cwd is off the home drive"
+        );
+        assert_eq!(strip_host_prefix("user@host:   "), "");
         assert_eq!(
             strip_host_prefix("deploy@10.0.0.5:2222"),
             "deploy@10.0.0.5:2222",
