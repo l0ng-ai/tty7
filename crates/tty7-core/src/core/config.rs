@@ -1326,9 +1326,19 @@ mod tests {
     fn sanitize_clamps_to_the_same_bounds_the_gui_steps_within() {
         // The GUI used to clamp to its own, narrower pair, so a config-legal
         // value landed outside the stepper's range and one click pushed it the
-        // wrong way. The bounds are one shared set now, and sanitize must
-        // agree with them exactly — a value at either edge survives unchanged
+        // wrong way. The bounds are one shared set now: `Tty7App::set_font_size`
+        // and `set_line_height` clamp to these very constants, which is what
+        // makes the steppers and the Ctrl+=/Ctrl+- keys agree with the file
         // (#550).
+        //
+        // The numbers themselves are the support surface
+        // `docs/reference/configuration.mdx` publishes, so pin them: narrowing
+        // either side is a documented behaviour change, not a refactor.
+        assert_eq!((FONT_SIZE_MIN, FONT_SIZE_MAX), (4.0, 256.0));
+        assert_eq!((LINE_HEIGHT_MIN, LINE_HEIGHT_MAX), (0.5, 4.0));
+
+        // A value at either edge survives sanitize unchanged, so the stepper
+        // has somewhere to stop rather than a value that keeps being rewritten.
         let mut cfg = Config {
             font_size: FONT_SIZE_MIN,
             line_height: LINE_HEIGHT_MAX,
@@ -1338,14 +1348,33 @@ mod tests {
         assert_eq!(cfg.font_size, FONT_SIZE_MIN);
         assert_eq!(cfg.line_height, LINE_HEIGHT_MAX);
 
+        // And a value past an edge lands *on* that edge — the direction the
+        // step was going — rather than anywhere else.
         let mut cfg = Config {
             font_size: 1_000.0,
-            line_height: 0.0,
+            line_height: 0.1,
             ..Config::default()
         };
         cfg.sanitize();
         assert_eq!(cfg.font_size, FONT_SIZE_MAX, "over the top clamps down");
-        assert!(cfg.line_height > 0.0, "a degenerate line height resets");
+        assert_eq!(
+            cfg.line_height, LINE_HEIGHT_MIN,
+            "under the floor clamps up"
+        );
+
+        // The values the issue was reported with: both are legal, so sanitize
+        // leaves them alone, and the steppers now step from where they are.
+        let mut cfg = Config {
+            font_size: 50.0,
+            line_height: 3.0,
+            ..Config::default()
+        };
+        cfg.sanitize();
+        assert_eq!((cfg.font_size, cfg.line_height), (50.0, 3.0));
+        // Both are inside the range the steppers clamp to, which is the whole
+        // point: `50 + 1` and `3.0 - 0.05` are legal, so neither click can be
+        // turned around by a clamp.
+        assert!(50.0 + 1.0 <= FONT_SIZE_MAX && 3.0 - 0.05 >= LINE_HEIGHT_MIN);
     }
 
     #[test]

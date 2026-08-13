@@ -114,8 +114,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validation. The scrollback and notify-threshold preset rows got the matching
   fix: a value between two buckets no longer lights up the nearest one
   (`scrollback_limit: 5000` highlighted "10,000", and clicking that cell
-  silently overwrote it) — it shows a "Custom (N)" cell that names the real
-  value and is not a button (#550).
+  silently overwrote it) — it shows a "Custom (5,000)" cell that names the
+  real value and is not a button (#550).
 
 ## [26.8.3] - 2026-08-12
 
