@@ -11,7 +11,7 @@ use crate::ui::file_copy;
 use crate::ui::host_ops::{ByHost, HostId, HostOps, InFlight, SharedHost, WatchSub};
 use crate::ui::host_registry::HostRegistry;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use crate::ui::right_panel::git_badge;
+use crate::ui::right_panel::{ROW_GLYPH, git_badge};
 use crate::ui::scm::status::{status_color, status_glyph};
 use gpui::prelude::*;
 use gpui::{
@@ -1798,7 +1798,7 @@ impl Tty7App {
             .cursor_pointer()
             .when(selected, |d| d.bg(gpui::rgb(sf.selected)))
             .when(!selected, |d| d.hover(|s| s.bg(gpui::rgb(sf.hover))))
-            .child(Icon::new(icon).xsmall().text_color(if is_dir {
+            .child(Icon::new(icon).size(px(ROW_GLYPH)).text_color(if is_dir {
                 cx.theme().foreground
             } else {
                 muted
@@ -2081,7 +2081,7 @@ impl gpui::Render for DragGhost {
             .border_1()
             .border_color(cx.theme().border)
             .text_sm()
-            .child(Icon::new(IconName::File).xsmall())
+            .child(Icon::new(IconName::File).size(px(ROW_GLYPH)))
             .child(SharedString::from(self.name.clone()))
     }
 }
