@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the panel on that directory. **Settings → Terminal → Links → Open files with**
   picks between the built-in editor, the OS file association and a command of
   your own — anyone who had already set `link_file_command` keeps it.
+- **A pane address may now be written without its `%`** — `tty7 pane ls
+  --json` prints bare ids, so `83` addresses the same pane as `%83`
+  everywhere an address is taken. One behaviour goes with it: a lone `tty7
+  send 83` used to type "83" into the caller's own pane and now reports that
+  it has nothing to send, the same as a lone `send %83` always did. It fails
+  loudly and never presses anything anywhere; to type a number as text, name
+  the pane too (`tty7 send %5 83 --enter`) (#538).
 
 ### Fixed
 
@@ -60,13 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A mistyped `tty7 send` address no longer types itself into your own
   pane** — `tty7 send %3x --key C-c` used to degrade the unparseable `%3x`
   into text aimed at the pane the caller was sitting in, then deliver the
-  Ctrl-C there too, interrupting whatever was in front of them. A `%` (or
-  bare digit) led token that still fails to parse is now the address error it
+  Ctrl-C there too, interrupting whatever was in front of them. A `%`
+  followed by a digit that still fails to parse is now the address error it
   looks like, while text that merely starts with `%` — vim's `%s/foo/bar/`,
-  `%!sort` — keeps typing as given. The explicit address slot also accepts
-  the bare ids `tty7 pane ls --json` prints, so `tty7 send 83 --key C-c`
-  addresses pane 83 instead of needing `"%${TTY7_PANE#%}"` contortions
-  (#538).
+  `%!sort` — keeps typing as given, as does anything unmarked that is not a
+  plain number (#538).
 - **The `ws rm` docs now say the panes are hung up, not orphaned** — the CLI
   reference claimed removing a workspace leaves its panes running as orphans
   to be found with `pane ls --all`, when the code has hung them up since the

@@ -97,9 +97,11 @@ Types `TEXT` into the pane as keystrokes; `--enter` appends CR. With one
 argument the text is the argument and the pane comes from `$TTY7_PANE` — but a
 lone `%42` (or bare `42`, the shape `pane ls --json` prints) is rejected as a
 missing-text error rather than typed, unless a `--key` gives it something to
-do. A `%`-or-digit-led token that still doesn't parse (`%3x`) is an address
+do. A `%` followed by a digit that still doesn't parse (`%3x`) is an address
 error, never text for your own pane — while text that merely starts with `%`
-(`%s/foo/bar/`, `%!sort`) types as given.
+(`%s/foo/bar/`, `%!sort`) types as given, as does anything unmarked that is not
+a plain number (`3x`, `+5`). To type an address-shaped string, name the pane as
+well: `tty7 send %42 %3x`.
 
 `--key` presses a key instead of typing characters, which is what a pane wants
 once something is already running in it: answering a prompt that only takes

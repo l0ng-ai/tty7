@@ -499,25 +499,21 @@ fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
     // it would break a use that was never ambiguous.
     let (target, text) = match (&args.first, &args.second) {
         (Some(first), Some(text)) => (Some(first.as_str()), Some(text.as_str())),
-        (Some(first), None) if address::parse_pane(first).is_ok() => {
-            if args.keys.is_empty() {
-                bail!("send needs TEXT after the pane address, or a --key to press");
+        (Some(first), None) => match address::parse_pane(first) {
+            Ok(_) => {
+                if args.keys.is_empty() {
+                    bail!(
+                        "send needs TEXT after the pane address, or a --key to press \
+                         — to type '{first}' literally, name the pane too: send %PANE {first}"
+                    );
+                }
+                (Some(first.as_str()), None)
             }
-            (Some(first.as_str()), None)
-        }
-        (Some(first), None)
-            if first.starts_with('%')
-                && first[1..]
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_digit()) =>
-        {
-            // parse_pane already failed (the arm above lost the race), so this
-            // is the error to show — it names what an address looks like.
-            address::parse_pane(first)?;
-            unreachable!("parse_pane failed in the arm above");
-        }
-        (Some(first), None) => (None, Some(first.as_str())),
+            // `%` then a digit is someone writing an address, so the parse
+            // error is the answer. Anything else is text and always was.
+            Err(error) if tried_to_write_an_address(first) => return Err(error),
+            Err(_) => (None, Some(first.as_str())),
+        },
         (None, _) => {
             if args.keys.is_empty() {
                 bail!("send needs TEXT to type or a --key to press");
@@ -561,6 +557,17 @@ fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
             "keys": pressed.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
         }),
     )
+}
+
+/// Whether a lone positional that failed to parse was reaching for an address
+/// rather than being text. Only `%` followed by a digit qualifies: it is the
+/// shape every pane address has, so `%3x` is a typo worth refusing, while
+/// `%s/foo/bar/` and `%!sort` are the ex commands they look like. A bare `3x`
+/// is not included — nothing marks it as an address, and it has always typed.
+fn tried_to_write_an_address(s: &str) -> bool {
+    s.strip_prefix('%')
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| c.is_ascii_digit())
 }
 
 fn capture(args: CaptureArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
@@ -2232,13 +2239,40 @@ mod tests {
             "nothing reached any pane — not the text, not the key"
         );
 
-        // The bare-id shape of the same mistake: `pane ls --json` prints bare
-        // ids, so "83x" is just as plausible a clipboard slip as "%3x".
+        // Any digit after the `%` is the same reach for an address.
         let mut backend = mock();
         let err = execute(cli(&["tty7", "send", "%42a"]), &ctx, &mut backend)
             .expect_err("still an address-shaped error, not text");
         assert!(err.to_string().contains("pane address"), "{err}");
         assert!(backend.sent.is_empty());
+    }
+
+    /// A lone bare id now reads as an address, so `send 83` no longer types
+    /// "83" into the caller's pane — it says it has nothing to send. That is
+    /// the one behaviour this change takes away, and it has to fail loudly
+    /// rather than quietly press keys somewhere else: `--enter` is not a
+    /// `--key`, so it does not turn the id into a target either.
+    #[test]
+    fn a_lone_bare_id_refuses_loudly_rather_than_retargeting() {
+        let ctx = Context {
+            pane: Some("5".into()),
+            ..Context::default()
+        };
+        for args in [
+            vec!["tty7", "send", "83"],
+            vec!["tty7", "send", "83", "--enter"],
+        ] {
+            let mut backend = mock();
+            let err =
+                execute(cli(&args), &ctx, &mut backend).expect_err("a bare id has nothing to send");
+            assert!(err.to_string().contains("needs TEXT"), "{err}");
+            // The escape hatch for typing it anyway is in the message.
+            assert!(err.to_string().contains("send %PANE 83"), "{err}");
+            assert!(
+                backend.sent.is_empty(),
+                "no keystroke reached pane 83 or pane 5"
+            );
+        }
     }
 
     /// The narrowing has to leave real text alone: `%` followed by a non-digit
@@ -2260,6 +2294,19 @@ mod tests {
             backend.sent,
             vec![(5, b"%!sort".to_vec()), (5, b"\r".to_vec())]
         );
+
+        // Nothing marks these as addresses, so the narrowing must leave them
+        // typing: `3x` has no `%`, and `+5` only looked numeric to
+        // `u64::from_str`.
+        for text in ["3x", "+5", "50%"] {
+            let mut backend = mock();
+            run_cli(&["tty7", "send", text], &ctx, &mut backend);
+            assert_eq!(
+                backend.sent,
+                vec![(5, text.as_bytes().to_vec())],
+                "'{text}' is text, not an address"
+            );
+        }
     }
 
     /// The explicit address slot takes the bare id `pane ls --json` prints,
