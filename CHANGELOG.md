@@ -7,7 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A host can be proved without spending a tab on it.** **Test** in the SSH
+  host form dials the host exactly as Connect would — proxy, jump host, host
+  key and authentication, all on the daemon — and reports back in place:
+  `Connected and authenticated in 640 ms`, or what the handshake stopped to
+  ask for (a password, a key passphrase, a keyboard-interactive answer, a host
+  key nobody has accepted yet, or one that is not the key the server gave
+  before), or the failure verbatim. A test never rides an existing connection
+  — one would answer for the credentials *that* connection was made with, so a
+  password typed wrong would come back green — and it never enters the
+  connection cache, so it leaves nothing open and holds nothing up. An edit to
+  the form drops the answer, which was about the host as it was typed a moment
+  ago (#438).
+- **The host form is reachable from wherever the machine is on screen.**
+  Right-clicking a machine in the workspace switcher offers **Edit Host…** for
+  a saved host, or **Save as SSH Host…** for one reached by address or by a
+  `~/.ssh/config` alias; the switcher's **Add SSH Host…** now opens the form
+  instead of the settings list you then had to find `+` on. A connection
+  dialled by hand and worth keeping becomes a saved host from the palette —
+  **SSH: Save Connection as Host…**, prefilled from the live session. The one
+  thing that cannot come along is an ad-hoc `-J` hop, and that is said out
+  loud rather than saved broken (#438).
+
 ### Changed
+
+- **An SSH pane is named after its host.** A fresh SSH tab reads the host's
+  name, or its address when the host has none — every host imported from
+  `~/.ssh/config` arrives nameless, and a window full of them all read `tty7`
+  until the far shell happened to title itself. The name survives a title
+  reset and a dropped link (`prod-web — disconnected`), and a tab titled
+  `deploy@10.0.0.5:2222` is shown whole rather than cut down to `2222`: the
+  `user@host:` head is only a head when a path follows it (#438).
+- **The host form's authentication row is a dropdown**, not a six-way
+  segmented control — it was the row that stacked first on a narrow page. And
+  the three proxy fields no longer read as independent: only the first one
+  filled is used, so the losing fields now say `Not used: Proxy command comes
+  first.` instead of leaving it to be discovered by connecting (#438).
 
 - **A workspace reads its own name from the first frame, and stops changing
   under you.** Every workspace a window creates is given a generated name —
