@@ -1286,6 +1286,7 @@ fn ssh_test_need_message(need: SshTestNeed) -> L10nKey {
         SshTestNeed::KeyPassphrase => L10nKey::SettingsTestNeedsPassphrase,
         SshTestNeed::KeyboardInteractive => L10nKey::SettingsTestNeedsInteractive,
         SshTestNeed::HostKeyDecision => L10nKey::SettingsTestNeedsHostKey,
+        SshTestNeed::HostKeyChanged => L10nKey::SettingsTestHostKeyChanged,
     }
 }
 
@@ -3470,6 +3471,11 @@ impl Tty7App {
                 let picked = auth_mode_labels().iter().position(|l| l == label);
                 if let (Some(ix), Some(form)) = (picked, this.ssh_form_mut()) {
                     form.auth = AUTH_MODES[ix];
+                    // The same reason the typed fields drop it: the answer on
+                    // screen was about a handshake this form would no longer
+                    // make. A green line under a changed method reads as a
+                    // method that was proved, and it was not.
+                    form.test = None;
                     cx.notify();
                 }
             },
@@ -7041,6 +7047,7 @@ mod tests {
             SshTestNeed::KeyPassphrase,
             SshTestNeed::KeyboardInteractive,
             SshTestNeed::HostKeyDecision,
+            SshTestNeed::HostKeyChanged,
         ];
         let lines: Vec<&str> = needs.iter().map(|n| t(ssh_test_need_message(*n))).collect();
         assert!(lines.iter().all(|l| !l.is_empty()));

@@ -283,6 +283,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsTestNeedsHostKey => {
             "已连到服务器 —— 它的主机密钥还没被接受，先连一次确认。"
         }
+        L10nKey::SettingsTestHostKeyChanged => {
+            "已连到服务器 —— 它的主机密钥和上次不一样了，先连一次核对这次变更。"
+        }
         L10nKey::SettingsTestFailed => "没连上：{reason}",
         L10nKey::SettingsProxyPortInvalid => "端口必须在 1-65535 之间——只写主机则使用默认端口。",
         L10nKey::SettingsKexAlgorithms => "KEX 算法",

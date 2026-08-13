@@ -321,6 +321,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsTestNeedsHostKey => {
             "Reached the server — its host key has not been accepted yet. Connect once to review it."
         }
+        L10nKey::SettingsTestHostKeyChanged => {
+            "Reached the server — its host key is not the one it gave before. Connect once to review the change."
+        }
         L10nKey::SettingsTestFailed => "Did not connect: {reason}",
         L10nKey::SettingsProxyPortInvalid => {
             "Port must be 1-65535 — the host on its own takes the default port."

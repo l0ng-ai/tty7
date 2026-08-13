@@ -324,6 +324,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsTestNeedsHostKey => {
             "サーバーに到達しました — ホストキーがまだ承認されていません。一度接続して確認してください"
         }
+        L10nKey::SettingsTestHostKeyChanged => {
+            "サーバーに到達しました — ホストキーが以前のものと異なります。一度接続して変更内容を確認してください"
+        }
         L10nKey::SettingsTestFailed => "接続できませんでした: {reason}",
         L10nKey::SettingsProxyPortInvalid => {
             "ポートは 1-65535 の範囲です — ホストだけならデフォルトポートを使います"

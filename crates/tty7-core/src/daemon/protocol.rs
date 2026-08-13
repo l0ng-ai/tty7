@@ -522,7 +522,12 @@ pub enum SshTestNeed {
     Password,
     KeyPassphrase,
     KeyboardInteractive,
+    /// The server's host key is one nobody here has accepted yet.
     HostKeyDecision,
+    /// The server presented a *different* key than the one on file. Kept apart
+    /// from `HostKeyDecision` because "not accepted yet" and "not the key it
+    /// gave last time" are not the same news.
+    HostKeyChanged,
 }
 
 impl NativeSshSpec {

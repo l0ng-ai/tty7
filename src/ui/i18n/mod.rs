@@ -307,6 +307,7 @@ l10n_keys! {
     SettingsTestNeedsPassphrase,
     SettingsTestNeedsInteractive,
     SettingsTestNeedsHostKey,
+    SettingsTestHostKeyChanged,
     SettingsTestFailed,
     SettingsProxyPortInvalid,
     SettingsKexAlgorithms,

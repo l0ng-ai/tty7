@@ -475,6 +475,13 @@ impl SshManager {
     /// the credentials that connection was made with, not the ones in the form
     /// — a password typed wrong would come back green. So a test dials its own
     /// and leaves the cache to the sessions.
+    ///
+    /// It leaves the cache's *lock* alone too. The slot is held for the whole
+    /// handshake, so a test that took it would stall every Connect to the same
+    /// host behind a connection it is not going to leave them — and, waiting
+    /// its turn behind a session already dialling, would spend its own budget
+    /// on the queue and come back "connection timed out" about a host that
+    /// answers fine.
     fn open_connection_reusing<'a>(
         &'a self,
         spec: &'a NativeSshSpec,
@@ -483,18 +490,24 @@ impl SshManager {
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<(Arc<SshConnection>, bool)>> + Send + 'a>> {
         Box::pin(async move {
             let key = ConnectionKey::from_spec(spec);
-            let slot: ConnSlot = {
-                let mut map = self.conns.lock().unwrap();
-                map.entry(key.clone())
-                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(Weak::new())))
-                    .clone()
-            };
-            let mut guard = slot.lock().await;
-            if reuse && let Some(conn) = guard.upgrade() {
-                if conn.is_alive() {
-                    return Ok((conn, true));
+            let mut guard = match reuse {
+                true => {
+                    let slot: ConnSlot = {
+                        let mut map = self.conns.lock().unwrap();
+                        map.entry(key.clone())
+                            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(Weak::new())))
+                            .clone()
+                    };
+                    let guard = slot.lock_owned().await;
+                    if let Some(conn) = guard.upgrade()
+                        && conn.is_alive()
+                    {
+                        return Ok((conn, true));
+                    }
+                    Some(guard)
                 }
-            }
+                false => None,
+            };
 
             let has_proxy_command =
                 matches!(&spec.proxy, crate::daemon::protocol::SshProxy::Command(_));
@@ -549,8 +562,8 @@ impl SshManager {
                 .map_err(anyhow::Error::msg)?;
 
             let conn = SshConnection::new(handle, key, remote_forwards);
-            if reuse {
-                *guard = Arc::downgrade(&conn);
+            if let Some(guard) = guard.as_mut() {
+                **guard = Arc::downgrade(&conn);
             }
             Ok((conn, false))
         })
@@ -576,9 +589,8 @@ fn declining_broker(asked: Arc<Mutex<Option<SshTestNeed>>>) -> Arc<PromptBroker>
             AuthPromptKind::Password { .. } => SshTestNeed::Password,
             AuthPromptKind::KeyPassphrase { .. } => SshTestNeed::KeyPassphrase,
             AuthPromptKind::KeyboardInteractive { .. } => SshTestNeed::KeyboardInteractive,
-            AuthPromptKind::HostKeyUnknown { .. } | AuthPromptKind::HostKeyChanged { .. } => {
-                SshTestNeed::HostKeyDecision
-            }
+            AuthPromptKind::HostKeyUnknown { .. } => SshTestNeed::HostKeyDecision,
+            AuthPromptKind::HostKeyChanged { .. } => SshTestNeed::HostKeyChanged,
             // Delivered with request_id 0 and never waited on.
             AuthPromptKind::Banner { .. } => return true,
         };
