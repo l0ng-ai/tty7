@@ -1931,19 +1931,35 @@ pub(crate) fn note_instance(seen: &mut String, instance: &str) -> bool {
     false
 }
 
-/// Rebuilds every local window from the machine tree after the daemon behind
-/// the local link changed — it died and the reconnect found a new process
-/// whose registry knows nothing about the panes on screen (#553).
+/// Drops the link to the local daemon and rebuilds every local window from the
+/// machine tree, for a caller that killed that daemon itself (#553).
 ///
-/// The invalidate half comes first on purpose: the link may still hand out
-/// the client that just went quiet, and a pull sent down it dies on a dead
-/// socket before the reader notices. With it dropped, `hydrate` waits for the
-/// reconnect `LocalLink::tick` is already driving and pulls the layout the
-/// daemon actually has. When no daemon ever answers, the windows owe a
-/// rehydration instead (`owe_rehydration`) — which is also the guard that
-/// keeps the emptied windows from being pushed back up as "close every tab".
+/// The invalidate half comes first on purpose: the link still holds the client
+/// that pointed at the server that is now gone, and a pull sent down it dies on
+/// a dead socket before the reader notices. With it dropped, `hydrate` waits for
+/// the reconnect `LocalLink::tick` is already driving and pulls the layout the
+/// daemon actually has.
+///
+/// Only for the caller that has no live link left. One that just handshaked a
+/// *new* daemon calls [`resync_local_windows_from_tree`] with that link in hand:
+/// dropping it there would throw away a working link and make every window wait
+/// out another connect for no reason.
 pub(crate) fn resync_after_local_daemon_change(cx: &mut App) {
     crate::ui::local_link::LocalLink::invalidate(cx);
+    resync_local_windows_from_tree(cx);
+}
+
+/// Rebuilds every local window from the machine tree, because the daemon behind
+/// the local link became a different process — it died and the reconnect found a
+/// new one, whose registry knows nothing about the panes on screen (#553).
+///
+/// Remote windows are left alone: their own link says when their machine's
+/// server changed, and this one speaks for this computer only.
+///
+/// When no daemon answers the pull, the windows owe a rehydration instead
+/// (`owe_rehydration`) — which is also the guard that keeps a window emptied by
+/// a failed pull from being pushed back up as "close every tab".
+pub(crate) fn resync_local_windows_from_tree(cx: &mut App) {
     for (workspace, _) in crate::ui::windows::WindowRegistry::open_windows(cx) {
         if WorkspaceStore::host_of(cx, workspace) != HostId::LOCAL {
             continue;

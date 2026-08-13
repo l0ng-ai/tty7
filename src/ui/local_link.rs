@@ -134,7 +134,15 @@ impl LocalLink {
                             tty7_core::host::HostId::LOCAL,
                         );
                         if restarted {
-                            crate::ui::tree_sync::resync_after_local_daemon_change(cx);
+                            // The link installed just above is this new
+                            // daemon's own and answers right now, so the pull
+                            // goes out on it. Dropping it first — which is what
+                            // a caller that killed the daemon itself has to do —
+                            // would leave every window waiting out another
+                            // connect, and a pull that runs out its fifteen
+                            // seconds waiting owes a `Replace` a window with
+                            // tabs on screen never claims back.
+                            crate::ui::tree_sync::resync_local_windows_from_tree(cx);
                         } else {
                             crate::ui::tree_sync::on_link_up(cx, tty7_core::host::HostId::LOCAL);
                         }

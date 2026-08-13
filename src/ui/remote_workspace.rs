@@ -1873,49 +1873,10 @@ mod tests {
         assert_eq!(flow.choice(), Some(&choice));
     }
 
-    #[test]
-    fn only_a_changed_instance_counts_as_a_restart() {
-        let mut seen = std::collections::HashMap::new();
-        let host = HostId::from_connection_key("ssh:build-box");
-
-        assert!(!crate::ui::tree_sync::note_instance(
-            seen.entry(host).or_default(),
-            "abc"
-        ));
-        assert!(!crate::ui::tree_sync::note_instance(
-            seen.entry(host).or_default(),
-            "abc"
-        ));
-        assert!(crate::ui::tree_sync::note_instance(
-            seen.entry(host).or_default(),
-            "def"
-        ));
-        assert!(!crate::ui::tree_sync::note_instance(
-            seen.entry(host).or_default(),
-            "def"
-        ));
-    }
-
-    #[test]
-    fn an_unknown_instance_is_not_a_restart_and_is_not_remembered() {
-        // The production caller reads the slot through `entry().or_default()`,
-        // which leaves an empty String behind for an empty instance — the
-        // "not remembered" guarantee now lives in note_instance refusing to
-        // *report* a restart for it and never mistaking the empty placeholder
-        // for a real instance later.
-        let mut seen = std::collections::HashMap::new();
-        let host = HostId::from_connection_key("ssh:build-box");
-
-        assert!(!crate::ui::tree_sync::note_instance(
-            seen.entry(host).or_default(),
-            ""
-        ));
-        assert!(
-            !crate::ui::tree_sync::note_instance(seen.entry(host).or_default(), "abc"),
-            "the first real instance is a first sighting, not a restart"
-        );
-    }
-
+    /// What the comparison itself answers is pinned where it now lives, in
+    /// `tree_sync`. What is this module's own is the slot it reads: one per
+    /// host, keyed the way `server_restarted` keys it, so a machine that
+    /// restarted says nothing about the one next to it.
     #[test]
     fn instances_are_per_machine() {
         let mut seen = std::collections::HashMap::new();
