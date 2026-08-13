@@ -1,7 +1,15 @@
 use std::fmt;
 
-pub const ASSET_X86_64: &str = "tty7-server-linux-x86_64-musl";
-pub const ASSET_AARCH64: &str = "tty7-server-linux-aarch64-musl";
+pub const ASSET_LINUX_X86_64: &str = "tty7-server-linux-x86_64-musl";
+pub const ASSET_LINUX_AARCH64: &str = "tty7-server-linux-aarch64-musl";
+
+/// The macOS servers carry no libc suffix because there is nothing to choose:
+/// they link the system libSystem every macOS has, which is as portable there
+/// as static musl is on Linux. Same flat, version-free shape as the others —
+/// the tag in the download URL carries the version.
+pub const ASSET_MACOS_X86_64: &str = "tty7-server-macos-x86_64";
+pub const ASSET_MACOS_AARCH64: &str = "tty7-server-macos-aarch64";
+
 pub const CHECKSUMS_ASSET: &str = "checksums.txt";
 
 pub const RELEASE_BASE: &str = "https://github.com/l0ng-ai/tty7/releases/download";
@@ -10,7 +18,7 @@ pub const INSTALL_DIR_COMPONENTS: [&str; 4] = [".local", "share", "tty7", "bin"]
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsupportedTarget {
-    NotLinux { raw: String },
+    UnsupportedSystem { raw: String },
     UnknownMachine { raw: String },
     Unparseable { raw: String },
 }
@@ -18,9 +26,9 @@ pub enum UnsupportedTarget {
 impl UnsupportedTarget {
     pub fn raw(&self) -> &str {
         match self {
-            Self::NotLinux { raw } | Self::UnknownMachine { raw } | Self::Unparseable { raw } => {
-                raw
-            }
+            Self::UnsupportedSystem { raw }
+            | Self::UnknownMachine { raw }
+            | Self::Unparseable { raw } => raw,
         }
     }
 }
@@ -28,14 +36,15 @@ impl UnsupportedTarget {
 impl fmt::Display for UnsupportedTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotLinux { raw } => write!(
+            Self::UnsupportedSystem { raw } => write!(
                 f,
-                "a remote tty7 workspace needs a Linux host; this machine reports `uname -sm` = {raw:?}"
+                "a remote tty7 workspace needs a Linux or macOS host; this machine reports \
+                 `uname -sm` = {raw:?}"
             ),
             Self::UnknownMachine { raw } => write!(
                 f,
                 "no tty7-server is published for this architecture (`uname -sm` = {raw:?}); \
-                 supported: x86_64/amd64 and aarch64/arm64"
+                 supported: Linux on x86_64/amd64 and aarch64/arm64, macOS on x86_64 and arm64"
             ),
             Self::Unparseable { raw } => write!(
                 f,
@@ -53,23 +62,31 @@ pub fn asset_for_uname(uname_sm: &str) -> Result<&'static str, UnsupportedTarget
     let (Some(system), Some(machine), None) = (words.next(), words.next(), words.next()) else {
         return Err(UnsupportedTarget::Unparseable { raw });
     };
-    if system != "Linux" {
-        return Err(UnsupportedTarget::NotLinux { raw });
-    }
-    match machine {
-        "x86_64" | "amd64" => Ok(ASSET_X86_64),
-        "aarch64" | "arm64" | "armv8l" | "armv8b" => Ok(ASSET_AARCH64),
-        _ => Err(UnsupportedTarget::UnknownMachine { raw }),
+    // Matched per system rather than by machine alone: the two do not share a
+    // vocabulary. Linux answers `arm64` on some distributions and `aarch64` on
+    // others, while macOS only ever says `arm64` — accepting Linux's spellings
+    // under Darwin would be guessing at output no Mac produces, and the machine
+    // names that would reach it are the ones worth refusing loudly.
+    match (system, machine) {
+        ("Linux", "x86_64" | "amd64") => Ok(ASSET_LINUX_X86_64),
+        ("Linux", "aarch64" | "arm64" | "armv8l" | "armv8b") => Ok(ASSET_LINUX_AARCH64),
+        // A Rosetta shell reports `x86_64` on Apple Silicon, and taking it at
+        // its word is right: the x86_64 server runs under the same translation
+        // the shell asking for it is already running under.
+        ("Darwin", "x86_64") => Ok(ASSET_MACOS_X86_64),
+        ("Darwin", "arm64") => Ok(ASSET_MACOS_AARCH64),
+        ("Linux" | "Darwin", _) => Err(UnsupportedTarget::UnknownMachine { raw }),
+        _ => Err(UnsupportedTarget::UnsupportedSystem { raw }),
     }
 }
 
 pub fn interned(name: &str) -> &'static str {
-    if name == ASSET_X86_64 {
-        ASSET_X86_64
-    } else if name == ASSET_AARCH64 {
-        ASSET_AARCH64
-    } else {
-        Box::leak(name.to_string().into_boxed_str())
+    match name {
+        _ if name == ASSET_LINUX_X86_64 => ASSET_LINUX_X86_64,
+        _ if name == ASSET_LINUX_AARCH64 => ASSET_LINUX_AARCH64,
+        _ if name == ASSET_MACOS_X86_64 => ASSET_MACOS_X86_64,
+        _ if name == ASSET_MACOS_AARCH64 => ASSET_MACOS_AARCH64,
+        _ => Box::leak(name.to_string().into_boxed_str()),
     }
 }
 
@@ -139,7 +156,7 @@ mod tests {
     #[test]
     fn uname_maps_to_the_published_assets() {
         for raw in ["Linux x86_64", "Linux amd64"] {
-            assert_eq!(asset_for_uname(raw).unwrap(), ASSET_X86_64, "{raw}");
+            assert_eq!(asset_for_uname(raw).unwrap(), ASSET_LINUX_X86_64, "{raw}");
         }
         for raw in [
             "Linux aarch64",
@@ -147,16 +164,43 @@ mod tests {
             "Linux armv8l",
             "Linux armv8b",
         ] {
-            assert_eq!(asset_for_uname(raw).unwrap(), ASSET_AARCH64, "{raw}");
+            assert_eq!(asset_for_uname(raw).unwrap(), ASSET_LINUX_AARCH64, "{raw}");
+        }
+        assert_eq!(
+            asset_for_uname("Darwin arm64").unwrap(),
+            ASSET_MACOS_AARCH64
+        );
+        assert_eq!(
+            asset_for_uname("Darwin x86_64").unwrap(),
+            ASSET_MACOS_X86_64
+        );
+    }
+
+    /// The two systems are matched as pairs, so a machine name that means one
+    /// thing on Linux must not be honoured under Darwin just because it appears
+    /// in the same function.
+    #[test]
+    fn a_machine_name_does_not_carry_across_systems() {
+        for raw in ["Darwin aarch64", "Darwin amd64", "Darwin armv8l"] {
+            assert!(
+                matches!(
+                    asset_for_uname(raw).unwrap_err(),
+                    UnsupportedTarget::UnknownMachine { .. }
+                ),
+                "{raw} is not something a Mac reports"
+            );
         }
     }
 
     #[test]
     fn uname_output_is_trimmed_before_matching() {
-        assert_eq!(asset_for_uname("Linux x86_64\n").unwrap(), ASSET_X86_64);
+        assert_eq!(
+            asset_for_uname("Linux x86_64\n").unwrap(),
+            ASSET_LINUX_X86_64
+        );
         assert_eq!(
             asset_for_uname("  Linux x86_64  \r\n").unwrap(),
-            ASSET_X86_64
+            ASSET_LINUX_X86_64
         );
     }
 
@@ -185,17 +229,18 @@ mod tests {
     }
 
     #[test]
-    fn non_linux_systems_are_refused() {
+    fn systems_we_publish_nothing_for_are_refused() {
         for raw in [
-            "Darwin arm64",
             "FreeBSD amd64",
+            "OpenBSD amd64",
             "SunOS i86pc",
             "linux x86_64",
+            "darwin arm64",
         ] {
             assert!(
                 matches!(
                     asset_for_uname(raw).unwrap_err(),
-                    UnsupportedTarget::NotLinux { .. }
+                    UnsupportedTarget::UnsupportedSystem { .. }
                 ),
                 "{raw}"
             );
@@ -233,7 +278,7 @@ mod tests {
     #[test]
     fn download_urls_point_at_the_release_the_tag_names() {
         assert_eq!(
-            download_url(&release_tag("26.7.5"), ASSET_X86_64),
+            download_url(&release_tag("26.7.5"), ASSET_LINUX_X86_64),
             "https://github.com/l0ng-ai/tty7/releases/download/v26.7.5/tty7-server-linux-x86_64-musl"
         );
         assert_eq!(
@@ -244,16 +289,32 @@ mod tests {
 
     #[test]
     fn asset_names_are_the_ones_the_release_workflow_publishes() {
-        assert_eq!(ASSET_X86_64, "tty7-server-linux-x86_64-musl");
-        assert_eq!(ASSET_AARCH64, "tty7-server-linux-aarch64-musl");
-        for asset in [ASSET_X86_64, ASSET_AARCH64] {
+        assert_eq!(ASSET_LINUX_X86_64, "tty7-server-linux-x86_64-musl");
+        assert_eq!(ASSET_LINUX_AARCH64, "tty7-server-linux-aarch64-musl");
+        assert_eq!(ASSET_MACOS_X86_64, "tty7-server-macos-x86_64");
+        assert_eq!(ASSET_MACOS_AARCH64, "tty7-server-macos-aarch64");
+
+        let all = [
+            ASSET_LINUX_X86_64,
+            ASSET_LINUX_AARCH64,
+            ASSET_MACOS_X86_64,
+            ASSET_MACOS_AARCH64,
+        ];
+        for asset in all {
             assert!(
-                !asset.contains("unknown"),
+                !asset.contains("unknown") && !asset.contains("apple"),
                 "{asset} carries the triple's vendor field"
             );
+            assert_eq!(asset, interned(asset), "{asset} must intern to itself");
         }
-        assert!(!ASSET_X86_64.contains(ASSET_AARCH64));
-        assert!(!ASSET_AARCH64.contains(ASSET_X86_64));
+        // No name may contain another: `checksums` looks a line up by filename,
+        // and a name that is a suffix of its neighbour would let one asset's
+        // digest answer for the other's.
+        for a in all {
+            for b in all {
+                assert!(a == b || !a.contains(b), "{a} contains {b}");
+            }
+        }
     }
 
     #[test]

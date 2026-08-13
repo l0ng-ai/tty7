@@ -46,10 +46,14 @@ Nothing is synced or copied. The repository stays where it is.
 
 | | |
 |---|---|
-| **What** | A single static `tty7-server` binary |
+| **What** | A single self-contained `tty7-server` binary |
 | **Where** | `~/.local/share/tty7/bin/tty7-server-c<control>p<protocol>` |
 | **Privileges** | None. No sudo, nothing outside your home directory |
-| **Hosts** | Linux, x86-64 or aarch64 |
+| **Hosts** | Linux (x86-64 or aarch64) and macOS (Apple Silicon or Intel) |
+
+The Linux binary is linked fully static against musl, so it runs on any
+distribution whatever its glibc vintage. The macOS one links only the libraries
+every Mac already has. Either way nothing is installed beside it.
 
 The binary is named after the wire dialect it speaks, so a client and a server
 that disagree never quietly half-work — tty7 installs the matching one instead.

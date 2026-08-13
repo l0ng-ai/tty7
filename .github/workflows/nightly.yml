@@ -309,11 +309,96 @@ jobs:
           path: tty7/dist/${{ matrix.asset }}
           if-no-files-found: error
 
+  # Mirrors release.yml's server-macos job; keep the two in sync when editing.
+  # Nightly carries the macOS servers for the same reason it carries the Linux
+  # ones: so the remote-install path onto a Mac can be exercised against the
+  # rolling channel instead of waiting for a tag.
+  server-macos:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+            asset: tty7-server-macos-aarch64
+          - target: x86_64-apple-darwin
+            arch: x86_64
+            asset: tty7-server-macos-x86_64
+    runs-on: macos-latest
+    env:
+      RUSTFLAGS: -C strip=symbols
+    steps:
+      - name: Checkout tty7
+        uses: actions/checkout@v4
+        with:
+          path: tty7
+
+      # Stamped for the same reason the musl servers are: the version the server
+      # reports during the handshake has to be tonight's, not the last stable.
+      - name: Stamp nightly version
+        working-directory: tty7
+        run: bash .github/scripts/stamp-version.sh "${{ needs.plan.outputs.version }}"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tty7
+          key: ${{ matrix.target }}
+
+      - name: Look for the tty7-server package
+        id: probe
+        working-directory: tty7
+        run: |
+          set -euo pipefail
+          if cargo metadata --no-deps --format-version 1 \
+              | jq -e '[.packages[].name] | index("tty7-server")' >/dev/null; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::tty7-server is not a workspace member yet — tonight's nightly carries no macOS remote-server assets"
+          fi
+
+      # No `--locked`, matching the rest of nightly: the version stamp above
+      # rewrites Cargo.toml and cargo has to be free to refresh its lock entry.
+      - name: Build tty7-server
+        if: steps.probe.outputs.present == 'true'
+        working-directory: tty7
+        run: cargo build --release -p tty7-server --target ${{ matrix.target }}
+
+      - name: Assert the binary is self-contained
+        if: steps.probe.outputs.present == 'true'
+        working-directory: tty7
+        run: |
+          bash .github/scripts/assert-macho.sh \
+            "target/${{ matrix.target }}/release/tty7-server" "${{ matrix.arch }}"
+
+      - name: Stage the asset
+        if: steps.probe.outputs.present == 'true'
+        working-directory: tty7
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/tty7-server" \
+             "dist/${{ matrix.asset }}"
+          chmod +x "dist/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v7
+        if: steps.probe.outputs.present == 'true'
+        with:
+          name: nightly-${{ matrix.asset }}
+          path: tty7/dist/${{ matrix.asset }}
+          if-no-files-found: error
+
   # Single publish step after all platforms succeed, so the rolling release is
   # always complete — a failed platform means tonight's nightly is skipped
   # entirely and users keep yesterday's, never a partial asset set.
   publish:
-    needs: [plan, build, server-musl]
+    needs: [plan, build, server-musl, server-macos]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
