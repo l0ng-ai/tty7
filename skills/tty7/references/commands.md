@@ -317,10 +317,10 @@ still tell a real name from a stand-in.
 | `pane close --orphans` | close every pane no workspace holds | `{"closed":[...]}` |
 
 `--all` is the one that shows leaks. Each entry is
-`{"pane","workspace","orphan","owner","title","cwd","live"}`: `owner` is
-`tty7-cli` for panes this CLI spawned (a workspace id otherwise), and
-`orphan: true` means no workspace holds it. An interrupted `tty7 run` is what
-leaves them.
+`{"pane","workspace","orphan","owner","title","cwd","live"}`: `owner` is the id
+of the workspace that may attach to the pane (absent when none may — a
+free-floating `tty7 run` before `--keep` files it), and `orphan: true` means
+no workspace holds it. An interrupted `tty7 run` is what leaves them.
 
 `close` takes several ids at once and keeps going after a failure: the rest are
 still attempted, and it exits 1 with `{"closed":[...],"failed":[...]}` so you

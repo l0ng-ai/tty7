@@ -50,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **The `owner` field of `pane ls --all` is documented the same way in both
+  references** — the bundled skill reference still claimed the CLI stamps a
+  literal `"tty7-cli"` owner, the behaviour that was removed because an owner
+  names the workspace allowed to attach. Both now describe the workspace id,
+  or its absence while a pane is unfiled (#591).
 - **A failed `tty7 wait` now says so on stderr even under `-q`.** Timeout and
   "pane exited first" are structured exits, so they bypassed the anyhow path
   that prints under quiet mode and left the exit code as the only evidence —

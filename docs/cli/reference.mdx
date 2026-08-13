@@ -289,9 +289,9 @@ a stand-in.
 
 `--all` is the one that shows leaks. Each entry is
 `{"pane","workspace","orphan","owner","title","cwd","live"}`: `owner` is the id
-of the workspace that owns the pane, and `orphan: true` means no workspace holds
-it. An interrupted `run` leaves orphans here, as does a `ws rm` that reported
-panes it could not hang up.
+of the workspace that may attach to the pane (absent when none may), and
+`orphan: true` means no workspace holds it. An interrupted `run` leaves orphans
+here, as does a `ws rm` that reported panes it could not hang up.
 
 `--orphans` is the reaper for exactly those. It closes what `pane ls --all`
 lists as orphaned and nothing else — panes a workspace holds are untouched —
