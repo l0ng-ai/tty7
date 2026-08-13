@@ -247,17 +247,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used to fail into a logfile line and nothing else; the click now raises the
   same kind of toast a failed image upload does, naming the path and the
   error. (#542)
-- **Settings' custom controls joined the keyboard** — the keybinding page's
-  record chips are focusable now, and a focused chip starts capture on
-  Enter/Space (gpui turns that key-up into a click on its own; a guard keeps a
-  re-triggered chip from wiping the chord it just gathered). Every segmented
-  control — bell mode, cursor shape, scrollback buckets, presets and the rest —
-  can be tabbed to and stepped with the arrow keys, clamped at the ends, and
-  the focused group wears the accent border the page already used for its
-  recording state. And the overlay itself now traps focus: Tab used to walk
-  straight out of Settings onto the workspace chrome behind it and paint focus
-  rings there, because the panel occluded the mouse but never contained the
-  focus walk. (#552)
+- **Settings' custom controls joined the keyboard** — the page was reachable
+  with a mouse and with nothing else. The section list, every segmented control
+  (bell mode, cursor shape, scrollback buckets, presets and the rest), the font
+  size and line height steppers, every switch, and — on a page whose whole
+  audience is people at a keyboard — the keybinding recorder were all bare
+  click targets with no focus handle between them, so Tab stepped over all five
+  and no key could press any of them. Tab now stops on each, Enter or Space
+  presses what it finds, and the section list and the segmented groups also
+  step with the arrow keys, clamped at the ends rather than wrapping: these are
+  pickers, not dials. A focused control wears a ring, drawn beside it rather
+  than in the layout so arriving at one cannot nudge the row it sits in. The
+  recorder starts capture on the key down, and re-entering capture for the row
+  already capturing is a no-op — otherwise recording a bare Enter or Space
+  would re-press the chip and throw away the chord it had just gathered. And
+  the overlay itself now traps focus: Tab used to walk straight out of Settings
+  onto the workspace chrome behind it and paint focus rings there, because the
+  panel occluded the mouse but never contained the focus walk. The pickers the
+  diff overlay and the forwards editor build out of the same code are left as
+  they were — mouse-only, and deaf to the arrow keys. (#552)
 
 ## [26.8.3] - 2026-08-12
 

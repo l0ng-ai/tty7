@@ -825,9 +825,128 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     }
 }
 
-pub(crate) fn switch(id: impl Into<gpui::ElementId>, cx: &App) -> gpui_component::switch::Switch {
-    let accent = cx.global::<presets::ActiveAccent>().0;
-    gpui_component::switch::Switch::new(id).color(Hsla::from(rgb(accent)))
+/// The ring that says where the keyboard is, drawn as an overlay rather than
+/// as a border in the layout: a ring that took space of its own would nudge
+/// whatever row it landed on every time focus arrived. Sits just outside the
+/// control it rings, so the control's own edge stays visible under it.
+///
+/// The caller is responsible for `.relative()` on the element being ringed,
+/// and for an `inset` its own clipping can live with: a container that hides
+/// its overflow will cut off a ring drawn outside its bounds.
+pub(crate) fn focus_ring(radius: Pixels, inset: Pixels, cx: &App) -> gpui::Div {
+    use gpui::Styled as _;
+    gpui::div()
+        .absolute()
+        .top(inset)
+        .left(inset)
+        .right(inset)
+        .bottom(inset)
+        .rounded(radius)
+        .border_1()
+        .border_color(cx.theme().ring)
+}
+
+/// A switch the keyboard can work.
+///
+/// gpui-component's own `Switch` has no focus handle anywhere in the file, so
+/// it never entered the tab order and had no activation key — one of the five
+/// classes of settings control that were mouse-only (#552). This wraps one in
+/// a focus stop: Tab lands on it, Enter or Space toggles it through the very
+/// same callback the mouse click uses, so the two can never drift apart.
+///
+/// The flag has to be set on the handle, at `track_focus`: a handle from
+/// `cx.focus_handle()` is minted with `tab_stop: false`, and `Interactivity`'s
+/// own `tab_stop()` is ignored once a handle is tracked from outside — so a
+/// tracked handle that never sets it is focusable by mouse and stepped
+/// straight over by the walker.
+#[derive(gpui::IntoElement)]
+pub(crate) struct Switch {
+    id: gpui::SharedString,
+    checked: bool,
+    on_click: Option<std::rc::Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
+}
+
+impl Switch {
+    /// Set the checked state of the switch.
+    pub(crate) fn checked(mut self, checked: bool) -> Self {
+        self.checked = checked;
+        self
+    }
+
+    /// The handler for both ways of flipping it: a click, and the Enter or
+    /// Space that a focused switch now answers.
+    pub(crate) fn on_click<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&bool, &mut Window, &mut App) + 'static,
+    {
+        self.on_click = Some(std::rc::Rc::new(handler));
+        self
+    }
+}
+
+impl gpui::RenderOnce for Switch {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl gpui::IntoElement {
+        use gpui::prelude::FluentBuilder as _;
+        use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+
+        let Self {
+            id,
+            checked,
+            on_click,
+        } = self;
+        let accent = cx.global::<presets::ActiveAccent>().0;
+        let focus = window
+            .use_keyed_state(
+                gpui::SharedString::from(format!("{id}-focus")),
+                cx,
+                |_, cx| cx.focus_handle(),
+            )
+            .read(cx)
+            .clone()
+            .tab_stop(true);
+        let focused = focus.is_focused(window);
+
+        let mut inner = gpui_component::switch::Switch::new(id.clone())
+            .color(Hsla::from(rgb(accent)))
+            .checked(checked);
+        if let Some(handler) = on_click.clone() {
+            inner = inner.on_click(move |on, window, cx| handler(on, window, cx));
+        }
+
+        gpui::div()
+            .id(gpui::SharedString::from(format!("{id}-stop")))
+            .track_focus(&focus)
+            .relative()
+            .flex()
+            .child(inner)
+            .when(focused, |d| d.child(focus_ring(px(999.), px(-2.), cx)))
+            .on_key_down(move |ev: &gpui::KeyDownEvent, window, cx| {
+                if !is_activation_key(&ev.keystroke) {
+                    return;
+                }
+                cx.stop_propagation();
+                if let Some(handler) = on_click.as_ref() {
+                    handler(&!checked, window, cx);
+                }
+            })
+    }
+}
+
+/// Enter and Space press whatever has the focus — the one gesture every
+/// toolkit agrees on. gpui gives this away for free to elements that carry a
+/// click listener, but only on the key *up*, and the controls this page had to
+/// teach are driven from the key down, so they ask here instead. A chord with
+/// a modifier in it belongs to whoever bound it.
+pub(crate) fn is_activation_key(keystroke: &gpui::Keystroke) -> bool {
+    matches!(keystroke.key.as_str(), "enter" | "space") && !keystroke.modifiers.modified()
+}
+
+pub(crate) fn switch(id: impl Into<gpui::SharedString>, _cx: &App) -> Switch {
+    Switch {
+        id: id.into(),
+        checked: false,
+        on_click: None,
+    }
 }
 
 pub(crate) fn apply_cursor_hide_mode(cx: &mut App) {

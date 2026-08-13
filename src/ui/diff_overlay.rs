@@ -2229,6 +2229,32 @@ mod overlay_gpui_tests {
         });
     }
 
+    /// #552 put a focus stop and the arrow keys on the settings page's
+    /// segmented groups. This picker is built by the same code and asked for
+    /// neither: Tab must not stop on it, and an unmodified arrow anywhere in
+    /// the overlay must not swap the view out from under the reader.
+    #[gpui::test]
+    fn the_view_picker_stays_off_the_keyboard(cx: &mut TestAppContext) {
+        let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
+        show(&app, &mut vcx, DiffSource::Worktree);
+        vcx.simulate_resize(gpui::size(gpui::px(1100.), gpui::px(800.)));
+        vcx.run_until_parked();
+
+        let was = vcx.update(|_, cx| view_mode(cx));
+        // Walk the window's own tab-stop map rather than pressing Tab: with a
+        // terminal pane focused, `tab` is bound to SendTab and never reaches
+        // the focus walker, which would make this pass for the wrong reason.
+        for _ in 0..80 {
+            vcx.update(|window, cx| window.focus_next(cx));
+            vcx.simulate_keystrokes("right");
+        }
+        assert_eq!(
+            vcx.update(|_, cx| view_mode(cx)),
+            was,
+            "the overlay's view picker joined the tab order behind the page's back",
+        );
+    }
+
     /// Every header branch, every row renderer, once each. A missing icon, an
     /// unset global or a panicking helper shows up here rather than the first
     /// time somebody opens a commit.

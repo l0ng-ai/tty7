@@ -1482,6 +1482,26 @@ impl gpui::RenderOnce for KeyCaptureChip {
             })
             .hover(|d| d.bg(kbd_bg))
             .child(captured)
+            // Enter and Space open capture on the key *down*. gpui would do it
+            // on the key up anyway, through the click path a focused element
+            // gets for free, but a recorder that starts half a keystroke late
+            // is a recorder that can miss the chord the user is already
+            // typing — and the key-up click still arrives, where
+            // `start_recording_key`'s re-entry guard absorbs it.
+            .on_key_down({
+                let app = app.clone();
+                let action = action.clone();
+                move |ev: &KeyDownEvent, window, cx| {
+                    if !crate::ui::theme::is_activation_key(&ev.keystroke) {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    app.update(cx, |this, cx| {
+                        this.start_recording_key(action.clone(), window, cx)
+                    })
+                    .ok();
+                }
+            })
             .on_click(move |_, window, cx| {
                 app.update(cx, |this, cx| {
                     this.start_recording_key(action.clone(), window, cx)
@@ -1523,6 +1543,108 @@ fn segmented_arrow_step(
     }
 }
 
+/// The cell a key press picks on a focused segmented group: the arrows step
+/// the selection, and Enter or Space presses the highlighted cell — the same
+/// thing clicking it does, so the gesture every other control on the page
+/// answers cannot be the one gesture this one ignores. Enter on the custom
+/// cell picks nothing: there is no bucket value behind it to write (#550).
+fn segmented_key_pick(
+    keystroke: &gpui::Keystroke,
+    selected: Option<usize>,
+    buckets: usize,
+) -> Option<usize> {
+    if crate::ui::theme::is_activation_key(keystroke) {
+        return selected;
+    }
+    segmented_arrow_step(&keystroke.key, &keystroke.modifiers, selected, buckets)
+}
+
+/// One end of a settings stepper — the − or the + beside a font size, a UI
+/// font size or a line height. A bare click target until #552: no focus
+/// handle, so no tab stop and no key that could press it, on a page whose
+/// whole audience is people at a keyboard. A component for the same reason as
+/// the chip and the group: only a render with the `Window` in it can mint a
+/// focus handle that survives the next frame.
+struct StepperButton {
+    app: gpui::WeakEntity<Tty7App>,
+    id: &'static str,
+    glyph: &'static str,
+    slot: usize,
+    foreground: gpui::Hsla,
+    border: gpui::Hsla,
+    hover_bg: gpui::Rgba,
+    on_press: std::rc::Rc<dyn Fn(&mut Tty7App, &mut Context<Tty7App>)>,
+}
+
+impl gpui::RenderOnce for StepperButton {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let StepperButton {
+            app,
+            id,
+            glyph,
+            slot,
+            foreground,
+            border,
+            hover_bg,
+            on_press,
+        } = self;
+        let corners =
+            rounding::segment_corners(slot, 3, rounding::TRACK_RADIUS, rounding::HAIRLINE);
+        let focus = window
+            .use_keyed_state(id, cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone()
+            .tab_stop(true);
+        let focused = focus.is_focused(window);
+        h_flex()
+            .id(id)
+            .track_focus(&focus)
+            .items_center()
+            .justify_center()
+            .h_full()
+            .px_2p5()
+            .text_sm()
+            .cursor_pointer()
+            .text_color(foreground)
+            .when(slot > 0, |s| s.border_l_1().border_color(border))
+            .rounded_corners(corners)
+            .hover(|h| h.bg(hover_bg))
+            // The stepper track clips its children, so this one says where the
+            // keyboard is with a wash rather than the ring the page uses
+            // elsewhere: a ring drawn outside these bounds would be cut off by
+            // the track's own `overflow_hidden`.
+            .when(focused, |s| s.bg(cx.theme().ring.opacity(0.28)))
+            .child(glyph)
+            .on_key_down({
+                let app = app.clone();
+                let on_press = on_press.clone();
+                move |ev: &KeyDownEvent, _window, cx| {
+                    if !crate::ui::theme::is_activation_key(&ev.keystroke) {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    app.update(cx, |this, cx| on_press(this, cx)).ok();
+                }
+            })
+            .on_click(move |_, _window, cx| {
+                app.update(cx, |this, cx| on_press(this, cx)).ok();
+            })
+    }
+}
+
+/// Whether a segmented group takes a focus stop of its own.
+///
+/// The settings page wants one on every group it draws (#552). The diff
+/// overlay and the forwards editor build theirs through the same code for a
+/// two-cell picker in a toolbar, and nobody asked for those to enter the tab
+/// order or to start eating unmodified arrow keys — so they stay exactly the
+/// mouse-only control they have always been.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SegmentedKeys {
+    Focusable,
+    MouseOnly,
+}
+
 /// The settings segmented control as a component rather than a bare row of
 /// click targets. Building it as a `RenderOnce` is what gets its render the
 /// `Window` the section renderers never see — and the window is what a stable
@@ -1535,6 +1657,7 @@ struct SegmentedControl {
     options: Vec<String>,
     selected: Option<usize>,
     custom_label: Option<String>,
+    keys: SegmentedKeys,
     on_pick: std::rc::Rc<dyn Fn(&mut Tty7App, usize, &mut Window, &mut Context<Tty7App>)>,
 }
 
@@ -1547,6 +1670,7 @@ impl gpui::RenderOnce for SegmentedControl {
             options,
             selected,
             custom_label,
+            keys,
             on_pick,
         } = self;
         let theme = cx.theme();
@@ -1567,37 +1691,37 @@ impl gpui::RenderOnce for SegmentedControl {
         // element. Keyed by the control id so a re-render finds the same handle
         // and focus survives it; the focused group wears the accent border the
         // key-capture chip already uses for its recording state.
-        let focus = window
-            .use_keyed_state(id.clone(), cx, |_, cx| cx.focus_handle())
-            .read(cx)
-            .clone()
-            .tab_stop(true);
-        let focused = focus.is_focused(window);
+        let focus = (keys == SegmentedKeys::Focusable).then(|| {
+            window
+                .use_keyed_state(id.clone(), cx, |_, cx| cx.focus_handle())
+                .read(cx)
+                .clone()
+                .tab_stop(true)
+        });
+        let focused = focus.as_ref().is_some_and(|focus| focus.is_focused(window));
         h_flex()
             .id(gpui::ElementId::Name(id.clone()))
-            .track_focus(&focus)
+            .when_some(focus, |group, focus| group.track_focus(&focus))
             .h(px(24.))
             .rounded(rounding::TRACK_RADIUS)
             .border_1()
             .border_color(if focused { accent } else { border })
             .bg(gpui::rgb(sf.base))
             .overflow_hidden()
-            .on_key_down({
-                let app = app.clone();
-                let on_pick = on_pick.clone();
-                move |ev: &KeyDownEvent, window, cx| {
-                    let Some(next) = segmented_arrow_step(
-                        &ev.keystroke.key,
-                        &ev.keystroke.modifiers,
-                        selected,
-                        buckets,
-                    ) else {
-                        return;
-                    };
-                    cx.stop_propagation();
-                    app.update(cx, |this, cx| on_pick(this, next, window, cx))
-                        .ok();
-                }
+            .when(keys == SegmentedKeys::Focusable, |group| {
+                group.on_key_down({
+                    let app = app.clone();
+                    let on_pick = on_pick.clone();
+                    move |ev: &KeyDownEvent, window, cx| {
+                        let Some(next) = segmented_key_pick(&ev.keystroke, selected, buckets)
+                        else {
+                            return;
+                        };
+                        cx.stop_propagation();
+                        app.update(cx, |this, cx| on_pick(this, next, window, cx))
+                            .ok();
+                    }
+                })
             })
             .children(cells.into_iter().enumerate().map(|(i, (label, bucket))| {
                 // A bucket is highlighted only on an exact match, and the
@@ -1813,6 +1937,52 @@ impl Tty7App {
                     ),
             )
             .child(nav_body);
+
+        // The section list joins the keyboard as one stop with arrows inside
+        // it, the way a list of choices is walked everywhere else — Tab lands
+        // on the list, Up and Down move the section, and the page follows at
+        // once. Per-item stops would have meant eight, and gpui-component's
+        // `SidebarMenuItem` has no focus handle to give them anyway; the
+        // container is ours to make focusable (#552).
+        let nav_focus = window
+            .use_keyed_state("settings-nav", cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone()
+            .tab_stop(true);
+        let nav_focused = nav_focus.is_focused(window);
+        let sidebar = div()
+            .id("settings-nav")
+            .track_focus(&nav_focus)
+            .relative()
+            .flex_shrink_0()
+            .h_full()
+            .child(sidebar)
+            .when(nav_focused, |nav| {
+                nav.child(crate::ui::theme::focus_ring(px(0.), px(0.), cx))
+            })
+            .on_key_down(cx.listener({
+                let nav_focus = nav_focus.clone();
+                move |this, ev: &KeyDownEvent, window, cx| {
+                    // Only when the list itself holds the focus. The search box
+                    // sits inside this container, and the Up, Down and Enter a
+                    // reader presses in a text field are the text field's.
+                    if !nav_focus.is_focused(window) {
+                        return;
+                    }
+                    let sections = SettingsSection::ALL;
+                    let at = sections.iter().position(|s| *s == section).unwrap_or(0);
+                    // A section list is the same kind of picker a segmented
+                    // group is, so it answers the same keys by the same rules:
+                    // clamped at the ends, and Enter presses what is already
+                    // highlighted.
+                    let Some(next) = segmented_key_pick(&ev.keystroke, Some(at), sections.len())
+                    else {
+                        return;
+                    };
+                    cx.stop_propagation();
+                    this.select_settings_section(sections[next], cx);
+                }
+            }));
 
         let content = match section {
             SettingsSection::Appearance => self.render_settings_appearance(cx),
@@ -2189,9 +2359,21 @@ impl Tty7App {
         on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
         let sf = cx.global::<presets::Surfaces>().window;
-        self.segmented_on(sf, id, options, selected, cx, on_pick)
+        self.segmented_full(
+            sf,
+            id,
+            options,
+            Some(selected),
+            None,
+            SegmentedKeys::Focusable,
+            cx,
+            on_pick,
+        )
     }
 
+    /// The same control on a caller's own surface. This is the one the diff
+    /// overlay and the forwards editor reach for, and they get the mouse-only
+    /// group they have always had — see [`SegmentedKeys`].
     pub(crate) fn segmented_on(
         &self,
         sf: presets::Surface,
@@ -2201,7 +2383,16 @@ impl Tty7App {
         cx: &mut Context<Self>,
         on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
-        self.segmented_full(sf, id, options, Some(selected), None, cx, on_pick)
+        self.segmented_full(
+            sf,
+            id,
+            options,
+            Some(selected),
+            None,
+            SegmentedKeys::MouseOnly,
+            cx,
+            on_pick,
+        )
     }
 
     /// A segmented control over a fixed set of values, used where the config
@@ -2227,9 +2418,19 @@ impl Tty7App {
         on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
         let sf = cx.global::<presets::Surfaces>().window;
-        self.segmented_full(sf, id, options, selected, custom_label, cx, on_pick)
+        self.segmented_full(
+            sf,
+            id,
+            options,
+            selected,
+            custom_label,
+            SegmentedKeys::Focusable,
+            cx,
+            on_pick,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn segmented_full(
         &self,
         sf: presets::Surface,
@@ -2237,6 +2438,7 @@ impl Tty7App {
         options: &[&str],
         selected: Option<usize>,
         custom_label: Option<String>,
+        keys: SegmentedKeys,
         cx: &mut Context<Self>,
         on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
@@ -2247,6 +2449,7 @@ impl Tty7App {
             options: options.iter().map(|option| (*option).to_string()).collect(),
             selected,
             custom_label,
+            keys,
             on_pick: std::rc::Rc::new(on_pick),
         })
         .into_any_element()
@@ -2280,62 +2483,64 @@ impl Tty7App {
                     .any(|(tag, value)| tag == "liga" && *value != 0)
         });
 
-        let step = move |id: &'static str, glyph: &'static str, slot: usize| {
-            let corners =
-                rounding::segment_corners(slot, 3, rounding::TRACK_RADIUS, rounding::HAIRLINE);
-            h_flex()
-                .id(id)
-                .items_center()
-                .justify_center()
-                .h_full()
-                .px_2p5()
-                .text_sm()
-                .cursor_pointer()
-                .text_color(foreground)
-                .when(slot > 0, |s| s.border_l_1().border_color(border))
-                .rounded_corners(corners)
-                .hover(|h| h.bg(hover_bg))
-                .child(glyph)
+        let app = cx.entity().downgrade();
+        // The press is handed over once and drives both ways in: the click and
+        // the Enter or Space that a focused step now answers.
+        let step = move |id: &'static str,
+                         glyph: &'static str,
+                         slot: usize,
+                         on_press: fn(&mut Self, &mut Context<Self>)| {
+            gpui::Component::new(StepperButton {
+                app: app.clone(),
+                id,
+                glyph,
+                slot,
+                foreground,
+                border,
+                hover_bg,
+                on_press: std::rc::Rc::new(on_press),
+            })
+            .into_any_element()
         };
         let control_h = px(24.);
-        let stepper_row =
-            move |dec: Stateful<Div>, value: String, inc: Stateful<Div>, reset: Button| {
-                h_flex()
-                    .items_center()
-                    .gap_3()
-                    .child(reset)
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .h(control_h)
-                            .rounded(rounding::TRACK_RADIUS)
-                            .bg(stepper_bg)
-                            .border_1()
-                            .border_color(border)
-                            .overflow_hidden()
-                            .child(dec)
-                            .child(
-                                div()
-                                    .min_w(px(40.))
-                                    .border_l_1()
-                                    .border_color(border)
-                                    .py_1()
-                                    .text_center()
-                                    .text_sm()
-                                    .text_color(foreground)
-                                    .child(value),
-                            )
-                            .child(inc),
-                    )
-                    .into_any_element()
-            };
+        let stepper_row = move |dec: AnyElement, value: String, inc: AnyElement, reset: Button| {
+            h_flex()
+                .items_center()
+                .gap_3()
+                .child(reset)
+                .child(
+                    h_flex()
+                        .items_center()
+                        .h(control_h)
+                        .rounded(rounding::TRACK_RADIUS)
+                        .bg(stepper_bg)
+                        .border_1()
+                        .border_color(border)
+                        .overflow_hidden()
+                        .child(dec)
+                        .child(
+                            div()
+                                .min_w(px(40.))
+                                .border_l_1()
+                                .border_color(border)
+                                .py_1()
+                                .text_center()
+                                .text_sm()
+                                .text_color(foreground)
+                                .child(value),
+                        )
+                        .child(inc),
+                )
+                .into_any_element()
+        };
         let font_size_control = stepper_row(
-            step("font-dec", "−", 0).on_click(
-                cx.listener(|this, _, _w, cx| this.change_font_size(-FONT_SIZE_STEP, cx)),
-            ),
+            step("font-dec", "−", 0, |this, cx| {
+                this.change_font_size(-FONT_SIZE_STEP, cx)
+            }),
             format!("{:.0}", font_size),
-            step("font-inc", "+", 2)
-                .on_click(cx.listener(|this, _, _w, cx| this.change_font_size(FONT_SIZE_STEP, cx))),
+            step("font-inc", "+", 2, |this, cx| {
+                this.change_font_size(FONT_SIZE_STEP, cx)
+            }),
             Button::new("font-reset")
                 .label(t(L10nKey::Reset))
                 .ghost()
@@ -2345,13 +2550,13 @@ impl Tty7App {
 
         let ui_font_size = self.ui_font_size(cx);
         let ui_font_size_control = stepper_row(
-            step("ui-font-dec", "−", 0).on_click(
-                cx.listener(|this, _, _w, cx| this.change_ui_font_size(-UI_FONT_SIZE_STEP, cx)),
-            ),
+            step("ui-font-dec", "−", 0, |this, cx| {
+                this.change_ui_font_size(-UI_FONT_SIZE_STEP, cx)
+            }),
             format!("{ui_font_size:.0}"),
-            step("ui-font-inc", "+", 2).on_click(
-                cx.listener(|this, _, _w, cx| this.change_ui_font_size(UI_FONT_SIZE_STEP, cx)),
-            ),
+            step("ui-font-inc", "+", 2, |this, cx| {
+                this.change_ui_font_size(UI_FONT_SIZE_STEP, cx)
+            }),
             Button::new("ui-font-reset")
                 .label(t(L10nKey::Reset))
                 .ghost()
@@ -2361,13 +2566,13 @@ impl Tty7App {
 
         let line_height = self.line_height;
         let line_height_control = stepper_row(
-            step("lh-dec", "−", 0).on_click(
-                cx.listener(|this, _, _w, cx| this.change_line_height(-LINE_HEIGHT_STEP, cx)),
-            ),
+            step("lh-dec", "−", 0, |this, cx| {
+                this.change_line_height(-LINE_HEIGHT_STEP, cx)
+            }),
             format!("{:.2}", line_height),
-            step("lh-inc", "+", 2).on_click(
-                cx.listener(|this, _, _w, cx| this.change_line_height(LINE_HEIGHT_STEP, cx)),
-            ),
+            step("lh-inc", "+", 2, |this, cx| {
+                this.change_line_height(LINE_HEIGHT_STEP, cx)
+            }),
             Button::new("lh-reset")
                 .label(t(L10nKey::Reset))
                 .ghost()
@@ -8027,6 +8232,20 @@ mod tests {
         assert_eq!(segmented_arrow_step("left", &ctrl, Some(1), 3), None);
     }
 
+    /// Enter and Space press the highlighted cell, exactly as clicking it
+    /// does. The custom cell has nothing to press.
+    #[test]
+    fn enter_and_space_press_the_highlighted_cell() {
+        let key = |k: &str| gpui::Keystroke::parse(k).unwrap();
+        assert_eq!(segmented_key_pick(&key("enter"), Some(1), 3), Some(1));
+        assert_eq!(segmented_key_pick(&key("space"), Some(2), 3), Some(2));
+        assert_eq!(segmented_key_pick(&key("enter"), None, 3), None);
+        // A chord with a modifier in it belongs to whoever bound it.
+        assert_eq!(segmented_key_pick(&key("ctrl-enter"), Some(1), 3), None);
+        // And the arrows still step through the same door.
+        assert_eq!(segmented_key_pick(&key("right"), Some(1), 3), Some(2));
+    }
+
     /// The custom cell of a valued segmented (#550) holds no value to write, so
     /// the arrows step off it onto the last bucket and never onto it.
     #[test]
@@ -8159,5 +8378,103 @@ mod gpui_tests {
                 step + 1,
             );
         }
+    }
+
+    /// Walk the page with Tab, pressing Space at every stop, until `found`
+    /// says the control under test answered. Space is the safe probe: gpui
+    /// only fires its own keyboard-click on the key *up*, which no test
+    /// dispatches, so nothing but the page's own key-down handlers can react.
+    /// The first Tab moves off the search box before any key is typed into it.
+    fn walk_pressing(
+        app: &Entity<Tty7App>,
+        vcx: &mut VisualTestContext,
+        key: &str,
+        what: &str,
+        mut found: impl FnMut(&Entity<Tty7App>, &mut VisualTestContext) -> bool,
+    ) {
+        for _ in 0..160 {
+            vcx.simulate_keystrokes("tab");
+            vcx.simulate_keystrokes(key);
+            if found(app, vcx) {
+                return;
+            }
+        }
+        panic!("Tab never reached {what}");
+    }
+
+    fn open_appearance(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Appearance, window, cx);
+        });
+        vcx.simulate_resize(size(px(1100.), px(800.)));
+        vcx.run_until_parked();
+        (app, vcx)
+    }
+
+    /// #552's switches: gpui-component's `Switch` has no focus handle in the
+    /// whole file, so one had to be wrapped in a stop of the page's own.
+    #[gpui::test]
+    fn tab_reaches_a_switch_and_space_toggles_it(cx: &mut TestAppContext) {
+        let (app, mut vcx) = open_appearance(cx);
+        let was = vcx.update(|_, cx| cx.global::<Config>().cursor_blink);
+        walk_pressing(&app, &mut vcx, "space", "a switch", |_, vcx| {
+            vcx.update(|_, cx| cx.global::<Config>().cursor_blink) != was
+        });
+    }
+
+    /// #552's steppers: the − and the + beside a font size were bare click
+    /// targets with no handle and no key that could press them.
+    #[gpui::test]
+    fn tab_reaches_a_stepper_and_space_presses_it(cx: &mut TestAppContext) {
+        let (app, mut vcx) = open_appearance(cx);
+        let was = vcx.update(|_, cx| cx.global::<Config>().font_size);
+        walk_pressing(&app, &mut vcx, "space", "a stepper button", |_, vcx| {
+            vcx.update(|_, cx| cx.global::<Config>().font_size) != was
+        });
+    }
+
+    /// #552's section nav. The list sits one stop *before* the search box the
+    /// page opens focused, so Shift-Tab is the short way onto it — and Down
+    /// walks it from there.
+    #[gpui::test]
+    fn shift_tab_reaches_the_section_nav_and_down_walks_it(cx: &mut TestAppContext) {
+        let (app, mut vcx) = open_appearance(cx);
+        let section = |app: &Entity<Tty7App>, vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| app.read(cx).active_settings().map(|s| s.section))
+        };
+        for _ in 0..160 {
+            vcx.simulate_keystrokes("shift-tab");
+            vcx.simulate_keystrokes("down");
+            if section(&app, &mut vcx) == Some(SettingsSection::Terminal) {
+                // And back up again, to prove the walk is a walk.
+                vcx.simulate_keystrokes("up");
+                assert!(
+                    section(&app, &mut vcx) == Some(SettingsSection::Appearance),
+                    "Up did not step back to the section above",
+                );
+                return;
+            }
+        }
+        panic!("Shift-Tab never reached the section nav");
+    }
+
+    /// #552's record chip, end to end: the page's whole audience is people at
+    /// a keyboard, and starting a capture was a mouse-only gesture.
+    #[gpui::test]
+    fn tab_reaches_the_record_chip_and_enter_starts_capture(cx: &mut TestAppContext) {
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Keybindings, window, cx);
+        });
+        vcx.simulate_resize(size(px(1100.), px(800.)));
+        vcx.run_until_parked();
+        walk_pressing(&app, &mut vcx, "enter", "a record chip", |app, vcx| {
+            vcx.update(|_, cx| {
+                app.read(cx)
+                    .active_settings()
+                    .is_some_and(|s| s.recording.is_some())
+            })
+        });
     }
 }
