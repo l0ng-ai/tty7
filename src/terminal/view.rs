@@ -1254,7 +1254,17 @@ impl TerminalView {
         cell_width: Pixels,
         line_height: Pixels,
         scale: f32,
+        cx: &mut Context<Self>,
     ) {
+        // A column change reflows every wrapped line, and a match point is an
+        // absolute (line, column) against the width it was scanned at — so
+        // the highlights keep washing the *old* positions until something
+        // rescans. Output rescans them (`Wakeup` → refresh), but a quiet
+        // local pane has no output coming: without this the drift outlasts
+        // the resize indefinitely (#586). Rescan with the output path's
+        // discipline — it keeps the selection and never scrolls. Rows alone
+        // reflow nothing, so a height-only drag stays cheap.
+        let cols_changed = cols != self.terminal.size().cols;
         if (cols, rows) != (self.terminal.size().cols, self.terminal.size().rows) {
             self.last_hover_cell = None;
             self.hovered_link = None;
@@ -1279,6 +1289,9 @@ impl TerminalView {
             (cell_width.as_f32() * scale).round().max(1.) as u16,
             (line_height.as_f32() * scale).round().max(1.) as u16,
         );
+        if cols_changed && self.search.is_some() {
+            self.refresh_matches_after_output(cx);
+        }
     }
 
     pub fn cwd(&self) -> Option<std::path::PathBuf> {
@@ -8494,16 +8507,16 @@ mod gpui_tests {
         let (window, _daemon) = harness(cx);
         window
             .update(cx, |view, _, cx| {
-                view.set_grid_size(80, 24, px(8.), px(17.), 1.);
+                view.set_grid_size(80, 24, px(8.), px(17.), 1., cx);
                 view.hover_link_at(0, 23, true, cx);
                 assert_eq!(view.last_hover_cell, Some((0, 23)));
                 view.hovered_link = Some(HoveredLink {
                     start: Point::new(Line(23), Column(0)),
                     end: Point::new(Line(23), Column(3)),
                 });
-                view.set_grid_size(80, 24, px(8.), px(17.), 1.);
+                view.set_grid_size(80, 24, px(8.), px(17.), 1., cx);
                 assert_eq!(view.last_hover_cell, Some((0, 23)));
-                view.set_grid_size(80, 8, px(8.), px(17.), 1.);
+                view.set_grid_size(80, 8, px(8.), px(17.), 1., cx);
                 assert!(view.last_hover_cell.is_none(), "the cell is stale");
                 assert!(view.hovered_link.is_none(), "so is the link it resolved");
             })
@@ -10849,6 +10862,78 @@ mod gpui_tests {
                 view.close_search(window, cx);
                 assert_eq!(view.search_last_query, "(");
                 assert!(view.search.is_none());
+            })
+            .unwrap();
+    }
+
+    /// A match point is an absolute (line, column) against the width it was
+    /// scanned at, so a column change reflows the text out from under every
+    /// highlight. Output rescans them, but a quiet pane has none coming —
+    /// the resize itself has to rescan (#586).
+    #[gpui::test]
+    fn a_column_resize_rescans_the_open_searchs_highlights(cx: &mut TestAppContext) {
+        // Rooted: the open bar's input reaches for `Root` when a frame draws
+        // (see `rooted_harness`).
+        let (window, view, mut daemon) = rooted_harness(cx);
+
+        // 76 columns of text: one row at 80 wide, wrapped onto two at 40.
+        let mut line = vec![b'a'; 70];
+        line.extend_from_slice(b"needle\r\n");
+        DaemonMsg::Output(line).encode(&mut daemon).unwrap();
+
+        for _ in 0..200 {
+            let ready = cx.update(|cx| {
+                let v = view.read(cx);
+                let term = v.terminal.term.lock();
+                let grid = term.grid();
+                (0..grid.screen_lines() as i32)
+                    .any(|l| (0..grid.columns()).any(|c| grid[Line(l)][Column(c)].c == 'n'))
+            });
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| {
+                    v.open_search(window, cx);
+                    let input = v.search.as_ref().unwrap().input.clone();
+                    input.update(cx, |s, cx| s.set_value("needle", window, cx));
+                    v.recompute_matches(cx);
+                    let before = *v.search.as_ref().unwrap().matches[0].start();
+                    assert_eq!(
+                        (before.line.0, before.column.0),
+                        (0, 70),
+                        "one unwrapped row at 80 columns"
+                    );
+
+                    // No output, no debounce: the resize alone has to move the
+                    // highlight to where the reflow put the text. Where exactly
+                    // the wrapped half lands (next row, or the first half pushed
+                    // into scrollback) is the grid's business — what matters is
+                    // that the highlight sits on the needle, not its old row.
+                    v.set_grid_size(40, 24, px(8.), px(17.), 1., cx);
+                    let after = *v.search.as_ref().unwrap().matches[0].start();
+                    assert_ne!(
+                        (after.line.0, after.column.0),
+                        (0, 70),
+                        "column 70 does not even exist at 40 wide — a stale point"
+                    );
+                    let term = v.terminal.term.lock();
+                    let cell = term.grid()[after.line][after.column].c;
+                    drop(term);
+                    assert_eq!(cell, 'n', "the highlight follows the reflowed text");
+
+                    // A rows-only change reflows nothing; the scan must not move.
+                    v.set_grid_size(40, 12, px(8.), px(17.), 1., cx);
+                    let still = *v.search.as_ref().unwrap().matches[0].start();
+                    assert_eq!(
+                        (still.line.0, still.column.0),
+                        (after.line.0, after.column.0)
+                    );
+                });
             })
             .unwrap();
     }

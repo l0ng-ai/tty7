@@ -50,6 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **Search highlights follow the text when the pane is resized.** A match
+  point is an absolute (line, column) against the width it was scanned at,
+  so narrowing a pane reflowed the text out from under every highlight until
+  new output happened to trigger a rescan — and a quiet local pane has none
+  coming. A column change now rescans immediately, with the output path's
+  discipline (the selection and scroll position are left alone); a
+  rows-only change reflows nothing and stays cheap (#586).
 - **A mistyped "Start in" path is refused at save instead of silently
   rerouting every new pane.** The custom path used to be stored unchecked,
   and the daemon's picker then skipped it — not a directory — and started
