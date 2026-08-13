@@ -34,8 +34,10 @@ Acrylic, and friends).
 
 **Settings → Terminal → Shell.** Leave **Program** empty to use the platform
 default. Otherwise it takes an executable name on PATH or an absolute path
-(`zsh`, `fish`, `pwsh`, `nu`, `/opt/homebrew/bin/bash`), plus space-separated
-**Arguments** — `-l` for a login shell, say.
+(`zsh`, `fish`, `pwsh`, `nu`, `/opt/homebrew/bin/bash`), plus **Arguments** —
+`-l` for a login shell, say. Arguments split the way a command line splits, so
+quote anything that contains a space: `-c "echo hi"` is two arguments, not
+three.
 
 **Start in** decides what a *fresh* shell opens in: tty7's launch directory
 (the default), your home folder, or a fixed path. New tabs and splits keep

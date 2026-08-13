@@ -351,12 +351,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsProgramDesc => {
             "Executable name on PATH or an absolute path (e.g. zsh, fish, pwsh)."
         }
-        L10nKey::SettingsProgramUndetected => {
-            "Not one of the shells tty7 detected — saved anyway, but a typo here only fails when a new pane opens."
-        }
         L10nKey::SettingsArguments => "Arguments",
         L10nKey::SettingsArgumentsDesc => {
-            "Launch flags, split like a shell command line — quote anything containing spaces (e.g. -l, or -c \"echo hi\")."
+            "Launch flags, split like a command line — quote anything containing spaces (e.g. -l, or -c \"echo hi\")."
         }
         L10nKey::SettingsArgumentsInvalid => {
             "The quotes do not balance — this value was not saved."

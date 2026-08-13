@@ -337,7 +337,6 @@ l10n_keys! {
     SettingsShellIntro,
     SettingsProgram,
     SettingsProgramDesc,
-    SettingsProgramUndetected,
     SettingsArguments,
     SettingsArgumentsDesc,
     SettingsArgumentsInvalid,

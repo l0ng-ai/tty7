@@ -1258,31 +1258,6 @@ fn field_error(message: impl Into<String>, cx: &App) -> Div {
         .child(message.into())
 }
 
-/// The softer sibling: a caution under a field whose value was *accepted* but
-/// looks wrong. Danger is reserved for values the commit refused to save.
-fn field_warning(message: impl Into<String>, cx: &App) -> Div {
-    div()
-        .text_xs()
-        .text_color(cx.theme().warning)
-        .child(message.into())
-}
-
-/// Whether a committed Program value names a shell tty7 has never seen (#551).
-///
-/// A bare command is findable only through PATH, and detection *is* a PATH
-/// probe — so an undetected bare name (`pwsh7`) is almost always a typo, and
-/// worth saying so under the field. Anything spelled as a path is taken at its
-/// word instead: the field exists so a shell detection missed stays reachable,
-/// and verifying the file at edit time would prove nothing about spawn time.
-fn program_undetected(inventory: &tty7_core::core::shells::ShellInventory, program: &str) -> bool {
-    !program.is_empty()
-        && !program.contains(['/', '\\'])
-        && !inventory
-            .shells
-            .iter()
-            .any(|shell| tty7_core::core::shells::same_shell_program(&shell.program, program))
-}
-
 fn forward_row_inputs(row: &ForwardRuleForm) -> [&Entity<InputState>; 5] {
     [
         &row.bind_host,
@@ -4761,15 +4736,6 @@ impl Tty7App {
             .cloned()
             .collect();
         let current_program = program_input.read(cx).value().trim().to_string();
-        // A committed program tty7 never detected is almost always a typo
-        // (`pwsh7`) that only surfaces when a pane fails to open — say so under
-        // the field. A warning, never a refusal: the field stays free-text so a
-        // shell detection missed remains reachable by name or path (#551).
-        // Same committed-value-only caveat as the proxy row: this parent
-        // re-renders on the Enter/blur commit, not per keystroke. Built here,
-        // before the picker closure below takes `current_program`.
-        let program_warning = program_undetected(&self.shells, &current_program)
-            .then(|| field_warning(t(L10nKey::SettingsProgramUndetected), cx));
         let platform_default_item: SharedString = if cfg!(windows) {
             "PowerShell".into()
         } else {
@@ -4817,18 +4783,19 @@ impl Tty7App {
             }
             menu
         });
-        let program_control = v_flex()
-            .gap_1()
+        let program_control = div()
             .w(px(260.))
             .max_w_full()
             .child(Input::new(&program_input).small().suffix(program_picker))
-            .when_some(program_warning, |this, line| this.child(line))
             .into_any_element();
-        // Args become argv verbatim, so an unbalanced quote is a value that
-        // cannot be saved at all — `commit_shell` refuses it, and this line is
-        // the explanation (#551). The proxy row's pattern.
+        // Args become argv verbatim, so a quote that never closes is a value
+        // that cannot be saved at all — `commit_shell` refuses it, and this
+        // line is the explanation (#551). The proxy row's pattern, including
+        // its caveat: the input commits on Enter/blur and this parent renders
+        // on that commit, so a half-typed quote is never marked wrong
+        // mid-keystroke.
         let args_value = args_input.read(cx).value();
-        let args_error = shell_words::split(&args_value)
+        let args_error = crate::ui::app::split_shell_args(&args_value)
             .is_err()
             .then(|| field_error(t(L10nKey::SettingsArgumentsInvalid), cx));
         let args_control = v_flex()
@@ -7572,55 +7539,6 @@ mod tests {
         assert_eq!(profiles_sharing_endpoint(&cfg, staging_id), 0);
         // A profile that is no longer on the list shares with nobody.
         assert_eq!(profiles_sharing_endpoint(&cfg, Uuid::new_v4()), 0);
-    }
-
-    fn inventory_with(programs: &[&str]) -> tty7_core::core::shells::ShellInventory {
-        tty7_core::core::shells::ShellInventory {
-            shells: programs
-                .iter()
-                .map(|program| tty7_core::core::shells::DetectedShell {
-                    label: program.to_string(),
-                    program: program.to_string(),
-                    args: Vec::new(),
-                    args_are_tty7_defaults: true,
-                    user_authored: false,
-                })
-                .collect(),
-            default_name: String::new(),
-        }
-    }
-
-    /// The #551 nudge's whole contract: an empty field means the platform
-    /// default, a path is taken at its word, and a bare name is fine exactly
-    /// when detection could have found it — everything else gets the warning.
-    #[test]
-    fn only_an_undetected_bare_program_draws_the_warning() {
-        let inventory = inventory_with(if cfg!(windows) {
-            &[r"C:\Program Files\PowerShell\7\pwsh.exe", "wsl.exe"]
-        } else {
-            &["/bin/zsh", "/opt/homebrew/bin/fish"]
-        });
-
-        // Empty means "platform default" — never a warning.
-        assert!(!program_undetected(&inventory, ""));
-        // Anything spelled as a path is taken at its word: the field exists so
-        // a shell detection missed stays reachable.
-        let custom_path = if cfg!(windows) {
-            r"D:\Tools\xsh.exe"
-        } else {
-            "/opt/weird/xsh"
-        };
-        assert!(!program_undetected(&inventory, custom_path));
-        // A detected shell, whether typed as the bare name or the full path.
-        let (bare, full) = if cfg!(windows) {
-            ("pwsh", r"C:\Program Files\PowerShell\7\pwsh.exe")
-        } else {
-            ("fish", "/opt/homebrew/bin/fish")
-        };
-        assert!(!program_undetected(&inventory, bare));
-        assert!(!program_undetected(&inventory, full));
-        // The issue's example: a bare name detection never saw.
-        assert!(program_undetected(&inventory, "pwsh7"));
     }
 }
 
