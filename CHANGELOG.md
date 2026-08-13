@@ -25,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A workspace no longer renames itself to a codename it was never shown.**
+  Every workspace a window creates is handed a generated name — `keen-marten` —
+  so the machine tree and `tty7 ws ls` have something to call it, while the
+  window itself reads the directory its shells are working in. The window is
+  left out of the deltas its own edits raise, so it never heard which codename
+  it got; the first time it pulled the whole tree again — a daemon restart, a
+  rebuild, or simply launching tty7 the next morning — the codename took the
+  workspace chip and was stamped into `views.json` from there, and that pull
+  had by then also cost the window the pane record it read the directory from.
+  A generated name is now treated as the placeholder it is: it still names the
+  workspace in the tree and to the CLI, but on screen only a name someone
+  actually chose outranks the directory, which the window now remembers across
+  a rebuild. A workspace with no directory to borrow still reads its codename
+  rather than "Untitled" (#604).
 - **A local daemon that dies and comes back no longer leaves a window of dead
   panes looking live** — from the client's side a killed daemon is
   indistinguishable from one whose shells all exited at once, so the window

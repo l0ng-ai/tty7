@@ -74,6 +74,32 @@ pub fn unique(taken: impl Fn(&str) -> bool) -> String {
     Names::new().unique(taken)
 }
 
+/// Does this read like a name minted here rather than typed by a person?
+///
+/// A client names every workspace it creates, so "this workspace has a name"
+/// and "somebody chose that name" are two different questions — and only the
+/// second one should outrank the directory a window's shells are working in.
+/// The tree cannot tell them apart, so the words themselves have to (#604).
+///
+/// Someone who names a workspace "wild-yak" by hand loses this coin flip and
+/// reads the directory in the chip instead. 576 pairs of animal words is a
+/// cheap thing to give up against every window renaming itself the next time
+/// its machine tree is pulled.
+pub fn is_generated(name: &str) -> bool {
+    // `unique` gives up on bare pairs after enough collisions and starts
+    // hanging a number off the end, so "keen-marten-7" is one of ours too.
+    let stem = match name.rsplit_once('-') {
+        Some((stem, count)) if !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit()) => {
+            stem
+        }
+        _ => name,
+    };
+    matches!(
+        stem.split_once('-'),
+        Some((adjective, noun)) if ADJECTIVES.contains(&adjective) && NOUNS.contains(&noun)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +117,34 @@ mod tests {
         let first = Names::seeded(7).candidate();
         let picked = Names::seeded(7).unique(|n| n == first);
         assert_ne!(picked, first);
+    }
+
+    #[test]
+    fn every_name_this_module_mints_is_recognised_as_one_of_ours() {
+        for seed in 1..200u64 {
+            let bare = Names::seeded(seed).candidate();
+            assert!(is_generated(&bare), "{bare} came from here");
+            let numbered = Names::seeded(seed).unique(|n| n.matches('-').count() < 2);
+            assert!(is_generated(&numbered), "{numbered} came from here too");
+        }
+    }
+
+    #[test]
+    fn a_name_a_person_would_type_is_not_mistaken_for_one() {
+        for chosen in [
+            "deploy",
+            "api",
+            "tty7",
+            "verify-main",
+            "quiet",
+            "otter",
+            "keen-marten-ish",
+            "quiet-otter-",
+            "Quiet-Otter",
+            "",
+        ] {
+            assert!(!is_generated(chosen), "{chosen:?} is nobody's codename");
+        }
     }
 
     #[test]

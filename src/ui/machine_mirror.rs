@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use gpui::{App, Global};
+use tty7_core::core::codename;
 use tty7_core::core::machine::{LayoutDelta, Machine, PaneRecord, Tab, TabId, Workspace};
 use tty7_core::daemon::control::{ControlRequest, ReplyOk};
 use tty7_core::host::HostId;
@@ -248,23 +249,48 @@ fn view_of<'a>(
 }
 
 pub fn display_name(cx: &App, entry: &crate::core::session::WindowView) -> Option<String> {
-    match view_of(cx, entry) {
-        Some((ws, panes)) => Some(display_name_of(ws, panes)),
-        None => entry.label.clone(),
-    }
+    let Some((ws, _)) = view_of(cx, entry) else {
+        return entry.label.clone();
+    };
+    // `subject_path` rather than `subject_path_of`: the entry remembers the
+    // directory from when the tree could still say, which is what a rebuilt
+    // window has to read it from (#604, see `subject_path`).
+    Some(name_from(
+        ws.name.as_deref(),
+        subject_path(cx, entry).as_deref(),
+    ))
 }
 
 pub fn display_name_of(ws: &Workspace, panes: &[PaneRecord]) -> String {
-    if let Some(name) = ws.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-        return name.to_string();
+    name_from(ws.name.as_deref(), subject_path_of(ws, panes).as_deref())
+}
+
+/// What to call a workspace, from its name and the directory its shells are
+/// working in.
+///
+/// A name somebody chose wins outright. A codename does not: every workspace a
+/// client creates is handed one so the tree and the CLI have something to call
+/// it, and the window that asked for it is never told which one it got — its
+/// mirror carries the workspace unnamed until the tree is pulled whole again.
+/// Letting a name nobody chose outrank the directory meant that pull renamed
+/// the workspace on screen, and a daemon restart is only one of the things
+/// that pulls (#604).
+fn name_from(name: Option<&str>, subject: Option<&str>) -> String {
+    let named = name.map(str::trim).filter(|n| !n.is_empty());
+    if let Some(chosen) = named.filter(|n| !codename::is_generated(n)) {
+        return chosen.to_string();
     }
-    subject_path_of(ws, panes)
+    subject
         .and_then(|path| {
-            std::path::Path::new(&path)
+            std::path::Path::new(path)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
         })
         .filter(|s| !s.is_empty())
+        // No directory to borrow from — an empty workspace, or one nobody has
+        // ever recorded a cwd for. A codename still beats "Untitled" at telling
+        // two of those apart in a list, which is what it was minted for.
+        .or_else(|| named.map(str::to_string))
         .unwrap_or_else(|| t(L10nKey::WindowUntitled).to_string())
 }
 
@@ -361,6 +387,17 @@ pub fn unclaimed_local_workspaces(cx: &App) -> Vec<UnclaimedWorkspace> {
         .collect()
 }
 
+/// Where this workspace is working, as the tree has it — falling back to what
+/// the entry remembers.
+///
+/// The fallback is not only for a machine that has not answered yet. A window
+/// is left out of the deltas its own edits raise, and the pane records ride
+/// along inside those deltas, so a pane this window created is in its mirror's
+/// tabs while the mirror holds no record for it — no cwd, no directory. The
+/// daemon closes the gap only when some fact later *changes*, and a pane
+/// restored with the cwd it will keep changes nothing. So after a rebuild the
+/// tree this window reads has forgotten where it is, and the entry is the only
+/// one still holding it (#604).
 pub fn subject_path(cx: &App, entry: &crate::core::session::WindowView) -> Option<String> {
     match view_of(cx, entry) {
         Some((ws, panes)) => subject_path_of(ws, panes).or_else(|| entry.subject.clone()),
@@ -372,8 +409,12 @@ pub fn display_hint(
     cx: &App,
     entry: &crate::core::session::WindowView,
 ) -> Option<(String, Option<String>)> {
-    let (ws, panes) = view_of(cx, entry)?;
-    Some((display_name_of(ws, panes), subject_path_of(ws, panes)))
+    let (ws, _) = view_of(cx, entry)?;
+    // Both halves read through the fallback, so the save this feeds writes the
+    // directory back rather than dropping it the first time the mirror cannot
+    // name one (#604).
+    let subject = subject_path(cx, entry);
+    Some((name_from(ws.name.as_deref(), subject.as_deref()), subject))
 }
 
 pub fn pane_ids(cx: &App, entry: &crate::core::session::WindowView) -> Option<Vec<u64>> {
@@ -444,6 +485,114 @@ mod tests {
                 Some("web"),
                 "which is what the next save stamps"
             );
+        });
+    }
+
+    /// #604: a window creates its workspace with a codename it is never told,
+    /// so its mirror carries the workspace unnamed and the chip reads the
+    /// directory. Pulling the tree whole — which a daemon restart, a rebuild
+    /// and a plain relaunch all do — used to hand that codename to the chip and
+    /// stamp it into `views.json` from there, and the rebuild had by then also
+    /// cost the mirror the pane record the directory was read from.
+    #[gpui::test]
+    fn a_rebuild_does_not_rename_a_workspace_to_its_codename(cx: &mut gpui::TestAppContext) {
+        use crate::core::session::{WindowView, WindowViews, WorkspaceStore};
+
+        cx.update(|cx| {
+            let mut entry = WindowView::default();
+            let id = entry.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![entry.clone()],
+                    active: None,
+                },
+            );
+
+            let holding = |pane: u64| Workspace {
+                id,
+                tabs: vec![leaf_tab(pane)],
+                ..Workspace::default()
+            };
+            let working_in = |pane: u64| {
+                vec![PaneRecord {
+                    cwd: Some("/work/verify-main".into()),
+                    ..PaneRecord::new(pane)
+                }]
+            };
+
+            // As the window that created the workspace sees it: the codename it
+            // asked for came back in no delta it was sent.
+            MachineMirrors::install(
+                cx,
+                HostId::LOCAL,
+                Machine {
+                    workspaces: vec![holding(1)],
+                    panes: working_in(1),
+                },
+            );
+            assert_eq!(display_name(cx, &entry).as_deref(), Some("verify-main"));
+            let (label, subject) = display_hint(cx, &entry).expect("the machine has answered");
+            assert_eq!(label, "verify-main");
+            assert_eq!(subject.as_deref(), Some("/work/verify-main"));
+            // What the next save stamps.
+            entry.label = Some(label);
+            entry.subject = subject;
+
+            // The rebuild: the tree as the machine really holds it, codename and
+            // all, and the pane on screen is one this window restored — in the
+            // workspace's tabs, in no pane record the window was sent.
+            MachineMirrors::install(
+                cx,
+                HostId::LOCAL,
+                Machine {
+                    workspaces: vec![Workspace {
+                        name: Some("keen-marten".into()),
+                        ..holding(2)
+                    }],
+                    panes: Vec::new(),
+                },
+            );
+            assert_eq!(
+                display_name(cx, &entry).as_deref(),
+                Some("verify-main"),
+                "a name nobody chose does not outrank the directory"
+            );
+            assert_eq!(
+                display_hint(cx, &entry),
+                Some(("verify-main".to_string(), Some("/work/verify-main".into()))),
+                "and the save that follows writes that back rather than the codename"
+            );
+
+            // A name the user did choose wins, rebuild or no rebuild.
+            MachineMirrors::install(
+                cx,
+                HostId::LOCAL,
+                Machine {
+                    workspaces: vec![Workspace {
+                        name: Some("deploy".into()),
+                        ..holding(2)
+                    }],
+                    panes: Vec::new(),
+                },
+            );
+            assert_eq!(display_name(cx, &entry).as_deref(), Some("deploy"));
+
+            // With no directory anywhere to borrow from, the codename is still
+            // better than "Untitled" — that is the list it was minted for.
+            entry.subject = None;
+            MachineMirrors::install(
+                cx,
+                HostId::LOCAL,
+                Machine {
+                    workspaces: vec![Workspace {
+                        name: Some("keen-marten".into()),
+                        ..holding(2)
+                    }],
+                    panes: Vec::new(),
+                },
+            );
+            assert_eq!(display_name(cx, &entry).as_deref(), Some("keen-marten"));
         });
     }
 
