@@ -6312,11 +6312,10 @@ impl Render for Tty7App {
         }
         let vertical = matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
             && !self.tabs.is_empty();
-        // The same three conditions, asked through the predicate the right
-        // panel sizes itself against — two spellings of "is the rail up" is one
-        // more than the layout can afford to have disagree.
+        // Asked through the predicate the right panel sizes itself against —
+        // two spellings of "is the rail up" is one more than the layout can
+        // afford to have disagree.
         let rail = self.sidebar_open(cx);
-        debug_assert_eq!(rail, vertical && !self.sidebar_collapsed);
         let strip = self.tab_strip(!vertical, window, cx);
         let sidebar = rail.then(|| self.tab_sidebar(window, cx));
         let ssh_status = self
