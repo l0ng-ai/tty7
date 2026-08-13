@@ -1017,6 +1017,7 @@ l10n_keys! {
     RemoteMismatchUnknownBuild,
     RemoteMismatchUnknownBuildFromExe,
     RemoteMismatchReplaceServer,
+    RemoteMismatchDowngradeServer,
     RemoteServerOutdated,
     RemoteServerTooNew,
     RemoteDaemonStartFailed,

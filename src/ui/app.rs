@@ -1544,11 +1544,11 @@ impl Tty7App {
         // there, and the installer now refuses rather than killing the one
         // that is running. Updating is the move that works, so offer that,
         // under its own name and with its own warning about ending sessions.
-        if matches!(
-            self.remote_status(cx),
-            Some(crate::ui::remote_workspace::RemoteStatus::ServerMismatch(_))
-        ) {
-            self.confirm_replace_remote_server(target, label, window, cx);
+        if let Some(crate::ui::remote_workspace::RemoteStatus::ServerMismatch(refusal)) =
+            self.remote_status(cx)
+        {
+            let action = crate::ui::remote_workspace::mismatch_action_key(&refusal);
+            self.confirm_replace_remote_server(target, label, action, window, cx);
             return;
         }
         self.confirm_restart_remote_server(target, label, window, cx);

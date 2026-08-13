@@ -1879,6 +1879,7 @@ impl Tty7App {
         // already names it.
         let shown = remote_connect::dialect_complaint(error, &group.label)
             .unwrap_or_else(|| format!("{}: {error}", group.label));
+        let replace_action = crate::ui::remote_workspace::mismatch_action_key(error);
         let theme = cx.theme();
         v_flex()
             .gap(px(4.))
@@ -1921,14 +1922,21 @@ impl Tty7App {
                     )
                     .when(
                         crate::daemon::control::is_dialect_refusal(error)
-                            && replace.target.is_some(),
+                            // Same gate as the workspace strip's: a machine
+                            // whose server is not ours to install cannot be
+                            // helped by this button, and a click that can only
+                            // fail is worse than no button.
+                            && replace
+                                .target
+                                .as_ref()
+                                .is_some_and(|t| t.hosts_our_server()),
                         |row| {
                             row.child(
                                 Button::new(gpui::SharedString::from(format!(
                                     "switcher-replace:{}",
                                     group.key
                                 )))
-                                .label(t(L10nKey::RemoteMismatchReplaceServer))
+                                .label(t(replace_action))
                                 .ghost()
                                 .xsmall()
                                 .on_click(cx.listener(
@@ -1938,6 +1946,7 @@ impl Tty7App {
                                             this.confirm_replace_remote_server(
                                                 target,
                                                 replace.label.clone(),
+                                                replace_action,
                                                 window,
                                                 cx,
                                             );

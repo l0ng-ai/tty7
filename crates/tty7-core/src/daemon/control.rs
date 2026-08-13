@@ -42,8 +42,16 @@ fn dialect_refusal(peer_build: &str, peer: u32, ours: u32) -> String {
     format!("control peer (build {peer_build}) {DIALECT_MARKER}{peer}, this build speaks v{ours}")
 }
 
+/// Whether this is a refusal over the control dialect — the whole shape of one,
+/// not just the marker.
+///
+/// Every reader of a `true` here goes on to restate the refusal with
+/// [`parse_dialect_refusal`], and one of them parks a link in a state only a
+/// person can leave. Two predicates for one question is how those two come
+/// apart: a message carrying the marker in some other shape would be parked on
+/// and then shown as the raw protocol wording it was supposed to replace.
 pub fn is_dialect_refusal(message: &str) -> bool {
-    message.contains(DIALECT_MARKER)
+    parse_dialect_refusal(message).is_some()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

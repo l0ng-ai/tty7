@@ -1283,6 +1283,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "{machine} は {running} から tty7 セッションを提供していますが、このクライアント（{wanted}）はそのプロトコルを理解できません。tty7 は対応するサーバーをそこにインストール済みですが、セッションは実行中のサーバー上にあります。\n\n{replace_server}\u{2003}を選ぶと {wanted} に置き換えられ、そのサーバー上のセッションはすべて終了します。\n{cancel}\u{2003}を選ぶと {machine} はそのままです。このウィンドウは接続しません"
         }
         L10nKey::RemoteMismatchReplaceServer => "サーバーを更新",
+        L10nKey::RemoteMismatchDowngradeServer => "サーバーを置き換え",
         L10nKey::RemoteMismatchUnknownBuild => "不明なビルド",
         L10nKey::RemoteMismatchUnknownBuildFromExe => "不明なビルド（{exe} から）",
         L10nKey::RemoteServerOutdated => {

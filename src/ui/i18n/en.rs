@@ -1251,6 +1251,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
              {cancel}\u{2003}leaves {machine} exactly as it is. This window will not connect."
         }
         L10nKey::RemoteMismatchReplaceServer => "Update Server",
+        // Same button, opposite direction: the machine is ahead of this build,
+        // so putting our server there takes it back a version. Calling that an
+        // update would be a lie, and it is the kind that ends other people's
+        // sessions on the way through.
+        L10nKey::RemoteMismatchDowngradeServer => "Replace Server",
         L10nKey::RemoteMismatchUnknownBuild => "an unknown build",
         L10nKey::RemoteMismatchUnknownBuildFromExe => "an unknown build (from {exe})",
         L10nKey::RemoteServerOutdated => {

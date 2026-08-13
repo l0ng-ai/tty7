@@ -1174,6 +1174,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
              {cancel}\u{2003}会保持 {machine} 现状不变。此窗口将不会连接。"
         }
         L10nKey::RemoteMismatchReplaceServer => "更新 server",
+        L10nKey::RemoteMismatchDowngradeServer => "替换 server",
         L10nKey::RemoteMismatchUnknownBuild => "未知构建",
         L10nKey::RemoteMismatchUnknownBuildFromExe => "未知构建（来自 {exe}）",
         L10nKey::RemoteServerOutdated => {
