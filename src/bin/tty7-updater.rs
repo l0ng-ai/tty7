@@ -828,6 +828,7 @@ mod windows {
                     app: options.app_path.ok_or_else(usage)?,
                     log: options.log.ok_or_else(usage)?,
                     version: options.expected_version.ok_or_else(usage)?,
+                    gui_pid: options.gui_pid,
                 })
             }
             _ => Err(usage()),
@@ -855,7 +856,7 @@ mod windows {
          --expected-sha256 <hex> [--config-dir <dir>] [--result-file <path>]\n\
          or: tty7-updater relaunch-watcher --status-file <path> --result-file <path> \
          --app-path <tty7-app.exe> --log <path> --expected-version <version> \
-         [--config-dir <dir>]"
+         [--gui-pid <pid>] [--config-dir <dir>]"
             .to_string()
     }
 
@@ -904,6 +905,8 @@ mod windows {
         /// The version being installed, for the watcher's synthesized
         /// outcomes.
         expected_version: Option<String>,
+        /// The GUI the watcher must not relaunch over. See [`WatcherPlan`].
+        gui_pid: Option<u32>,
     }
 
     fn tail_options(mut args: impl Iterator<Item = OsString>) -> Result<TailOptions, String> {
@@ -920,6 +923,13 @@ mod windows {
                 Some("--log") => options.log = Some(next_path(&mut args)?),
                 Some("--expected-version") => {
                     options.expected_version = Some(next_string(&mut args)?)
+                }
+                Some("--gui-pid") => {
+                    options.gui_pid = Some(
+                        next_string(&mut args)?
+                            .parse::<u32>()
+                            .map_err(|_| "gui pid is not an unsigned integer".to_string())?,
+                    )
                 }
                 _ => return Err(usage()),
             }
@@ -1482,6 +1492,11 @@ mod windows {
         app: PathBuf,
         log: PathBuf,
         version: String,
+        /// The GUI that raised the prompt, so a relaunch never lands beside a
+        /// window that is still there. Optional: a watcher told nothing about
+        /// it still brings the app back, which is the point of the timeouts
+        /// below — it just cannot tell "still up" from "already gone".
+        gui_pid: Option<u32>,
     }
 
     /// How often the watcher looks at the status and outcome files.
@@ -1491,31 +1506,72 @@ mod windows {
     /// `WATCH_TIMEOUT` bounds once the chain has reported.
     const WATCH_STATUS_GRACE: Duration = Duration::from_secs(15 * 60);
     /// Bounds the whole install once the chain reported in. An install still
-    /// running past it (an antivirus rescanning every replaced file) is left
-    /// to finish on its own: the watcher stops waiting rather than relaunch
-    /// the app into a directory that may still be mid-replace.
+    /// running past it (an antivirus rescanning every replaced file) has
+    /// stopped being an install and started being a machine with no
+    /// terminal on it: the watcher gives up waiting and brings the app back.
     const WATCH_TIMEOUT: Duration = Duration::from_secs(60 * 60);
     /// Between the chain's pid dying and giving up on its outcome: the write
     /// is the last thing the chain does, so it lands within seconds.
     const WATCH_RESULT_GRACE: Duration = Duration::from_secs(10);
+    /// How long a GUI that is still up when the watcher is ready to relaunch
+    /// is given to finish quitting. Long enough for a shutdown already under
+    /// way, short enough that a GUI which is *staying* (a declined prompt
+    /// whose `kill` did not land) is recognized as staying.
+    const GUI_EXIT_GRACE: Duration = Duration::from_secs(30);
+
+    /// What the watcher ended up believing about the install, and whether
+    /// that belief is already on disk. Anything it had to invent has to be
+    /// written before the app comes back, or a failure the chain never got
+    /// to record dies with the watcher — which is the hole #540 is about.
+    struct WatchOutcome {
+        outcome: UpdateOutcome,
+        recorded: bool,
+    }
+
+    impl WatchOutcome {
+        /// The chain's own word for it, already on disk.
+        fn recorded(outcome: UpdateOutcome) -> Self {
+            Self {
+                outcome,
+                recorded: true,
+            }
+        }
+
+        /// The watcher's word for it, and nobody else's.
+        fn synthesized(plan: &WatcherPlan, detail: &str) -> Self {
+            Self {
+                outcome: UpdateOutcome {
+                    version: plan.version.clone(),
+                    ok: false,
+                    detail: Some(detail.to_string()),
+                },
+                recorded: false,
+            }
+        }
+    }
 
     fn watch(plan: &WatcherPlan) -> Result<(), String> {
+        // Opened first thing, while the GUI is provably still alive: it is
+        // blocked inside `ShellExecuteExW` waiting on the prompt, which is
+        // why the watcher is spawned before the prompt is raised. A handle
+        // taken then keeps naming that same process object no matter which
+        // process inherits the number later.
+        let gui = GuiProcess::open(plan.gui_pid);
         let started = Instant::now();
         let mut chain_seen = false;
-        let outcome = loop {
-            if let Some(outcome) = read_outcome_lossy(plan) {
-                break outcome;
+        let end = loop {
+            if let Some(end) = read_outcome_lossy(plan) {
+                break end;
             }
             match status_pid(&plan.status_file) {
                 Some(pid) if pid_alive(pid) => {
                     chain_seen = true;
                     if started.elapsed() > WATCH_TIMEOUT {
-                        log_line(
-                            &plan.log,
-                            "the elevated update did not finish within the hour; \
-                             leaving it to complete on its own",
+                        break WatchOutcome::synthesized(
+                            plan,
+                            "the elevated update was still running an hour after it \
+                             started and never recorded a result",
                         );
-                        return Ok(());
                     }
                 }
                 // A dead pid — whether or not it was ever seen alive (a fast
@@ -1530,62 +1586,88 @@ mod windows {
                 }
                 None => {
                     if started.elapsed() > WATCH_STATUS_GRACE {
-                        log_line(
-                            &plan.log,
-                            "no elevated updater ever reported in; the prompt was \
-                             likely never answered",
+                        break WatchOutcome::synthesized(
+                            plan,
+                            "the elevated updater never reported in; the install did \
+                             not run",
                         );
-                        return Ok(());
                     }
                 }
             }
             thread::sleep(WATCH_POLL);
         };
-        finish_watch(plan, outcome)
+        finish_watch(plan, &gui, end)
     }
 
     /// The chain is gone; its outcome should already be on its way to disk.
-    fn await_final_outcome(plan: &WatcherPlan) -> UpdateOutcome {
+    fn await_final_outcome(plan: &WatcherPlan) -> WatchOutcome {
         let deadline = Instant::now() + WATCH_RESULT_GRACE;
         loop {
-            if let Some(outcome) = read_outcome_lossy(plan) {
-                return outcome;
+            if let Some(end) = read_outcome_lossy(plan) {
+                return end;
             }
             if Instant::now() >= deadline {
-                return UpdateOutcome {
-                    version: plan.version.clone(),
-                    ok: false,
-                    detail: Some(
-                        "the elevated updater exited without recording a result".to_string(),
-                    ),
-                };
+                return WatchOutcome::synthesized(
+                    plan,
+                    "the elevated updater exited without recording a result",
+                );
             }
             thread::sleep(WATCH_POLL);
         }
     }
 
     /// The watcher's read of the outcome file: a parse failure is an outcome
-    /// — something wrote it — not a reason to keep waiting.
-    fn read_outcome_lossy(plan: &WatcherPlan) -> Option<UpdateOutcome> {
+    /// — something wrote it — not a reason to keep waiting. Unreadable counts
+    /// as unrecorded, so the description below replaces the garbage.
+    fn read_outcome_lossy(plan: &WatcherPlan) -> Option<WatchOutcome> {
         match tty7_core::daemon::install::outcome::read_outcome(&plan.result_file) {
-            Ok(outcome) => outcome,
+            Ok(outcome) => outcome.map(WatchOutcome::recorded),
             Err(error) => {
                 let detail = format!(
                     "the update result at {} could not be read: {error}",
                     plan.result_file.display()
                 );
                 log_line(&plan.log, &detail);
-                Some(UpdateOutcome {
-                    version: plan.version.clone(),
-                    ok: false,
-                    detail: Some(detail),
-                })
+                Some(WatchOutcome::synthesized(plan, &detail))
             }
         }
     }
 
-    fn finish_watch(plan: &WatcherPlan, outcome: UpdateOutcome) -> Result<(), String> {
+    fn finish_watch(plan: &WatcherPlan, gui: &GuiProcess, end: WatchOutcome) -> Result<(), String> {
         let _ = fs::remove_file(&plan.status_file);
+        let WatchOutcome { outcome, recorded } = end;
+        // Nothing relaunches over a GUI that is still on screen. Two shapes
+        // reach here with one running: a declined prompt whose `kill` did not
+        // land — that GUI is staying, and owns its own window and its own
+        // record — and a chain that failed fast enough to beat the quitting
+        // GUI out the door, which is a GUI that will be gone in a moment and
+        // must be relaunched once it is. Waiting tells them apart without
+        // having to know which it was.
+        if gui.alive() && !gui.wait_for_exit(GUI_EXIT_GRACE) {
+            log_line(
+                &plan.log,
+                "the tty7 that raised the prompt is still running; leaving the \
+                 relaunch to it",
+            );
+            return Ok(());
+        }
+        if !recorded {
+            // The chain never got far enough to say this itself, and the
+            // launch below is what reads it: an unexplained update that
+            // simply asks again is exactly what the outcome file is for.
+            log_line(&plan.log, outcome.detail.as_deref().unwrap_or_default());
+            if let Err(error) =
+                tty7_core::daemon::install::outcome::write_outcome(&plan.result_file, &outcome)
+            {
+                log_line(
+                    &plan.log,
+                    &format!(
+                        "could not record the update outcome at {}: {error}",
+                        plan.result_file.display()
+                    ),
+                );
+            }
+        }
         // Success or failure, the binary at the app path is the one to run:
         // the new version after a completed install, the previous one after
         // a recovery. Spawned from this never-elevated process, so the app
@@ -1619,6 +1701,60 @@ mod windows {
             Ok(())
         } else {
             Err(outcome.detail.unwrap_or_default())
+        }
+    }
+
+    /// The GUI that raised the UAC prompt, as seen by the watcher it spawned.
+    ///
+    /// Only ever consulted to answer "would relaunching now put a second
+    /// window beside the first", and the answer is asymmetric on purpose. A
+    /// living GUI always answers to its own pid, so "alive" is never wrong in
+    /// the direction that would double-launch. The one way to be wrong the
+    /// other way is a pid recycled into an unrelated process, which needs the
+    /// GUI to have died before this watcher even started — before the prompt
+    /// was answered — and costs only the relaunch this watcher would not have
+    /// performed before either.
+    struct GuiProcess {
+        pid: Option<u32>,
+        /// Held from watcher startup. A handle outlives the pid: the kernel
+        /// keeps the process object alive as long as this is open, so a
+        /// recycled number cannot answer for it.
+        handle: Option<OwnedHandle>,
+    }
+
+    impl GuiProcess {
+        fn open(pid: Option<u32>) -> Self {
+            let handle = pid.and_then(|pid| {
+                let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+                (!handle.is_null()).then(|| OwnedHandle(handle))
+            });
+            Self { pid, handle }
+        }
+
+        fn alive(&self) -> bool {
+            if let Some(handle) = &self.handle {
+                return unsafe { WaitForSingleObject(handle.0, 0) } == WAIT_TIMEOUT;
+            }
+            // The handle could not be taken. Falling back to the number keeps
+            // the conservative answer available; a caller that named no pid
+            // at all has no GUI to collide with.
+            self.pid.is_some_and(pid_alive)
+        }
+
+        /// Waits out a GUI that is quitting. `true` once it is gone, `false`
+        /// if it is still there when the budget runs out — which is the
+        /// answer "this one is staying".
+        fn wait_for_exit(&self, budget: Duration) -> bool {
+            let deadline = Instant::now() + budget;
+            loop {
+                if !self.alive() {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                thread::sleep(WATCH_POLL);
+            }
         }
     }
 
@@ -2725,6 +2861,40 @@ mod windows {
             assert!(tail_options([OsString::from("stray")].into_iter()).is_err());
             // A flag missing its value is an error, not an empty path.
             assert!(tail_options([OsString::from("--config-dir")].into_iter()).is_err());
+        }
+
+        /// The watcher relaunches the app on every way out, so the one thing
+        /// it must never get wrong is "is that GUI still on screen" — the
+        /// answer that keeps a declined prompt from being handed a second
+        /// window.
+        #[test]
+        fn a_live_gui_is_never_mistaken_for_a_finished_one() {
+            // Nothing named: nothing to collide with, so a relaunch goes ahead.
+            let unnamed = GuiProcess::open(None);
+            assert!(!unnamed.alive());
+            assert!(unnamed.wait_for_exit(Duration::from_millis(0)));
+
+            // This process is alive and staying: "still running", which is
+            // what suppresses the relaunch.
+            let own = GuiProcess::open(Some(std::process::id()));
+            assert!(own.alive());
+            assert!(!own.wait_for_exit(Duration::from_millis(0)));
+
+            // The case the relaunch actually depends on: a handle taken while
+            // the process was alive keeps naming it, and reports the exit
+            // afterwards however the pid is reused.
+            let mut child = Command::new("ping")
+                .args(["-n", "30", "127.0.0.1"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("ping ships with Windows");
+            let gui = GuiProcess::open(Some(child.id()));
+            assert!(gui.alive());
+            child.kill().unwrap();
+            let _ = child.wait();
+            assert!(gui.wait_for_exit(Duration::from_secs(5)));
         }
 
         /// The elevated stage pins the helper it is about to run against the

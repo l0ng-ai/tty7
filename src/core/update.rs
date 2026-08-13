@@ -1512,7 +1512,13 @@ impl PendingUpdate {
             .arg("--log")
             .arg(&parts.log)
             .arg("--expected-version")
-            .arg(&parts.version);
+            .arg(&parts.version)
+            // So the watcher can tell a GUI that is quitting from one that
+            // stayed: a declined prompt leaves this process on screen, and
+            // the relaunch it would otherwise perform on its own timeout
+            // would put a second window beside it.
+            .arg("--gui-pid")
+            .arg(std::process::id().to_string());
         if let Some(dir) = &self.config_dir {
             watcher.arg("--config-dir").arg(dir);
         }

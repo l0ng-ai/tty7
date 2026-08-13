@@ -623,7 +623,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::UpdateDialogLater => "後で",
         L10nKey::UpdateDialogNextLaunch => "次回起動時にインストール",
         L10nKey::UpdateDialogNeedsElevation => {
-            "この tty7 は全ユーザー向けにインストールされているため、インストール開始前に Windows の管理者承認が一度だけ求められます。tty7 自体が管理者権限で実行されることはなく、あなたの権限のまま再起動します"
+            "この tty7 は全ユーザー向けにインストールされているため、インストール開始前に Windows の管理者承認が一度だけ求められます。tty7 自体が管理者権限で実行されることはなく、あなたの権限のまま再起動します。"
         }
         L10nKey::SettingsUpdateCheckFailed => "アップデートを確認できませんでした: {error}",
         L10nKey::SettingsUpdatePrepareFailed => "アップデートに失敗しました: {error}",
