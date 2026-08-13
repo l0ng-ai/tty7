@@ -188,6 +188,11 @@ want directly after a `send`; a command quick enough to finish inside one
 
 The reply carries the agent's message and native session id. The JSON's `stale`
 flag says whether the answer might belong to the previous turn.
+
+JSON: `{"pane","status","matched","stale","activity","message","session_id"}`.
+A timeout exits `124` with the same object plus `"timed_out": true` —
+`matched` is `false` there, and `stale` still says whether the pane moved
+while you watched.
 [Orchestration →](/agents/orchestration)
 
 ### `tty7 events`

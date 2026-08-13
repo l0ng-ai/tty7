@@ -1131,7 +1131,23 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
                 124,
                 Report {
                     human,
-                    json: json!({ "pane": pane, "status": current.name(), "timed_out": true }),
+                    // The same shape as a finished wait, plus the flag that
+                    // says the deadline ended it: a consumer written against
+                    // the success path must not find its fields missing on
+                    // exactly the branch it wrote error handling for (#589).
+                    json: {
+                        let session = entry.as_ref().map(|e| &e.state);
+                        json!({
+                            "pane": pane,
+                            "status": current.name(),
+                            "matched": false,
+                            "stale": !changed,
+                            "timed_out": true,
+                            "activity": session.map(|s| s.activity),
+                            "message": session.and_then(|s| s.message.clone()),
+                            "session_id": session.and_then(|s| s.session_id.clone()),
+                        })
+                    },
                 },
             ));
         }
@@ -3110,10 +3126,15 @@ mod tests {
             &mut backend,
         )
         .expect("a timeout is an exit code, not an error");
-        assert!(
-            matches!(out, Outcome::Exit(124, _)),
-            "a pane that was free all along has not run anything"
-        );
+        let Outcome::Exit(124, r) = out else {
+            panic!("a pane that was free all along has not run anything");
+        };
+        // A timeout answers in the success path's own shape, plus the flag —
+        // a consumer's error branch must not meet missing fields (#589).
+        assert_eq!(r.json["timed_out"], true);
+        assert_eq!(r.json["matched"], false);
+        assert_eq!(r.json["stale"], true, "nothing ran while we watched");
+        assert!(r.json.get("session_id").is_some());
 
         // Free → busy → free is the real shape, and it must wake.
         let mut backend = mock();

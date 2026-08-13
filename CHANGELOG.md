@@ -50,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach them. The retry is now dropped only for a tab the user really did make
   while the pull was out, and a window waiting on a rebuild adds to its machine
   without pruning it until the pull lands (#579).
+- **A timed-out `tty7 wait` now answers in the same JSON shape as a finished
+  one** — `matched`, `stale` and the agent session fields, plus
+  `"timed_out": true` — instead of a bare object missing the fields a
+  consumer's error branch was written against. The schema, including
+  `timed_out`, is now documented (#589).
 - **Cancelling the amend confirmation no longer switches amend off.** The
   toggle was cleared when Commit was pressed — before the "rewrite the last
   commit?" prompt — so answering Cancel returned to a panel whose amend mode
