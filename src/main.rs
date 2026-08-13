@@ -74,26 +74,41 @@ fn spawn_config_watcher(cx: &mut App) {
     Box::leak(Box::new(watcher));
 
     cx.spawn(async move |cx| {
+        // One toast per breakage rather than one per write: this watcher also
+        // fires for every theme file, so a config.json left broken would
+        // otherwise re-announce itself on each of them. Cleared by the load
+        // that parses, so a second breakage speaks up again.
+        let mut announced = false;
         while rx.recv().await.is_ok() {
             cx.background_executor().timer(DEBOUNCE).await;
             while rx.try_recv().is_ok() {}
 
             cx.update(|cx| {
                 let (config, outcome) = Config::load_with_outcome();
-                if outcome == crate::core::config::LoadOutcome::Quarantined {
+                if outcome.failed() {
                     // Keep the settings the app is running on: swapping the
                     // stand-in defaults in would flash the whole UI onto
                     // defaults, and the load already parked the broken file
                     // beside the original. It reloads itself the moment the
                     // file parses again.
-                    notify_config_quarantined(cx, false);
+                    if !announced {
+                        announced = true;
+                        notify_config_load_failed(cx, outcome, false);
+                    }
+                    // The theme files this same watcher covers must keep
+                    // hot-reloading: a typo in config.json is no reason for
+                    // theme editing to go dead until the app restarts. They
+                    // read the global config, which is deliberately still the
+                    // one the app is running on.
+                    reload_themes(cx);
+                    cx.refresh_windows();
                     return;
                 }
+                announced = false;
                 crate::ui::i18n::set_locale(&config.gui_language);
                 cx.set_global(config);
-                crate::ui::presets::load_registry(cx);
+                reload_themes(cx);
                 crate::ui::theme::apply_cursor_hide_mode(cx);
-                crate::ui::theme::apply_theme(None, cx);
                 // The menu bar is built once from the current locale, so editing
                 // gui_language by hand has to rebuild it the same way the
                 // in-app language picker does.
@@ -119,13 +134,36 @@ fn is_theme_file(p: &std::path::Path) -> bool {
         })
 }
 
-/// Says out loud that config.json did not load and where its contents were
-/// parked. Without this the symptom is "my settings are gone" (startup) or
-/// "my edit did nothing" (reload) — both read as data loss, and neither
-/// points at the file that needs fixing.
-fn notify_config_quarantined(cx: &mut App, startup: bool) {
+/// Re-reads what the theme files on disk say. The config watcher covers the
+/// themes directory too, so this has to run even when config.json itself did
+/// not load — editing a theme cannot go dead because of a typo elsewhere.
+fn reload_themes(cx: &mut App) {
+    crate::ui::presets::load_registry(cx);
+    crate::ui::theme::apply_theme(None, cx);
+}
+
+/// Says out loud that config.json did not load and, when there is one, where
+/// its contents were parked. Without this the symptom is "my settings are
+/// gone" (startup) or "my edit did nothing" (reload) — both read as data loss,
+/// and neither points at the file that needs fixing.
+fn notify_config_load_failed(
+    cx: &mut App,
+    outcome: crate::core::config::LoadOutcome,
+    startup: bool,
+) {
+    use crate::core::config::LoadOutcome;
+    use crate::ui::i18n::L10nKey;
     use gpui_component::WindowExt as _;
 
+    // Only an unparseable file leaves a copy behind; an unreadable one had
+    // nothing to copy, so it must not send the user after a `.corrupt` file
+    // that was never written.
+    let key = match (outcome, startup) {
+        (LoadOutcome::Unreadable, true) => L10nKey::ConfigUnreadableStartup,
+        (LoadOutcome::Unreadable, false) => L10nKey::ConfigUnreadableReload,
+        (_, true) => L10nKey::ConfigQuarantinedStartup,
+        (_, false) => L10nKey::ConfigQuarantinedReload,
+    };
     let Some(workspace) = crate::ui::windows::WindowRegistry::most_recent(cx) else {
         return;
     };
@@ -133,14 +171,7 @@ fn notify_config_quarantined(cx: &mut App, startup: bool) {
         return;
     };
     let _ = handle.update(cx, |_, window, cx| {
-        window.push_notification(
-            crate::ui::i18n::t(if startup {
-                crate::ui::i18n::L10nKey::ConfigQuarantinedStartup
-            } else {
-                crate::ui::i18n::L10nKey::ConfigQuarantinedReload
-            }),
-            cx,
-        );
+        window.push_notification(crate::ui::i18n::t(key), cx);
     });
 }
 
@@ -448,7 +479,7 @@ fn main() {
         return;
     }
 
-    let config = crate::core::config::Config::load();
+    let (config, config_outcome) = crate::core::config::Config::load_with_outcome();
     let gui_language = config.gui_language.clone();
 
     // After the PATH enrichment above, which is what makes the candidate scan
@@ -481,9 +512,8 @@ fn main() {
             #[cfg(target_os = "macos")]
             set_dock_icon_for_bare_binary();
             crate::ui::i18n::set_locale(&gui_language);
-            // The load above is reused rather than re-read: a second read of a
-            // file that fails to parse would quarantine a second copy.
-            let quarantined = config.quarantined;
+            // The load above is reused rather than re-read: reading the same
+            // file twice at launch would report the same failure twice.
             cx.set_global(config);
             crate::ui::theme::refresh_system_appearance(cx);
             crate::core::session::WorkspaceStore::init(cx);
@@ -502,8 +532,8 @@ fn main() {
 
             let reopen = crate::ui::windows::restore_target(cx, open_path.as_deref());
             crate::ui::windows::open_at(cx, reopen, open_path);
-            if quarantined {
-                notify_config_quarantined(cx, true);
+            if config_outcome.failed() {
+                notify_config_load_failed(cx, config_outcome, true);
             }
         });
 }

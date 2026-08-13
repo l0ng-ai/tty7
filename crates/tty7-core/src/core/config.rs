@@ -603,6 +603,21 @@ pub enum LoadOutcome {
     /// returned config is the defaults with writes suppressed — saving over
     /// the broken file would make one typo permanent.
     Quarantined,
+    /// The file is there but could not be read at all. Writes are suppressed
+    /// the same way, but nothing was parked beside it: there was nothing
+    /// readable to copy. Distinct from [`LoadOutcome::Quarantined`] because
+    /// telling the user to look in `config.json.corrupt` for contents that
+    /// were never written there sends them after a file that is not there.
+    Unreadable,
+}
+
+impl LoadOutcome {
+    /// Whether the file is standing between the user and their settings: the
+    /// values handed back are defaults with writes suppressed, not anything
+    /// the user wrote.
+    pub fn failed(self) -> bool {
+        matches!(self, Self::Quarantined | Self::Unreadable)
+    }
 }
 
 impl Config {
@@ -634,7 +649,7 @@ impl Config {
                 );
                 let mut cfg = Config::default();
                 cfg.quarantined = true;
-                return (cfg, LoadOutcome::Quarantined);
+                return (cfg, LoadOutcome::Unreadable);
             }
         };
         match serde_json::from_str::<Config>(strip_bom(&text)) {
@@ -813,11 +828,27 @@ pub fn strip_bom(text: &str) -> &str {
 /// Sets a corrupt state file aside (copied, the original left in place) so the
 /// caller can fall back to defaults without silently destroying what was there.
 pub(crate) fn quarantine(path: &std::path::Path) {
+    // A broken file is read again and again — `Config::load` alone runs on
+    // every pane spawn and every palette command — so this is reached over
+    // and over for the same contents. A sibling already holding those bytes
+    // *is* the copy this call would make; without the check, opening a
+    // couple of tabs on a broken config.json fills the config directory with
+    // eight identical `.corrupt` files and then overwrites the first one.
+    if let Ok(bytes) = std::fs::read(path)
+        && already_kept(path, &bytes)
+    {
+        return;
+    }
     let aside = quarantine_path(path);
     match std::fs::copy(path, &aside) {
         Ok(_) => log::warn!("the previous contents were kept at {}", aside.display()),
         Err(e) => log::warn!("could not keep a copy at {}: {e}", aside.display()),
     }
+}
+
+/// Whether an earlier quarantine of `path` already holds exactly `bytes`.
+fn already_kept(path: &std::path::Path, bytes: &[u8]) -> bool {
+    quarantine_candidates(path).any(|kept| std::fs::read(&kept).is_ok_and(|held| held == bytes))
 }
 
 /// Like [`quarantine`], but moves the file out of the way — for files that
@@ -830,15 +861,21 @@ pub(crate) fn quarantine_by_rename(path: &std::path::Path) {
     }
 }
 
-fn quarantine_path(path: &std::path::Path) -> PathBuf {
+/// Every name a quarantined copy of `path` may go under, oldest first.
+fn quarantine_candidates(path: &std::path::Path) -> impl Iterator<Item = PathBuf> + use<'_> {
     const MAX_QUARANTINED: u32 = 8;
 
-    let base = path.with_extension("json.corrupt");
+    std::iter::once(path.with_extension("json.corrupt"))
+        .chain((1..MAX_QUARANTINED).map(|n| path.with_extension(format!("json.corrupt.{n}"))))
+}
+
+fn quarantine_path(path: &std::path::Path) -> PathBuf {
+    let mut candidates = quarantine_candidates(path);
+    let base = candidates.next().expect("the base name is always offered");
     if !base.exists() {
         return base;
     }
-    (1..MAX_QUARANTINED)
-        .map(|n| path.with_extension(format!("json.corrupt.{n}")))
+    candidates
         .find(|candidate| !candidate.exists())
         .unwrap_or(base)
 }
@@ -1665,7 +1702,7 @@ mod tests {
         pin_config_dir();
         let path = Config::path().expect("pinned config dir");
         let aside = path.with_extension("json.corrupt");
-        std::fs::remove_file(&aside).ok();
+        clear_quarantines(&path);
         std::fs::write(&path, "{ not json").unwrap();
 
         let (loaded, outcome) = Config::load_with_outcome();
@@ -1697,7 +1734,94 @@ mod tests {
         assert!(std::fs::read_to_string(&path).unwrap().contains("19.0"));
 
         std::fs::remove_file(&path).ok();
-        std::fs::remove_file(&aside).ok();
+        clear_quarantines(&path);
+    }
+
+    #[test]
+    fn a_config_that_stays_broken_is_parked_once_not_once_per_read() {
+        let _guard = lock_config_file();
+        pin_config_dir();
+        let path = Config::path().expect("pinned config dir");
+        clear_quarantines(&path);
+        std::fs::write(&path, "{ not json").unwrap();
+
+        // `Config::load` runs on every pane spawn and every palette command,
+        // so a file left broken is read dozens of times a session. Each read
+        // used to leave another copy, filling the config directory and then
+        // overwriting the oldest one.
+        for _ in 0..12 {
+            let _ = Config::load();
+        }
+        let parked: Vec<_> = quarantine_candidates(&path)
+            .filter(|candidate| candidate.exists())
+            .collect();
+        assert_eq!(
+            parked.len(),
+            1,
+            "one broken file, one copy — found {parked:?}"
+        );
+
+        // A *different* broken version is still worth keeping.
+        std::fs::write(&path, "{ also not json").unwrap();
+        let _ = Config::load();
+        let parked: Vec<_> = quarantine_candidates(&path)
+            .filter(|candidate| candidate.exists())
+            .collect();
+        assert_eq!(parked.len(), 2, "found {parked:?}");
+        assert_eq!(
+            std::fs::read_to_string(&parked[0]).unwrap(),
+            "{ not json",
+            "the first rescue copy is still the first one"
+        );
+
+        std::fs::remove_file(&path).ok();
+        clear_quarantines(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_config_suppresses_writes_without_parking_a_copy() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let _guard = lock_config_file();
+        pin_config_dir();
+        let path = Config::path().expect("pinned config dir");
+        clear_quarantines(&path);
+        std::fs::write(&path, r#"{"font_size": 21.0}"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_to_string(&path).is_ok() {
+            std::fs::remove_file(&path).ok();
+            return;
+        }
+
+        let (loaded, outcome) = Config::load_with_outcome();
+        // Not `Quarantined`: nothing was parked, so the notification must not
+        // point at a `config.json.corrupt` that was never written.
+        assert_eq!(outcome, LoadOutcome::Unreadable);
+        assert!(outcome.failed());
+        assert!(
+            loaded.quarantined,
+            "what cannot be read must not be written"
+        );
+        assert!(
+            quarantine_candidates(&path).all(|candidate| !candidate.exists()),
+            "there was nothing readable to copy"
+        );
+
+        loaded.save();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"font_size": 21.0}"#,
+            "the file the app could not read is the file the user still has"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    fn clear_quarantines(path: &std::path::Path) {
+        for candidate in quarantine_candidates(path) {
+            std::fs::remove_file(candidate).ok();
+        }
     }
 
     #[test]

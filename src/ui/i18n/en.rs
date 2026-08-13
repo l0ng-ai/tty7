@@ -1425,10 +1425,16 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "This stops every running shell on this computer — anything still running in them will be terminated. Your tabs and layout are kept and reopened with fresh shells."
         }
         L10nKey::ConfigQuarantinedStartup => {
-            "config.json could not be parsed, so tty7 is running on default settings. The file's contents were kept beside it as config.json.corrupt — fix the file and it reloads itself. Until then, changes made in Settings are not saved."
+            "config.json could not be parsed, so tty7 is running on default settings and will not write over the file. Its contents were kept beside it as config.json.corrupt — fix the file and it reloads itself. Until then, changes made in Settings are not saved."
         }
         L10nKey::ConfigQuarantinedReload => {
-            "The edited config.json could not be parsed, so the running settings were kept. The file's contents were set aside as config.json.corrupt — fix the file and it reloads itself. Until then, changes made in Settings are not saved."
+            "The edited config.json could not be parsed, so tty7 kept the settings it is already running on and set the file's contents aside as config.json.corrupt. Fix the file and it reloads itself; saving a setting before then replaces it with the settings in use."
+        }
+        L10nKey::ConfigUnreadableStartup => {
+            "config.json could not be read, so tty7 is running on default settings and will not write over the file — it is left exactly as it is. Fix its permissions or contents and it reloads itself. Until then, changes made in Settings are not saved."
+        }
+        L10nKey::ConfigUnreadableReload => {
+            "config.json could not be read, so tty7 kept the settings it is already running on and left the file exactly as it is. Fix its permissions or contents and it reloads itself; saving a setting before then replaces it with the settings in use."
         }
         L10nKey::AppWorktreeRemoveDetailDirty => {
             "The closed tab's worktree at {path} has uncommitted changes."
