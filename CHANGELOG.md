@@ -237,11 +237,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tooltip. (#546)
 - **Terminal pop-up menus no longer leak clicks into the grid behind them** —
   the completion menu and the reverse-search menu (both the floating panel and
-  the input-bar row) inserted no hitbox of their own, so a click that missed
-  every button fell straight through: it moved the cursor, started or cleared
-  a selection, and a Ctrl+click even opened the link hidden *under* the menu.
-  All three now occlude, so a click on menu background is simply swallowed.
-  (#541)
+  the input-bar row) inserted no hitbox of their own, so a press on one fell
+  straight through to the terminal: it cleared whatever was selected and
+  dragged out a new selection, merely moving over a row underlined the text
+  beneath it, and a Ctrl+click opened the link the menu was covering. All
+  three occlude now, so a press on a menu stops at the menu. (#541)
 - **A file link that fails to open says so** — clicking a file path whose
   opener is missing, or whose `link_file_command` template expands to nothing,
   used to fail into a logfile line and nothing else; the click now raises the
