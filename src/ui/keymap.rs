@@ -11,11 +11,21 @@ use crate::ui::palette::CommandGroup;
 use crate::ui::settings::humanize_action;
 use crate::ui::theme::set_menus;
 
-#[derive(Default)]
-struct BoundKeystrokes(Vec<(String, Option<&'static str>)>);
-impl Global for BoundKeystrokes {}
+/// The bindings that were already in the keymap before tty7 put its own
+/// there. gpui-component installs a table of its own from `gpui_component::
+/// init` — the `Input` context's editing keys, the list and menu navigation,
+/// the escape that closes a dialog — and it has no entry point to install
+/// them a second time. A rebuild replaces the whole map, so it has to lay
+/// these back down first, in the order they were added, or the map that comes
+/// out has no backspace in any text field in the app (#548).
+struct BaseBindings(Vec<KeyBinding>);
+impl Global for BaseBindings {}
 
 pub fn init(cx: &mut App) {
+    if cx.try_global::<BaseBindings>().is_none() {
+        let base: Vec<KeyBinding> = cx.key_bindings().borrow().bindings().cloned().collect();
+        cx.set_global(BaseBindings(base));
+    }
     rebuild_keymap(cx);
     cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
     set_menus(cx);
@@ -52,7 +62,8 @@ fn fixed_bindings() -> Vec<KeyBinding> {
     bindings
 }
 
-/// Clears the keymap and binds the full set from the live config.
+/// Replaces the keymap with the full set: the bindings tty7 inherited, then
+/// the ones the live config asks for, then the fixed ones.
 ///
 /// gpui's `Keymap::add_bindings` only ever pushes — it never dedups and
 /// nothing retires a binding — so rebinding by *appending* (the old `rebind`)
@@ -60,14 +71,19 @@ fn fixed_bindings() -> Vec<KeyBinding> {
 /// Clearing first makes a rebind O(map) instead of O(map × calls), and makes
 /// it safe to drive from the config watcher: a hand edit that only reorders
 /// or re-comments the file reloads to an identical triple and never reaches
-/// here, while a real change rebuilds once (#548).
+/// here, while a real change rebuilds once (#548). The order is the order
+/// `init` bound them in, and gpui reads the map back to front, so tty7's
+/// bindings still win over the inherited ones.
 fn rebuild_keymap(cx: &mut App) {
     let effective = effective_bindings(cx);
-    let mut bindings = action_bindings(&effective);
+    let mut bindings: Vec<KeyBinding> = cx
+        .try_global::<BaseBindings>()
+        .map(|base| base.0.clone())
+        .unwrap_or_default();
+    bindings.extend(action_bindings(&effective));
     bindings.extend(fixed_bindings());
     cx.clear_key_bindings();
     cx.bind_keys(bindings);
-    cx.set_global(BoundKeystrokes(bound_keystrokes(&effective)));
 }
 
 pub fn rebind(cx: &mut App) {
@@ -167,6 +183,11 @@ fn action_bindings(effective: &[(String, String)]) -> Vec<KeyBinding> {
     bindings
 }
 
+/// The keystroke and context of every binding `action_bindings` installs.
+/// The rebind used to keep this in a global to retire the previous set one
+/// `NoAction` at a time; a rebuild replaces the whole map instead, so this is
+/// now only the tests' way of asking what a config would install.
+#[cfg(test)]
 fn bound_keystrokes(effective: &[(String, String)]) -> Vec<(String, Option<&'static str>)> {
     let extras = extra_keystrokes(effective);
     effective
@@ -1569,6 +1590,40 @@ mod gpui_tests {
                 size,
                 "rebind clears before it binds, so the map does not grow"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn a_rebuild_keeps_the_bindings_tty7_did_not_install(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            // gpui-component binds the whole `Input` editing table — backspace
+            // among it — from its own `init`, which runs once, before ours. A
+            // rebuild replaces the map, so it has to carry them; without this
+            // the first rebind left every text field in the app unable to
+            // delete a character (#548).
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+
+            let backspace = |cx: &App| {
+                let typed = [Keystroke::parse("backspace").unwrap()];
+                cx.key_bindings()
+                    .borrow()
+                    .all_bindings_for_input(&typed)
+                    .iter()
+                    .map(|b| b.action().name().to_string())
+                    .collect::<Vec<_>>()
+            };
+
+            let inherited = backspace(cx);
+            assert!(
+                !inherited.is_empty(),
+                "gpui-component binds backspace before tty7 touches the keymap"
+            );
+
+            init(cx);
+            assert_eq!(backspace(cx), inherited, "init must not drop them");
+            rebind(cx);
+            assert_eq!(backspace(cx), inherited, "nor may a rebind");
         });
     }
 }
