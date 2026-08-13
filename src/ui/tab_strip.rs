@@ -20,7 +20,7 @@ use crate::core::actions::{
 use crate::core::config::RightPanelTab;
 use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
-use crate::ui::app::{TILE_GLYPH, TILE_GLYPH_LINE, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
+use crate::ui::app::{TILE_GLYPH, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
@@ -1527,10 +1527,8 @@ impl Tty7App {
 
         let add_button = div().occlude().flex_shrink_0().child(
             self.attach_new_tab_menu(
-                chrome_tile_sized(
+                chrome_tile(
                     Button::new("tab-add").icon(Icon::new(IconName::Plus)),
-                    TILE_SIZE,
-                    TILE_GLYPH_LINE,
                     false,
                     cx,
                 )
@@ -1559,11 +1557,9 @@ impl Tty7App {
                 .child(
                     div().occlude().flex_shrink_0().child(
                         self.attach_new_tab_menu(
-                            chrome_tile_sized(
+                            chrome_tile(
                                 Button::new("titlebar-add-collapsed")
                                     .icon(Icon::new(IconName::Plus)),
-                                TILE_SIZE,
-                                TILE_GLYPH_LINE,
                                 false,
                                 cx,
                             )

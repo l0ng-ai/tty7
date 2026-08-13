@@ -132,6 +132,28 @@ pub(crate) const TILE_GLYPH_SM: f32 = TILE_GLYPH;
 pub(crate) const TILE_SIZE_XS: f32 = 18.;
 pub(crate) const TILE_GLYPH_XS: f32 = 11.;
 
+/// The compensation a glyph gets when its art does not fill the box the rest
+/// of the set fills.
+///
+/// Every icon tty7 draws itself sits on the same optical bound — 3.4..20.6 of
+/// a 24 viewBox, 19.3 units of ink once the round caps are counted. Stock
+/// lucide `close` is a bare 6..18 cross, 14 units, so at [`TILE_GLYPH`] it
+/// carries a quarter less ink than the tiles beside it and reads as the one
+/// disabled control in the row. 16 buys that back.
+///
+/// Reach for this only for art we do not own. `plus` used to be here for the
+/// same reason and is not any more: it is ours, so it was redrawn onto the
+/// bound instead of being scaled up at the call site — the fix that also
+/// reaches the 24px tiles, which have no `_LINE` step to grow into.
+///
+/// Note what scaling a glyph up quietly buys along with the extent: 16/13 more
+/// stroke. `plus` had been leaning on that, so moving it to [`TILE_GLYPH`]
+/// thinned it by a fifth even though it got *longer*, and it had to take that
+/// weight back in its own `stroke-width` — a cross is two hairlines with no
+/// fill to hide behind, so it is the one glyph in the set whose weight had to
+/// be settled by looking rather than by arithmetic. `ui::assets`' test carries
+/// the band it landed in and what was rejected either side. Anything else that
+/// leaves here owes the same accounting.
 pub(crate) const TILE_GLYPH_LINE: f32 = 16.;
 
 pub(crate) const TILE_PAD: f32 = (TILE_SIZE - TILE_GLYPH) / 2.;
