@@ -112,6 +112,41 @@ const RESIZE_STEP: f32 = 0.05;
 
 pub(crate) const RECORD_COMMIT_DELAY_MS: u64 = 650;
 
+/// The narrowest the terminal column may be squeezed to by the panels beside
+/// it: roughly forty columns at the default font, which is a prompt with room
+/// to read what it printed.
+pub(crate) const TERMINAL_MIN_W: f32 = 360.;
+
+/// How wide one side panel may grow, given the floor under the terminal and the
+/// floor under the *other* panel.
+///
+/// Each panel used to cap itself at half the window and know nothing about the
+/// other, so the two of them could take the whole of it between them — two
+/// halves leave nothing. On a 720-point window with both open the terminal was
+/// left about 260 points, twenty-odd columns of the one pane the window exists
+/// to show, and dragging either panel wider took the difference out of it.
+/// Reserving the terminal's floor and the other panel's floor first means the
+/// pane the user came for is spoken for before either panel is, and the cap
+/// that comes out of it bounds the drag and the layout alike — so a panel
+/// dragged to its limit stays where it was dropped instead of springing back.
+///
+/// The half-window cap stays, and this takes whichever of the two binds harder.
+/// It is the one that binds on a wide window, where the reservation alone would
+/// have *raised* the ceiling — on a 1440-point window it works out to 864, so
+/// dropping it would have let a panel grow past where it could before under
+/// cover of a change that is only meant to take width away from panels.
+///
+/// `other_floor` is zero when the other panel is closed, which is why this
+/// takes floors rather than reading them: only the caller knows what is up.
+pub(crate) fn side_panel_max(viewport: f32, own_floor: f32, other_floor: f32) -> f32 {
+    (viewport - TERMINAL_MIN_W - other_floor)
+        .min(viewport * SIDE_PANEL_MAX_RATIO)
+        .max(own_floor)
+}
+
+/// The half of the window neither panel may grow past on its own.
+const SIDE_PANEL_MAX_RATIO: f32 = 0.5;
+
 pub(crate) const TITLE_BAR_HEIGHT: f32 = 40.;
 
 pub(crate) const TILE_SIZE: f32 = 32.;
@@ -6277,7 +6312,11 @@ impl Render for Tty7App {
         }
         let vertical = matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
             && !self.tabs.is_empty();
-        let rail = vertical && !self.sidebar_collapsed;
+        // The same three conditions, asked through the predicate the right
+        // panel sizes itself against — two spellings of "is the rail up" is one
+        // more than the layout can afford to have disagree.
+        let rail = self.sidebar_open(cx);
+        debug_assert_eq!(rail, vertical && !self.sidebar_collapsed);
         let strip = self.tab_strip(!vertical, window, cx);
         let sidebar = rail.then(|| self.tab_sidebar(window, cx));
         let ssh_status = self
@@ -7793,10 +7832,63 @@ mod window_drag_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseReason, TabAgentSession, clear_window_override_values, close_prompt, join_shell_args,
-        leaf_shares_the_window_daemon, mru_order, pane_free_for, parse_ssh_connect_input,
-        parse_ssh_option_words, split_shell_args, wd_path_saveable,
+        CloseReason, TERMINAL_MIN_W, TabAgentSession, clear_window_override_values, close_prompt,
+        join_shell_args, leaf_shares_the_window_daemon, mru_order, pane_free_for,
+        parse_ssh_connect_input, parse_ssh_option_words, side_panel_max, split_shell_args,
+        wd_path_saveable,
     };
+
+    const SIDEBAR_MIN: f32 = crate::ui::tab_sidebar::MIN_SIDEBAR_WIDTH;
+    const PANEL_MIN: f32 = crate::ui::right_panel::MIN_WIDTH;
+
+    /// Two panels that each cap themselves at half the window leave the
+    /// terminal nothing when both are open, so the cap is what is left after
+    /// the terminal's floor and the *other* panel's floor — or half the window,
+    /// whichever binds harder.
+    #[test]
+    fn the_terminal_is_spoken_for_before_either_panel_is() {
+        // Mid width: the reservation binds, and a panel dragged to it with the
+        // other at its floor leaves the terminal exactly its floor. Two halves
+        // left it nothing.
+        let mid = 900.;
+        let sidebar = side_panel_max(mid, SIDEBAR_MIN, PANEL_MIN);
+        assert_eq!(sidebar, mid - TERMINAL_MIN_W - PANEL_MIN);
+        assert_eq!(mid - sidebar - PANEL_MIN, TERMINAL_MIN_W);
+
+        // With nothing on the other side, half the window already leaves the
+        // terminal the other half, so the older cap is the one that binds and
+        // a lone panel behaves exactly as it always did.
+        assert_eq!(side_panel_max(mid, SIDEBAR_MIN, 0.), mid / 2.);
+    }
+
+    /// The reservation must only ever take width away from a panel. On a wide
+    /// window it works out *larger* than the half-window cap that was already
+    /// there, and letting it win would widen the ceiling instead.
+    #[test]
+    fn a_wide_window_still_stops_a_panel_at_half_of_it() {
+        let wide = 1440.;
+        assert!(
+            wide - TERMINAL_MIN_W - PANEL_MIN > wide / 2.,
+            "otherwise this test is not testing the case it names"
+        );
+        assert_eq!(side_panel_max(wide, SIDEBAR_MIN, PANEL_MIN), wide / 2.);
+        assert_eq!(side_panel_max(wide, PANEL_MIN, SIDEBAR_MIN), wide / 2.);
+    }
+
+    /// Below the width where everything fits, the floor wins over the
+    /// reservation: a cap under a panel's own minimum would be a panel drawn
+    /// narrower than it can be read at, and the terminal — which can reflow —
+    /// takes the shortfall instead.
+    #[test]
+    fn a_window_too_narrow_for_all_three_falls_back_to_the_floors() {
+        let narrow = 720.;
+        assert_eq!(side_panel_max(narrow, SIDEBAR_MIN, PANEL_MIN), SIDEBAR_MIN);
+        assert_eq!(side_panel_max(narrow, PANEL_MIN, SIDEBAR_MIN), PANEL_MIN);
+        // Both panels pinned to their floors leaves the terminal the rest —
+        // less than its floor, but more than the 260-odd points two saved
+        // widths used to leave it.
+        assert!(narrow - SIDEBAR_MIN - PANEL_MIN > 300.);
+    }
 
     #[test]
     fn a_start_in_path_saves_only_when_it_names_a_real_directory() {

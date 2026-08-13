@@ -16,7 +16,6 @@ use crate::ui::i18n::{L10nKey, t};
 use crate::ui::scrollbar::with_vertical_scrollbar;
 
 pub(crate) const MIN_WIDTH: f32 = 216.;
-pub(crate) const MAX_WIDTH_RATIO: f32 = 0.5;
 
 /// How wide a panel edge is to grab. Both edges a window can drag — the tab
 /// sidebar's and this panel's — are the same target, so they are one number.
@@ -294,9 +293,27 @@ impl Tty7App {
         self.right_panel_visible && !self.tabs.is_empty()
     }
 
-    pub(crate) fn right_panel_px(&self, window: &Window, _cx: &gpui::App) -> f32 {
-        let max = (window.viewport_size().width.as_f32() * MAX_WIDTH_RATIO).max(MIN_WIDTH);
-        self.right_panel_width.get().clamp(MIN_WIDTH, max)
+    /// What the sidebar has reserved, from this panel's point of view.
+    pub(crate) fn sidebar_floor(&self, cx: &gpui::App) -> f32 {
+        if self.sidebar_open(cx) {
+            crate::ui::tab_sidebar::MIN_SIDEBAR_WIDTH
+        } else {
+            0.
+        }
+    }
+
+    pub(crate) fn right_panel_max_px(&self, window: &Window, cx: &gpui::App) -> f32 {
+        crate::ui::app::side_panel_max(
+            window.viewport_size().width.as_f32(),
+            MIN_WIDTH,
+            self.sidebar_floor(cx),
+        )
+    }
+
+    pub(crate) fn right_panel_px(&self, window: &Window, cx: &gpui::App) -> f32 {
+        self.right_panel_width
+            .get()
+            .clamp(MIN_WIDTH, self.right_panel_max_px(window, cx))
     }
 
     pub(crate) fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
@@ -385,6 +402,11 @@ impl Tty7App {
         use std::rc::Rc;
 
         let container: Rc<StdCell<Option<Bounds<Pixels>>>> = Rc::new(StdCell::new(None));
+        // Read while there is still a `cx` to read it from: the drag handler
+        // below only ever sees a `Window`, and the cap it clamps against has to
+        // be the same one the layout applies or the panel springs back from
+        // wherever it was dropped.
+        let sidebar_floor = self.sidebar_floor(cx);
         let backing = canvas(
             {
                 let container = container.clone();
@@ -408,8 +430,11 @@ impl Tty7App {
                             };
                             let right = b.origin.x + b.size.width;
                             let raw = (right - ev.position.x).as_f32();
-                            let max = (window.viewport_size().width.as_f32() * MAX_WIDTH_RATIO)
-                                .max(MIN_WIDTH);
+                            let max = crate::ui::app::side_panel_max(
+                                window.viewport_size().width.as_f32(),
+                                MIN_WIDTH,
+                                sidebar_floor,
+                            );
                             width_cell.set(raw.clamp(MIN_WIDTH, max));
                             window.refresh();
                         }

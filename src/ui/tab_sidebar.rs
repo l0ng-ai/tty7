@@ -24,10 +24,9 @@ use crate::ui::tab_strip::{
     elide_path_keep_tail, measure_text, strip_host_prefix,
 };
 
-const MIN_SIDEBAR_WIDTH: f32 = 180.;
+pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.;
 
 const GRAB_HANDLE_W: f32 = 48.;
-const MAX_SIDEBAR_WIDTH_RATIO: f32 = 0.5;
 
 const ROW_GAP: f32 = 2.;
 
@@ -97,6 +96,31 @@ struct SidebarInfo {
 }
 
 impl Tty7App {
+    /// Whether the tab rail is on screen — the same three conditions `render`
+    /// assembles the layout from, in one place the panel opposite can ask.
+    pub(crate) fn sidebar_open(&self, cx: &gpui::App) -> bool {
+        cx.global::<Config>().tab_bar_position == crate::core::config::TabBarPosition::Left
+            && !self.tabs.is_empty()
+            && !self.sidebar_collapsed
+    }
+
+    /// What the right panel has reserved, from the sidebar's point of view.
+    pub(crate) fn right_panel_floor(&self, cx: &gpui::App) -> f32 {
+        if self.right_panel_open(cx) {
+            crate::ui::right_panel::MIN_WIDTH
+        } else {
+            0.
+        }
+    }
+
+    pub(crate) fn sidebar_max_px(&self, window: &Window, cx: &gpui::App) -> f32 {
+        crate::ui::app::side_panel_max(
+            window.viewport_size().width.as_f32(),
+            MIN_SIDEBAR_WIDTH,
+            self.right_panel_floor(cx),
+        )
+    }
+
     pub(crate) fn tab_sidebar(
         &self,
         window: &mut Window,
@@ -105,8 +129,7 @@ impl Tty7App {
         let active = self.active;
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let show_badges = self.mod_hint_badges;
-        let max_width = (window.viewport_size().width.as_f32() * MAX_SIDEBAR_WIDTH_RATIO)
-            .max(MIN_SIDEBAR_WIDTH);
+        let max_width = self.sidebar_max_px(window, cx);
         let width = self.sidebar_width.get().clamp(MIN_SIDEBAR_WIDTH, max_width);
         let query = self.sidebar_search.read(cx).value().trim().to_lowercase();
         // Every group drops itself when its rows filter out, so a query that
@@ -986,6 +1009,11 @@ impl Tty7App {
             );
 
         let container: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+        // Read while there is still a `cx` to read it from: the drag handler
+        // below only ever sees a `Window`, and the cap it clamps against has to
+        // be the same one the layout applies or the sidebar springs back from
+        // wherever it was dropped.
+        let panel_floor = self.right_panel_floor(cx);
         let backing = canvas(
             {
                 let container = container.clone();
@@ -1008,9 +1036,11 @@ impl Tty7App {
                                 return;
                             };
                             let raw = (ev.position.x - b.origin.x).as_f32();
-                            let max = (window.viewport_size().width.as_f32()
-                                * MAX_SIDEBAR_WIDTH_RATIO)
-                                .max(MIN_SIDEBAR_WIDTH);
+                            let max = crate::ui::app::side_panel_max(
+                                window.viewport_size().width.as_f32(),
+                                MIN_SIDEBAR_WIDTH,
+                                panel_floor,
+                            );
                             width_cell.set(raw.clamp(MIN_SIDEBAR_WIDTH, max));
                             window.refresh();
                         }
