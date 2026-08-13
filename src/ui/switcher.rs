@@ -3658,6 +3658,86 @@ mod gpui_tests {
     use super::Column;
     use crate::ui::app::test_window::harness_with_tabs;
 
+    /// Deleting a remote workspace has to take the listing snapshot's row with
+    /// it. The snapshot every window keeps for the switcher is merged into the
+    /// panel every frame, and with the store entry gone nothing dedups that
+    /// row any more — the workspace the user just deleted popped straight back
+    /// as an adoptable machine row until the next reconnect replaced the
+    /// snapshot.
+    #[gpui::test]
+    fn a_deleted_remote_workspace_leaves_the_switcher(cx: &mut TestAppContext) {
+        use gpui::VisualContext as _;
+
+        use crate::core::session::{RemoteRef, RemoteTarget, WindowView, WorkspaceId};
+
+        let (app, vcx) = crate::ui::app::test_window::harness(cx);
+        let handle = vcx.window_handle();
+        let weak = app.downgrade();
+
+        let target = RemoteTarget::Alias {
+            alias: "build-box".into(),
+        };
+        let machine_ws = WorkspaceId::new();
+        let kept_ws = WorkspaceId::new();
+        let view = WindowView::on_remote(RemoteRef::new(target.clone(), machine_ws));
+        let doomed = view.id;
+
+        app.update(cx, |app, cx| {
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![view],
+                    active: None,
+                },
+            );
+            crate::ui::windows::WindowRegistry::init(cx);
+            crate::ui::windows::WindowRegistry::register(cx, app.workspace, handle, weak);
+            app.host_snapshots.insert(
+                target.host_id(),
+                super::HostSnapshot {
+                    target: target.clone(),
+                    rows: vec![
+                        crate::ui::remote_connect::RemoteWorkspaceRow {
+                            id: machine_ws,
+                            name: "doomed".into(),
+                            panes: 0,
+                            last_active: 0,
+                        },
+                        crate::ui::remote_connect::RemoteWorkspaceRow {
+                            id: kept_ws,
+                            name: "kept".into(),
+                            panes: 0,
+                            last_active: 0,
+                        },
+                    ],
+                },
+            );
+        });
+
+        // From a plain app context, the way `confirm_and_delete`'s spawned
+        // task calls it — inside the entity's own update this would abort on
+        // the reentrant read (#617's lesson).
+        cx.update(|cx| {
+            crate::ui::windows::delete_workspace(cx, doomed);
+        });
+
+        app.update(cx, |app, cx| {
+            let listed: Vec<WorkspaceId> = app
+                .switcher_groups(cx)
+                .iter()
+                .flat_map(|g| g.rows.iter().filter_map(|r| r.remote_id))
+                .collect();
+            assert!(
+                !listed.contains(&machine_ws),
+                "the deleted workspace came back from the listing snapshot"
+            );
+            assert!(
+                listed.contains(&kept_ws),
+                "its machine's other workspaces are still on offer"
+            );
+        });
+    }
+
     #[gpui::test]
     fn ctrl_tab_raises_the_panel_on_the_previously_used_tab(cx: &mut TestAppContext) {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);

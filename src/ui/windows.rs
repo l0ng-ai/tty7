@@ -542,11 +542,39 @@ fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId, ids: Vec<u64>) {
 }
 
 pub fn delete_workspace(cx: &mut App, workspace: WorkspaceId) {
+    let remote = WorkspaceStore::remote_ref(cx, workspace);
     let doomed = delete_from_tree(cx, workspace);
     stop_workspace_keeping(cx, workspace, doomed);
     WorkspaceStore::remove(cx, workspace);
+    if let Some(remote) = remote {
+        scrub_host_snapshots(cx, &remote);
+    }
     release_unused_hosts(cx);
     refresh_menu(cx);
+}
+
+/// Drops a deleted workspace's row from every window's machine-listing
+/// snapshot. The snapshot is captured at connect time and merged into the
+/// switcher every frame, deduped against the store — so with the store entry
+/// just removed, nothing holds that row back any more and the workspace the
+/// user deleted pops straight back into the panel as an adoptable machine row
+/// until the next reconnect replaces the snapshot. `forget_workspace` must
+/// *not* do this: forgetting keeps the machine's session, and re-discovering
+/// it from the listing is that flow's whole point (#485).
+fn scrub_host_snapshots(cx: &mut App, remote: &crate::core::session::RemoteRef) {
+    let host = remote.host_id();
+    let machine_ws = remote.workspace;
+    for (_, app) in WindowRegistry::open_windows(cx) {
+        let Some(app) = app.upgrade() else {
+            continue;
+        };
+        app.update(cx, |app, cx| {
+            if let Some(snapshot) = app.host_snapshots.get_mut(&host) {
+                snapshot.rows.retain(|row| row.id != machine_ws);
+                cx.notify();
+            }
+        });
+    }
 }
 
 /// Drop a workspace's local bookmark without telling its machine anything.
