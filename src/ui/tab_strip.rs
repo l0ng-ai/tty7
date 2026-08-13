@@ -837,7 +837,15 @@ impl Tty7App {
         hollow: bool,
     ) -> gpui::AnyElement {
         let d = (size * 0.42).max(7.);
-        let bg = ring;
+        // The halo was the surface itself, which is only a ring while the
+        // surface is light — on a dark theme it went near-black and read as a
+        // notch bitten out of the avatar rather than a badge sitting on it.
+        // Light themes already ring the dot in white; give the dark ones the
+        // same white edge, and the hollow Waiting dot the same white hole.
+        let bg = match crate::ui::presets::surface_is_dark(ring) {
+            true => gpui::white(),
+            false => ring,
+        };
         if unread > 0 {
             let nd = (size * 0.72).max(13.0);
             let label = unread.min(9).to_string();
