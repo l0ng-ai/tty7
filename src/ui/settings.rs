@@ -1456,10 +1456,14 @@ impl gpui::RenderOnce for KeyCaptureChip {
             kbd_bg,
             accent,
         } = self;
+        // `tab_stop` is what the focus walker looks at: a tracked handle that
+        // never sets it is focusable by click but stepped straight over by Tab.
+        // gpui-component's `Button` sets it the same way, at `track_focus`.
         let focus = window
             .use_keyed_state(format!("kb-{action}"), cx, |_, cx| cx.focus_handle())
             .read(cx)
-            .clone();
+            .clone()
+            .tab_stop(true);
         let focused = focus.is_focused(window);
         div()
             .id(SharedString::from(format!("kb-{action}")))
@@ -1557,14 +1561,17 @@ impl gpui::RenderOnce for SegmentedControl {
             .chain(custom_label.map(|label| (label, None)))
             .collect();
         let count = cells.len();
-        // A focus handle of its own is what puts the group in the tab order.
-        // Keyed by the control id so a re-render finds the same handle and
-        // focus survives it; the focused group wears the accent border the
+        // A focus handle of its own is what puts the group in the tab order —
+        // and `tab_stop`, the way gpui-component's `Button` sets it, is what
+        // makes the walker stop on it rather than step over a merely focusable
+        // element. Keyed by the control id so a re-render finds the same handle
+        // and focus survives it; the focused group wears the accent border the
         // key-capture chip already uses for its recording state.
         let focus = window
             .use_keyed_state(id.clone(), cx, |_, cx| cx.focus_handle())
             .read(cx)
-            .clone();
+            .clone()
+            .tab_stop(true);
         let focused = focus.is_focused(window);
         h_flex()
             .id(gpui::ElementId::Name(id.clone()))
@@ -8019,12 +8026,26 @@ mod tests {
         };
         assert_eq!(segmented_arrow_step("left", &ctrl, Some(1), 3), None);
     }
+
+    /// The custom cell of a valued segmented (#550) holds no value to write, so
+    /// the arrows step off it onto the last bucket and never onto it.
+    #[test]
+    fn segmented_arrows_step_off_the_custom_cell_but_never_onto_it() {
+        let plain = gpui::Modifiers::default();
+        assert_eq!(segmented_arrow_step("left", &plain, None, 3), Some(2));
+        assert_eq!(segmented_arrow_step("up", &plain, None, 3), Some(2));
+        assert_eq!(segmented_arrow_step("right", &plain, None, 3), None);
+        assert_eq!(segmented_arrow_step("down", &plain, None, 3), None);
+        // The last bucket is the end of the walk even when the custom cell is
+        // painted beside it.
+        assert_eq!(segmented_arrow_step("right", &plain, Some(2), 3), None);
+    }
 }
 
 #[cfg(test)]
 mod gpui_tests {
     use super::SettingsSection;
-    use crate::core::config::Config;
+    use crate::core::config::{Config, CursorStyle};
     use crate::core::session::Session;
     use crate::ui::app::Tty7App;
     use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
@@ -8078,5 +8099,38 @@ mod gpui_tests {
             matches!(section, Some(SettingsSection::Appearance)),
             "the panel should still be on Appearance after two paint passes",
         );
+    }
+
+    /// The #552 contract end to end: a segmented group has to be *reachable*,
+    /// not merely focusable. A handle that is tracked but never marked a tab
+    /// stop is stepped straight over by gpui's focus walker, so this walks the
+    /// page with Tab the way a keyboard user would and lets the arrow key step
+    /// the cursor-shape group once it gets there.
+    #[gpui::test]
+    fn tab_reaches_a_segmented_group_and_an_arrow_steps_it(cx: &mut TestAppContext) {
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Appearance, window, cx);
+        });
+        vcx.simulate_resize(size(px(1100.), px(800.)));
+        vcx.run_until_parked();
+
+        let cursor_style =
+            |vcx: &mut VisualTestContext| vcx.update(|_, cx| cx.global::<Config>().cursor_style);
+        assert_eq!(
+            cursor_style(&mut vcx),
+            CursorStyle::Block,
+            "the fixture starts on the first cell of the cursor-shape group",
+        );
+        // One lap of the trapped focus ring is plenty; the page has nothing
+        // like this many stops.
+        for _ in 0..120 {
+            vcx.simulate_keystrokes("tab");
+            vcx.simulate_keystrokes("right");
+            if cursor_style(&mut vcx) == CursorStyle::Bar {
+                return;
+            }
+        }
+        panic!("Tab never reached the cursor-shape segmented group");
     }
 }
