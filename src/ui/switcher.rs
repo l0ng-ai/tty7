@@ -1271,7 +1271,7 @@ impl Tty7App {
         let Some(name) = name else {
             return;
         };
-        crate::ui::tree_sync::rename_workspace(cx, self.workspace, Some(name));
+        crate::ui::tree_sync::name_new_workspace(cx, self.workspace, name);
         crate::ui::windows::refresh_menu(cx);
         self.sync_window_title(window, cx);
     }
@@ -3840,6 +3840,59 @@ mod gpui_tests {
             assert!(
                 !form.name.read(cx).value().trim().is_empty(),
                 "the name box starts prefilled with the generated default"
+            );
+        });
+    }
+
+    /// Creating a workspace switches this window over to it, and the pull that
+    /// follows used to read the window back out of the registry to see what it
+    /// was showing — the very entity `switch_workspace` is holding. gpui
+    /// aborts the process for that, so the window had to be registered here for
+    /// the lookup to find anything and the crash to reproduce (#617).
+    #[gpui::test]
+    fn creating_a_workspace_does_not_read_the_window_making_it(cx: &mut TestAppContext) {
+        use gpui::VisualContext;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let handle = vcx.window_handle();
+        let weak = app.downgrade();
+        app.update(cx, |app, cx| {
+            crate::ui::windows::WindowRegistry::init(cx);
+            crate::ui::windows::WindowRegistry::register(cx, app.workspace, handle, weak);
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_workspace_form(window, cx)
+        });
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.switcher_form_create(window, cx)
+        });
+
+        app.update(cx, |app, cx| {
+            assert!(
+                crate::ui::windows::WindowRegistry::app_for(cx, app.workspace).is_some(),
+                "the window followed its new workspace into the registry"
+            );
+        });
+    }
+
+    /// The name the form collected has to reach the create, not chase it. It
+    /// used to go out as a rename the moment the window switched — before the
+    /// workspace existed on the machine to be renamed — so it was answered
+    /// `NotFound`, dropped, and the generated name stood (#618).
+    #[gpui::test]
+    fn a_name_typed_into_the_form_is_held_for_the_create(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.name_fresh_workspace(Some("deploy".into()), window, cx)
+        });
+
+        app.update(cx, |app, cx| {
+            assert_eq!(
+                crate::ui::tree_sync::chosen_name_for(cx, app.workspace).as_deref(),
+                Some("deploy"),
+                "the create this window is about to make spends it"
             );
         });
     }

@@ -750,6 +750,15 @@ struct WsState {
     /// Parking it also means a pull that has to be retried still gets the
     /// folder opened, on whichever attempt finally lands.
     then_open: Option<std::path::PathBuf>,
+    /// A name the user typed for a workspace this window is about to create.
+    ///
+    /// It has to travel with the create rather than follow it as a rename: the
+    /// workspace does not exist on the machine yet, so a rename sent now is
+    /// answered `NotFound` and dropped, and the create that runs afterwards
+    /// names it whatever `fresh_workspace_name` rolled (#618). Consumed by
+    /// `start_prime`, which spends it instead of the generated name, and
+    /// cleared by `finish_prime` once the machine has confirmed a name.
+    chosen_name: Option<String>,
     /// Whether this window has already been told why it opened empty.
     ///
     /// The retry is as quiet as the failure was, so a window whose machine
@@ -775,6 +784,7 @@ impl Default for WsState {
             owed_over: Vec::new(),
             rehydrate_attempts: 0,
             then_open: None,
+            chosen_name: None,
             said_why_empty: false,
         }
     }
@@ -1014,6 +1024,41 @@ fn unsendable(request: &ControlRequest, why: &str) {
     }
 }
 
+/// Names a workspace this window is in the middle of creating.
+///
+/// Parked rather than sent: the machine has not been asked to create the
+/// workspace yet, so a rename addressed to it right now comes back `NotFound`
+/// and is dropped on the floor — which is how a name typed into the create form
+/// used to lose to the generated one (#618). `start_prime` spends it on the
+/// create itself.
+///
+/// A window already synced with its machine has no create coming, so there is
+/// nothing to ride along with and the rename goes out as usual.
+pub(crate) fn name_new_workspace(cx: &mut App, client_ws: WorkspaceId, name: String) {
+    // A window tree-sync has never heard of is as unprimed as one it is
+    // priming right now: either way the create is still ahead of us.
+    let state = cx
+        .default_global::<TreeSync>()
+        .windows
+        .entry(client_ws)
+        .or_default();
+    if matches!(state.sync, SyncPhase::Unprimed { .. }) {
+        state.chosen_name = Some(name);
+        return;
+    }
+    rename_workspace(cx, client_ws, Some(name));
+}
+
+/// The name parked for a create that has not run yet, for tests that need to
+/// see it got that far.
+#[cfg(test)]
+pub(crate) fn chosen_name_for(cx: &mut App, client_ws: WorkspaceId) -> Option<String> {
+    cx.default_global::<TreeSync>()
+        .windows
+        .get(&client_ws)
+        .and_then(|state| state.chosen_name.clone())
+}
+
 pub(crate) fn rename_workspace(cx: &mut App, client_ws: WorkspaceId, name: Option<String>) {
     fire_workspace_op(cx, client_ws, move |ws| ControlRequest::WorkspaceRename {
         workspace: ws,
@@ -1047,10 +1092,20 @@ fn start_prime(cx: &mut App, client_ws: WorkspaceId) {
         .get(&client_ws)
         .map(|s| s.epoch)
         .unwrap_or(0);
-    // Picked here, on the main thread, where the names already in use are
-    // readable. It is only spent if the workspace turns out to be new.
-    let fresh = fresh_workspace_name(cx, host);
     cx.spawn(async move |cx| {
+        // Picked on the main thread, where the names already in use are
+        // readable, but inside the task rather than before it: a window that is
+        // switching workspaces orders its pull first and is named second, so
+        // reading any earlier would miss the name the user typed. A name the
+        // user did type beats a generated one, and is left in place for
+        // `finish_prime` to spend against the machine's answer.
+        let fresh = cx.update(|cx| {
+            cx.default_global::<TreeSync>()
+                .windows
+                .get(&client_ws)
+                .and_then(|state| state.chosen_name.clone())
+                .unwrap_or_else(|| fresh_workspace_name(cx, host))
+        });
         let outcome = cx
             .background_executor()
             .spawn(async move { pull_or_create(&client, machine_ws, fresh) })
@@ -1091,6 +1146,34 @@ pub(crate) fn fresh_workspace_name(cx: &App, host: HostId) -> String {
 /// never arrives. Dropping the name here left the mirror holding the workspace
 /// unnamed until something pulled the whole tree again, and the name it had had
 /// all along then landed on screen looking like a rename (#604).
+/// Settles the name a window asked for against the name its machine came back
+/// with, and returns what the workspace is really called.
+///
+/// `answered` is the machine's answer. A chosen name it read back was spent by
+/// the create that carried it, and there is nothing left to do. One it did not
+/// means the create never ran — the workspace was already there, or the other
+/// create won the race with a stale idea of the name — so it goes out as the
+/// rename it has become. Either way the name is owed only once.
+fn settle_chosen_name(
+    cx: &mut App,
+    client_ws: WorkspaceId,
+    answered: Option<String>,
+) -> Option<String> {
+    let chosen = cx
+        .default_global::<TreeSync>()
+        .windows
+        .get_mut(&client_ws)
+        .and_then(|state| state.chosen_name.take());
+    match chosen {
+        Some(chosen) if answered.as_deref() == Some(chosen.as_str()) => answered,
+        Some(chosen) => {
+            rename_workspace(cx, client_ws, Some(chosen.clone()));
+            Some(chosen)
+        }
+        None => answered,
+    }
+}
+
 fn pull_or_create(
     client: &ControlClient,
     machine_ws: WorkspaceId,
@@ -1168,7 +1251,8 @@ fn finish_prime(
     );
     // The pull above is the only place this window will hear the workspace's
     // name — it is left out of the deltas its own create raises (#604).
-    crate::ui::machine_mirror::MachineMirrors::note_workspace_name(cx, host, machine_ws, landed.2);
+    let name = settle_chosen_name(cx, client_ws, landed.2);
+    crate::ui::machine_mirror::MachineMirrors::note_workspace_name(cx, host, machine_ws, name);
     if !was_dirty {
         return;
     }
@@ -1485,9 +1569,18 @@ fn hydrate_with(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt, showing: Vec
             });
             return;
         };
+        // Read here rather than before the spawn: `switch_workspace` orders
+        // this pull and only then names the workspace, so at the moment this
+        // task was created the name had not been typed in yet.
+        let chosen = cx.update(|cx| {
+            cx.default_global::<TreeSync>()
+                .windows
+                .get(&client_ws)
+                .and_then(|state| state.chosen_name.clone())
+        });
         let outcome = cx
             .background_executor()
-            .spawn(async move { pull_workspace(&client, machine_ws) })
+            .spawn(async move { pull_workspace(&client, machine_ws, chosen) })
             .await;
         cx.update(|cx| finish_hydration(cx, client_ws, epoch, adopt, outcome));
     })
@@ -1632,6 +1725,7 @@ fn arm_rehydrate_retry(cx: &mut App, client_ws: WorkspaceId, epoch: u64, attempt
 fn pull_workspace(
     client: &ControlClient,
     machine_ws: WorkspaceId,
+    chosen: Option<String>,
 ) -> io::Result<(Machine, WsMirror, Session)> {
     let mut machine = match layout_of(machine_get(client)?, machine_ws) {
         Ok(pulled) => return Ok(pulled),
@@ -1644,7 +1738,10 @@ fn pull_workspace(
         .iter()
         .filter_map(|w| w.name.as_deref())
         .collect();
-    let name = tty7_core::core::codename::unique(|n| taken.contains(&n));
+    // A name the user typed beats a rolled one. This create and `start_prime`'s
+    // race each other (see the `Err` arm below), so both have to offer it —
+    // whichever wins, the workspace ends up called what was asked for.
+    let name = chosen.unwrap_or_else(|| tty7_core::core::codename::unique(|n| taken.contains(&n)));
     match client.call(ControlRequest::WorkspaceCreate {
         name: Some(name),
         workspace: Some(machine_ws),
@@ -1759,7 +1856,17 @@ fn settle_hydration(
         }
     };
     let host = WorkspaceStore::host_of(cx, client_ws);
+    let machine_ws = tree_workspace_id(cx, client_ws);
+    // What the tree that is about to be installed calls this workspace, which
+    // for a pull that had to create it is the name that create proposed.
+    let answered = machine
+        .workspaces
+        .iter()
+        .find(|w| w.id == machine_ws)
+        .and_then(|w| w.name.clone());
     crate::ui::machine_mirror::MachineMirrors::install(cx, host, machine);
+    let name = settle_chosen_name(cx, client_ws, answered);
+    crate::ui::machine_mirror::MachineMirrors::note_workspace_name(cx, host, machine_ws, name);
     let machine_was_empty = mirror.tabs.is_empty();
     let was_dirty = {
         let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
@@ -2339,6 +2446,190 @@ mod tests {
         );
     }
 
+    /// A name typed into the create form is for a workspace the machine has
+    /// not been told to make yet. Sending it as a rename is sending it into a
+    /// `NotFound`, which `unsendable` swallows, and the create that follows
+    /// then names the workspace whatever it rolled — the user's name lost to a
+    /// generated one every time (#618).
+    #[gpui::test]
+    fn a_typed_name_waits_for_the_create_rather_than_racing_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            cx.default_global::<TreeSync>()
+                .windows
+                .entry(ws)
+                .or_default();
+
+            name_new_workspace(cx, ws, "deploy".into());
+
+            assert_eq!(
+                cx.default_global::<TreeSync>().windows[&ws]
+                    .chosen_name
+                    .as_deref(),
+                Some("deploy"),
+                "the name rides along with the create instead of chasing it"
+            );
+        });
+    }
+
+    /// `start_prime` spends the typed name on the create, so a machine that
+    /// answers with it has settled the matter.
+    #[gpui::test]
+    fn the_machine_reading_back_the_typed_name_settles_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let (ws, view) = primed_window(cx, Some("deploy"));
+            let epoch = cx.default_global::<TreeSync>().windows[&ws].epoch;
+
+            finish_prime(
+                cx,
+                ws,
+                epoch,
+                Ok((WsMirror::default(), Some("deploy".into()))),
+            );
+
+            assert!(
+                cx.default_global::<TreeSync>().windows[&ws]
+                    .chosen_name
+                    .is_none(),
+                "a name the machine has confirmed is not still owed"
+            );
+            assert_eq!(
+                crate::ui::machine_mirror::display_name(cx, &view).as_deref(),
+                Some("deploy"),
+                "and it is what the window shows"
+            );
+        });
+    }
+
+    /// The other branch of `pull_or_create`: the workspace was already on the
+    /// machine, so the pull answered and the create never ran — nobody was ever
+    /// offered the typed name. It has to go out as a rename, and it has to beat
+    /// the name the pull came back with, which #604 wired straight to the chip.
+    #[gpui::test]
+    fn a_workspace_the_machine_already_had_still_takes_the_typed_name(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let (ws, view) = primed_window(cx, Some("deploy"));
+            let epoch = cx.default_global::<TreeSync>().windows[&ws].epoch;
+
+            finish_prime(
+                cx,
+                ws,
+                epoch,
+                Ok((WsMirror::default(), Some("keen-marten".into()))),
+            );
+
+            assert!(
+                cx.default_global::<TreeSync>().windows[&ws]
+                    .chosen_name
+                    .is_none(),
+                "said once, not on every later pull"
+            );
+            assert_eq!(
+                crate::ui::machine_mirror::display_name(cx, &view).as_deref(),
+                Some("deploy"),
+                "the name the user typed outranks the one the pull answered with"
+            );
+        });
+    }
+
+    /// The create that actually runs when a window switches workspaces is
+    /// `pull_workspace`'s, not `start_prime`'s — `hydrate` is what
+    /// `switch_workspace` orders, and it rolled its own codename with no idea a
+    /// name had been typed. Whatever the tree comes back saying, the typed name
+    /// is what the workspace ends up called.
+    #[gpui::test]
+    fn a_hydrating_pull_settles_the_typed_name_too(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::ui::windows::WindowRegistry::init(cx);
+            let (ws, view) = primed_window(cx, Some("deploy"));
+            let epoch = cx.default_global::<TreeSync>().windows[&ws].epoch;
+            let pulled = Machine {
+                workspaces: vec![tty7_core::core::machine::Workspace {
+                    id: ws,
+                    name: Some("keen-marten".into()),
+                    ..Default::default()
+                }],
+                panes: Vec::new(),
+            };
+
+            settle_hydration(
+                cx,
+                ws,
+                epoch,
+                Adopt::IfEmpty,
+                Ok((pulled, WsMirror::default(), Session::default())),
+            );
+
+            assert_eq!(
+                crate::ui::machine_mirror::display_name(cx, &view).as_deref(),
+                Some("deploy"),
+                "the name the user typed, not the codename the pull rolled"
+            );
+            assert!(
+                cx.default_global::<TreeSync>().windows[&ws]
+                    .chosen_name
+                    .is_none(),
+                "and it is owed only once"
+            );
+        });
+    }
+
+    /// A window with no name owed reads whatever the machine says, which is
+    /// the whole of #604 and must survive the arbitration above.
+    #[gpui::test]
+    fn a_window_owing_no_name_still_reads_the_machines(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let (ws, view) = primed_window(cx, None);
+            let epoch = cx.default_global::<TreeSync>().windows[&ws].epoch;
+
+            finish_prime(
+                cx,
+                ws,
+                epoch,
+                Ok((WsMirror::default(), Some("keen-marten".into()))),
+            );
+
+            assert_eq!(
+                crate::ui::machine_mirror::display_name(cx, &view).as_deref(),
+                Some("keen-marten")
+            );
+        });
+    }
+
+    /// A window mid-prime with `chosen` parked on it, and a machine this client
+    /// has pulled, so the mirror has somewhere to write the name.
+    fn primed_window(
+        cx: &mut App,
+        chosen: Option<&str>,
+    ) -> (WorkspaceId, crate::core::session::WindowView) {
+        tty7_core::core::config::set_config_dir(
+            std::env::temp_dir().join(format!("tty7-chosen-name-{}", std::process::id())),
+        );
+        let view = crate::core::session::WindowView::default();
+        let ws = view.id;
+        WorkspaceStore::install_for_test(
+            cx,
+            crate::core::session::WindowViews {
+                views: vec![view.clone()],
+                active: Some(ws),
+            },
+        );
+        crate::ui::machine_mirror::MachineMirrors::install(cx, HostId::LOCAL, Machine::default());
+        let state = cx
+            .default_global::<TreeSync>()
+            .windows
+            .entry(ws)
+            .or_default();
+        state.sync = SyncPhase::Unprimed {
+            dirty: false,
+            priming: true,
+        };
+        state.chosen_name = chosen.map(str::to_string);
+        (ws, view)
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_peer_without_the_machine_tree_bit_classifies_as_unserved() {
@@ -2407,7 +2698,7 @@ mod tests {
                 "the request must be parked, not opened over a layout still in flight"
             );
 
-            hydrate(cx, ws, Adopt::IfEmpty);
+            hydrate_with(cx, ws, Adopt::IfEmpty, Vec::new());
             assert_eq!(
                 cx.default_global::<TreeSync>().windows[&ws]
                     .then_open

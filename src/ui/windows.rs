@@ -152,7 +152,7 @@ impl WindowRegistry {
         }
     }
 
-    fn register(
+    pub(crate) fn register(
         cx: &mut App,
         workspace: WorkspaceId,
         handle: AnyWindowHandle,
