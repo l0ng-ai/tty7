@@ -150,6 +150,29 @@ fn a_routed_pane_spawns_takes_input_and_survives_a_reconnect() {
 }
 
 #[test]
+fn a_routed_version_reply_names_the_resize_echo_feature() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let config = dir.path().join("remote-config");
+    std::fs::create_dir_all(&config).unwrap();
+
+    let (mut sock, hub_thread) = routed(dir.path(), "version-1.sock", &config);
+    ClientMsg::Version.encode(&mut sock).unwrap();
+    let version = match DaemonMsg::read(&mut sock).unwrap() {
+        DaemonMsg::Version(v) => v,
+        other => panic!("expected Version through the router, got {other:?}"),
+    };
+    assert!(
+        version.has_feature(tty7_core::daemon::protocol::FEATURE_RESIZE_ECHO),
+        "a routed daemon echoes Size like a local one; its features must say so: {:?}",
+        version.features
+    );
+    drop(sock);
+    let _ = hub_thread.join();
+
+    shutdown(dir.path(), &config);
+}
+
+#[test]
 fn the_channel_decides_which_dialect_the_route_carries() {
     let control = RouteHeader::local_stdio(EXE, &["--stdio"]);
     assert_eq!(control.channel, RouteChannel::Control);

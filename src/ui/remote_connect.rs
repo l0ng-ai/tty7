@@ -473,6 +473,17 @@ impl HostLinks {
         cx.try_global::<HostLinks>()?.homes.get(&id).cloned()
     }
 
+    /// Whether the daemon behind this host's link advertised `feature` on its
+    /// control hello — the per-host sibling of `local_daemon_supports`. `false`
+    /// while no link is up: a caller that cannot see the hello must assume
+    /// nothing of the far end, and every feature is gated so that "assume
+    /// nothing" degrades to the old behavior rather than breaking.
+    pub fn peer_supports(cx: &App, id: HostId, feature: &str) -> bool {
+        cx.try_global::<HostLinks>()
+            .and_then(|table| table.hosts.get(&id))
+            .is_some_and(|host| host.peer().has_feature(feature))
+    }
+
     pub fn insert(cx: &mut App, host: Arc<RemoteHost>, home: PathBuf) {
         let id = host.id();
         crate::ui::host_registry::HostRegistry::insert(cx, Arc::clone(&host).into_shared());

@@ -371,6 +371,15 @@ fn handshake<R: Read>(
     if services.machine.is_some() {
         features.push(feature::MACHINE_TREE.to_string());
     }
+    // The pane daemon's features ride along, same as `protocol_version` above:
+    // a pane connection answers exactly one message, so a client that wanted
+    // them from `ClientMsg::Version` would pay a whole routed connection — for
+    // ssh and WSL, a whole bridge process — per pane. The hello already travels
+    // once per host and is cached on the link, so this is where a client can
+    // afford to learn what the panes it routes here will do (the resize echo
+    // above all). Additive names are safe: every check on either end asks for
+    // a name, never for the exact list.
+    features.extend(crate::daemon::protocol::DaemonVersion::current().features);
 
     sink.send(&ControlServerMsg::HelloOk(ControlHelloOk {
         control_version: CONTROL_VERSION,
@@ -2303,6 +2312,24 @@ mod tests {
         assert!(
             !peer.home.is_empty(),
             "the server's $HOME backs `new workspace in ~`"
+        );
+    }
+
+    #[test]
+    fn the_handshake_advertises_the_pane_daemons_features() {
+        let p = pair();
+        let peer = p.host.peer();
+        for name in crate::daemon::protocol::DaemonVersion::current().features {
+            assert!(
+                peer.has_feature(&name),
+                "the hello must carry the pane feature {name:?}: a pane \
+                 connection answers one message, so this handshake is the \
+                 only affordable place for a client to learn it"
+            );
+        }
+        assert!(
+            peer.has_feature(crate::daemon::protocol::FEATURE_RESIZE_ECHO),
+            "the resize-echo deferral on remote routes hangs off this name"
         );
     }
 

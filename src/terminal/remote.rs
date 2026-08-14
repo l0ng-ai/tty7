@@ -88,6 +88,12 @@ pub struct PaneWorkspace {
     pub workspace: crate::core::session::WorkspaceId,
     pub target: crate::core::session::RemoteTarget,
     pub spec: Option<Box<NativeSshSpec>>,
+    /// Whether the daemon serving this workspace's panes echoes a `Size` frame
+    /// when it applies a resize — read off the host's control hello by whoever
+    /// built this value, because this module may not ask the network itself.
+    /// `false` whenever the answer is unknown (link down, server too old to
+    /// advertise), which keeps the safe reflow-at-request behavior.
+    pub resize_echo: bool,
 }
 
 impl PaneWorkspace {
@@ -123,7 +129,15 @@ impl PaneWorkspace {
 pub enum PaneRoute {
     #[default]
     Local,
-    Remote(Box<crate::daemon::router::RouteHeader>),
+    Remote {
+        header: Box<crate::daemon::router::RouteHeader>,
+        /// Whether the daemon at the far end of this route echoes a `Size`
+        /// frame when it applies a resize, per its host's control hello (see
+        /// [`PaneWorkspace::resize_echo`]). Riding on the route puts the
+        /// answer everywhere a route is assigned — spawn, attach, relink —
+        /// and a relink builds its route fresh, so a reconnect re-answers it.
+        resize_echo: bool,
+    },
     Unroutable(String),
 }
 
@@ -132,7 +146,10 @@ impl PaneRoute {
         match workspace {
             None => PaneRoute::Local,
             Some(ws) => match ws.route_header() {
-                Ok(header) => PaneRoute::Remote(Box::new(header)),
+                Ok(header) => PaneRoute::Remote {
+                    header: Box::new(header),
+                    resize_echo: ws.resize_echo,
+                },
                 Err(e) => PaneRoute::Unroutable(e.to_string()),
             },
         }
@@ -140,7 +157,7 @@ impl PaneRoute {
 
     pub fn header(&self) -> Option<&crate::daemon::router::RouteHeader> {
         match self {
-            PaneRoute::Remote(header) => Some(header),
+            PaneRoute::Remote { header, .. } => Some(header),
             PaneRoute::Local | PaneRoute::Unroutable(_) => None,
         }
     }
@@ -202,10 +219,6 @@ pub struct RemoteTerminal {
     /// flag under the term lock before every grid mutation, so once it is set
     /// the abandoned thread can only exit, never write.
     reader_quit: Arc<AtomicBool>,
-    /// Test hook: pretend the daemon advertised `FEATURE_RESIZE_ECHO`.
-    /// Production code probes the real daemon per call in [`Self::resize`].
-    #[cfg(test)]
-    force_resize_echo: bool,
 }
 
 /// The workspace id a spawn carries, so the pane's shell gets `$TTY7_WS` and a
@@ -564,8 +577,6 @@ impl RemoteTerminal {
             proxy,
             reader_thread: Some(reader_thread),
             reader_quit,
-            #[cfg(test)]
-            force_resize_echo: false,
         })
     }
 
@@ -1095,24 +1106,21 @@ impl RemoteTerminal {
     /// geometry, and reflowing before it drains parses old-width bytes into a
     /// new-width grid (maximize during a burst of output garbled the pane).
     ///
-    /// Older daemons never echo, so those keep the reflow-at-request-time
-    /// behavior. Non-local routes keep it too, for a weaker reason: only the
-    /// local daemon's feature set is probed, so the client cannot *rely* on an
-    /// echo arriving. A current remote daemon does send one — the router
-    /// forwards frames it does not parse, and the reader applies it as a
-    /// same-size no-op after the eager reflow — but deferral can't hang on a
-    /// maybe. Follow-up: carry the remote daemon's advertised features on the
-    /// route handshake and consult them here; remote panes then get the
-    /// deferred path for free.
+    /// The local daemon is probed directly. A routed pane consults the answer
+    /// its route carries, read off the host's control hello when the route was
+    /// built — the daemon serves one `ClientMsg` per connection, so asking
+    /// `Version` per pane would cost a whole routed connection each time. The
+    /// remaining cases never defer: an older server does not advertise the
+    /// echo, an unroutable route reaches no daemon at all, and deferral must
+    /// not hang the grid on an echo nobody promised.
     fn resize_echoed(&self) -> bool {
-        #[cfg(test)]
-        if self.force_resize_echo {
-            return true;
-        }
-        self.route.is_local()
-            && crate::daemon::spawn::local_daemon_supports(
+        match &self.route {
+            PaneRoute::Local => crate::daemon::spawn::local_daemon_supports(
                 crate::daemon::protocol::FEATURE_RESIZE_ECHO,
-            )
+            ),
+            PaneRoute::Remote { resize_echo, .. } => *resize_echo,
+            PaneRoute::Unroutable(_) => false,
+        }
     }
 
     pub fn resize(&mut self, size: TermSize, cell_w: u16, cell_h: u16) {
@@ -2360,6 +2368,7 @@ mod tests {
                 )
                 .unwrap(),
             )),
+            resize_echo: false,
         }
     }
 
@@ -2381,6 +2390,19 @@ mod tests {
             "a pane must not be sent to the control socket"
         );
         assert_eq!(header.describe(), "ssh me@build-box:22");
+
+        let mut ws = ssh_workspace();
+        ws.resize_echo = true;
+        assert!(
+            matches!(
+                PaneRoute::for_workspace(Some(&ws)),
+                PaneRoute::Remote {
+                    resize_echo: true,
+                    ..
+                }
+            ),
+            "what the host's hello said about the resize echo rides the route"
+        );
     }
 
     #[test]
@@ -2391,6 +2413,7 @@ mod tests {
                 distro: "Ubuntu-22.04".into(),
             },
             spec: None,
+            resize_echo: false,
         };
         let route = PaneRoute::for_workspace(Some(&ws));
         let header = route.header().expect("WSL is routed");
@@ -2407,6 +2430,7 @@ mod tests {
                 args: vec!["--stdio".into()],
             },
             spec: None,
+            resize_echo: false,
         };
         let route = PaneRoute::for_workspace(Some(&ws));
         let header = route.header().expect("a local child is routable");
@@ -2428,6 +2452,7 @@ mod tests {
                 alias: "build-box".into(),
             },
             spec: None,
+            resize_echo: false,
         };
         let route = PaneRoute::for_workspace(Some(&ws));
         assert!(matches!(route, PaneRoute::Unroutable(_)));
@@ -3354,7 +3379,13 @@ mod tests {
 
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
         let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
-        term.force_resize_echo = true;
+        // A remote route whose host advertised the echo. The local daemon's
+        // answer rides the same gate through `local_daemon_supports`, so this
+        // covers the deferral for both.
+        term.route = PaneRoute::Remote {
+            header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
+            resize_echo: true,
+        };
 
         term.resize(TermSize::new(120, 30), 8, 17);
         assert!(matches!(
@@ -3407,6 +3438,37 @@ mod tests {
             'B',
             "bytes after the echo parse at the new width"
         );
+    }
+
+    #[test]
+    fn a_remote_route_without_the_advertised_echo_reflows_at_request_time() {
+        use alacritty_terminal::grid::Dimensions as _;
+
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        // What `for_workspace` builds when the host's hello named no echo —
+        // an older server, or a link that was down when the route was made.
+        term.route = PaneRoute::Remote {
+            header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
+            resize_echo: false,
+        };
+
+        term.resize(TermSize::new(120, 30), 8, 17);
+        assert_eq!(
+            term.term.lock().columns(),
+            120,
+            "with no promised echo the grid must reflow at request time — \
+             deferring would leave it at the old width forever"
+        );
+        assert!(matches!(
+            ClientMsg::read(&mut daemon_side).unwrap(),
+            ClientMsg::Resize(ws) if ws.cols == 120 && ws.rows == 30
+        ));
+
+        // The other route with no daemon to promise anything.
+        term.route = PaneRoute::Unroutable("no ssh details".into());
+        assert!(!term.resize_echoed(), "no route, no echo to wait for");
     }
 
     #[test]

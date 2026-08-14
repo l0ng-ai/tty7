@@ -1015,10 +1015,21 @@ pub(crate) fn pane_workspace_for(
     let spec = remote_connect::spec_for(&host.target, cx)
         .ok()
         .map(|spec| Box::new(spec.without_secrets()));
+    // Answered here because the terminal cannot ask the network itself: the
+    // host's control hello carries the pane daemon's features, and the route
+    // built from this value hands the answer to `resize_echoed`. A relink
+    // comes back through here too, so a reconnected (possibly upgraded)
+    // server is re-asked.
+    let resize_echo = remote_connect::HostLinks::peer_supports(
+        cx,
+        host.host_id(),
+        crate::daemon::protocol::FEATURE_RESIZE_ECHO,
+    );
     let pane = crate::terminal::PaneWorkspace {
         workspace,
         target: host.target,
         spec,
+        resize_echo,
     };
     if let Ok(header) = pane.route_header() {
         remote_connect::note_origin(&header.target, &pane.target);
