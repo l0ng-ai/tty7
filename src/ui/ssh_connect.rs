@@ -161,6 +161,27 @@ impl Tty7App {
     /// Keep the connection in front of you: the form opens on everything the
     /// live session was dialled with, so a host proved by hand becomes a saved
     /// one without retyping it (#438).
+    /// What the tab's own context menu offers, for the tab it was opened on
+    /// rather than for whichever pane happens to be focused.
+    ///
+    /// `Some(id)` is a saved host to open; `None` with a spec is a connection
+    /// worth keeping. `None` at all means this tab is not an SSH one.
+    pub(crate) fn tab_ssh_host_action(
+        &self,
+        index: usize,
+        window: &gpui::Window,
+        cx: &gpui::App,
+    ) -> Option<(Option<Uuid>, Box<NativeSshSpec>)> {
+        let spec = self
+            .tabs
+            .get(index)?
+            .title_leaf(Some(window), cx)?
+            .read(cx)
+            .ssh_spec()?;
+        let saved = saved_profile_of(&spec, &cx.global::<Config>().ssh_profiles);
+        Some((saved, spec))
+    }
+
     pub(crate) fn save_ssh_session_as_host(
         &mut self,
         window: &mut gpui::Window,
@@ -169,7 +190,19 @@ impl Tty7App {
         let Some(spec) = self.unsaved_ssh_session(window, cx) else {
             return;
         };
-        let profile = profile_from_live_spec(&spec);
+        self.save_ssh_spec_as_host(&spec, window, cx);
+    }
+
+    /// Open the host form on a live connection, prefilled from what it was
+    /// dialled with. Shared by the palette, the failure strip and the tab menu,
+    /// which reach it from three different pane identities.
+    pub(crate) fn save_ssh_spec_as_host(
+        &mut self,
+        spec: &NativeSshSpec,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let profile = profile_from_live_spec(spec);
         let jumped = spec.jump.is_some();
         self.open_settings_section(crate::ui::settings::SettingsSection::Ssh, window, cx);
         self.ssh_form_load(&profile, window, cx);

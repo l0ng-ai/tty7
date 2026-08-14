@@ -1035,7 +1035,7 @@ impl Tty7App {
         }
     }
 
-    /// The machine this window is on, for the horizontal tab strip.
+    /// The machine this window is on, for the title bar's strip.
     ///
     /// The rail carries this under the workspace head, and the strip has no
     /// workspace head — so with the tab bar on top a window on another computer
@@ -1044,8 +1044,16 @@ impl Tty7App {
     /// machine reads the same wherever it is shown.
     ///
     /// `None` on a local workspace: a badge that is always there stops being
-    /// read.
+    /// read. And `None` wherever another surface is already carrying it.
     fn strip_machine_badge(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        // Only when nothing else is already saying it. The rail carries the
+        // badge under the workspace head whenever it is on screen, and the home
+        // screen carries it when there are no tabs at all — drawing it here too
+        // puts the same badge on screen twice, which is how a badge stops being
+        // read.
+        if self.sidebar_open(cx) || self.tabs.is_empty() {
+            return None;
+        }
         let machine = self.window_machine(cx)?;
         let theme = cx.theme();
         let muted = theme.muted_foreground;
@@ -1259,6 +1267,27 @@ impl Tty7App {
                         }
                     }),
             );
+        }
+
+        // The connection this tab is on, editable from the tab itself. A
+        // hostname or password typed wrong used to be fixable only by finding
+        // the same host again in Settings, and right-clicking the connection —
+        // the gesture that asks "change this" — offered nothing (#438).
+        if let Some((saved, spec)) = this.tab_ssh_host_action(index, window, cx) {
+            let label = match saved {
+                Some(_) => t(L10nKey::SshEditProfile),
+                None => t(L10nKey::SshSaveAsHost),
+            };
+            menu = menu.separator().item(PopupMenuItem::new(label).on_click({
+                let app = app.clone();
+                move |_, window, cx| {
+                    let spec = spec.clone();
+                    let _ = app.update(cx, |this, cx| match saved {
+                        Some(id) => this.open_ssh_profile_in_settings(id, window, cx),
+                        None => this.save_ssh_spec_as_host(&spec, window, cx),
+                    });
+                }
+            }));
         }
 
         let agent_session = this.tab_agent_session(index, window, cx);
