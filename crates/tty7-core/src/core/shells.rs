@@ -518,6 +518,11 @@ pub fn git_bash_path() -> Option<PathBuf> {
 }
 
 #[cfg(all(windows, test))]
+pub fn nushell_path() -> Option<PathBuf> {
+    find_in_path("nu.exe")
+}
+
+#[cfg(all(windows, test))]
 mod wsl_tests {
     #[test]
     fn the_default_distro_is_one_of_the_installed_ones() {

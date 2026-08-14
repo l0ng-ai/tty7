@@ -175,6 +175,10 @@ pub struct TerminalView {
     scroll_anim_epoch: u64,
     gesture_until: Option<std::time::Instant>,
     pub title: String,
+    /// A title the pane has been told about but has not adopted yet — see
+    /// `set_title_when_settled`. `None` means the tab is showing the newest
+    /// title there is.
+    pending_title: Option<String>,
     /// What the pane is called before anything running in it says otherwise —
     /// and what it goes back to when the program resets the title or the
     /// session ends. "tty7" for a local shell; for an SSH pane it is the host
@@ -396,6 +400,39 @@ const INTEGRATION_GRACE: std::time::Duration = std::time::Duration::from_secs(8)
 const INTEGRATION_NOTICE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 const OPPORTUNISTIC_GIT_GAP: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// How long a title the program set has to stand before the tab adopts it.
+///
+/// Long enough that a command which is over almost as soon as it started never
+/// reaches the label, short enough that one still running is named while the
+/// wait for it is still what the reader is doing.
+const TITLE_SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// What a pane does with a title the program just set — see
+/// `TerminalView::set_title_when_settled`.
+#[derive(Debug, PartialEq, Eq)]
+enum TitleSettle {
+    /// The tab already reads this, so whatever was waiting to replace it never
+    /// has to happen. This is the case a short command lands in.
+    Revert,
+    /// Hold it: a wait is already running and adopts the newest title when it
+    /// elapses. Restarting the wait instead would let a program that rewrites
+    /// its title faster than the wait — a download reporting progress — put
+    /// off the tab's next update forever.
+    Queue,
+    /// Hold it and start the wait.
+    QueueAndWait,
+}
+
+fn settle_title(showing: &str, waiting: bool, incoming: &str) -> TitleSettle {
+    if incoming == showing {
+        return TitleSettle::Revert;
+    }
+    match waiting {
+        true => TitleSettle::Queue,
+        false => TitleSettle::QueueAndWait,
+    }
+}
 
 const MAX_HISTORY_BYTES: u64 = 4 << 20;
 
@@ -1199,6 +1236,7 @@ impl TerminalView {
             scroll_anim_epoch: 0,
             gesture_until: None,
             title: DEFAULT_TITLE.to_string(),
+            pending_title: None,
             default_title: DEFAULT_TITLE.to_string(),
             marked_text: String::new(),
             last_mouse_cell: None,
@@ -1567,6 +1605,43 @@ impl TerminalView {
         self.ssh_spec.is_some() && self.terminal.exited
     }
 
+    /// Takes a title the program set, and gives it to the tab only once it has
+    /// stood for `TITLE_SETTLE`.
+    ///
+    /// Nearly every prompt framework titles the tab with the command it is
+    /// about to run and puts the old title back at the next prompt — that is
+    /// where a tab's process name comes from. For a command that finishes in a
+    /// blink both edges land within a few frames of each other, so the label
+    /// flashed the command and snapped back, which reads as a rendering glitch
+    /// rather than as information. Holding the change means a command has to
+    /// actually still be running to name the tab.
+    ///
+    /// A title that reverts before it lands never happens at all: the revert
+    /// matches what the tab already shows and just drops the pending one. A
+    /// program that keeps rewriting its title — a download writing progress
+    /// there — still updates, because the wait already in flight adopts
+    /// whatever the newest title is when it elapses rather than starting over.
+    fn set_title_when_settled(&mut self, title: String, cx: &mut Context<Self>) {
+        match settle_title(&self.title, self.pending_title.is_some(), &title) {
+            TitleSettle::Revert => self.pending_title = None,
+            TitleSettle::Queue => self.pending_title = Some(title),
+            TitleSettle::QueueAndWait => {
+                self.pending_title = Some(title);
+                cx.spawn(async move |view, cx| {
+                    cx.background_executor().timer(TITLE_SETTLE).await;
+                    view.update(cx, |view, cx| {
+                        if let Some(title) = view.pending_title.take() {
+                            view.title = title;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+    }
+
     fn handle_event(&mut self, ev: AlacEvent, cx: &mut Context<Self>) {
         self.terminal.poll_exited();
         self.sync_typeahead_owner();
@@ -1579,17 +1654,14 @@ impl TerminalView {
                 self.note_output_under_search(cx);
                 cx.notify();
             }
-            AlacEvent::Title(title) => {
-                self.title = title;
-                cx.notify();
-            }
-            AlacEvent::ResetTitle => {
-                self.title = self.default_title.clone();
-                cx.notify();
-            }
+            AlacEvent::Title(title) => self.set_title_when_settled(title, cx),
+            AlacEvent::ResetTitle => self.set_title_when_settled(self.default_title.clone(), cx),
             AlacEvent::PtyWrite(text) => self.terminal.write(text.into_bytes()),
             AlacEvent::ChildExit(_) | AlacEvent::Exit => {
                 self.terminal.exited = true;
+                // Nothing is left to settle, and a title still waiting its turn
+                // would land on top of the state below a moment from now.
+                self.pending_title = None;
                 // The pane keeps answering to its own name (an SSH pane's
                 // host, #438) — only the state suffix is localized (#602).
                 self.title = if self.workspace().is_some() && !self.terminal.child_exited() {
@@ -6701,15 +6773,15 @@ mod tests {
     };
     use super::{SCROLL_ANIM_FRAME, scroll_anim_step};
     use super::{
+        TitleSettle, remote_paste_spec, settle_title, staged_path_for_pane, stages_clipboard_image,
+        staging_cache, staging_dir_is_safe, wsl_path, wsl_share_distro, wsl_share_path,
+    };
+    use super::{
         description_budget, drag_scroll_step, elide, encode_mouse, escape_candidate,
         expand_file_command_template, fallback_chain, fig_icon_emoji, fig_icon_glyph,
         focus_report_bytes, highlight_runs, input_overflow_shift, input_overlay_rows, menu_layout,
         paste_bytes, select_end_copy, shell_escape_path, should_show_context_menu,
         smooth_scroll_step, submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
-    };
-    use super::{
-        remote_paste_spec, staged_path_for_pane, stages_clipboard_image, staging_cache,
-        staging_dir_is_safe, wsl_path, wsl_share_distro, wsl_share_path,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
@@ -6719,6 +6791,30 @@ mod tests {
     use crate::core::session::{RemoteTarget, WorkspaceId};
     use crate::daemon::protocol::RemoteKind;
     use crate::terminal::PaneWorkspace;
+
+    #[test]
+    fn a_title_the_tab_already_shows_drops_the_one_that_was_waiting() {
+        // The revert is what cancels a flash: the pane is told the title it is
+        // already displaying, and the queued command name goes away with it.
+        assert_eq!(
+            settle_title("~/dev", true, "~/dev"),
+            TitleSettle::Revert,
+            "a revert cancels the pending title rather than queueing behind it"
+        );
+        assert_eq!(
+            settle_title("~/dev", false, "~/dev"),
+            TitleSettle::Revert,
+            "and asks for no wait when there was nothing pending either"
+        );
+        // A second title while one is already waiting rides the wait in
+        // flight; restarting it is what would let a title that keeps changing
+        // put the tab's next update off forever.
+        assert_eq!(settle_title("~/dev", true, "wget 40%"), TitleSettle::Queue);
+        assert_eq!(
+            settle_title("~/dev", false, "wget 1%"),
+            TitleSettle::QueueAndWait
+        );
+    }
 
     #[test]
     fn a_notification_title_keeps_at_most_two_segments() {
@@ -8713,6 +8809,12 @@ mod gpui_tests {
             .unwrap();
     }
 
+    /// Runs out the wait a new title is held for.
+    fn settle(cx: &mut TestAppContext) {
+        cx.executor().advance_clock(super::TITLE_SETTLE * 2);
+        cx.run_until_parked();
+    }
+
     #[gpui::test]
     fn title_events_drive_the_tab_title(cx: &mut TestAppContext) {
         let (window, _daemon) = harness(cx);
@@ -8720,10 +8822,66 @@ mod gpui_tests {
             .update(cx, |view, _, cx| {
                 assert_eq!(view.title, "tty7");
                 view.handle_event(AlacEvent::Title("vim — main.rs".into()), cx);
+            })
+            .unwrap();
+        settle(cx);
+        window
+            .update(cx, |view, _, cx| {
                 assert_eq!(view.title, "vim — main.rs");
                 view.handle_event(AlacEvent::ResetTitle, cx);
-                assert_eq!(view.title, "tty7");
             })
+            .unwrap();
+        settle(cx);
+        window
+            .update(cx, |view, _, _| assert_eq!(view.title, "tty7"))
+            .unwrap();
+    }
+
+    /// The flash this wait exists to stop: a prompt framework names the command
+    /// it is about to run and puts the directory back at the next prompt, and
+    /// for anything that finishes in a blink both edges arrive within a few
+    /// frames. The tab used to show the command and snap back, which reads as a
+    /// glitch rather than as information.
+    #[gpui::test]
+    fn a_command_over_before_the_wait_never_reaches_the_tab(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.default_title = "~/dev".into();
+                view.title = "~/dev".into();
+                view.handle_event(AlacEvent::Title("ls".into()), cx);
+                view.handle_event(AlacEvent::Title("~/dev".into()), cx);
+                assert_eq!(view.title, "~/dev", "and never flashed on the way");
+            })
+            .unwrap();
+        settle(cx);
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(
+                    view.title, "~/dev",
+                    "the command was over before the tab could adopt its name"
+                );
+            })
+            .unwrap();
+    }
+
+    /// A program that rewrites its own title faster than the wait — a download
+    /// reporting progress — still updates the tab. The wait already running
+    /// adopts the newest title rather than starting over, which is what would
+    /// leave the tab frozen on the directory for as long as the download ran.
+    #[gpui::test]
+    fn a_title_rewritten_faster_than_the_wait_still_lands(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.handle_event(AlacEvent::Title("wget 1%".into()), cx);
+                view.handle_event(AlacEvent::Title("wget 40%".into()), cx);
+                view.handle_event(AlacEvent::Title("wget 99%".into()), cx);
+            })
+            .unwrap();
+        settle(cx);
+        window
+            .update(cx, |view, _, _| assert_eq!(view.title, "wget 99%"))
             .unwrap();
     }
 
@@ -8738,10 +8896,19 @@ mod gpui_tests {
             .update(cx, |view, _, cx| {
                 view.default_title = "prod-web".into();
                 view.title = "prod-web".into();
-
                 view.handle_event(AlacEvent::Title("vim — main.rs".into()), cx);
+            })
+            .unwrap();
+        settle(cx);
+        window
+            .update(cx, |view, _, cx| {
                 assert_eq!(view.title, "vim — main.rs");
                 view.handle_event(AlacEvent::ResetTitle, cx);
+            })
+            .unwrap();
+        settle(cx);
+        window
+            .update(cx, |view, _, _| {
                 assert_eq!(
                     view.title, "prod-web",
                     "a reset goes back to the host, not to the app's own name"

@@ -618,6 +618,82 @@ if (-not $env:TTY7_SHELL_INTEGRATION) {
 # --- end tty7 shell integration ---
 "#;
 
+const NUSHELL_INTEGRATION: &str = r#"
+# --- tty7 shell integration (nushell) ---
+# Guard on emptiness (`== ""`), not mere definedness, exactly like the other
+# shells: setup() resets the sentinel to an empty-but-exported value at each
+# spawn boundary, and a nested `nu` inherits the set `1` without re-installing.
+if (($env.TTY7_SHELL_INTEGRATION? | default "") == "") {
+  $env.TTY7_SHELL_INTEGRATION = "1"
+
+  # tty7 restores the user's own config.nu at this placeholder — `source` is
+  # evaluated at parse time, so the wrapper can only name a file that provably
+  # exists; the Rust side resolves the path (the same resolution
+  # `$nu.default-config-dir` performs) and substitutes a literal, or a no-op
+  # line when there is no config.nu. The order is load-bearing: a config.nu
+  # conventionally ends with a wholesale `$env.config = {...}` that would
+  # clobber every hook added below, so the hooks must come after it.
+  __TTY7_SOURCE_USER_CONFIG__
+
+  # Hooks live in `$env.config.hooks` as lists. Ensure the skeleton exists
+  # before appending to it — a minimal config, or none at all, leaves it
+  # missing, and a bare assignment would error instead of creating it.
+  if (($env.config.hooks? | default {}) | is-empty) {
+    $env.config = ($env.config | upsert hooks { pre_prompt: [], pre_execution: [], env_change: {} })
+  }
+
+  $env.config.hooks.pre_prompt = ($env.config.hooks.pre_prompt | default [] | append {||
+    # OSC 133 prompt-start (A) and the previous command's exit (D). D is gated
+    # on a flag the pre_execution hook arms, so the very first prompt emits no
+    # bogus exit status — the same rule every other integration follows.
+    let __tty7_osc = {|__tty7_payload| print -n $"(ansi osc)($__tty7_payload)(char bel)" }
+    if ($env.__tty7_cmd_active? | default false) {
+      hide-env __tty7_cmd_active
+      do $__tty7_osc $"133;D;($env.LAST_EXIT_CODE? | default 0)"
+    }
+    # OSC 7 cwd, so the daemon tracks the pane's directory across `cd`. The
+    # payload is percent-decoded on the daemon side, so a literal `%` must be
+    # escaped as %25, and a Windows drive path needs the leading slash that
+    # makes `C:/…` an absolute URI path (`/C:/…`). Backslashes are separators
+    # only on Windows — a Unix path may legally contain one, so that
+    # translation is gated on the platform the way nu's own OSC 7 gates it.
+    let __tty7_path = if (($nu.os-info.name? | default '') == 'windows') {
+      ($env.PWD | str replace -a '\' '/' | str replace -a '%' '%25')
+    } else {
+      ($env.PWD | str replace -a '%' '%25')
+    }
+    let __tty7_path = if ($__tty7_path | str starts-with '/') { $__tty7_path } else { '/' + $__tty7_path }
+    do $__tty7_osc $"7;file://($env.COMPUTERNAME? | default 'localhost')($__tty7_path)"
+    do $__tty7_osc "133;A"
+  })
+
+  # OSC 133 command-output-begins (C) plus the flag that gates the D report.
+  # Nushell's pre_execution hook receives no command text, so C carries no
+  # payload — the daemon still flips to "command running" on the bare mark.
+  $env.config.hooks.pre_execution = ($env.config.hooks.pre_execution | default [] | append {||
+    $env.__tty7_cmd_active = true
+    print -n $"(ansi osc)133;C(char bel)"
+  })
+
+  # OSC 133 prompt-end (B) must land after the very last prompt character, and
+  # the only hook-shaped place Nushell runs at that point is prompt_indicator —
+  # so wrap it, but only when the config defines one. A missing indicator is
+  # the built-in default prompt's to render (recent Nushells draw it and their
+  # own B mark themselves), and replacing it here would erase the glyph.
+  if ((($env.config.prompt_indicator? | default null) | describe) != 'nothing') {
+    let __tty7_orig_indicator = $env.config.prompt_indicator
+    $env.config.prompt_indicator = {||
+      let __tty7_ind = match ($__tty7_orig_indicator | describe) {
+        'closure' => (do $__tty7_orig_indicator)
+        _ => $__tty7_orig_indicator
+      }
+      $"($__tty7_ind)(ansi osc)133;B(char bel)"
+    }
+  }
+}
+# --- end tty7 shell integration ---
+"#;
+
 fn zsh_redirectors() -> [(&'static str, String); 4] {
     let redirect = |name: &str, tail: &str| {
         format!(
@@ -674,6 +750,7 @@ enum ShellKind {
     Bash,
     Fish,
     PowerShell,
+    Nushell,
     Wsl,
 }
 
@@ -692,6 +769,7 @@ fn shell_kind(program: Option<&str>) -> Option<ShellKind> {
         "bash" => Some(ShellKind::Bash),
         "fish" => Some(ShellKind::Fish),
         "powershell" | "pwsh" => Some(ShellKind::PowerShell),
+        "nu" => Some(ShellKind::Nushell),
         "wsl" => Some(ShellKind::Wsl),
         _ => None,
     }
@@ -794,6 +872,121 @@ fn setup_powershell() -> Option<Injection> {
         replaces_argv: false,
         dir: None,
     })
+}
+
+/// Nushell has no environment variable that redirects its config file the way
+/// ZDOTDIR does for zsh, so the injection rides `--config` instead: a
+/// throwaway config.nu that sources the user's real one and then appends the
+/// OSC hooks. The `dir` is what makes the file disappear when the pane closes.
+///
+/// Trade-off, inherent to `--config`: `$nu.config-path` points at the wrapper,
+/// so `config nu` inside the pane edits a file that vanishes with it. The zsh
+/// path dodges the analogue by restoring ZDOTDIR after startup; Nushell's
+/// `$nu.*` paths are immutable, so this is accepted rather than fought.
+fn setup_nushell() -> Option<Injection> {
+    setup_nushell_with(nushell_user_config_path().as_deref())
+}
+
+/// Split from `setup_nushell` so a test can drive the whole wrapper against a
+/// config.nu of its own without writing into the real one.
+fn setup_nushell_with(user_config: Option<&Path>) -> Option<Injection> {
+    let dir = throwaway_dir("tty7-nu-")?;
+    let config = dir.join("config.nu");
+    std::fs::write(&config, nushell_config_script_with(user_config)).ok()?;
+
+    Some(Injection {
+        env: HashMap::new(),
+        args: vec![
+            "--config".to_string(),
+            config.to_string_lossy().into_owned(),
+        ],
+        replaces_argv: false,
+        dir: Some(dir),
+    })
+}
+
+/// The wrapper config.nu: the user's real config.nu sourced back in when it
+/// exists, then the OSC hooks. `source` is a parse-time construct in Nushell —
+/// it cannot be guarded at runtime or name a missing file — so the path is
+/// resolved and substituted here, and a machine without a config.nu gets a
+/// no-op line instead.
+fn nushell_config_script_with(user_config: Option<&Path>) -> String {
+    let source = match user_config {
+        Some(path) => format!("source {}", nu_string_literal(&path.to_string_lossy())),
+        None => "# no user config.nu to restore".to_string(),
+    };
+    NUSHELL_INTEGRATION.replace("__TTY7_SOURCE_USER_CONFIG__", &source)
+}
+
+/// Where nu would load its config.nu from. Only a file that exists comes
+/// back — the wrapper's `source` cannot name one that is not there.
+fn nushell_user_config_path() -> Option<PathBuf> {
+    let config = nushell_config_dir()?.join("config.nu");
+    config.is_file().then_some(config)
+}
+
+/// nu's own config directory, resolved the way nu resolves it. Getting this
+/// wrong is silent and total: the wrapper reports "no config.nu to restore"
+/// for a user who has one, and `nu --config` then replaces their config with
+/// one that never sources it.
+///
+/// nu-path's `configurable_dir_path` consults `$XDG_CONFIG_HOME` on *every*
+/// platform, Windows included, and only when it is non-empty **and** absolute;
+/// anything else falls through to `dirs::config_dir()`.
+fn nushell_config_dir() -> Option<PathBuf> {
+    nushell_config_dir_from(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        platform_config_dir(),
+    )
+}
+
+fn nushell_config_dir_from(
+    xdg_config_home: Option<&std::ffi::OsStr>,
+    platform_default: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let base = match xdg_config_home {
+        Some(xdg) if !xdg.is_empty() && Path::new(xdg).is_absolute() => PathBuf::from(xdg),
+        _ => platform_default?,
+    };
+    Some(base.join("nushell"))
+}
+
+/// `dirs::config_dir()` — what nu falls back to. Note this is **not** where
+/// tty7 keeps its own config (`~/.config/tty7` on macOS too); nu follows the
+/// platform convention, and the two are only the same directory on Linux.
+#[cfg(windows)]
+fn platform_config_dir() -> Option<PathBuf> {
+    // `dirs` asks Windows for FOLDERID_RoamingAppData; `%APPDATA%` is the
+    // same directory in every environment tty7 can spawn a pane in.
+    std::env::var_os("APPDATA")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_config_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+    Some(PathBuf::from(home).join("Library/Application Support"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_config_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+    Some(PathBuf::from(home).join(".config"))
+}
+
+/// A Nushell string literal for `path`. Single quotes are fully literal in
+/// Nushell, so they are the default; a path that contains an apostrophe (legal
+/// on Windows) falls back to double quotes with backslash escaping.
+fn nu_string_literal(path: &str) -> String {
+    if !path.contains('\'') {
+        return format!("'{path}'");
+    }
+    let escaped = path
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$");
+    format!("\"{escaped}\"")
 }
 
 fn powershell_encoded_command(script: &str) -> String {
@@ -1062,6 +1255,7 @@ pub fn setup(program: Option<&str>, args: &[String], has_custom_args: bool) -> O
         ShellKind::Fish => setup_fish(),
         ShellKind::Bash => setup_bash(),
         ShellKind::PowerShell => setup_powershell(),
+        ShellKind::Nushell => setup_nushell(),
         #[cfg(windows)]
         ShellKind::Wsl => setup_wsl(args),
         #[cfg(not(windows))]
@@ -1457,6 +1651,7 @@ mod tests {
         let mut out = Vec::new();
         let mut answered = 0usize;
         let mut typed = false;
+        let mut seen_fail = None;
         while std::time::Instant::now() < deadline {
             match rx.recv_timeout(std::time::Duration::from_millis(200)) {
                 Ok(chunk) => out.extend_from_slice(&chunk),
@@ -1481,13 +1676,15 @@ mod tests {
                 answered = asked;
             }
 
-            // Type only once the first prompt is fully drawn (B is its last act).
+            // Type only once the first prompt is marked (A or B — they arrive
+            // in the same prompt cycle for every integrated shell, and a
+            // Nushell without a config-defined prompt_indicator emits only A).
             // Writing at spawn time instead puts the keystrokes ahead of the
             // cursor-position reply in the same input stream, and pwsh — still
             // waiting on that reply — eats `false\r` as the answer to its own
             // query. The command then never runs, and the failure reads as a
             // missing C mark rather than as the race it is.
-            if !typed && text.contains("133;B") {
+            if !typed && (text.contains("133;A") || text.contains("133;B")) {
                 writer.write_all(keys).expect("write");
                 writer.flush().expect("flush");
                 typed = true;
@@ -1497,8 +1694,17 @@ mod tests {
             // emit an unpaired D while drawing its first prompt, and breaking on
             // that would sample the transcript before the prompt cycle under test
             // has run at all.
-            if typed && text.contains(FAILED_COMMAND_MARK) {
-                break;
+            if typed && text.contains(FAILED_COMMAND_MARK) && seen_fail.is_none() {
+                seen_fail = Some(std::time::Instant::now());
+            }
+            // The D mark and the rest of the same prompt cycle (the cwd report,
+            // the A mark) are separate writes: breaking the moment the mark
+            // arrives can sample the transcript before the report does. Hold
+            // the pty open briefly so the cycle's tail lands.
+            if let Some(at) = seen_fail {
+                if at.elapsed() >= std::time::Duration::from_millis(500) {
+                    break;
+                }
             }
         }
         // Reap before asserting: a panic here would otherwise leave the shell
@@ -1508,7 +1714,7 @@ mod tests {
         drop(pty.master);
         assert!(
             typed,
-            "no prompt-end mark ever arrived, so nothing was typed; got:\n{}",
+            "no prompt-start mark ever arrived, so nothing was typed; got:\n{}",
             String::from_utf8_lossy(&out)
         );
         String::from_utf8_lossy(&out).into_owned()
@@ -1518,6 +1724,19 @@ mod tests {
         let payload = text
             .split("\u{1b}]")
             .find(|s| s.starts_with("7;file://"))
+            .and_then(|s| s.split(['\u{7}', '\u{1b}']).next())
+            .unwrap_or_else(|| panic!("expected OSC 7; got:\n{text}"));
+        crate::daemon::pane::parse_osc7(payload.as_bytes())
+            .unwrap_or_else(|| panic!("daemon could not parse OSC 7 payload {payload:?}"))
+    }
+
+    /// The last OSC 7 cwd report in a transcript — the one emitted after the
+    /// typed commands ran, which is what proves `cd` moved the pane's cwd.
+    fn last_osc7(text: &str) -> PathBuf {
+        let payload = text
+            .split("\u{1b}]")
+            .filter(|s| s.starts_with("7;file://"))
+            .last()
             .and_then(|s| s.split(['\u{7}', '\u{1b}']).next())
             .unwrap_or_else(|| panic!("expected OSC 7; got:\n{text}"));
         crate::daemon::pane::parse_osc7(payload.as_bytes())
@@ -1680,6 +1899,12 @@ mod tests {
             assert!(
                 matches!(shell_kind(Some(prog)), Some(ShellKind::PowerShell)),
                 "{prog} should map to PowerShell"
+            );
+        }
+        for prog in ["nu", "nu.exe", "C:/Tools/nu.exe"] {
+            assert!(
+                matches!(shell_kind(Some(prog)), Some(ShellKind::Nushell)),
+                "{prog} should map to Nushell"
             );
         }
         assert!(shell_kind(Some("/bin/sh")).is_none());
@@ -2349,6 +2574,16 @@ mod tests {
 
         assert!(setup(Some("pwsh"), &[], true).is_none());
 
+        let inj = setup(Some("nu.exe"), &[], false).expect("nushell setup");
+        assert!(inj.env.contains_key("TTY7_SHELL_INTEGRATION"));
+        assert_eq!(inj.args[0], "--config");
+        assert!(!inj.replaces_argv);
+        if let Some(d) = inj.dir {
+            let _ = std::fs::remove_dir_all(d);
+        }
+
+        assert!(setup(Some("nu.exe"), &[], true).is_none());
+
         assert!(setup(Some("/bin/sh"), &[], false).is_none());
     }
 
@@ -2490,5 +2725,306 @@ mod tests {
         assert!(a.is_dir() && b.is_dir());
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn setup_nushell_writes_config_and_points_at_it() {
+        let inj = setup_nushell().expect("nushell setup should succeed");
+        let dir = inj.dir.clone().expect("nushell needs a throwaway dir");
+        assert_eq!(inj.args[0], "--config");
+        assert_eq!(inj.args.len(), 2);
+        let written = std::fs::read_to_string(&inj.args[1]).expect("config written");
+        assert_eq!(
+            written,
+            nushell_config_script_with(nushell_user_config_path().as_deref())
+        );
+        assert!(inj.env.is_empty());
+        assert!(!inj.replaces_argv);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nushell_integration_emits_every_osc_133_mark_and_cwd() {
+        let s = NUSHELL_INTEGRATION;
+        for mark in ["133;A", "133;B", "133;C", "133;D;"] {
+            assert!(s.contains(mark), "Nushell must emit {mark:?}");
+        }
+        assert!(s.contains("7;file://"));
+        assert!(
+            s.contains(r#"($nu.os-info.name? | default '') == 'windows'"#),
+            "the backslash translation must be gated on Windows — a Unix path \
+             may legally contain a literal backslash"
+        );
+        assert!(
+            s.contains(r#"str replace -a '%' '%25'"#),
+            "must percent-escape"
+        );
+        assert!(s.contains("__tty7_cmd_active"));
+        assert!(s.contains("hide-env __tty7_cmd_active"));
+        assert!(s.contains("prompt_indicator?"));
+        assert!(
+            s.contains(r##"($env.TTY7_SHELL_INTEGRATION? | default "") == """##),
+            "must guard install on the sentinel being empty, like the other shells"
+        );
+    }
+
+    #[test]
+    fn nushell_config_script_substitutes_a_literal_source_or_a_noop() {
+        let with = nushell_config_script_with(Some(Path::new(
+            r"C:\Users\ann\AppData\Roaming\nushell\config.nu",
+        )));
+        assert!(with.contains("source 'C:\\Users\\ann\\AppData\\Roaming\\nushell\\config.nu'"));
+        let source_at = with.find("source ").expect("sources the user config");
+        let hooks_at = with.find("hooks.pre_prompt").expect("appends hooks");
+        assert!(
+            source_at < hooks_at,
+            "the user config must be sourced before the hooks are appended"
+        );
+
+        let without = nushell_config_script_with(None);
+        assert!(
+            !without.contains("source '") && !without.contains("source \""),
+            "no config.nu means nothing to source"
+        );
+        assert!(without.contains("no user config.nu to restore"));
+        assert!(without.contains("hooks.pre_prompt"));
+    }
+
+    #[test]
+    fn nu_string_literal_quotes_paths_for_the_wrapper() {
+        assert_eq!(
+            nu_string_literal(r"C:\Users\ann\nushell\config.nu"),
+            r"'C:\Users\ann\nushell\config.nu'"
+        );
+        assert_eq!(
+            nu_string_literal("/home/ann/.config/nushell/config.nu"),
+            "'/home/ann/.config/nushell/config.nu'"
+        );
+        // An apostrophe (legal on Windows) forces the double-quoted fallback.
+        assert_eq!(
+            nu_string_literal(r"C:\it's\config.nu"),
+            r#""C:\\it's\\config.nu""#
+        );
+        // Single quotes are fully literal in Nushell, so `$` needs no escaping
+        // there; only an apostrophe forces the double-quoted fallback.
+        assert_eq!(
+            nu_string_literal(r"C:\a$b\config.nu"),
+            r"'C:\a$b\config.nu'"
+        );
+        assert_eq!(
+            nu_string_literal(r"C:\it's\$x\config.nu"),
+            r#""C:\\it's\\\$x\\config.nu""#
+        );
+    }
+
+    /// nu-path resolves the config dir from `$XDG_CONFIG_HOME` on every
+    /// platform, but only when it is non-empty *and* absolute. Both halves are
+    /// load-bearing: the original Windows arm ignored the variable outright,
+    /// and the original non-Windows arm accepted a relative value nu rejects.
+    #[test]
+    fn nushell_config_dir_follows_nu_s_own_resolution_rules() {
+        use std::ffi::OsStr;
+        // `/x` is not absolute on Windows (no prefix), so the fixtures have to
+        // be shaped for the host or the rule under test is never exercised.
+        let abs_xdg = if cfg!(windows) { r"C:\xdg" } else { "/xdg" };
+        let platform = || {
+            Some(PathBuf::from(if cfg!(windows) {
+                r"C:\platform"
+            } else {
+                "/platform"
+            }))
+        };
+        let want = |base: &str| Some(PathBuf::from(base).join("nushell"));
+
+        // Unset, empty, or relative: nu ignores it and takes the platform dir.
+        for ignored in [None, Some(OsStr::new("")), Some(OsStr::new("relative/dir"))] {
+            assert_eq!(
+                nushell_config_dir_from(ignored, platform()),
+                want(&platform().unwrap().to_string_lossy()),
+                "XDG_CONFIG_HOME {ignored:?} must not displace the platform dir"
+            );
+        }
+
+        // Non-empty and absolute: it wins, even where there is no platform dir.
+        assert_eq!(
+            nushell_config_dir_from(Some(OsStr::new(abs_xdg)), platform()),
+            want(abs_xdg)
+        );
+        assert_eq!(
+            nushell_config_dir_from(Some(OsStr::new(abs_xdg)), None),
+            want(abs_xdg)
+        );
+        assert_eq!(nushell_config_dir_from(None, None), None);
+    }
+
+    /// The macOS half of the same rule, stated as itself: nu follows the
+    /// platform convention there, which is *not* where tty7 keeps its own
+    /// config (`~/.config/tty7`). Reading `~/.config/nushell` on a Mac finds
+    /// nothing, and the wrapper then replaces a config it thinks is absent.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn nushell_config_dir_is_application_support_on_macos() {
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+        assert_eq!(
+            platform_config_dir(),
+            Some(home.join("Library/Application Support"))
+        );
+    }
+
+    /// Ask the real binary. A hand-copy of nu's resolution rules is only as
+    /// good as the reading behind it — this is the check that fails outright
+    /// if the two ever disagree on this machine.
+    #[cfg(unix)]
+    #[test]
+    fn nushell_config_dir_is_what_nu_itself_reports() {
+        let Some(nu) = test_nushell_path() else {
+            eprintln!("skipping: Nushell not installed");
+            return;
+        };
+        let xdg_absolute = std::env::temp_dir().join("tty7-nu-xdg");
+        let cases: [Option<&std::ffi::OsStr>; 4] = [
+            None,
+            Some(std::ffi::OsStr::new("")),
+            Some(std::ffi::OsStr::new("relative/dir")),
+            Some(xdg_absolute.as_os_str()),
+        ];
+        for xdg in cases {
+            let mut cmd = std::process::Command::new(&nu);
+            cmd.args(["-n", "-c", "$nu.default-config-dir"]);
+            match xdg {
+                Some(v) => cmd.env("XDG_CONFIG_HOME", v),
+                None => cmd.env_remove("XDG_CONFIG_HOME"),
+            };
+            let out = cmd.output().expect("run nu");
+            // A relative value makes nu warn before it answers, so take the
+            // last line, not the whole of stdout.
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let theirs = PathBuf::from(stdout.lines().last().unwrap_or_default().trim());
+            let ours = nushell_config_dir_from(xdg, platform_config_dir())
+                .expect("this machine has a config dir");
+            assert_eq!(
+                ours, theirs,
+                "tty7 and nu disagree on the config dir for XDG_CONFIG_HOME={xdg:?}"
+            );
+        }
+    }
+
+    /// End to end over a real pty: a user who *has* a config.nu must still
+    /// have it after tty7 points `nu --config` at the wrapper. `--config`
+    /// replaces the user's config rather than adding to it, so a wrapper that
+    /// fails to source it silently strips their prompt, aliases and
+    /// keybindings.
+    #[cfg(unix)]
+    #[test]
+    fn nushell_restores_the_user_config_and_still_reports_the_prompt_cycle() {
+        let Some(nu) = test_nushell_path() else {
+            eprintln!("skipping: Nushell not installed");
+            return;
+        };
+        let nu = nu.to_string_lossy().into_owned();
+        let home = tempfile::tempdir().expect("tempdir");
+        let user_config = home.path().join("config.nu");
+        // Shaped like a real config.nu: a wholesale `$env.config = {...}` (the
+        // conventional ending, and the one that would wipe hooks added before
+        // it), plus a marker only the user's own file could have set.
+        std::fs::write(
+            &user_config,
+            "$env.config = { show_banner: false }\n$env.TTY7_USER_CONFIG_LOADED = \"yes\"\n",
+        )
+        .expect("write user config");
+
+        let mut injection = setup_nushell_with(Some(&user_config)).expect("nushell integration");
+        // What `setup` does at every spawn boundary, and what this test
+        // bypasses by reaching for `setup_nushell_with` directly. Without it
+        // the wrapper is a no-op whenever the test itself runs inside an
+        // integrated pane — the guard sees the inherited `1` and skips the
+        // whole block, and the marks in the transcript are then Nushell's own.
+        injection
+            .env
+            .insert("TTY7_SHELL_INTEGRATION".to_string(), String::new());
+        let text = prompt_cycle_over_pty(
+            &nu,
+            &injection,
+            // One line: Nushell's line editor holds the tty in raw mode and
+            // drops what arrives while a command is running, so a second `\r`
+            // never reaches it and its prompt cycle never happens. `1 / 0` is
+            // the failure — a bare `false` in Nushell is a value.
+            b"print $\"probe=($env.TTY7_USER_CONFIG_LOADED? | default 'MISSING')\"; 1 / 0\r",
+            Some(home.path()),
+        );
+
+        assert!(
+            text.contains("probe=yes"),
+            "the user's own config.nu must survive --config; got:\n{text}"
+        );
+        // Assert on tty7's *own* marks, not on the substring `133;A`: stock
+        // Nushell emits its own OSC 133 cycle alongside these, so a bare
+        // substring passes even when the wrapper never ran. tty7's hooks
+        // terminate with BEL and Nushell's with ST, which tells them apart.
+        for mark in ["133;A\u{7}", "133;C\u{7}", FAILED_COMMAND_MARK] {
+            assert!(
+                text.contains(mark),
+                "Nushell must still report {mark:?} after sourcing the user config; got:\n{text}"
+            );
+        }
+        // Same reasoning for the cwd: the hook falls back to `localhost` for
+        // the host, while Nushell's native OSC 7 names the real one.
+        assert!(
+            text.contains("7;file://localhost/"),
+            "tty7's own OSC 7 must be among the reports; got:\n{text}"
+        );
+        assert_eq!(
+            last_osc7(&text),
+            home.path().canonicalize().expect("canonical tempdir"),
+            "the pane's reported cwd must be where nu actually is"
+        );
+    }
+
+    /// `shells::nushell_path` is Windows-only (nu has no fixed install path
+    /// there); on unix the binary is whatever `nu` resolves to on PATH.
+    #[cfg(unix)]
+    fn test_nushell_path() -> Option<PathBuf> {
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|dir| dir.join("nu"))
+            .find(|p| p.is_file())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nushell_reports_the_full_prompt_cycle_over_a_real_pty() {
+        let Some(nu) = crate::core::shells::nushell_path() else {
+            eprintln!("skipping: Nushell not installed");
+            return;
+        };
+        let nu = nu.to_string_lossy().into_owned();
+        let injection = setup(Some(&nu), &[], false).expect("nushell integration");
+        // One line: Nushell's line editor holds the tty in raw mode and can
+        // drop what arrives while a command is running, so a second `\r` may
+        // never reach it. `cd` first, then a command that fails — `1 / 0`
+        // errors with exit status 1 (a literal `false` is just a value).
+        let text = prompt_cycle_over_pty(
+            &nu,
+            &injection,
+            b"cd C:/Windows; 1 / 0\r",
+            Some(Path::new("C:/")),
+        );
+
+        for mark in ["133;A", "133;B", "133;C", FAILED_COMMAND_MARK] {
+            assert!(
+                text.contains(mark),
+                "Nushell must report {mark:?}; got:\n{text}"
+            );
+        }
+        let cwd = reported_cwd(&text);
+        assert!(
+            cwd.exists(),
+            "Nushell reported a cwd the Windows side cannot resolve: {cwd:?} \
+             — a drive-relative path, so the URI leading-slash translation regressed"
+        );
+        assert_eq!(
+            last_osc7(&text),
+            PathBuf::from("C:/Windows"),
+            "`cd` must move the pane's reported cwd; got:\n{text}"
+        );
     }
 }
