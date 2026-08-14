@@ -6347,9 +6347,6 @@ impl Render for Tty7App {
             })
             .when_some(self.render_remote_input_notice(cx), |this, el| {
                 this.child(el)
-            })
-            .when_some(self.render_worktree_prompt_overlay(cx), |this, el| {
-                this.child(el)
             });
 
         let diff_overlay = self.render_diff_overlay(window, cx);
@@ -6771,6 +6768,14 @@ impl Render for Tty7App {
                 .children(bg_image)
                 .child(main_layout)
                 .when_some(settings_overlay, |this, overlay| this.child(overlay))
+                // Window-level, like the switcher and the palette: the prompt
+                // blocks the whole app, so its scrim has to reach the title bar
+                // and the side panels too. Parented to `body_area` it was
+                // clipped to the terminal area, which read as "only the
+                // terminal is busy".
+                .when_some(self.render_worktree_prompt_overlay(cx), |this, el| {
+                    this.child(el)
+                })
                 .children(self.render_switcher(window, cx))
                 .when_some(self.palette.clone(), |this, palette| this.child(palette))
                 .children(gpui_component::Root::render_notification_layer(window, cx));

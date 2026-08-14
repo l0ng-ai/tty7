@@ -174,11 +174,6 @@ impl Tty7App {
             .border_color(cx.theme().border)
             .rounded_lg()
             .shadow_lg()
-            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
-                if ev.keystroke.key == "escape" {
-                    this.cancel_worktree_prompt(window, cx);
-                }
-            }))
             .child(
                 div()
                     .text_sm()
@@ -232,6 +227,11 @@ impl Tty7App {
                 // waiting, and clicking it backs out — the same gesture the
                 // palette and the switcher already answer to.
                 .bg(crate::ui::presets::scrim_fill(cx))
+                .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                    if ev.keystroke.key == "escape" {
+                        this.cancel_worktree_prompt(window, cx);
+                    }
+                }))
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
@@ -242,7 +242,7 @@ impl Tty7App {
                 .flex_col()
                 .items_center()
                 .justify_start()
-                .pt(px(48.))
+                .pt(px(crate::ui::switcher::CARD_TOP))
                 .child(card)
                 .into_any_element(),
         )

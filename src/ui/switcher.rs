@@ -32,7 +32,7 @@ const FORM_LIST_H: f32 = 8.5 * (ROW_H + 8.0);
 
 const LEFT_W: f32 = 340.0;
 
-const CARD_TOP: f32 = 120.0;
+pub(crate) const CARD_TOP: f32 = 120.0;
 
 /// Breathing room the card keeps from the window edge, and the height its own
 /// search row and footer take on top of the body.
