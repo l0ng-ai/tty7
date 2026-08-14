@@ -1145,6 +1145,15 @@ impl PaletteView {
         cx.notify();
     }
 
+    /// Open straight on the address box, for callers that already know the
+    /// user wants a connection and not a command — the New Tab menu's
+    /// *Add Connection…*, which would otherwise land them in the command list
+    /// to find the row that opens this.
+    pub fn open_on_ssh_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = PaletteMenu::SshConnect;
+        self.show_ssh_connect(window, cx);
+    }
+
     fn show_ssh_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let list = Self::build_list_with_delegate(PaletteDelegate::ssh_connect(), window, cx);
         self._sub = cx.subscribe_in(&list, window, Self::on_list_event);

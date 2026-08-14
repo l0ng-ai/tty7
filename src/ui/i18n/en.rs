@@ -1459,6 +1459,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdCut => "Cut",
         L10nKey::CmdPaste => "Paste",
         L10nKey::CmdSelectAll => "Select All",
+        L10nKey::MenuSshAddConnection => "Add Connection…",
         L10nKey::CmdSshAddConnection => "SSH: Add Connection…",
         L10nKey::CmdSshManageProfiles => "SSH: Manage Profiles…",
         L10nKey::CmdSshReconnect => "SSH: Reconnect",

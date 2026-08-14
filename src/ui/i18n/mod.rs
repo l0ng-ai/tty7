@@ -1185,6 +1185,7 @@ l10n_keys! {
     CmdPaste,
     CmdSelectAll,
     CmdSshAddConnection,
+    MenuSshAddConnection,
     CmdSshManageProfiles,
     CmdSshReconnect,
     CmdSshRemoteFiles,

@@ -460,6 +460,12 @@ pub(crate) const BUTTON_ICON_SCALE: f32 = 0.75;
 /// gpui-component renders an icon-only `.xsmall()` button as a 20×20 box (18×18
 /// where the chrome overrode it). Grow only the box: the glyph keeps its size,
 /// so the chrome looks unchanged and simply stops being fiddly to hit.
+/// How many saved hosts the New Tab menu offers before it stops and points at
+/// the full list. This is a menu whose first job is the shells at the top; past
+/// a handful of hosts under them neither half is scannable, and *Add
+/// Connection…* reaches every host anyway.
+const NEW_TAB_MENU_HOSTS: usize = 6;
+
 pub(crate) const MIN_TARGET: f32 = 24.;
 
 pub(crate) fn hit_target(button: Button) -> Button {
@@ -1014,6 +1020,28 @@ impl Tty7App {
         let shells = self.shells.shells.clone();
         let default_name = self.default_shell_label(cx);
         let app = cx.entity().downgrade();
+        // The saved hosts this menu offers, most likely first. Every other way
+        // to open one — the palette, the switcher's create form, the settings
+        // list — is somewhere other than the button that means "start
+        // something", which is why reaching a saved host took four clicks
+        // through the workspace switcher (#438).
+        //
+        // Capped, because this is a menu and not a host list: past a handful of
+        // rows the shells at the top stop being findable, and *Other Host…*
+        // leads to the full list anyway.
+        let hosts: Vec<(uuid::Uuid, SharedString, SharedString)> =
+            crate::ui::ssh_connect::ssh_profiles_by_frecency(cx)
+                .into_iter()
+                .take(NEW_TAB_MENU_HOSTS)
+                .map(|p| {
+                    let endpoint = crate::core::ssh_profile::to_connect_string(&p);
+                    let name = match p.name.trim() {
+                        "" => endpoint.clone(),
+                        name => name.to_string(),
+                    };
+                    (p.id, name.into(), endpoint.into())
+                })
+                .collect();
         // Every other tile in this row names itself on hover — Switch
         // Workspace, More, Hide Sidebar. The three New Tab buttons that come
         // through here were the ones left silent.
@@ -1059,6 +1087,47 @@ impl Tty7App {
                     },
                 ));
             }
+
+            menu = menu
+                .separator()
+                .item(PopupMenuItem::label(t(L10nKey::CmdGroupSsh)));
+            for (id, name, endpoint) in &hosts {
+                let (id, connect) = (*id, app.clone());
+                let (name, endpoint) = (name.clone(), endpoint.clone());
+                // The address under the name, the way the palette and the
+                // switcher's host list both show a host: two machines called
+                // `web` are told apart by nothing else.
+                let row = PopupMenuItem::element(move |_window, cx| {
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(name.clone())
+                        .when(name != endpoint, |row| {
+                            row.child(
+                                div()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(endpoint.clone()),
+                            )
+                        })
+                });
+                menu = menu.item(row.on_click(move |_, window, cx| {
+                    if let Some(app) = connect.upgrade() {
+                        app.update(cx, |this, cx| this.connect_ssh_profile(id, window, cx));
+                    }
+                }));
+            }
+            let other = app.clone();
+            menu = menu.item(
+                PopupMenuItem::new(t(L10nKey::MenuSshAddConnection)).on_click(
+                    move |_, window, cx| {
+                        if let Some(app) = other.upgrade() {
+                            app.update(cx, |this, cx| this.open_ssh_connect_input(window, cx));
+                        }
+                    },
+                ),
+            );
             menu
         })
     }

@@ -990,10 +990,23 @@ impl Tty7App {
     }
 
     fn render_ssh_input(&self, ix: usize) -> AnyElement {
-        match self.ssh_prompt.inputs.get(ix) {
-            Some(state) => Input::new(state).small().into_any_element(),
-            None => div().into_any_element(),
-        }
+        let Some(state) = self.ssh_prompt.inputs.get(ix) else {
+            return div().into_any_element();
+        };
+        // A masked field gets the eye. Mistyping a long passphrase is the
+        // ordinary way this dialog fails, and a field that cannot be read back
+        // makes the second attempt as blind as the first — with a connection
+        // dropped in between. A field the server asked to have echoed is not
+        // masked and gets no toggle: there is nothing hidden to reveal.
+        let masked = self
+            .ssh_prompt
+            .model
+            .as_ref()
+            .is_some_and(|model| input_is_masked(model, ix));
+        Input::new(state)
+            .small()
+            .when(masked, Input::mask_toggle)
+            .into_any_element()
     }
 
     fn render_ssh_remember(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1039,6 +1052,22 @@ impl Tty7App {
     }
 }
 
+/// Whether the nth field of this prompt hides what is typed into it.
+///
+/// `InputState` keeps its own `masked` private, so the render side cannot ask
+/// it back — and the render side is what decides whether the field gets the eye
+/// that reveals it. One answer, read twice.
+fn input_is_masked(model: &PromptModel, i: usize) -> bool {
+    match model {
+        PromptModel::Password { .. } | PromptModel::KeyPassphrase { .. } => true,
+        // A server that asked for its prompt to be echoed gets an echoed field.
+        PromptModel::KeyboardInteractive { prompts, .. } => {
+            prompts.get(i).map(|p| !p.echo).unwrap_or(true)
+        }
+        PromptModel::HostKeyUnknown { .. } | PromptModel::HostKeyChanged { .. } => false,
+    }
+}
+
 fn build_inputs(
     model: &PromptModel,
     window: &mut Window,
@@ -1047,13 +1076,7 @@ fn build_inputs(
     let count = model.input_count();
     (0..count)
         .map(|i| {
-            let masked = match model {
-                PromptModel::Password { .. } | PromptModel::KeyPassphrase { .. } => true,
-                PromptModel::KeyboardInteractive { prompts, .. } => {
-                    prompts.get(i).map(|p| !p.echo).unwrap_or(true)
-                }
-                PromptModel::HostKeyUnknown { .. } | PromptModel::HostKeyChanged { .. } => false,
-            };
+            let masked = input_is_masked(model, i);
             cx.new(|cx| InputState::new(window, cx).masked(masked))
         })
         .collect()
@@ -1062,6 +1085,55 @@ fn build_inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The render side decides whether a field gets the eye that reveals it,
+    /// and `InputState` keeps its own `masked` private — so the answer has to
+    /// come from the model both times. A field the server asked to have echoed
+    /// has nothing to reveal, and offering to reveal it would be a control that
+    /// does nothing.
+    #[test]
+    fn only_a_hidden_field_offers_to_be_revealed() {
+        let password = PromptModel::Password {
+            user: "deploy".into(),
+            host: "10.0.0.5".into(),
+            port: 22,
+            rejected: false,
+        };
+        assert!(input_is_masked(&password, 0));
+
+        let passphrase = PromptModel::KeyPassphrase {
+            key_path: "/keys/id_ed25519".into(),
+            comment: String::new(),
+            rejected: false,
+        };
+        assert!(input_is_masked(&passphrase, 0));
+
+        let ki = PromptModel::KeyboardInteractive {
+            name: "Duo".into(),
+            instructions: String::new(),
+            prompts: vec![
+                KiRow {
+                    text: "Password:".into(),
+                    echo: false,
+                },
+                KiRow {
+                    text: "Which device?".into(),
+                    echo: true,
+                },
+            ],
+            endpoint: None,
+            stored_rejected: false,
+        };
+        assert!(input_is_masked(&ki, 0));
+        assert!(
+            !input_is_masked(&ki, 1),
+            "the server asked for this one back"
+        );
+        assert!(
+            input_is_masked(&ki, 9),
+            "a prompt index the server never sent is hidden, not exposed"
+        );
+    }
 
     fn endpoint() -> PromptEndpoint {
         PromptEndpoint {

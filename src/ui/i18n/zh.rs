@@ -1364,6 +1364,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdCut => "剪切",
         L10nKey::CmdPaste => "粘贴",
         L10nKey::CmdSelectAll => "全选",
+        L10nKey::MenuSshAddConnection => "添加连接…",
         L10nKey::CmdSshAddConnection => "SSH：添加连接…",
         L10nKey::CmdSshManageProfiles => "SSH：管理主机配置…",
         L10nKey::CmdSshReconnect => "SSH：重新连接",

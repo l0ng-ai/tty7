@@ -4368,6 +4368,21 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Open the palette already on its address box.
+    ///
+    /// The New Tab menu's *Add Connection…* means "I want a connection", and
+    /// dropping the user in the command list to find the row that means the
+    /// same thing is a step nobody asked for.
+    pub(crate) fn open_ssh_connect_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_none() {
+            self.toggle_palette(window, cx);
+        }
+        if let Some(palette) = self.palette.clone() {
+            palette.update(cx, |palette, cx| palette.open_on_ssh_connect(window, cx));
+        }
+        cx.notify();
+    }
+
     fn on_palette_event(
         &mut self,
         _view: &Entity<PaletteView>,
