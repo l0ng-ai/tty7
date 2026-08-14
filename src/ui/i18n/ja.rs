@@ -18,6 +18,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::NewFileName => "新しいファイル名",
         L10nKey::HomeNewTab => "新規タブ",
         L10nKey::HomeReopenClosedTab => "閉じたタブをもう一度開く",
+        L10nKey::HomeRemoteConnected => "{machine} に接続済み",
         L10nKey::HomeSwitchWorkspace => "ワークスペースを切り替える…",
         L10nKey::HomeCommandPalette => "コマンドパレット…",
         L10nKey::HomeSplitRight => "右に分割",
@@ -1246,6 +1247,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteStripPreempted => "このワークスペースは {by} で開かれました",
         L10nKey::RemoteStripFailed => "{machine} に未接続です — {error}",
         L10nKey::RemoteStripRouteLost => "{machine} の接続設定は存在しません — 再接続できません",
+        L10nKey::RemoteStateConnecting => "接続中",
+        L10nKey::RemoteStateReconnecting => "再接続中",
+        L10nKey::RemoteStatePreempted => "他で開いています",
+        L10nKey::RemoteStateDisconnected => "未接続",
+        L10nKey::RemoteStateFailed => "接続できません",
+        L10nKey::RemoteStateServerMismatch => "サーバー不一致",
+        L10nKey::RemoteStateRouteLost => "プロファイル消失",
         L10nKey::RemoteRouteParkedHint => {
             "接続設定が存在しないため、自動再接続しません。リモートのセッションは残っています — \
              新しいプロファイルでこのマシンに接続すると、ワークスペース一覧に再表示されます。"

@@ -258,7 +258,15 @@ impl Tty7App {
     ) -> Option<impl IntoElement + use<>> {
         let machine = self.remote_machine_label(cx);
         let status = self.remote_status(cx)?;
-        let message = status.strip_message(&machine)?;
+        // A healthy link says nothing over a *working* window — the sidebar
+        // banner is already carrying it there. Here there are no tabs and so no
+        // sidebar, and the screen is a logo and four shortcuts that look exactly
+        // the same whichever machine they will run on. Say which one, before ⌘T
+        // opens a shell somewhere the reader did not mean.
+        let message = match status.strip_message(&machine) {
+            Some(message) => message,
+            None => t_fmt(L10nKey::HomeRemoteConnected, &[("machine", &machine)]),
+        };
         // An install in flight replaces both halves of the strip: its own line
         // instead of the complaint that is being answered, and no button, since
         // pressing Update Server again would start a second one on top of it.

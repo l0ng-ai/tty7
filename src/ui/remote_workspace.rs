@@ -151,6 +151,55 @@ impl RemoteStatus {
     pub fn accepts_input(&self) -> bool {
         matches!(self, RemoteStatus::Attached)
     }
+
+    /// One or two words for a badge that has already spent its width on the
+    /// machine's name.
+    ///
+    /// `None` for `Attached`, which is the state every reader assumes: the dot
+    /// beside it is green, and spelling "connected" out on every healthy frame
+    /// is how a status line stops being read. Everything else is worth a word,
+    /// and the reason behind that word is a sentence the strip already carries.
+    pub fn short_label(&self) -> Option<&'static str> {
+        match self {
+            RemoteStatus::Attached => None,
+            RemoteStatus::Connecting => Some(t(L10nKey::RemoteStateConnecting)),
+            RemoteStatus::Reconnecting { .. } => Some(t(L10nKey::RemoteStateReconnecting)),
+            RemoteStatus::Preempted { .. } => Some(t(L10nKey::RemoteStatePreempted)),
+            RemoteStatus::Disconnected => Some(t(L10nKey::RemoteStateDisconnected)),
+            RemoteStatus::Failed(_) => Some(t(L10nKey::RemoteStateFailed)),
+            RemoteStatus::ServerMismatch(_) => Some(t(L10nKey::RemoteStateServerMismatch)),
+            RemoteStatus::RouteLost => Some(t(L10nKey::RemoteStateRouteLost)),
+        }
+    }
+
+    /// The colour a status dot wears for this state.
+    ///
+    /// The same ramp the switcher paints its machine rows with — green while
+    /// the link is up, amber while it is being made or remade, red once it has
+    /// given up, grey for a machine nobody is talking to. One machine has to
+    /// read the same in the switcher and in the window it is open in, so both
+    /// ask here.
+    pub fn dot(&self, theme: &gpui_component::Theme) -> gpui::Hsla {
+        match self {
+            RemoteStatus::Attached => gpui::rgb(crate::ui::tab_strip::LIVE_DOT).into(),
+            RemoteStatus::Connecting | RemoteStatus::Reconnecting { .. } => theme.warning,
+            RemoteStatus::Preempted { .. } => theme.warning,
+            RemoteStatus::Failed(_) | RemoteStatus::ServerMismatch(_) | RemoteStatus::RouteLost => {
+                theme.danger
+            }
+            RemoteStatus::Disconnected => gpui::rgb(crate::ui::tab_strip::UNKNOWN_DOT).into(),
+        }
+    }
+}
+
+/// The machine a window is on, when that is not this computer.
+///
+/// `None` for a local workspace on purpose: a badge shown everywhere means
+/// nothing anywhere, and every surface that asks here is asking "is there
+/// something the reader does not already assume?".
+pub(crate) struct WindowMachine {
+    pub label: String,
+    pub status: RemoteStatus,
 }
 
 /// Which way the one button points.
@@ -364,6 +413,32 @@ impl Tty7App {
         cx: &gpui::App,
     ) -> Option<crate::terminal::PaneWorkspace> {
         pane_workspace_for(cx, self.workspace)
+    }
+
+    /// The machine this window is on, when it is not this computer — for the
+    /// surfaces that have to keep saying so while everything is going *right*.
+    ///
+    /// `remote_status` already answers `None` for a local workspace, which is
+    /// the whole condition; the label costs a config read, so it is only taken
+    /// once that has passed.
+    pub(crate) fn window_machine(&self, cx: &gpui::App) -> Option<WindowMachine> {
+        let status = self.remote_status(cx)?;
+        Some(WindowMachine {
+            label: self.remote_machine_label(cx),
+            status,
+        })
+    }
+
+    /// The address behind the machine's name — `deploy@10.0.0.5:2222` — for
+    /// the surfaces that show the name and can spare a tooltip for the rest.
+    ///
+    /// `None` when the snapshot spells the endpoint the same way the label
+    /// does, which is every host saved without a name: repeating a string
+    /// under itself is not an explanation.
+    pub(crate) fn remote_endpoint_label(&self, cx: &gpui::App) -> Option<String> {
+        let host = WorkspaceStore::remote_ref(cx, self.workspace)?;
+        let endpoint = host.via.as_ref()?.endpoint();
+        (endpoint != remote_connect::route_label(cx, &host)).then_some(endpoint)
     }
 
     pub(crate) fn remote_machine_label(&self, cx: &gpui::App) -> String {
@@ -2412,6 +2487,37 @@ mod tests {
         assert!(!RemoteStatus::Disconnected.accepts_input());
         assert!(!RemoteStatus::Connecting.accepts_input());
         assert!(!RemoteStatus::Failed("x".into()).accepts_input());
+    }
+
+    /// The badge under the workspace head has already spent its width on the
+    /// machine's name, so the state beside it is one or two words — and the
+    /// state every reader assumes is no words at all. A green dot next to
+    /// "java-box · connected" says the same thing twice.
+    #[test]
+    fn only_a_state_worth_reading_earns_a_word() {
+        assert_eq!(RemoteStatus::Attached.short_label(), None);
+        for status in [
+            RemoteStatus::Connecting,
+            RemoteStatus::Reconnecting {
+                attempt: 2,
+                last_error: None,
+            },
+            RemoteStatus::Preempted {
+                by: "laptop".into(),
+            },
+            RemoteStatus::Disconnected,
+            RemoteStatus::Failed("connection refused".into()),
+            RemoteStatus::ServerMismatch("speaks control v9".into()),
+            RemoteStatus::RouteLost,
+        ] {
+            let word = status
+                .short_label()
+                .unwrap_or_else(|| panic!("{status:?} has nothing to say"));
+            assert!(
+                word.split_whitespace().count() <= 2,
+                "{status:?} said {word:?}, which is a sentence, not a badge"
+            );
+        }
     }
 
     #[test]

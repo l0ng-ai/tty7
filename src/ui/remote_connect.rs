@@ -1262,4 +1262,34 @@ mod tests {
         adopt_probe(&mut state, Some(vec!["Arch".to_string()]));
         assert_eq!(state.names, vec!["Arch".to_string()]);
     }
+
+    /// The pane that fills a window while a connection is being made names the
+    /// machine it is waiting on, and a `Profile` target spells itself as a bare
+    /// uuid. Reading `target.to_string()` there put "Connecting to
+    /// 51d32f65-e669-496b-8f7d-e09cb4991cb6…" on screen — the same leak #485
+    /// took out of the switcher. Every caller that shows a target to a reader
+    /// goes through here instead, so this pins the two answers it can give.
+    #[gpui::test]
+    fn a_profile_target_never_labels_itself_with_its_uuid(cx: &mut gpui::TestAppContext) {
+        let mut profile = crate::core::ssh_profile::SshProfile::new("build-box");
+        profile.host = "10.0.0.5".into();
+        profile.user = "deploy".into();
+        let saved = RemoteTarget::Profile { id: profile.id };
+        let deleted = RemoteTarget::Profile {
+            id: uuid::Uuid::new_v4(),
+        };
+
+        cx.update(|cx| {
+            let mut cfg = Config::default();
+            cfg.ssh_profiles = vec![profile.clone()];
+            cx.set_global(cfg);
+
+            assert_eq!(target_label(cx, &saved), "build-box");
+            assert_eq!(
+                target_label(cx, &deleted),
+                t(L10nKey::RemoteProfileGone),
+                "a profile that is gone still may not be spelled as its uuid"
+            );
+        });
+    }
 }

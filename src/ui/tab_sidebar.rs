@@ -69,6 +69,21 @@ struct SidebarRowShown {
     title: Option<(SharedString, SharedString)>,
     branch: Option<(SharedString, SharedString, u32, u32)>,
     cwd: Option<(SharedString, SharedString)>,
+    /// The machine the pane is on, when the row named it because the window's
+    /// own banner does not.
+    machine: Option<(SharedString, SharedString)>,
+}
+
+/// Whether a sidebar row names the machine its pane is on.
+///
+/// The window's own machine is already on the banner under the workspace head,
+/// so a row only speaks up when it would be *contradicting* that: an ssh pane
+/// opened inside a local workspace, or a `wsl` shell beside Windows ones.
+/// Repeating the workspace's machine on every row of a remote window is how a
+/// badge stops being read.
+fn row_machine(pane: Option<String>, window: Option<&str>) -> Option<String> {
+    let pane = pane?;
+    (!pane.trim().is_empty() && Some(pane.as_str()) != window).then_some(pane)
 }
 
 #[derive(Clone)]
@@ -192,6 +207,9 @@ impl Tty7App {
             .collect();
 
         let pointer = window.mouse_position();
+        // What the banner under the workspace head already says, so a row can
+        // tell whether naming its own machine would be news or an echo.
+        let window_machine = self.window_machine(cx).map(|m| m.label);
         // The row text is measured against real glyphs before it is elided:
         // `text_sm` is 0.875rem and `text_xs` 0.75rem, resolved here so the
         // measurement and the render use the same sizes and family.
@@ -442,10 +460,36 @@ impl Tty7App {
                     }
                     line
                 });
+                // A pane somewhere other than where the rest of the window is
+                // says so on its own line. The window's machine is already on
+                // the banner under the workspace head, so a row only speaks up
+                // when it would be *contradicting* that — an ssh pane opened
+                // inside a local workspace, or a `wsl` shell beside Windows
+                // ones. Repeating the workspace's own machine on every row of a
+                // remote window is how a badge stops being read.
+                let machine_shown = row_machine(
+                    tab.pane
+                        .focused_or_first(window, cx)
+                        .and_then(|leaf| leaf.read(cx).remote_context())
+                        .map(|remote| remote.target),
+                    window_machine.as_deref(),
+                )
+                .map(|target| {
+                    let full = SharedString::from(target);
+                    let shown = elide_keep_edges(
+                        &window.text_system(),
+                        &font,
+                        meta_size,
+                        &full,
+                        (label_avail - row_metrics::BRANCH_ICON - row_metrics::META_GAP).max(0.),
+                    );
+                    (shown, full)
+                });
                 // Outside a repo there is no branch line; the second line then
                 // carries the compressed cwd with its root marker, so a tab
                 // whose title is just a shell name still says where it lives.
-                if git_line.is_none() {
+                // A machine line has already answered "where", and better.
+                if git_line.is_none() && machine_shown.is_none() {
                     cwd_shown = tab
                         .pane
                         .focused_or_first(window, cx)
@@ -481,8 +525,9 @@ impl Tty7App {
                     title: full_title.map(|full| (shown_title.clone(), full)),
                     branch: branch_shown.clone(),
                     cwd: cwd_shown.clone(),
+                    machine: machine_shown.clone(),
                 };
-                let info = self.sidebar_info(tab, window, cx, &shown);
+                let info = Self::sidebar_info(&shown);
                 // Colors are captured by value so the tooltip builder (which
                 // borrows no app state) can style the card on its own.
                 let muted = cx.theme().muted_foreground;
@@ -596,6 +641,25 @@ impl Tty7App {
                                 .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
                                 .child(shown_title),
                         )
+                        .when_some(machine_shown, |col, (machine, _)| {
+                            col.child(
+                                h_flex()
+                                    .id(("sidebar-machine-row", i))
+                                    .w_full()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        gpui::svg()
+                                            .path("icons/machine-remote.svg")
+                                            .flex_shrink_0()
+                                            .size(px(row_metrics::BRANCH_ICON))
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .child(div().flex_1().min_w_0().truncate().child(machine)),
+                            )
+                        })
                         .children(git_line)
                         .when_some(cwd_shown, |col, (cwd, _)| {
                             col.child(
@@ -980,6 +1044,8 @@ impl Tty7App {
             .pt(px(4.))
             .child(self.workspace_head(cx));
 
+        let machine_banner = self.remote_head_banner(cx);
+
         let chip_inset = crate::ui::app::CONTENT_INSET - 7. + 4.;
         let top_bar = h_flex()
             .flex_shrink_0()
@@ -1115,6 +1181,7 @@ impl Tty7App {
                         cx,
                     ))
                     .child(workspace_head)
+                    .children(machine_banner)
                     .child(top_bar)
                     .child(crate::ui::scrollbar::with_vertical_scrollbar(
                         "tab-sidebar-scrollbar",
@@ -1125,24 +1192,71 @@ impl Tty7App {
             .child(handle)
     }
 
+    /// The line under the workspace head naming the machine this window is on.
+    ///
+    /// A window on another computer used to look exactly like one on this one
+    /// for as long as nothing went wrong: the home screen's strip stays silent
+    /// while the link is `Attached`, the workspace head shows a name someone
+    /// made up, and a connected pane's row is titled by the remote shell's own
+    /// cwd. The only trace was a 6px dot on the tab avatar. Running a command
+    /// on the wrong machine is the mistake this product can make that costs the
+    /// most, so the machine is stated where the window's identity already lives
+    /// and left there — the same dot-plus-name the switcher's rows use, so one
+    /// machine reads the same in both places.
+    ///
+    /// `None` on a local workspace: a badge that is always there stops being
+    /// read.
+    fn remote_head_banner(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let machine = self.window_machine(cx)?;
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let dot = machine.status.dot(theme);
+        // Only when it is not the state a reader already assumes. "Connected"
+        // spelled out on every frame of a healthy link is the noise this
+        // banner is trying not to be; the dot carries that case alone.
+        let state = machine.status.short_label();
+        let endpoint = self.remote_endpoint_label(cx);
+
+        Some(
+            h_flex()
+                .id("sidebar-machine")
+                .flex_shrink_0()
+                .items_center()
+                .gap(px(6.))
+                .w_full()
+                .px(px(crate::ui::app::CONTENT_INSET - 3.))
+                .pt(px(5.))
+                .text_xs()
+                .text_color(muted)
+                .when_some(endpoint, |row, endpoint| {
+                    row.tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(endpoint.clone()).build(window, cx)
+                    })
+                })
+                .child(div().flex_shrink_0().size(px(6.)).rounded_full().bg(dot))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(machine.label)),
+                )
+                .when_some(state, |row, state| {
+                    row.child(div().flex_shrink_0().child("·"))
+                        .child(div().flex_shrink_0().child(state))
+                }),
+        )
+    }
+
     /// What the sidebar row hid: the full title, the full branch and diff
-    /// counts, the working directory, and the remote host the avatar only
-    /// dots. `None` when the row showed everything — a card would add noise,
-    /// not information. The host is included even for an untruncated row,
-    /// because the title strips the `user@host:` prefix the avatar cannot
-    /// spell out.
+    /// counts, the working directory, and the machine the pane is on.
+    /// `None` when the row showed everything — a card would add noise, not
+    /// information.
     ///
     /// Every line is decided by comparing what the row rendered against the
     /// string it was elided from. Both come from the row itself: deriving
     /// them here a second time is how a renamed tab ended up with a name the
     /// row shortened and the card refused to expand.
-    fn sidebar_info(
-        &self,
-        tab: &crate::ui::app::Tab,
-        window: &mut Window,
-        cx: &gpui::App,
-        shown: &SidebarRowShown,
-    ) -> Option<SidebarInfo> {
+    fn sidebar_info(shown: &SidebarRowShown) -> Option<SidebarInfo> {
         let elided = |pair: &Option<(SharedString, SharedString)>| {
             pair.as_ref()
                 .filter(|(shown, full)| shown != full)
@@ -1164,13 +1278,16 @@ impl Tty7App {
         // The host is read off the same leaf the title and cwd came from; a
         // split tab whose panes sit on different machines would otherwise
         // name whichever one happens to be first.
-        if let Some(target) = tab.pane.focused_or_first(window, cx).and_then(|leaf| {
-            leaf.read(cx)
-                .remote_context()
-                .map(|r| SharedString::from(r.target.clone()))
-        }) {
-            info.host = Some(target);
-        }
+        //
+        // The row now carries the machine itself whenever it differs from the
+        // window's, so the card only takes it when the row could not: either it
+        // had to elide the name, or the row stayed quiet because the banner
+        // over the sidebar already says it — and a card that repeats what is
+        // two rows above it is noise.
+        info.host = match &shown.machine {
+            Some((shown, full)) => (shown != full).then(|| full.clone()),
+            None => None,
+        };
         (info.title.is_some() || info.branch.is_some() || info.cwd.is_some() || info.host.is_some())
             .then_some(info)
     }
@@ -1610,5 +1727,37 @@ mod tests {
         let (short, long) = (p("/app"), p("/x/app"));
         let names = group_names(&[&short, &long]);
         assert_eq!(names, vec!["app", "x/app"]);
+    }
+
+    /// The banner under the workspace head names the window's machine, so the
+    /// only rows worth a machine line are the ones that would contradict it.
+    /// Repeating "java-box" down every row of a java-box window is how the
+    /// badge stops being read; leaving an ssh pane inside a *local* workspace
+    /// unlabelled is how a command lands on the wrong computer.
+    #[test]
+    fn a_row_names_its_machine_only_when_the_window_does_not() {
+        let some = |s: &str| Some(s.to_string());
+
+        assert_eq!(
+            row_machine(some("java-box"), None),
+            some("java-box"),
+            "an ssh pane in a local workspace has to say so"
+        );
+        assert_eq!(
+            row_machine(some("java-box"), Some("java-box")),
+            None,
+            "every row of a java-box window would just echo the banner"
+        );
+        assert_eq!(
+            row_machine(some("build-box"), Some("java-box")),
+            some("build-box"),
+            "a pane ssh'd on somewhere else still contradicts the banner"
+        );
+        assert_eq!(row_machine(None, Some("java-box")), None);
+        assert_eq!(
+            row_machine(some("   "), None),
+            None,
+            "a remote context with no target names nothing"
+        );
     }
 }

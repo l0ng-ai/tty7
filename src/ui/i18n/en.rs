@@ -18,6 +18,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::NewFileName => "New file name",
         L10nKey::HomeNewTab => "New Tab",
         L10nKey::HomeReopenClosedTab => "Reopen Closed Tab",
+        L10nKey::HomeRemoteConnected => "Connected to {machine}",
         L10nKey::HomeSwitchWorkspace => "Switch Workspace…",
         L10nKey::HomeCommandPalette => "Command Palette…",
         L10nKey::HomeSplitRight => "Split Right",
@@ -1193,6 +1194,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteStripRouteLost => {
             "The connection profile for {machine} no longer exists — it cannot reconnect"
         }
+        L10nKey::RemoteStateConnecting => "connecting",
+        L10nKey::RemoteStateReconnecting => "reconnecting",
+        L10nKey::RemoteStatePreempted => "open elsewhere",
+        L10nKey::RemoteStateDisconnected => "not connected",
+        L10nKey::RemoteStateFailed => "unreachable",
+        L10nKey::RemoteStateServerMismatch => "server mismatch",
+        L10nKey::RemoteStateRouteLost => "profile gone",
         L10nKey::RemoteRouteParkedHint => {
             "Its connection profile no longer exists, so it will not reconnect on its own. \
              The remote session is still there — connect to the machine with a new profile \

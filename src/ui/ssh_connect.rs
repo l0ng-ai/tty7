@@ -83,22 +83,31 @@ impl Tty7App {
         self.open_native_ssh_tab(spec, window, cx);
     }
 
+    /// The connection Reconnect would put back: one in the focused pane that
+    /// has dropped and still remembers what it was dialled with.
+    ///
+    /// What the command *does* and whether the palette offers it are the same
+    /// question, so both read it here — a Reconnect row on a pane with nothing
+    /// to reconnect is a button that does nothing and does not say so.
+    pub(crate) fn ssh_session_to_restart(
+        &self,
+        window: &gpui::Window,
+        cx: &gpui::App,
+    ) -> Option<Box<crate::daemon::protocol::NativeSshSpec>> {
+        let view = self.focused_pane_view(window, cx)?;
+        let view = view.read(cx);
+        view.ssh_disconnected().then(|| view.ssh_spec()).flatten()
+    }
+
     pub(crate) fn restart_ssh_session(
         &mut self,
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
-        let Some(view) = self.focused_pane_view(window, cx) else {
+        let Some(spec) = self.ssh_session_to_restart(window, cx) else {
             return;
         };
-        let dead_spec = {
-            let v = view.read(cx);
-            if !v.ssh_disconnected() {
-                return;
-            }
-            v.ssh_spec()
-        };
-        let Some(spec) = dead_spec else {
+        let Some(view) = self.focused_pane_view(window, cx) else {
             return;
         };
         let resolved = self.resolve_restart_spec(spec, cx);

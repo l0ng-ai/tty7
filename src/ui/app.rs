@@ -2615,8 +2615,17 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// The focused pane, when it has a connection forwards can be opened over.
+    /// The palette asks this to decide whether to offer the command at all, so
+    /// the row and what pressing it does cannot drift apart.
+    pub(crate) fn forwardable_pane(&self, window: &Window, cx: &App) -> Option<u64> {
+        let leaf = self.tabs.get(self.active)?.detail_pane(window, cx)?;
+        let view = leaf.read(cx);
+        crate::ui::right_panel::pane_holds_forwards(view).then_some(view.pane_id)
+    }
+
     pub(crate) fn show_ssh_forwards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((pane_id, _)) = self.active_connected_native_ssh_pane(window, cx) else {
+        let Some(pane_id) = self.forwardable_pane(window, cx) else {
             return;
         };
         self.set_right_panel_tab(crate::core::config::RightPanelTab::Info, cx);
@@ -4174,10 +4183,29 @@ impl Tty7App {
             },
         );
 
-        // Offered only where it would do something. A connection opened from a
-        // saved host has nothing to save, and a pane that is not an SSH one has
-        // no connection at all — either would be a row that quietly did nothing
-        // (#549).
+        // The four commands that act on *the connection in the focused pane*.
+        // Every one of them used to be offered from every pane, and every one
+        // of them returned without doing anything when the pane had no
+        // connection — a row that looks like it works, does nothing, and says
+        // nothing about why. They are offered where they would act (#549).
+        if self.ssh_session_to_restart(window, cx).is_some() {
+            commands.push(
+                Command::localized(L10nKey::CmdSshReconnect, CommandKind::RestartSshSession)
+                    .in_group(CommandGroup::Ssh),
+            );
+        }
+        if self.active_connected_native_ssh_pane(window, cx).is_some() {
+            commands.push(
+                Command::localized(L10nKey::CmdSshRemoteFiles, CommandKind::ToggleSftp)
+                    .in_group(CommandGroup::Ssh),
+            );
+        }
+        if self.forwardable_pane(window, cx).is_some() {
+            commands.push(
+                Command::localized(L10nKey::CmdSshPortForwarding, CommandKind::ShowSshForwards)
+                    .in_group(CommandGroup::Ssh),
+            );
+        }
         if self.unsaved_ssh_session(window, cx).is_some() {
             commands.push(
                 Command::localized(
@@ -7267,10 +7295,14 @@ pub(crate) fn new_terminal(
         owner,
         font_size,
     };
+    // Asked of the host listing, not of the target's own `Display`: a
+    // `Profile` target spells itself as a bare uuid, and this pane fills the
+    // whole window while a connection is being made — "Connecting to
+    // 51d32f65-e669-…" is the same thing #485 took out of the switcher.
     let machine = spawn
         .workspace
         .as_ref()
-        .map(|w| w.target.to_string())
+        .map(|w| crate::ui::remote_connect::target_label(cx, &w.target))
         .unwrap_or_else(|| t(L10nKey::AppLocalServerName).to_string());
     let pending = cx.new(|cx| crate::ui::pending_pane::PendingPane::new(machine, spawn, cx));
     cx.subscribe_in(

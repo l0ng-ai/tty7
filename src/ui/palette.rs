@@ -14,7 +14,7 @@ use crate::core::config::{Config, RightPanelTab, TabBarPosition};
 use crate::core::ssh_profile::parse_quick_connect;
 use crate::ui::i18n::{L10nKey, alias_translations, t, t_fmt};
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandKind {
     NewTab,
     NewWorkspace,
@@ -527,12 +527,14 @@ impl Command {
             Command::localized(L10nKey::CmdSelectAll, SelectAllText),
         ];
 
+        // Reconnect, Remote Files and Port Forwarding are not here: each of
+        // them acts on the connection in the focused pane, and each returned
+        // without doing anything when there was not one. `palette_commands`
+        // adds them where they would do something, the way #549 made Save
+        // Connection as Host earn its row.
         let ssh = [
             Command::localized(L10nKey::CmdSshAddConnection, OpenSshConnectInput),
             Command::localized(L10nKey::CmdSshManageProfiles, OpenSshProfiles),
-            Command::localized(L10nKey::CmdSshReconnect, RestartSshSession),
-            Command::localized(L10nKey::CmdSshRemoteFiles, ToggleSftp),
-            Command::localized(L10nKey::CmdSshPortForwarding, ShowSshForwards),
         ];
 
         let agents = [
@@ -1325,6 +1327,44 @@ mod tests {
             .into_iter()
             .map(|c| c.title)
             .collect()
+    }
+
+    /// The commands that act on the connection in the focused pane are added by
+    /// `Tty7App::palette_commands`, which can see whether there *is* one. Any
+    /// of them left in the static list is offered from every pane, and returns
+    /// without doing anything on most of them — the row that looks like it
+    /// works, does nothing, and says nothing about why (#549).
+    #[gpui::test]
+    fn the_static_list_offers_nothing_that_needs_a_live_connection(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::core::config::Config::default());
+            let kinds: Vec<CommandKind> = Command::base_commands(
+                cx,
+                ChromeState {
+                    rail_collapsed: false,
+                    right_panel_visible: false,
+                },
+            )
+            .into_iter()
+            .map(|c| c.kind)
+            .collect();
+
+            for needs_connection in [
+                CommandKind::RestartSshSession,
+                CommandKind::ToggleSftp,
+                CommandKind::ShowSshForwards,
+                CommandKind::SaveSshSessionAsHost,
+            ] {
+                assert!(
+                    !kinds.contains(&needs_connection),
+                    "{needs_connection:?} acts on a connection, so only a pane that has one may offer it"
+                );
+            }
+            assert!(
+                kinds.contains(&CommandKind::OpenSshConnectInput),
+                "the commands that make a connection are always available"
+            );
+        });
     }
 
     #[test]

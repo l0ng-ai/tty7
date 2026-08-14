@@ -700,14 +700,7 @@ impl Tty7App {
                 if let Some(ssh) = view.ssh_spec() {
                     rows.push(InfoRow::text(t(L10nKey::PanelSsh), ssh.host.clone()).copyable());
                 }
-                let connected_ssh = view
-                    .remote_context()
-                    .is_some_and(|c| c.kind == crate::daemon::protocol::RemoteKind::NativeSsh)
-                    && matches!(
-                        view.ssh_phase(),
-                        Some(crate::daemon::protocol::SshPhase::Connected)
-                    );
-                if connected_ssh || view.workspace().is_some() {
+                if pane_holds_forwards(view) {
                     forwards_pane = Some(view.pane_id);
                 }
                 git = view.git_status(cx);
@@ -1358,6 +1351,24 @@ impl Tty7App {
         }
         Some((view.pane_id, remote.target))
     }
+}
+
+/// Whether a pane has a connection that forwards can be opened over: a native
+/// ssh session that finished authenticating, or a pane the daemon reaches
+/// through a remote workspace's link.
+///
+/// The Info panel decides whether to draw the Forwards section from this, and
+/// the palette decides whether to offer *SSH: Port Forwarding* from it too.
+/// They used to answer separately and disagree: the panel showed the section
+/// for a remote-workspace pane, and the command — which asked only for a native
+/// ssh pane — returned without doing anything on exactly those panes.
+pub(crate) fn pane_holds_forwards(view: &crate::terminal::view::TerminalView) -> bool {
+    use crate::daemon::protocol::{RemoteKind, SshPhase};
+    let connected_ssh = view
+        .remote_context()
+        .is_some_and(|c| c.kind == RemoteKind::NativeSsh)
+        && matches!(view.ssh_phase(), Some(SshPhase::Connected));
+    connected_ssh || view.workspace().is_some()
 }
 
 /// Width of the fixed cell a git status letter is centred in.

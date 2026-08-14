@@ -18,6 +18,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::NewFileName => "新文件名",
         L10nKey::HomeNewTab => "新标签页",
         L10nKey::HomeReopenClosedTab => "重新打开已关闭的标签页",
+        L10nKey::HomeRemoteConnected => "已连接到 {machine}",
         L10nKey::HomeSwitchWorkspace => "切换工作区…",
         L10nKey::HomeCommandPalette => "命令面板…",
         L10nKey::HomeSplitRight => "向右分屏",
@@ -1121,6 +1122,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteStripPreempted => "此工作区已在 {by} 上打开",
         L10nKey::RemoteStripFailed => "未连接到 {machine}——{error}",
         L10nKey::RemoteStripRouteLost => "{machine} 的连接配置已不存在，无法重连",
+        L10nKey::RemoteStateConnecting => "连接中",
+        L10nKey::RemoteStateReconnecting => "重连中",
+        L10nKey::RemoteStatePreempted => "已在别处打开",
+        L10nKey::RemoteStateDisconnected => "未连接",
+        L10nKey::RemoteStateFailed => "无法连接",
+        L10nKey::RemoteStateServerMismatch => "服务端版本不匹配",
+        L10nKey::RemoteStateRouteLost => "配置已丢失",
         L10nKey::RemoteRouteParkedHint => {
             "其连接配置已不存在，不会再自动重连。远端会话仍在——\
              新建配置连上该机器后，可在工作区列表中找回。"
