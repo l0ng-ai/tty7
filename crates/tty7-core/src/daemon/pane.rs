@@ -11,6 +11,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::core::kitty_graphics::{GraphicsSniffer, Segment, Sniffed};
 use crate::core::osc::OscTokenizer;
+use crate::daemon::protocol::SshPhase;
 use crate::daemon::protocol::{
     AuthResponse, DaemonMsg, MAX_FRAME, NativeSshSpec, PaneInfo, RemoteContext, RemoteKind,
     ShellSpec, WinSize,
@@ -684,6 +685,13 @@ struct PaneState {
     /// `shell` above, which is the shell-integration state.
     shell_spec: Option<ShellSpec>,
     remote: Option<RemoteContext>,
+    /// The last phase a native ssh connection reported.
+    ///
+    /// Kept so a client that attaches later is told: the phase is an event, and
+    /// a GUI restarted while the session was up got no answer at all — every
+    /// live connection came back wearing the grey "nobody said" dot instead of
+    /// the green one, on a pane the user could type into.
+    ssh_phase: Option<SshPhase>,
     agent: Option<crate::core::cli_agent::CLIAgent>,
     agent_argv: Option<Vec<String>>,
     agent_session: Option<crate::core::cli_agent::AgentSessionState>,
@@ -1330,6 +1338,7 @@ impl DaemonPane {
                 shell: ShellState::default(),
                 shell_spec: spawn.shell.clone(),
                 remote: spawn.remote.clone(),
+                ssh_phase: None,
                 agent: None,
                 agent_session: None,
                 agent_argv: None,
@@ -1549,6 +1558,7 @@ impl DaemonPane {
                     command: None,
                 },
                 remote: carried.remote,
+                ssh_phase: None,
                 agent: carried.agent,
                 agent_session: carried.agent_session,
                 agent_argv: carried.agent_argv,
@@ -1598,6 +1608,7 @@ impl DaemonPane {
             osc_title: None,
             shell: ShellState::default(),
             remote: Some(remote),
+            ssh_phase: None,
             agent: None,
             agent_session: None,
             agent_argv: None,
@@ -1610,7 +1621,14 @@ impl DaemonPane {
         let broker = {
             let state = state.clone();
             crate::daemon::ssh::PromptBroker::new(Box::new(move |msg: DaemonMsg| {
-                match &state.lock().unwrap().subscriber {
+                let mut st = state.lock().unwrap();
+                // Remembered before it is sent, and remembered even when there
+                // is no client listening: the phase a connection reached while
+                // nobody was attached is exactly the one the next client needs.
+                if let DaemonMsg::SshStatus { phase } = &msg {
+                    st.ssh_phase = Some(phase.clone());
+                }
+                match &st.subscriber {
                     Some(sub) => sub.send(msg).is_ok(),
                     None => false,
                 }
@@ -2401,6 +2419,11 @@ fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>) {
     if st.remote.is_some() {
         let _ = subscriber.send(DaemonMsg::RemoteContext(st.remote.clone()));
     }
+    if let Some(phase) = &st.ssh_phase {
+        let _ = subscriber.send(DaemonMsg::SshStatus {
+            phase: phase.clone(),
+        });
+    }
     if st.agent.is_some() {
         let _ = subscriber.send(DaemonMsg::Agent(st.agent));
     }
@@ -3041,6 +3064,66 @@ mod tests {
     use super::*;
     use crate::core::kitty_graphics::ImageDelete;
     use std::path::Path;
+
+    /// A client that attaches after the fact is told what the connection
+    /// reached. The phase is an event, so a GUI restarted while an ssh session
+    /// was up got no answer at all — every live connection came back wearing
+    /// the grey "nobody said" dot on a pane the user could type into.
+    #[test]
+    fn attaching_late_is_told_the_phase_the_connection_reached() {
+        let mut st = PaneState {
+            id: 7,
+            ring: ReplayRing::new(crate::daemon::protocol::WinSize {
+                cols: 80,
+                rows: 24,
+                cell_w: 8,
+                cell_h: 16,
+            }),
+            subscriber: None,
+            subscriber_epoch: 0,
+            observers: Vec::new(),
+            observer_seq: 0,
+            cwd: None,
+            osc_title: None,
+            shell: ShellState::default(),
+            shell_spec: None,
+            remote: Some(RemoteContext {
+                kind: crate::daemon::protocol::RemoteKind::NativeSsh,
+                argv: Vec::new(),
+                target: "java-box".into(),
+            }),
+            ssh_phase: Some(SshPhase::Connected),
+            agent: None,
+            agent_argv: None,
+            agent_session: None,
+            alive: true,
+            exit_code: None,
+        };
+
+        let (tx, rx) = mpsc::channel();
+        replay_state(&st, &tx);
+        drop(tx);
+        let replayed: Vec<DaemonMsg> = rx.into_iter().collect();
+        assert!(
+            replayed.iter().any(|m| matches!(
+                m,
+                DaemonMsg::SshStatus {
+                    phase: SshPhase::Connected
+                }
+            )),
+            "a late client has no other way to learn the connection is up: {replayed:?}"
+        );
+
+        // A pane that never had a connection says nothing about one.
+        st.ssh_phase = None;
+        let (tx, rx) = mpsc::channel();
+        replay_state(&st, &tx);
+        drop(tx);
+        assert!(
+            !rx.into_iter()
+                .any(|m| matches!(m, DaemonMsg::SshStatus { .. }))
+        );
+    }
 
     #[test]
     fn a_shell_that_cannot_run_is_named_once_not_wrapped_four_deep() {
@@ -4154,6 +4237,7 @@ mod tests {
             osc_title: None,
             shell: ShellState::default(),
             remote: None,
+            ssh_phase: None,
             agent: None,
             agent_session: None,
             agent_argv: None,
