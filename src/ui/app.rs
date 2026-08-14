@@ -384,7 +384,11 @@ impl Tab {
 
     /// The leaf a tab names itself after — its title and, with it, the home
     /// that title's path is measured against.
-    fn title_leaf(&self, window: Option<&Window>, cx: &App) -> Option<Entity<TerminalView>> {
+    pub(crate) fn title_leaf(
+        &self,
+        window: Option<&Window>,
+        cx: &App,
+    ) -> Option<Entity<TerminalView>> {
         let leaf = match window {
             Some(window) => self
                 .pane

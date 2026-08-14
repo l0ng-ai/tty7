@@ -466,6 +466,19 @@ pub(crate) const BUTTON_ICON_SCALE: f32 = 0.75;
 /// Connection…* reaches every host anyway.
 const NEW_TAB_MENU_HOSTS: usize = 6;
 
+/// What a tab chip says under the pointer: the machine it is on, then the title
+/// it could not fit, joined only when there are both.
+///
+/// The machine leads because it is the half a reader cannot infer from the chip
+/// — the title is at least partly on screen, and the machine is a 6px dot.
+fn chip_tooltip(machine: Option<String>, title: Option<String>) -> Option<SharedString> {
+    match (machine, title) {
+        (None, None) => None,
+        (None, Some(one)) | (Some(one), None) => Some(SharedString::from(one)),
+        (Some(machine), Some(title)) => Some(SharedString::from(format!("{machine} · {title}"))),
+    }
+}
+
 pub(crate) const MIN_TARGET: f32 = 24.;
 
 pub(crate) fn hit_target(button: Button) -> Button {
@@ -974,17 +987,27 @@ impl Tty7App {
         window: Option<&Window>,
         cx: &App,
     ) -> Option<SharedString> {
-        if tab.name.as_ref().is_some_and(|n| !n.trim().is_empty()) {
-            return None;
-        }
-        let (raw, home) = tab.leaf_title_and_home(window, cx);
-        let raw = raw.trim();
-        if raw.is_empty() || raw == self.tab_label(tab, index, window, cx) {
-            return None;
-        }
-        Some(SharedString::from(
-            abbreviate_home(raw, home.as_deref()).into_owned(),
-        ))
+        // A chip has no second line, so a pane on another machine has nothing
+        // but a 6px dot to say so. The rail's rows spell the machine out; here
+        // the pointer is the only place it fits. Leads the tooltip, because it
+        // is the part a reader cannot infer from the chip.
+        let machine = tab
+            .title_leaf(window, cx)
+            .and_then(|leaf| leaf.read(cx).remote_context())
+            .map(|remote| remote.target)
+            .filter(|target| !target.trim().is_empty());
+        let title = match tab.name.as_ref().filter(|n| !n.trim().is_empty()) {
+            Some(_) => None,
+            None => {
+                let (raw, home) = tab.leaf_title_and_home(window, cx);
+                let raw = raw.trim();
+                match raw.is_empty() || raw == self.tab_label(tab, index, window, cx) {
+                    true => None,
+                    false => Some(abbreviate_home(raw, home.as_deref()).into_owned()),
+                }
+            }
+        };
+        chip_tooltip(machine, title)
     }
 
     pub(crate) fn tab_label(
@@ -1010,6 +1033,46 @@ impl Tty7App {
         } else {
             label
         }
+    }
+
+    /// The machine this window is on, for the horizontal tab strip.
+    ///
+    /// The rail carries this under the workspace head, and the strip has no
+    /// workspace head — so with the tab bar on top a window on another computer
+    /// said nothing at all about it, which is the state this badge exists to
+    /// prevent. Same dot-plus-name as the rail's and the switcher's, so one
+    /// machine reads the same wherever it is shown.
+    ///
+    /// `None` on a local workspace: a badge that is always there stops being
+    /// read.
+    fn strip_machine_badge(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let machine = self.window_machine(cx)?;
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let dot = machine.status.dot(theme);
+        let state = machine.status.short_label();
+        Some(
+            h_flex()
+                .id("strip-machine")
+                .flex_shrink(1.)
+                .min_w_0()
+                .items_center()
+                .gap(px(6.))
+                .pl(px(8.))
+                .text_xs()
+                .text_color(muted)
+                .child(div().flex_shrink_0().size(px(6.)).rounded_full().bg(dot))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(machine.label)),
+                )
+                .when_some(state, |row, state| {
+                    row.child(div().flex_shrink_0().child("·"))
+                        .child(div().flex_shrink_0().child(state))
+                }),
+        )
     }
 
     pub(crate) fn attach_new_tab_menu(
@@ -1679,7 +1742,17 @@ impl Tty7App {
             .when_some(left_group, |this, g| this.child(g))
             .child(chips)
             .when(show_chips, move |this| this.child(add_button))
-            .child(div().flex_1().min_w(px(GRAB_HANDLE_W)))
+            // The machine badge rides in the drag slack rather than beside the
+            // chips: it must never take width from the tabs, and there is
+            // normally far more room here than it needs.
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w(px(GRAB_HANDLE_W))
+                    .items_center()
+                    .overflow_hidden()
+                    .children(self.strip_machine_badge(cx)),
+            )
             .when_some(right_chrome, |this, chrome| match chrome_band_w {
                 Some(w) => this.child(
                     h_flex()
@@ -1698,6 +1771,22 @@ impl Tty7App {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    /// A chip has no second line, so a pane on another machine has nothing but
+    /// a 6px dot to say so — the pointer is the only place the machine fits.
+    #[test]
+    fn a_chip_names_its_machine_before_the_title_it_could_not_fit() {
+        let m = || Some("java-box".to_string());
+        let t = || Some("java@java: ~".to_string());
+        assert_eq!(chip_tooltip(None, None), None);
+        assert_eq!(chip_tooltip(m(), None).as_deref(), Some("java-box"));
+        assert_eq!(chip_tooltip(None, t()).as_deref(), Some("java@java: ~"));
+        assert_eq!(
+            chip_tooltip(m(), t()).as_deref(),
+            Some("java-box · java@java: ~"),
+            "the machine leads: it is the half the chip cannot show at all"
+        );
+    }
     use std::path::Path;
     use unicode_segmentation::UnicodeSegmentation;
 
