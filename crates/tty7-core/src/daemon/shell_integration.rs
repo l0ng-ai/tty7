@@ -1047,9 +1047,14 @@ fn wsl_cd(args: &[String]) -> Option<String> {
 
 #[cfg_attr(not(windows), allow(unused_variables))]
 pub fn setup(program: Option<&str>, args: &[String], has_custom_args: bool) -> Option<Injection> {
+    // Every arm defers to user-authored args: argv injection would collide
+    // with them outright, and even zsh's env-only ZDOTDIR swap changes which
+    // startup files run.
     let mut injection = match shell_kind(program)? {
-        ShellKind::Zsh => setup_zsh(),
-        ShellKind::Fish => setup_fish(),
+        ShellKind::Zsh if !has_custom_args => setup_zsh(),
+        ShellKind::Zsh => None,
+        ShellKind::Fish if !has_custom_args => setup_fish(),
+        ShellKind::Fish => None,
         ShellKind::Bash if !has_custom_args => setup_bash(),
         ShellKind::Bash => None,
         ShellKind::PowerShell if !has_custom_args => setup_powershell(),
@@ -2312,8 +2317,12 @@ mod tests {
             let _ = std::fs::remove_dir_all(d);
         }
 
+        assert!(setup(Some("zsh"), &[], true).is_none());
+
         let inj = setup(Some("fish"), &[], false).expect("fish setup");
         assert!(inj.env.contains_key("TTY7_SHELL_INTEGRATION"));
+
+        assert!(setup(Some("fish"), &[], true).is_none());
 
         let bash = if cfg!(windows) {
             "C:/Program Files/Git/bin/bash.exe"
