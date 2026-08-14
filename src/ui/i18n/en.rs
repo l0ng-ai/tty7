@@ -1652,8 +1652,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::IntegrationNoticeNotEngaged => {
             "tty7 shell integration hasn't engaged in this pane, so inline completion and the \
-             Ctrl+R menu are unavailable. A PTY wrapper (figterm-style) or an unsupported shell \
-             setup can cause this."
+             Ctrl+R menu are unavailable. A shell you started with your own arguments, a PTY \
+             wrapper (figterm-style), or an unsupported shell setup can cause this."
         }
         L10nKey::PaneTitleDisconnected => "{title} — disconnected",
         L10nKey::PaneTitleProcessExited => "{title} — process exited",
