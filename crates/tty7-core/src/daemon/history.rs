@@ -192,7 +192,11 @@ pub fn sweep(keep: &HashSet<u64>) {
     let Some(dir) = dir() else {
         return;
     };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    sweep_in(&dir, keep);
+}
+
+fn sweep_in(dir: &Path, keep: &HashSet<u64>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
@@ -353,12 +357,19 @@ mod tests {
 
     #[test]
     fn the_sweep_keeps_only_the_panes_that_still_exist() {
-        pin_config_dir();
-        let origin = a_global_history("swept", "old\n");
-        let kept = seed(80_007, &origin);
-        let dropped = seed(80_008, &origin);
+        // A directory of its own, not the pinned one the rest of the suite
+        // shares: a sweep deletes every pane it was not told to keep, and the
+        // panes of whatever test is running alongside this one are exactly
+        // that. Hence `sweep_in` rather than `sweep`.
+        let dir = std::env::temp_dir().join(format!("tty7-sweeptest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let kept = dir.join("pane-80007");
+        let dropped = dir.join("pane-80008");
+        std::fs::write(&kept, "old\n").unwrap();
+        std::fs::write(&dropped, "old\n").unwrap();
+        std::fs::write(with_suffix(&dropped, ".seed"), "0").unwrap();
 
-        sweep(&HashSet::from([80_007]));
+        sweep_in(&dir, &HashSet::from([80_007]));
 
         assert!(kept.exists(), "a live pane keeps its history");
         assert!(!dropped.exists(), "a pane that is gone does not");
@@ -366,8 +377,7 @@ mod tests {
             !with_suffix(&dropped, ".seed").exists(),
             "the sidecars go with it"
         );
-        retire(80_007);
-        let _ = std::fs::remove_file(&origin);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

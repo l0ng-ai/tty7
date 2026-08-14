@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A zsh or fish you gave your own arguments to is no longer injected into.**
+  Custom arguments have always been the line where tty7 backs off — the bash,
+  PowerShell and WSL setups checked for them — but the zsh and fish setups did
+  not, so a `fish` started with your flags had `-C <script>` appended to them
+  and a `zsh` had its `ZDOTDIR` swapped out from under its startup files. Both
+  now behave like the rest. **This turns shell integration off for a config
+  that sets `shell` or a `custom_shells` entry with `args`** — including the
+  `{"program": "fish", "args": ["-l"]}` the reference page used to print as an
+  example — so prompt marks, working directory reporting, command-finished
+  notifications, inline completion, <kbd>⌃ R</kbd> and per-pane history stop in
+  those panes. Drop the arguments to get them back, and the notice a pane
+  raises when integration never engaged now names this as a cause (#624, #629).
 - **An SSH pane is named after its host.** A fresh SSH tab reads the host's
   name, or its address when the host has none — every host imported from
   `~/.ssh/config` arrives nameless, and a window full of them all read `tty7`

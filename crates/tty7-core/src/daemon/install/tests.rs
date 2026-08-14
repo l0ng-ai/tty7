@@ -47,6 +47,10 @@ struct FakeRemote {
     launch_works: bool,
     speaks: Mutex<HashMap<String, RemoteProtocol>>,
     installed_speaks: Option<RemoteProtocol>,
+    /// The stop command comes back as a failure and the daemon keeps serving —
+    /// a login shell that could not read the script, which is the shape the
+    /// no-`/proc` bug took on every Mac.
+    stop_fails: bool,
 }
 
 impl FakeRemote {
@@ -70,7 +74,13 @@ impl FakeRemote {
             launch_works: true,
             speaks: Mutex::new(HashMap::new()),
             installed_speaks: Some(ours()),
+            stop_fails: false,
         }
+    }
+
+    fn refusing_to_stop(mut self) -> Self {
+        self.stop_fails = true;
+        self
     }
 
     fn speaking(self, exe: &str, spoken: RemoteProtocol) -> Self {
@@ -172,6 +182,13 @@ impl RemoteOps for FakeRemote {
             return ok(&exe);
         }
         if cmd == TERMINATE_RUNNING_COMMAND {
+            if self.stop_fails {
+                return Ok(ExecOutput {
+                    status: Some(127),
+                    stdout: String::new(),
+                    stderr: "no shell over here would read that".into(),
+                });
+            }
             *self.daemon_running.lock().unwrap() = false;
             *self.running_exe.lock().unwrap() = None;
             return ok("");
@@ -1027,6 +1044,150 @@ fn the_running_exe_probe_cannot_fail_the_command() {
     assert!(RUNNING_EXE_COMMAND.trim_end().ends_with("true"));
     assert!(TERMINATE_RUNNING_COMMAND.trim_end().ends_with("true"));
     assert!(TERMINATE_RUNNING_COMMAND.contains("*/tty7-server-*"));
+}
+
+/// Both commands have to work on a machine with no `/proc`, which is every Mac
+/// and every BSD, and the `/proc` glob has to stay inside the guard: zsh is the
+/// login shell over there, and a top-level glob that matches nothing takes the
+/// rest of the command line with it — including the trailing `true`.
+#[test]
+fn finding_the_running_server_survives_a_machine_without_proc() {
+    for cmd in [RUNNING_EXE_COMMAND, TERMINATE_RUNNING_COMMAND] {
+        assert!(
+            cmd.starts_with("if [ -d /proc ]; then"),
+            "the glob has to be unreachable before the guard passes: {cmd}"
+        );
+        let (guarded, fallback) = cmd
+            .split_once("; else ")
+            .expect("a machine with no /proc still needs an answer");
+        assert!(
+            guarded.contains("/proc/[0-9]*") && !fallback.contains("/proc/"),
+            "the fallback reads ps, not a filesystem that is not there: {cmd}"
+        );
+        assert!(
+            fallback.contains("ps -xwwo pid=,comm="),
+            "unwrapped, unabbreviated, and this user's processes only: {cmd}"
+        );
+    }
+}
+
+/// Whichever branch the far end takes, the command has to parse — a syntax
+/// error here is invisible in production, where the output is read as "no
+/// server is running" and the failure is a ten-second timeout.
+///
+/// Parsed, not run: the terminate command would kill this developer's own
+/// server, and this test is not the place to find that out.
+#[cfg(unix)]
+#[test]
+fn both_branches_of_the_probe_are_valid_shell() {
+    for cmd in [RUNNING_EXE_COMMAND, TERMINATE_RUNNING_COMMAND] {
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(cmd)
+            .output()
+            .expect("every unix has /bin/sh");
+        assert!(
+            out.status.success(),
+            "{cmd}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// `sh -n` cannot see the failure that started all this: a glob matching
+/// nothing is perfectly good syntax and only falls over when it runs, and it
+/// falls over in zsh alone — which is the login shell on the machines that had
+/// no `/proc` in the first place. So run the probe for real, in every shell
+/// this machine has, and hold it to an exit status: the old shape answered 1
+/// under zsh, having abandoned the command line before the trailing `true`.
+///
+/// Only the probe. The terminate command differs from it by one word, and that
+/// word would end whatever server the developer running this happens to have
+/// up; the test above pins the two to the same shape.
+#[cfg(unix)]
+#[test]
+fn the_probe_runs_clean_in_every_shell_this_machine_has() {
+    let shells: Vec<&str> = ["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/dash"]
+        .into_iter()
+        .filter(|sh| std::path::Path::new(sh).exists())
+        .collect();
+    assert!(!shells.is_empty(), "a unix without /bin/sh is not a unix");
+
+    for shell in shells {
+        let out = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(RUNNING_EXE_COMMAND)
+            .output()
+            .unwrap_or_else(|e| panic!("{shell} would not run: {e}"));
+        assert!(
+            out.status.success(),
+            "{shell} did not survive the probe\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// The `ps` arm swallows its own stderr, so a flag this machine's `ps` does not
+/// accept would cost nothing visible: no output, no failure, just a probe that
+/// never finds a server and a restart that waits out its timeout. Ask `ps` on
+/// its own instead, and only where the guard would actually route through it —
+/// on Linux this arm is unreachable and Linux's `ps` need not agree.
+#[cfg(unix)]
+#[test]
+fn the_ps_arm_is_a_ps_this_machine_accepts() {
+    if std::path::Path::new("/proc").is_dir() {
+        return;
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-xwwo", "pid=,comm="])
+        .output()
+        .expect("a machine with no /proc has a ps");
+    assert!(
+        out.status.success(),
+        "ps rejected the fallback's arguments: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let listing = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        listing.lines().any(|line| {
+            let mut parts = line.split_whitespace();
+            parts.next().is_some_and(|pid| pid.parse::<u32>().is_ok()) && parts.next().is_some()
+        }),
+        "a pid and a command per line is the whole shape the loop reads: {listing}"
+    );
+}
+
+/// A stop that never reached the far end has to say so. It used to be
+/// discarded outright, so the only thing anyone saw was the wait timing out —
+/// which reads as "the daemon refused to die" when the truth was that the
+/// command asking it to had fallen over before the `kill`.
+#[test]
+fn a_stop_that_failed_is_named_in_the_timeout() {
+    let remote = FakeRemote::new()
+        .with_previous_install()
+        .refusing_to_stop()
+        .serving(&format!("{BIN_DIR}/tty7-server-26.7.4"));
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let failed = installer(&remote, &release, &user, "me@stubborn-box:22")
+        .with_shutdown_timeout(Duration::from_millis(30))
+        .restart_daemon()
+        .expect_err("nothing stopped, so the restart cannot claim to have worked");
+
+    let InstallError::Launch { reason } = &failed else {
+        panic!("{failed:?}");
+    };
+    assert!(
+        reason.contains("did not stop") && reason.contains("no shell over here"),
+        "the reason has to carry why the stop failed, not just that it did: {reason}"
+    );
+    assert!(
+        *remote.daemon_running.lock().unwrap(),
+        "and the machine is left exactly as it was, not half stopped"
+    );
 }
 
 #[test]

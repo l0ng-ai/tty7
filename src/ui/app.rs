@@ -6165,12 +6165,25 @@ impl Tty7App {
         let status = self.remote_status(cx)?;
         let machine = self.remote_machine_label(cx);
         let message = status.strip_message(&machine)?;
-        let action = self.remote_strip_action(&status, cx);
+        // While an install runs, the strip is that install's progress: the
+        // refusal it is answering is no longer the news, and the button that
+        // started it would only start a second one.
+        let installing = self.remote_strip_progress(cx);
+        let action = installing
+            .is_none()
+            .then(|| self.remote_strip_action(&status, cx))
+            .flatten();
         let theme = cx.theme();
-        let bar = gpui_component::h_flex()
+        let message = match installing {
+            Some(phase) => format!(
+                "{machine} — {}",
+                crate::ui::remote_workspace::install_phase_caption(phase)
+            ),
+            None => message,
+        };
+        let bar = gpui_component::v_flex()
             .occlude()
-            .items_center()
-            .gap_2()
+            .gap(px(6.))
             .px_3()
             .py_1p5()
             .rounded_lg()
@@ -6180,25 +6193,33 @@ impl Tty7App {
             .shadow_md()
             .text_xs()
             .text_color(theme.muted_foreground)
-            .child(gpui_component::Icon::new(gpui_component::IconName::Globe))
             .child(
-                div()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.foreground)
-                    .child(message),
+                gpui_component::h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(gpui_component::Icon::new(gpui_component::IconName::Globe))
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.foreground)
+                            .child(message),
+                    )
+                    .when_some(action, |this, (label, action)| {
+                        use gpui_component::Sizable as _;
+                        use gpui_component::button::ButtonVariants as _;
+                        this.child(
+                            gpui_component::button::Button::new("remote-status-action")
+                                .label(label)
+                                .primary()
+                                .small()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.run_strip_action(action.clone(), window, cx);
+                                })),
+                        )
+                    }),
             )
-            .when_some(action, |this, (label, action)| {
-                use gpui_component::Sizable as _;
-                use gpui_component::button::ButtonVariants as _;
-                this.child(
-                    gpui_component::button::Button::new("remote-status-action")
-                        .label(label)
-                        .primary()
-                        .small()
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.run_strip_action(action.clone(), window, cx);
-                        })),
-                )
+            .when_some(installing, |this, phase| {
+                this.child(crate::ui::remote_workspace::install_progress_bar(phase, cx))
             });
         Some(
             div()
