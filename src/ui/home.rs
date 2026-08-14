@@ -259,12 +259,25 @@ impl Tty7App {
         let machine = self.remote_machine_label(cx);
         let status = self.remote_status(cx)?;
         let message = status.strip_message(&machine)?;
-        let action = self.remote_strip_action(&status, cx);
+        // An install in flight replaces both halves of the strip: its own line
+        // instead of the complaint that is being answered, and no button, since
+        // pressing Update Server again would start a second one on top of it.
+        let installing = self.remote_strip_progress(cx);
+        let action = installing
+            .is_none()
+            .then(|| self.remote_strip_action(&status, cx))
+            .flatten();
         let theme = cx.theme();
+        let message = match installing {
+            Some(phase) => format!(
+                "{machine} — {}",
+                crate::ui::remote_workspace::install_phase_caption(phase)
+            ),
+            None => message,
+        };
         Some(
-            h_flex()
-                .items_center()
-                .gap_2()
+            v_flex()
+                .gap(px(6.))
                 .px(px(12.))
                 .py(px(6.))
                 .rounded(px(10.))
@@ -273,19 +286,29 @@ impl Tty7App {
                 .border_color(theme.border)
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child(gpui_component::Icon::new(IconName::Globe))
-                .child(message)
-                .when_some(action, |this, (label, action)| {
-                    this.child(
-                        Button::new("home-remote-status-action")
-                            .label(label)
-                            .ghost()
-                            .small()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.run_strip_action(action.clone(), window, cx);
-                            }))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
-                    )
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(gpui_component::Icon::new(IconName::Globe))
+                        .child(message)
+                        .when_some(action, |this, (label, action)| {
+                            this.child(
+                                Button::new("home-remote-status-action")
+                                    .label(label)
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.run_strip_action(action.clone(), window, cx);
+                                    }))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    }),
+                            )
+                        }),
+                )
+                .when_some(installing, |this, phase| {
+                    this.child(crate::ui::remote_workspace::install_progress_bar(phase, cx))
                 }),
         )
     }

@@ -1029,6 +1029,55 @@ fn the_running_exe_probe_cannot_fail_the_command() {
     assert!(TERMINATE_RUNNING_COMMAND.contains("*/tty7-server-*"));
 }
 
+/// Both commands have to work on a machine with no `/proc`, which is every Mac
+/// and every BSD, and the `/proc` glob has to stay inside the guard: zsh is the
+/// login shell over there, and a top-level glob that matches nothing takes the
+/// rest of the command line with it — including the trailing `true`.
+#[test]
+fn finding_the_running_server_survives_a_machine_without_proc() {
+    for cmd in [RUNNING_EXE_COMMAND, TERMINATE_RUNNING_COMMAND] {
+        assert!(
+            cmd.starts_with("if [ -d /proc ]; then"),
+            "the glob has to be unreachable before the guard passes: {cmd}"
+        );
+        let (guarded, fallback) = cmd
+            .split_once("; else ")
+            .expect("a machine with no /proc still needs an answer");
+        assert!(
+            guarded.contains("/proc/[0-9]*") && !fallback.contains("/proc/"),
+            "the fallback reads ps, not a filesystem that is not there: {cmd}"
+        );
+        assert!(
+            fallback.contains("ps -xwwo pid=,comm="),
+            "unwrapped, unabbreviated, and this user's processes only: {cmd}"
+        );
+    }
+}
+
+/// Whichever branch the far end takes, the command has to parse — a syntax
+/// error here is invisible in production, where the output is read as "no
+/// server is running" and the failure is a ten-second timeout.
+///
+/// Parsed, not run: the terminate command would kill this developer's own
+/// server, and this test is not the place to find that out.
+#[cfg(unix)]
+#[test]
+fn both_branches_of_the_probe_are_valid_shell() {
+    for cmd in [RUNNING_EXE_COMMAND, TERMINATE_RUNNING_COMMAND] {
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(cmd)
+            .output()
+            .expect("every unix has /bin/sh");
+        assert!(
+            out.status.success(),
+            "{cmd}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 #[test]
 fn exec_failures_quote_stderr_when_there_is_any() {
     let with_stderr = ExecOutput {

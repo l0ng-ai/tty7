@@ -18,7 +18,7 @@ use crate::daemon::install::InstallPhase;
 use crate::terminal::pane_liveness::Liveness;
 use crate::ui::app::Tty7App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow, human_bytes};
+use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow};
 use crate::ui::remote_workspace::{ConnectFlow, MachineStatus, RemoteLinks};
 
 const CARD_W: f32 = 840.0;
@@ -2156,23 +2156,7 @@ impl Tty7App {
         let theme = cx.theme();
         let accent = theme.warning;
         let fraction = phase.fraction().unwrap_or(0.0);
-        let caption = match phase {
-            InstallPhase::Restarting => t(L10nKey::SwitcherRestartingServer).to_string(),
-            InstallPhase::Downloading { done, total } => match total {
-                Some(total) => t_fmt(
-                    L10nKey::SwitcherDownloadingServerWithTotal,
-                    &[("done", &human_bytes(done)), ("total", &human_bytes(total))],
-                ),
-                None => t_fmt(
-                    L10nKey::SwitcherDownloadingServerNoTotal,
-                    &[("done", &human_bytes(done))],
-                ),
-            },
-            InstallPhase::Uploading { done, total } => t_fmt(
-                L10nKey::SwitcherCopyingServer,
-                &[("done", &human_bytes(done)), ("total", &human_bytes(total))],
-            ),
-        };
+        let caption = crate::ui::remote_workspace::install_phase_caption(phase);
 
         v_flex()
             .gap(px(6.))

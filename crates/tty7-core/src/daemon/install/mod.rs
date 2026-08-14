@@ -1045,9 +1045,23 @@ impl<'a> Installer<'a> {
     }
 }
 
-const RUNNING_EXE_COMMAND: &str = r#"for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) || continue; case "$e" in */tty7-server-*) printf '%s' "${e% (deleted)}"; break;; esac; done; true"#;
+/// Finding the running server takes two shapes because `/proc` is a Linux
+/// thing. On Linux, `/proc/<pid>/exe` is the honest answer: a symlink to the
+/// file that is actually executing, whatever anyone did to `argv[0]`. macOS and
+/// the BSDs have no `/proc` at all, so fall back to `ps`, whose `comm` is the
+/// full path there — on Linux it would be the name truncated to 15 characters,
+/// one short of `tty7-server-c7p5`, which is exactly why the fallback is a
+/// fallback and not the only branch.
+///
+/// The `/proc` glob lives *inside* the `[ -d /proc ]` arm on purpose. The far
+/// end runs these through the user's login shell, and zsh — the default on
+/// macOS — aborts the whole command line when a glob matches nothing, so with
+/// the loop at top level the trailing `true` never ran and every one of these
+/// was a silent no-op on every Mac. That is what left `restart_daemon` waiting
+/// out its ten seconds for a daemon nobody had asked to stop.
+const RUNNING_EXE_COMMAND: &str = r#"if [ -d /proc ]; then for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) || continue; case "$e" in */tty7-server-*) printf '%s' "${e% (deleted)}"; break;; esac; done; else ps -xwwo pid=,comm= 2>/dev/null | while read -r pid e; do case "$e" in */tty7-server-*) printf '%s' "$e"; break;; esac; done; fi; true"#;
 
-const TERMINATE_RUNNING_COMMAND: &str = r#"for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) || continue; case "$e" in */tty7-server-*) kill -TERM "${p#/proc/}" 2>/dev/null; break;; esac; done; true"#;
+const TERMINATE_RUNNING_COMMAND: &str = r#"if [ -d /proc ]; then for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) || continue; case "$e" in */tty7-server-*) kill -TERM "${p#/proc/}" 2>/dev/null; break;; esac; done; else ps -xwwo pid=,comm= 2>/dev/null | while read -r pid e; do case "$e" in */tty7-server-*) kill -TERM "$pid" 2>/dev/null; break;; esac; done; fi; true"#;
 
 fn launch_command(binary: &str) -> String {
     let bin = shell_quote(binary);

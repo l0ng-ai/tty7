@@ -168,6 +168,56 @@ pub(crate) fn mismatch_action_key(refusal: &str) -> L10nKey {
     }
 }
 
+/// One line for an install in flight — bytes moved, or the wait for the far end
+/// to come back up. Shared by the switcher's progress bar and the strip's, so a
+/// user watching both is not told two different things.
+pub(crate) fn install_phase_caption(phase: crate::daemon::install::InstallPhase) -> String {
+    use crate::daemon::install::InstallPhase;
+    use crate::ui::remote_connect::human_bytes;
+    match phase {
+        InstallPhase::Restarting => t(L10nKey::SwitcherRestartingServer).to_string(),
+        InstallPhase::Downloading { done, total } => match total {
+            Some(total) => t_fmt(
+                L10nKey::SwitcherDownloadingServerWithTotal,
+                &[("done", &human_bytes(done)), ("total", &human_bytes(total))],
+            ),
+            None => t_fmt(
+                L10nKey::SwitcherDownloadingServerNoTotal,
+                &[("done", &human_bytes(done))],
+            ),
+        },
+        InstallPhase::Uploading { done, total } => t_fmt(
+            L10nKey::SwitcherCopyingServer,
+            &[("done", &human_bytes(done)), ("total", &human_bytes(total))],
+        ),
+    }
+}
+
+/// The thin filled bar under an install's caption. `Restarting` has no
+/// fraction to show — the far end is either back or it is not — so it draws
+/// empty, which is what the switcher has always done and is still better than
+/// the bar vanishing for the last leg.
+pub(crate) fn install_progress_bar(
+    phase: crate::daemon::install::InstallPhase,
+    cx: &gpui::App,
+) -> impl gpui::IntoElement + use<> {
+    use gpui::{ParentElement as _, Styled as _};
+    use gpui_component::ActiveTheme as _;
+    let theme = cx.theme();
+    gpui::div()
+        .w_full()
+        .h(gpui::px(3.))
+        .rounded_full()
+        .bg(theme.border)
+        .child(
+            gpui::div()
+                .h_full()
+                .w(gpui::relative(phase.fraction().unwrap_or(0.0)))
+                .rounded_full()
+                .bg(theme.warning),
+        )
+}
+
 /// What the remote strip's button is for, once the status has been read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StripAction {
@@ -399,6 +449,22 @@ impl Tty7App {
                 },
             )
         })
+    }
+
+    /// What the install running against *this* window's machine has reached, if
+    /// one is running at all.
+    ///
+    /// The switcher has drawn this since installs got a progress bar, but the
+    /// strip never did — so pressing Update Server on a parked workspace with
+    /// no switcher open froze the screen for as long as the download took and
+    /// then produced a modal, with nothing in between. Same source, so
+    /// the two cannot disagree about how far along it is.
+    pub(crate) fn remote_strip_progress(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<crate::daemon::install::InstallPhase> {
+        let own = WorkspaceStore::remote_ref(cx, self.workspace)?;
+        remote_connect::install_progress_for(own.target.host_id())
     }
 
     pub(crate) fn run_strip_action(
