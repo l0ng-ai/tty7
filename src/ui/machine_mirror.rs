@@ -592,7 +592,7 @@ mod tests {
                 ..PaneSeed::bare(1)
             }
             .into_record(true);
-            MachineMirrors::note_seeded_panes(cx, HostId::LOCAL, vec![seeded.clone()]);
+            MachineMirrors::note_seeded_panes(cx, HostId::LOCAL, vec![seeded]);
             assert_eq!(display_name(cx, &entry).as_deref(), Some("verify-main"));
             assert_eq!(
                 subject_path(cx, &entry).as_deref(),
@@ -609,7 +609,15 @@ mod tests {
                         tabs: vec![leaf_tab(1)],
                         ..Workspace::default()
                     }],
-                    panes: vec![seeded],
+                    // The record the machine minted for the same seed, written
+                    // out rather than the copy above reused: a pull that hands
+                    // back the very value the window put in is only agreeing
+                    // with itself.
+                    panes: vec![PaneRecord {
+                        cwd: Some("/work/verify-main".into()),
+                        live: true,
+                        ..PaneRecord::new(1)
+                    }],
                 },
             );
             assert_eq!(display_name(cx, &entry).as_deref(), Some("verify-main"));
