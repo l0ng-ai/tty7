@@ -16,6 +16,12 @@ use crate::ui::right_panel::{META, TEXT, TEXT_MONO};
 /// draw the same row, so they fade it by the same amount.
 pub(crate) const NO_TARGET_FADE: f32 = 0.4;
 
+/// What a forward listens on when nobody says otherwise, and what the panel
+/// puts in the bind-host field when it opens the form. Loopback, not every
+/// interface: a rule typed in a hurry should not expose the far side's service
+/// to the network this laptop is on.
+pub(crate) const DEFAULT_BIND_HOST: &str = "127.0.0.1";
+
 /// The managed-forward form's five text fields, read out of their inputs.
 ///
 /// Split out so the question "do these make a rule?" can be asked without a
@@ -55,7 +61,7 @@ impl ForwardFields {
         let bind_host = match self.bind_host.trim() {
             // The panel's own default, and the one the strip's tooltip
             // promises: an empty bind host is loopback, not every interface.
-            "" => "127.0.0.1".to_string(),
+            "" => DEFAULT_BIND_HOST.to_string(),
             host => host.to_string(),
         };
         let description = self.description.trim();
@@ -72,16 +78,23 @@ impl ForwardFields {
     /// Whether the form is still empty enough that saying what is missing
     /// would be nagging rather than helping — the same restraint the settings
     /// sheet shows through `ForwardRuleForm::is_blank`.
+    ///
+    /// The bind host is compared against the default rather than against empty:
+    /// the panel opens the form with `127.0.0.1` already in that field, so a
+    /// field-by-field emptiness check called a form nobody had touched
+    /// "started", and every Add opened under a red line telling the user what
+    /// was missing from a form they had not begun to fill in.
     pub(crate) fn is_blank(&self) -> bool {
-        [
-            &self.bind_host,
-            &self.bind_port,
-            &self.target_host,
-            &self.target_port,
-            &self.description,
-        ]
-        .iter()
-        .all(|v| v.trim().is_empty())
+        let untouched_bind_host = matches!(self.bind_host.trim(), "" | DEFAULT_BIND_HOST);
+        untouched_bind_host
+            && [
+                &self.bind_port,
+                &self.target_host,
+                &self.target_port,
+                &self.description,
+            ]
+            .iter()
+            .all(|v| v.trim().is_empty())
     }
 }
 
@@ -111,6 +124,34 @@ pub(crate) fn rule_of(forward: &ManagedForward) -> SshForwardRule {
         target_port: forward.target_port,
         description: forward.description.clone(),
     }
+}
+
+/// The one-letter badge a rule wears, the same letter `ssh -L/-R/-D` uses.
+fn kind_letter(kind: SshForwardKind) -> &'static str {
+    match kind {
+        SshForwardKind::Local => "L",
+        SshForwardKind::Remote => "R",
+        SshForwardKind::Dynamic => "D",
+    }
+}
+
+/// What a rule listens on, with the loopback host left off — `8080` rather than
+/// `127.0.0.1:8080`, which is the same address spelled three times a row.
+fn bind_label(host: &str, port: u16) -> String {
+    match host {
+        DEFAULT_BIND_HOST | "localhost" | "" => port.to_string(),
+        host => format!("{host}:{port}"),
+    }
+}
+
+/// The square action tile a forward row's buttons are cut from — the panel's
+/// existing hover-strip size, in one place so the switch and the delete are the
+/// same target.
+fn row_tile(id: impl Into<gpui::ElementId>, icon: IconName, cx: &mut Context<Tty7App>) -> Button {
+    crate::ui::tab_strip::chrome_tile(Button::new(id).icon(icon).xsmall(), false, cx)
+        .w(px(crate::ui::tab_strip::MIN_TARGET))
+        .h(px(crate::ui::tab_strip::MIN_TARGET))
+        .rounded(px(4.))
 }
 
 impl Tty7App {
@@ -272,17 +313,32 @@ impl Tty7App {
             .filter(|m| m.pane_id == pane_id)
             .cloned()
             .collect();
+        // Switched-off rules sit under the running ones, in the order they
+        // were switched off. Their index into the panel's own list is what the
+        // buttons act on, so it is carried alongside rather than derived twice.
+        let paused: Vec<(usize, SshForwardRule)> = self
+            .loopback_panel
+            .paused
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.pane_id == pane_id)
+            .map(|(ix, p)| (ix, p.rule.clone()))
+            .collect();
+        let empty = managed.is_empty() && paused.is_empty();
 
         let mono = cx.theme().mono_font_family.clone();
         let mut list = v_flex().px(px(CONTENT_INSET - 4.)).py(px(2.)).gap(px(1.));
         for forward in &managed {
             list = list.child(self.forward_row(forward, &mono, cx));
         }
+        for (index, rule) in &paused {
+            list = list.child(self.paused_forward_row(*index, rule, &mono, cx));
+        }
 
         Some(
             v_flex()
                 .child(self.panel_subtitle(t(L10nKey::ForwardPanelTitle), true, Some(add), cx))
-                .when(managed.is_empty() && !open, |this| {
+                .when(empty && !open, |this| {
                     this.child(
                         div()
                             .px(px(CONTENT_INSET))
@@ -292,10 +348,103 @@ impl Tty7App {
                             .child(crate::ui::i18n::t(crate::ui::i18n::L10nKey::None)),
                     )
                 })
-                .when(!managed.is_empty(), |this| this.child(list))
+                .when(!empty, |this| this.child(list))
                 .when(open, |this| this.child(self.forward_form(pane_id, cx)))
                 .into_any_element(),
         )
+    }
+
+    /// A rule that is switched off: the same row, faded, with the switch that
+    /// puts it back always visible — a row nobody can see a way out of reads as
+    /// broken rather than as off.
+    fn paused_forward_row(
+        &self,
+        index: usize,
+        rule: &SshForwardRule,
+        mono: &gpui::SharedString,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let letter = kind_letter(rule.kind);
+        let bind = bind_label(&rule.bind_host, rule.bind_port);
+        let tail = match rule.kind {
+            SshForwardKind::Dynamic => "SOCKS".to_string(),
+            _ => format!("→ {}:{}", rule.target_host, rule.target_port),
+        };
+        let group = gpui::SharedString::from(format!("panel-forward-off-{index}"));
+
+        h_flex()
+            .id(("panel-forward-off", index))
+            .group(group.clone())
+            .items_center()
+            .gap(px(8.))
+            .px(px(4.))
+            .py(px(3.))
+            .rounded(px(5.))
+            .opacity(NO_TARGET_FADE)
+            .child(crate::ui::right_panel::git_badge(letter, muted, mono))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(1.))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(crate::ui::right_panel::info_chip(
+                                &bind,
+                                theme.accent,
+                                theme.foreground,
+                                mono,
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(rems(TEXT_MONO))
+                                    .font_family(mono.clone())
+                                    .text_color(muted)
+                                    .child(tail),
+                            ),
+                    )
+                    .when_some(rule.description.clone(), |this, desc| {
+                        this.child(
+                            div()
+                                .truncate()
+                                .text_size(rems(META))
+                                .text_color(muted)
+                                .child(desc),
+                        )
+                    }),
+            )
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .gap(px(1.))
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        row_tile(("panel-forward-on", index), IconName::Play, cx)
+                            .tooltip(t(L10nKey::ForwardTooltipTurnOn))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.resume_paused_forward(index, window, cx)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .opacity(0.)
+                            .group_hover(group, |s| s.opacity(1.))
+                            .child(
+                                row_tile(("panel-forward-off-del", index), IconName::Close, cx)
+                                    .tooltip(t(L10nKey::ForwardTooltipForget))
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        this.remove_paused_forward(index, cx)
+                                    })),
+                            ),
+                    ),
+            )
     }
 
     fn forward_row(
@@ -307,17 +456,9 @@ impl Tty7App {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
-        let letter = match forward.kind {
-            SshForwardKind::Local => "L",
-            SshForwardKind::Remote => "R",
-            SshForwardKind::Dynamic => "D",
-        };
+        let letter = kind_letter(forward.kind);
         let errored = matches!(forward.status, ForwardStatus::Error(_));
-        let bind = if matches!(forward.bind_host.as_str(), "127.0.0.1" | "localhost" | "") {
-            forward.bind_port.to_string()
-        } else {
-            format!("{}:{}", forward.bind_host, forward.bind_port)
-        };
+        let bind = bind_label(&forward.bind_host, forward.bind_port);
         let tail = match &forward.status {
             ForwardStatus::Error(msg) => msg.clone(),
             ForwardStatus::Listening => match forward.kind {
@@ -385,22 +526,33 @@ impl Tty7App {
                     }),
             )
             .child(
-                div()
+                h_flex()
                     .flex_shrink_0()
+                    .gap(px(1.))
                     .opacity(0.)
                     .group_hover(group, |s| s.opacity(1.))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    // Off, not gone: the rule is kept and can be switched back
+                    // on without being typed again (#437).
                     .child(
-                        crate::ui::tab_strip::chrome_tile(
-                            Button::new(("panel-forward-del", forward_id as usize))
-                                .icon(IconName::Close)
-                                .xsmall(),
-                            false,
+                        row_tile(
+                            ("panel-forward-pause", forward_id as usize),
+                            IconName::Pause,
                             cx,
                         )
-                        .w(px(crate::ui::tab_strip::MIN_TARGET))
-                        .h(px(crate::ui::tab_strip::MIN_TARGET))
-                        .rounded(px(4.))
+                        .tooltip(t(L10nKey::ForwardTooltipTurnOff))
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                this.pause_managed_forward(pane_id, forward_id, cx)
+                            },
+                        )),
+                    )
+                    .child(
+                        row_tile(
+                            ("panel-forward-del", forward_id as usize),
+                            IconName::Close,
+                            cx,
+                        )
                         .tooltip(t(L10nKey::ForwardTooltipRemove))
                         .on_click(cx.listener(
                             move |this, _, _window, cx| {
@@ -636,6 +788,23 @@ mod tests {
         assert!(form.is_blank(), "whitespace is not typing");
         form.bind_port = "8".to_string();
         assert!(!form.is_blank());
+    }
+
+    /// The panel opens the form with the default bind host already in the
+    /// field. Reading that as "the user has started filling this in" is what
+    /// put a red line under every freshly opened Add, telling the user what was
+    /// missing from a form they had not touched.
+    #[test]
+    fn the_bind_host_the_form_opens_with_is_not_typing() {
+        let mut form = fields(SshForwardKind::Local, "", "", "");
+        form.bind_host = DEFAULT_BIND_HOST.to_string();
+        assert!(form.is_blank(), "the form opens on this; nobody typed it");
+
+        form.bind_host = "0.0.0.0".to_string();
+        assert!(
+            !form.is_blank(),
+            "a bind host that is not the default was typed, and the form may say what is missing"
+        );
     }
 
     #[test]

@@ -883,6 +883,9 @@ fn parse_forward_rule(kind: ForwardKind, value: &str) -> Option<ForwardRule> {
         bind,
         target,
         description: String::new(),
+        // A LocalForward in `~/.ssh/config` is one ssh would open, so the
+        // profile imported from it opens it too.
+        enabled: true,
     })
 }
 

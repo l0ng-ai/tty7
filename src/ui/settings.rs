@@ -226,6 +226,13 @@ const STACK_ROW_BELOW: f32 = 500.;
 /// lines instead of running off the page.
 const SPLIT_FORWARD_ROW_BELOW: f32 = 620.;
 
+/// How far a switched-off forwarding rule fades. Deep enough that a column of
+/// rules shows at a glance which ones this connection will open, shallow enough
+/// that the one that is off is still readable — it is a rule being kept, not a
+/// rule being deleted. The same weight the live Forwards panel fades a Dynamic
+/// rule's absent target by.
+const DISABLED_RULE_FADE: f32 = crate::ui::forwards::NO_TARGET_FADE;
+
 /// And the width below which even `bind → target` is more than one line holds:
 /// two host fields at their narrow floor, two ports and the arrow come to about
 /// 310, which is more than `CONTENT_MIN_W`. The SSH page reaches this on the
@@ -984,6 +991,10 @@ impl SshProfileForm {
 
 pub(crate) struct ForwardRuleForm {
     pub(crate) kind: ForwardKind,
+    /// Whether the connection opens this rule. Off keeps the rule and skips
+    /// it, which is what a forward for a service that is only up some of the
+    /// time needs (#437).
+    pub(crate) enabled: bool,
     pub(crate) bind_host: Entity<InputState>,
     pub(crate) bind_port: Entity<InputState>,
     pub(crate) target_host: Entity<InputState>,
@@ -1011,6 +1022,7 @@ impl ForwardRuleForm {
             bind,
             target,
             description: val(&self.description),
+            enabled: self.enabled,
         })
     }
 
@@ -1433,6 +1445,7 @@ fn seed_forward_row(
     let port = |p: u16| if p == 0 { String::new() } else { p.to_string() };
     ForwardRuleForm {
         kind: rule.kind,
+        enabled: rule.enabled,
         bind_host: seed_hinted(window, cx, &rule.bind.host, "localhost"),
         bind_port: seed_hinted(window, cx, &port(rule.bind.port), "8080"),
         target_host: seed_hinted(window, cx, &rule.target.host, "127.0.0.1"),
@@ -3252,9 +3265,16 @@ impl Tty7App {
                     .mt_3()
                     .gap_2()
                     .child(
+                        // Declared, not shared out: `flex_1` is a share of a
+                        // parent's width, and nothing above this row has one —
+                        // on a content-sizing pass the chain resolved against
+                        // nothing and the field collapsed to a 24px pill beside
+                        // its own Connect button, with the placeholder that
+                        // explains the whole page clipped out of it. The same
+                        // failure the rail's workspace head had.
                         div()
-                            .flex_1()
-                            .max_w(px(320.))
+                            .w(px(320.))
+                            .max_w_full()
                             .child(Input::new(&input).small()),
                     )
                     .child(
@@ -4462,14 +4482,24 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
+        // The header says how many rules the connection *opens*, so a rule
+        // switched off is not one of them — the collapsed section would
+        // otherwise promise three forwards and open one.
         let count = form
             .forwards
             .iter()
-            .filter(|r| r.collect(cx).is_some())
+            .filter(|r| r.enabled && r.collect(cx).is_some())
             .count();
-        let summary = match count {
-            0 => t(L10nKey::SettingsNoneSummary).to_string(),
-            _ => t_plural(L10nKey::SettingsRulesOpenedWithConnection, count, &[]),
+        let off = form.forwards.iter().filter(|r| !r.enabled).count();
+        let summary = match (count, off) {
+            (0, 0) => t(L10nKey::SettingsNoneSummary).to_string(),
+            (0, off) => t_plural(L10nKey::SettingsRulesOff, off, &[]),
+            (count, 0) => t_plural(L10nKey::SettingsRulesOpenedWithConnection, count, &[]),
+            (count, off) => format!(
+                "{} · {}",
+                t_plural(L10nKey::SettingsRulesOpenedWithConnection, count, &[]),
+                t_plural(L10nKey::SettingsRulesOff, off, &[])
+            ),
         };
         let mut section = v_flex().child(self.disclosure_header(
             "ssh-sec-fwd",
@@ -4618,8 +4648,29 @@ impl Tty7App {
         )
         .tooltip(t(L10nKey::SettingsRemoveRule))
         .on_click(cx.listener(move |this, _, _w, cx| this.remove_forward_rule(idx, cx)));
+        // Leads the row rather than trailing it: this is the one control that
+        // decides whether the rest of the row means anything, and a reader
+        // scanning a column of rules for the one that is off should not have
+        // to read across four fields to find out.
+        let enable = div().flex_shrink_0().child(
+            crate::ui::theme::switch(("ssh-fwd-enabled", idx), cx)
+                .small()
+                .checked(row.enabled)
+                .tooltip(match row.enabled {
+                    true => t(L10nKey::SettingsFwdRuleOn),
+                    false => t(L10nKey::SettingsFwdRuleOff),
+                })
+                .on_click(cx.listener(move |this, on: &bool, _w, cx| {
+                    if let Some(f) = this.ssh_form_mut()
+                        && let Some(r) = f.forwards.get_mut(idx)
+                    {
+                        r.enabled = *on;
+                        cx.notify();
+                    }
+                })),
+        );
 
-        let rule = match split {
+        let body = match split {
             true => v_flex()
                 .gap_1()
                 .child(
@@ -4638,6 +4689,21 @@ impl Tty7App {
                 .child(description)
                 .child(remove),
         };
+        // A rule that is off keeps every field readable and editable — it is
+        // still the rule, just not one this connection opens — but it stops
+        // competing with the ones that are on.
+        let rule = h_flex()
+            .gap_2()
+            .when(split, |row| row.items_start())
+            .when(!split, |row| row.items_center())
+            .child(enable)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .when(!row.enabled, |body| body.opacity(DISABLED_RULE_FADE))
+                    .child(body),
+            );
 
         v_flex()
             .gap_0p5()

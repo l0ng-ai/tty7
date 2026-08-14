@@ -376,7 +376,14 @@ fn build_spec_inner(
         key_passphrases: (!key_passphrases.is_empty()).then_some(key_passphrases),
         proxy: map_proxy(profile),
         jump,
-        forwards: profile.forwards.iter().map(map_forward).collect(),
+        // A rule that is switched off stays in the profile and is simply not
+        // offered to the far side (#437).
+        forwards: profile
+            .forwards
+            .iter()
+            .filter(|rule| rule.enabled)
+            .map(map_forward)
+            .collect(),
         keepalive_interval_s: profile.keepalive_interval_s,
         keepalive_count_max: profile.keepalive_count_max,
         connect_timeout_s: profile.connect_timeout_s,
@@ -468,6 +475,9 @@ fn unmap_forward(rule: &SshForwardRule) -> ForwardRule {
         bind: HostPort::new(rule.bind_host.clone(), rule.bind_port),
         target: HostPort::new(rule.target_host.clone(), rule.target_port),
         description: rule.description.clone().unwrap_or_default(),
+        // A live connection only carries the rules that were switched on, so
+        // everything read back off one is on.
+        enabled: true,
     }
 }
 
@@ -693,6 +703,7 @@ mod tests {
             bind: HostPort::new("localhost", 8080),
             target: HostPort::new("127.0.0.1", 80),
             description: "web".into(),
+            enabled: true,
         }];
 
         let spec = build_native_ssh_spec(&p, &[], &store, true);
@@ -781,6 +792,32 @@ mod tests {
             build_native_ssh_spec(&p, &[], &store, true)
                 .key_passphrases
                 .is_none()
+        );
+    }
+
+    /// A rule that is switched off stays in the profile — that is the whole
+    /// point of switching it off rather than deleting it — and simply is not
+    /// among the ones the connection opens (#437).
+    #[test]
+    fn a_switched_off_rule_is_kept_and_not_opened() {
+        let store = InMemoryCredentialStore::new();
+        let mut p = profile("web", "10.0.0.5", "deploy");
+        let rule = |port: u16, enabled: bool| ForwardRule {
+            kind: ForwardKind::Local,
+            bind: HostPort::new("127.0.0.1", port),
+            target: HostPort::new("127.0.0.1", 80),
+            description: String::new(),
+            enabled,
+        };
+        p.forwards = vec![rule(8080, true), rule(8081, false), rule(8082, true)];
+
+        let spec = build_native_ssh_spec(&p, &[], &store, true);
+        let ports: Vec<u16> = spec.forwards.iter().map(|f| f.bind_port).collect();
+        assert_eq!(ports, vec![8080, 8082]);
+        assert_eq!(
+            p.forwards.len(),
+            3,
+            "the profile still has every rule someone wrote"
         );
     }
 

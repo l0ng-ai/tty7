@@ -526,6 +526,22 @@ pub(crate) struct LoopbackForwardPanelState {
     /// Why the last Add or Save did not take, in the far side's own words.
     /// Cleared the moment the form is closed or the edit is abandoned.
     pub(crate) mf_error: Option<String>,
+    /// Rules that were switched off rather than removed (#437).
+    ///
+    /// Switching one off really does take the forward down — there is no such
+    /// thing as a paused listener on the far side — so the rule has nowhere to
+    /// live but here, and the panel draws these beside the running ones. A
+    /// service that is only up some of the time can then be switched off and
+    /// back on instead of deleted and typed in again.
+    pub(crate) paused: Vec<PausedForward>,
+}
+
+/// A forward the user switched off, kept whole so switching it back on needs
+/// nothing typed again.
+#[derive(Clone)]
+pub(crate) struct PausedForward {
+    pub(crate) pane_id: u64,
+    pub(crate) rule: crate::daemon::protocol::SshForwardRule,
 }
 
 pub struct Tty7App {
@@ -988,7 +1004,9 @@ impl Tty7App {
         let sftp_panel = crate::ui::sftp::SftpPanelState::new(window, cx);
         let file_tree = crate::ui::file_tree::FileTreeState::new(window, cx);
         let editor = crate::ui::code_editor::EditorPanelState::new(window, cx);
-        let mf_bind_host = cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1"));
+        let mf_bind_host = cx.new(|cx| {
+            InputState::new(window, cx).default_value(crate::ui::forwards::DEFAULT_BIND_HOST)
+        });
         let mf_bind_port = cx.new(|cx| InputState::new(window, cx).placeholder("8080"));
         let mf_target_host = cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
         let mf_target_port = cx.new(|cx| InputState::new(window, cx).placeholder("80"));
@@ -1146,6 +1164,7 @@ impl Tty7App {
                 mf_description,
                 mf_editing: None,
                 mf_error: None,
+                paused: Vec::new(),
             },
             sftp_panel,
             right_panel: Default::default(),
@@ -2594,10 +2613,97 @@ impl Tty7App {
         ] {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
-        self.loopback_panel
-            .mf_bind_host
-            .update(cx, |input, cx| input.set_value("127.0.0.1", window, cx));
+        self.loopback_panel.mf_bind_host.update(cx, |input, cx| {
+            input.set_value(crate::ui::forwards::DEFAULT_BIND_HOST, window, cx)
+        });
         cx.notify();
+    }
+
+    /// Take a running forward down but keep the rule, so it can be put back
+    /// without being typed again (#437).
+    ///
+    /// The far side has no idea a rule can be "off" — a listener is either
+    /// bound or it is not — so this is a remove that files the rule here
+    /// instead of dropping it. If the remove does not answer, nothing moves:
+    /// the row stays where it is, still running, rather than turning into a
+    /// paused entry for a forward that is in fact still bound.
+    pub(crate) fn pause_managed_forward(
+        &mut self,
+        pane_id: u64,
+        forward_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(forward) = self
+            .loopback_panel
+            .managed
+            .iter()
+            .find(|m| m.id == forward_id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(list) = self.forward_route(pane_id, cx).remove(forward_id) else {
+            return;
+        };
+        self.loopback_panel.managed = list;
+        self.loopback_panel.paused.push(PausedForward {
+            pane_id,
+            rule: crate::ui::forwards::rule_of(&forward),
+        });
+        cx.notify();
+    }
+
+    /// Put a switched-off rule back on the connection.
+    ///
+    /// It only leaves the paused list once the far side has bound it — a rule
+    /// whose port is now taken has to stay switched off and say so, rather than
+    /// vanishing from the panel because a button was pressed.
+    pub(crate) fn resume_paused_forward(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::daemon::protocol::ForwardStatus;
+        use gpui_component::WindowExt as _;
+
+        let Some(paused) = self.loopback_panel.paused.get(index).cloned() else {
+            return;
+        };
+        let route = self.forward_route(paused.pane_id, cx);
+        let before: Vec<u64> = self.loopback_panel.managed.iter().map(|m| m.id).collect();
+        let Some(list) = route.add(paused.rule.clone()) else {
+            window.push_notification(t(L10nKey::ForwardRequestFailed), cx);
+            return;
+        };
+        // A rule that could not be bound is registered all the same, with the
+        // reason in its status — the same shape `add_managed_forward` reads.
+        let broken = crate::ui::forwards::added_forward(&before, &list).and_then(|added| {
+            match &added.status {
+                ForwardStatus::Error(msg) => Some((added.id, msg.clone())),
+                ForwardStatus::Listening => None,
+            }
+        });
+        self.loopback_panel.managed = list;
+        if let Some((id, msg)) = broken {
+            if let Some(list) = route.remove(id) {
+                self.loopback_panel.managed = list;
+            }
+            window.push_notification(msg, cx);
+            cx.notify();
+            return;
+        }
+        self.loopback_panel.paused.remove(index);
+        cx.notify();
+    }
+
+    /// Forget a rule that was switched off. The far side has nothing to undo —
+    /// pausing already took the forward down.
+    pub(crate) fn remove_paused_forward(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.loopback_panel.paused.len() {
+            self.loopback_panel.paused.remove(index);
+            cx.notify();
+        }
     }
 
     pub(crate) fn remove_managed_forward(

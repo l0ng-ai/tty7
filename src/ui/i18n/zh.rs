@@ -244,8 +244,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsJumpHostSelf => "主机不能把自己当作跳板——不会被保存。",
         L10nKey::SettingsNoneSummary => "（无）",
         L10nKey::SettingsPortForwarding => "端口转发",
+        L10nKey::SettingsRulesOff => "1 条已停用",
         L10nKey::SettingsRulesOpenedWithConnection => "1 条规则，随连接打开",
         L10nKey::SettingsAddRule => "+ 添加规则",
+        L10nKey::SettingsFwdRuleOn => "连接时开启",
+        L10nKey::SettingsFwdRuleOff => "保留但不开启",
         L10nKey::SettingsRemoveRule => "删除规则",
         L10nKey::SettingsFwdLegendLocal => "L — 本地端口可达远程侧",
         L10nKey::SettingsFwdLegendRemote => "R — 远程端口可达本机",
@@ -870,6 +873,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardDisconnectedFrom => "与 {host} 的连接已断开",
         L10nKey::SshEditProfile => "编辑连接…",
         L10nKey::ForwardTooltipAdd => "添加转发",
+        L10nKey::ForwardTooltipTurnOff => "停用（保留规则）",
+        L10nKey::ForwardTooltipTurnOn => "启用",
+        L10nKey::ForwardTooltipForget => "删除这条规则",
         L10nKey::ForwardTooltipRemove => "移除",
         L10nKey::ForwardLocal => "本地",
         L10nKey::ForwardRemote => "远程",
@@ -1696,6 +1702,9 @@ pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsRulesOpenedWithConnection, "zero") => "0 条规则，随连接打开",
         (L10nKey::SettingsRulesOpenedWithConnection, "one") => "1 条规则，随连接打开",
         (L10nKey::SettingsRulesOpenedWithConnection, "other") => "{count} 条规则，随连接打开",
+        (L10nKey::SettingsRulesOff, "zero") => "0 条已停用",
+        (L10nKey::SettingsRulesOff, "one") => "1 条已停用",
+        (L10nKey::SettingsRulesOff, "other") => "{count} 条已停用",
         (L10nKey::SettingsOfflineMachines, "zero") => {
             "还有 0 台已保存的机器未连接——在其中一台上打开工作区，即可在那台机器上安装 hook。"
         }

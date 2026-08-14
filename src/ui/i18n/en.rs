@@ -276,8 +276,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsJumpHostSelf => "A host can't be its own jump host — won't be saved.",
         L10nKey::SettingsNoneSummary => "(none)",
         L10nKey::SettingsPortForwarding => "Port forwarding",
+        L10nKey::SettingsRulesOff => "1 switched off",
         L10nKey::SettingsRulesOpenedWithConnection => "1 rule, opened with the connection",
         L10nKey::SettingsAddRule => "+ Add rule",
+        L10nKey::SettingsFwdRuleOn => "Opened with the connection",
+        L10nKey::SettingsFwdRuleOff => "Kept, but not opened",
         L10nKey::SettingsRemoveRule => "Remove rule",
         L10nKey::SettingsFwdLegendLocal => "L — a local port reaches the remote side",
         L10nKey::SettingsFwdLegendRemote => "R — a remote port reaches this machine",
@@ -916,6 +919,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ForwardDisconnectedFrom => "Disconnected from {host}",
         L10nKey::SshEditProfile => "Edit connection…",
         L10nKey::ForwardTooltipAdd => "Add forward",
+        L10nKey::ForwardTooltipTurnOff => "Switch off — keeps the rule",
+        L10nKey::ForwardTooltipTurnOn => "Switch on",
+        L10nKey::ForwardTooltipForget => "Forget this rule",
         L10nKey::ForwardTooltipRemove => "Remove",
         L10nKey::ForwardLocal => "Local",
         L10nKey::ForwardRemote => "Remote",
@@ -1797,6 +1803,9 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsRulesOpenedWithConnection, "other") => {
             "{count} rules, opened with the connection"
         }
+        (L10nKey::SettingsRulesOff, "zero") => "0 switched off",
+        (L10nKey::SettingsRulesOff, "one") => "1 switched off",
+        (L10nKey::SettingsRulesOff, "other") => "{count} switched off",
         (L10nKey::SettingsOfflineMachines, "zero") => {
             "0 more saved machines are not connected — open a workspace on one to install its hooks there."
         }

@@ -279,8 +279,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsNoneSummary => "(なし)",
         L10nKey::SettingsPortForwarding => "ポートフォワーディング",
+        L10nKey::SettingsRulesOff => "1 件は無効",
         L10nKey::SettingsRulesOpenedWithConnection => "接続と同時に開くルール 1 件",
         L10nKey::SettingsAddRule => "+ ルールを追加",
+        L10nKey::SettingsFwdRuleOn => "接続時に開く",
+        L10nKey::SettingsFwdRuleOff => "保持するが開かない",
         L10nKey::SettingsRemoveRule => "ルールを削除",
         L10nKey::SettingsFwdLegendLocal => "L — ローカルポートからリモート側へアクセスできる",
         L10nKey::SettingsFwdLegendRemote => "R — リモートポートからこのマシンへアクセスできる",
@@ -966,6 +969,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardDisconnectedFrom => "{host} から切断されました",
         L10nKey::SshEditProfile => "接続を編集…",
         L10nKey::ForwardTooltipAdd => "フォワードを追加",
+        L10nKey::ForwardTooltipTurnOff => "無効にする（ルールは残す）",
+        L10nKey::ForwardTooltipTurnOn => "有効にする",
+        L10nKey::ForwardTooltipForget => "このルールを削除",
         L10nKey::ForwardTooltipRemove => "削除",
         L10nKey::ForwardLocal => "ローカル",
         L10nKey::ForwardRemote => "リモート",
@@ -1855,6 +1861,9 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsRulesOpenedWithConnection, "other") => {
             "接続と同時に開くルール {count} 件"
         }
+        (L10nKey::SettingsRulesOff, "zero") => "0 件は無効",
+        (L10nKey::SettingsRulesOff, "one") => "1 件は無効",
+        (L10nKey::SettingsRulesOff, "other") => "{count} 件は無効",
         (L10nKey::SettingsOfflineMachines, "zero") => {
             "未接続の保存済みマシンはもうありません — いずれかでワークスペースを開くと、そこにフックをインストールできます"
         }

@@ -148,6 +148,16 @@ pub struct ForwardRule {
     pub bind: HostPort,
     pub target: HostPort,
     pub description: String,
+    /// Whether the connection opens this rule. A rule that is off is kept
+    /// exactly as it was written and simply not offered to the far side, so a
+    /// forward for a service that is only up some of the time can be switched
+    /// off instead of deleted and typed again (#437).
+    ///
+    /// `default_true` rather than `#[serde(default)]`'s `false`: every rule
+    /// written before this field existed was on, and reading them back off is
+    /// how a config full of working forwards would go quiet after an update.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 impl Default for ForwardRule {
@@ -157,6 +167,7 @@ impl Default for ForwardRule {
             bind: HostPort::default(),
             target: HostPort::default(),
             description: String::new(),
+            enabled: true,
         }
     }
 }
@@ -563,6 +574,7 @@ mod tests {
             bind: HostPort::new("127.0.0.1", 8080),
             target: HostPort::new("10.0.0.1", 80),
             description: "web".to_string(),
+            enabled: false,
         }];
         original.socks_proxy = Some(HostPort::new("proxy", 1080));
         original.algorithms.kex = vec!["curve25519-sha256".to_string()];
