@@ -193,10 +193,17 @@ pub(crate) fn install_phase_caption(phase: crate::daemon::install::InstallPhase)
     }
 }
 
+/// How tall the filled bar is, wherever it is drawn.
+const PROGRESS_H: f32 = 3.0;
+
 /// The thin filled bar under an install's caption. `Restarting` has no
 /// fraction to show — the far end is either back or it is not — so it draws
 /// empty, which is what the switcher has always done and is still better than
 /// the bar vanishing for the last leg.
+///
+/// The switcher draws this one too. It used to build its own copy of exactly
+/// this shape, which is one copy too many for a bar whose whole point is that
+/// both places say the same thing.
 pub(crate) fn install_progress_bar(
     phase: crate::daemon::install::InstallPhase,
     cx: &gpui::App,
@@ -206,7 +213,7 @@ pub(crate) fn install_progress_bar(
     let theme = cx.theme();
     gpui::div()
         .w_full()
-        .h(gpui::px(3.))
+        .h(gpui::px(PROGRESS_H))
         .rounded_full()
         .bg(theme.border)
         .child(
@@ -516,13 +523,22 @@ impl Tty7App {
         });
         cx.notify();
 
-        remote_connect::clear_install_progress(choice.target.host_id());
-        self.watch_for_install_consent(choice.target.host_id(), cx);
+        let host_id = choice.target.host_id();
+        remote_connect::clear_install_progress(host_id);
+        self.watch_for_install_consent(host_id, cx);
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { remote_connect::connect_blocking(&target, header, &label) })
                 .await;
+            // Retired here rather than in `finish_connect`, which bows out
+            // early whenever `connect` has moved on — a disconnect from the
+            // switcher, or entering another workspace, both of which can land
+            // mid-install. The strip reads this entry with no link state to
+            // temper it, so one left behind freezes a progress bar on every
+            // window pointed at this machine *and* takes away the Update
+            // Server button, which is the one thing that could have fixed it.
+            remote_connect::clear_install_progress(host_id);
             let _ = this.update_in(cx, |this, window, cx| {
                 this.finish_connect(result, window, cx)
             });
@@ -570,7 +586,6 @@ impl Tty7App {
         let Some(choice) = self.connect.as_ref().and_then(ConnectFlow::choice).cloned() else {
             return;
         };
-        remote_connect::clear_install_progress(choice.target.host_id());
         match result {
             Ok(connected) => {
                 let home = connected.home.clone();

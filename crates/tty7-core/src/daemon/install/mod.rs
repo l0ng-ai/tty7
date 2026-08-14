@@ -599,6 +599,7 @@ pub struct Installer<'a> {
     version: String,
     dialect: RemoteProtocol,
     startup_timeout: Duration,
+    shutdown_timeout: Duration,
     poll_interval: Duration,
 }
 
@@ -618,6 +619,7 @@ impl<'a> Installer<'a> {
             version: client_version().to_string(),
             dialect: RemoteProtocol::of_this_build(),
             startup_timeout: REMOTE_STARTUP_TIMEOUT,
+            shutdown_timeout: REMOTE_SHUTDOWN_TIMEOUT,
             poll_interval: REMOTE_POLL_INTERVAL,
         }
     }
@@ -637,6 +639,7 @@ impl<'a> Installer<'a> {
             version: client_version().to_string(),
             dialect: RemoteProtocol::of_this_build(),
             startup_timeout: REMOTE_STARTUP_TIMEOUT,
+            shutdown_timeout: REMOTE_SHUTDOWN_TIMEOUT,
             poll_interval: REMOTE_POLL_INTERVAL,
         }
     }
@@ -702,6 +705,15 @@ impl<'a> Installer<'a> {
     pub fn with_timeouts(mut self, startup: Duration, poll: Duration) -> Self {
         self.startup_timeout = startup;
         self.poll_interval = poll;
+        self
+    }
+
+    /// How long [`Installer::cycle_daemon`] waits for the old server to go
+    /// away. Its own knob rather than a third argument to `with_timeouts`,
+    /// because the only caller that shortens it is the test that watches a
+    /// stop fail, and every other caller wants the shipped ten seconds.
+    pub fn with_shutdown_timeout(mut self, shutdown: Duration) -> Self {
+        self.shutdown_timeout = shutdown;
         self
     }
 
@@ -1015,15 +1027,39 @@ impl<'a> Installer<'a> {
     fn cycle_daemon(&self, paths: &RemotePaths) -> Result<(), InstallError> {
         install_progress().report(&self.host, InstallPhase::Restarting);
 
-        let _ = self.ops.run(TERMINATE_RUNNING_COMMAND);
+        // Keep why the stop failed, if it did. The command ends in `true`, so
+        // anything short of success means the far end never reached the kill at
+        // all — a login shell that choked on the script, a connection that went
+        // away. Throwing that away is half of what made the no-`/proc` bug cost
+        // a report instead of one glance at a log: the only thing anyone ever
+        // saw was the timeout below, and it blames a daemon for not stopping
+        // when nothing had asked it to.
+        let stop_failure = match self.ops.run(TERMINATE_RUNNING_COMMAND) {
+            Ok(out) if out.success() => None,
+            Ok(out) => Some(out.failure_reason()),
+            Err(reason) => Some(reason),
+        };
+        if let Some(reason) = &stop_failure {
+            log::warn!(
+                "remote {}: asking the running server to stop did not succeed: {reason}",
+                self.host,
+            );
+        }
 
-        let deadline = Instant::now() + REMOTE_SHUTDOWN_TIMEOUT;
+        let shutdown_timeout = self.shutdown_timeout;
+        let deadline = Instant::now() + shutdown_timeout;
         while self.daemon_is_serving(paths)? {
             if Instant::now() >= deadline {
                 return Err(InstallError::Launch {
-                    reason: format!(
-                        "the running remote daemon did not stop within {REMOTE_SHUTDOWN_TIMEOUT:?}"
-                    ),
+                    reason: match &stop_failure {
+                        Some(reason) => format!(
+                            "the running remote daemon did not stop within {shutdown_timeout:?}, \
+                             and the command asking it to stop failed: {reason}"
+                        ),
+                        None => format!(
+                            "the running remote daemon did not stop within {shutdown_timeout:?}"
+                        ),
+                    },
                 });
             }
             std::thread::sleep(self.poll_interval);
@@ -1047,11 +1083,22 @@ impl<'a> Installer<'a> {
 
 /// Finding the running server takes two shapes because `/proc` is a Linux
 /// thing. On Linux, `/proc/<pid>/exe` is the honest answer: a symlink to the
-/// file that is actually executing, whatever anyone did to `argv[0]`. macOS and
-/// the BSDs have no `/proc` at all, so fall back to `ps`, whose `comm` is the
-/// full path there — on Linux it would be the name truncated to 15 characters,
-/// one short of `tty7-server-c7p5`, which is exactly why the fallback is a
-/// fallback and not the only branch.
+/// file that is actually executing, whatever anyone did to `argv[0]`. macOS —
+/// the only other machine [`asset::asset_for_uname`] will install onto — has no
+/// `/proc` at all, so fall back to `ps`.
+///
+/// Its `comm` is not quite `exe`'s equal: on Darwin it reports `argv[0]`, so it
+/// is a path only because [`launch_command`] launches by absolute path, and a
+/// server started some other way would be invisible to it. It is still the
+/// better of the two answers available there. Linux's `comm` is not an answer
+/// at all — the name truncated to 15 characters, one short of
+/// `tty7-server-c7p5` — which is why the fallback stays a fallback and `/proc`
+/// keeps first refusal.
+///
+/// Neither arm reaches past the connecting user: `readlink` on another user's
+/// `exe` is refused, and `ps` without `-A` lists only our own processes. The
+/// pattern is anchored at a `/` so it cannot match a name that merely ends in
+/// one of ours.
 ///
 /// The `/proc` glob lives *inside* the `[ -d /proc ]` arm on purpose. The far
 /// end runs these through the user's login shell, and zsh — the default on

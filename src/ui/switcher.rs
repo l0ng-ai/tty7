@@ -52,8 +52,6 @@ const ICON: f32 = 16.0;
 
 const ROW_PAD: f32 = 8.0;
 
-const PROGRESS_H: f32 = 3.0;
-
 /// `Failed` stays a unit variant so `Link` can be `Copy` and travel by value in
 /// `GroupRef`; what went wrong rides in `Group::error` instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2154,8 +2152,6 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        let accent = theme.warning;
-        let fraction = phase.fraction().unwrap_or(0.0);
         let caption = crate::ui::remote_workspace::install_phase_caption(phase);
 
         v_flex()
@@ -2170,20 +2166,7 @@ impl Tty7App {
                     .text_color(theme.muted_foreground)
                     .child(format!("{label} — {caption}")),
             )
-            .child(
-                div()
-                    .w_full()
-                    .h(px(PROGRESS_H))
-                    .rounded_full()
-                    .bg(theme.border)
-                    .child(
-                        div()
-                            .h_full()
-                            .w(gpui::relative(fraction))
-                            .rounded_full()
-                            .bg(accent),
-                    ),
-            )
+            .child(crate::ui::remote_workspace::install_progress_bar(phase, cx))
     }
     fn render_row(
         &self,
