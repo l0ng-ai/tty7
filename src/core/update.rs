@@ -132,8 +132,10 @@ pub enum UpdateInstallHint {
     UnsupportedMacos,
     #[cfg(target_os = "linux")]
     UnsupportedLinux,
-    /// Linux updates by hand, but "use the release page" leaves the user to
-    /// work out which of five files is theirs. This names it.
+    /// The Linux shapes that still update by hand — a tarball install, or an
+    /// AppImage that cannot replace itself (read-only directory, no bundled
+    /// helper). "Use the release page" would leave the user to work out which
+    /// of five files is theirs; this names it.
     #[cfg(target_os = "linux")]
     LinuxManualPackage(String),
     #[cfg(target_os = "windows")]
@@ -1170,9 +1172,10 @@ fn sweep_orphaned_stages(keep: Option<PathBuf>) {
     }
 }
 
-/// Where each platform's staging directories are created — beside the bundle on
-/// macOS (it has to be on the app's own volume to rename into place), and the
-/// per-user temp directory on Windows.
+/// Where each platform's staging directories are created — beside the bundle
+/// on macOS and beside the image on Linux (both have to be on the installed
+/// file's own volume to rename into place), and the per-user temp directory
+/// on Windows.
 // The `return`s are what let one cfg block win per platform; clippy sees only
 // the surviving one and reads it as redundant.
 #[allow(clippy::needless_return)]
@@ -1184,11 +1187,18 @@ fn stage_roots() -> Vec<PathBuf> {
             .into_iter()
             .collect();
     }
+    #[cfg(target_os = "linux")]
+    {
+        return current_appimage()
+            .and_then(|appimage| appimage.parent().map(Path::to_path_buf))
+            .into_iter()
+            .collect();
+    }
     #[cfg(target_os = "windows")]
     {
         return vec![std::env::temp_dir()];
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     Vec::new()
 }
 
@@ -1970,6 +1980,7 @@ fn select_release_asset_for(
 /// The release package this installation can replace itself with. Split from
 /// the bare filename so the Windows Inno layout can carry "yes, but the
 /// install needs a UAC prompt" alongside it (#504).
+#[derive(Debug)]
 struct PackageOffer {
     name: String,
     #[cfg(target_os = "windows")]
@@ -2017,14 +2028,16 @@ fn package_for_current_install(version: &str) -> Result<PackageOffer, UpdateInst
             // there is no filename worth naming.
             return Err(UpdateInstallHint::UnsupportedLinux);
         };
-        // The AppImage runtime exports this, pointing at the image it mounted.
-        // Nothing else identifies which of the two Linux packages is installed.
-        let name = if std::env::var_os("APPIMAGE").is_some() {
-            format!("tty7-{version}-linux-{arch}.AppImage")
-        } else {
-            format!("tty7-{version}-linux-{arch}.tar.gz")
-        };
-        return Err(UpdateInstallHint::LinuxManualPackage(name));
+        let appimage = current_appimage();
+        // An AppImage can replace itself only if a staging directory fits
+        // beside it — the swap is two renames, which need one filesystem —
+        // and only if it carries the helper that performs the swap after
+        // this process exits. Images from before the helper shipped fail the
+        // second check and keep the manual path they always had.
+        let can_self_update = appimage.as_deref().is_some_and(|appimage| {
+            is_appimage_update_writable(appimage) && bundled_updater().is_some()
+        });
+        return linux_package_for(version, arch, appimage.is_some(), can_self_update);
     }
     #[cfg(target_os = "windows")]
     {
@@ -2118,7 +2131,11 @@ fn prepare_update(
     {
         return prepare_windows_update(version, &asset.name, &archive, &checksums);
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        return prepare_linux_update(version, &asset.name, &archive, &checksums);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     anyhow::bail!("automatic installation is not supported on this platform")
 }
 
@@ -2228,7 +2245,7 @@ fn updater_tail_args(config_dir: Option<&Path>, outcome: Option<&Path>) -> Vec<s
     args
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn update_staging_dir(parent: &Path) -> Result<tempfile::TempDir> {
     tempfile::Builder::new()
         .prefix(".tty7-update-")
@@ -2279,6 +2296,70 @@ fn prepare_macos_update(
             PathBuf::from(version),
         ],
     )?;
+    let log =
+        crate::core::config::config_path("update.log").unwrap_or_else(|| dir.join("update.log"));
+    if let Some(parent) = log.parent() {
+        std::fs::create_dir_all(parent).context("creating the update log directory")?;
+    }
+    let dir = staging.keep();
+    Ok(PreparedUpdate {
+        updater,
+        command: "install".to_string(),
+        rest: vec![
+            current,
+            archive,
+            checksums,
+            PathBuf::from(asset_name),
+            dir.clone(),
+            PathBuf::from(version),
+            log,
+        ],
+        config_dir: crate::core::config::config_dir_path(),
+        stage: dir,
+        needs_elevation: false,
+        expected_sha256: None,
+    })
+}
+
+/// Stages a downloaded AppImage beside the installed one and has the bundled
+/// updater verify it while this process is still around to show a failure.
+///
+/// Staging lives in the image's own directory for the same reason macOS
+/// stages beside the bundle: the swap is two renames, and renames only stay
+/// atomic on one filesystem. The helper that performs them is *copied* into
+/// staging rather than run from the image — the image is a FUSE mount the
+/// runtime tears down when the GUI exits, which is precisely the moment the
+/// installer starts working.
+#[cfg(target_os = "linux")]
+fn prepare_linux_update(
+    version: &str,
+    asset_name: &str,
+    archive: &[u8],
+    checksums: &[u8],
+) -> Result<PreparedUpdate> {
+    let current = current_appimage().context("tty7 is not running from an AppImage")?;
+    let parent = current
+        .parent()
+        .context("the AppImage has no parent directory")?;
+    let bundled = bundled_updater().context("tty7-updater is not bundled with this image")?;
+    let staging = update_staging_dir(parent)?;
+    let dir = staging.path().to_path_buf();
+    let archive = write_staged_asset(&dir, asset_name, archive)?;
+    let checksums = write_staged_asset(&dir, "checksums.txt", checksums)?;
+    run_updater(
+        &bundled,
+        [
+            PathBuf::from("verify"),
+            archive.clone(),
+            checksums.clone(),
+            PathBuf::from(asset_name),
+            dir.clone(),
+            PathBuf::from(version),
+        ],
+    )?;
+    let updater = dir.join("tty7-updater");
+    std::fs::copy(&bundled, &updater)
+        .with_context(|| format!("copying the updater to {}", updater.display()))?;
     let log =
         crate::core::config::config_path("update.log").unwrap_or_else(|| dir.join("update.log"));
     if let Some(parent) = log.parent() {
@@ -2441,9 +2522,61 @@ fn bundled_updater() -> Option<PathBuf> {
     updater.is_file().then_some(updater)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+/// The updater shipped inside the mounted image, beside this executable at
+/// `usr/bin`. Resolved through `current_exe` rather than `$APPDIR` so a
+/// stale or hand-set variable cannot point the update machinery at a binary
+/// that is not the one this process actually runs beside.
+#[cfg(target_os = "linux")]
+fn bundled_updater() -> Option<PathBuf> {
+    let updater = std::env::current_exe().ok()?.parent()?.join("tty7-updater");
+    updater.is_file().then_some(updater)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn bundled_updater() -> Option<PathBuf> {
     None
+}
+
+/// The image this process is running from. The AppImage runtime exports
+/// `$APPIMAGE`, pointing at the file it mounted; nothing else identifies
+/// which of the Linux packages is installed. Required to name an existing
+/// absolute path — the variable outlives moves and deletions, and every
+/// answer given here is a file the updater will later rename.
+#[cfg(target_os = "linux")]
+fn current_appimage() -> Option<PathBuf> {
+    let appimage = PathBuf::from(std::env::var_os("APPIMAGE")?);
+    (appimage.is_absolute() && appimage.is_file()).then_some(appimage)
+}
+
+#[cfg(target_os = "linux")]
+fn is_appimage_update_writable(appimage: &Path) -> bool {
+    appimage.parent().is_some_and(can_stage_replacement_in)
+}
+
+/// The Linux answer, split from the probing so the policy is testable
+/// without an AppImage runtime setting variables. Only an AppImage that can
+/// stage and swap itself is offered an install; every other shape keeps the
+/// named-package hint it always had — a tarball unpacks wherever the user
+/// chose, a distro package belongs to its package manager, and guessing at
+/// either is exactly what `package_for_current_install` must never do.
+#[cfg(target_os = "linux")]
+fn linux_package_for(
+    version: &str,
+    arch: &str,
+    is_appimage: bool,
+    can_self_update: bool,
+) -> Result<PackageOffer, UpdateInstallHint> {
+    if !is_appimage {
+        return Err(UpdateInstallHint::LinuxManualPackage(format!(
+            "tty7-{version}-linux-{arch}.tar.gz"
+        )));
+    }
+    let name = format!("tty7-{version}-linux-{arch}.AppImage");
+    if can_self_update {
+        Ok(PackageOffer::plain(name))
+    } else {
+        Err(UpdateInstallHint::LinuxManualPackage(name))
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -2685,7 +2818,7 @@ fn windows_all_users_install_path() -> Option<PathBuf> {
     (!value.is_empty()).then(|| PathBuf::from(std::ffi::OsString::from_wide(&value)))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn can_stage_replacement_in(dir: &Path) -> bool {
     tempfile::Builder::new()
         .prefix(".tty7-update-write-test-")
@@ -2814,6 +2947,64 @@ mod tests {
                 "tty7-27.1.0-macos-arm64.zip".to_string()
             ))
         );
+    }
+
+    /// The one Linux shape that installs itself: an AppImage whose directory
+    /// takes a staging directory and whose image carries the helper.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_appimage_that_can_replace_itself_is_offered_the_appimage() {
+        let offer = linux_package_for("27.1.0", "x86_64", true, true)
+            .expect("a self-updating AppImage yields an offer");
+        assert_eq!(offer.name, "tty7-27.1.0-linux-x86_64.AppImage");
+    }
+
+    /// Everything else keeps the manual hint, and the hint names the exact
+    /// package for the installation shape rather than pointing at a release
+    /// page with five files on it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_installs_that_cannot_self_update_name_their_package() {
+        // An AppImage in a read-only directory, or one from before the
+        // helper shipped: still an AppImage, still updated by hand.
+        assert_eq!(
+            linux_package_for("27.1.0", "x86_64", true, false).unwrap_err(),
+            UpdateInstallHint::LinuxManualPackage("tty7-27.1.0-linux-x86_64.AppImage".to_string())
+        );
+        // A tarball (or distro-packaged) install is never guessed at.
+        assert_eq!(
+            linux_package_for("27.1.0", "x86_64", false, false).unwrap_err(),
+            UpdateInstallHint::LinuxManualPackage("tty7-27.1.0-linux-x86_64.tar.gz".to_string())
+        );
+        // `can_self_update` without an AppImage cannot happen (the probe is
+        // gated on the variable), but the policy must not invent an offer if
+        // it ever does.
+        assert!(linux_package_for("27.1.0", "x86_64", false, true).is_err());
+    }
+
+    /// The offered AppImage name must match what the release actually
+    /// publishes, checksums manifest included — the same end-to-end shape the
+    /// macOS selection test pins.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_selection_matches_the_published_asset_names() {
+        let name = "tty7-27.1.0-linux-x86_64.AppImage";
+        let offer = linux_package_for("27.1.0", "x86_64", true, true).unwrap();
+        let assets = [
+            github_asset("tty7-27.1.0-linux-x86_64.tar.gz"),
+            github_asset(name),
+            github_asset("checksums.txt"),
+        ];
+        let selected = select_release_asset_for(Ok(offer), &assets);
+        assert_eq!(
+            selected.asset,
+            Some(ReleaseAsset {
+                name: name.to_string(),
+                url: format!("https://example.test/{name}"),
+                checksums_url: "https://example.test/checksums.txt".to_string(),
+            })
+        );
+        assert_eq!(selected.reason, None);
     }
 
     #[cfg(target_os = "windows")]

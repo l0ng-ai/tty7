@@ -122,15 +122,15 @@ jobs:
         with:
           workspaces: tty7
 
+      # The updater ships on every GUI platform now: inside the macOS bundle,
+      # beside the Windows app, and inside the Linux AppImage.
       - name: Build
         working-directory: tty7
         shell: bash
         run: |
           cargo build --release --target "${{ matrix.target }}"
-          if [[ "${{ matrix.os }}" == "macos" || "${{ matrix.os }}" == "windows" ]]; then
-            cargo build --release --features updater \
-              --bin tty7-updater --target "${{ matrix.target }}"
-          fi
+          cargo build --release --features updater \
+            --bin tty7-updater --target "${{ matrix.target }}"
 
       - name: Bundle macOS DMG
         if: matrix.os == 'macos'
@@ -173,6 +173,26 @@ jobs:
         if: matrix.os == 'linux'
         working-directory: tty7
         run: bash .github/scripts/bundle-appimage.sh "${{ matrix.target }}" "${{ matrix.arch }}"
+
+      # The same facts the in-app updater checks on the user's machine,
+      # checked here so a packaging mistake fails the nightly instead. See
+      # the twin step in release.yml.
+      - name: Verify Linux AppImage update package
+        if: matrix.os == 'linux'
+        working-directory: tty7
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.plan.outputs.version }}"
+          IMAGE="$PWD/dist/tty7-${VERSION}-linux-${{ matrix.arch }}.AppImage"
+          VERIFY_ROOT="$RUNNER_TEMP/tty7-appimage-update-verify"
+          rm -rf "$VERIFY_ROOT"
+          mkdir -p "$VERIFY_ROOT"
+          (cd "$VERIFY_ROOT" && "$IMAGE" --appimage-extract >/dev/null)
+          test -x "$VERIFY_ROOT/squashfs-root/usr/bin/tty7-app"
+          test -x "$VERIFY_ROOT/squashfs-root/usr/bin/tty7-updater"
+          grep -Fxq "X-AppImage-Version=${VERSION}" \
+            "$VERIFY_ROOT/squashfs-root/usr/share/applications/tty7.desktop"
 
       # See release.yml for why this is best-effort rather than required.
       - name: Fetch the bundled Linux server

@@ -2,7 +2,10 @@
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
 )]
-#![cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#![cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
+    allow(dead_code)
+)]
 
 #[cfg(target_os = "macos")]
 mod macos {
@@ -586,6 +589,692 @@ mod macos {
             .unwrap();
 
             assert_eq!(bundle_version(&app).unwrap(), "26.8.2-nightly.20260803");
+        }
+    }
+}
+
+/// The Linux half serves exactly one installation shape: an AppImage. The
+/// installed artifact is a single file (the path `$APPIMAGE` names), so the
+/// whole install is one atomic swap — move the running image aside, rename
+/// the verified download into its place, and start it. Tarball and distro
+/// installs never reach this program; `package_for_current_install` in
+/// `core::update` hands them the release page instead.
+///
+/// One Linux-specific constraint shapes the code: the image the GUI runs
+/// from is a FUSE mount the AppImage runtime tears down when the app exits —
+/// which is the moment `install` starts working. The GUI therefore copies
+/// this helper out of the mount into the staging directory and runs the
+/// copy, the same way the Windows path runs a private copy because Setup
+/// replaces the installed one.
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::fs::{self, OpenOptions};
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
+    use std::thread;
+    use std::time::Duration;
+
+    const PARENT_POLL: Duration = Duration::from_millis(100);
+    const LAUNCH_GRACE: Duration = Duration::from_secs(1);
+
+    /// Where `bundle-appimage.sh` installs the desktop entry inside the
+    /// image. The root-level `tty7.desktop` is linuxdeploy's symlink to this
+    /// file, and extracting a symlink alone yields a dangling link — so the
+    /// real path is the one asked for.
+    const DESKTOP_ENTRY: &str = "usr/share/applications/tty7.desktop";
+    /// The helper inside the image, beside the app the way every platform
+    /// ships it.
+    const BUNDLED_UPDATER: &str = "usr/bin/tty7-updater";
+    /// The desktop-entry key `bundle-appimage.sh` stamps the release version
+    /// into — the AppImage convention for stating a version where tools can
+    /// read it without running the app.
+    const VERSION_KEY: &str = "X-AppImage-Version=";
+
+    pub fn run() -> Result<(), String> {
+        let mut args = std::env::args_os().skip(1);
+        let command = args
+            .next()
+            .and_then(|arg| arg.into_string().ok())
+            .ok_or_else(usage)?;
+        match command.as_str() {
+            "verify" => {
+                let archive = next_path(&mut args)?;
+                let checksums = next_path(&mut args)?;
+                let asset_name = next_string(&mut args)?;
+                let stage = next_path(&mut args)?;
+                let expected_version = next_string(&mut args)?;
+                reject_extra(args)?;
+                verify_archive(&archive, &checksums, &asset_name)?;
+                verify_update(&archive, &stage, &expected_version)
+            }
+            "install" => {
+                let parent_pid = next_string(&mut args)?
+                    .parse::<u32>()
+                    .map_err(|_| "parent pid is not an unsigned integer".to_string())?;
+                let current = next_path(&mut args)?;
+                let archive = next_path(&mut args)?;
+                let checksums = next_path(&mut args)?;
+                let asset_name = next_string(&mut args)?;
+                let stage = next_path(&mut args)?;
+                let expected_version = next_string(&mut args)?;
+                let log = next_path(&mut args)?;
+                let options = tail_options(args)?;
+                options.apply();
+                install(InstallPlan {
+                    parent_pid,
+                    current,
+                    archive,
+                    checksums,
+                    asset_name,
+                    stage,
+                    expected_version,
+                    log,
+                    result_file: options.result_file,
+                })
+            }
+            _ => Err(usage()),
+        }
+    }
+
+    fn usage() -> String {
+        "usage: tty7-updater verify <archive.AppImage> <checksums.txt> \
+         <asset-name> <stage-dir> <version>\n\
+         or: tty7-updater install <parent-pid> <current.AppImage> <archive.AppImage> \
+         <checksums.txt> <asset-name> <stage-dir> <version> <log-path> \
+         [--config-dir <dir>] [--result-file <path>]"
+            .to_string()
+    }
+
+    fn next_path(args: &mut impl Iterator<Item = std::ffi::OsString>) -> Result<PathBuf, String> {
+        args.next().map(PathBuf::from).ok_or_else(usage)
+    }
+
+    fn next_string(args: &mut impl Iterator<Item = std::ffi::OsString>) -> Result<String, String> {
+        args.next()
+            .and_then(|arg| arg.into_string().ok())
+            .ok_or_else(usage)
+    }
+
+    fn reject_extra(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<(), String> {
+        if args.next().is_some() {
+            Err(usage())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The named options an install verb takes after its positional
+    /// arguments. See the Windows half of this file for why these are
+    /// arguments and not the environment.
+    #[derive(Default)]
+    struct TailOptions {
+        config_dir: Option<PathBuf>,
+        result_file: Option<PathBuf>,
+    }
+
+    fn tail_options(
+        mut args: impl Iterator<Item = std::ffi::OsString>,
+    ) -> Result<TailOptions, String> {
+        let mut options = TailOptions::default();
+        while let Some(arg) = args.next() {
+            match arg.to_str() {
+                Some("--config-dir") => options.config_dir = Some(next_path(&mut args)?),
+                Some("--result-file") => options.result_file = Some(next_path(&mut args)?),
+                _ => return Err(usage()),
+            }
+        }
+        Ok(options)
+    }
+
+    impl TailOptions {
+        fn apply(&self) {
+            let Some(dir) = &self.config_dir else { return };
+            tty7_core::core::config::set_config_dir(dir.clone());
+            // Re-exported so the relaunched app — a child of this process —
+            // keeps answering for the same config directory. Safe here:
+            // argument parsing runs before any thread exists.
+            unsafe { std::env::set_var("TTY7_CONFIG_DIR", dir) };
+        }
+    }
+
+    /// The terminal outcome of the attempt, for the next GUI launch to merge
+    /// into the update state (#540). Best-effort, like every log line here.
+    fn report_outcome(
+        result_file: Option<&Path>,
+        log: &Path,
+        version: &str,
+        result: &Result<(), String>,
+    ) {
+        let Some(path) = result_file else { return };
+        let outcome = tty7_core::daemon::install::outcome::UpdateOutcome {
+            version: version.to_string(),
+            ok: result.is_ok(),
+            detail: result.as_ref().err().cloned(),
+        };
+        if let Err(error) = tty7_core::daemon::install::outcome::write_outcome(path, &outcome) {
+            log_line(
+                log,
+                &format!(
+                    "could not record the update outcome at {}: {error}",
+                    path.display()
+                ),
+            );
+        }
+    }
+
+    struct InstallPlan {
+        parent_pid: u32,
+        current: PathBuf,
+        archive: PathBuf,
+        checksums: PathBuf,
+        asset_name: String,
+        stage: PathBuf,
+        expected_version: String,
+        log: PathBuf,
+        result_file: Option<PathBuf>,
+    }
+
+    fn install(plan: InstallPlan) -> Result<(), String> {
+        install_inner(&plan)
+    }
+
+    // The daemon is deliberately left running, exactly as on macOS: nothing
+    // locks a running executable's file on Linux, and the daemon serves its
+    // panes from the old mount until the user chooses to restart it — that
+    // is what keeps their shells alive across the update.
+    fn install_inner(plan: &InstallPlan) -> Result<(), String> {
+        wait_for_exit(plan.parent_pid);
+        log_line(&plan.log, "re-verifying the staged tty7 update");
+        let verification = verify_archive(&plan.archive, &plan.checksums, &plan.asset_name)
+            .and_then(|()| verify_update(&plan.archive, &plan.stage, &plan.expected_version));
+        if let Err(error) = verification {
+            log_line(&plan.log, &error);
+            let _ = fs::remove_dir_all(&plan.stage);
+            let result = Err(error);
+            // The outcome lands before the old app does: the relaunched GUI
+            // merges it at startup, and a write afterward races that merge
+            // (#540).
+            report_outcome(
+                plan.result_file.as_deref(),
+                &plan.log,
+                &plan.expected_version,
+                &result,
+            );
+            let _ = launch_app(&plan.current);
+            return result;
+        }
+        log_line(&plan.log, &format!("replacing {}", plan.current.display()));
+        let report = |result: &Result<(), String>| {
+            report_outcome(
+                plan.result_file.as_deref(),
+                &plan.log,
+                &plan.expected_version,
+                result,
+            );
+        };
+        replace_and_relaunch(
+            &plan.current,
+            &plan.archive,
+            &plan.stage,
+            launch_app,
+            report,
+        )
+        .inspect_err(|error| log_line(&plan.log, error))
+    }
+
+    fn verify_archive(archive: &Path, checksums: &Path, asset_name: &str) -> Result<(), String> {
+        let bytes =
+            fs::read(archive).map_err(|error| format!("reading {}: {error}", archive.display()))?;
+        let manifest = fs::read_to_string(checksums)
+            .map_err(|error| format!("reading {}: {error}", checksums.display()))?;
+        tty7_core::daemon::install::checksums::verify(&manifest, asset_name, &bytes)
+            .map_err(|error| error.to_string())
+    }
+
+    /// What the downloaded file has to prove before it may become the
+    /// installation: it is a type-2 AppImage at all, it states the version
+    /// this update was for, and it carries its own updater — an image
+    /// without one would install fine and then be the last version that
+    /// ever could. Runs only after `verify_archive` has pinned the bytes to
+    /// the release's checksums.txt; from there, running the image's own
+    /// `--appimage-extract` is running the released code, which is exactly
+    /// what the swap is about to do anyway.
+    fn verify_update(staged: &Path, stage: &Path, expected_version: &str) -> Result<(), String> {
+        if !is_appimage(&read_header(staged)?) {
+            return Err(format!("{} is not a type-2 AppImage", staged.display()));
+        }
+        // Downloaded bytes land without the execute bit; extraction needs the
+        // runtime to run. The definitive mode is set again at swap time, taken
+        // from the file being replaced.
+        make_executable(staged)?;
+        let desktop = extract_entry(staged, stage, DESKTOP_ENTRY)?;
+        let text = fs::read_to_string(&desktop)
+            .map_err(|error| format!("reading {}: {error}", desktop.display()))?;
+        let actual = version_from_desktop_entry(&text).ok_or_else(|| {
+            format!("the staged AppImage's desktop entry carries no {VERSION_KEY}")
+        })?;
+        if actual != expected_version {
+            return Err(format!(
+                "the staged AppImage reports version {actual}, expected {expected_version}"
+            ));
+        }
+        extract_entry(staged, stage, BUNDLED_UPDATER)?;
+        Ok(())
+    }
+
+    /// ELF with the AppImage type-2 marker (`AI\x02` at offset 8). The
+    /// runtime the swap is about to spawn only exists behind this shape; a
+    /// wrongly published asset — a tarball under the AppImage name, an HTML
+    /// error page — fails here with a name instead of at launch.
+    fn is_appimage(header: &[u8]) -> bool {
+        header.len() >= 11
+            && header[..4] == [0x7f, b'E', b'L', b'F']
+            && header[8..11] == [b'A', b'I', 0x02]
+    }
+
+    fn read_header(path: &Path) -> Result<Vec<u8>, String> {
+        let mut file =
+            fs::File::open(path).map_err(|error| format!("reading {}: {error}", path.display()))?;
+        let mut header = [0u8; 16];
+        let read = file
+            .read(&mut header)
+            .map_err(|error| format!("reading {}: {error}", path.display()))?;
+        Ok(header[..read].to_vec())
+    }
+
+    fn make_executable(path: &Path) -> Result<(), String> {
+        let mode = fs::metadata(path)
+            .map_err(|error| format!("reading the mode of {}: {error}", path.display()))?
+            .permissions()
+            .mode();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o755))
+            .map_err(|error| format!("marking {} executable: {error}", path.display()))
+    }
+
+    /// Unpacks one entry of the staged image into `<stage>/squashfs-root/`
+    /// and returns the extracted file's path.
+    ///
+    /// `--appimage-extract` is answered by the AppImage runtime itself,
+    /// before any application code, and unpacks without mounting — so it
+    /// works on machines whose FUSE setup the eventual launch will need but
+    /// this verification should not. Run from the staging directory so the
+    /// `squashfs-root` it creates lands beside the package and is removed
+    /// with it. The runtime exits zero even when nothing matched, which is
+    /// why the answer is the extracted file's existence rather than the
+    /// exit status.
+    fn extract_entry(appimage: &Path, stage: &Path, entry: &str) -> Result<PathBuf, String> {
+        // Anchored before the spawn: exec resolves a relative program path
+        // against the child's working directory, which the line below moves —
+        // a hand-run `tty7-updater verify ./pkg.AppImage …` would otherwise
+        // fail with a bare "No such file or directory".
+        let appimage = std::path::absolute(appimage)
+            .map_err(|error| format!("resolving {}: {error}", appimage.display()))?;
+        run_checked(
+            Command::new(&appimage)
+                .args(["--appimage-extract", entry])
+                .current_dir(stage)
+                .stdout(Stdio::null()),
+            "extracting from the staged AppImage",
+        )?;
+        let extracted = stage.join("squashfs-root").join(entry);
+        if !extracted.is_file() {
+            return Err(format!("the staged AppImage carries no {entry}"));
+        }
+        Ok(extracted)
+    }
+
+    fn version_from_desktop_entry(text: &str) -> Option<String> {
+        text.lines()
+            .find_map(|line| line.strip_prefix(VERSION_KEY))
+            .map(|version| version.trim().to_string())
+            .filter(|version| !version.is_empty())
+    }
+
+    fn replace_and_relaunch(
+        current: &Path,
+        replacement: &Path,
+        stage: &Path,
+        launch: impl Fn(&Path) -> Result<(), String>,
+        report: impl Fn(&Result<(), String>),
+    ) -> Result<(), String> {
+        // The staging directory is a fresh TempDir created beside the current
+        // image, so a backup here stays on the same filesystem without using a
+        // predictable sibling path. In particular, never delete a fixed-name
+        // path beside the image: it may be a recovery copy left by an
+        // interrupted update (or simply an unrelated user-owned path).
+        let backup = stage.join("previous.AppImage");
+        if backup.exists() {
+            let result = Err(format!(
+                "the update staging backup already exists: {}",
+                backup.display()
+            ));
+            report(&result);
+            return result;
+        }
+        // The replacement wears the current image's own mode: a rename keeps
+        // the staged file's permissions, which are the download's, and the
+        // user's choice of who may run their tty7 is not this program's to
+        // revise. Owner execute is guaranteed on top — without it nothing can
+        // relaunch — and grants nobody else anything.
+        if let Err(error) = carry_mode(current, replacement) {
+            report(&Err(error.clone()));
+            return Err(error);
+        }
+        if let Err(error) = fs::rename(current, &backup) {
+            let result = Err(format!("moving the current AppImage aside: {error}"));
+            report(&result);
+            return result;
+        }
+
+        if let Err(error) = fs::rename(replacement, current) {
+            let _ = fs::rename(&backup, current);
+            let _ = fs::remove_dir_all(stage);
+            let result = Err(format!("putting the staged AppImage in place: {error}"));
+            report(&result);
+            return result;
+        }
+
+        match launch(current) {
+            Ok(()) => {
+                let _ = remove_path(&backup);
+                let _ = fs::remove_dir_all(stage);
+                let result = Ok(());
+                report(&result);
+                result
+            }
+            Err(error) => {
+                let _ = remove_path(current);
+                let (result, relaunch) = match fs::rename(&backup, current) {
+                    Ok(()) => {
+                        let _ = fs::remove_dir_all(stage);
+                        (Err(error), true)
+                    }
+                    Err(restore) => (
+                        Err(format!("{error}; restoring the previous image: {restore}")),
+                        false,
+                    ),
+                };
+                // The outcome lands before the old app does: the relaunched
+                // GUI merges it at startup, and a write afterward races that
+                // merge (#540).
+                report(&result);
+                if relaunch {
+                    let _ = launch(current);
+                }
+                result
+            }
+        }
+    }
+
+    /// Puts the mode of the file being replaced onto its replacement,
+    /// with owner execute assured. Falls back to plain 0o755 when the
+    /// current image cannot answer — it is about to be renamed away, not
+    /// consulted as an authority.
+    fn carry_mode(current: &Path, replacement: &Path) -> Result<(), String> {
+        let mode = fs::metadata(current)
+            .map(|meta| meta.permissions().mode())
+            .unwrap_or(0o755);
+        fs::set_permissions(replacement, fs::Permissions::from_mode(mode | 0o700))
+            .map_err(|error| format!("setting the mode of {}: {error}", replacement.display()))
+    }
+
+    /// Starts the image at its installed path. The runtime sets `$APPIMAGE`
+    /// and `$APPDIR` for the process it mounts, overwriting the stale pair
+    /// this process inherited from the app that spawned it.
+    fn launch_app(appimage: &Path) -> Result<(), String> {
+        let mut child = Command::new(appimage)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("launching {}: {error}", appimage.display()))?;
+        healthy_after_grace(&mut child)
+    }
+
+    fn healthy_after_grace(child: &mut Child) -> Result<(), String> {
+        thread::sleep(LAUNCH_GRACE);
+        match child
+            .try_wait()
+            .map_err(|error| format!("checking the relaunched app: {error}"))?
+        {
+            None => Ok(()),
+            Some(status) => Err(format!(
+                "the relaunched app exited immediately with {status}"
+            )),
+        }
+    }
+
+    fn wait_for_exit(pid: u32) {
+        // The updater is spawned directly by the app it waits for, so while
+        // that app lives it *is* this process's parent, and the kernel
+        // reparents us the moment it exits. Watching getppid() is therefore
+        // immune to pid reuse, which `kill(pid, 0)` is not: a recycled pid
+        // keeps answering 0 forever. Same reasoning as the macos module;
+        // Linux reparents to init or the nearest subreaper, and either way
+        // the answer stops being `pid`.
+        let pid = pid as libc::pid_t;
+        if unsafe { libc::getppid() } == pid {
+            while unsafe { libc::getppid() } == pid {
+                thread::sleep(PARENT_POLL);
+            }
+            return;
+        }
+        // Not our parent — a hand-run updater. The polling fallback keeps
+        // that invocation working, pid-reuse caveat and all.
+        while process_alive(pid) {
+            thread::sleep(PARENT_POLL);
+        }
+    }
+
+    fn process_alive(pid: libc::pid_t) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    fn remove_path(path: &Path) -> Result<(), String> {
+        if !path.exists() {
+            return Ok(());
+        }
+        if path.is_dir() {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_file(path)
+        }
+        .map_err(|error| format!("removing {}: {error}", path.display()))
+    }
+
+    fn run_checked(command: &mut Command, context: &str) -> Result<(), String> {
+        let output = command
+            .output()
+            .map_err(|error| format!("{context}: {error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{context}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    }
+
+    fn log_line(path: &Path, message: &str) {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{message}");
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn successful_launch_commits_the_replacement() {
+            let root = tempfile::tempdir().unwrap();
+            let current = root.path().join("tty7.AppImage");
+            let stage = root.path().join("stage");
+            fs::create_dir(&stage).unwrap();
+            let replacement = stage.join("tty7-new.AppImage");
+            fs::write(&current, b"old image").unwrap();
+            fs::write(&replacement, b"new image").unwrap();
+
+            replace_and_relaunch(&current, &replacement, &stage, |_| Ok(()), |_| ()).unwrap();
+
+            assert_eq!(fs::read(&current).unwrap(), b"new image");
+            assert!(!stage.exists());
+        }
+
+        #[test]
+        fn failed_launch_restores_and_relaunches_the_previous_image() {
+            let root = tempfile::tempdir().unwrap();
+            let current = root.path().join("tty7.AppImage");
+            let stage = root.path().join("stage");
+            fs::create_dir(&stage).unwrap();
+            let replacement = stage.join("tty7-new.AppImage");
+            fs::write(&current, b"old image").unwrap();
+            fs::write(&replacement, b"new image").unwrap();
+            let launches = std::cell::Cell::new(0);
+            let reported_after_launches = std::cell::Cell::new(usize::MAX);
+
+            let error = replace_and_relaunch(
+                &current,
+                &replacement,
+                &stage,
+                |_| {
+                    launches.set(launches.get() + 1);
+                    if launches.get() == 1 {
+                        Err("new app failed".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_| reported_after_launches.set(launches.get()),
+            )
+            .unwrap_err();
+
+            assert_eq!(error, "new app failed");
+            assert_eq!(launches.get(), 2);
+            // The outcome is reported after the failed first launch but before
+            // the old app comes back — the relaunched GUI must find it already
+            // on disk at startup (#540).
+            assert_eq!(reported_after_launches.get(), 1);
+            assert_eq!(fs::read(&current).unwrap(), b"old image");
+            assert!(!stage.exists());
+        }
+
+        /// The installed image keeps the mode the user gave it — a 0700
+        /// image stays private — while the download's missing execute bit
+        /// never survives into the installation.
+        #[test]
+        fn the_replacement_wears_the_current_images_mode() {
+            let root = tempfile::tempdir().unwrap();
+            let current = root.path().join("tty7.AppImage");
+            let stage = root.path().join("stage");
+            fs::create_dir(&stage).unwrap();
+            let replacement = stage.join("tty7-new.AppImage");
+            fs::write(&current, b"old image").unwrap();
+            fs::write(&replacement, b"new image").unwrap();
+            fs::set_permissions(&current, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&replacement, fs::Permissions::from_mode(0o644)).unwrap();
+
+            replace_and_relaunch(&current, &replacement, &stage, |_| Ok(()), |_| ()).unwrap();
+
+            let mode = fs::metadata(&current).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "mode {mode:o}");
+        }
+
+        /// A leftover backup means an earlier attempt stopped between its two
+        /// renames; installing over it would overwrite the one copy of the
+        /// previous version.
+        #[test]
+        fn an_existing_backup_stops_the_replacement() {
+            let root = tempfile::tempdir().unwrap();
+            let current = root.path().join("tty7.AppImage");
+            let stage = root.path().join("stage");
+            fs::create_dir(&stage).unwrap();
+            let replacement = stage.join("tty7-new.AppImage");
+            fs::write(&current, b"old image").unwrap();
+            fs::write(&replacement, b"new image").unwrap();
+            fs::write(stage.join("previous.AppImage"), b"earlier backup").unwrap();
+
+            let error = replace_and_relaunch(
+                &current,
+                &replacement,
+                &stage,
+                |_| panic!("nothing may launch when the backup path is taken"),
+                |_| (),
+            )
+            .unwrap_err();
+
+            assert!(error.contains("backup already exists"), "{error}");
+            assert_eq!(fs::read(&current).unwrap(), b"old image");
+        }
+
+        #[test]
+        fn archive_verification_rejects_bytes_that_do_not_match_the_manifest() {
+            let root = tempfile::tempdir().unwrap();
+            let archive = root.path().join("tty7.AppImage");
+            let manifest = root.path().join("checksums.txt");
+            fs::write(&archive, b"downloaded bytes").unwrap();
+            fs::write(
+                &manifest,
+                format!(
+                    "{}  tty7.AppImage\n",
+                    tty7_core::daemon::install::checksums::hex(
+                        &tty7_core::daemon::install::checksums::sha256(b"published bytes")
+                    )
+                ),
+            )
+            .unwrap();
+
+            let error = verify_archive(&archive, &manifest, "tty7.AppImage").unwrap_err();
+            assert!(error.contains("failed sha256 verification"), "{error}");
+        }
+
+        /// The magic check runs before anything executes the download, so a
+        /// mis-published asset is named without being run.
+        #[test]
+        fn verification_rejects_a_file_that_is_not_an_appimage() {
+            let mut elf_with_marker = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, b'A', b'I', 0x02];
+            elf_with_marker.resize(16, 0);
+            assert!(is_appimage(&elf_with_marker));
+            // A plain ELF — the tarball's binary, say — is not an AppImage.
+            let mut bare_elf = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0];
+            bare_elf.resize(16, 0);
+            assert!(!is_appimage(&bare_elf));
+            assert!(!is_appimage(b"<html>Not Found</html>"));
+            assert!(!is_appimage(b""));
+            assert!(!is_appimage(&[0x7f, b'E', b'L', b'F']));
+
+            let root = tempfile::tempdir().unwrap();
+            let staged = root.path().join("tty7.AppImage");
+            fs::write(&staged, b"<html>Not Found</html>").unwrap();
+            let error = verify_update(&staged, root.path(), "27.1.0").unwrap_err();
+            assert!(error.contains("not a type-2 AppImage"), "{error}");
+        }
+
+        #[test]
+        fn the_desktop_entry_states_the_version() {
+            let text = "[Desktop Entry]\nType=Application\nName=tty7\nExec=tty7-app\n\
+                        Icon=tty7\nX-AppImage-Version=26.8.4\n";
+            assert_eq!(version_from_desktop_entry(text).as_deref(), Some("26.8.4"));
+            // The nightly stamp survives whole — the identity the GUI
+            // compares against carries the prerelease tail.
+            assert_eq!(
+                version_from_desktop_entry("X-AppImage-Version=26.8.4-nightly.202608140200\n")
+                    .as_deref(),
+                Some("26.8.4-nightly.202608140200")
+            );
+            assert_eq!(
+                version_from_desktop_entry("[Desktop Entry]\nName=tty7\n"),
+                None
+            );
+            // A stated nothing is not a version.
+            assert_eq!(version_from_desktop_entry("X-AppImage-Version=\n"), None);
+            assert_eq!(version_from_desktop_entry("X-AppImage-Version=  \n"), None);
         }
     }
 }
@@ -3366,8 +4055,16 @@ fn main() {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
 fn main() {
-    eprintln!("tty7-updater is only available on macOS and Windows");
+    if let Err(error) = linux::run() {
+        eprintln!("tty7-updater: {error}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn main() {
+    eprintln!("tty7-updater is only available on macOS, Windows and Linux");
     std::process::exit(1);
 }

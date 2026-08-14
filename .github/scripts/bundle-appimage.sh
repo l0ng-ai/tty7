@@ -62,6 +62,12 @@ chmod +x "$APPDIR/usr/bin/tty7-app"
 cp "target/${TARGET}/release/tty7" "$APPDIR/usr/bin/tty7"
 chmod +x "$APPDIR/usr/bin/tty7"
 
+# The in-app updater, beside the GUI the way every platform ships it. The GUI
+# copies it out of the mount into its staging directory before use — the mount
+# is gone by the time an install runs (see src/bin/tty7-updater.rs).
+cp "target/${TARGET}/release/tty7-updater" "$APPDIR/usr/bin/tty7-updater"
+chmod +x "$APPDIR/usr/bin/tty7-updater"
+
 # A desktop entry + icon are mandatory AppImage metadata; linuxdeploy places
 # them and generates AppRun. Icon basename must match the desktop's Icon= key.
 cat > "$TOOLS/tty7.desktop" <<'DESKTOP'
@@ -75,6 +81,12 @@ Categories=System;TerminalEmulator;
 Terminal=false
 StartupWMClass=tty7
 DESKTOP
+# The release version, stamped where the in-app updater can read it back with
+# one `--appimage-extract` and no mount: a downloaded image must state the
+# version it claims before it may replace the installed one (`verify_update`
+# in src/bin/tty7-updater.rs). X-AppImage-Version is the AppImage convention
+# for exactly this. Appended outside the heredoc, which is quoted on purpose.
+echo "X-AppImage-Version=${VERSION}" >> "$TOOLS/tty7.desktop"
 # linuxdeploy only accepts fixed icon resolutions (…256, 384, 512 — NOT the
 # source's 1024), so downscale to 256×256.
 convert assets/app-icon.png -resize 256x256 "$TOOLS/tty7.png"
