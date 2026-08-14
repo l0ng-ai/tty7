@@ -819,6 +819,27 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // ring and the on-switch.
     t.drag_border = rgb(m.accent).into();
 
+    // The code editor's gutter fill and current-line band do not come from
+    // `Theme` at all — gpui-component reads them off the *syntax* theme, which
+    // is still its stock one. So the editor painted a #0a0a0a strip down the
+    // line-number column and a #171717 band across the cursor's line, on top of
+    // a preset background that is nowhere near either. That is the black edge.
+    //
+    // Cleared to transparent rather than repainted with the preset's own fill:
+    // the code panel sits on the window background, which may be a gradient or
+    // a wallpaper image, and any flat colour would show as a seam against it.
+    // The current line and the invisibles become translucent ink for the same
+    // reason — they read correctly on light and dark presets alike.
+    let ink: Hsla = rgb(m.foreground).into();
+    let mut highlight = (*t.highlight_theme).clone();
+    highlight.style.editor_background = Some(gpui::transparent_black());
+    highlight.style.editor_gutter_background = Some(gpui::transparent_black());
+    highlight.style.editor_active_line = Some(ink.opacity(0.06));
+    highlight.style.editor_line_number = Some(rgb(m.muted_foreground).into());
+    highlight.style.editor_active_line_number = Some(ink);
+    highlight.style.editor_invisible = Some(ink.opacity(0.25));
+    t.highlight_theme = std::sync::Arc::new(highlight);
+
     #[cfg(target_os = "macos")]
     if let Some(window) = window.as_deref_mut() {
         window.set_traffic_light_position(traffic_light_position());
