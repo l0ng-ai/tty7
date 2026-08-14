@@ -148,7 +148,13 @@ fn is_reapable_daemon_name(name: &str) -> bool {
 /// query, no TCP: a dead recorded daemon means a connect to the endpoint
 /// would only pay the OS's refusal delay (seconds on some machines) for
 /// information the pidfile already has.
-pub(crate) fn recorded_daemon_is_dead() -> bool {
+///
+/// The GUI's GuiOpen handoff probe relies on the same signal: the probe
+/// connects to the daemon's control listener, so a dead recorded daemon
+/// guarantees no GUI is registered there — running the probe would only wait
+/// out the refusal delay on the stale `control.port` that `ensure_running`
+/// clears later. The probe skips itself instead.
+pub fn recorded_daemon_is_dead() -> bool {
     let Some(pid) = pidfile::read() else {
         return false;
     };
