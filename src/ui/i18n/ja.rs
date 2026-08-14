@@ -547,7 +547,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSidebarGrouping => "サイドバーのグループ化",
         L10nKey::SettingsSidebarGroupingDesc => {
-            "git リポジトリごとにサイドバータブをまとめ、リポジトリ外のタブはスクラッチセクションに置きます。左サイドバーにのみ適用"
+            "git リポジトリごとにサイドバータブをまとめます。リポジトリ外のタブはスクラッチセクションに置くか、「リポジトリ／フォルダ別」なら作業ディレクトリごとにまとめます。左サイドバーにのみ適用"
         }
         L10nKey::SettingsDiffPreviewFromCounts => "サイドバーのカウントから Diff プレビューを開く",
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
@@ -572,6 +572,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsTop => "上部",
         L10nKey::SettingsLeft => "左側",
         L10nKey::SettingsByRepo => "リポジトリ別",
+        L10nKey::SettingsByRepoOrFolder => "リポジトリ／フォルダ別",
         L10nKey::SettingsFlat => "フラット表示",
         L10nKey::SettingsPreset => "プリセット",
         L10nKey::SettingsPresetDesc => {
@@ -873,7 +874,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "トレイ メニューバー ステータス アイコン エージェント 通知 システム tray icon menu bar status system attention"
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
-            "タブ グループ リポジトリ git スクラッチ ヘッダー サイドバー フラット sidebar grouping tabs repo repository git scratch header flat"
+            "タブ グループ リポジトリ git スクラッチ ヘッダー サイドバー フラット フォルダ ディレクトリ sidebar grouping tabs repo repository git scratch header flat folder directory"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "ダブルクリック 単語 url パス 選択 セマンティック 括弧 メール smart selection double click word url path bracket email"

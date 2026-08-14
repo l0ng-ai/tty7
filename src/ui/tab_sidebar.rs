@@ -1176,21 +1176,22 @@ impl Tty7App {
     }
 
     fn sidebar_group_keys(&self, cx: &gpui::App) -> Vec<Option<PathBuf>> {
-        let grouping = cx.global::<Config>().sidebar_grouping == SidebarGrouping::Repo;
+        let grouping = cx.global::<Config>().sidebar_grouping;
         self.tabs
             .iter()
             .map(|tab| {
-                if !grouping {
+                if grouping == SidebarGrouping::None {
                     return None;
                 }
                 let cwd = tab.pane.first_leaf().and_then(|leaf| {
                     let view = leaf.terminal()?.read(cx);
                     Some((view.host_id(), view.git_status_cwd()?.to_path_buf()))
                 });
-                if let Some(known) =
-                    cwd.and_then(|(id, cwd)| cx.global::<GitStatusCache>().known_repo_for(id, &cwd))
-                {
-                    *tab.sidebar_group.borrow_mut() = known;
+                if let Some((id, cwd)) = cwd {
+                    let known = cx.global::<GitStatusCache>().known_repo_for(id, &cwd);
+                    if let Some(group) = resolved_group(grouping, known, &cwd) {
+                        *tab.sidebar_group.borrow_mut() = group;
+                    }
                 }
                 tab.sidebar_group.borrow().clone()
             })
@@ -1220,8 +1221,9 @@ impl Tty7App {
     }
 
     /// Which group a tab about to be spawned in `cwd` belongs to, when the
-    /// repo probe for that directory has already landed. `Some(None)` means
-    /// the cache knows it is not a repo; a bare `None` means it never looked.
+    /// repo probe for that directory has already landed. A bare `None` means
+    /// the cache never looked; `Some(None)` means it knows the cwd is not in
+    /// a repo — Scratch, or the cwd itself under repo-or-directory grouping.
     ///
     /// A tab's group otherwise starts empty and only fills in once its shell
     /// has started and reported a cwd, which parks every new tab in the
@@ -1233,13 +1235,32 @@ impl Tty7App {
         cwd: Option<&Path>,
         cx: &gpui::App,
     ) -> Option<Option<PathBuf>> {
+        let cwd = cwd?;
         let host = self
             .window_workspace(cx)
             .as_ref()
             .map_or(crate::ui::host_ops::HostId::LOCAL, |ws| ws.target.host_id());
-        cx.try_global::<GitStatusCache>()?
-            .known_repo_for(host, cwd?)
+        let known = cx.try_global::<GitStatusCache>()?.known_repo_for(host, cwd);
+        resolved_group(cx.global::<Config>().sidebar_grouping, known, cwd)
     }
+}
+
+/// The group a probed cwd resolves to under `grouping`: the repo home when
+/// the cache found one, otherwise Scratch — or the cwd itself under
+/// repo-or-directory grouping, so a shell in a plain folder still gets a
+/// header. `known` is the cache's three-valued answer; a probe that never
+/// ran resolves to `None`, no decision, and the tab keeps whatever group it
+/// already has rather than bouncing through Scratch mid-probe.
+fn resolved_group(
+    grouping: SidebarGrouping,
+    known: Option<Option<PathBuf>>,
+    cwd: &Path,
+) -> Option<Option<PathBuf>> {
+    Some(match known? {
+        Some(root) => Some(root),
+        None if grouping == SidebarGrouping::RepoOrDirectory => Some(cwd.to_path_buf()),
+        None => None,
+    })
 }
 
 #[derive(Debug, PartialEq)]
@@ -1420,6 +1441,37 @@ mod tests {
         assert_eq!(diff_click_cwd::<PathBuf>(&cfg, None), None);
         cfg.sidebar_diff_preview = false;
         assert_eq!(diff_click_cwd::<PathBuf>(&cfg, None), None);
+    }
+
+    #[test]
+    fn a_probed_non_repo_groups_by_folder_only_in_the_fallback_mode() {
+        let cwd = p("/w/plain");
+        assert_eq!(
+            resolved_group(SidebarGrouping::RepoOrDirectory, Some(None), &cwd),
+            Some(Some(p("/w/plain")))
+        );
+        assert_eq!(
+            resolved_group(SidebarGrouping::Repo, Some(None), &cwd),
+            Some(None),
+            "under Repo a probed non-repo still falls to Scratch"
+        );
+        // Never probed: no decision in either mode, so the tab keeps the
+        // group it already has instead of bouncing through Scratch.
+        assert_eq!(resolved_group(SidebarGrouping::Repo, None, &cwd), None);
+        assert_eq!(
+            resolved_group(SidebarGrouping::RepoOrDirectory, None, &cwd),
+            None
+        );
+    }
+
+    #[test]
+    fn a_known_repo_home_wins_over_the_folder_in_both_modes() {
+        for mode in [SidebarGrouping::Repo, SidebarGrouping::RepoOrDirectory] {
+            assert_eq!(
+                resolved_group(mode, Some(Some(p("/w/repo"))), &p("/w/repo/sub")),
+                Some(Some(p("/w/repo")))
+            );
+        }
     }
 
     #[test]

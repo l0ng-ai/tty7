@@ -22,7 +22,10 @@ not its history — switching branches or `cd`-ing around inside a repository
 never moves a row out from under its header.
 
 **Settings → Window & Tabs → Sidebar grouping** switches between *By repo* (the
-default) and *Flat*.
+default), *By repo or folder*, and *Flat*. The default collects every non-repo
+tab in Scratch; *By repo or folder* groups those tabs under their working
+directory instead — for agents running in plain folders — leaving Scratch to
+tabs whose shell has not reported a directory yet.
 
 ## What a row tells you
 
@@ -52,9 +55,8 @@ they simply stop opening the overlay.
 ## Rearranging
 
 Drag a row to reorder it within its group, or drag a whole group header to move
-the group. A row cannot be dragged into a different group: with the default repo
-grouping a tab's group comes from its working directory, so `cd` is what moves
-it.
+the group. A row cannot be dragged into a different group: a tab's group comes
+from its working directory, so `cd` is what moves it.
 
 ## Naming
 

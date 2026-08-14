@@ -5726,7 +5726,8 @@ impl Tty7App {
         let sidebar_diff_preview = cfg.sidebar_diff_preview;
         let sidebar_grouping_idx = match cfg.sidebar_grouping {
             crate::core::config::SidebarGrouping::Repo => 0,
-            crate::core::config::SidebarGrouping::None => 1,
+            crate::core::config::SidebarGrouping::RepoOrDirectory => 1,
+            crate::core::config::SidebarGrouping::None => 2,
         };
         let notify_idx = match cfg.notify_on_command_finish {
             NotifyMode::Never => 0,
@@ -5837,14 +5838,18 @@ impl Tty7App {
             .into_any_element();
         let sidebar_grouping_radio = self.segmented(
             "wt-sidebar-grouping",
-            &[t(L10nKey::SettingsByRepo), t(L10nKey::SettingsFlat)],
+            &[
+                t(L10nKey::SettingsByRepo),
+                t(L10nKey::SettingsByRepoOrFolder),
+                t(L10nKey::SettingsFlat),
+            ],
             sidebar_grouping_idx,
             cx,
             |this, ix, _w, cx| {
-                let grouping = if ix == 0 {
-                    crate::core::config::SidebarGrouping::Repo
-                } else {
-                    crate::core::config::SidebarGrouping::None
+                let grouping = match ix {
+                    0 => crate::core::config::SidebarGrouping::Repo,
+                    1 => crate::core::config::SidebarGrouping::RepoOrDirectory,
+                    _ => crate::core::config::SidebarGrouping::None,
                 };
                 this.set_sidebar_grouping(grouping, cx);
             },

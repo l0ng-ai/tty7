@@ -473,7 +473,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsTabBarPositionDesc => "将标签页显示为顶部横向条或左侧垂直侧栏。",
         L10nKey::SettingsSidebarGrouping => "侧栏分组",
         L10nKey::SettingsSidebarGroupingDesc => {
-            "按 git 仓库在标题下对侧栏标签页分组，非仓库标签页放在“草稿”分组。仅适用于左侧栏。"
+            "按 git 仓库在标题下对侧栏标签页分组；非仓库标签页放在“草稿”分组，选“按仓库或文件夹”时则按其工作目录分组。仅适用于左侧栏。"
         }
         L10nKey::SettingsDiffPreviewFromCounts => "从侧栏计数打开 diff 预览",
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
@@ -496,6 +496,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsTop => "顶部",
         L10nKey::SettingsLeft => "左侧",
         L10nKey::SettingsByRepo => "按仓库",
+        L10nKey::SettingsByRepoOrFolder => "按仓库或文件夹",
         L10nKey::SettingsFlat => "平铺",
         L10nKey::SettingsPreset => "预设",
         L10nKey::SettingsPresetDesc => {
@@ -779,7 +780,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "显示托盘图标 托盘 菜单栏 状态 图标 show tray icon menu bar status"
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
-            "侧栏分组 标签页 分组 仓库 git 侧栏 sidebar grouping tabs repo repository"
+            "侧栏分组 标签页 分组 仓库 git 侧栏 文件夹 目录 sidebar grouping tabs repo repository folder directory"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "智能选择 双击 选择 单词 URL 路径 邮箱 括号 smart selection double click"

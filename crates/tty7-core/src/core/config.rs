@@ -407,6 +407,9 @@ pub enum WindowBackdrop {
 pub enum SidebarGrouping {
     #[default]
     Repo,
+    /// By repository where there is one; a tab whose cwd is known not to be
+    /// in a repo groups under that cwd instead of falling to Scratch.
+    RepoOrDirectory,
     None,
 }
 
@@ -1186,6 +1189,27 @@ mod tests {
         assert!(json.contains("\"sidebar_diff_preview\":false"), "persisted");
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.sidebar_diff_preview);
+    }
+
+    #[test]
+    fn sidebar_grouping_defaults_and_round_trips_leniently() {
+        assert_eq!(Config::default().sidebar_grouping, SidebarGrouping::Repo);
+
+        let text = serde_json::to_string(&Config {
+            sidebar_grouping: SidebarGrouping::RepoOrDirectory,
+            ..Config::default()
+        })
+        .unwrap();
+        assert!(text.contains("\"sidebar_grouping\":\"repo-or-directory\""));
+        let back: Config = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.sidebar_grouping, SidebarGrouping::RepoOrDirectory);
+
+        let flat: Config = serde_json::from_str(r#"{"sidebar_grouping":"none"}"#).unwrap();
+        assert_eq!(flat.sidebar_grouping, SidebarGrouping::None);
+
+        // Unknown values fall back to Repo instead of rejecting the whole config.
+        let lenient: Config = serde_json::from_str(r#"{"sidebar_grouping":"folders"}"#).unwrap();
+        assert_eq!(lenient.sidebar_grouping, SidebarGrouping::Repo);
     }
 
     #[test]

@@ -540,7 +540,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSidebarGrouping => "Sidebar grouping",
         L10nKey::SettingsSidebarGroupingDesc => {
-            "Group sidebar tabs under a header per git repository, with non-repo tabs in a Scratch section. Only applies to the left sidebar."
+            "Group sidebar tabs under a header per git repository. Non-repo tabs collect in a Scratch section, or under their working directory with By repo or folder. Only applies to the left sidebar."
         }
         L10nKey::SettingsDiffPreviewFromCounts => "Open diff preview from sidebar counts",
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
@@ -567,6 +567,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsTop => "Top",
         L10nKey::SettingsLeft => "Left",
         L10nKey::SettingsByRepo => "By repo",
+        L10nKey::SettingsByRepoOrFolder => "By repo or folder",
         L10nKey::SettingsFlat => "Flat",
         L10nKey::SettingsPreset => "Preset",
         L10nKey::SettingsPresetDesc => {
@@ -827,7 +828,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "tray menu bar status item agent attention system icon"
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
-            "tabs group repo repository git scratch header sidebar flat"
+            "tabs group repo repository git scratch header sidebar flat folder directory cwd"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "double click word url path select semantic bracket email"
