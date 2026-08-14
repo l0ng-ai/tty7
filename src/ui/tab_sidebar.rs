@@ -1222,8 +1222,9 @@ impl Tty7App {
 
     /// Which group a tab about to be spawned in `cwd` belongs to, when the
     /// repo probe for that directory has already landed. A bare `None` means
-    /// the cache never looked; `Some(None)` means it knows the cwd is not in
-    /// a repo — Scratch, or the cwd itself under repo-or-directory grouping.
+    /// the cache never looked; `Some` is the group [`resolved_group`] reached
+    /// — the repo home, the cwd itself under repo-or-directory grouping, or
+    /// `Some(None)` for Scratch.
     ///
     /// A tab's group otherwise starts empty and only fills in once its shell
     /// has started and reported a cwd, which parks every new tab in the

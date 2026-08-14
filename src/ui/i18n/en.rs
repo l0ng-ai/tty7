@@ -540,7 +540,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSidebarGrouping => "Sidebar grouping",
         L10nKey::SettingsSidebarGroupingDesc => {
-            "Group sidebar tabs under a header per git repository. Non-repo tabs collect in a Scratch section, or under their working directory with By repo or folder. Only applies to the left sidebar."
+            "Group sidebar tabs under a header per git repository. Non-repo tabs collect in a Scratch section, or under their working directory with \"By repo or folder\". Only applies to the left sidebar."
         }
         L10nKey::SettingsDiffPreviewFromCounts => "Open diff preview from sidebar counts",
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
