@@ -55,7 +55,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::Close => "关闭",
         L10nKey::QuitStopServerTitle => "退出并停止 server？",
         L10nKey::QuitStopServerBody => {
-            "这会退出 tty7 并停止后台 server，所有仍在运行的 shell 都会被终止。你的标签页和布局会被保留，下次启动时以全新的 shell 重新打开。（普通退出会保持 shell 运行。）"
+            "这会退出 tty7 并停止后台 server，所有仍在运行的 shell 都会被终止。你的标签页和布局会被保留，下次启动时以全新的 shell 重新打开。（关闭窗口只会把应用收起到托盘，shell 保持运行。）"
         }
         L10nKey::QuitAndStop => "退出并停止",
         L10nKey::CloseSshConnectionTitle => "关闭这个 SSH 连接？",

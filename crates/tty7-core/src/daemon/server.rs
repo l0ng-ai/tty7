@@ -527,7 +527,12 @@ fn report_conpty_host() {
 fn run_with(registry: Arc<Registry>) -> anyhow::Result<()> {
     crate::daemon::control::server_started();
 
-    if transport::endpoint_exists() {
+    // A stale daemon.port whose recorded daemon is gone cannot belong to a
+    // live server: skip the probe (which would pay the OS's refusal delay on
+    // the dead port) and let the bind below overwrite the file. A live
+    // recorded daemon still gets the connect — the singleton seat is held by
+    // this process, so it can only be a foreign server worth refusing.
+    if transport::endpoint_exists() && !crate::daemon::spawn::recorded_daemon_is_dead() {
         match transport::connect() {
             Ok(_) => {
                 anyhow::bail!(

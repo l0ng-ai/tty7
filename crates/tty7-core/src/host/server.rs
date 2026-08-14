@@ -1548,15 +1548,22 @@ mod wsock {
         // GUI-hosted control server does not report itself as freshly started.
         super::server_started();
         let path = control_endpoint_path()?;
-        if let Ok(live) = transport::connect_endpoint(CONTROL_PORT_FILE) {
-            drop(live);
-            return Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                format!(
-                    "a control server is already listening at {}",
-                    transport::endpoint_display_named(CONTROL_PORT_FILE)
-                ),
-            ));
+        // A control.port left by a dead daemon is stale: connecting to it
+        // would pay the OS's refusal delay for nothing. The pidfile says
+        // whether the daemon that wrote the port is still alive — when it is
+        // gone the port cannot hold a live control server, and the bind below
+        // simply overwrites the stale file.
+        if !crate::daemon::spawn::recorded_daemon_is_dead() {
+            if let Ok(live) = transport::connect_endpoint(CONTROL_PORT_FILE) {
+                drop(live);
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!(
+                        "a control server is already listening at {}",
+                        transport::endpoint_display_named(CONTROL_PORT_FILE)
+                    ),
+                ));
+            }
         }
         let (listener, token) =
             transport::bind_endpoint(CONTROL_PORT_FILE).map_err(io::Error::other)?;

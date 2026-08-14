@@ -61,7 +61,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::QuitStopServerBody => {
             "This quits tty7 and stops the background server — anything still running \
              in your shells is terminated. Your tabs and layout are kept and reopen with \
-             fresh shells next launch. (Plain Quit keeps shells running.)"
+             fresh shells next launch. (Closing the window only retires the app to the \
+             tray; the shells keep running.)"
         }
         L10nKey::QuitAndStop => "Quit and Stop",
         L10nKey::CloseSshConnectionTitle => "Close this SSH connection?",

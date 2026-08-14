@@ -429,8 +429,21 @@ mod imp_windows {
         connect_with_token(port, &token)
     }
 
+    /// How long a liveness connect may wait for the peer's TCP handshake.
+    ///
+    /// A live daemon on loopback completes it in well under a millisecond —
+    /// the kernel answers from the accept backlog, so even a busy daemon
+    /// connects instantly. The budget exists for the other direction: a stale
+    /// port file whose port now belongs to a filtered or firewall-dropped
+    /// socket must fail fast, or every cold start pays the OS's refusal delay
+    /// (seconds on some machines instead of the instant RST a closed loopback
+    /// port normally returns). Real clients never feel it: a daemon that
+    /// cannot answer a TCP handshake on loopback in half a second is not one
+    /// worth waiting for.
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
     fn connect_with_token(port: u16, token: &Token) -> io::Result<Stream> {
-        let mut stream = TcpStream::connect(loopback(port))?;
+        let mut stream = TcpStream::connect_timeout(&loopback(port), CONNECT_TIMEOUT)?;
         tune(&stream);
         stream.write_all(token)?;
         Ok(stream)

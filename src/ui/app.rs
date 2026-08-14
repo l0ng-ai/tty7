@@ -1242,10 +1242,17 @@ impl Tty7App {
                 app.update(cx, |app, cx| app.detach_workspace(cx));
             }
             if last_window {
-                cx.spawn(async move |cx| {
-                    let _ = cx.update(|cx| cx.quit());
-                })
-                .detach();
+                // With a tray icon, closing the last window retires to the
+                // tray: the daemon stays reachable (show / quit-and-stop)
+                // instead of being orphaned behind a dead icon. Without one
+                // the app quits — the only way it stays visible at all.
+                let retire_to_tray = cx.global::<Config>().show_tray_icon;
+                if !retire_to_tray {
+                    cx.spawn(async move |cx| {
+                        let _ = cx.update(|cx| cx.quit());
+                    })
+                    .detach();
+                }
             }
             true
         });
@@ -1576,8 +1583,10 @@ impl Tty7App {
                 surface_window(window, cx);
                 self.check_for_updates_now(window, cx);
             }
-            TrayAction::Quit => cx.quit(),
-            TrayAction::QuitStopSessions => self.quit_stop_sessions(window, cx),
+            // One exit path with one meaning: quit the app and stop the server
+            // (after the confirmation that protects running shells). Closing
+            // the window is the keep-everything exit — it retires to the tray.
+            TrayAction::Quit => self.quit_stop_sessions(window, cx),
         }
     }
 
@@ -4383,7 +4392,10 @@ impl Tty7App {
             OpenDocumentation => cx.open_url(DOCS_URL),
             OpenDiscord => cx.open_url(DISCORD_URL),
             ReportIssue => cx.open_url(ISSUES_URL),
-            Quit => cx.quit(),
+            // Same exit as the tray's: confirm, then stop the server with the
+            // app. A bare quit would leave the daemon orphaned behind a dead
+            // tray icon.
+            Quit => self.quit_stop_sessions(window, cx),
             RestartDaemon => self.restart_window_daemon(window, cx),
             ToggleSftp => self.toggle_sftp(window, cx),
             ShowSshForwards => self.show_ssh_forwards(window, cx),
@@ -6818,7 +6830,9 @@ impl Render for Tty7App {
                     }
                     this.editor_save_active(window, cx)
                 }))
-                .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
+                .on_action(
+                    cx.listener(|this, _: &Quit, window, cx| this.quit_stop_sessions(window, cx)),
+                )
                 .on_action(cx.listener(|this, _: &OpenSshProfiles, window, cx| {
                     this.open_settings_section(SettingsSection::Ssh, window, cx)
                 }))

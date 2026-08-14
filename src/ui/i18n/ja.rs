@@ -61,7 +61,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::Close => "閉じる",
         L10nKey::QuitStopServerTitle => "tty7 を終了してサーバーを停止しますか？",
         L10nKey::QuitStopServerBody => {
-            "tty7 を終了してバックグラウンドサーバーを停止します。シェルで実行中のものはすべて終了します。タブとレイアウトは保持され、次回起動時に新しいシェルで開きます。通常の終了ではシェルは動き続けます。"
+            "tty7 を終了してバックグラウンドサーバーを停止します。シェルで実行中のものはすべて終了します。タブとレイアウトは保持され、次回起動時に新しいシェルで開きます。ウィンドウを閉じただけではアプリはトレイに退避し、シェルは動き続けます。"
         }
         L10nKey::QuitAndStop => "終了して停止",
         L10nKey::CloseSshConnectionTitle => "この SSH 接続を閉じますか？",

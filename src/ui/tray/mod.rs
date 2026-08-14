@@ -14,16 +14,17 @@ use std::sync::Mutex;
 use crate::core::cli_agent::AgentStatus;
 use crate::core::config::{Config, NotifyMode};
 use crate::ui::i18n::{L10nKey, t};
-use gpui::App;
+use gpui::{App, AppContext};
 
 const POLL: std::time::Duration = std::time::Duration::from_millis(1000);
 
 /// Handed out to callers that live outside the UI thread — notification click
 /// handlers, which run on a platform callback thread and can only enqueue.
 ///
-/// `init` runs again whenever the window count drops to zero and comes back, so
-/// this has to be replaceable: holding the first channel forever would keep its
-/// (long dead) dispatch loop alive and send later clicks nowhere.
+/// The dispatch loop is created once, for the whole process. A window can be
+/// built and retired many times (the tray keeps the app alive windowless), so
+/// the channel must survive as long as the app does — it does, because the
+/// loop outlives every window.
 static SENDER: Mutex<Option<smol::channel::Sender<TrayAction>>> = Mutex::new(None);
 
 /// A sender for the current tray dispatch loop, if one is running.
@@ -42,7 +43,6 @@ pub(crate) enum TrayAction {
     OpenSettings,
     CheckForUpdates,
     Quit,
-    QuitStopSessions,
 }
 
 pub(crate) fn urgency(status: AgentStatus) -> u8 {
@@ -178,11 +178,9 @@ pub(crate) fn menu_spec(snap: &TraySnapshot) -> Vec<SpecItem> {
     items.push(item("settings", t(L10nKey::AppMenuSettings)));
     items.push(item("updates", t(L10nKey::AppMenuCheckForUpdates)));
     items.push(SpecItem::Separator);
+    // One exit path with one meaning: quit the app and stop the server. The
+    // window-close button is the keep-everything exit — it retires to the tray.
     items.push(item("quit", t(L10nKey::AppMenuQuit)));
-    items.push(item(
-        "quit-stop",
-        crate::ui::i18n::t(crate::ui::i18n::L10nKey::TrayQuitStopServer),
-    ));
     items
 }
 
@@ -192,7 +190,6 @@ pub(crate) fn action_from_id(id: &str) -> Option<TrayAction> {
         "settings" => Some(TrayAction::OpenSettings),
         "updates" => Some(TrayAction::CheckForUpdates),
         "quit" => Some(TrayAction::Quit),
-        "quit-stop" => Some(TrayAction::QuitStopSessions),
         "notify:always" => Some(TrayAction::SetNotifyMode(NotifyMode::Always)),
         "notify:unfocused" => Some(TrayAction::SetNotifyMode(NotifyMode::Unfocused)),
         "notify:never" => Some(TrayAction::SetNotifyMode(NotifyMode::Never)),
@@ -283,7 +280,6 @@ mod tests {
                 t(L10nKey::AppMenuSettings),
                 t(L10nKey::AppMenuCheckForUpdates),
                 t(L10nKey::AppMenuQuit),
-                t(L10nKey::TrayQuitStopServer),
             ]
         );
         assert!(
@@ -330,8 +326,26 @@ fn dispatch(action: TrayAction, cx: &mut App) {
     .or_else(|| WindowRegistry::most_recent(cx));
 
     let Some(workspace) = target else {
-        if matches!(action, TrayAction::Quit) {
-            cx.quit();
+        // No window on screen. The tray is then the app's only presence, so
+        // every action either works windowless or brings a window back first.
+        match action {
+            TrayAction::Quit => {
+                // Nothing to prompt on: the confirmation exists to ask whether
+                // the panes behind a window should end, and there is no window.
+                cx.spawn(async move |cx| {
+                    cx.background_spawn(async { crate::daemon::spawn::stop() })
+                        .await;
+                    let _ = cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+            // ShowWindow and the rest: restore the most recent workspace the
+            // way a pathless launch would, then drop the action — the window
+            // that just came back can be asked again.
+            _ => {
+                let restore = crate::ui::windows::restore_target(cx, None);
+                crate::ui::windows::open_at(cx, restore.map(|(id, _)| id), None);
+            }
         }
         return;
     };
@@ -349,6 +363,16 @@ fn dispatch(action: TrayAction, cx: &mut App) {
 }
 
 pub(crate) fn init(cx: &mut App) {
+    // One tray per process. Every window's constructor calls this, and the
+    // tray-persist flow builds and retires windows without the app ever
+    // exiting — a second backend loop here would add a second icon that the
+    // window close cannot remove. The channel and both loops are created
+    // exactly once; later calls must not touch them.
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
+
     let (tx, rx) = smol::channel::unbounded::<TrayAction>();
     if let Ok(mut slot) = SENDER.lock() {
         *slot = Some(tx.clone());
@@ -377,6 +401,14 @@ pub(crate) fn init(cx: &mut App) {
                 shown = None;
                 attempts = 0;
                 cooldown = 0;
+                // Closing the last window only keeps the app alive because the
+                // tray is its window. If the icon is turned off while no
+                // window is up (a config edit is the only way there), staying
+                // would leave an invisible process that can never be reached.
+                if cx.update(|cx| crate::ui::windows::WindowRegistry::count(cx)) == 0 {
+                    let _ = cx.update(|cx| cx.quit());
+                    continue;
+                }
                 continue;
             }
             if backend.is_none() && attempts < MAX_ATTEMPTS {
