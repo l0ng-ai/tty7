@@ -354,7 +354,12 @@ impl PaneSeed {
         }
     }
 
-    fn into_record(self, live: bool) -> PaneRecord {
+    /// The record `register_pane` mints for this seed. Public because the
+    /// window that pushed the seed mirrors the machine's tree, and this
+    /// record reaches it in nothing it is sent — a client is left out of the
+    /// deltas its own ops raise — so it puts the same record in its mirror
+    /// itself (#612).
+    pub fn into_record(self, live: bool) -> PaneRecord {
         PaneRecord {
             id: self.pane,
             cwd: self.cwd,

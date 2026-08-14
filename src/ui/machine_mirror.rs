@@ -111,6 +111,29 @@ impl MachineMirrors {
         ws.active_tab = active;
     }
 
+    /// Records for the panes this window itself seeded into the machine.
+    ///
+    /// A window is left out of the deltas its own ops raise, and `TabCreated`
+    /// carries no pane record for anyone anyway, so the record the machine
+    /// mints for a pane this window created reaches it in nothing it is sent.
+    /// `PaneFacts` only close that gap when a fact changes, and a pane spawned
+    /// into its cwd and left at the prompt never changes one — the mirror held
+    /// tabs full of panes it knew nothing about, the window's own workspace
+    /// answered no subject path, an unnamed one read "Untitled" (#612). The
+    /// window knows what it seeded, so it records that itself. Insert only: a
+    /// record already here came from the machine — a pull, a rider on
+    /// `TabRestructured`, `PaneFacts` — and outranks what a seed knows.
+    pub fn note_seeded_panes(cx: &mut App, host: HostId, records: Vec<PaneRecord>) {
+        let Some(machine) = cx.default_global::<Self>().machines.get_mut(&host) else {
+            return;
+        };
+        for record in records {
+            if !machine.panes.iter().any(|p| p.id == record.id) {
+                machine.panes.push(record);
+            }
+        }
+    }
+
     /// The name the machine has for a workspace, from a pull that saw it.
     ///
     /// A window is left out of the deltas its own ops raise, so the name it
@@ -414,7 +437,7 @@ pub fn pane_count(cx: &App, entry: &crate::core::session::WindowView) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use tty7_core::core::machine::{Axis, PaneNode, Tab, TabId};
+    use tty7_core::core::machine::{Axis, PaneNode, PaneSeed, Tab, TabId};
 
     use super::*;
 
@@ -534,6 +557,108 @@ mod tests {
             assert_eq!(display_name(cx, &entry).as_deref(), Some("verify-main"));
             MachineMirrors::note_workspace_name(cx, HostId::LOCAL, id, None);
             assert_eq!(display_name(cx, &entry).as_deref(), Some("verify-main"));
+        });
+    }
+
+    /// #612: the deltas that carry a pane's record — `TabRestructured`'s
+    /// rider, `PaneFacts` on a change; `TabCreated` carries none at all —
+    /// reach every window but the one whose op raised them. The window seeded
+    /// the pane, so it records what it seeded; the full tree a rebuild pulls
+    /// then says the same thing and nothing on screen moves. Until it did,
+    /// the window's own workspace answered no subject path: an unnamed one
+    /// read "Untitled", and saving geometry stamped a null subject over what
+    /// views.json remembered.
+    #[gpui::test]
+    fn a_seeded_pane_reads_the_same_before_and_after_a_full_pull(cx: &mut gpui::TestAppContext) {
+        use crate::core::session::{WindowView, WindowViews, WorkspaceStore};
+
+        cx.update(|cx| {
+            let entry = WindowView::default();
+            let id = entry.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![entry.clone()],
+                    active: None,
+                },
+            );
+
+            // What the window knows the moment it pushes its first tab: the
+            // tab it made, and the seed it sent along.
+            MachineMirrors::install(cx, HostId::LOCAL, Machine::default());
+            MachineMirrors::note_synced_workspace(cx, HostId::LOCAL, id, vec![leaf_tab(1)], None);
+            let seeded = PaneSeed {
+                cwd: Some("/work/verify-main".into()),
+                ..PaneSeed::bare(1)
+            }
+            .into_record(true);
+            MachineMirrors::note_seeded_panes(cx, HostId::LOCAL, vec![seeded.clone()]);
+            assert_eq!(display_name(cx, &entry).as_deref(), Some("verify-main"));
+            assert_eq!(
+                subject_path(cx, &entry).as_deref(),
+                Some("/work/verify-main")
+            );
+
+            // The rebuild, pulling the whole tree: the same answer.
+            MachineMirrors::install(
+                cx,
+                HostId::LOCAL,
+                Machine {
+                    workspaces: vec![Workspace {
+                        id,
+                        tabs: vec![leaf_tab(1)],
+                        ..Workspace::default()
+                    }],
+                    panes: vec![seeded],
+                },
+            );
+            assert_eq!(display_name(cx, &entry).as_deref(), Some("verify-main"));
+            assert_eq!(
+                subject_path(cx, &entry).as_deref(),
+                Some("/work/verify-main")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_seed_fills_only_the_records_the_mirror_lacks(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            // Facts the machine broadcast before the sync write got here: a
+            // reported title, a deeper cwd. The seed's flat idea of the pane
+            // must not roll them back.
+            let facts = PaneRecord {
+                cwd: Some("/work/deeper".into()),
+                osc_title: Some("me@host:~/work/deeper".into()),
+                live: true,
+                ..PaneRecord::new(1)
+            };
+            MachineMirrors::install(
+                cx,
+                HostId::LOCAL,
+                Machine {
+                    workspaces: Vec::new(),
+                    panes: vec![facts.clone()],
+                },
+            );
+            let known = PaneSeed {
+                cwd: Some("/work".into()),
+                ..PaneSeed::bare(1)
+            }
+            .into_record(false);
+            let fresh = PaneSeed {
+                cwd: Some("/work/api".into()),
+                ..PaneSeed::bare(2)
+            }
+            .into_record(true);
+            MachineMirrors::note_seeded_panes(cx, HostId::LOCAL, vec![known, fresh]);
+            let machine = MachineMirrors::machine(cx, HostId::LOCAL).expect("installed");
+            assert_eq!(machine.panes.len(), 2);
+            assert_eq!(
+                machine.panes[0], facts,
+                "what the machine said outranks the seed"
+            );
+            assert_eq!(machine.panes[1].cwd.as_deref(), Some("/work/api"));
+            assert!(machine.panes[1].live);
         });
     }
 
