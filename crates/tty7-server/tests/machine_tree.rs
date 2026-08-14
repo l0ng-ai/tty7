@@ -131,6 +131,21 @@ fn the_server_advertises_the_machine_tree() {
 }
 
 #[test]
+fn the_server_advertises_the_pane_daemons_features() {
+    let dir = data_dir();
+    let client = connect(dir.path(), "pane-cap");
+    assert!(
+        client
+            .peer_features
+            .iter()
+            .any(|f| f == tty7_core::daemon::protocol::FEATURE_RESIZE_ECHO),
+        "a remote client learns what this machine's panes do from this hello and \
+         nowhere else — without the name it reflows at request time forever: {:?}",
+        client.peer_features
+    );
+}
+
+#[test]
 fn the_tree_is_built_by_operations_and_lives_in_the_servers_file() {
     let dir = data_dir();
     let client = connect(dir.path(), "ops");
