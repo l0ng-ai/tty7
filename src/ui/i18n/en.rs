@@ -1340,6 +1340,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherTabsAfterOpening => "Open this workspace to see its tabs.",
         L10nKey::SwitcherOpenToManage => "Open this workspace to rename or stop it.",
         L10nKey::SwitcherConnectToUse => "Connect to this machine to open a workspace on it.",
+        L10nKey::SwitcherMachinesNoWorkspace => "Machines with no workspace yet",
         L10nKey::SwitcherOrphanPanes => {
             "Background panes — shells still running outside any window:"
         }

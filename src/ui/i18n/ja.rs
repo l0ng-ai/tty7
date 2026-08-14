@@ -1373,6 +1373,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherTabsAfterOpening => "このワークスペースを開くとタブが表示されます",
         L10nKey::SwitcherOpenToManage => "このワークスペースを開くと名前の変更や停止ができます",
         L10nKey::SwitcherConnectToUse => "このマシンに接続するとワークスペースを作成できます",
+        L10nKey::SwitcherMachinesNoWorkspace => "ワークスペースがまだないマシン",
         L10nKey::SwitcherOrphanPanes => {
             "バックグラウンドペイン — どのウィンドウにも属さずに実行中のシェル:"
         }

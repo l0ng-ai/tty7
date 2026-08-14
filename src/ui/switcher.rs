@@ -32,6 +32,12 @@ const FORM_LIST_H: f32 = 8.5 * (ROW_H + 8.0);
 
 const LEFT_W: f32 = 340.0;
 
+/// How many not-yet-used machines a search offers. This box sits under the
+/// workspace list and is an answer to "the machine you meant is configured but
+/// has nothing on it yet" — a long list of them would push the workspaces the
+/// query actually matched off the screen.
+const MAX_UNLISTED_HOSTS: usize = 5;
+
 pub(crate) const CARD_TOP: f32 = 120.0;
 
 /// Breathing room the card keeps from the window edge, and the height its own
@@ -343,6 +349,17 @@ fn flatten(groups: &[Group], query: &str) -> Vec<Nav> {
             .then_with(|| a.name.cmp(&b.name))
     });
     nav
+}
+
+/// Of the machines a query matched, the ones the workspace list does not
+/// already show — capped, because this box sits under the workspaces the query
+/// actually matched and must not push them off the screen.
+fn hosts_without_workspaces(matched: Vec<HostChoice>, listed: &[String]) -> Vec<HostChoice> {
+    matched
+        .into_iter()
+        .filter(|h| !listed.contains(&h.target.to_string()))
+        .take(MAX_UNLISTED_HOSTS)
+        .collect()
 }
 
 /// One line of the create form's host dropdown.
@@ -1636,7 +1653,8 @@ impl Tty7App {
             let group = &layout.groups[g];
             list = list.child(self.render_row(group, &group.rows[r], picked, Some(at), cx));
         }
-        if layout.nav.is_empty() {
+        let unlisted = self.unlisted_hosts(&sw.text(cx), cx);
+        if layout.nav.is_empty() && unlisted.is_empty() {
             list = list.child(
                 div()
                     .px(px(ROW_PAD))
@@ -1645,6 +1663,9 @@ impl Tty7App {
                     .text_color(cx.theme().muted_foreground)
                     .child(t(L10nKey::SwitcherNoMatch)),
             );
+        }
+        if !unlisted.is_empty() {
+            list = list.child(self.render_unlisted_hosts(unlisted, cx));
         }
         // Orphan panes belong to the machine, not to a workspace, so they are
         // not rows and join no navigation — the bottom of the workspace list
@@ -2005,6 +2026,100 @@ impl Tty7App {
 
     /// The orphan block under the local group (#596): one line per pane no
     /// window holds — id, owner, where it runs — and the way to stop it.
+    /// Machines the query matched that have no workspace yet.
+    ///
+    /// The search box says it looks through "workspaces, tabs, and machines",
+    /// and a machine only became findable once it *had* a workspace — so
+    /// searching for the box you are about to set up found nothing, and the way
+    /// in was New Workspace… and its dropdown, which you had to already know
+    /// about. These rows lead there with the host chosen.
+    ///
+    /// Outside the navigation, like the orphan-pane box under them (#596): they
+    /// are not workspaces, and Enter belongs to the workspace the cursor is on.
+    fn unlisted_hosts(&self, query: &str, cx: &gpui::App) -> Vec<HostChoice> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let listed: Vec<String> = WorkspaceStore::all(cx)
+            .views
+            .iter()
+            .filter_map(|w| w.host.as_ref().map(|r| r.target.to_string()))
+            .collect();
+        let hosts = remote_connect::available_hosts(cx);
+        hosts_without_workspaces(remote_connect::filter_hosts(&hosts, query), &listed)
+    }
+
+    fn render_unlisted_hosts(
+        &self,
+        hosts: Vec<HostChoice>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let sf = rungs(cx);
+        let hover = gpui::rgb(sf.hover);
+        let mut list = v_flex().gap(px(1.));
+        for host in hosts {
+            let label = host.label.clone();
+            let detail = host.detail.clone();
+            let key = gpui::SharedString::from(format!("switcher-host:{}", host.target));
+            list = list.child(
+                h_flex()
+                    .id(key)
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(6.))
+                    .py(px(3.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .hover(move |r| r.bg(hover))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(gpui::rgb(crate::ui::tab_strip::UNKNOWN_DOT)),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(theme.foreground)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(detail),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.switcher_to_form(Some(host.clone()), window, cx)
+                    })),
+            );
+        }
+        v_flex()
+            .gap(px(4.))
+            .mx(px(4.))
+            .mt(px(6.))
+            .mb(px(2.))
+            .px(px(10.))
+            .py(px(8.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(t(L10nKey::SwitcherMachinesNoWorkspace)),
+            )
+            .child(list)
+    }
+
     fn render_orphan_panes(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let Some(switcher) = self.switcher.as_ref() else {
@@ -3247,6 +3362,44 @@ fn glyph_col(w: f32, child: impl IntoElement) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The search box says it looks through "workspaces, tabs, and machines",
+    /// and a machine only became findable once it had a workspace — so
+    /// searching for the box you were about to set up found nothing. What it
+    /// must *not* do is repeat the machines the list above it is already
+    /// showing.
+    #[test]
+    fn only_the_machines_the_workspace_list_is_not_already_showing() {
+        let host = |alias: &str| HostChoice {
+            target: RemoteTarget::Alias {
+                alias: alias.into(),
+            },
+            label: alias.into(),
+            detail: format!("me@{alias}"),
+        };
+        let listed = vec![
+            RemoteTarget::Alias {
+                alias: "devbox".into(),
+            }
+            .to_string(),
+        ];
+
+        let out = hosts_without_workspaces(vec![host("devbox"), host("gpu")], &listed);
+        assert_eq!(
+            out.iter().map(|h| h.label.as_str()).collect::<Vec<_>>(),
+            vec!["gpu"],
+            "devbox already has a row of its own above this box"
+        );
+
+        let many: Vec<HostChoice> = (0..MAX_UNLISTED_HOSTS + 3)
+            .map(|i| host(&format!("box{i}")))
+            .collect();
+        assert_eq!(
+            hosts_without_workspaces(many, &[]).len(),
+            MAX_UNLISTED_HOSTS,
+            "the box must not push the matched workspaces off the screen"
+        );
+    }
 
     /// A wrong hostname or a stale password used to be fixable only by
     /// finding the same machine again in Settings (#438). The machine is on
