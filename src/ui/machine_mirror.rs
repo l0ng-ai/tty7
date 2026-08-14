@@ -8,10 +8,25 @@ use tty7_core::host::HostId;
 use crate::core::session::WorkspaceId;
 use crate::ui::i18n::{L10nKey, t};
 
+/// A write a window made to its own mirror, kept for as long as a pull that
+/// was already on its way when it happened has still to land.
+type MirrorWrite = Box<dyn Fn(&mut Machine)>;
+
 #[derive(Default)]
 pub struct MachineMirrors {
     machines: HashMap<HostId, Machine>,
     pulling: Vec<HostId>,
+    /// What this client wrote into a mirror while a pull of it was in flight.
+    ///
+    /// The tree a `MachineGet` answers is authoritative for everything the
+    /// machine knew when it built it — and what it did not know is exactly the
+    /// ops a window has just pushed, since a client is left out of the deltas
+    /// its own ops raise. The write here is the only copy of those there is,
+    /// and a pull dispatched before it and installed after it took that copy
+    /// away: the seeded pane records and the pushed tabs went missing again,
+    /// by another route (#612, #604). Replayed on top of the tree that lands,
+    /// in the order they were made.
+    since_pull: HashMap<HostId, Vec<MirrorWrite>>,
 }
 
 impl Global for MachineMirrors {}
@@ -34,11 +49,9 @@ impl MachineMirrors {
             }
             crate::ui::tree_sync::TreeLink::Down => return,
         };
-        let mirrors = cx.default_global::<Self>();
-        if mirrors.pulling.contains(&host) {
+        if !Self::start_pull(cx, host) {
             return;
         }
-        mirrors.pulling.push(host);
         cx.spawn(async move |cx| {
             let pulled = cx
                 .background_executor()
@@ -56,16 +69,63 @@ impl MachineMirrors {
                     }
                 })
                 .await;
-            cx.update(|cx| {
-                let mirrors = cx.default_global::<Self>();
-                mirrors.pulling.retain(|h| *h != host);
-                if let Some(machine) = pulled {
-                    mirrors.machines.insert(host, *machine);
-                    cx.refresh_windows();
-                }
-            });
+            cx.update(|cx| Self::finish_pull(cx, host, pulled.map(|machine| *machine)));
         })
         .detach();
+    }
+
+    /// Claims the one pull a host is allowed to have on its way, and starts
+    /// keeping what this client writes until it lands. `false` if a pull is
+    /// already running: its answer is as fresh as this one's would have been.
+    fn start_pull(cx: &mut App, host: HostId) -> bool {
+        let mirrors = cx.default_global::<Self>();
+        if mirrors.pulling.contains(&host) {
+            return false;
+        }
+        mirrors.pulling.push(host);
+        mirrors.since_pull.entry(host).or_default();
+        true
+    }
+
+    /// Installs a pulled tree, and replays over it what this client wrote
+    /// while it was on its way.
+    ///
+    /// The tree wins on everything it speaks about: it is the machine's own
+    /// answer, and a mirror that kept its older values over it would be
+    /// resurrecting what a pane's death or another window's op had settled.
+    /// What it cannot speak about is an op that had not reached the machine
+    /// when it was built — the window's own, whose deltas never come back to
+    /// it. Those writes go on top: against a tree that turned out to hold
+    /// them anyway each one is a no-op, since the seeded records insert only
+    /// and the tabs are the tabs the window pushed.
+    fn finish_pull(cx: &mut App, host: HostId, pulled: Option<Machine>) {
+        let mirrors = cx.default_global::<Self>();
+        mirrors.pulling.retain(|h| *h != host);
+        let since = mirrors.since_pull.remove(&host).unwrap_or_default();
+        let Some(machine) = pulled else {
+            return;
+        };
+        mirrors.machines.insert(host, machine);
+        let machine = mirrors.machines.get_mut(&host).expect("just inserted");
+        for write in since {
+            write(machine);
+        }
+        cx.refresh_windows();
+    }
+
+    /// Writes into a mirror what a window knows about its own machine, and
+    /// keeps the write for a pull already on its way (see [`Self::finish_pull`]).
+    ///
+    /// A mirror that is not here yet is no reason to drop the write: the pull
+    /// that will install it is the very one the write has to survive.
+    fn write(cx: &mut App, host: HostId, edit: impl Fn(&mut Machine) + 'static) {
+        let mirrors = cx.default_global::<Self>();
+        if let Some(machine) = mirrors.machines.get_mut(&host) {
+            edit(machine);
+        }
+        if let Some(since) = mirrors.since_pull.get_mut(&host) {
+            since.push(Box::new(edit));
+        }
     }
 
     pub fn install(cx: &mut App, host: HostId, machine: Machine) {
@@ -94,21 +154,20 @@ impl MachineMirrors {
         tabs: Vec<Tab>,
         active: Option<TabId>,
     ) {
-        let Some(machine) = cx.default_global::<Self>().machines.get_mut(&host) else {
-            return;
-        };
-        let ws = match machine.workspaces.iter_mut().find(|w| w.id == machine_ws) {
-            Some(ws) => ws,
-            None => {
-                machine.workspaces.push(Workspace {
-                    id: machine_ws,
-                    ..Workspace::default()
-                });
-                machine.workspaces.last_mut().expect("just pushed")
-            }
-        };
-        ws.tabs = tabs;
-        ws.active_tab = active;
+        Self::write(cx, host, move |machine| {
+            let ws = match machine.workspaces.iter_mut().find(|w| w.id == machine_ws) {
+                Some(ws) => ws,
+                None => {
+                    machine.workspaces.push(Workspace {
+                        id: machine_ws,
+                        ..Workspace::default()
+                    });
+                    machine.workspaces.last_mut().expect("just pushed")
+                }
+            };
+            ws.tabs = tabs.clone();
+            ws.active_tab = active;
+        });
     }
 
     /// Records for the panes this window itself seeded into the machine.
@@ -124,14 +183,13 @@ impl MachineMirrors {
     /// record already here came from the machine — a pull, a rider on
     /// `TabRestructured`, `PaneFacts` — and outranks what a seed knows.
     pub fn note_seeded_panes(cx: &mut App, host: HostId, records: Vec<PaneRecord>) {
-        let Some(machine) = cx.default_global::<Self>().machines.get_mut(&host) else {
-            return;
-        };
-        for record in records {
-            if !machine.panes.iter().any(|p| p.id == record.id) {
-                machine.panes.push(record);
+        Self::write(cx, host, move |machine| {
+            for record in &records {
+                if !machine.panes.iter().any(|p| p.id == record.id) {
+                    machine.panes.push(record.clone());
+                }
             }
-        }
+        });
     }
 
     /// The name the machine has for a workspace, from a pull that saw it.
@@ -148,20 +206,21 @@ impl MachineMirrors {
         machine_ws: WorkspaceId,
         name: Option<String>,
     ) {
-        let Some(machine) = cx.default_global::<Self>().machines.get_mut(&host) else {
-            return;
-        };
-        if let Some(ws) = machine.workspaces.iter_mut().find(|w| w.id == machine_ws) {
-            ws.name = name;
-        }
+        Self::write(cx, host, move |machine| {
+            if let Some(ws) = machine.workspaces.iter_mut().find(|w| w.id == machine_ws) {
+                ws.name = name.clone();
+            }
+        });
         cx.refresh_windows();
     }
 
     pub fn note_workspace_op(cx: &mut App, host: HostId, request: &ControlRequest) {
-        let Some(machine) = cx.default_global::<Self>().machines.get_mut(&host) else {
-            return;
-        };
-        match request {
+        let request = request.clone();
+        // Read now rather than inside the write: a replay of the touch is the
+        // same touch, and it should not creep forward to the moment a pull
+        // happened to land.
+        let touched = crate::ui::home::now_secs();
+        Self::write(cx, host, move |machine| match &request {
             ControlRequest::WorkspaceRename { workspace, name } => {
                 if let Some(ws) = machine.workspaces.iter_mut().find(|w| w.id == *workspace) {
                     ws.name = name.clone();
@@ -169,14 +228,14 @@ impl MachineMirrors {
             }
             ControlRequest::WorkspaceTouch { workspace } => {
                 if let Some(ws) = machine.workspaces.iter_mut().find(|w| w.id == *workspace) {
-                    ws.last_active = crate::ui::home::now_secs();
+                    ws.last_active = touched;
                 }
             }
             ControlRequest::WorkspaceRemove { workspace } => {
                 machine.workspaces.retain(|w| w.id != *workspace);
             }
             _ => {}
-        }
+        });
     }
 }
 
@@ -667,6 +726,101 @@ mod tests {
             );
             assert_eq!(machine.panes[1].cwd.as_deref(), Some("/work/api"));
             assert!(machine.panes[1].live);
+        });
+    }
+
+    /// #612 by its other route: a `MachineGet` already on its way when the
+    /// window wrote down what it had just pushed was built before that push,
+    /// and landing it whole put the mirror back to a tree that has never heard
+    /// of the tab or the pane — the same workspace answering no subject path,
+    /// with no later op to write it down again. What the window pushed goes
+    /// back on top of the tree that lands; what that tree does say still
+    /// outranks it; and once it has landed the writes are spent.
+    #[gpui::test]
+    fn a_pull_already_on_its_way_lands_under_what_the_window_pushed(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            // Nothing pulled yet, which is where a window that opens with its
+            // machine's link coming up starts: the pull below is the one that
+            // will install this mirror at all.
+            let id = WorkspaceId::new();
+            assert!(MachineMirrors::start_pull(cx, HostId::LOCAL));
+
+            // What the window pushes while that pull is on its way: a tab of
+            // its own, and the seeds behind the panes in it.
+            let pushed = leaf_tab(5);
+            MachineMirrors::note_synced_workspace(
+                cx,
+                HostId::LOCAL,
+                id,
+                vec![pushed.clone()],
+                None,
+            );
+            let seeded = |pane, cwd: &str| {
+                PaneSeed {
+                    cwd: Some(cwd.into()),
+                    ..PaneSeed::bare(pane)
+                }
+                .into_record(true)
+            };
+            MachineMirrors::note_seeded_panes(
+                cx,
+                HostId::LOCAL,
+                vec![seeded(5, "/work/verify-main"), seeded(6, "/work")],
+            );
+
+            // The tree the machine built before any of that: an older tab, and
+            // a pane 6 it has since watched move on. Pane 5 it has never seen.
+            MachineMirrors::finish_pull(
+                cx,
+                HostId::LOCAL,
+                Some(Machine {
+                    workspaces: vec![Workspace {
+                        id,
+                        tabs: vec![leaf_tab(4)],
+                        ..Workspace::default()
+                    }],
+                    panes: vec![PaneRecord {
+                        cwd: Some("/work/deeper".into()),
+                        osc_title: Some("me@host:~/work/deeper".into()),
+                        live: true,
+                        ..PaneRecord::new(6)
+                    }],
+                }),
+            );
+
+            let machine = MachineMirrors::machine(cx, HostId::LOCAL).expect("the pull installed");
+            assert_eq!(
+                machine.workspaces[0].tabs,
+                vec![pushed],
+                "the tabs the window pushed are not rolled back by a tree older than them"
+            );
+            let cwd_of = |pane: u64| {
+                machine
+                    .panes
+                    .iter()
+                    .find(|p| p.id == pane)
+                    .and_then(|p| p.cwd.clone())
+            };
+            assert_eq!(
+                cwd_of(5).as_deref(),
+                Some("/work/verify-main"),
+                "and the record for the pane it seeded is still the only one there is"
+            );
+            assert_eq!(
+                cwd_of(6).as_deref(),
+                Some("/work/deeper"),
+                "while a pane the machine did speak about keeps what it said"
+            );
+
+            // Spent: the next pull is the machine's own word, with nothing of
+            // the window's replayed under it a second time.
+            assert!(MachineMirrors::start_pull(cx, HostId::LOCAL));
+            MachineMirrors::finish_pull(cx, HostId::LOCAL, Some(Machine::default()));
+            let machine = MachineMirrors::machine(cx, HostId::LOCAL).expect("installed");
+            assert!(
+                machine.workspaces.is_empty() && machine.panes.is_empty(),
+                "a tree that has dropped them says so: {machine:?}"
+            );
         });
     }
 
