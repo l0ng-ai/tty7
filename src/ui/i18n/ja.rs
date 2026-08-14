@@ -461,7 +461,14 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsBellModeBoth => "点滅 + 音声",
         L10nKey::SettingsPrompt => "プロンプト",
         L10nKey::SettingsPromptIntro => {
-            "シェルプロンプトに表示する tty7 独自のメニュー。オフにするとキーはシェルに渡されます"
+            "シェルプロンプトでの tty7 独自のエディターとメニュー。オフにするとその分がシェルに渡されます"
+        }
+        L10nKey::SettingsPromptEditor => "プロンプトエディター",
+        L10nKey::SettingsPromptEditorDesc => {
+            "シェルプロンプトで入力する行を tty7 が持ちます — 選択、取り消し、そして下のメニュー。オフにすると、プロンプトでのキー、IME の確定、貼り付けはすべてシェルへ直接渡り、シェル自身の行エディター（zsh の ZLE、readline、fish）が編集を担当するため、そこでバインドしたキーがそのまま動きます。どちらの場合もシェル統合は有効なままです"
+        }
+        L10nKey::SettingsNeedsPromptEditor => {
+            "プロンプトエディターが必要です。オフの間、このキーはすでにシェルのものです"
         }
         L10nKey::SettingsTabCompletion => "タブ補完",
         L10nKey::SettingsTabCompletionDesc => {
@@ -886,6 +893,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchLegiblePaletteKeywords => {
             "可読 コントラスト 明色 パレット パラメーター 修正 legible bright contrast palette parameter"
+        }
+        L10nKey::SettingsSearchPromptEditorKeywords => {
+            "プロンプト エディター ネイティブ シェル 入力 行編集 キーバインド 貼り付け prompt editor native shell input zle readline"
         }
         L10nKey::SettingsSearchTabBarPositionKeywords => {
             "タブ 垂直 サイドバー 左 上 レイアウト レール tab bar position tabs vertical sidebar left top rail"

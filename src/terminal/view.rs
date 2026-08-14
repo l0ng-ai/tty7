@@ -239,6 +239,12 @@ pub struct TerminalView {
     git_status_cwd: Option<std::path::PathBuf>,
     last_agent_activity: u64,
     cmd: CmdEditor,
+    /// Mirrors `Config::prompt_editor`. Cached rather than read from the global
+    /// because the ownership question ("does this keystroke belong to the local
+    /// editor?") is asked from `&self` helpers that have no `App` to read from;
+    /// `report_mouse` is cached for the same reason, and both are refreshed
+    /// from `reload_from_config` when the config changes under a live pane.
+    pub(crate) prompt_editor: bool,
     typeahead: Typeahead,
     hold: GapHold,
     history: Vec<String>,
@@ -1038,6 +1044,7 @@ impl TerminalView {
             .as_ref()
             .map(crate::core::config::gpui_font_features);
         let report_mouse = config.mouse_reporting;
+        let prompt_editor = config.prompt_editor;
         let mut font = gpui::font(font_family);
         font.fallbacks = Some(gpui::FontFallbacks::from_fonts(fallbacks.clone()));
         if let Some(features) = &font_features {
@@ -1232,6 +1239,7 @@ impl TerminalView {
             git_status_cwd: None,
             last_agent_activity: 0,
             cmd: CmdEditor::new(),
+            prompt_editor,
             typeahead: Typeahead::new(),
             hold: GapHold::new(),
             history: history.entries,
@@ -1738,10 +1746,14 @@ impl TerminalView {
             return;
         }
 
+        // Ctrl-R landing on the PTY is only worth a notice when the user still
+        // expects tty7's menu. With the prompt editor off, the shell owning
+        // Ctrl-R is exactly what was asked for.
         if m.control
             && !m.platform
             && !m.alt
             && ks.key == "r"
+            && self.prompt_editor
             && cx.global::<Config>().history_search
         {
             self.note_integration_gap(cx);
@@ -3411,7 +3423,36 @@ impl TerminalView {
         self.input_inactive_reason().is_none()
     }
 
+    /// Moves this pane between tty7's inline editor and the shell's own line
+    /// editor while it is live.
+    ///
+    /// A line the user already typed is not dropped on the floor: it is handed
+    /// to the shell the same way an unknown chord hands one over, so the text
+    /// is still on the prompt to finish under ZLE/readline. A multi-line draft
+    /// has nowhere to go on a shell prompt, so it stays in the editor and comes
+    /// back if the setting is turned on again.
+    pub(crate) fn set_prompt_editor(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.prompt_editor == on {
+            return;
+        }
+        if !on && self.input_active() && !self.cmd.text().is_empty() {
+            self.handoff_line_to_shell(&[], cx);
+        }
+        self.prompt_editor = on;
+        self.close_completion();
+        self.reverse_search = None;
+        cx.notify();
+    }
+
     fn input_inactive_reason(&self) -> Option<&'static str> {
+        // The one gate for `prompt_editor: false`. Every path that could take a
+        // prompt away from the shell — keys, IME commits, paste, Tab, the
+        // completion and reverse-search menus, the input bar itself — asks this
+        // first, so answering here is what makes the mode whole instead of a
+        // special case per key.
+        if !self.prompt_editor {
+            return Some("the inline prompt editor is turned off");
+        }
         if self.terminal.exited {
             return Some("the shell has exited");
         }
@@ -3451,7 +3492,11 @@ impl TerminalView {
     }
 
     fn shell_owns_prompt(&self) -> bool {
-        self.shell_vi_prompt() || self.handoff_active()
+        // With the prompt editor off the shell owns every prompt, always. That
+        // is what keeps the gap hold and the typeahead record — both of which
+        // exist to feed tty7's editor, and one of which erases the line with
+        // ^U before doing it — away from a line only ZLE is editing.
+        !self.prompt_editor || self.shell_vi_prompt() || self.handoff_active()
     }
 
     fn on_alt_screen(&self) -> bool {
@@ -9836,6 +9881,143 @@ mod gpui_tests {
             next_input_until_timeout(&mut daemon),
             Some(vec![0x12]),
             "the raw ^R follows the handed-over line"
+        );
+    }
+
+    /// The whole point of `prompt_editor: false`: a prefix and an arrow key
+    /// reach the PTY at a live OSC 133 prompt, so the shell's own line editor
+    /// (zsh's ZLE, readline) runs the widget bound there — including a history
+    /// widget reading the shell's own, shared history.
+    #[gpui::test]
+    fn prompt_editor_off_hands_typing_and_arrows_to_the_shell(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        // The editor engages first: this is a pane with working shell
+        // integration, which the mode has to keep working.
+        wait_for_input_active(&window, cx);
+
+        window
+            .update(cx, |view, window, cx| {
+                view.history = ["quit"].into_iter().map(String::from).collect();
+                view.history_frecency = vec![0.0; view.history.len()];
+                view.set_prompt_editor(false, cx);
+                assert!(
+                    !view.input_active(),
+                    "the shell owns the prompt in native input mode"
+                );
+                assert!(
+                    view.terminal.at_prompt(),
+                    "OSC 133 prompt tracking stays live"
+                );
+
+                type_char(view, "h", window, cx);
+                let up = KeyDownEvent {
+                    keystroke: key("up"),
+                    is_held: false,
+                    prefer_character_input: false,
+                };
+                view.on_key_down(&up, window, cx);
+
+                assert_eq!(view.cmd.text(), "", "nothing was typed into tty7's editor");
+                assert!(
+                    view.history_nav.is_none(),
+                    "Up never touched tty7's own history"
+                );
+            })
+            .unwrap();
+
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(b"h".to_vec()));
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"\x1b[A".to_vec()),
+            "the physical Up key reaches the PTY for ZLE to bind"
+        );
+
+        window
+            .update(cx, |view, _, cx| {
+                view.set_prompt_editor(true, cx);
+                assert!(
+                    view.input_active(),
+                    "turning it back on re-arms the editor at the same prompt"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Tab and Ctrl-R are the two keys with their own opt-outs; turning the
+    /// editor off has to hand them over too, without the missing-integration
+    /// notice that Ctrl-R raises when tty7 *wanted* the key and could not have
+    /// it.
+    #[gpui::test]
+    fn prompt_editor_off_hands_over_tab_and_ctrl_r(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for_input_active(&window, cx);
+
+        window
+            .update(cx, |view, window, cx| {
+                view.set_prompt_editor(false, cx);
+                view.created_at = std::time::Instant::now() - INTEGRATION_GRACE * 2;
+                view.tab_pressed(true, cx);
+
+                let ctrl_r = KeyDownEvent {
+                    keystroke: key("ctrl-r"),
+                    is_held: false,
+                    prefer_character_input: false,
+                };
+                view.on_key_down(&ctrl_r, window, cx);
+                assert!(view.completion.is_none(), "no tty7 completion menu");
+                assert!(view.reverse_search.is_none(), "no tty7 history menu");
+                assert!(
+                    view.integration_notice.is_none(),
+                    "the shell owning ^R is what was asked for, not a gap to report"
+                );
+            })
+            .unwrap();
+
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(b"\t".to_vec()));
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x12]));
+    }
+
+    /// Turning the setting off mid-line must not eat what is already typed —
+    /// the editor hands the line over the way an unknown chord does, so it is
+    /// still on the prompt for the shell to finish.
+    #[gpui::test]
+    fn turning_the_prompt_editor_off_hands_the_typed_line_over(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for_input_active(&window, cx);
+
+        window
+            .update(cx, |view, _, cx| {
+                view.cmd.set("git status");
+                view.set_prompt_editor(false, cx);
+                assert_eq!(view.cmd.text(), "", "the editor let the line go");
+            })
+            .unwrap();
+
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"git status".to_vec()),
+            "the half-typed line is on the shell's prompt now"
         );
     }
 

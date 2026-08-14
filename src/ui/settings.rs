@@ -515,6 +515,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Input,
+            title: SettingsPromptEditor,
+            keywords: SettingsSearchPromptEditorKeywords,
+        },
+        SearchEntry {
+            section: Input,
             title: SettingsTabCompletion,
             keywords: SettingsSearchTabCompletionKeywords,
         },
@@ -1925,6 +1930,23 @@ impl Tty7App {
         control: AnyElement,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
+        self.settings_row_gated_when(label, desc, control, false, cx)
+    }
+
+    /// The same row, greyed out when `gated` — for a control another setting
+    /// has switched off, whose own value is still there for when it comes back.
+    ///
+    /// Only the text dims. The control draws its own disabled state — a
+    /// switch's thumb is already down to 35% there — and dimming the whole row
+    /// on top of that leaves a pill with nothing visible inside it.
+    pub(crate) fn settings_row_gated_when(
+        &self,
+        label: impl Into<String>,
+        desc: impl Into<String>,
+        control: AnyElement,
+        gated: bool,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
         let theme = cx.theme();
         let label = label.into();
         let desc = desc.into();
@@ -1959,6 +1981,7 @@ impl Tty7App {
         let labels = v_flex()
             .gap_0p5()
             .min_w_0()
+            .when(gated, |col| col.opacity(0.45))
             .child(
                 div()
                     .text_sm()
@@ -5410,6 +5433,7 @@ impl Tty7App {
     fn render_settings_input(&self, cx: &mut Context<Self>) -> AnyElement {
         let cfg = cx.global::<Config>();
         let option_as_alt = cfg.macos_option_as_alt;
+        let prompt_editor = cfg.prompt_editor;
         let tab_completion = cfg.tab_completion;
         let history_search = cfg.history_search;
         let per_pane_history = cfg.per_pane_history;
@@ -5417,12 +5441,28 @@ impl Tty7App {
         let copy_on_select = cfg.copy_on_select;
         let clip_trim = cfg.clipboard_trim_trailing_spaces;
 
+        // Tab completion and history search are menus tty7 opens *inside* its
+        // own prompt editor. With the editor off, both keys already belong to
+        // the shell, so the switches have nothing left to switch: grey them
+        // out and say why, rather than leave two controls that quietly do
+        // nothing. Their stored values are untouched and come back with it.
+        let gated = |desc: L10nKey| match prompt_editor {
+            true => t(desc).to_string(),
+            false => format!("{} {}", t(desc), t(L10nKey::SettingsNeedsPromptEditor)),
+        };
+
+        let prompt_editor_switch = crate::ui::theme::switch("term-prompt-editor", cx)
+            .checked(prompt_editor)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_prompt_editor(*on, cx)))
+            .into_any_element();
         let tab_completion_switch = crate::ui::theme::switch("term-tab-completion", cx)
             .checked(tab_completion)
+            .disabled(!prompt_editor)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_tab_completion(*on, cx)))
             .into_any_element();
         let history_search_switch = crate::ui::theme::switch("term-history-search", cx)
             .checked(history_search)
+            .disabled(!prompt_editor)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_history_search(*on, cx)))
             .into_any_element();
         let per_pane_history_switch = crate::ui::theme::switch("term-per-pane-history", cx)
@@ -5463,15 +5503,23 @@ impl Tty7App {
                 cx,
             ))
             .child(self.settings_row(
-                t(L10nKey::SettingsTabCompletion),
-                t(L10nKey::SettingsTabCompletionDesc),
-                tab_completion_switch,
+                t(L10nKey::SettingsPromptEditor),
+                t(L10nKey::SettingsPromptEditorDesc),
+                prompt_editor_switch,
                 cx,
             ))
-            .child(self.settings_row(
+            .child(self.settings_row_gated_when(
+                t(L10nKey::SettingsTabCompletion),
+                gated(L10nKey::SettingsTabCompletionDesc),
+                tab_completion_switch,
+                !prompt_editor,
+                cx,
+            ))
+            .child(self.settings_row_gated_when(
                 t(L10nKey::SettingsHistorySearch),
-                t(L10nKey::SettingsHistorySearchDesc),
+                gated(L10nKey::SettingsHistorySearchDesc),
                 history_search_switch,
+                !prompt_editor,
                 cx,
             ))
             .child(self.settings_row(
@@ -8021,5 +8069,43 @@ mod gpui_tests {
             matches!(section, Some(SettingsSection::Appearance)),
             "the panel should still be on Appearance after two paint passes",
         );
+    }
+
+    /// The Input page paints with the prompt editor off — that is the state
+    /// where two of its rows are greyed out and their switches disabled — and
+    /// the cascade only *disables* those two. It must not rewrite what they
+    /// hold, or turning the editor back on would hand the user a completion
+    /// menu they had switched off.
+    #[gpui::test]
+    fn the_prompt_editor_greys_its_dependants_without_rewriting_them(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Input, window, cx);
+            app.set_history_search(false, cx);
+            app.set_prompt_editor(false, cx);
+        });
+        vcx.simulate_resize(size(px(1100.), px(800.)));
+        vcx.run_until_parked();
+
+        let (prompt_editor, tab_completion, history_search) = vcx.update(|_, cx| {
+            let cfg = cx.global::<Config>();
+            (cfg.prompt_editor, cfg.tab_completion, cfg.history_search)
+        });
+        assert!(!prompt_editor, "the switch stuck");
+        assert!(
+            tab_completion,
+            "a greyed-out row keeps its value for when the editor comes back"
+        );
+        assert!(!history_search, "and one the user had turned off stays off");
+
+        app.update_in(&mut vcx, |app, _, cx| app.set_prompt_editor(true, cx));
+        vcx.run_until_parked();
+        let (prompt_editor, tab_completion) = vcx.update(|_, cx| {
+            let cfg = cx.global::<Config>();
+            (cfg.prompt_editor, cfg.tab_completion)
+        });
+        assert!(prompt_editor);
+        assert!(tab_completion, "the completion menu comes back with it");
     }
 }

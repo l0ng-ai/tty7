@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Give the prompt back to the shell** — a new **Settings → Input → Prompt →
+  Prompt editor** switch (`prompt_editor` in `config.json`, on by default).
+  Turned off, tty7 stops editing the shell prompt: every keystroke there —
+  printable keys, arrows, IME commits, paste, <kbd>⇥</kbd> and <kbd>⌃ R</kbd> —
+  goes straight to the PTY, so zsh's ZLE, bash's readline and fish's reader own
+  the line and the keys bound in a dotfile behave exactly as they do outside
+  tty7, history traversal included. Previously the only way to get there was to
+  hide the shell's own name from tty7 so integration never armed. Shell
+  integration is untouched by the switch: prompt boundaries, working directory,
+  exit codes, notifications and `tty7 procs` keep working. Tab completion and
+  history search are menus tty7 opens inside that editor, so both grey out
+  while it is off rather than sitting there doing nothing. It reaches open
+  panes immediately, and a half-typed line is handed to the shell rather than
+  dropped on the way over.
+
 - **A host can be proved without spending a tab on it.** **Test** in the SSH
   host form dials the host exactly as Connect would — proxy, jump host, host
   key and authentication, all on the daemon — and reports back in place:

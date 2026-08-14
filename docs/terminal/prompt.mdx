@@ -121,10 +121,45 @@ readout, the "command finished" notification, and `tty7 procs` are built on.
 
 ## Turning it off
 
-Both prompt features are switches, and turning one off hands its key straight
-back to the shell:
+Each prompt feature is a switch, and turning one off hands its key straight back
+to the shell:
 
 | Setting | Key it releases |
 |---|---|
 | **Settings → Input → Prompt → Tab completion** | <kbd>⇥</kbd> → your shell's completion |
 | **Settings → Input → Prompt → History search** | <kbd>⌃ R</kbd> → your shell's reverse-i-search, or your fzf binding |
+
+### Giving the whole prompt back to the shell
+
+Turning off **Settings → Input → Prompt → Prompt editor**
+(`prompt_editor: false`) hands over not one key but the line itself. Every
+keystroke at the prompt — printable characters, arrows, IME commits, paste — goes
+straight to the PTY, and your shell's own line editor does the editing: zsh's
+ZLE, bash's readline, fish's reader. A widget you bound yourself runs exactly as
+it does outside tty7:
+
+```zsh
+# ~/.zshrc — works at a tty7 prompt with the editor off
+bindkey '^[[A' history-beginning-search-backward-end
+```
+
+What you give up is the layer this page describes: ghost suggestions, the
+completion menu, the fuzzy <kbd>⌃ R</kbd>, the multi-line editor, mouse caret
+placement and undo on the prompt. Tab completion and history search grey out in
+Settings while it is off — both are menus tty7 opens inside that editor, so
+there is nothing left for them to switch.
+
+What you keep is everything shell integration reports: prompt boundaries, the
+working directory, exit codes, "command finished" notifications, the sidebar's
+branch readout, `tty7 procs`. The setting moves the line editor, not the
+integration.
+
+It applies to open panes immediately, so there is nothing to restart, and a line
+you had half-typed is handed to the shell rather than dropped.
+
+<Tip>
+  Reach for this if the shell's own history traversal matters to you — shared
+  history between panes, `HIST_FIND_NO_DUPS`, a prefix search bound to
+  <kbd>↑</kbd> — or if a plugin you rely on (zsh-autosuggestions,
+  zsh-syntax-highlighting, atuin) should own the line instead.
+</Tip>

@@ -452,7 +452,14 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsBellModeBoth => "Both",
         L10nKey::SettingsPrompt => "Prompt",
         L10nKey::SettingsPromptIntro => {
-            "tty7's own menus at the shell prompt. Turn one off to hand the key back to the shell."
+            "tty7's own editor and menus at the shell prompt. Turn one off to hand that much back to the shell."
+        }
+        L10nKey::SettingsPromptEditor => "Prompt editor",
+        L10nKey::SettingsPromptEditorDesc => {
+            "tty7 owns the line you type at the shell prompt: selection, undo, and the menus below. When off, every key, IME commit and paste at the prompt goes straight to the shell, so its own line editor — zsh's ZLE, readline, fish — does the editing and the keys you bound there behave as written. Shell integration stays on either way."
+        }
+        L10nKey::SettingsNeedsPromptEditor => {
+            "Needs the prompt editor: with it off, this key already belongs to the shell."
         }
         L10nKey::SettingsTabCompletion => "Tab completion",
         L10nKey::SettingsTabCompletionDesc => {
@@ -840,6 +847,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchLegiblePaletteKeywords => {
             "legible contrast bright palette psreadline parameter readable"
+        }
+        L10nKey::SettingsSearchPromptEditorKeywords => {
+            "prompt editor native shell input line editor zle readline fish keybindings ime paste"
         }
         L10nKey::SettingsSearchTabBarPositionKeywords => {
             "tabs vertical sidebar left top layout rail"

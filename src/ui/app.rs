@@ -2869,6 +2869,21 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.smart_select = on);
     }
 
+    /// Hands the prompt to the shell's own line editor, or takes it back.
+    ///
+    /// Live panes carry a cached copy of the flag (see
+    /// [`crate::terminal::view::TerminalView::prompt_editor`]), so the switch
+    /// has to reach them: without this, only panes opened afterwards would
+    /// change hands.
+    pub(crate) fn set_prompt_editor(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.prompt_editor = on);
+        for tab in &self.tabs {
+            for leaf in tab.pane.terminals() {
+                leaf.update(cx, |v, cx| v.set_prompt_editor(on, cx));
+            }
+        }
+    }
+
     pub(crate) fn set_tab_completion(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.tab_completion = on);
     }
@@ -5294,6 +5309,7 @@ impl Tty7App {
             }
         }
         let report_mouse = cx.global::<Config>().mouse_reporting;
+        let prompt_editor = cx.global::<Config>().prompt_editor;
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 leaf.update(cx, |v, cx| {
@@ -5301,6 +5317,11 @@ impl Tty7App {
                         v.report_mouse = report_mouse;
                         cx.notify();
                     }
+                    // A hand edit of `config.json` — or another window's
+                    // settings page — has to move a live pane between the
+                    // local editor and ZLE too, not just the window that
+                    // flipped the switch.
+                    v.set_prompt_editor(prompt_editor, cx);
                 });
             }
         }

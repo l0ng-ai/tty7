@@ -108,8 +108,9 @@ their id from the file name. [More about themes →](/customization/themes)
 
 | Key | Type | Default | |
 |---|---|---|---|
-| `tab_completion` | bool | `true` | tty7's completion menu on <kbd>⇥</kbd>. Off hands the key to the shell. |
-| `history_search` | bool | `true` | tty7's fuzzy history on <kbd>⌃ R</kbd>. Off hands the key to the shell. |
+| `prompt_editor` | bool | `true` | tty7 edits the shell prompt. Off sends every key at the prompt to the shell, so its own line editor (ZLE, readline) owns editing. Shell integration stays on. |
+| `tab_completion` | bool | `true` | tty7's completion menu on <kbd>⇥</kbd>. Off hands the key to the shell. Needs `prompt_editor`. |
+| `history_search` | bool | `true` | tty7's fuzzy history on <kbd>⌃ R</kbd>. Off hands the key to the shell. Needs `prompt_editor`. |
 | `smart_select` | bool | `true` | Double-click grabs URLs, paths, bracket pairs, CJK words. |
 | `word_separators` | string | see below | Characters that end a word. Used when smart selection is off. |
 | `copy_on_select` | bool | `false` | |

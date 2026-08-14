@@ -395,7 +395,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsBellModeBoth => "闪烁 + 声音",
         L10nKey::SettingsPrompt => "提示符",
         L10nKey::SettingsPromptIntro => {
-            "shell 提示符处的 tty7 自带菜单。关闭某项即可把按键交还给 shell。"
+            "shell 提示符处的 tty7 自带编辑器与菜单。关闭某项即可把这部分交还给 shell。"
+        }
+        L10nKey::SettingsPromptEditor => "提示符编辑器",
+        L10nKey::SettingsPromptEditorDesc => {
+            "由 tty7 接管你在 shell 提示符上敲的这一行：选择、撤销，以及下面这些菜单。关闭后，提示符处的每个按键、输入法上屏和粘贴都直接交给 shell，由它自己的行编辑器——zsh 的 ZLE、readline、fish——负责编辑，你在那里绑定的键位照常生效。两种模式下 shell 集成都保持开启。"
+        }
+        L10nKey::SettingsNeedsPromptEditor => {
+            "需要提示符编辑器：它关闭时，这个按键本就归 shell 所有。"
         }
         L10nKey::SettingsTabCompletion => "Tab 补全",
         L10nKey::SettingsTabCompletionDesc => {
@@ -792,6 +799,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchLegiblePaletteKeywords => {
             "颜色 低对比度 可读 纠偏 调色板 修正 contrast legible palette parameter"
+        }
+        L10nKey::SettingsSearchPromptEditorKeywords => {
+            "提示符编辑器 提示符 编辑器 原生输入 行编辑 键位 快捷键 输入法 粘贴 prompt editor native shell input zle readline"
         }
         L10nKey::SettingsSearchTabBarPositionKeywords => {
             "标签栏位置 标签栏 侧边栏 左侧 顶部 布局 tab bar position tabs sidebar left top"
