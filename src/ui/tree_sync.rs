@@ -232,6 +232,28 @@ fn desired_node(pane: &Pane, remote_window: bool, cx: &App) -> Option<DesiredNod
     }
 }
 
+/// The records the machine's `register_pane` will mint from the seeds a sync
+/// pushes, for the window to mirror itself — they come back to it in nothing
+/// it is sent (#612). Its own terminals stand in for the machine's liveness
+/// probe: a pane this window holds open is one that registry answers alive, and
+/// one still connecting is not yet anyone's to call — later facts settle it.
+fn seeded_records(desired: &[DesiredTab], live: impl Fn(u64) -> bool) -> Vec<PaneRecord> {
+    fn walk(node: &DesiredNode, live: &impl Fn(u64) -> bool, out: &mut Vec<PaneRecord>) {
+        match node {
+            DesiredNode::Leaf { pane, seed } => out.push(seed.clone().into_record(live(*pane))),
+            DesiredNode::Split { a, b, .. } => {
+                walk(a, live, out);
+                walk(b, live, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for tab in desired {
+        walk(&tab.root, &live, &mut out);
+    }
+    out
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct WsMirror {
     pub tabs: Vec<TreeTab>,
@@ -842,6 +864,17 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
                 let host = WorkspaceStore::host_of(cx, client_ws);
                 crate::ui::machine_mirror::MachineMirrors::note_synced_workspace(
                     cx, host, machine_ws, tabs, active,
+                );
+                let open: Vec<u64> = app
+                    .tabs
+                    .iter()
+                    .flat_map(|t| t.pane.terminals())
+                    .map(|v| v.read(cx).pane_id)
+                    .collect();
+                crate::ui::machine_mirror::MachineMirrors::note_seeded_panes(
+                    cx,
+                    host,
+                    seeded_records(&desired, |pane| open.contains(&pane)),
                 );
                 pump(cx, client_ws);
             }
@@ -3475,6 +3508,26 @@ mod tests {
             group: None,
             root,
         }
+    }
+
+    #[test]
+    fn seeded_records_carry_the_seed_and_the_windows_own_liveness() {
+        let desired = vec![
+            tab(
+                TabId::new(),
+                split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)),
+            ),
+            tab(TabId::new(), leaf(3)),
+        ];
+        let records = seeded_records(&desired, |pane| pane != 2);
+        assert_eq!(
+            records.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(records[0].cwd.as_deref(), Some("/work/1"));
+        assert!(records[0].live, "a pane the window holds open is live");
+        assert!(!records[1].live, "one still connecting is not yet");
+        assert!(records[2].live);
     }
 
     fn assert_converged(mirror: &WsMirror, desired: &[DesiredTab]) {
