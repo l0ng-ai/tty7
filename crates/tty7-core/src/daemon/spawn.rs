@@ -155,10 +155,22 @@ fn is_reapable_daemon_name(name: &str) -> bool {
 /// out the refusal delay on the stale `control.port` that `ensure_running`
 /// clears later. The probe skips itself instead.
 pub fn recorded_daemon_is_dead() -> bool {
-    let Some(pid) = pidfile::read() else {
+    recorded_daemon_is_dead_with(pidfile::read(), daemon_process_alive)
+}
+
+/// The rule alone, so it can be tested without a pidfile on disk — pinning a
+/// config directory would mean an env var, and that is process-global state
+/// every other test running beside this one would inherit.
+///
+/// Note what a missing pidfile answers: **not dead**, because nothing here
+/// knows otherwise. Callers must not read that as "alive" — a refused connect
+/// is still the authority, and `ensure_running` keeps its own stale branch for
+/// exactly that.
+fn recorded_daemon_is_dead_with(recorded: Option<u32>, alive: impl Fn(u32) -> bool) -> bool {
+    let Some(pid) = recorded else {
         return false;
     };
-    pid > 4 && pid != std::process::id() && !daemon_process_alive(pid)
+    pid > 4 && pid != std::process::id() && !alive(pid)
 }
 
 #[cfg(windows)]
@@ -247,9 +259,17 @@ pub fn ensure_running() -> anyhow::Result<()> {
                     stale = true;
                 }
             }
+        } else {
+            // A refused connect is the other stale signal, and it is the only
+            // one left when the pidfile cannot answer: it is missing (the
+            // daemon died between `bind` and `write_current`, or never managed
+            // to write it), or it records a pid the OS has since handed to an
+            // unrelated process. `recorded_daemon_is_dead` says "not dead" to
+            // both, so without this the endpoint file survives and the spawn
+            // poll below pays the refusal delay on it — the very cost this
+            // function was rewritten to avoid.
+            stale = true;
         }
-    } else {
-        stale = true;
     }
 
     if stale {
@@ -1111,6 +1131,44 @@ mod tests {
     use crate::daemon::control::CONTROL_VERSION;
     use std::io::ErrorKind;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn a_missing_pidfile_is_not_a_dead_daemon() {
+        let dead = |_| false;
+        let alive = |_| true;
+
+        // The case the caller has to keep handling itself: no pidfile is no
+        // evidence. The daemon may have died between `transport::bind` (which
+        // writes daemon.port) and `pidfile::write_current`, or never managed
+        // the write at all — a refused connect is then the only signal that
+        // the endpoint file is stale, and skipping the cleanup on it leaves
+        // the spawn poll paying the refusal delay this whole path exists to
+        // avoid.
+        assert!(!recorded_daemon_is_dead_with(None, dead));
+
+        // A recorded pid the OS has handed to something else is likewise not
+        // evidence of death — it is alive, just not ours. `reap_recorded_daemon`
+        // is what checks the executable before killing anything.
+        assert!(!recorded_daemon_is_dead_with(Some(4242), alive));
+
+        // Our own pid: an in-process daemon, so certainly not dead.
+        assert!(!recorded_daemon_is_dead_with(
+            Some(std::process::id()),
+            dead
+        ));
+
+        // Reserved low pids are never a daemon of ours; refuse to call them
+        // dead so nothing downstream reaps them.
+        for reserved in [0, 1, 4] {
+            assert!(
+                !recorded_daemon_is_dead_with(Some(reserved), dead),
+                "pid {reserved} must never be treated as our dead daemon"
+            );
+        }
+
+        // The one case that is evidence: a plausible pid that is gone.
+        assert!(recorded_daemon_is_dead_with(Some(4242), dead));
+    }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]

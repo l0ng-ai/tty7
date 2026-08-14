@@ -1246,7 +1246,14 @@ impl Tty7App {
                 // tray: the daemon stays reachable (show / quit-and-stop)
                 // instead of being orphaned behind a dead icon. Without one
                 // the app quits — the only way it stays visible at all.
-                let retire_to_tray = cx.global::<Config>().show_tray_icon;
+                //
+                // The icon has to actually be up, not merely asked for: the
+                // backend can fail for the whole run (a Linux session with no
+                // StatusNotifier host), and retiring into an icon that never
+                // appeared leaves a process with no window and no tray — no
+                // way back in, and the daemon still held.
+                let retire_to_tray =
+                    cx.global::<Config>().show_tray_icon && crate::ui::tray::icon_is_up();
                 if !retire_to_tray {
                     cx.spawn(async move |cx| {
                         let _ = cx.update(|cx| cx.quit());
