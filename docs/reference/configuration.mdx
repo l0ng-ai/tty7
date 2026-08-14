@@ -84,8 +84,8 @@ their id from the file name. [More about themes →](/customization/themes)
 
 | Key | Type | Default | |
 |---|---|---|---|
-| `shell` | object | — | `{"program": "fish", "args": ["-l"]}`. Unset uses the platform default. |
-| `custom_shells` | array | `[]` | Extra entries for the new-tab menu: `[{"label": "Ubuntu", "program": "wsl.exe", "args": ["-d", "Ubuntu"]}]`. Launched exactly as written, listed after the detected shells. Give an entry arguments and tty7 also skips shell integration for it, so it has no prompt marks, working-directory tracking, or command-finished notifications; an entry without arguments is integrated like the detected row beside it. An entry with no `program` is skipped; with no `label` it is named after its program. |
+| `shell` | object | — | `{"program": "fish", "args": ["-l"]}`. Unset uses the platform default. `args` you write are launched verbatim, which also turns off [shell integration](/reference/shell-integration) for that shell — leave them out to keep it. |
+| `custom_shells` | array | `[]` | Extra entries for the new-tab menu: `[{"label": "Ubuntu", "program": "wsl.exe", "args": ["-d", "Ubuntu"]}]`. Launched exactly as written, listed after the detected shells. Give an entry arguments and tty7 also skips [shell integration](/reference/shell-integration) for it, so it has no prompt marks, working-directory tracking, or command-finished notifications; an entry with no arguments, on a shell tty7 recognizes, is integrated like the detected row beside it. An entry with no `program` is skipped; with no `label` it is named after its program. |
 | `working_directory` | object | `{"strategy":"inherit"}` | `strategy` is `inherit`, `home`, or `custom`; `path` is used when custom. |
 | `env` | object | `{}` | Extra environment variables for every pane. |
 | `scrollback_limit` | number | `10000` | Lines per pane (100–100,000). New panes only. |
