@@ -207,9 +207,11 @@ impl Tty7App {
             .collect();
 
         let pointer = window.mouse_position();
-        // What the banner under the workspace head already says, so a row can
-        // tell whether naming its own machine would be news or an echo.
-        let window_machine = self.window_machine(cx).map(|m| m.label);
+        // Asked once for the whole frame: the banner under the workspace head
+        // draws from it, and every row reads it to tell whether naming its own
+        // machine would be news or an echo.
+        let machine = self.window_machine(cx);
+        let window_machine = machine.as_ref().map(|m| m.label.clone());
         // The row text is measured against real glyphs before it is elided:
         // `text_sm` is 0.875rem and `text_xs` 0.75rem, resolved here so the
         // measurement and the render use the same sizes and family.
@@ -1044,7 +1046,7 @@ impl Tty7App {
             .pt(px(4.))
             .child(self.workspace_head(cx));
 
-        let machine_banner = self.remote_head_banner(cx);
+        let machine_banner = self.remote_head_banner(machine.clone(), cx);
 
         let chip_inset = crate::ui::app::CONTENT_INSET - 7. + 4.;
         let top_bar = h_flex()
@@ -1206,8 +1208,12 @@ impl Tty7App {
     ///
     /// `None` on a local workspace: a badge that is always there stops being
     /// read.
-    fn remote_head_banner(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let machine = self.window_machine(cx)?;
+    fn remote_head_banner(
+        &self,
+        machine: Option<crate::ui::remote_workspace::WindowMachine>,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let machine = machine?;
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let dot = machine.status.dot(theme);

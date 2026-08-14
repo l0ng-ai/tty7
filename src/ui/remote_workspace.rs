@@ -197,6 +197,7 @@ impl RemoteStatus {
 /// `None` for a local workspace on purpose: a badge shown everywhere means
 /// nothing anywhere, and every surface that asks here is asking "is there
 /// something the reader does not already assume?".
+#[derive(Clone)]
 pub(crate) struct WindowMachine {
     pub label: String,
     pub status: RemoteStatus,
