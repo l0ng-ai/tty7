@@ -1188,6 +1188,7 @@ l10n_keys! {
     CmdSelectAll,
     CmdSshAddConnection,
     MenuSshAddConnection,
+    MenuSshPortForwarding,
     CmdSshManageProfiles,
     CmdSshReconnect,
     CmdSshRemoteFiles,

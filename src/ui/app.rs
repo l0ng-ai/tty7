@@ -2729,7 +2729,18 @@ impl Tty7App {
     /// The palette asks this to decide whether to offer the command at all, so
     /// the row and what pressing it does cannot drift apart.
     pub(crate) fn forwardable_pane(&self, window: &Window, cx: &App) -> Option<u64> {
-        let leaf = self.tabs.get(self.active)?.detail_pane(window, cx)?;
+        self.forwardable_pane_of(self.active, window, cx)
+    }
+
+    /// The same question about a named tab, for the tab's own context menu:
+    /// right-clicking a background tab has to act on *that* tab's connection.
+    pub(crate) fn forwardable_pane_of(
+        &self,
+        index: usize,
+        window: &Window,
+        cx: &App,
+    ) -> Option<u64> {
+        let leaf = self.tabs.get(index)?.detail_pane(window, cx)?;
         let view = leaf.read(cx);
         crate::ui::right_panel::pane_holds_forwards(view).then_some(view.pane_id)
     }
@@ -2738,6 +2749,16 @@ impl Tty7App {
         let Some(pane_id) = self.forwardable_pane(window, cx) else {
             return;
         };
+        self.open_forwards_for(pane_id, window, cx);
+    }
+
+    /// Put the Forwards section on screen for a pane and open its add form.
+    pub(crate) fn open_forwards_for(
+        &mut self,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.set_right_panel_tab(crate::core::config::RightPanelTab::Info, cx);
         if self.loopback_panel.form_pane_id != Some(pane_id) {
             self.toggle_managed_forward_form(pane_id, window, cx);

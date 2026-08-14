@@ -1494,6 +1494,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdCut => "切り取り",
         L10nKey::CmdPaste => "貼り付け",
         L10nKey::CmdSelectAll => "すべて選択",
+        L10nKey::MenuSshPortForwarding => "ポート転送…",
         L10nKey::MenuSshAddConnection => "接続を追加…",
         L10nKey::CmdSshAddConnection => "SSH: 接続を追加…",
         L10nKey::CmdSshManageProfiles => "SSH: プロファイルを管理…",

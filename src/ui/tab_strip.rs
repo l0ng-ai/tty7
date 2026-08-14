@@ -1288,6 +1288,21 @@ impl Tty7App {
                     });
                 }
             }));
+            // Forwards belong to one connection, and this is the connection.
+            // They lived only behind a palette command and a section of the Info
+            // panel, neither of which is where someone looking at the tab would
+            // reach for them (#439).
+            if let Some(pane_id) = this.forwardable_pane_of(index, window, cx) {
+                menu = menu.item(
+                    PopupMenuItem::new(t(L10nKey::MenuSshPortForwarding)).on_click({
+                        let app = app.clone();
+                        move |_, window, cx| {
+                            let _ = app
+                                .update(cx, |this, cx| this.open_forwards_for(pane_id, window, cx));
+                        }
+                    }),
+                );
+            }
         }
 
         let agent_session = this.tab_agent_session(index, window, cx);
