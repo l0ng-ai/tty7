@@ -6550,11 +6550,16 @@ impl Render for Tty7App {
         let rail = self.sidebar_open(cx);
         let strip = self.tab_strip(!vertical, window, cx);
         let sidebar = rail.then(|| self.tab_sidebar(window, cx));
-        let ssh_status = self
+        let ssh_leaf = self
             .tabs
             .get(self.active)
-            .and_then(|t| t.pane.focused_or_first(window, cx))
-            .and_then(|leaf| self.render_ssh_status_strip(&leaf, cx));
+            .and_then(|t| t.pane.focused_or_first(window, cx));
+        let ssh_status = ssh_leaf
+            .as_ref()
+            .and_then(|leaf| self.render_ssh_status_strip(leaf, cx));
+        let ssh_connecting = ssh_leaf
+            .as_ref()
+            .and_then(|leaf| self.render_ssh_connecting(leaf, cx));
         let body = match self.tabs.get(self.active) {
             None => self.render_home(cx).into_any_element(),
             Some(active_tab) => {
@@ -6611,6 +6616,7 @@ impl Render for Tty7App {
             .when_some(self.render_ssh_prompt_overlay(window, cx), |this, el| {
                 this.child(el)
             })
+            .when_some(ssh_connecting, |this, el| this.child(el))
             .when_some(ssh_status, |this, el| this.child(el))
             .when_some(self.render_remote_workspace_strip(cx), |this, el| {
                 this.child(el)

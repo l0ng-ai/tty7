@@ -1,4 +1,7 @@
-use gpui::{AnyElement, Context, Div, Entity, FontWeight, Stateful, div, prelude::*, px, rems};
+use gpui::{
+    AnimationExt as _, AnyElement, Context, Div, Entity, FontWeight, Stateful, div, prelude::*, px,
+    rems,
+};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::{
@@ -155,6 +158,72 @@ fn row_tile(id: impl Into<gpui::ElementId>, icon: IconName, cx: &mut Context<Tty
 }
 
 impl Tty7App {
+    /// What a native SSH pane shows while the connection is being made.
+    ///
+    /// The pane is a terminal that has printed nothing yet, so until this it
+    /// was a blank rectangle: a host that takes twenty seconds to time out
+    /// looked exactly like one that had already connected and had nothing to
+    /// say. The remote-workspace route has had a spinner and a name for this
+    /// all along (`PendingPane`); the pane route had the dot on the tab and
+    /// nothing else.
+    ///
+    /// Only `Connecting`. `Authenticating` is the phase the prompt sheet is up
+    /// in, and a second thing saying "working on it" behind a dialog asking for
+    /// a password is noise.
+    pub(crate) fn render_ssh_connecting(
+        &self,
+        leaf: &Entity<TerminalView>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use crate::daemon::protocol::SshPhase;
+        let view = leaf.read(cx);
+        if !matches!(view.ssh_phase(), Some(SshPhase::Connecting)) {
+            return None;
+        }
+        let host = view
+            .ssh_spec()
+            .and_then(|s| s.display_name.clone())
+            .or_else(|| view.remote_context().map(|c| c.target))
+            .unwrap_or_default();
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    v_flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(
+                            Icon::new(IconName::LoaderCircle)
+                                .size(px(18.))
+                                .text_color(muted.opacity(0.75))
+                                .with_animation(
+                                    "ssh-connecting-spin",
+                                    gpui::Animation::new(std::time::Duration::from_millis(900))
+                                        .repeat(),
+                                    |icon, delta| {
+                                        icon.transform(gpui::Transformation::rotate(
+                                            gpui::percentage(delta),
+                                        ))
+                                    },
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(t_fmt(L10nKey::PendingConnecting, &[("machine", &host)])),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     pub(crate) fn render_ssh_status_strip(
         &self,
         leaf: &Entity<TerminalView>,
