@@ -78,6 +78,11 @@ const THEME_PANEL_W_MIN: f32 = 240.;
 /// a description stops being a paragraph and becomes a line to scan across.
 const READING_COLUMN: f32 = 640.;
 
+/// How far the content scrollbar stays clear of the top and bottom of the
+/// window. The page has no chrome of its own to stop at, so a bar drawn to the
+/// last pixel runs into the window's rounded corner and looks cut off.
+const SCROLLBAR_WINDOW_INSET: f32 = 12.;
+
 /// What the page gets before any list does, and the floor it may be pushed to
 /// when even that cannot be had — the numbers this file did not have.
 ///
@@ -1706,19 +1711,29 @@ impl Tty7App {
                     // Chinese and Japanese pages while every other row stopped
                     // at the column.
                     //
-                    // `items_center` centres the column across the page's
-                    // cross axis. The cap keeps a description a paragraph
-                    // rather than a line to scan across, but left-aligning what
-                    // it caps put the whole page against the nav: on a window
-                    // as wide as the display it was made for, 640 points of
-                    // settings sat beside 1600 points of nothing. Centred, the
-                    // page is one column with air on both sides at every width,
-                    // and below the cap — where the column is the page — this
-                    // does nothing at all.
-                    v_flex().w_full().items_center().px_10().py_8().child(
+                    // `mx_auto` on the column centres it across the page. The
+                    // cap keeps a description a paragraph rather than a line to
+                    // scan across, but left-aligning what it caps put the whole
+                    // page against the nav: on a window as wide as the display
+                    // it was made for, 640 points of settings sat beside 1600
+                    // points of nothing. Centred, the page is one column with
+                    // air on both sides at every width, and below the cap —
+                    // where the column is the page — this does nothing at all.
+                    //
+                    // The centring has to come from the margin, not from an
+                    // `items_center` on a flex box here. The scroll pane is a
+                    // flex column and this box is its item: as a block it
+                    // reports the full height of the page it stacks, but as a
+                    // flex box it negotiates a height with the pane and lands
+                    // near the viewport, and `content_size` — which is just
+                    // this box's laid-out bounds — then leaves most of the page
+                    // outside the scroll range. `flex_shrink_0` does not buy
+                    // its way out of that; only staying a block does.
+                    div().w_full().px_10().py_8().child(
                         div()
                             .w_full()
                             .max_w(px(READING_COLUMN * ui_scale))
+                            .mx_auto()
                             .children(no_match_note)
                             .child(content),
                     ),
@@ -1731,10 +1746,13 @@ impl Tty7App {
                 // the pane that covers most of the page would hide the theme
                 // image behind it.
                 .when_some(self.active_settings(), |pane, s| {
-                    pane.child(crate::ui::scrollbar::with_vertical_scrollbar(
+                    // Inset: this pane reaches both ends of the window, so a
+                    // full-height bar ends up on the rounded corner.
+                    pane.child(crate::ui::scrollbar::with_inset_vertical_scrollbar(
                         "settings-content-scrollbar",
                         body,
                         &s.content_scroll,
+                        px(SCROLLBAR_WINDOW_INSET),
                     ))
                 })
                 .into_any_element()

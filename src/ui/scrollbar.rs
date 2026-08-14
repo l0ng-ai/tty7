@@ -1,4 +1,4 @@
-use gpui::{AnyElement, ElementId, ScrollHandle, div, prelude::*};
+use gpui::{AnyElement, ElementId, Pixels, ScrollHandle, div, prelude::*, px};
 use gpui_component::scroll::Scrollbar;
 use gpui_component::v_flex;
 
@@ -14,6 +14,21 @@ pub(crate) fn with_vertical_scrollbar(
     scroll_area: impl IntoElement,
     handle: &ScrollHandle,
 ) -> AnyElement {
+    with_inset_vertical_scrollbar(id, scroll_area, handle, px(0.))
+}
+
+/// The same bar, held `inset_y` clear of the top and bottom of the area.
+///
+/// Every list inside a bordered panel wants the bar to run the full height —
+/// the border is already the edge. A scroll area that *is* the window has no
+/// such edge, and a bar that runs to the last pixel lands on the rounded
+/// corner and reads as if it had been clipped.
+pub(crate) fn with_inset_vertical_scrollbar(
+    id: impl Into<ElementId>,
+    scroll_area: impl IntoElement,
+    handle: &ScrollHandle,
+    inset_y: Pixels,
+) -> AnyElement {
     v_flex()
         .relative()
         .flex_1()
@@ -28,10 +43,10 @@ pub(crate) fn with_vertical_scrollbar(
         .child(
             div()
                 .absolute()
-                .top_0()
+                .top(inset_y)
                 .left_0()
                 .right_0()
-                .bottom_0()
+                .bottom(inset_y)
                 // No `scrollbar_show` override: it falls back to
                 // `cx.theme().scrollbar_show`, which `apply_theme` pins to
                 // `Scrolling` for every list in the app. Overriding it here
