@@ -23,6 +23,28 @@ half-configured.
 Each rule takes an optional description — *"what it's for"* — because six months
 later `8080 → 3000` explains nothing.
 
+## Switching a rule off
+
+The switch at the start of a rule decides whether the connection opens it. A
+rule that is off is kept exactly as you wrote it and simply not offered to the
+far side — which is what a forward for a service that is only up part of the
+day needs, instead of deleting the rule and typing it in again twice a day.
+
+The section header counts both: *"2 rules, opened with the connection · 1
+switched off"*.
+
+A live forward has the same switch. In the **Forwards** panel, ⏸ takes the
+listener down and keeps the row — faded, with ▶ beside it. Nothing is retyped
+when it comes back. If the port has been taken in the meantime, the rule stays
+off and says why rather than disappearing.
+
+<Note>
+  A live forward switched off this way comes back on when you switch it on, not
+  when you reconnect — the far side has no such thing as a paused listener, so
+  the rule is being kept by tty7 for this session. For something you want off
+  across sessions, switch the rule off in the profile.
+</Note>
+
 ## Adding one mid-session
 
 *SSH: Port Forwarding* in the command palette opens the **Forwards** panel for

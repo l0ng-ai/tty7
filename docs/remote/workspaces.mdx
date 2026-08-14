@@ -46,6 +46,26 @@ Nothing is synced or copied. The repository stays where it is.
   </Step>
 </Steps>
 
+## Knowing which machine you are on
+
+A window on another machine says so, and keeps saying so. Under the workspace
+name in the tab rail is a dot and the machine's name — green while the link is
+up, amber while it is being made or remade, red once it has given up, with a
+word beside it whenever the state is not the one you would assume:
+
+```
+[F] fable-marten          ⌃⌄
+ ●  devbox · reconnecting
+```
+
+The tab rows below it stay quiet, because the badge above them already answered
+the question. A row only names its own machine when that would *contradict* the
+badge — an SSH pane opened inside a local workspace, or a `wsl` shell beside
+Windows ones.
+
+An empty remote workspace has no rail to carry the badge, so the home screen
+names the machine a new tab would open a shell on.
+
 ## What gets installed
 
 | | |
