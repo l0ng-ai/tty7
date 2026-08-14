@@ -2313,8 +2313,18 @@ impl Tty7App {
                                     .child(host_label),
                             )
                             .when(!when_path.is_empty(), |line| {
+                                // `flex_1`, not a bare `min_w_0`: with an auto
+                                // basis this box takes its content width as its
+                                // starting size and then absorbs every pixel
+                                // the row is over — which collapsed it to its
+                                // zero minimum and left a lone "…" where the
+                                // timestamp goes. Rows with *less* to say lost
+                                // more of it: `java-box · …` beside
+                                // `local · ~/repo/025/tty7 ·…`. A zero basis
+                                // that grows into what is left ellipsizes only
+                                // what genuinely does not fit.
                                 line.child(div().flex_shrink_0().child("·"))
-                                    .child(div().min_w_0().truncate().child(when_path))
+                                    .child(div().flex_1().min_w_0().truncate().child(when_path))
                             }),
                     ),
             )

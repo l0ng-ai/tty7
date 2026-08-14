@@ -155,15 +155,7 @@ impl Tty7App {
     ) -> Option<Box<NativeSshSpec>> {
         let spec = self.focused_pane_view(window, cx)?.read(cx).ssh_spec()?;
         let profiles = &cx.global::<Config>().ssh_profiles;
-        // A transient profile is handed a fresh uuid on its way to the daemon,
-        // so an id alone does not mean a host was saved — only one that still
-        // resolves does.
-        let saved = spec
-            .profile_id
-            .as_deref()
-            .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .is_some_and(|id| profiles.iter().any(|p| p.id == id));
-        (!saved).then_some(spec)
+        saved_profile_of(&spec, profiles).is_none().then_some(spec)
     }
 
     /// Keep the connection in front of you: the form opens on everything the
@@ -242,6 +234,21 @@ impl Tty7App {
             entry.last_used = crate::core::config::unix_now();
         });
     }
+}
+
+/// The saved host a live connection came from, if it still exists.
+///
+/// A transient profile is handed a fresh uuid on its way to the daemon, so
+/// *every* spec carries a `profile_id` and an id alone does not mean anything
+/// was saved. Only one that still resolves does — and the two places that ask
+/// (whether to offer Save Connection as Host, and whether the failure strip's
+/// button edits a host or offers to keep one) have to agree, or an ad-hoc
+/// connection gets an Edit button that opens Settings on nothing.
+pub(crate) fn saved_profile_of(spec: &NativeSshSpec, profiles: &[SshProfile]) -> Option<Uuid> {
+    spec.profile_id
+        .as_deref()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .filter(|id| profiles.iter().any(|p| p.id == *id))
 }
 
 /// Saved hosts, most likely first: whatever has been connected to often and
@@ -657,6 +664,34 @@ mod tests {
         p.auth = AuthMode::PublicKey;
         let spec = build_native_ssh_spec(&p, &[], &store, true);
         assert_eq!(spec.password, None);
+    }
+
+    /// Both the palette (Save Connection as Host) and the failure strip (Edit
+    /// connection… vs Save as Host…) branch on this. They used to answer it
+    /// separately, and the strip's copy of the test only checked that the uuid
+    /// parsed — which every connection's does — so an ad-hoc `user@host` wore
+    /// an Edit button that opened Settings on "Nothing selected".
+    #[test]
+    fn only_a_uuid_that_still_names_a_host_counts_as_saved() {
+        let store = InMemoryCredentialStore::new();
+        let saved = profile("prod-web", "10.0.0.5", "deploy");
+        let profiles = vec![saved.clone()];
+
+        let spec = build_native_ssh_spec(&saved, &profiles, &store, true);
+        assert_eq!(saved_profile_of(&spec, &profiles), Some(saved.id));
+
+        // What `quick_connect` and the palette's address box build: a profile
+        // that never reached the config, carrying a uuid of its own.
+        let adhoc = profile("", "nosuchhost.invalid", "root");
+        let spec = build_native_ssh_spec(&adhoc, &profiles, &store, true);
+        assert!(
+            spec.profile_id.is_some(),
+            "the spec does carry an id — that is exactly why the id alone is not the test"
+        );
+        assert_eq!(saved_profile_of(&spec, &profiles), None);
+
+        // And a host that was saved and has since been deleted.
+        assert_eq!(saved_profile_of(&spec, &[]), None);
     }
 
     /// The pane wears this until the remote shell titles itself, so a host

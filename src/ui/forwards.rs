@@ -182,11 +182,14 @@ impl Tty7App {
             _ => None,
         };
         // A saved connection is editable; a one-off `user@host` is not, and
-        // offering to edit one would open an empty page.
+        // offering to edit one opened Settings on "Nothing selected" — this
+        // comment already said that was the thing to avoid, and the code under
+        // it only checked that the spec's uuid *parsed*. Every connection has
+        // one. Ask the same question `unsaved_ssh_session` asks.
+        let profiles = &cx.global::<crate::core::config::Config>().ssh_profiles;
         let profile = view
             .ssh_spec()
-            .and_then(|s| s.profile_id.clone())
-            .and_then(|id| uuid::Uuid::parse_str(&id).ok());
+            .and_then(|spec| crate::ui::ssh_connect::saved_profile_of(&spec, profiles));
 
         let theme = cx.theme();
 
@@ -251,15 +254,28 @@ impl Tty7App {
                         cx.listener(|this, _, window, cx| this.restart_ssh_session(window, cx)),
                     ),
             )
-            .children(profile.map(|id| {
-                Button::new("ssh-edit-profile")
-                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshEditProfile))
+            .child(match profile {
+                // A saved host: the form that opens is the one this connection
+                // was dialled from, so a wrong hostname or password is fixed
+                // where it lives.
+                Some(id) => Button::new("ssh-edit-profile")
+                    .label(t(L10nKey::SshEditProfile))
                     .ghost()
                     .small()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_ssh_profile_in_settings(id, window, cx)
-                    }))
-            }));
+                    })),
+                // A one-off: there is no host to open, but the address that
+                // failed is worth keeping — the form opens prefilled from the
+                // live spec, which is where the typo gets corrected (#438).
+                None => Button::new("ssh-save-as-host")
+                    .label(t(L10nKey::SshSaveAsHost))
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.save_ssh_session_as_host(window, cx)
+                    })),
+            });
         Some(
             div()
                 .absolute()

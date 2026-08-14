@@ -871,6 +871,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardPanelTitle => "端口转发",
         L10nKey::ForwardDisconnected => "已断开",
         L10nKey::ForwardDisconnectedFrom => "与 {host} 的连接已断开",
+        L10nKey::SshSaveAsHost => "保存为主机…",
         L10nKey::SshEditProfile => "编辑连接…",
         L10nKey::ForwardTooltipAdd => "添加转发",
         L10nKey::ForwardTooltipTurnOff => "停用（保留规则）",

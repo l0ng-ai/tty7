@@ -678,6 +678,7 @@ l10n_keys! {
     ForwardDisconnected,
     ForwardDisconnectedFrom,
     SshEditProfile,
+    SshSaveAsHost,
     ForwardTooltipAdd,
     ForwardTooltipRemove,
     ForwardTooltipTurnOff,

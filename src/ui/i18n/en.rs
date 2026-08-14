@@ -917,6 +917,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ForwardPanelTitle => "Forwards",
         L10nKey::ForwardDisconnected => "Disconnected",
         L10nKey::ForwardDisconnectedFrom => "Disconnected from {host}",
+        L10nKey::SshSaveAsHost => "Save as Host…",
         L10nKey::SshEditProfile => "Edit connection…",
         L10nKey::ForwardTooltipAdd => "Add forward",
         L10nKey::ForwardTooltipTurnOff => "Switch off — keeps the rule",
