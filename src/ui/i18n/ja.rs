@@ -463,6 +463,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsPromptIntro => {
             "シェルプロンプトに表示する tty7 独自のメニュー。オフにするとキーはシェルに渡されます"
         }
+        L10nKey::SettingsPromptEditor => "プロンプトエディタ",
+        L10nKey::SettingsPromptEditorDesc => {
+            "プロンプトの行を tty7 が編集します — ゴースト提案、シンタックスハイライト、クリックでのカーソル移動、下記のメニュー。オフの場合、キーもクリックも貼り付けもシェル自身のラインエディタ（ZLE、readline）に直接渡されます — プロンプトマークや通知はそのまま動作します"
+        }
         L10nKey::SettingsTabCompletion => "タブ補完",
         L10nKey::SettingsTabCompletionDesc => {
             "プロンプトで Tab を押すと tty7 の補完メニューが開きます。オフの場合、Tab はシェル自身の補完に渡されます"
@@ -841,6 +845,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchProgramKeywords => {
             "シェル バイナリ zsh bash fish nu nushell pwsh powershell 実行可能 起動 program shell binary executable launch"
+        }
+        L10nKey::SettingsSearchPromptEditorKeywords => {
+            "プロンプトエディタ ラインエディタ 行編集 履歴 矢印 上 無効 zle readline zsh prompt editor line editing history arrow disable"
         }
         L10nKey::SettingsSearchRememberWindowSizeKeywords => {
             "ウィンドウ サイズ 位置 境界 ジオメトリ 起動 記憶 remember window size position bounds geometry launch startup"

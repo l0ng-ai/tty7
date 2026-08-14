@@ -397,6 +397,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsPromptIntro => {
             "shell 提示符处的 tty7 自带菜单。关闭某项即可把按键交还给 shell。"
         }
+        L10nKey::SettingsPromptEditor => "提示符编辑器",
+        L10nKey::SettingsPromptEditorDesc => {
+            "提示符处的命令行由 tty7 编辑：幽灵提示、语法着色、点击定位光标，以及下方的菜单。关闭后，按键、点击和粘贴都直接交给 shell 自身的行编辑器（ZLE、readline）——提示符标记和通知照常工作。"
+        }
         L10nKey::SettingsTabCompletion => "Tab 补全",
         L10nKey::SettingsTabCompletionDesc => {
             "在提示符按 Tab 打开 tty7 的补全菜单。关闭后 Tab 交由 shell 自身的补全处理。"
@@ -747,6 +751,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchProgramKeywords => {
             "程序 shell 二进制 zsh bash fish nu nushell pwsh powershell 可执行文件 启动 program shell binary launch"
+        }
+        L10nKey::SettingsSearchPromptEditorKeywords => {
+            "提示符编辑器 行编辑器 行编辑 历史 方向键 上 禁用 zle readline zsh prompt editor line editing history arrow disable"
         }
         L10nKey::SettingsSearchRememberWindowSizeKeywords => {
             "记住窗口大小位置 窗口 大小 位置 启动 记住 remember window size position geometry"

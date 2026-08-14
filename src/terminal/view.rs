@@ -225,6 +225,10 @@ pub struct TerminalView {
     pub(super) search_scan_armed: bool,
     pub bell_flash: bool,
     pub report_mouse: bool,
+    /// Mirror of `Config::prompt_editor`, written at construction and kept
+    /// fresh by the config watcher — the input gate has no `App` to read the
+    /// global through.
+    pub prompt_editor: bool,
     last_at_prompt: bool,
     last_typeahead_blocked: bool,
     running_since: Option<std::time::Instant>,
@@ -1038,6 +1042,7 @@ impl TerminalView {
             .as_ref()
             .map(crate::core::config::gpui_font_features);
         let report_mouse = config.mouse_reporting;
+        let prompt_editor = config.prompt_editor;
         let mut font = gpui::font(font_family);
         font.fallbacks = Some(gpui::FontFallbacks::from_fonts(fallbacks.clone()));
         if let Some(features) = &font_features {
@@ -1196,6 +1201,7 @@ impl TerminalView {
             marked_text: String::new(),
             last_mouse_cell: None,
             report_mouse,
+            prompt_editor,
             last_hover_cell: None,
             link_modifier_down: false,
             link_probes: Default::default(),
@@ -3412,6 +3418,9 @@ impl TerminalView {
     }
 
     fn input_inactive_reason(&self) -> Option<&'static str> {
+        if !self.prompt_editor {
+            return Some("the prompt editor is turned off in Settings");
+        }
         if self.terminal.exited {
             return Some("the shell has exited");
         }
@@ -9148,6 +9157,65 @@ mod gpui_tests {
             .unwrap();
         assert_eq!(next_input_until_timeout(&mut daemon), Some(b"cd ".to_vec()));
         assert_eq!(next_input_until_timeout(&mut daemon), Some(b"\t".to_vec()));
+    }
+
+    #[gpui::test]
+    fn prompt_editor_off_leaves_the_prompt_to_the_shell(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        let (client_side, mut daemon) = UnixStream::pair().unwrap();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let mut cfg = Config::default();
+            cfg.prompt_editor = false;
+            cx.set_global(cfg);
+        });
+        let window = cx.add_window(|window, cx| {
+            let terminal = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24))
+                .expect("socketpair-backed terminal");
+            TerminalView::with_terminal(terminal, 1, window, cx)
+        });
+        prompt_ready(&window, cx, &mut daemon);
+
+        window
+            .update(cx, |view, window, cx| {
+                assert!(
+                    !view.input_active(),
+                    "the shell's line editor owns this prompt"
+                );
+                type_char(view, "a", window, cx);
+                assert_eq!(view.cmd.text(), "", "no local overlay while opted out");
+                view.on_key_down(
+                    &KeyDownEvent {
+                        keystroke: key("up"),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+                assert!(
+                    view.history_nav.is_none(),
+                    "Up must not open tty7's history"
+                );
+            })
+            .unwrap();
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(b"a".to_vec()));
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"\x1b[A".to_vec()),
+            "Up reaches the shell as an arrow key"
+        );
+
+        window
+            .update(cx, |view, _, _| {
+                view.prompt_editor = true;
+                assert!(
+                    view.input_active(),
+                    "turning the setting back on re-arms the editor at the same prompt"
+                );
+            })
+            .unwrap();
     }
 
     fn dir_candidate(text: &str, start: usize, end: usize) -> completion::Candidate {

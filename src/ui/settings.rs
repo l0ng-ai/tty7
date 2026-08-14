@@ -515,6 +515,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Input,
+            title: SettingsPromptEditor,
+            keywords: SettingsSearchPromptEditorKeywords,
+        },
+        SearchEntry {
+            section: Input,
             title: SettingsTabCompletion,
             keywords: SettingsSearchTabCompletionKeywords,
         },
@@ -5410,6 +5415,7 @@ impl Tty7App {
     fn render_settings_input(&self, cx: &mut Context<Self>) -> AnyElement {
         let cfg = cx.global::<Config>();
         let option_as_alt = cfg.macos_option_as_alt;
+        let prompt_editor = cfg.prompt_editor;
         let tab_completion = cfg.tab_completion;
         let history_search = cfg.history_search;
         let per_pane_history = cfg.per_pane_history;
@@ -5417,6 +5423,10 @@ impl Tty7App {
         let copy_on_select = cfg.copy_on_select;
         let clip_trim = cfg.clipboard_trim_trailing_spaces;
 
+        let prompt_editor_switch = crate::ui::theme::switch("term-prompt-editor", cx)
+            .checked(prompt_editor)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_prompt_editor(*on, cx)))
+            .into_any_element();
         let tab_completion_switch = crate::ui::theme::switch("term-tab-completion", cx)
             .checked(tab_completion)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_tab_completion(*on, cx)))
@@ -5460,6 +5470,12 @@ impl Tty7App {
             .child(self.section_intro(
                 t(L10nKey::SettingsPrompt),
                 t(L10nKey::SettingsPromptIntro),
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsPromptEditor),
+                t(L10nKey::SettingsPromptEditorDesc),
+                prompt_editor_switch,
                 cx,
             ))
             .child(self.settings_row(

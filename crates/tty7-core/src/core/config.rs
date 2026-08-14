@@ -232,6 +232,12 @@ pub struct Config {
     pub tab_completion: bool,
     #[serde(default = "default_true")]
     pub history_search: bool,
+    /// Whether tty7 arms its own line editor at a shell prompt. Off leaves
+    /// the whole line to the shell's line editor (ZLE, readline): keys,
+    /// clicks and paste go straight to the PTY. Shell integration — prompt
+    /// marks, cwd tracking, notifications — is unaffected.
+    #[serde(default = "default_true")]
+    pub prompt_editor: bool,
 
     #[serde(default, deserialize_with = "de_lenient")]
     pub cursor_style: CursorStyle,
@@ -559,6 +565,7 @@ impl Default for Config {
             bell: BellMode::Visual,
             tab_completion: true,
             history_search: true,
+            prompt_editor: true,
             cursor_style: CursorStyle::Block,
             macos_option_as_alt: false,
             mouse_hide_while_typing: true,
@@ -1561,6 +1568,7 @@ mod tests {
         assert!(cfg.mouse_reporting);
         assert!(cfg.tab_completion);
         assert!(cfg.history_search);
+        assert!(cfg.prompt_editor);
         assert_eq!(cfg.notify_threshold_secs, 10);
         assert_eq!(cfg.bell, BellMode::Visual);
 
@@ -1569,6 +1577,7 @@ mod tests {
         assert!(cfg.mouse_reporting);
         assert!(cfg.tab_completion);
         assert!(cfg.history_search);
+        assert!(cfg.prompt_editor);
         assert_eq!(cfg.notify_threshold_secs, 10);
         assert_eq!(cfg.bell, BellMode::Visual);
 
@@ -1576,6 +1585,8 @@ mod tests {
         assert!(!cfg.tab_completion);
         let cfg: Config = serde_json::from_str(r#"{"history_search": false}"#).unwrap();
         assert!(!cfg.history_search);
+        let cfg: Config = serde_json::from_str(r#"{"prompt_editor": false}"#).unwrap();
+        assert!(!cfg.prompt_editor);
 
         let cfg: Config = serde_json::from_str(
             r#"{"restore_session": false, "mouse_reporting": false, "bell": "audible"}"#,

@@ -454,6 +454,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsPromptIntro => {
             "tty7's own menus at the shell prompt. Turn one off to hand the key back to the shell."
         }
+        L10nKey::SettingsPromptEditor => "Prompt editor",
+        L10nKey::SettingsPromptEditorDesc => {
+            "tty7 edits the line at the prompt: ghost suggestions, syntax highlighting, click to place the caret, and the menus below. When off, every key, click, and paste goes straight to your shell's own line editor (ZLE, readline) — prompt marks and notifications keep working."
+        }
         L10nKey::SettingsTabCompletion => "Tab completion",
         L10nKey::SettingsTabCompletionDesc => {
             "Tab at the prompt opens tty7's completion menu. When off, Tab goes to the shell's own completion instead."
@@ -799,6 +803,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchProgramKeywords => {
             "shell binary zsh bash fish nu nushell pwsh powershell executable launch"
+        }
+        L10nKey::SettingsSearchPromptEditorKeywords => {
+            "line editor zle readline zsh widget arrow up history ghost suggestion caret disable prompt"
         }
         L10nKey::SettingsSearchRememberWindowSizeKeywords => {
             "window size position bounds geometry launch startup remember"

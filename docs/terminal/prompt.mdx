@@ -121,10 +121,17 @@ readout, the "command finished" notification, and `tty7 procs` are built on.
 
 ## Turning it off
 
-Both prompt features are switches, and turning one off hands its key straight
+Each prompt feature is a switch, and turning one off hands its key straight
 back to the shell:
 
 | Setting | Key it releases |
 |---|---|
 | **Settings → Input → Prompt → Tab completion** | <kbd>⇥</kbd> → your shell's completion |
 | **Settings → Input → Prompt → History search** | <kbd>⌃ R</kbd> → your shell's reverse-i-search, or your fzf binding |
+
+To hand the whole prompt back, turn off **Settings → Input → Prompt → Prompt
+editor** (`prompt_editor` in `config.json`). Every key, click, and paste then
+goes straight to your shell's own line editor — <kbd>↑</kbd> runs the ZLE
+widget or readline binding you put on it, not tty7's history. Shell integration
+stays on: prompt marks, working-directory tracking, and the command-finished
+notification keep working.

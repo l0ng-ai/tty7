@@ -2877,6 +2877,18 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.history_search = on);
     }
 
+    pub(crate) fn set_prompt_editor(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.prompt_editor = on);
+        for tab in &self.tabs {
+            for leaf in tab.pane.terminals() {
+                leaf.update(cx, |v, cx| {
+                    v.prompt_editor = on;
+                    cx.notify();
+                });
+            }
+        }
+    }
+
     pub(crate) fn set_startup_mode(
         &mut self,
         mode: crate::core::config::StartupMode,
@@ -5293,12 +5305,19 @@ impl Tty7App {
                 }
             }
         }
-        let report_mouse = cx.global::<Config>().mouse_reporting;
+        let (report_mouse, prompt_editor) = {
+            let cfg = cx.global::<Config>();
+            (cfg.mouse_reporting, cfg.prompt_editor)
+        };
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 leaf.update(cx, |v, cx| {
                     if v.report_mouse != report_mouse {
                         v.report_mouse = report_mouse;
+                        cx.notify();
+                    }
+                    if v.prompt_editor != prompt_editor {
+                        v.prompt_editor = prompt_editor;
                         cx.notify();
                     }
                 });
