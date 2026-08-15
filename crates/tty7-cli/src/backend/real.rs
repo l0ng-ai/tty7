@@ -218,6 +218,10 @@ impl Backend for RealBackend {
         Ok(procs)
     }
 
+    fn is_this_machine(&self) -> bool {
+        self.machine.is_none()
+    }
+
     fn agent_hooks_state(&mut self, agent: HookAgent) -> Option<HooksState> {
         if self.machine.is_some() {
             return None;

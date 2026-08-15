@@ -43,6 +43,13 @@ pub trait Backend {
 
     fn procs(&mut self, pane: u64) -> Result<PaneProcs>;
 
+    /// Whether this backend addresses the machine the CLI is running on.
+    ///
+    /// The question is "may I answer this from the local filesystem?", and the
+    /// answer is no for a routed backend — a path in a `-m` command names a
+    /// directory on the far side, where this process cannot stat anything.
+    fn is_this_machine(&self) -> bool;
+
     /// The install state for an agent's status hooks on the machine this
     /// backend addresses. Routed machines return `None`: their config belongs
     /// to the remote host and must not be guessed from the local filesystem.
@@ -103,6 +110,13 @@ pub mod mock {
         pub events: Vec<ControlEvent>,
         /// Set to make `hello` fail — doctor's unreachable-server branch.
         pub unreachable: bool,
+        /// Whether this mock stands for the machine the tests run on.
+        ///
+        /// Off by default, and deliberately: the fixture machine is a Windows
+        /// one (`C:\\proj`), so a check that consults the real filesystem
+        /// would judge its paths against the host running the suite. A test
+        /// about local-path handling turns it on and uses paths that exist.
+        pub this_machine: bool,
     }
 
     impl Default for MockBackend {
@@ -127,6 +141,7 @@ pub mod mock {
                 run_exit: Some(0),
                 events: Vec::new(),
                 unreachable: false,
+                this_machine: false,
             }
         }
     }
@@ -188,6 +203,10 @@ pub mod mock {
                 .procs_replies
                 .pop_front()
                 .unwrap_or_else(|| self.procs_reply.clone()))
+        }
+
+        fn is_this_machine(&self) -> bool {
+            self.this_machine
         }
 
         fn agent_hooks_state(&mut self, agent: HookAgent) -> Option<HooksState> {

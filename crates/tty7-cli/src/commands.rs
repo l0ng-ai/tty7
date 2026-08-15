@@ -332,6 +332,23 @@ fn ws_detach(ws: &str, backend: &mut dyn Backend) -> Result<Outcome> {
 }
 
 fn new_workspace(path: Option<String>, open: bool, backend: &mut dyn Backend) -> Result<Outcome> {
+    // Same instruction-not-a-hint rule as `run --cwd`, and checked before the
+    // workspace exists: a path that does not resolve left the pane in whatever
+    // directory the CLI was started from, so `tty7 new ~/porj` answered with an
+    // id and a workspace rooted somewhere the caller never named. Nothing runs
+    // here, so this only misplaces a shell — but it misplaces it silently.
+    if let Some(dir) = path.as_deref()
+        && backend.is_this_machine()
+    {
+        let at = std::path::Path::new(dir);
+        if !at.is_dir() {
+            let why = match at.exists() {
+                true => "not a directory",
+                false => "no such directory",
+            };
+            bail!("{dir}: {why} on this machine");
+        }
+    }
     let ws = match backend.control(ControlRequest::WorkspaceCreate {
         name: None,
         workspace: None,
@@ -389,6 +406,28 @@ fn new_workspace(path: Option<String>, open: bool, backend: &mut dyn Backend) ->
 }
 
 fn run(args: RunArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
+    // An explicit `--cwd` is an instruction, not a hint. The daemon falls back
+    // to a directory that does resolve when the one it is handed does not —
+    // right for a cwd inherited from a pane's OSC 7, which is only as good as
+    // the shell that reported it, and wrong for one the user typed: a mistyped
+    // `--cwd` otherwise ran the command in whatever directory the *CLI* was
+    // started from and reported success, so `run --cwd ~/proj -- make` built
+    // the wrong tree and said it worked.
+    //
+    // Only answerable for this machine; a routed `--cwd` names a directory on
+    // the far side, as `agent_hooks_state` says of config for the same reason.
+    if let Some(dir) = args.cwd.as_deref()
+        && backend.is_this_machine()
+    {
+        let path = std::path::Path::new(dir);
+        if !path.is_dir() {
+            let why = match path.exists() {
+                true => "not a directory",
+                false => "no such directory",
+            };
+            bail!("--cwd {dir}: {why} on this machine");
+        }
+    }
     let workspace = match args.ws.as_deref() {
         Some(explicit) => {
             let machine = fetch_machine(backend)?;
@@ -2925,6 +2964,78 @@ mod tests {
         .expect_err("a kept pane with no workspace would be an unlisted orphan");
         assert!(err.to_string().contains("--ws"), "{err}");
         assert!(backend.runs.is_empty(), "nothing must be spawned");
+    }
+
+    /// A `--cwd` that does not name a directory must stop the run.
+    ///
+    /// The daemon falls back to a directory that resolves when the one it gets
+    /// does not, which is right for a cwd inherited from a pane's OSC 7 and
+    /// wrong for one typed on the command line: `run --cwd ~/porj -- make`
+    /// used to build whatever tree the CLI happened to be started in and exit
+    /// 0. Nothing may be spawned — a refusal after the spawn is not a refusal.
+    #[test]
+    fn a_cwd_that_is_not_a_directory_stops_the_run() {
+        let mut backend = mock();
+        backend.this_machine = true;
+        let err = execute(
+            cli(&["tty7", "run", "--cwd", "/nonexistent-dir-xyz", "--", "make"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect_err("a directory that is not there cannot be run in");
+        assert!(err.to_string().contains("no such directory"), "{err}");
+        assert!(backend.runs.is_empty(), "nothing must be spawned");
+
+        // A path that exists but is a file is the other half, and reads
+        // differently to whoever typed it.
+        let mut backend = mock();
+        backend.this_machine = true;
+        let err = execute(
+            cli(&["tty7", "run", "--cwd", "/etc/hosts", "--", "make"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect_err("a file is not a working directory");
+        assert!(err.to_string().contains("not a directory"), "{err}");
+        assert!(backend.runs.is_empty(), "nothing must be spawned");
+
+        // Routed: the path belongs to the far side's filesystem, so this
+        // machine has no standing to judge it and the run goes ahead.
+        let mut backend = mock();
+        backend.this_machine = false;
+        execute(
+            cli(&["tty7", "run", "--cwd", "/nonexistent-dir-xyz", "--", "make"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect("a routed cwd is the remote machine's to resolve");
+        assert_eq!(backend.runs.len(), 1, "the routed run must still happen");
+    }
+
+    /// `tty7 new <path>` refuses a path it cannot root the workspace at, and
+    /// refuses it before creating anything.
+    ///
+    /// The pane otherwise landed in whatever directory the CLI was started
+    /// from, so the caller got an id back and a workspace somewhere they never
+    /// named. Checked before `WorkspaceCreate`, or the refusal leaves an empty
+    /// workspace behind for the user to clean up.
+    #[test]
+    fn new_refuses_a_path_it_cannot_root_the_workspace_at() {
+        let mut backend = mock();
+        backend.this_machine = true;
+        let err = execute(
+            cli(&["tty7", "new", "/nonexistent-dir-xyz"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect_err("a workspace cannot be rooted at a directory that is not there");
+        assert!(err.to_string().contains("no such directory"), "{err}");
+        assert!(
+            backend.control_calls.is_empty(),
+            "nothing may be created before the path is judged: {:?}",
+            backend.control_calls
+        );
+        assert!(backend.spawned.is_empty(), "and no shell spawned");
     }
 
     #[test]
