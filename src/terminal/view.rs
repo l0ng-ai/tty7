@@ -6213,7 +6213,16 @@ fn one_line_char(c: char) -> char {
     }
 }
 
-fn one_line(text: &str) -> String {
+/// `text` with every line break and control character folded to a visible
+/// stand-in, so it draws on exactly one row.
+///
+/// The hazard is not this module's alone. Anything that draws a name it did
+/// not compose is exposed to it — a filename is bytes to the kernel, so
+/// `touch $'a\nb'` is a file the tree has to draw. Fold at the point of
+/// drawing, never at the point of reading: the unfolded name is what
+/// `join`/`rename`/`remove` are handed, and a `↵` spliced into it names
+/// nothing on disk.
+pub(crate) fn one_line(text: &str) -> String {
     text.chars().map(one_line_char).collect()
 }
 
@@ -6764,6 +6773,25 @@ mod tests {
         // the next two characters.
         assert_eq!(unescape_mark_text("50% off"), "50% off");
         assert_eq!(unescape_mark_text("cargo build"), "cargo build");
+    }
+
+    #[test]
+    fn a_name_drawn_on_one_row_keeps_its_line_breaks_visible() {
+        use super::one_line;
+        // A newline is the whole point: gpui breaks on it whatever the row
+        // says, so it has to become something that occupies a column instead.
+        assert_eq!(one_line("a\nb"), "a↵b");
+        assert_eq!(one_line("a\r\nb"), "a ↵b");
+        // Every other control character folds to a space rather than
+        // vanishing, so the name's length still reflects what is on disk.
+        assert_eq!(one_line("a\tb\u{7}c"), "a b c");
+        // One char in, one char out — a fuzzy matcher's byte positions are
+        // handed to this and still have to address the same characters.
+        for s in ["plain.rs", "a\nb", "a\tb", "日本語\n"] {
+            assert_eq!(one_line(s).chars().count(), s.chars().count(), "{s:?}");
+        }
+        // Text with nothing to fold comes back untouched.
+        assert_eq!(one_line("README.md"), "README.md");
     }
 
     #[test]

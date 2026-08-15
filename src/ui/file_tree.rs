@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::core::config::RightPanelTab;
 use crate::core::git::status::{DecoStatus, DirRollup, StatusIndex};
 use crate::terminal::git_data::index_of;
+use crate::terminal::view::one_line;
 use crate::ui::app::Tty7App;
 use crate::ui::file_copy;
 use crate::ui::host_ops::{ByHost, HostId, HostOps, InFlight, SharedHost, WatchSub};
@@ -1815,7 +1816,7 @@ impl Tty7App {
                 .when(deco.strike, |d| d.line_through())
                 .when(deco.bold, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
                 .when(row.is_root, |d| d.font_weight(gpui::FontWeight::MEDIUM))
-                .child(SharedString::from(row.entry.name.clone()))
+                .child(SharedString::from(one_line(&row.entry.name)))
                 .into_any_element()
         };
 
@@ -2117,7 +2118,7 @@ impl gpui::Render for DragGhost {
             .border_color(cx.theme().border)
             .text_sm()
             .child(Icon::new(IconName::File).size(px(ROW_GLYPH)))
-            .child(SharedString::from(self.name.clone()))
+            .child(SharedString::from(one_line(&self.name)))
     }
 }
 
