@@ -1296,6 +1296,26 @@ pub mod remote {
         }
     }
 
+    /// What the probe *said*, kept apart from its having said nothing.
+    ///
+    /// `None` means the far side never answered: the channel or the command
+    /// failed, or the timeout cut the read off before the marker and the line
+    /// it introduces both arrived. That is a different fact from "answered,
+    /// and logs in with a shell there is no bootstrap for", which is
+    /// `Some(None)`. Only the second is worth remembering — the first is a
+    /// slow link or a busy server, and the next pane deserves a fresh ask.
+    pub(crate) fn probe_answer(output: &str) -> Option<Option<(RemoteShell, String)>> {
+        // Read exactly as far as `parse_probe` does before it can form an
+        // opinion, so the two cannot disagree about whether there was one.
+        let mut lines = output
+            .lines()
+            .map(|l| l.trim_end_matches('\r').trim())
+            .skip_while(|l| *l != PROBE_MARKER);
+        lines.next()?;
+        lines.find(|l| !l.is_empty())?;
+        Some(parse_probe(output))
+    }
+
     pub(crate) fn parse_probe(output: &str) -> Option<(RemoteShell, String)> {
         let mut lines = output
             .lines()
@@ -1434,6 +1454,39 @@ fi
             assert_eq!(parse_probe("__tty7_shell\n\n"), None);
             assert_eq!(parse_probe("__tty7_shell\n/bin/ksh\n"), None);
             assert_eq!(parse_probe("/bin/zsh\n"), None);
+        }
+
+        #[test]
+        fn a_probe_that_never_answered_is_told_apart_from_one_that_said_no() {
+            // Answered, with a shell there is a bootstrap for.
+            assert_eq!(
+                probe_answer("__tty7_shell\n/bin/zsh\n"),
+                Some(Some((RemoteShell::Zsh, "/bin/zsh".to_string())))
+            );
+            // Answered, and the answer is one there is no bootstrap for. Worth
+            // remembering: asking again gets the same `/bin/ksh` every time.
+            assert_eq!(probe_answer("__tty7_shell\n/bin/ksh\n"), Some(None));
+            assert_eq!(probe_answer("__tty7_shell\n$SHELL\n"), Some(None));
+
+            // Never answered. The channel or the exec failed, or the read timed
+            // out — none of which says anything about the remote's shell, and
+            // all of which used to be cached as if it did.
+            assert_eq!(probe_answer(""), None, "nothing came back at all");
+            assert_eq!(
+                probe_answer("Welcome to prod!\n"),
+                None,
+                "a banner, and then the read was cut off"
+            );
+            assert_eq!(
+                probe_answer("__tty7_shell\n"),
+                None,
+                "the marker arrived and the line it introduces did not"
+            );
+            assert_eq!(
+                probe_answer("__tty7_shell\n\n"),
+                None,
+                "and a blank line is not that line"
+            );
         }
 
         #[test]

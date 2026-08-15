@@ -449,17 +449,28 @@ impl SshManager {
         let cached = { self.probes.lock().unwrap().get(&key).cloned() };
         let probed = match cached {
             Some(hit) => hit,
-            None => {
-                let probed = probe_remote_shell(conn).await;
-                match &probed {
-                    Some((shell, path)) => {
-                        log::debug!("ssh {key:?}: remote shell {shell:?} at {path}")
+            // Only an answer is remembered. This map is on the process-wide
+            // `SshManager` and nothing ever evicts from it, so caching a probe
+            // that failed would spend the rest of the daemon's life claiming a
+            // host has no shell integration because one channel open, one
+            // exec, or one five-second read went badly. Reconnecting would not
+            // clear it either.
+            None => match probe_remote_shell(conn).await {
+                Some(answer) => {
+                    match &answer {
+                        Some((shell, path)) => {
+                            log::debug!("ssh {key:?}: remote shell {shell:?} at {path}")
+                        }
+                        None => log::debug!("ssh {key:?}: no remote shell integration"),
                     }
-                    None => log::debug!("ssh {key:?}: no remote shell integration"),
+                    self.probes.lock().unwrap().insert(key, answer.clone());
+                    answer
                 }
-                self.probes.lock().unwrap().insert(key, probed.clone());
-                probed
-            }
+                None => {
+                    log::debug!("ssh {key:?}: shell probe did not answer; will ask again");
+                    None
+                }
+            },
         };
         probed.map(|(shell, path)| remote::bootstrap_command(shell, &path))
     }
@@ -612,7 +623,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 const PROBE_OUTPUT_LIMIT: usize = 8 * 1024;
 
-async fn probe_remote_shell(conn: &SshConnection) -> Option<(remote::RemoteShell, String)> {
+/// `None` when the remote never answered, so the caller knows not to remember
+/// it. See [`remote::probe_answer`].
+async fn probe_remote_shell(conn: &SshConnection) -> Option<Option<(remote::RemoteShell, String)>> {
     let mut channel = conn.open_session_channel().await.ok()?;
     channel.exec(true, remote::PROBE_COMMAND).await.ok()?;
 
@@ -633,7 +646,7 @@ async fn probe_remote_shell(conn: &SshConnection) -> Option<(remote::RemoteShell
     };
     let _ = tokio::time::timeout(PROBE_TIMEOUT, collect).await;
 
-    remote::parse_probe(&String::from_utf8_lossy(&out))
+    remote::probe_answer(&String::from_utf8_lossy(&out))
 }
 
 async fn probe_remote_env(conn: &SshConnection) -> Option<remote_link::RemoteEnv> {
