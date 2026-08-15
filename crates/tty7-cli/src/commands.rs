@@ -950,6 +950,24 @@ fn pane_close(
 }
 
 /// The panes the daemon is running that no workspace's tab tree references.
+/// Every pane the server runs that no workspace tree holds.
+///
+/// This set is wider than "leftovers", and the difference matters because
+/// `pane close --orphans` hangs up everything in it. A `run` that is executing
+/// *right now* is in here too: `run --ws W` stamps the pane with `W` as its
+/// owner and files it into no tab unless `--keep` is given, so for the length
+/// of the command it is indistinguishable from the pane an interrupted `run`
+/// left behind — same `orphan`, same `owner`, same everything `PaneInfo`
+/// carries. Verified against a live server, and it is why the reaper cannot be
+/// made safe from here.
+///
+/// The distinction that would work is whether a client is still attached: an
+/// interrupted `run` has none, a running one does. The daemon knows, and
+/// `PaneInfo` does not carry it. Adding the field is backward compatible —
+/// every other field on that struct is already `#[serde(default)]`, so a peer
+/// that predates it simply omits it — but it is a wire change, and until it
+/// happens the honest thing is that the docs say plainly that `--orphans` will
+/// kill a `run` started from another shell.
 fn orphan_panes(machine: &Machine, backend: &mut dyn Backend) -> Result<Vec<u64>> {
     let held: Vec<u64> = machine
         .workspaces

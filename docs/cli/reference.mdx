@@ -336,8 +336,16 @@ list a retry needs.
 
 <Warning>
   `--orphans` closes every orphan on the machine, and an orphan can still be
-  doing real work — an interrupted `run` leaves the command running. Look at
-  `pane ls --all` first.
+  doing real work. Not only an interrupted `run`: a `run` that is **in progress
+  right now** is an orphan too. `run --ws W` stamps its pane with `W` as the
+  owner and files it into no tab until `--keep` does, so while the command
+  executes the pane reads exactly like a leftover — same `orphan: true`, same
+  `owner`. Nothing in the listing tells the two apart, so `pane ls --all` cannot
+  answer this one for you.
+
+  In practice that means `--orphans` from one shell, or one agent, will kill a
+  `tty7 run` started from another. Close orphans by id when anything might be
+  running, and keep `--orphans` for a machine you know is idle.
 </Warning>
 
 `title` is usually the running command — `claude`, `nvim`, `cargo` — which makes
