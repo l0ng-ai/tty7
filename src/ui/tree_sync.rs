@@ -1574,16 +1574,33 @@ fn sweep_parked(cx: &mut App, client_ws: WorkspaceId, tree: &std::collections::H
     let route = crate::terminal::PaneRoute::for_workspace(
         crate::ui::remote_workspace::pane_workspace_for(cx, client_ws).as_ref(),
     );
-    for pane in parked {
-        if showing.contains(&pane) || tree.contains(&pane) {
-            continue;
-        }
+    for pane in stranded_of(&parked, &showing, tree) {
         log::debug!("hanging up pane {pane}: the tree it was dropped from does not name it");
         let route = route.clone();
         cx.background_executor()
             .spawn(async move { crate::terminal::RemoteTerminal::kill_pane_on(&route, pane) })
             .detach();
     }
+}
+
+/// Which parked panes nothing is holding: the whole decision, with none of the
+/// ending.
+///
+/// Split out because the two halves are verifiable in very different ways. The
+/// hang-up itself can only be watched happening — and the fuzz that watches it
+/// varies enormously run to run, which is how a change of mine once looked
+/// effective for five iterations while doing nothing at all. The rule is
+/// arithmetic and can simply be asserted.
+fn stranded_of(
+    parked: &[u64],
+    showing: &std::collections::HashSet<u64>,
+    tree: &std::collections::HashSet<u64>,
+) -> Vec<u64> {
+    parked
+        .iter()
+        .copied()
+        .filter(|pane| !showing.contains(pane) && !tree.contains(pane))
+        .collect()
 }
 
 fn pump(cx: &mut App, client_ws: WorkspaceId) {
@@ -2838,6 +2855,47 @@ fn set_gui_ratio(pane: &mut Pane, path: &[Side], ratio: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three conditions that have to agree before a shell is ended, each
+    /// of which has been seen to matter.
+    ///
+    /// Asserted rather than watched: the sweep itself can only be observed
+    /// happening, and the fuzz that observes it swings from 50 operations a
+    /// run to 5, which is how an earlier change of mine looked effective for
+    /// five iterations while doing nothing at all.
+    #[test]
+    fn only_a_pane_nobody_holds_is_ended() {
+        let set = |ids: &[u64]| {
+            ids.iter()
+                .copied()
+                .collect::<std::collections::HashSet<u64>>()
+        };
+
+        // Held by a window, by the tree, by both, by neither.
+        assert_eq!(
+            stranded_of(&[1, 2, 3, 4], &set(&[1, 3]), &set(&[2, 3])),
+            vec![4],
+            "only the pane no window shows and no workspace names is stranded"
+        );
+
+        // The window's word outweighs the tree's silence: a pane it has
+        // spawned and not yet placed is exactly what the tree cannot see.
+        assert_eq!(
+            stranded_of(&[7], &set(&[7]), &set(&[])),
+            Vec::<u64>::new(),
+            "a pane on screen is never ended, whatever the tree says"
+        );
+
+        // And the tree's word outweighs the window's: a tab that failed to
+        // rebuild leaves its panes in the tree and off the screen.
+        assert_eq!(
+            stranded_of(&[8], &set(&[]), &set(&[8])),
+            Vec::<u64>::new(),
+            "a pane the tree still names is somebody's, and comes back on attach"
+        );
+
+        assert!(stranded_of(&[], &set(&[1]), &set(&[2])).is_empty());
+    }
 
     /// Pins which requests carry an already-spawned pane, because that is the
     /// set a refused operation can strand a shell from. A new request that
