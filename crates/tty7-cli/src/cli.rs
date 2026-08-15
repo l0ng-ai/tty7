@@ -397,7 +397,17 @@ pub enum WsCmd {
         ws: String,
     },
 
-    #[command(about = "Become the workspace's controlling client")]
+    #[command(
+        about = "Become the workspace's controlling client",
+        long_about = "Become the workspace's controlling client, and displace whoever held \
+                      it — `took_over_from` names them.\n\n\
+                      An attachment belongs to the connection that made it, and this \
+                      command's connection ends with the command. So the claim itself does \
+                      not outlive the process: `tty7 ws ls` will show the workspace \
+                      unattached again a moment later, and that is not a failure. What \
+                      lasts is the displacement — the previous holder has been told, and a \
+                      dedicated one has been hung up."
+    )]
     Attach {
         #[arg(value_name = "WORKSPACE")]
         ws: String,
