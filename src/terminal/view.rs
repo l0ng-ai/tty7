@@ -32,6 +32,7 @@ use crate::core::actions::{
 use crate::core::config::{BellMode, Config, LinkFileOpen, NotifyMode};
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use unicode_segmentation::UnicodeSegmentation as _;
 
 const GRID_PAD_X: f32 = 8.;
 const GRID_PAD_Y: f32 = 4.;
@@ -6552,14 +6553,20 @@ fn description_budget(cell_width: f32, label_cells: usize, menu_w: f32) -> usize
 /// `text` cut to `budget` characters, with the last one spent on an ellipsis.
 /// A budget too small to say anything with returns nothing rather than a bare
 /// "…", which reads as a description that is there but unreadable.
+///
+/// "Character" is a grapheme cluster, the unit `clusters` in the tab strip
+/// explains: a completion description is arbitrary text from a shell plugin,
+/// and cutting a cluster in half renders as a character the description never
+/// contained.
 fn elide(text: &str, budget: usize) -> String {
-    if text.chars().count() <= budget {
+    let clusters: Vec<&str> = text.graphemes(true).collect();
+    if clusters.len() <= budget {
         return text.to_string();
     }
     if budget < 2 {
         return String::new();
     }
-    let mut out: String = text.chars().take(budget - 1).collect();
+    let mut out: String = clusters[..budget - 1].concat();
     out.push('…');
     out
 }
@@ -8043,6 +8050,18 @@ mod tests {
         assert_eq!(elide("Show commit logs", 40), "Show commit logs");
         // Exactly the budget is still a fit; nothing is spent on an ellipsis.
         assert_eq!(elide("abcd", 4), "abcd");
+    }
+
+    #[test]
+    fn an_elided_description_spends_its_budget_on_whole_clusters() {
+        use unicode_segmentation::UnicodeSegmentation as _;
+        // A shell plugin's description is arbitrary text, emoji included.
+        let out = elide("🇨🇳🇨🇳🇨🇳🇨🇳🇨🇳 open the thing", 4);
+        assert_eq!(out.graphemes(true).count(), 4, "{out:?}");
+        assert_eq!(out, "🇨🇳🇨🇳🇨🇳…");
+        // The budget is in clusters, so it holds three flags and an ellipsis
+        // rather than one and a half flags reading as "CN CN C".
+        assert!(out.ends_with('…'), "{out:?}");
     }
 
     #[test]

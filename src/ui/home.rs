@@ -7,6 +7,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::kbd::Kbd;
 use gpui_component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::core::session::{SessionPane, SessionTab};
 use crate::ui::app::Tty7App;
@@ -55,9 +56,17 @@ fn first_leaf_cwd(pane: &SessionPane) -> Option<&std::path::PathBuf> {
     }
 }
 
+/// `s` cut to [`CLOSED_LABEL_MAX`] clusters, with an ellipsis when it was cut.
+///
+/// Counted in grapheme clusters rather than `char`s for the reason
+/// `tab_strip::clusters` gives: a directory name is a name a person chose,
+/// and cutting `❤️` or `🇨🇳` by `char` drops the variation selector or one
+/// half of the flag, so the cut renders as a different character than the
+/// one it kept.
 fn clamp_label(s: &str) -> String {
-    if s.chars().count() > CLOSED_LABEL_MAX {
-        format!("{}…", s.chars().take(CLOSED_LABEL_MAX).collect::<String>())
+    let clusters: Vec<&str> = s.graphemes(true).collect();
+    if clusters.len() > CLOSED_LABEL_MAX {
+        format!("{}…", clusters[..CLOSED_LABEL_MAX].concat())
     } else {
         s.to_string()
     }
@@ -394,6 +403,25 @@ mod tests {
             pane: leaf(Some("/")),
         };
         assert_eq!(closed_tab_label(&root), None);
+    }
+
+    #[test]
+    fn closed_tab_label_never_cuts_a_cluster_in_half() {
+        // 24 flags: over the budget, and every one of them two code points
+        // that mean a letter apiece if they are separated.
+        let tab = SessionTab {
+            name: Some("🇨🇳".repeat(24)),
+            tree_id: None,
+            sidebar_group: None,
+            pane: leaf(None),
+        };
+        let label = closed_tab_label(&tab).unwrap();
+        assert_eq!(label, format!("{}…", "🇨🇳".repeat(CLOSED_LABEL_MAX)));
+        // Counting `char`s would have taken CLOSED_LABEL_MAX code points —
+        // half as many flags, the last of them split into a bare regional
+        // indicator that draws as the letter C.
+        assert_eq!(label.graphemes(true).count(), CLOSED_LABEL_MAX + 1);
+        assert_eq!(label.chars().count(), CLOSED_LABEL_MAX * 2 + 1);
     }
 
     #[test]

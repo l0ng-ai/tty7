@@ -3,8 +3,9 @@
 //! once per visible row per frame.
 
 use std::borrow::Cow;
+use unicode_segmentation::UnicodeSegmentation as _;
 
-/// The ellipsis every eliding function here uses. One `char`, so a budget in
+/// The ellipsis every eliding function here uses. One cluster, so a budget in
 /// characters is a budget the caller can reason about.
 const ELLIPSIS: char = '…';
 
@@ -27,18 +28,26 @@ pub(crate) fn split_display_path(rel: &str) -> (&str, &str) {
 /// carry their meaning at the ends — `feature/…/auth-retry` still says which
 /// area and which change, where a plain truncate says neither.
 ///
-/// `max_chars` counts characters including the ellipsis, so the result never
-/// renders wider than the caller budgeted. Cuts land on character boundaries by
-/// construction: everything here walks `chars()`, never bytes.
+/// `max_chars` counts what a reader counts as one character — grapheme
+/// clusters — including the ellipsis, so the result never renders wider than
+/// the caller budgeted.
+///
+/// Walking `chars()` would already put every cut on a `char` boundary and so
+/// never produce invalid UTF-8, which is the hazard that usually gets the
+/// attention. It is not the hazard that shows: a filename holding `❤️` or
+/// `🇨🇳` cut mid-cluster loses the variation selector or one regional
+/// indicator, and the row then draws a character the path does not contain.
+/// `tab_strip::clusters` states the same rule for tab labels.
 pub(crate) fn elide_middle(s: &str, max_chars: usize) -> Cow<'_, str> {
-    let total = s.chars().count();
+    let clusters: Vec<&str> = s.graphemes(true).collect();
+    let total = clusters.len();
     if total <= max_chars {
         return Cow::Borrowed(s);
     }
     // Below three there is no room for head + ellipsis + tail; fall back to a
     // plain head cut rather than returning something wider than asked for.
     if max_chars <= 2 {
-        return Cow::Owned(s.chars().take(max_chars).collect());
+        return Cow::Owned(clusters[..max_chars].concat());
     }
     let keep = max_chars - 1;
     // Bias the extra character to the head: the tail is usually a file name,
@@ -46,9 +55,9 @@ pub(crate) fn elide_middle(s: &str, max_chars: usize) -> Cow<'_, str> {
     let head = keep.div_ceil(2);
     let tail = keep - head;
     let mut out = String::with_capacity(s.len());
-    out.extend(s.chars().take(head));
+    out.push_str(&clusters[..head].concat());
     out.push(ELLIPSIS);
-    out.extend(s.chars().skip(total - tail));
+    out.push_str(&clusters[total - tail..].concat());
     Cow::Owned(out)
 }
 
@@ -109,6 +118,23 @@ mod tests {
     fn elide_middle_leaves_short_strings_borrowed() {
         assert!(matches!(elide_middle("short", 10), Cow::Borrowed("short")));
         assert!(matches!(elide_middle("exact", 5), Cow::Borrowed("exact")));
+    }
+
+    #[test]
+    fn elide_middle_cuts_between_clusters_not_inside_them() {
+        // Both ends are clusters that mean something else in pieces: a family
+        // is four code points joined by ZWJ, a flag is two indicators.
+        let s = "👨‍👩‍👧/aaaaaaaaaaaaaaaaaaaa/🇨🇳";
+        let out = elide_middle(s, 8);
+        assert_eq!(out.graphemes(true).count(), 8, "{out:?}");
+        assert!(out.starts_with("👨‍👩‍👧"), "{out:?}");
+        assert!(out.ends_with("🇨🇳"), "{out:?}");
+        // Cutting by `char` would have spent four of its seven on the family
+        // alone and split it, so the head would have ended in a dangling ZWJ
+        // that then attaches itself to the ellipsis.
+        let by_char: String = s.chars().take(4).collect();
+        assert!(by_char.ends_with('\u{200D}'), "{by_char:?}");
+        assert!(!out.contains("👨\u{200D}👩\u{200D}…"), "{out:?}");
     }
 
     #[test]
