@@ -1419,6 +1419,71 @@ fn finish_prime(
     app.update(cx, |app, cx| sync_window(app, cx));
 }
 
+/// Every pane the window is showing, or `None` when that cannot be established.
+///
+/// `None` is not "it is showing nothing" — it is "do not act on this", and
+/// [`hang_up_detached`] treats it that way. A leaked shell is recoverable with
+/// `tty7 pane close --orphans`; a shell ended under a window that was merely
+/// unreadable for a moment is not.
+///
+/// A slot still connecting counts by the pane it is reattaching to. That is the
+/// one worth protecting: the daemon has registered it, so it can be named as
+/// detached, while the window has nothing on screen for it yet.
+fn shown_pane_ids(cx: &mut App, client_ws: WorkspaceId) -> Option<std::collections::HashSet<u64>> {
+    let entity = crate::ui::windows::WindowRegistry::app_for(cx, client_ws)?.upgrade()?;
+    let app = entity.read(cx);
+    Some(
+        app.tabs
+            .iter()
+            .flat_map(|tab| tab.pane.leaves())
+            .filter_map(|slot| match slot {
+                PaneSlot::Ready(view) => Some(view.read(cx).pane_id),
+                PaneSlot::Connecting(pending) => pending.read(cx).spawn.restore_pane,
+            })
+            .collect(),
+    )
+}
+
+/// Ends the shells behind panes the tree has just let go of.
+///
+/// Two conditions, and the second is what makes this safe. The daemon's answer
+/// is `collect_orphan_panes` taken across the whole machine *after* the change,
+/// so a pane that merely moved is still held by something and is never named —
+/// but a pane this window has spawned and registered and not yet placed in the
+/// tree is named, because at that instant nothing in the tree does hold it. Its
+/// `TabCreate` may still be sitting in the queue behind the op that produced
+/// this answer. Ending it would take down a pane the user is looking at, which
+/// is how a workspace with ten live tabs was lost before (#628). So a pane the
+/// window is showing is left alone whatever the tree says.
+fn hang_up_detached(cx: &mut App, client_ws: WorkspaceId, detached: Vec<u64>) {
+    if detached.is_empty() {
+        return;
+    }
+    let Some(showing) = shown_pane_ids(cx, client_ws) else {
+        log::debug!(
+            "workspace {client_ws}: {} detached pane(s) left running — the window could not be \
+             read, and a pane it might still be showing is not one to end on a guess",
+            detached.len()
+        );
+        return;
+    };
+    // Asked of the store rather than of the window: this is a property of the
+    // workspace, and the store answers without borrowing an entity.
+    let route = crate::terminal::PaneRoute::for_workspace(
+        crate::ui::remote_workspace::pane_workspace_for(cx, client_ws).as_ref(),
+    );
+    for pane in detached {
+        if showing.contains(&pane) {
+            continue;
+        }
+        log::debug!("hanging up pane {pane}, which the tree no longer holds");
+        let route = route.clone();
+        cx.background_executor()
+            .spawn(async move { crate::terminal::RemoteTerminal::kill_pane_on(&route, pane) })
+            .detach();
+    }
+}
+
 fn pump(cx: &mut App, client_ws: WorkspaceId) {
     let host = WorkspaceStore::host_of(cx, client_ws);
     let client = tree_control_for(cx, host);
@@ -1447,12 +1512,26 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
         let result = cx
             .background_executor()
             .spawn(async move {
+                // `TabClose` and `PaneClose` answer with the panes the tree let
+                // go of, and the shells behind them keep running until somebody
+                // hangs them up. The daemon will not do it: the same removal is
+                // how a pane crosses to another tab, so it cannot tell an
+                // ending from a move. Whoever sent the op has to say. `tty7
+                // pane close` always has (`hang_up_removed_panes`); the window
+                // did it only where a *person* closed something, and never for
+                // the identical ops its own reconciliation raises.
+                //
+                // Collected here and acted on back on the main thread, where
+                // what the window is still showing can be read.
+                let mut detached: Vec<u64> = Vec::new();
                 for op in batch {
-                    if let Err(e) = client.call(op.clone()) {
-                        return Err((op, e));
+                    match client.call(op.clone()) {
+                        Ok(ReplyOk::Panes(panes)) => detached.extend(panes),
+                        Ok(_) => {}
+                        Err(e) => return Err((op, e)),
                     }
                 }
-                Ok(())
+                Ok(detached)
             })
             .await;
         cx.update(|cx| {
@@ -1460,7 +1539,10 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
                 state.inflight = false;
             }
             match result {
-                Ok(()) => pump(cx, client_ws),
+                Ok(detached) => {
+                    hang_up_detached(cx, client_ws, detached);
+                    pump(cx, client_ws)
+                }
                 Err((op, e)) => {
                     log::warn!("tree operation {op:?} failed: {e}; re-pulling the tree");
                     if let Some(pane) = seeded_pane(&op) {
