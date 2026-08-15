@@ -98,8 +98,6 @@ l10n_keys! {
     HomeReopenClosedTab,
     HomeSwitchWorkspace,
     HomeCommandPalette,
-    HomeSplitRight,
-    HomeSplitDown,
     HomeSettings,
     Reconnect,
     None,

@@ -20,8 +20,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::HomeReopenClosedTab => "閉じたタブをもう一度開く",
         L10nKey::HomeSwitchWorkspace => "ワークスペースを切り替える…",
         L10nKey::HomeCommandPalette => "コマンドパレット…",
-        L10nKey::HomeSplitRight => "右に分割",
-        L10nKey::HomeSplitDown => "下に分割",
         L10nKey::HomeSettings => "設定…",
         L10nKey::Reconnect => "再接続",
         L10nKey::None => "なし",

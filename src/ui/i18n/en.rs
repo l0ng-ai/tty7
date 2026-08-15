@@ -20,8 +20,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::HomeReopenClosedTab => "Reopen Closed Tab",
         L10nKey::HomeSwitchWorkspace => "Switch Workspace…",
         L10nKey::HomeCommandPalette => "Command Palette…",
-        L10nKey::HomeSplitRight => "Split Right",
-        L10nKey::HomeSplitDown => "Split Down",
         L10nKey::HomeSettings => "Settings…",
         L10nKey::Reconnect => "Reconnect",
         L10nKey::None => "None.",

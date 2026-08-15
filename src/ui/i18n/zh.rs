@@ -20,8 +20,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::HomeReopenClosedTab => "重新打开已关闭的标签页",
         L10nKey::HomeSwitchWorkspace => "切换工作区…",
         L10nKey::HomeCommandPalette => "命令面板…",
-        L10nKey::HomeSplitRight => "向右分屏",
-        L10nKey::HomeSplitDown => "向下分屏",
         L10nKey::HomeSettings => "设置…",
         L10nKey::Reconnect => "重新连接",
         L10nKey::None => "无。",
