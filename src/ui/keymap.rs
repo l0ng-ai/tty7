@@ -1073,19 +1073,71 @@ mod tests {
         // action in the first but not the second cannot be bound at all — not
         // from config.json, which drops it silently, and not from the
         // Keybindings page, which reads the second.
+        // Read the arms rather than three names someone thought of. Both lists
+        // are hand-maintained and 106 long, and a sample cannot see the 107th —
+        // which is the entry a new action arrives as.
         let bindable: std::collections::HashSet<&str> =
             default_bindings().into_iter().map(|(a, _)| a).collect();
-        for action in [
-            "ShowRightPanelInfo",
-            "ShowRightPanelChanges",
-            "ShowRightPanelFiles",
-        ] {
-            assert!(bindable.contains(action), "{action} has nowhere to bind to");
+        let dispatchable = dispatchable_action_names();
+        assert!(
+            dispatchable.len() > 100,
+            "only {} arms parsed out of `make_binding`; the scan below is not \
+             reading what it thinks it is",
+            dispatchable.len()
+        );
+
+        let orphaned: Vec<&str> = dispatchable
+            .iter()
+            .copied()
+            .filter(|a| !bindable.contains(a))
+            .collect();
+        assert!(
+            orphaned.is_empty(),
+            "dispatchable with nowhere to bind them, so config.json drops them \
+             silently and the Keybindings page never lists them: {orphaned:?}"
+        );
+
+        let dangling: Vec<&str> = bindable
+            .iter()
+            .copied()
+            .filter(|a| !dispatchable.contains(a))
+            .collect();
+        assert!(
+            dangling.is_empty(),
+            "bindable but not dispatchable, so binding one writes a key that \
+             fires nothing: {dangling:?}"
+        );
+
+        for action in dispatchable {
             assert!(
                 make_binding(action, "ctrl-1").is_some(),
-                "{action} has a slot but nothing to dispatch"
+                "{action} is spelled in an arm but did not build a binding"
             );
         }
+    }
+
+    /// Every action name `make_binding` answers to, read out of its arms.
+    ///
+    /// The set exists only as a `match` in this file, so there is nothing to
+    /// ask at runtime. Reading the source is the same move `aumid`'s test
+    /// makes against `windows-installer.iss`, and it is what keeps this
+    /// honest as the match grows.
+    fn dispatchable_action_names() -> std::collections::HashSet<&'static str> {
+        let src = include_str!("keymap.rs");
+        let start = src
+            .find("fn make_binding")
+            .expect("make_binding is defined in this file");
+        let body = &src[start..];
+        let end = body.find("\n}").expect("make_binding has an end");
+        body[..end]
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim_start();
+                let rest = line.strip_prefix('"')?;
+                let (name, tail) = rest.split_once('"')?;
+                tail.trim_start().starts_with("=>").then_some(name)
+            })
+            .collect()
     }
 
     #[test]
