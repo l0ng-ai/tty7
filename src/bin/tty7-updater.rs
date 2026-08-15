@@ -327,9 +327,21 @@ mod macos {
         }
 
         if let Err(error) = fs::rename(replacement, current) {
-            let _ = fs::rename(&backup, current);
-            let _ = fs::remove_dir_all(stage);
-            let result = Err(format!("putting the staged app in place: {error}"));
+            // The same care the launch-failure arm below takes, and for a
+            // sharper reason: `current` has already been moved into the stage,
+            // so the backup is the only app there is. Dropping the stage
+            // without checking the restore first deleted it — leaving nothing
+            // at `current`, and an error that mentioned only the swap.
+            let result = match fs::rename(&backup, current) {
+                Ok(()) => {
+                    let _ = fs::remove_dir_all(stage);
+                    Err(format!("putting the staged app in place: {error}"))
+                }
+                Err(restore) => Err(format!(
+                    "putting the staged app in place: {error}; \
+                     restoring the previous app: {restore}"
+                )),
+            };
             report(&result);
             return result;
         }
@@ -473,6 +485,38 @@ mod macos {
             assert_eq!(fs::read_to_string(current.join("marker")).unwrap(), "new");
             assert!(!stage.exists());
             assert!(!root.path().join(".tty7.app.tty7-update-backup").exists());
+        }
+
+        #[test]
+        fn a_failed_swap_puts_the_previous_app_back() {
+            // The window this covers: `current` has already been renamed into
+            // the stage, so between the two renames there is no app at all.
+            // A replacement that is not there fails the second one.
+            let root = tempfile::tempdir().unwrap();
+            let current = root.path().join("tty7.app");
+            let stage = root.path().join("stage");
+            bundle(&current, "old");
+            fs::create_dir_all(&stage).unwrap();
+            let replacement = stage.join("never-extracted.app");
+
+            let error = replace_and_relaunch(
+                &current,
+                &replacement,
+                &stage,
+                |_| panic!("nothing should be launched when the swap failed"),
+                |_| (),
+            )
+            .unwrap_err();
+
+            assert!(
+                error.starts_with("putting the staged app in place:"),
+                "{error}"
+            );
+            assert!(
+                current.exists(),
+                "the previous app must be back where it was"
+            );
+            assert_eq!(fs::read_to_string(current.join("marker")).unwrap(), "old");
         }
 
         #[test]
