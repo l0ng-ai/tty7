@@ -148,7 +148,7 @@ angle brackets, and a tab:
 
 | Key | Type | Default | |
 |---|---|---|---|
-| `agent_commands` | object | `{}` | Map a wrapper command to an agent slug: `{"cc": "claude"}`. |
+| `agent_commands` | object | `{}` | Map a wrapper command to an agent slug: `{"cc": "claude"}`. Read once per server, so a new entry needs `tty7 server restart`. |
 | `restore_agent_sessions` | bool | `true` | Relaunch an agent conversation when a lost pane is restored. |
 | `install_cli_on_path` | bool | `true` | Put the bundled `tty7` command on PATH at launch. |
 

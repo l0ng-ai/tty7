@@ -990,6 +990,14 @@ pub(crate) fn extra_env() -> HashMap<String, String> {
     Config::load().env
 }
 
+/// `agent_commands`, lowercased once and kept for the life of the server.
+///
+/// Read on every pane spawn — twice, on the marks a shell reports — so the
+/// alternative is `Config::load()` off disk each time a pane starts. The cost
+/// of the cache is that this is the one setting a running server will not pick
+/// up: a new wrapper needs `tty7 server restart`, which the row in
+/// `docs/reference/configuration.mdx` now says, because nothing about editing
+/// the file would otherwise suggest it.
 pub(crate) fn agent_commands_cached() -> &'static HashMap<String, String> {
     static CACHE: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| {
