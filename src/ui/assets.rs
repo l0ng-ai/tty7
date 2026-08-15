@@ -47,6 +47,9 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/machine-local.svg" => include_bytes!("../../assets/icons/machine-local.svg"),
         "icons/machine-remote.svg" => include_bytes!("../../assets/icons/machine-remote.svg"),
         "icons/refresh.svg" => include_bytes!("../../assets/icons/refresh.svg"),
+        "icons/chevrons-up-down.svg" => {
+            include_bytes!("../../assets/icons/chevrons-up-down.svg")
+        }
         "icons/agents/claude.svg" => include_bytes!("../../assets/icons/agents/claude.svg"),
         "icons/agents/codex.svg" => include_bytes!("../../assets/icons/agents/codex.svg"),
         "icons/agents/gemini.svg" => include_bytes!("../../assets/icons/agents/gemini.svg"),
@@ -96,6 +99,33 @@ mod tests {
                 agent.display_name()
             );
         }
+    }
+
+    /// Reads the directory rather than a list, because a list is what let
+    /// `chevrons-up-down.svg` sit here unserved: it was drawn to this repo's
+    /// weight like every other glyph in `assets/icons`, and being absent from
+    /// the match it fell through to the stock one, a hair lighter than its
+    /// neighbours in the same row. Nothing failed, so nothing said so.
+    #[test]
+    fn every_icon_this_repo_ships_is_the_one_that_draws() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(dir).expect("assets/icons is readable") {
+            let entry = entry.expect("a readable directory entry");
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.ends_with(".svg") {
+                continue;
+            }
+            let path = format!("icons/{name}");
+            assert!(
+                agent_icon(&path).is_some(),
+                "assets/icons/{name} ships but nothing serves it, so the stock \
+                 glyph draws in its place"
+            );
+            checked += 1;
+        }
+        assert!(checked > 15, "only {checked} icons were checked");
     }
 
     #[test]
