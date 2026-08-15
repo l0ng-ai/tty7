@@ -167,6 +167,38 @@ mod tests {
         assert!(!endpoint_exists(), "endpoint cleared after removal");
     }
 
+    /// A socket file left behind by a killed daemon blocks the next `bind`.
+    ///
+    /// This is the fact `run_with` turns on: a unix endpoint is a *file*, and
+    /// binding a path that exists fails rather than replacing it, so the
+    /// startup path has to unlink a dead predecessor's socket itself. Windows
+    /// records a port instead, which the next bind simply overwrites — that
+    /// difference is what let the unlink get skipped on the one path where it
+    /// was load-bearing, and a `kill -9` then left the daemon unable to start.
+    #[test]
+    fn a_leftover_socket_file_blocks_the_next_bind_until_it_is_removed() {
+        pin_config_dir();
+        remove_stale_endpoint();
+
+        let dead = bind().expect("first bind");
+        drop(dead); // as a killed daemon leaves it: file on disk, nobody listening
+        assert!(endpoint_exists(), "SIGKILL leaves the socket file behind");
+        assert!(
+            connect().is_err(),
+            "nothing is listening, so the path is provably stale"
+        );
+
+        assert!(
+            bind().is_err(),
+            "binding an existing socket path fails — this is the whole bug"
+        );
+
+        remove_stale_endpoint();
+        let fresh = bind().expect("bind succeeds once the stale file is gone");
+        drop(fresh);
+        remove_stale_endpoint();
+    }
+
     #[test]
     fn socket_path_stays_in_config_dir_when_it_fits() {
         let dir = std::path::PathBuf::from("/tmp/tty7-short");

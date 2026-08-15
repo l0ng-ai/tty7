@@ -543,23 +543,28 @@ fn report_conpty_host() {
 fn run_with(registry: Arc<Registry>) -> anyhow::Result<()> {
     crate::daemon::control::server_started();
 
-    // A stale daemon.port whose recorded daemon is gone cannot belong to a
-    // live server: skip the probe (which would pay the OS's refusal delay on
-    // the dead port) and let the bind below overwrite the file. A live
-    // recorded daemon still gets the connect — the singleton seat is held by
-    // this process, so it can only be a foreign server worth refusing.
-    if transport::endpoint_exists() && !crate::daemon::spawn::recorded_daemon_is_dead() {
-        match transport::connect() {
-            Ok(_) => {
-                anyhow::bail!(
-                    "daemon already running at {}",
-                    transport::endpoint_display()
-                );
-            }
-            Err(_) => {
-                transport::remove_stale_endpoint();
-            }
+    // A stale endpoint whose recorded daemon is gone cannot belong to a live
+    // server, so there is nothing worth asking it: skip the probe, which would
+    // otherwise pay the OS's refusal delay on a dead port. A live recorded
+    // daemon still gets the connect — the singleton seat is held by this
+    // process, so anything answering is a foreign server worth refusing.
+    //
+    // The removal is not part of that shortcut, though, and used to be: the
+    // endpoint on unix is a socket *file*, and `bind` on a path that exists
+    // fails with EADDRINUSE rather than replacing it, where a Windows
+    // daemon.port is a recorded number the next bind simply overwrites. So the
+    // one case that most needs the unlink — the recorded daemon gone, which is
+    // every unclean death: SIGKILL, OOM, a lost machine — was the case that
+    // skipped it, and the server could not start again until somebody deleted
+    // a socket out of the temp dir by hand.
+    if transport::endpoint_exists() {
+        if !crate::daemon::spawn::recorded_daemon_is_dead() && transport::connect().is_ok() {
+            anyhow::bail!(
+                "daemon already running at {}",
+                transport::endpoint_display()
+            );
         }
+        transport::remove_stale_endpoint();
     }
 
     let listener = transport::bind()?;
