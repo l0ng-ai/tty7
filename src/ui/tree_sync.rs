@@ -1463,12 +1463,60 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
                 Ok(()) => pump(cx, client_ws),
                 Err((op, e)) => {
                     log::warn!("tree operation {op:?} failed: {e}; re-pulling the tree");
+                    if let Some(pane) = seeded_pane(&op) {
+                        // Known leak, and this line is how anyone hitting it
+                        // finds out. `TabCreate`, `PaneSplit` and `PaneReplace`
+                        // each name a pane this window has *already* spawned —
+                        // the shell is running on the machine before the tree
+                        // is told about it. When the op is refused the tree
+                        // never takes the pane, the re-pull below leaves the
+                        // window without the tab it was for, and the shell goes
+                        // on running with nothing referencing it.
+                        //
+                        // Reproducible: with a window open, `tty7 tab new` and
+                        // `tty7 tab close` back to back. The GUI restores the
+                        // new tab, finds its pane already hung up, spawns a
+                        // replacement, and `PaneReplace` is refused because the
+                        // tab is gone. Four cycles in five leak; leave half a
+                        // second between the two and none do.
+                        //
+                        // Not swept here on purpose. At this point the window
+                        // still holds a view for the pane and only drops it
+                        // once the re-pull lands, so hanging it up here would
+                        // kill a pane that is still on screen. The sweep
+                        // belongs after the pull settles, and has to test the
+                        // whole machine tree rather than this workspace's
+                        // mirror — a pane of another workspace on the same host
+                        // is not this window's to end. Until then
+                        // `tty7 pane close --orphans` is the recovery, and
+                        // `tty7 pane ls --all` already points at it.
+                        log::warn!(
+                            "pane {pane} was spawned for that operation and nothing holds it \
+                             now; it will show up in `tty7 pane ls --all` as an orphan"
+                        );
+                    }
                     desync(cx, client_ws, "an operation was refused");
                 }
             }
         });
     })
     .detach();
+}
+
+/// The pane an operation carries that this window has already spawned.
+///
+/// These three requests are the only ones that name a pane into existence:
+/// the shell is running on the machine before the tree is told about it, which
+/// is exactly what makes a refused operation leave something behind. Every
+/// other request only ever moves, renames or removes panes the tree already
+/// knows, and refusing one of those strands nothing.
+fn seeded_pane(op: &ControlRequest) -> Option<u64> {
+    match op {
+        ControlRequest::TabCreate { pane, .. } => Some(pane.pane),
+        ControlRequest::PaneSplit { new, .. } => Some(new.pane),
+        ControlRequest::PaneReplace { new, .. } => Some(new.pane),
+        _ => None,
+    }
 }
 
 fn desync(cx: &mut App, client_ws: WorkspaceId, why: &str) {
@@ -2566,6 +2614,67 @@ fn set_gui_ratio(pane: &mut Pane, path: &[Side], ratio: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins which requests carry an already-spawned pane, because that is the
+    /// set a refused operation can strand a shell from. A new request that
+    /// names a pane into existence has to be added here too, or its refusal
+    /// leaks silently.
+    #[test]
+    fn only_the_requests_that_spawn_a_pane_report_a_seed() {
+        let ws = WorkspaceId::new();
+        let seed = |pane| PaneSeed {
+            pane,
+            cwd: None,
+            ssh_spec: None,
+            agent: None,
+            shell: None,
+        };
+
+        assert_eq!(
+            seeded_pane(&ControlRequest::TabCreate {
+                workspace: ws,
+                at: None,
+                pane: seed(7),
+                tab: None,
+            }),
+            Some(7)
+        );
+        assert_eq!(
+            seeded_pane(&ControlRequest::PaneReplace {
+                workspace: ws,
+                old: 7,
+                new: seed(8),
+            }),
+            Some(8)
+        );
+        assert_eq!(
+            seeded_pane(&ControlRequest::PaneSplit {
+                workspace: ws,
+                pane: 7,
+                axis: TreeAxis::Vertical,
+                ratio: 0.5,
+                new: seed(9),
+                first: false,
+            }),
+            Some(9)
+        );
+
+        // Removing or renaming names no new pane, so a refusal strands nothing.
+        assert_eq!(
+            seeded_pane(&ControlRequest::TabClose {
+                workspace: ws,
+                tab: TabId::new(),
+            }),
+            None
+        );
+        assert_eq!(
+            seeded_pane(&ControlRequest::PaneClose {
+                workspace: ws,
+                pane: 7,
+            }),
+            None
+        );
+    }
 
     #[test]
     fn note_instance_reports_only_a_real_change() {
