@@ -105,7 +105,29 @@ impl RealBackend {
         if self.panes.is_none() {
             let client = match self.route()? {
                 Some(target) => PaneClient::routed(target),
-                None => PaneClient::local(),
+                None => {
+                    let client = PaneClient::local();
+                    // One probe on the way in, so that "there is no server"
+                    // says so. Panes are reached over the daemon's own socket,
+                    // and with no daemon there is no socket: every later call
+                    // fails with a bare `NotFound`, which `send` and `capture`
+                    // then wrap as "sending input to pane %1: No such file or
+                    // directory" and `procs` reports with no context at all.
+                    // All three read as if the *pane* were missing. The
+                    // control path has said the useful thing all along —
+                    // `local_control` contexts its connect the same way — and
+                    // this is that courtesy one socket over.
+                    //
+                    // A daemon that is running answers a bad pane id with its
+                    // own message ("no such pane 999"), so nothing real is
+                    // swallowed here. Local only: the message names this
+                    // machine, and a routed client would pay a round trip
+                    // across the link to be told something that is not true of
+                    // the far end. Cached with the client, so it is one round
+                    // trip per process.
+                    client.version().context(NOT_RUNNING)?;
+                    client
+                }
             };
             self.panes = Some(client);
         }
