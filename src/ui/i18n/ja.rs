@@ -1796,7 +1796,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabMenuLocalShells => "ローカル",
         L10nKey::TabMenuAddHost => "SSH ホストを追加…",
         L10nKey::TabMenuAllHosts => "すべての SSH ホスト…",
-        L10nKey::TabMenuSplitHint => "{key} を押しながらで分割",
+        L10nKey::TabMenuSplitHint => "{key} を押しながら選ぶと分割",
         L10nKey::TabUnnamedShell => "シェル {n}",
         L10nKey::ShellDefault => "デフォルト",
         L10nKey::SidebarScratchGroup => "スクラッチ",

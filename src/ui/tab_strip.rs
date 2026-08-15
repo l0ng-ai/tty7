@@ -540,15 +540,19 @@ fn split_modifier() -> &'static str {
     }
 }
 
-/// What the New Tab menu offers, copied off the app before the menu is built.
+/// What the New Tab menu offers, read off the app when the menu is opened.
 ///
-/// The builder runs on the popup's own entity and cannot read `Tty7App` back,
-/// so everything a row needs to name itself is taken here and carried in.
+/// The builder runs on the popup's own entity, so what a row needs to name
+/// itself is taken here and carried in. Taken on open rather than on render:
+/// the strip redraws on every frame a terminal paints, and the host list is
+/// worth sorting once per menu, not once per frame — and a host saved while
+/// the window sat still is in the list the next time the `+` is pressed.
 struct NewTabMenu {
     app: gpui::WeakEntity<Tty7App>,
     shells: Vec<(SharedString, ShellSpec)>,
     default_shell: SharedString,
-    /// Saved host, its display name, and the `user@host:port` under it.
+    /// Saved host, its display name, and the `user@host:port` beside it —
+    /// empty when the name already says it.
     hosts: Vec<(uuid::Uuid, SharedString, SharedString)>,
 }
 
@@ -556,6 +560,11 @@ impl NewTabMenu {
     fn build(&self, menu: PopupMenu) -> PopupMenu {
         let mut menu = menu
             .min_w(px(240.))
+            // Shells are whatever this machine has plus whatever the user
+            // added by hand, so the row count has no ceiling. Past the height
+            // of the window an un-scrollable menu simply loses its last rows —
+            // and the last rows here are the SSH section.
+            .scrollable(true)
             .item(PopupMenuItem::label(t(L10nKey::TabMenuLocalShells)));
         for (label, spec) in &self.shells {
             let spec = spec.clone();
@@ -597,19 +606,21 @@ impl NewTabMenu {
         for (id, name, endpoint) in &self.hosts {
             let (id, name, endpoint) = (*id, name.clone(), endpoint.clone());
             let app = self.app.clone();
-            menu = menu.item(
+            let row = if endpoint.is_empty() {
+                PopupMenuItem::new(name.clone())
+            } else {
                 PopupMenuItem::element(move |_window, cx| {
                     menu_row(name.clone(), endpoint.clone(), cx)
                 })
-                .on_click(move |_, window, cx| {
-                    let at = SpawnWhere::from_modifiers(window.modifiers());
-                    if let Some(app) = app.upgrade() {
-                        app.update(cx, |this, cx| {
-                            this.connect_ssh_profile_at(id, at, window, cx)
-                        });
-                    }
-                }),
-            );
+            };
+            menu = menu.item(row.on_click(move |_, window, cx| {
+                let at = SpawnWhere::from_modifiers(window.modifiers());
+                if let Some(app) = app.upgrade() {
+                    app.update(cx, |this, cx| {
+                        this.connect_ssh_profile_at(id, at, window, cx)
+                    });
+                }
+            }));
         }
         // With no hosts saved, the row that closes the section is the one that
         // gets you your first — the list of hosts is not somewhere to send
@@ -647,8 +658,9 @@ impl NewTabMenu {
 /// so the ones that fit are the ones actually used.
 ///
 /// A host saved without a name has nothing to show but where it goes, so it
-/// shows that: the endpoint leads the row and repeats under it rather than
-/// leaving the row blank.
+/// leads with the endpoint rather than leaving the row blank — and then drops
+/// the endpoint beside it, because a row that says `root@build.lan` twice
+/// tells the reader nothing the first half did not.
 fn menu_hosts(
     profiles: Vec<crate::core::ssh_profile::SshProfile>,
 ) -> Vec<(uuid::Uuid, SharedString, SharedString)> {
@@ -662,20 +674,35 @@ fn menu_hosts(
             } else {
                 p.name.clone()
             };
-            (p.id, SharedString::from(name), SharedString::from(endpoint))
+            let note = if name == endpoint {
+                String::new()
+            } else {
+                endpoint
+            };
+            (p.id, SharedString::from(name), SharedString::from(note))
         })
         .collect()
 }
 
 /// A menu row that names a thing on the left and says what it is on the right.
+///
+/// Both halves are cut rather than allowed to push: a menu is 500px wide at
+/// the most, and a descriptive host name next to a long `user@host:port` will
+/// ask for more than that. The name keeps whatever the endpoint leaves.
 fn menu_row(label: SharedString, note: SharedString, cx: &gpui::App) -> impl IntoElement + use<> {
     h_flex()
         .w_full()
         .items_center()
         .justify_between()
         .gap_3()
-        .child(label)
-        .child(div().text_color(cx.theme().muted_foreground).child(note))
+        .child(div().flex_1().min_w_0().truncate().child(label))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(cx.theme().muted_foreground)
+                .child(note),
+        )
 }
 
 /// The words behind the status dot's colour.
@@ -1197,7 +1224,7 @@ impl Tty7App {
         id: &'static str,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        let open = self.new_tab_menu_rows(cx);
+        let app = cx.entity().downgrade();
         chrome_tile(Button::new(id).icon(Icon::new(IconName::Plus)), false, cx)
             .rounded_lg()
             // Every other tile in this row names itself on hover — Switch
@@ -1206,14 +1233,21 @@ impl Tty7App {
             // more here than anywhere else in the row: it is the way back to
             // opening a tab without reading a menu first.
             .tooltip(chord_hint(t(L10nKey::AppMenuNewTab), "NewTab", cx))
-            .dropdown_menu(move |menu, _window, _cx| open.build(menu))
+            // Built when the menu opens, not when the strip draws: this
+            // closure runs once per press, and again after each dismissal.
+            .dropdown_menu(move |menu, _window, cx| {
+                let Some(this) = app.upgrade() else {
+                    return menu;
+                };
+                this.read(cx).new_tab_menu_rows(app.clone(), cx).build(menu)
+            })
     }
 
-    /// What the menu offers, read off the app before the menu is built — the
-    /// builder runs on the popup's own entity and cannot reach back here.
-    fn new_tab_menu_rows(&self, cx: &Context<Self>) -> NewTabMenu {
+    /// What the menu offers, read off the app as the menu opens — the builder
+    /// runs on the popup's own entity, so the rows carry a weak handle back.
+    fn new_tab_menu_rows(&self, app: gpui::WeakEntity<Self>, cx: &App) -> NewTabMenu {
         NewTabMenu {
-            app: cx.entity().downgrade(),
+            app,
             shells: self
                 .shells
                 .shells
@@ -1814,7 +1848,18 @@ mod tests {
         // with an empty name would be a blank line you could click.
         let rows = menu_hosts(vec![host("", "root", "build.lan")]);
         assert_eq!(rows[0].1, "root@build.lan");
-        assert_eq!(rows[0].2, "root@build.lan");
+        // And it says it once: the endpoint has already led the row, so
+        // repeating it in the note column would be a row talking to itself.
+        assert_eq!(rows[0].2, "");
+    }
+
+    #[test]
+    fn a_host_named_after_its_own_address_does_not_say_it_twice() {
+        // Quick Connect saves a host under the target that was typed, so this
+        // is the ordinary shape of a host nobody has renamed.
+        let rows = menu_hosts(vec![host("deploy@10.0.0.5", "deploy", "10.0.0.5")]);
+        assert_eq!(rows[0].1, "deploy@10.0.0.5");
+        assert_eq!(rows[0].2, "");
     }
 
     #[test]
