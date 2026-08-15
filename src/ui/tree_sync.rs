@@ -1435,19 +1435,32 @@ fn finish_prime(
     app.update(cx, |app, cx| sync_window(app, cx));
 }
 
-/// Every pane the window is showing, or `None` when that cannot be established.
+/// Every pane **any** open window is showing, or `None` when that cannot be
+/// established.
 ///
-/// `None` is not "it is showing nothing" — it is "do not act on this", and
-/// [`hang_up_detached`] treats it that way. A leaked shell is recoverable with
-/// `tty7 pane close --orphans`; a shell ended under a window that was merely
-/// unreadable for a moment is not.
+/// Every window, not just the one that raised the op. The answer this guards is
+/// the daemon's, and the daemon's is machine-wide: a pane another window has
+/// spawned and registered but not yet placed in the tree is named as detached,
+/// because at that instant nothing in the tree holds it. Asking only the window
+/// in hand would end a pane a *different* window is showing — the same mistake
+/// as judging one against a tree that has not caught up, one window over.
+///
+/// `None` is not "nothing is showing" — it is "do not act on this", and
+/// [`hang_up_detached`] treats it that way. A window that will not answer might
+/// be showing anything, so a window that fails to upgrade abandons the sweep
+/// rather than shrinking it. A leaked shell is recoverable with `tty7 pane
+/// close --orphans`; a shell ended under a live window is not.
 ///
 /// A slot still connecting counts by the pane it is reattaching to. That is the
 /// one worth protecting: the daemon has registered it, so it can be named as
 /// detached, while the window has nothing on screen for it yet.
-fn shown_pane_ids(cx: &mut App, client_ws: WorkspaceId) -> Option<std::collections::HashSet<u64>> {
-    let entity = crate::ui::windows::WindowRegistry::app_for(cx, client_ws)?.upgrade()?;
-    Some(pane_ids_of(entity.read(cx), cx))
+fn shown_pane_ids(cx: &mut App) -> Option<std::collections::HashSet<u64>> {
+    let mut shown = std::collections::HashSet::new();
+    for (_, weak) in crate::ui::windows::WindowRegistry::open_windows(cx) {
+        let app = weak.upgrade()?;
+        shown.extend(pane_ids_of(app.read(cx), cx));
+    }
+    Some(shown)
 }
 
 /// The same question asked of a window already in hand, which is how a caller
@@ -1479,7 +1492,7 @@ fn hang_up_detached(cx: &mut App, client_ws: WorkspaceId, detached: Vec<u64>) {
     if detached.is_empty() {
         return;
     }
-    let Some(showing) = shown_pane_ids(cx, client_ws) else {
+    let Some(showing) = shown_pane_ids(cx) else {
         log::debug!(
             "workspace {client_ws}: {} detached pane(s) left running — the window could not be \
              read, and a pane it might still be showing is not one to end on a guess",
@@ -1552,7 +1565,7 @@ fn sweep_parked(cx: &mut App, client_ws: WorkspaceId, tree: &std::collections::H
     if parked.is_empty() {
         return;
     }
-    let Some(showing) = shown_pane_ids(cx, client_ws) else {
+    let Some(showing) = shown_pane_ids(cx) else {
         return;
     };
     if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) {
