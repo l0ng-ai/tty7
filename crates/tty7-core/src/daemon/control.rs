@@ -112,10 +112,21 @@ pub(crate) const GIT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(crate) const MAX_CONCURRENT_GIT_STREAMS: usize = 8;
 
+/// Capabilities a peer names in its hello, for the things a version number is
+/// too coarse for. Every check asks for one name, never for the exact list, so
+/// adding one is safe in both directions.
 pub mod feature {
     pub const CONTROL: &str = "control";
     pub(crate) const HOST_RPC: &str = "host-rpc";
+    /// Advertised only when the peer actually keeps a machine tree, which is
+    /// what `tree_sync` gates the whole tree path on.
     pub const MACHINE_TREE: &str = "machine-tree";
+    /// Advertised, and read by nothing — here and in every build that has
+    /// shipped. Kept rather than dropped because it costs one string in a
+    /// hello that already travels once per host, and a client that later wants
+    /// to detect the bridge can then do it against servers already deployed;
+    /// removing it would take that away for no gain. Said out loud so the next
+    /// reader does not go looking for the consumer.
     pub(crate) const STDIO_BRIDGE: &str = "stdio-bridge";
 }
 
