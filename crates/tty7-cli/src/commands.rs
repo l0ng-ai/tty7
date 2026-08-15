@@ -513,6 +513,20 @@ fn run(args: RunArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcom
     ))
 }
 
+/// `n` panes, said the way English says it.
+///
+/// The rest of the tree counts properly — the GUI routes its counts through
+/// `t_plural`, and `pane close` narrates a batch only when there is one — so
+/// `pane(s)` was the odd form left, on the three lines that report a partial
+/// failure or a leftover. Those are exactly the lines a reader is already
+/// unhappy to be reading.
+fn panes_count(n: usize) -> String {
+    match n {
+        1 => "1 pane".to_string(),
+        n => format!("{n} panes"),
+    }
+}
+
 /// Do the filing that follows a spawn, hanging the pane up if it fails.
 ///
 /// Every verb that puts a new pane in the tree spawns it first and asks the
@@ -877,8 +891,8 @@ fn hang_up_removed_panes(request: &str, reply: ReplyOk, backend: &mut dyn Backen
     }
     if !failures.is_empty() {
         bail!(
-            "failed to hang up {} pane(s) removed by {request}: {}",
-            failures.len(),
+            "failed to hang up {} removed by {request}: {}",
+            panes_count(failures.len()),
             failures.join("; ")
         );
     }
@@ -978,8 +992,9 @@ fn pane_ls_all(backend: &mut dyn Backend) -> Result<Outcome> {
     let mut human = output::registry_table(&running, &|pane| holder(pane).map(|ws| ws.to_string()));
     if orphans > 0 {
         human.push_str(&format!(
-            "\n{orphans} pane(s) held by no workspace — `tty7 pane close %<id>` stops one, \
-             `tty7 pane close --orphans` stops all of them\n"
+            "\n{} held by no workspace — `tty7 pane close %<id>` stops one, \
+             `tty7 pane close --orphans` stops all of them\n",
+            panes_count(orphans)
         ));
     }
     report(human, json!({ "panes": panes, "orphans": orphans }))
@@ -1063,8 +1078,8 @@ fn pane_close(
         // The complaint goes to stderr all the same, so `-q` still reports it
         // and the exit code is not the only thing that says so.
         eprintln!(
-            "tty7: closed {} pane(s); {} could not be closed — {}",
-            closed.len(),
+            "tty7: closed {}; {} could not be closed — {}",
+            panes_count(closed.len()),
             failures.len(),
             failures.join("; ")
         );
@@ -3054,6 +3069,20 @@ mod tests {
         )
         .expect("a routed cwd is the remote machine's to resolve");
         assert_eq!(backend.runs.len(), 1, "the routed run must still happen");
+    }
+
+    /// Counts of panes read as English on the failure lines too.
+    ///
+    /// These three lines said `pane(s)`, which is the form a codebase reaches
+    /// for when it has not decided — and this one has: the GUI counts through
+    /// `t_plural`, and `pane close` narrates a batch only when there is one to
+    /// narrate. They are also the lines a reader meets when something has
+    /// already gone wrong, which is a poor moment to look unfinished.
+    #[test]
+    fn pane_counts_are_singular_when_there_is_one() {
+        assert_eq!(panes_count(0), "0 panes");
+        assert_eq!(panes_count(1), "1 pane");
+        assert_eq!(panes_count(2), "2 panes");
     }
 
     /// Filing a spawned pane can fail, and the pane must not survive it.
