@@ -11,7 +11,8 @@ use crate::daemon::control::{
     KEEPALIVE_PING_INTERVAL, LinkShutdown, ReplyOk,
 };
 use crate::host::{
-    Entry, Host, HostId, Meta, Output, SearchHit, SharedHost, ShellInventory, WatchHandle, WatchSub,
+    Entry, Host, HostId, Meta, Output, SearchHit, SharedHost, ShellInventory, WatchHandle,
+    WatchSub, guard_off_ui,
 };
 
 pub struct RemoteHost {
@@ -117,7 +118,20 @@ impl RemoteHost {
         self
     }
 
+    /// Every blocking round trip this host makes, and so the one place its
+    /// half of [`guard_off_ui`] belongs.
+    ///
+    /// `LocalHost` arms the same assertion on each of its blocking methods,
+    /// which left the protection backwards: a `read_dir` on the UI thread
+    /// tripped it against a local disk and went unnoticed against a machine
+    /// across a network, where the freeze is a round trip rather than a
+    /// syscall. The two methods that reach the wire without coming through
+    /// here — `read_file` and `git_with_deadline` — arm it themselves.
+    ///
+    /// `is_connected` deliberately stays clear of this: it reads a flag the
+    /// client already holds, and rendering asks it constantly.
     fn call(&self, req: ControlRequest) -> io::Result<ReplyOk> {
+        guard_off_ui();
         self.client.call(req)
     }
 }
@@ -185,6 +199,7 @@ impl Host for RemoteHost {
     }
 
     fn read_file(&self, p: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
+        guard_off_ui();
         let got = self.client.call_full(
             ControlRequest::ReadFile {
                 path: wire_path(p),
@@ -283,6 +298,7 @@ impl Host for RemoteHost {
         args: &[&str],
         deadline: Duration,
     ) -> io::Result<Output> {
+        guard_off_ui();
         // Byte-for-byte the same request `git` sends; only the client's own
         // patience changes. The server never times a job out, so a v5 peer that
         // knows nothing about long git verbs serves this unchanged.
