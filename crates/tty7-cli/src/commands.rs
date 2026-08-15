@@ -405,6 +405,21 @@ fn run(args: RunArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcom
              pass --ws, or run inside a tty7 shell where $TTY7_WS names one"
         );
     }
+    // `--keep` files the pane into its workspace *after* the spawn, so a
+    // `$TTY7_WS` that no longer names one here — a workspace since removed, or
+    // a shell opened against another machine — started the pane and then failed
+    // the filing, leaving it running with nothing holding it. Recoverable
+    // (`pane ls --all`, then `pane close`), but nobody asked for the pane.
+    //
+    // The `--ws` arm above has always resolved before spawning. This is that
+    // check for the inherited id, and only when `--keep` needs it: a plain
+    // `run` uses the workspace as an ownership stamp, where a stale id costs
+    // nothing and a round trip to find out would.
+    if args.keep && args.ws.is_none() {
+        let id = workspace.expect("checked above: --keep requires a workspace");
+        let machine = fetch_machine(backend)?;
+        resolve::workspace(&machine, &address::WorkspaceAddress::Id(id))?;
+    }
     let pane = backend.run_spawn(RunSpec {
         workspace,
         cwd: args.cwd.clone(),
@@ -2829,6 +2844,29 @@ mod tests {
         );
         assert_eq!(backend.runs.len(), 1);
         assert!(matches!(out, Outcome::Exit(0, _)));
+    }
+
+    #[test]
+    fn run_keep_with_a_tty7_ws_this_machine_lost_spawns_nothing() {
+        // The shell that set `$TTY7_WS` may have outlived its workspace, or be
+        // pointed at another machine. Filing happens after the spawn, so
+        // checking only at that point started the pane and then failed — an
+        // orphan nobody asked for, recoverable but only through
+        // `pane ls --all`. The `--ws` arm resolves before spawning; this is
+        // the same guarantee for the inherited id.
+        let mut backend = mock();
+        let ctx = Context {
+            ws: Some("11111111-2222-3333-4444-555555555555".to_string()),
+            ..Context::default()
+        };
+        let err = execute(
+            cli(&["tty7", "run", "--keep", "--", "make"]),
+            &ctx,
+            &mut backend,
+        )
+        .expect_err("a workspace this machine does not have cannot hold a kept pane");
+        assert!(err.to_string().contains("no workspace with id"), "{err}");
+        assert!(backend.runs.is_empty(), "nothing must be spawned");
     }
 
     #[test]
