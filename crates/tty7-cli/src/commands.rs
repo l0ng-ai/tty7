@@ -627,8 +627,27 @@ fn or_no_such_pane<T>(result: Result<T>, pane: u64, backend: &mut dyn Backend) -
         return result;
     };
     match backend.list_panes() {
-        Ok(panes) if !panes.iter().any(|p| p.pane_id == pane) => Err(resolve::no_such_pane(pane)),
+        Ok(panes) if !panes.iter().any(|p| p.pane_id == pane) => {
+            Err(not_running_or_absent(pane, backend))
+        }
         _ => Err(original),
+    }
+}
+
+/// Which of the two "nothing is running there" answers this pane has earned.
+///
+/// Absent from the running registry is not the same as absent from the machine:
+/// a pane `run --keep` filed into a workspace stays in the tree, so `tab ls`
+/// still names it. Only the tree can tell them apart, and it is fetched only
+/// here — on a path that has already failed twice — so no ordinary call pays
+/// for it. A tree that cannot be read falls back to the plainer answer.
+fn not_running_or_absent(pane: u64, backend: &mut dyn Backend) -> anyhow::Error {
+    match fetch_machine(backend)
+        .ok()
+        .and_then(|m| resolve::workspace_of_pane(&m, pane).ok().cloned())
+    {
+        Some(ws) => resolve::pane_not_running(pane, &ws),
+        None => resolve::no_such_pane(pane),
     }
 }
 
@@ -1707,6 +1726,29 @@ mod tests {
         assert_eq!(
             swapped.to_string(),
             "no pane %999 on this machine — `tty7 pane ls --all` lists them"
+        );
+
+        // Held by a workspace tree but not running: "no pane %3 on this
+        // machine" would be false, and it would point at `pane ls --all`,
+        // which lists what the server runs and so can never show this one.
+        let parked = or_no_such_pane::<()>(
+            Err(anyhow::anyhow!("daemon refused Observe")),
+            3,
+            &mut backend,
+        )
+        .expect_err("still a failure");
+        let said = parked.to_string();
+        assert!(
+            said.starts_with("pane %3 is not running"),
+            "a pane the tree still holds is not absent: {said}"
+        );
+        assert!(
+            said.contains("api") && said.contains("tab ls"),
+            "it has to name the holder and a command that can actually show it: {said}"
+        );
+        assert!(
+            !said.contains("pane ls --all"),
+            "that is the one command guaranteed not to list it: {said}"
         );
 
         // The pane is there, so the failure was about something else and its

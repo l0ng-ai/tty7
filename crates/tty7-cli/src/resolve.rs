@@ -105,6 +105,27 @@ pub fn no_such_pane(pane: u64) -> anyhow::Error {
     anyhow::anyhow!("no pane %{pane} on this machine — `tty7 pane ls --all` lists them")
 }
 
+/// The answer for a pane the machine's tree still holds but nothing is running.
+///
+/// `run --keep` files its pane into a workspace, and the tree keeps that leaf
+/// after the command exits, so `tab ls` goes on reporting the id. Nothing is
+/// running behind it, though, which is what every `%PANE` verb needs — and
+/// [`no_such_pane`] is the wrong sentence for it twice over: the pane *is* on
+/// this machine, and `pane ls --all` lists what the server runs, so the command
+/// it recommends is one that can never show this pane.
+pub fn pane_not_running(pane: u64, ws: &Workspace) -> anyhow::Error {
+    let label = ws
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("workspace {}", short_id(&ws.id)));
+    anyhow::anyhow!(
+        "pane %{pane} is not running — {label} still holds it, so there is nothing to \
+         read or type into. `tty7 tab ls {}` shows it; opening the workspace in the GUI \
+         revives it.",
+        short_id(&ws.id)
+    )
+}
+
 pub fn workspace_of_pane(machine: &Machine, pane: u64) -> Result<&Workspace> {
     machine
         .workspaces
