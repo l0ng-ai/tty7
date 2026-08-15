@@ -331,23 +331,50 @@ fn ws_detach(ws: &str, backend: &mut dyn Backend) -> Result<Outcome> {
     report("", json!({ "detached": id.to_string() }))
 }
 
+/// Refuse a working directory this machine cannot start a shell in.
+///
+/// An explicit path is an instruction, not a hint. The daemon falls back to a
+/// directory that does resolve when the one it is handed does not — right for
+/// a cwd inherited from a pane's OSC 7, which is only as good as the shell
+/// that reported it, and wrong for one typed on the command line: a mistyped
+/// path otherwise put the shell in whatever directory the *CLI* was started
+/// from and reported success, so `run --cwd ~/porj -- make` built the wrong
+/// tree and said it worked.
+///
+/// Only answerable for this machine. A routed path names a directory on the
+/// far side, which this process cannot stat — the reason `agent_hooks_state`
+/// already gives for declining to answer config questions when routed.
+///
+/// `flag` is the switch the reader typed, if they typed one, so the sentence
+/// starts the way their command did. The path is always in it: naming only the
+/// flag would leave them to work out which of their paths was refused.
+fn refuse_an_unusable_cwd(
+    dir: Option<&str>,
+    flag: Option<&str>,
+    backend: &dyn Backend,
+) -> Result<()> {
+    let Some(dir) = dir else { return Ok(()) };
+    if !backend.is_this_machine() {
+        return Ok(());
+    }
+    let at = std::path::Path::new(dir);
+    if at.is_dir() {
+        return Ok(());
+    }
+    let why = match at.exists() {
+        true => "not a directory",
+        false => "no such directory",
+    };
+    match flag {
+        Some(flag) => bail!("{flag} {dir}: {why} on this machine"),
+        None => bail!("{dir}: {why} on this machine"),
+    }
+}
+
 fn new_workspace(path: Option<String>, open: bool, backend: &mut dyn Backend) -> Result<Outcome> {
-    // Same instruction-not-a-hint rule as `run --cwd`, and checked before the
-    // workspace exists: a path that does not resolve left the pane in whatever
-    // directory the CLI was started from, so `tty7 new ~/porj` answered with an
-    // id and a workspace rooted somewhere the caller never named. Nothing runs
-    // here, so this only misplaces a shell — but it misplaces it silently.
-    if let Some(dir) = path.as_deref()
-        && backend.is_this_machine()
-    {
-        let at = std::path::Path::new(dir);
-        if !at.is_dir() {
-            let why = match at.exists() {
-                true => "not a directory",
-                false => "no such directory",
-            };
-            bail!("{dir}: {why} on this machine");
-        }
+    // Before the workspace exists, so a refusal leaves nothing to clean up.
+    if let Some(dir) = path.as_deref() {
+        refuse_an_unusable_cwd(Some(dir), None, backend)?;
     }
     let ws = match backend.control(ControlRequest::WorkspaceCreate {
         name: None,
@@ -414,28 +441,7 @@ fn new_workspace(path: Option<String>, open: bool, backend: &mut dyn Backend) ->
 }
 
 fn run(args: RunArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
-    // An explicit `--cwd` is an instruction, not a hint. The daemon falls back
-    // to a directory that does resolve when the one it is handed does not —
-    // right for a cwd inherited from a pane's OSC 7, which is only as good as
-    // the shell that reported it, and wrong for one the user typed: a mistyped
-    // `--cwd` otherwise ran the command in whatever directory the *CLI* was
-    // started from and reported success, so `run --cwd ~/proj -- make` built
-    // the wrong tree and said it worked.
-    //
-    // Only answerable for this machine; a routed `--cwd` names a directory on
-    // the far side, as `agent_hooks_state` says of config for the same reason.
-    if let Some(dir) = args.cwd.as_deref()
-        && backend.is_this_machine()
-    {
-        let path = std::path::Path::new(dir);
-        if !path.is_dir() {
-            let why = match path.exists() {
-                true => "not a directory",
-                false => "no such directory",
-            };
-            bail!("--cwd {dir}: {why} on this machine");
-        }
-    }
+    refuse_an_unusable_cwd(args.cwd.as_deref(), Some("--cwd"), backend)?;
     let workspace = match args.ws.as_deref() {
         Some(explicit) => {
             let machine = fetch_machine(backend)?;
@@ -843,6 +849,7 @@ fn tab_new(
     ctx: &Context,
     backend: &mut dyn Backend,
 ) -> Result<Outcome> {
+    refuse_an_unusable_cwd(cwd.as_deref(), Some("--cwd"), backend)?;
     let machine = fetch_machine(backend)?;
     let id = resolve_ws(explicit, ctx, &machine)?;
     let pane = backend.spawn_shell(id, cwd.clone())?;
@@ -3154,6 +3161,38 @@ mod tests {
             backend.spawned.is_empty(),
             "the refusal has to come before the spawn, or it leaves an orphan"
         );
+    }
+
+    /// Every verb that takes a working directory judges it the same way.
+    ///
+    /// `run --cwd` and `new <path>` were fixed together and `tab new --cwd`
+    /// was missed, so it went on putting the tab's shell in whatever directory
+    /// the CLI was started from and answering with a pane id. The check lives
+    /// in one place now; this is the list of callers that must reach it.
+    #[test]
+    fn every_verb_taking_a_directory_refuses_one_that_is_not_there() {
+        let cases: [&[&str]; 3] = [
+            &["tty7", "run", "--cwd", "/nonexistent-dir-xyz", "--", "make"],
+            &["tty7", "tab", "new", "api", "--cwd", "/nonexistent-dir-xyz"],
+            &["tty7", "new", "/nonexistent-dir-xyz"],
+        ];
+        for argv in cases {
+            let mut backend = mock();
+            backend.this_machine = true;
+            let Err(err) = execute(cli(argv), &Context::default(), &mut backend) else {
+                panic!("{argv:?} started a shell in a directory that is not there");
+            };
+            let said = err.to_string();
+            assert!(said.contains("no such directory"), "{argv:?}: {said}");
+            assert!(
+                said.contains("/nonexistent-dir-xyz"),
+                "the path the reader typed has to be in it: {said}"
+            );
+            assert!(
+                backend.spawned.is_empty(),
+                "{argv:?} spawned a shell before refusing"
+            );
+        }
     }
 
     /// `tty7 new <path>` refuses a path it cannot root the workspace at, and
