@@ -10,7 +10,7 @@ pub struct GitignoreChain {
 }
 
 impl GitignoreChain {
-    pub fn is_ignored(&mut self, path: &Path, is_dir: bool, root: &Path) -> bool {
+    pub(crate) fn is_ignored(&mut self, path: &Path, is_dir: bool, root: &Path) -> bool {
         let Some(parent) = path.parent() else {
             return false;
         };

@@ -1296,7 +1296,7 @@ pub mod remote {
         }
     }
 
-    pub fn parse_probe(output: &str) -> Option<(RemoteShell, String)> {
+    pub(crate) fn parse_probe(output: &str) -> Option<(RemoteShell, String)> {
         let mut lines = output
             .lines()
             .map(|l| l.trim_end_matches('\r').trim())
@@ -1309,7 +1309,7 @@ pub mod remote {
         RemoteShell::from_path(path).map(|shell| (shell, path.to_string()))
     }
 
-    pub fn bootstrap_command(shell: RemoteShell, shell_path: &str) -> String {
+    pub(crate) fn bootstrap_command(shell: RemoteShell, shell_path: &str) -> String {
         match shell {
             RemoteShell::Zsh => zsh_bootstrap(shell_path),
             RemoteShell::Bash => bash_bootstrap(shell_path),

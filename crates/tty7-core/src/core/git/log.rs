@@ -115,7 +115,8 @@ impl Commit {
         &self.oid[..n]
     }
 
-    pub fn is_merge(&self) -> bool {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn is_merge(&self) -> bool {
         self.parents.len() > 1
     }
 }
@@ -418,7 +419,7 @@ pub struct ParsedLog {
 /// Records are split on RS and fields on US. Fields are taken with `splitn`, so
 /// the body — the only field that can contain anything at all — absorbs every
 /// separator past the tenth instead of shifting the parse.
-pub fn parse_log(stdout: &[u8]) -> ParsedLog {
+pub(crate) fn parse_log(stdout: &[u8]) -> ParsedLog {
     let mut commits = Vec::new();
     let mut used = 0usize;
     let mut clipped = false;
@@ -564,7 +565,7 @@ fn ref_deco(full: &str, is_head: bool) -> Option<RefDeco> {
 
 /// Parses the output of the `for-each-ref` invocation [`REF_FORMAT`] belongs
 /// to, keyed by the commit each ref ultimately points at.
-pub fn parse_refs(stdout: &[u8]) -> HashMap<Oid, Vec<RefDeco>> {
+pub(crate) fn parse_refs(stdout: &[u8]) -> HashMap<Oid, Vec<RefDeco>> {
     let mut out: HashMap<Oid, Vec<RefDeco>> = HashMap::new();
     let text = String::from_utf8_lossy(stdout);
     for line in text.lines().take(MAX_REFS) {
@@ -595,7 +596,7 @@ pub fn parse_refs(stdout: &[u8]) -> HashMap<Oid, Vec<RefDeco>> {
     out
 }
 
-pub fn for_each_ref(host: &dyn Host, root: &Path) -> HashMap<Oid, Vec<RefDeco>> {
+pub(crate) fn for_each_ref(host: &dyn Host, root: &Path) -> HashMap<Oid, Vec<RefDeco>> {
     let count = format!("--count={MAX_REFS}");
     let args = [
         "for-each-ref",
@@ -619,7 +620,8 @@ pub fn for_each_ref(host: &dyn Host, root: &Path) -> HashMap<Oid, Vec<RefDeco>> 
 /// separate call from [`for_each_ref`] because that one groups by the commit a
 /// ref points at, which is the wrong shape for a list of branches — the
 /// switcher wants every branch, including the ones sharing a tip.
-pub fn local_branches(host: &dyn Host, root: &Path) -> Vec<String> {
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn local_branches(host: &dyn Host, root: &Path) -> Vec<String> {
     let count = format!("--count={MAX_REFS}");
     let args = [
         "for-each-ref",
@@ -633,7 +635,8 @@ pub fn local_branches(host: &dyn Host, root: &Path) -> Vec<String> {
     }
 }
 
-pub fn parse_branch_names(stdout: &[u8]) -> Vec<String> {
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn parse_branch_names(stdout: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(stdout)
         .lines()
         .map(str::trim)
@@ -837,7 +840,7 @@ fn file_status(code: &str) -> Option<FileStatus> {
 /// losing it costs the numbers and nothing else. Losing the other way round is
 /// worse — a path with counts and no letter would vanish — so anything left
 /// over is appended rather than dropped.
-pub fn join_commit_files(numstat: &[u8], name_status: &[u8]) -> Vec<CommitFile> {
+pub(crate) fn join_commit_files(numstat: &[u8], name_status: &[u8]) -> Vec<CommitFile> {
     let mut counts = parse_numstat(numstat);
     let named = parse_name_status(name_status);
     let mut out: Vec<CommitFile> = Vec::with_capacity(named.len());

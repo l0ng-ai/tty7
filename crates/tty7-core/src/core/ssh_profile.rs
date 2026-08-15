@@ -89,7 +89,9 @@ impl SshProfile {
             .collect()
     }
 
-    pub fn connect_string(&self) -> String {
+    /// Unused wrapper over `to_connect_string`, which callers use directly.
+    #[allow(dead_code)]
+    pub(crate) fn connect_string(&self) -> String {
         to_connect_string(self)
     }
 }
@@ -257,7 +259,7 @@ pub fn to_connect_string(profile: &SshProfile) -> String {
     out
 }
 
-pub fn expand_identity_placeholders(path: &str, host: &str, user: &str) -> String {
+pub(crate) fn expand_identity_placeholders(path: &str, host: &str, user: &str) -> String {
     let mut out = String::with_capacity(path.len());
     let mut chars = path.chars();
     while let Some(ch) = chars.next() {

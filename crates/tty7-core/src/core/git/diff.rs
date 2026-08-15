@@ -160,7 +160,7 @@ impl DiffSource {
     /// Whether untracked files belong in the snapshot. They are a property of
     /// the working tree, so a commit or a range has none, and a staged diff
     /// does not either — an untracked file is by definition not in the index.
-    pub fn lists_untracked(&self) -> bool {
+    pub(crate) fn lists_untracked(&self) -> bool {
         matches!(self, DiffSource::Worktree | DiffSource::Head)
     }
 

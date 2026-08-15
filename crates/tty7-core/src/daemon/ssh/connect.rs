@@ -69,7 +69,7 @@ pub struct ProcessStream {
 }
 
 impl ProcessStream {
-    pub fn from_parts(
+    pub(crate) fn from_parts(
         child: tokio::process::Child,
         stdin: tokio::process::ChildStdin,
         stdout: tokio::process::ChildStdout,
@@ -212,7 +212,7 @@ fn spawn_proxy_command(
     )))
 }
 
-pub fn proxy_command_argv(template: &str, host: &str, port: u16, user: &str) -> Vec<String> {
+pub(crate) fn proxy_command_argv(template: &str, host: &str, port: u16, user: &str) -> Vec<String> {
     shell_split(template)
         .into_iter()
         .map(|tok| substitute_tokens(&tok, host, port, user))
@@ -369,7 +369,7 @@ async fn http_connect(
     Ok(s)
 }
 
-pub fn build_config(spec: &NativeSshSpec) -> Arc<russh::client::Config> {
+pub(crate) fn build_config(spec: &NativeSshSpec) -> Arc<russh::client::Config> {
     // Every hop comes through here — the target and each jump host build their
     // own config from their own spec — so each asks known_hosts about itself.
     let known = known_hosts::known_algorithms(&spec.host, spec.port);

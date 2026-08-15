@@ -6,7 +6,7 @@ pub fn path() -> Option<PathBuf> {
     config::config_path("daemon.pid")
 }
 
-pub fn write_current() {
+pub(crate) fn write_current() {
     let Some(path) = path() else { return };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);

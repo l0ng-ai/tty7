@@ -57,12 +57,12 @@ fn dir() -> Option<PathBuf> {
     crate::core::config::config_path("history")
 }
 
-pub fn path_for(pane: u64) -> Option<PathBuf> {
+pub(crate) fn path_for(pane: u64) -> Option<PathBuf> {
     Some(dir()?.join(format!("pane-{pane}")))
 }
 
 /// What to put in a pane's environment, if it should have a history of its own.
-pub fn env_for(pane: u64, shell: &str) -> Option<(String, String)> {
+pub(crate) fn env_for(pane: u64, shell: &str) -> Option<(String, String)> {
     if !understands(shell) || !enabled() {
         return None;
     }

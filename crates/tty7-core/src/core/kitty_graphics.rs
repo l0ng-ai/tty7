@@ -332,7 +332,7 @@ impl GraphicsSniffer {
 
     /// A sniffer whose parser may honor file/shm transfer (local pane only).
     /// See [`GraphicsParser::new_local`].
-    pub fn new_local(local: bool) -> Self {
+    pub(crate) fn new_local(local: bool) -> Self {
         Self {
             tokenizer: ApcTokenizer::new(),
             parser: GraphicsParser::new_local(local),
@@ -343,7 +343,7 @@ impl GraphicsSniffer {
     /// is local when tty7 spawned a local shell and no foreground `ssh` owns the
     /// PTY; that can flip mid-session, and it gates whether the next `a=q` probe
     /// is answered `OK` for file/shm transfer. Cheap enough to call per chunk.
-    pub fn set_local(&mut self, local: bool) {
+    pub(crate) fn set_local(&mut self, local: bool) {
         self.parser.local = local;
     }
 
@@ -382,7 +382,7 @@ impl GraphicsSniffer {
     /// colored stdout (full of CSI escapes but no APC) stays on this path. The
     /// trailing-`ESC` guard keeps an `ESC _` straddling a chunk boundary on the
     /// slow path, where the held-`ESC` state carries it across correctly.
-    pub fn sniff<'a>(&mut self, bytes: &'a [u8]) -> Sniffed<'a> {
+    pub(crate) fn sniff<'a>(&mut self, bytes: &'a [u8]) -> Sniffed<'a> {
         if matches!(self.tokenizer.state, State::Ground)
             && bytes.last() != Some(&0x1b)
             && memchr::memmem::find(bytes, b"\x1b_").is_none()
@@ -768,7 +768,7 @@ impl Image {
     /// bytes appended verbatim. A JSON envelope would base64-inflate the pixel
     /// payload ~1.33×; this keeps it byte-for-byte, which matters at video frame
     /// rates. See [`decode_frame`](Image::decode_frame).
-    pub fn encode_frame(&self) -> Vec<u8> {
+    pub(crate) fn encode_frame(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(HEADER_LEN + self.data.len());
         out.extend_from_slice(&self.id.to_le_bytes());
         out.extend_from_slice(&self.number.to_le_bytes());
@@ -788,7 +788,8 @@ impl Image {
     }
 
     /// Reconstruct from an [`encode_frame`](Image::encode_frame) payload.
-    pub fn decode_frame(bytes: &[u8]) -> Option<Self> {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn decode_frame(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < HEADER_LEN {
             return None;
         }
@@ -1073,7 +1074,7 @@ pub struct ImageDelete {
 }
 
 impl ImageDelete {
-    pub fn from_control(c: &Control) -> Self {
+    pub(crate) fn from_control(c: &Control) -> Self {
         Self {
             // A bare `a=d` with no `d=` means "delete all visible placements",
             // which kitty spells `a` — normalize the unset case to it.
@@ -1181,7 +1182,7 @@ impl GraphicsParser {
 
     /// A parser that may honor file/shm transfer because the sender is on this
     /// host (see [`GraphicsParser::local`]).
-    pub fn new_local(local: bool) -> Self {
+    pub(crate) fn new_local(local: bool) -> Self {
         Self {
             local,
             ..Self::default()

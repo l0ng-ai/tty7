@@ -193,7 +193,7 @@ mod windows {
 
     const INTERNET_SETTINGS: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 
-    pub fn system_proxy(target_url: &str) -> Option<Proxy> {
+    pub(crate) fn system_proxy(target_url: &str) -> Option<Proxy> {
         let key = RegKey::predef(HKEY_CURRENT_USER)
             .open_subkey(INTERNET_SETTINGS)
             .ok()?;
@@ -277,7 +277,7 @@ mod macos {
         }
     }
 
-    pub fn system_proxy(target_url: &str) -> Option<Proxy> {
+    pub(crate) fn system_proxy(target_url: &str) -> Option<Proxy> {
         let store = SCDynamicStoreBuilder::new("tty7").build();
         let proxies = store.get_proxies()?;
 

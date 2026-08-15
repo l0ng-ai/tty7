@@ -56,7 +56,7 @@ impl fmt::Display for UnsupportedTarget {
 
 impl std::error::Error for UnsupportedTarget {}
 
-pub fn asset_for_uname(uname_sm: &str) -> Result<&'static str, UnsupportedTarget> {
+pub(crate) fn asset_for_uname(uname_sm: &str) -> Result<&'static str, UnsupportedTarget> {
     let raw = uname_sm.trim().to_string();
     let mut words = raw.split_whitespace();
     let (Some(system), Some(machine), None) = (words.next(), words.next(), words.next()) else {
@@ -80,7 +80,7 @@ pub fn asset_for_uname(uname_sm: &str) -> Result<&'static str, UnsupportedTarget
     }
 }
 
-pub fn interned(name: &str) -> &'static str {
+pub(crate) fn interned(name: &str) -> &'static str {
     match name {
         _ if name == ASSET_LINUX_X86_64 => ASSET_LINUX_X86_64,
         _ if name == ASSET_LINUX_AARCH64 => ASSET_LINUX_AARCH64,
@@ -90,7 +90,7 @@ pub fn interned(name: &str) -> &'static str {
     }
 }
 
-pub fn release_tag(version: &str) -> String {
+pub(crate) fn release_tag(version: &str) -> String {
     if version.contains("-nightly.") {
         "nightly".to_string()
     } else {
@@ -98,7 +98,7 @@ pub fn release_tag(version: &str) -> String {
     }
 }
 
-pub fn download_url(tag: &str, asset: &str) -> String {
+pub(crate) fn download_url(tag: &str, asset: &str) -> String {
     format!("{RELEASE_BASE}/{tag}/{asset}")
 }
 
@@ -110,7 +110,7 @@ pub struct RemotePaths {
     pub dir_chain: Vec<String>,
 }
 
-pub fn remote_paths(home: &str, control: u32, protocol: u32) -> RemotePaths {
+pub(crate) fn remote_paths(home: &str, control: u32, protocol: u32) -> RemotePaths {
     let home = home.trim_end_matches('/');
     let mut dir_chain = Vec::with_capacity(INSTALL_DIR_COMPONENTS.len());
     let mut cursor = home.to_string();
@@ -128,11 +128,11 @@ pub fn remote_paths(home: &str, control: u32, protocol: u32) -> RemotePaths {
     }
 }
 
-pub fn binary_name(control: u32, protocol: u32) -> String {
+pub(crate) fn binary_name(control: u32, protocol: u32) -> String {
     format!("tty7-server-c{control}p{protocol}")
 }
 
-pub fn remote_paths_for_binary(
+pub(crate) fn remote_paths_for_binary(
     home: &str,
     binary: &str,
     control: u32,
@@ -143,7 +143,7 @@ pub fn remote_paths_for_binary(
     paths
 }
 
-pub fn dialect_from_path(path: &str) -> Option<(u32, u32)> {
+pub(crate) fn dialect_from_path(path: &str) -> Option<(u32, u32)> {
     let name = path.rsplit('/').next()?;
     let (control, protocol) = name.strip_prefix("tty7-server-c")?.split_once('p')?;
     Some((control.parse().ok()?, protocol.parse().ok()?))

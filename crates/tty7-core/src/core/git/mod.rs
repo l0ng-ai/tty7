@@ -123,7 +123,7 @@ pub fn git_output(cwd: &Path, args: &[&str]) -> io::Result<Output> {
 /// arrived over the wire with no "this one is a network op" bit on it.
 ///
 /// A `None` value removes the variable instead of setting it.
-pub fn git_output_with_env(
+pub(crate) fn git_output_with_env(
     cwd: &Path,
     args: &[&str],
     env: &[(&str, Option<&str>)],
@@ -163,7 +163,7 @@ pub fn git_output_with_env(
     })
 }
 
-pub fn git_stream(
+pub(crate) fn git_stream(
     cwd: &Path,
     args: &[&str],
     mut on_chunk: impl FnMut(&[u8]) -> bool,

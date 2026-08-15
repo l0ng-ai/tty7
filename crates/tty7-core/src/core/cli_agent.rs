@@ -94,7 +94,7 @@ impl CLIAgent {
         }
     }
 
-    pub fn from_slug(name: &str) -> Option<CLIAgent> {
+    pub(crate) fn from_slug(name: &str) -> Option<CLIAgent> {
         let name = name.trim().to_ascii_lowercase();
         CLIAgent::ALL.into_iter().find(|a| a.slug() == name)
     }
@@ -356,11 +356,11 @@ impl CLIAgent {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn detect_from_argv(argv: &[String]) -> Option<CLIAgent> {
+    pub(crate) fn detect_from_argv(argv: &[String]) -> Option<CLIAgent> {
         Self::detect_from_argv_with(argv, &HashMap::new())
     }
 
-    pub fn detect_from_argv_with(
+    pub(crate) fn detect_from_argv_with(
         argv: &[String],
         custom: &HashMap<String, String>,
     ) -> Option<CLIAgent> {
@@ -400,7 +400,7 @@ impl CLIAgent {
         None
     }
 
-    pub fn detect_from_command_with(
+    pub(crate) fn detect_from_command_with(
         command: &str,
         custom: &HashMap<String, String>,
     ) -> Option<CLIAgent> {
@@ -416,7 +416,7 @@ impl CLIAgent {
 /// case so the result can serve as `launch_argv` for flag replay on resume.
 /// Quoted arguments containing spaces come out split; `replay_flags` rejects
 /// such tokens rather than replaying them wrong.
-pub fn command_argv(command: &str) -> Vec<String> {
+pub(crate) fn command_argv(command: &str) -> Vec<String> {
     let mut argv: Vec<String> = command
         .split_whitespace()
         .map(|t| t.trim_matches(['"', '\'']).to_string())
@@ -522,7 +522,7 @@ impl AgentSessionState {
         AgentStatus::Idle
     }
 
-    pub fn apply_event(&mut self, ev: &AgentEvent) {
+    pub(crate) fn apply_event(&mut self, ev: &AgentEvent) {
         self.rich = true;
         if let Some(id) = &ev.session_id {
             self.session_id = Some(id.clone());

@@ -227,7 +227,10 @@ pub fn serve_with<D: Duplex>(link: D, host: SharedHost, services: Services) -> i
     serve_halves_with(read, write, shutdown, host, services, label)
 }
 
-pub fn serve_halves<R, W>(
+/// Unused: `serve_with` is what every caller reaches for. Kept as the split-half
+/// /// form it is built on rather than deleted blind — see the note in the loop.
+#[allow(dead_code)]
+pub(crate) fn serve_halves<R, W>(
     r: R,
     w: W,
     shutdown: Arc<dyn LinkShutdown>,
@@ -241,7 +244,7 @@ where
     serve_halves_with(r, w, shutdown, host, Services::none(), label)
 }
 
-pub fn serve_halves_with<R, W>(
+pub(crate) fn serve_halves_with<R, W>(
     mut r: R,
     w: W,
     shutdown: Arc<dyn LinkShutdown>,
@@ -1542,7 +1545,7 @@ mod wsock {
 
     pub const CONTROL_PORT_FILE: &str = "control.port";
 
-    pub fn control_endpoint_path() -> io::Result<PathBuf> {
+    pub(crate) fn control_endpoint_path() -> io::Result<PathBuf> {
         transport::port_path_named(CONTROL_PORT_FILE).ok_or_else(|| {
             io::Error::other("no config directory to record the control endpoint in")
         })
@@ -1621,7 +1624,7 @@ mod wsock {
         transport::connect_endpoint(CONTROL_PORT_FILE)
     }
 
-    pub fn remove_control_endpoint() {
+    pub(crate) fn remove_control_endpoint() {
         transport::remove_endpoint(CONTROL_PORT_FILE);
     }
 }

@@ -181,7 +181,7 @@ impl InstallRequestWire {
         }
     }
 
-    pub fn into_request(self) -> InstallRequest {
+    pub(crate) fn into_request(self) -> InstallRequest {
         InstallRequest {
             host: self.host,
             version: self.version,

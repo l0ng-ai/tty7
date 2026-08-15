@@ -115,7 +115,7 @@ impl SshManager {
         self.forwards.list(pane_id)
     }
 
-    pub fn teardown_pane_forwards(&'static self, pane_id: u64) {
+    pub(crate) fn teardown_pane_forwards(&'static self, pane_id: u64) {
         self.runtime.spawn(async move {
             self.forwards.teardown_pane(pane_id).await;
         });
@@ -146,7 +146,7 @@ impl SshManager {
         false
     }
 
-    pub fn spawn_native_session(
+    pub(crate) fn spawn_native_session(
         &'static self,
         pane_id: u64,
         spec: Box<NativeSshSpec>,
@@ -187,7 +187,7 @@ impl SshManager {
     /// spot and reported as what it asked for: a form is nowhere to answer a
     /// password prompt, and hanging on one for two minutes would be a worse
     /// answer than "it got that far and wants your password".
-    pub fn test_connection(&'static self, spec: &NativeSshSpec) -> SshTestReport {
+    pub(crate) fn test_connection(&'static self, spec: &NativeSshSpec) -> SshTestReport {
         let budget = spec
             .connect_timeout_s
             .filter(|v| *v > 0)
@@ -402,7 +402,9 @@ impl SshManager {
         Ok(())
     }
 
-    pub fn open_remote_link_blocking(
+    /// Unused: every caller opens the link through the async path.
+    #[allow(dead_code)]
+    pub(crate) fn open_remote_link_blocking(
         &self,
         spec: &NativeSshSpec,
         setup: &RouteSetup,

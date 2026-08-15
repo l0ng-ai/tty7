@@ -481,7 +481,7 @@ pub struct CustomShell {
     pub args: Vec<String>,
 }
 
-pub fn default_font_fallbacks() -> Vec<String> {
+pub(crate) fn default_font_fallbacks() -> Vec<String> {
     let names: &[&str] = if cfg!(target_os = "macos") {
         &[
             "Menlo",
@@ -825,7 +825,7 @@ fn config_dir() -> Option<PathBuf> {
 /// elsewhere" (see `machine::adopt_legacy_data_dir`). It cannot be answered by
 /// whether the override is set: `daemon::spawn` passes `--config-dir` to every
 /// daemon it starts, the ordinary install's included.
-pub fn machine_config_dir() -> Option<PathBuf> {
+pub(crate) fn machine_config_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("TTY7_CONFIG_DIR").filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
@@ -921,7 +921,7 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
     write_atomic_mode(path, bytes, false)
 }
 
-pub fn write_atomic_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomic_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     write_atomic_mode(path, bytes, true)
 }
 
@@ -961,11 +961,11 @@ pub fn config_dir_path() -> Option<PathBuf> {
     config_dir()
 }
 
-pub fn shell_command() -> Option<(String, Vec<String>)> {
+pub(crate) fn shell_command() -> Option<(String, Vec<String>)> {
     Config::load().shell.map(|s| (s.program, s.args))
 }
 
-pub fn working_directory_base() -> Option<PathBuf> {
+pub(crate) fn working_directory_base() -> Option<PathBuf> {
     let wd = Config::load().working_directory;
     let home = || std::env::var_os("HOME").map(PathBuf::from);
     match wd.strategy {
@@ -982,11 +982,11 @@ pub fn working_directory_base() -> Option<PathBuf> {
     }
 }
 
-pub fn extra_env() -> HashMap<String, String> {
+pub(crate) fn extra_env() -> HashMap<String, String> {
     Config::load().env
 }
 
-pub fn agent_commands_cached() -> &'static HashMap<String, String> {
+pub(crate) fn agent_commands_cached() -> &'static HashMap<String, String> {
     static CACHE: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| {
         Config::load()

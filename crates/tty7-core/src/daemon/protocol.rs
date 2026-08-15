@@ -64,7 +64,7 @@ impl DaemonVersion {
     }
 }
 
-pub fn process_instance() -> &'static str {
+pub(crate) fn process_instance() -> &'static str {
     static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     INSTANCE.get_or_init(|| uuid::Uuid::new_v4().to_string())
 }
@@ -411,7 +411,7 @@ impl PortEntry {
     /// Whether a bound address can be reached on this machine's loopback —
     /// true for the wildcards and the loopback addresses themselves, false for
     /// a socket pinned to one specific non-loopback interface.
-    pub fn reaches_loopback(addr: &str) -> bool {
+    pub(crate) fn reaches_loopback(addr: &str) -> bool {
         matches!(
             addr,
             "" | "*" | "0.0.0.0" | "::" | "[::]" | "127.0.0.1" | "::1" | "[::1]" | "localhost"
@@ -911,7 +911,7 @@ mod kind {
     pub const DELETE_IMAGE: u8 = 61;
 }
 
-pub fn write_frame<W: Write>(w: &mut W, kind: u8, payload: &[u8]) -> io::Result<()> {
+pub(crate) fn write_frame<W: Write>(w: &mut W, kind: u8, payload: &[u8]) -> io::Result<()> {
     let len = payload.len();
     if len > MAX_FRAME {
         return Err(io::Error::new(

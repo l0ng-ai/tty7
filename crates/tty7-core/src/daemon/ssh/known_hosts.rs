@@ -25,7 +25,7 @@ pub enum HostKeyStatus {
     Revoked,
 }
 
-pub fn default_path() -> Option<PathBuf> {
+pub(crate) fn default_path() -> Option<PathBuf> {
     home_dir().map(|h| h.join(".ssh").join("known_hosts"))
 }
 
@@ -43,7 +43,7 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-pub fn host_token(host: &str, port: u16) -> String {
+pub(crate) fn host_token(host: &str, port: u16) -> String {
     if port == 22 {
         host.to_string()
     } else {
@@ -58,7 +58,7 @@ pub fn check(host: &str, port: u16, key: &PublicKey) -> HostKeyStatus {
     }
 }
 
-pub fn check_in_file(path: &Path, host: &str, port: u16, key: &PublicKey) -> HostKeyStatus {
+pub(crate) fn check_in_file(path: &Path, host: &str, port: u16, key: &PublicKey) -> HostKeyStatus {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return HostKeyStatus::Unknown,
@@ -66,7 +66,12 @@ pub fn check_in_file(path: &Path, host: &str, port: u16, key: &PublicKey) -> Hos
     check_in_str(&contents, host, port, key)
 }
 
-pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> HostKeyStatus {
+pub(crate) fn check_in_str(
+    contents: &str,
+    host: &str,
+    port: u16,
+    key: &PublicKey,
+) -> HostKeyStatus {
     let token = host_token(host, port);
     let our_alg = key.algorithm();
 
@@ -139,21 +144,21 @@ pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> H
 /// see `connect::build_preferred`. Markers are skipped: a `@cert-authority` line
 /// names the authority's key rather than the host's, and a `@revoked` one names
 /// a key that would be refused, so neither predicts what the host will present.
-pub fn known_algorithms(host: &str, port: u16) -> Vec<Algorithm> {
+pub(crate) fn known_algorithms(host: &str, port: u16) -> Vec<Algorithm> {
     match default_path() {
         Some(path) => known_algorithms_in_file(&path, host, port),
         None => Vec::new(),
     }
 }
 
-pub fn known_algorithms_in_file(path: &Path, host: &str, port: u16) -> Vec<Algorithm> {
+pub(crate) fn known_algorithms_in_file(path: &Path, host: &str, port: u16) -> Vec<Algorithm> {
     match std::fs::read_to_string(path) {
         Ok(contents) => known_algorithms_in_str(&contents, host, port),
         Err(_) => Vec::new(),
     }
 }
 
-pub fn known_algorithms_in_str(contents: &str, host: &str, port: u16) -> Vec<Algorithm> {
+pub(crate) fn known_algorithms_in_str(contents: &str, host: &str, port: u16) -> Vec<Algorithm> {
     let token = host_token(host, port);
     let mut out: Vec<Algorithm> = Vec::new();
     for line in contents.lines() {
@@ -172,14 +177,14 @@ pub fn known_algorithms_in_str(contents: &str, host: &str, port: u16) -> Vec<Alg
     out
 }
 
-pub fn append_trusted(host: &str, port: u16, key: &PublicKey) -> std::io::Result<()> {
+pub(crate) fn append_trusted(host: &str, port: u16, key: &PublicKey) -> std::io::Result<()> {
     let path = default_path().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "no home dir for known_hosts")
     })?;
     append_trusted_to(&path, host, port, key)
 }
 
-pub fn append_trusted_to(
+pub(crate) fn append_trusted_to(
     path: &Path,
     host: &str,
     port: u16,
@@ -238,7 +243,7 @@ pub fn list() -> Vec<KnownHostEntry> {
     }
 }
 
-pub fn list_in_str(contents: &str) -> Vec<KnownHostEntry> {
+pub(crate) fn list_in_str(contents: &str) -> Vec<KnownHostEntry> {
     let mut out = Vec::new();
     for line in contents.lines() {
         let Some(entry) = KnownHostsLine::parse(line) else {
@@ -273,7 +278,7 @@ pub fn delete(id: &KnownHostId) -> std::io::Result<()> {
     delete_in_file(&path, id)
 }
 
-pub fn delete_in_file(path: &Path, id: &KnownHostId) -> std::io::Result<()> {
+pub(crate) fn delete_in_file(path: &Path, id: &KnownHostId) -> std::io::Result<()> {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -295,7 +300,7 @@ pub fn delete_in_file(path: &Path, id: &KnownHostId) -> std::io::Result<()> {
     })
 }
 
-pub fn delete_in_str(contents: &str, id: &KnownHostId) -> (String, bool) {
+pub(crate) fn delete_in_str(contents: &str, id: &KnownHostId) -> (String, bool) {
     let mut out = String::with_capacity(contents.len());
     let mut removed = false;
     for segment in split_keep_terminators(contents) {
@@ -326,14 +331,14 @@ pub fn delete_in_str(contents: &str, id: &KnownHostId) -> (String, bool) {
 ///
 /// A no-op for a host that was merely unknown, which by definition has no
 /// same-algorithm line to drop.
-pub fn forget_superseded(host: &str, port: u16, key: &PublicKey) -> std::io::Result<()> {
+pub(crate) fn forget_superseded(host: &str, port: u16, key: &PublicKey) -> std::io::Result<()> {
     match default_path() {
         Some(path) => forget_superseded_in_file(&path, host, port, key),
         None => Ok(()),
     }
 }
 
-pub fn forget_superseded_in_file(
+pub(crate) fn forget_superseded_in_file(
     path: &Path,
     host: &str,
     port: u16,
@@ -350,7 +355,7 @@ pub fn forget_superseded_in_file(
     Ok(())
 }
 
-pub fn superseded_ids_in_str(
+pub(crate) fn superseded_ids_in_str(
     contents: &str,
     host: &str,
     port: u16,

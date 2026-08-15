@@ -21,11 +21,11 @@ pub enum RemoteLink {
 }
 
 impl RemoteLink {
-    pub fn stream_local(channel: Channel<Msg>) -> RemoteLink {
+    pub(crate) fn stream_local(channel: Channel<Msg>) -> RemoteLink {
         RemoteLink::StreamLocal(channel.into_stream())
     }
 
-    pub fn session_exec(channel: Channel<Msg>) -> RemoteLink {
+    pub(crate) fn session_exec(channel: Channel<Msg>) -> RemoteLink {
         RemoteLink::SessionExec(channel.into_stream())
     }
 
@@ -42,7 +42,11 @@ impl RemoteLink {
         )?))
     }
 
-    pub fn wsl_shell(distro: &str, command: &str, channel: RouteChannel) -> io::Result<RemoteLink> {
+    pub(crate) fn wsl_shell(
+        distro: &str,
+        command: &str,
+        channel: RouteChannel,
+    ) -> io::Result<RemoteLink> {
         super::install::wsl::validate_distro(distro)?;
         let command = channel.bridge_command(command);
         let args = super::install::wsl::wsl_args(distro, &["sh", "-c", &command]);
@@ -52,7 +56,7 @@ impl RemoteLink {
         )?))
     }
 
-    pub fn kind_label(&self) -> &'static str {
+    pub(crate) fn kind_label(&self) -> &'static str {
         match self {
             RemoteLink::StreamLocal(_) => "streamlocal",
             RemoteLink::SessionExec(_) => "session-exec",
@@ -61,14 +65,16 @@ impl RemoteLink {
         }
     }
 
-    pub fn is_stdio_bridge(&self) -> bool {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn is_stdio_bridge(&self) -> bool {
         matches!(
             self,
             RemoteLink::SessionExec(_) | RemoteLink::Wsl(_) | RemoteLink::LocalStdio(_)
         )
     }
 
-    pub fn is_ssh(&self) -> bool {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn is_ssh(&self) -> bool {
         matches!(
             self,
             RemoteLink::StreamLocal(_) | RemoteLink::SessionExec(_)
@@ -121,7 +127,7 @@ pub enum RemoteEntry {
 }
 
 impl RemoteEntry {
-    pub fn kind_label(&self) -> &'static str {
+    pub(crate) fn kind_label(&self) -> &'static str {
         match self {
             RemoteEntry::StreamLocal { .. } => "streamlocal",
             RemoteEntry::SessionExec { .. } => "session-exec",
@@ -129,7 +135,7 @@ impl RemoteEntry {
     }
 }
 
-pub fn choose_entry(
+pub(crate) fn choose_entry(
     socket: Option<&str>,
     forwarding_allowed: bool,
     server_command: &str,
@@ -163,7 +169,7 @@ pub const REMOTE_ENV_PROBE: &str = concat!(
 );
 
 impl RemoteEnv {
-    pub fn parse_probe(out: &str) -> RemoteEnv {
+    pub(crate) fn parse_probe(out: &str) -> RemoteEnv {
         let mut env = RemoteEnv::default();
         for line in out.lines() {
             let Some(rest) = line.trim().strip_prefix(ENV_MARKER) else {

@@ -89,7 +89,7 @@ pub enum ChangeCode {
 }
 
 impl ChangeCode {
-    pub fn from_byte(b: u8) -> Option<ChangeCode> {
+    pub(crate) fn from_byte(b: u8) -> Option<ChangeCode> {
         Some(match b {
             b'.' | b' ' => ChangeCode::None,
             b'M' => ChangeCode::Modified,
@@ -117,7 +117,7 @@ impl ChangeCode {
         }
     }
 
-    pub fn is_change(self) -> bool {
+    pub(crate) fn is_change(self) -> bool {
         self != ChangeCode::None
     }
 }
@@ -135,7 +135,7 @@ pub enum ConflictKind {
 }
 
 impl ConflictKind {
-    pub fn from_xy(x: u8, y: u8) -> Option<ConflictKind> {
+    pub(crate) fn from_xy(x: u8, y: u8) -> Option<ConflictKind> {
         Some(match (x, y) {
             (b'D', b'D') => ConflictKind::BothDeleted,
             (b'A', b'U') => ConflictKind::AddedByUs,
@@ -150,11 +150,15 @@ impl ConflictKind {
 
     /// Whether our side still has a file — decides if "open changes" can show
     /// an ours/theirs diff or only one stage.
-    pub fn ours_exists(self) -> bool {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn ours_exists(self) -> bool {
         !matches!(self, ConflictKind::BothDeleted | ConflictKind::DeletedByUs)
     }
 
-    pub fn theirs_exists(self) -> bool {
+    /// The mirror of `ours_exists`, which the tests do use. Half a pair is worse
+    /// /// than a spare, so it stays.
+    #[allow(dead_code)]
+    pub(crate) fn theirs_exists(self) -> bool {
         !matches!(
             self,
             ConflictKind::BothDeleted | ConflictKind::DeletedByThem
@@ -283,7 +287,7 @@ impl HeadState {
 
     /// `false` before the first commit, which is the one case where
     /// `git reset HEAD -- <path>` fails outright.
-    pub fn has_commits(&self) -> bool {
+    pub(crate) fn has_commits(&self) -> bool {
         !matches!(self, HeadState::Unborn { .. })
     }
 }
@@ -514,7 +518,7 @@ pub struct ParsedStatus {
 
 impl ParsedStatus {
     /// Finish the picture with what only a filesystem probe knows.
-    pub fn into_status(
+    pub(crate) fn into_status(
         self,
         root: PathBuf,
         home: PathBuf,
@@ -542,7 +546,7 @@ impl ParsedStatus {
 /// Never fails: git's output is only ever malformed if we asked for the wrong
 /// format, and a status that is missing one unreadable row is far better for
 /// the panel than no status at all. Records that do not parse are dropped.
-pub fn parse_porcelain_v2(stdout: &[u8]) -> ParsedStatus {
+pub(crate) fn parse_porcelain_v2(stdout: &[u8]) -> ParsedStatus {
     let mut parser = Parser::default();
     let mut split = RecordSplitter::new(0);
     split.push(stdout, |record| parser.record(record));

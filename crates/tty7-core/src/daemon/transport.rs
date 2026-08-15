@@ -72,7 +72,7 @@ mod imp_unix {
         Ok(stream)
     }
 
-    pub fn tune(stream: &Stream) {
+    pub(crate) fn tune(stream: &Stream) {
         use std::os::unix::io::AsRawFd as _;
         let size: libc::c_int = 256 * 1024;
         for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
@@ -89,15 +89,15 @@ mod imp_unix {
     }
 
     #[inline]
-    pub fn authenticate(_stream: &mut Stream) -> io::Result<()> {
+    pub(crate) fn authenticate(_stream: &mut Stream) -> io::Result<()> {
         Ok(())
     }
 
-    pub fn endpoint_exists() -> bool {
+    pub(crate) fn endpoint_exists() -> bool {
         socket_path().is_some_and(|p| p.exists())
     }
 
-    pub fn remove_stale_endpoint() {
+    pub(crate) fn remove_stale_endpoint() {
         if let Some(path) = socket_path() {
             let _ = std::fs::remove_file(path);
         }
@@ -317,7 +317,7 @@ mod imp_windows {
         port_path_named(PANE_PORT_FILE)
     }
 
-    pub fn port_path_named(file: &str) -> Option<PathBuf> {
+    pub(crate) fn port_path_named(file: &str) -> Option<PathBuf> {
         config::config_path(file)
     }
 
@@ -342,14 +342,14 @@ mod imp_windows {
         connect_with_token(port, &token)
     }
 
-    pub fn authenticate(stream: &mut Stream) -> io::Result<()> {
+    pub(crate) fn authenticate(stream: &mut Stream) -> io::Result<()> {
         let expected = DAEMON_TOKEN
             .get()
             .ok_or_else(|| io::Error::other("daemon auth token not initialized"))?;
         authenticate_with(stream, expected)
     }
 
-    pub fn check_endpoint_token(stream: &mut Stream, expected: &Token) -> io::Result<()> {
+    pub(crate) fn check_endpoint_token(stream: &mut Stream, expected: &Token) -> io::Result<()> {
         authenticate_with(stream, expected)
     }
 
@@ -366,15 +366,15 @@ mod imp_windows {
         }
     }
 
-    pub fn tune(stream: &Stream) {
+    pub(crate) fn tune(stream: &Stream) {
         let _ = stream.set_nodelay(true);
     }
 
-    pub fn endpoint_exists() -> bool {
+    pub(crate) fn endpoint_exists() -> bool {
         port_path().is_some_and(|p| p.exists())
     }
 
-    pub fn remove_stale_endpoint() {
+    pub(crate) fn remove_stale_endpoint() {
         if let Some(path) = port_path() {
             let _ = std::fs::remove_file(path);
         }
@@ -386,7 +386,7 @@ mod imp_windows {
         Ok(listener)
     }
 
-    pub fn bind_endpoint(file: &str) -> anyhow::Result<(Listener, Token)> {
+    pub(crate) fn bind_endpoint(file: &str) -> anyhow::Result<(Listener, Token)> {
         bind_named(file, make_token())
     }
 
@@ -408,7 +408,7 @@ mod imp_windows {
         Ok((listener, token))
     }
 
-    pub fn connect_endpoint(file: &str) -> io::Result<Stream> {
+    pub(crate) fn connect_endpoint(file: &str) -> io::Result<Stream> {
         let (port, token) = read_port_file_named(file)
             .filter(|(p, _)| *p != 0)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no {file} file")))?;
@@ -448,7 +448,7 @@ mod imp_windows {
         Ok(stream)
     }
 
-    pub fn remove_endpoint(file: &str) {
+    pub(crate) fn remove_endpoint(file: &str) {
         if let Some(path) = port_path_named(file) {
             let _ = std::fs::remove_file(path);
         }
@@ -458,7 +458,7 @@ mod imp_windows {
         endpoint_display_named(PANE_PORT_FILE)
     }
 
-    pub fn endpoint_display_named(file: &str) -> String {
+    pub(crate) fn endpoint_display_named(file: &str) -> String {
         match read_port_file_named(file) {
             Some((port, _)) => format!("127.0.0.1:{port}"),
             None => "127.0.0.1:<unbound>".to_string(),

@@ -77,12 +77,12 @@ pub fn parse_dialect_refusal(message: &str) -> Option<DialectRefusal> {
     })
 }
 
-pub fn server_instance() -> &'static str {
+pub(crate) fn server_instance() -> &'static str {
     static INSTANCE: OnceLock<String> = OnceLock::new();
     INSTANCE.get_or_init(|| uuid::Uuid::new_v4().to_string())
 }
 
-pub fn server_started() -> Instant {
+pub(crate) fn server_started() -> Instant {
     static STARTED: OnceLock<Instant> = OnceLock::new();
     *STARTED.get_or_init(Instant::now)
 }
@@ -374,11 +374,11 @@ impl ControlRequest {
         }
     }
 
-    pub fn takes_blob(&self) -> bool {
+    pub(crate) fn takes_blob(&self) -> bool {
         matches!(self, ControlRequest::WriteFile { .. })
     }
 
-    pub fn returns_blob(&self) -> bool {
+    pub(crate) fn returns_blob(&self) -> bool {
         matches!(self, ControlRequest::ReadFile { .. })
     }
 }
@@ -392,7 +392,7 @@ pub enum ControlReply {
 }
 
 impl ControlReply {
-    pub fn into_result(self) -> io::Result<ReplyOk> {
+    pub(crate) fn into_result(self) -> io::Result<ReplyOk> {
         match self {
             ControlReply::Ok(v) => Ok(v),
             ControlReply::Err(e) => Err(e.into_io()),
@@ -456,7 +456,7 @@ impl WireError {
         }
     }
 
-    pub fn from_io(e: &io::Error) -> Self {
+    pub(crate) fn from_io(e: &io::Error) -> Self {
         use io::ErrorKind as K;
         let kind = match e.kind() {
             K::NotFound => WireErrorKind::NotFound,
@@ -477,13 +477,13 @@ impl WireError {
         }
     }
 
-    pub fn into_io(self) -> io::Error {
+    pub(crate) fn into_io(self) -> io::Error {
         io::Error::new(self.kind.to_io_kind(), self.msg)
     }
 }
 
 impl WireErrorKind {
-    pub fn to_io_kind(self) -> io::ErrorKind {
+    pub(crate) fn to_io_kind(self) -> io::ErrorKind {
         use io::ErrorKind as K;
         match self {
             WireErrorKind::NotFound | WireErrorKind::GitUnavailable => K::NotFound,
@@ -749,7 +749,7 @@ impl ControlClientMsg {
         write_frame(w, k, &payload)
     }
 
-    pub fn to_frame(&self) -> io::Result<(u8, Vec<u8>)> {
+    pub(crate) fn to_frame(&self) -> io::Result<(u8, Vec<u8>)> {
         let (k, payload) = match self {
             ControlClientMsg::Hello(hello) => (kind::HELLO, to_json(hello)?),
             ControlClientMsg::Request { req_id, req } => {
@@ -842,7 +842,7 @@ impl ControlServerMsg {
         write_frame(w, k, &payload)
     }
 
-    pub fn to_frame(&self) -> io::Result<(u8, Vec<u8>)> {
+    pub(crate) fn to_frame(&self) -> io::Result<(u8, Vec<u8>)> {
         let (k, payload) = match self {
             ControlServerMsg::HelloOk(ok) => (kind::HELLO_OK, to_json(ok)?),
             ControlServerMsg::Response { req_id, reply } => {
@@ -1060,7 +1060,7 @@ impl ControlClient {
         self.inner.connected.load(Ordering::Acquire)
     }
 
-    pub fn on_link_down<F: Fn() + Send + Sync + 'static>(&self, hook: F) {
+    pub(crate) fn on_link_down<F: Fn() + Send + Sync + 'static>(&self, hook: F) {
         if let Ok(mut hooks) = self.inner.link_down.lock() {
             hooks.push(Box::new(hook));
         }
@@ -1069,7 +1069,7 @@ impl ControlClient {
         }
     }
 
-    pub fn idle_for(&self) -> Duration {
+    pub(crate) fn idle_for(&self) -> Duration {
         self.inner
             .last_inbound
             .lock()
@@ -1081,16 +1081,20 @@ impl ControlClient {
         self.call_full(req, &[]).map(|r| r.reply)
     }
 
-    pub fn call_with_blob(&self, req: ControlRequest, blob: &[u8]) -> io::Result<ReplyOk> {
+    pub(crate) fn call_with_blob(&self, req: ControlRequest, blob: &[u8]) -> io::Result<ReplyOk> {
         self.call_full(req, blob).map(|r| r.reply)
     }
 
-    pub fn call_full(&self, req: ControlRequest, blob: &[u8]) -> io::Result<ControlResponse> {
+    pub(crate) fn call_full(
+        &self,
+        req: ControlRequest,
+        blob: &[u8],
+    ) -> io::Result<ControlResponse> {
         let deadline = req.deadline();
         self.call_with_deadline(req, blob, deadline)
     }
 
-    pub fn call_with_deadline(
+    pub(crate) fn call_with_deadline(
         &self,
         req: ControlRequest,
         blob: &[u8],

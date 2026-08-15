@@ -579,7 +579,7 @@ fn batched(prefix: &[&str], specs: &[String]) -> Vec<Vec<String>> {
 /// "fetch first". git's porcelain messages are not a stable interface in
 /// principle, but these particular strings have survived every release since
 /// they were introduced, and the fallback is only a less specific notification.
-pub fn classify(stderr: &str, status: Option<i32>) -> GitOpErrorKind {
+pub(crate) fn classify(stderr: &str, status: Option<i32>) -> GitOpErrorKind {
     let has = |needle: &str| stderr.contains(needle);
 
     if has("could not read Username")

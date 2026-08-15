@@ -54,7 +54,7 @@ impl From<DistroNameError> for io::Error {
 
 const MAX_DISTRO_NAME: usize = 255;
 
-pub fn validate_distro(name: &str) -> Result<(), DistroNameError> {
+pub(crate) fn validate_distro(name: &str) -> Result<(), DistroNameError> {
     if name.is_empty() {
         return Err(DistroNameError::Empty);
     }
@@ -70,7 +70,7 @@ pub fn validate_distro(name: &str) -> Result<(), DistroNameError> {
     Ok(())
 }
 
-pub fn wsl_args(distro: &str, argv: &[&str]) -> Vec<String> {
+pub(crate) fn wsl_args(distro: &str, argv: &[&str]) -> Vec<String> {
     let mut args = vec!["-d".to_string(), distro.to_string()];
     // `--` hands the rest of the line to the distro's default shell, which
     // re-parses it before the program ever runs — fish chokes on the POSIX
@@ -86,7 +86,10 @@ pub fn host_label(distro: &str) -> String {
     format!("wsl:{distro}")
 }
 
-pub fn list_distros() -> Vec<String> {
+/// WSL is a Windows-only surface; nothing outside it has a reason to ask, and
+/// /// on every other platform this is unreachable by construction.
+#[allow(dead_code)]
+pub(crate) fn list_distros() -> Vec<String> {
     let mut cmd = std::process::Command::new(WSL_EXE);
     cmd.args(["-l", "-q"])
         .stdin(Stdio::null())
@@ -101,7 +104,8 @@ pub fn list_distros() -> Vec<String> {
     parse_distro_list(&out.stdout)
 }
 
-pub fn parse_distro_list(bytes: &[u8]) -> Vec<String> {
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn parse_distro_list(bytes: &[u8]) -> Vec<String> {
     decode_wsl_text(bytes)
         .lines()
         .map(|line| line.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}' || c == '\0'))
@@ -110,7 +114,7 @@ pub fn parse_distro_list(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
-pub fn decode_wsl_text(bytes: &[u8]) -> String {
+pub(crate) fn decode_wsl_text(bytes: &[u8]) -> String {
     if !bytes.contains(&0) {
         return strip_bom(&String::from_utf8_lossy(bytes));
     }
@@ -477,7 +481,7 @@ pub const BUNDLED_DIR_ENV: &str = "TTY7_BUNDLED_SERVER_DIR";
 
 pub const BUNDLED_SUBDIR: &str = "server";
 
-pub fn bundled_search_dirs(exe: Option<&Path>, override_dir: Option<&Path>) -> Vec<PathBuf> {
+pub(crate) fn bundled_search_dirs(exe: Option<&Path>, override_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut push = |d: PathBuf| {
         if !dirs.contains(&d) {
@@ -502,7 +506,7 @@ pub struct BundledServerBinary {
 }
 
 impl BundledServerBinary {
-    pub fn discover() -> Self {
+    pub(crate) fn discover() -> Self {
         let exe = std::env::current_exe().ok();
         let over = std::env::var_os(BUNDLED_DIR_ENV)
             .filter(|v| !v.is_empty())
@@ -510,16 +514,16 @@ impl BundledServerBinary {
         Self::in_dirs(bundled_search_dirs(exe.as_deref(), over.as_deref()))
     }
 
-    pub fn in_dirs(dirs: Vec<PathBuf>) -> Self {
+    pub(crate) fn in_dirs(dirs: Vec<PathBuf>) -> Self {
         Self { dirs }
     }
 
-    pub fn from_env_only() -> Option<Self> {
+    pub(crate) fn from_env_only() -> Option<Self> {
         let dir = std::env::var_os(BUNDLED_DIR_ENV).filter(|v| !v.is_empty())?;
         Some(Self::in_dirs(vec![PathBuf::from(dir)]))
     }
 
-    pub fn locate(&self, asset: &str) -> Option<PathBuf> {
+    pub(crate) fn locate(&self, asset: &str) -> Option<PathBuf> {
         self.dirs
             .iter()
             .map(|dir| dir.join(asset))
@@ -627,13 +631,13 @@ fn remember(distro: &str, proved: Proved) {
 /// Where this distro's server was last proved to be, or `None` if the next pane
 /// would have to go and ask. A hint for callers deciding whether a failure is
 /// worth re-proving; the answer itself comes from `ensure_wsl_server`.
-pub fn remembered_wsl_server(distro: &str) -> Option<String> {
+pub(crate) fn remembered_wsl_server(distro: &str) -> Option<String> {
     remembered(distro).map(|proved| proved.binary)
 }
 
 /// Drop what we thought we knew about a distro, so the next `ensure_wsl_server`
 /// proves it again the long way.
-pub fn forget_wsl_server(distro: &str) {
+pub(crate) fn forget_wsl_server(distro: &str) {
     READY
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -695,7 +699,7 @@ pub fn ensure_wsl_server(distro: &str) -> io::Result<String> {
     Ok(report.paths.binary)
 }
 
-pub fn restart_wsl_daemon(distro: &str) -> io::Result<()> {
+pub(crate) fn restart_wsl_daemon(distro: &str) -> io::Result<()> {
     validate_distro(distro)?;
     let ops = WslRemoteOps::new(distro);
     let source = BundledServerBinary::discover();
@@ -714,7 +718,7 @@ pub fn restart_wsl_daemon(distro: &str) -> io::Result<()> {
 /// Restart the distro's daemon after making sure the binary it launches is this
 /// build's. The bundled server is already on this computer, so unlike SSH there
 /// is nothing to download — the copy is the whole install.
-pub fn replace_wsl_server(distro: &str) -> io::Result<()> {
+pub(crate) fn replace_wsl_server(distro: &str) -> io::Result<()> {
     validate_distro(distro)?;
     let ops = WslRemoteOps::new(distro);
     let source = BundledServerBinary::discover();

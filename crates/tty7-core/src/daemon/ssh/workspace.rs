@@ -4,7 +4,7 @@ use crate::daemon::protocol::{DaemonMsg, WorkspaceOp, WorkspaceRequest};
 use super::SshManager;
 use super::sftp::SftpManager;
 
-pub fn job_key(workspace: WorkspaceId) -> u64 {
+pub(crate) fn job_key(workspace: WorkspaceId) -> u64 {
     workspace.element_key() | (1 << 63)
 }
 

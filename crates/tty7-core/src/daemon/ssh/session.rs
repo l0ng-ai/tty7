@@ -89,7 +89,7 @@ pub struct BridgeEnds {
     pub cmd_rx: tokio::sync::mpsc::UnboundedReceiver<ChannelCmd>,
 }
 
-pub fn make_bridge() -> BridgeEnds {
+pub(crate) fn make_bridge() -> BridgeEnds {
     let (data_tx, data_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(DATA_CHANNEL_DEPTH);
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<ChannelCmd>();
     let handle = Arc::new(SshSessionHandle { cmd_tx });
@@ -185,7 +185,7 @@ impl SshConnection {
         &self.key
     }
 
-    pub fn is_alive(&self) -> bool {
+    pub(crate) fn is_alive(&self) -> bool {
         if !self.alive.load(Ordering::SeqCst) {
             return false;
         }

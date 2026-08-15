@@ -529,7 +529,7 @@ pub fn uninstall_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<
     }
 }
 
-pub fn refresh_hooks(target: &HookTarget) -> usize {
+pub(crate) fn refresh_hooks(target: &HookTarget) -> usize {
     let mut refreshed = 0;
     for agent in HookAgent::ALL {
         if hooks_state(target, agent) != HooksState::Outdated {

@@ -54,7 +54,7 @@ pub fn remote_basename(path: &str) -> String {
     }
 }
 
-pub fn upload_temp_name(remote: &str) -> String {
+pub(crate) fn upload_temp_name(remote: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
@@ -135,19 +135,19 @@ impl JobProgress {
         !matches!(self.state, SftpJobState::Running)
     }
 
-    pub fn set_total(&mut self, total: u64) {
+    pub(crate) fn set_total(&mut self, total: u64) {
         if !self.is_terminal() {
             self.bytes_total = total;
         }
     }
 
-    pub fn set_current(&mut self, path: impl Into<String>) {
+    pub(crate) fn set_current(&mut self, path: impl Into<String>) {
         if !self.is_terminal() {
             self.current = path.into();
         }
     }
 
-    pub fn add_bytes(&mut self, n: u64) {
+    pub(crate) fn add_bytes(&mut self, n: u64) {
         if !self.is_terminal() {
             self.bytes_done = self.bytes_done.saturating_add(n);
         }
@@ -278,7 +278,7 @@ impl SftpManager {
         })
     }
 
-    pub fn put_bytes(
+    pub(crate) fn put_bytes(
         &self,
         conn: &Arc<SshConnection>,
         path: &str,
@@ -317,7 +317,7 @@ impl SftpManager {
         }
     }
 
-    pub fn start_transfer(
+    pub(crate) fn start_transfer(
         &'static self,
         conn: &Arc<SshConnection>,
         spec: SftpTransferSpec,
@@ -361,7 +361,7 @@ impl SftpManager {
         }
     }
 
-    pub fn list_jobs(&self, pane_id: u64) -> Vec<SftpJobProgress> {
+    pub(crate) fn list_jobs(&self, pane_id: u64) -> Vec<SftpJobProgress> {
         let mut jobs = self.jobs.lock().unwrap();
         jobs.retain(|_, job| !job.is_expired());
         let mut out: Vec<SftpJobProgress> = jobs

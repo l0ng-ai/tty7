@@ -42,7 +42,7 @@ pub fn register_ui_thread() {
     let _ = UI_THREAD.set(std::thread::current().id());
 }
 
-pub fn is_ui_thread() -> bool {
+pub(crate) fn is_ui_thread() -> bool {
     UI_THREAD
         .get()
         .is_some_and(|t| *t == std::thread::current().id())
@@ -82,7 +82,7 @@ pub struct MTime {
 }
 
 impl MTime {
-    pub fn from_system_time(t: std::time::SystemTime) -> MTime {
+    pub(crate) fn from_system_time(t: std::time::SystemTime) -> MTime {
         match t.duration_since(std::time::UNIX_EPOCH) {
             Ok(d) => MTime {
                 secs: d.as_secs() as i64,
@@ -130,11 +130,11 @@ impl Output {
         self.status == Some(0)
     }
 
-    pub fn stdout_trimmed(&self) -> String {
+    pub(crate) fn stdout_trimmed(&self) -> String {
         String::from_utf8_lossy(&self.stdout).trim().to_string()
     }
 
-    pub fn stderr_trimmed(&self) -> String {
+    pub(crate) fn stderr_trimmed(&self) -> String {
         String::from_utf8_lossy(&self.stderr).trim().to_string()
     }
 }

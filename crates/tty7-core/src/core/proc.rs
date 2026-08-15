@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+#[cfg_attr(not(test), allow(dead_code))]
 const REAP_POLL: Duration = Duration::from_millis(25);
 
 pub fn hide_console(cmd: &mut Command) -> &mut Command {
@@ -16,7 +17,9 @@ pub fn hide_console(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-pub fn hide_console_tokio(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
+pub(crate) fn hide_console_tokio(
+    cmd: &mut tokio::process::Command,
+) -> &mut tokio::process::Command {
     #[cfg(windows)]
     {
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -24,7 +27,8 @@ pub fn hide_console_tokio(cmd: &mut tokio::process::Command) -> &mut tokio::proc
     cmd
 }
 
-pub fn output_within(cmd: &mut Command, timeout: Duration) -> io::Result<Output> {
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn output_within(cmd: &mut Command, timeout: Duration) -> io::Result<Output> {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -67,6 +71,7 @@ pub fn output_within(cmd: &mut Command, timeout: Duration) -> io::Result<Output>
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> Vec<u8> {
     let mut buf = Vec::new();
     if let Some(mut pipe) = pipe {

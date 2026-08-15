@@ -62,7 +62,7 @@ fn lock_path() -> Option<PathBuf> {
 static HELD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 #[cfg(unix)]
-pub fn held_fd() -> Option<std::os::fd::RawFd> {
+pub(crate) fn held_fd() -> Option<std::os::fd::RawFd> {
     match HELD.load(std::sync::atomic::Ordering::Relaxed) {
         -1 => None,
         fd => Some(fd),

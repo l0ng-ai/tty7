@@ -111,7 +111,7 @@ fn append_custom(inventory: &mut ShellInventory, custom: &[crate::core::config::
     }
 }
 
-pub fn detect_shells() -> Vec<DetectedShell> {
+pub(crate) fn detect_shells() -> Vec<DetectedShell> {
     #[cfg(unix)]
     {
         detect_unix()
@@ -387,7 +387,7 @@ fn detect_unix() -> Vec<DetectedShell> {
 }
 
 #[cfg(windows)]
-pub fn windows_default_shell() -> &'static str {
+pub(crate) fn windows_default_shell() -> &'static str {
     use std::sync::OnceLock;
     static DEFAULT: OnceLock<String> = OnceLock::new();
     DEFAULT.get_or_init(|| {
@@ -513,12 +513,12 @@ fn detect_windows() -> Vec<DetectedShell> {
 }
 
 #[cfg(all(windows, test))]
-pub fn git_bash_path() -> Option<PathBuf> {
+pub(crate) fn git_bash_path() -> Option<PathBuf> {
     find_git_bash()
 }
 
 #[cfg(all(windows, test))]
-pub fn nushell_path() -> Option<PathBuf> {
+pub(crate) fn nushell_path() -> Option<PathBuf> {
     find_in_path("nu.exe")
 }
 
@@ -620,7 +620,11 @@ mod wsl_tests {
     }
 }
 
-pub fn wsl_distros() -> Vec<String> {
+/// Called only from a `#[cfg(windows)]` test, so it reads as dead on every
+/// /// other platform. Not `cfg(windows)` itself: the probe underneath is written
+/// /// once and the Windows build is the only one with anything to probe.
+#[allow(dead_code)]
+pub(crate) fn wsl_distros() -> Vec<String> {
     wsl_distros_probed().unwrap_or_default()
 }
 
@@ -634,14 +638,14 @@ const LXSS: &str = r"Software\Microsoft\Windows\CurrentVersion\Lxss";
 /// carries `DistributionName`). The registry rather than `wsl -l`: this runs
 /// on the pane-spawn path, where a microsecond read beats a subprocess.
 #[cfg(windows)]
-pub fn default_wsl_distro() -> Option<String> {
+pub(crate) fn default_wsl_distro() -> Option<String> {
     let guid = registry_user_string(LXSS, "DefaultDistribution")?;
     let name = registry_user_string(&format!(r"{LXSS}\{guid}"), "DistributionName")?;
     (!name.is_empty()).then_some(name)
 }
 
 #[cfg(not(windows))]
-pub fn default_wsl_distro() -> Option<String> {
+pub(crate) fn default_wsl_distro() -> Option<String> {
     None
 }
 

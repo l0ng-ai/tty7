@@ -69,7 +69,7 @@ pub struct Segment {
 /// terminal output is only interpretable forwards, so the tail can stand on its
 /// own in a way the head cannot. A partially eaten segment keeps its geometry —
 /// the bytes that remain were still written at that size.
-pub fn trim_to(segments: &mut Vec<Segment>, cap: usize) {
+pub(crate) fn trim_to(segments: &mut Vec<Segment>, cap: usize) {
     let total: usize = segments.iter().map(|s| s.bytes.len()).sum();
     let mut over = total.saturating_sub(cap);
     while over > 0 {

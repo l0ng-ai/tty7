@@ -28,7 +28,7 @@ impl ControlClient {
         Self::routed_over(transport::connect()?, target, hello)
     }
 
-    pub fn routed_over(
+    pub(crate) fn routed_over(
         mut stream: transport::Stream,
         target: RouteTarget,
         hello: &ControlHello,
@@ -43,7 +43,7 @@ impl ControlClient {
         Self::over_stream(stream, hello)
     }
 
-    pub fn over_stream(
+    pub(crate) fn over_stream(
         stream: transport::Stream,
         hello: &ControlHello,
     ) -> io::Result<ControlClient> {
@@ -73,11 +73,19 @@ impl ControlClient {
         self.link.call(req)
     }
 
-    pub fn request_full(&self, req: ControlRequest, blob: &[u8]) -> io::Result<ControlResponse> {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn request_full(
+        &self,
+        req: ControlRequest,
+        blob: &[u8],
+    ) -> io::Result<ControlResponse> {
         self.link.call_full(req, blob)
     }
 
-    pub fn request_with_deadline(
+    /// Unused member of the request family; `request` and `request_full` are the
+    /// /// ones callers take.
+    #[allow(dead_code)]
+    pub(crate) fn request_with_deadline(
         &self,
         req: ControlRequest,
         blob: &[u8],

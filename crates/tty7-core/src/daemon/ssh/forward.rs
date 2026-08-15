@@ -322,7 +322,11 @@ impl SshForwardRegistry {
             .await
     }
 
-    pub fn list_workspace(&self, workspace: WorkspaceId, view_pane: u64) -> Vec<ManagedForward> {
+    pub(crate) fn list_workspace(
+        &self,
+        workspace: WorkspaceId,
+        view_pane: u64,
+    ) -> Vec<ManagedForward> {
         self.list_owned(&ForwardOwner::Workspace(workspace), view_pane)
     }
 
@@ -671,7 +675,7 @@ impl SshForwardRegistry {
 }
 
 impl SshManager {
-    pub fn existing_connection(&self, spec: &NativeSshSpec) -> Option<Arc<SshConnection>> {
+    pub(crate) fn existing_connection(&self, spec: &NativeSshSpec) -> Option<Arc<SshConnection>> {
         let key = ConnectionKey::from_spec(spec);
         let slot = self.conns.lock().unwrap().get(&key).cloned()?;
         let guard = slot.try_lock().ok()?;
@@ -679,7 +683,7 @@ impl SshManager {
         conn.is_alive().then_some(conn)
     }
 
-    pub fn add_workspace_forward(
+    pub(crate) fn add_workspace_forward(
         &self,
         workspace: WorkspaceId,
         view_pane: u64,
@@ -694,7 +698,7 @@ impl SshManager {
         })
     }
 
-    pub fn remove_workspace_forward(
+    pub(crate) fn remove_workspace_forward(
         &self,
         workspace: WorkspaceId,
         view_pane: u64,
@@ -706,7 +710,7 @@ impl SshManager {
         )
     }
 
-    pub fn list_workspace_forwards(
+    pub(crate) fn list_workspace_forwards(
         &self,
         workspace: WorkspaceId,
         view_pane: u64,

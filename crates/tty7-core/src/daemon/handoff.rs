@@ -144,7 +144,7 @@ pub struct Adopted {
 /// caller can keep running as if it had never been asked. That ordering is the
 /// whole safety argument: the state is staged first and the irreversible step
 /// is last, so a failure anywhere before it costs a log line.
-pub fn take_over(
+pub(crate) fn take_over(
     exe: &Path,
     panes: Vec<Carried>,
     next_pane_id: u64,

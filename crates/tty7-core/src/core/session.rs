@@ -135,7 +135,8 @@ impl RemoteTarget {
         }
     }
 
-    pub fn parse_direct(input: &str) -> Option<RemoteTarget> {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn parse_direct(input: &str) -> Option<RemoteTarget> {
         let q = crate::core::ssh_profile::parse_quick_connect(input)?;
         let port = q.port_or_default();
         Some(RemoteTarget::direct(
@@ -159,7 +160,8 @@ impl RemoteTarget {
         }
     }
 
-    pub fn is_ssh(&self) -> bool {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn is_ssh(&self) -> bool {
         match self {
             RemoteTarget::Profile { .. }
             | RemoteTarget::Alias { .. }
@@ -462,7 +464,7 @@ impl WindowViews {
             .collect()
     }
 
-    pub fn open_views(&self) -> impl Iterator<Item = &WindowView> {
+    pub(crate) fn open_views(&self) -> impl Iterator<Item = &WindowView> {
         self.views.iter().filter(|w| w.open)
     }
 

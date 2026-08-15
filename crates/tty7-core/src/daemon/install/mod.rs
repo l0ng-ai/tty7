@@ -17,7 +17,7 @@ pub use checksums::ChecksumError;
 
 use crate::daemon::ssh::SshConnection;
 
-pub fn client_version() -> &'static str {
+pub(crate) fn client_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
@@ -148,7 +148,7 @@ impl<'a> BundledOrRelease<'a> {
     /// Prefer a server binary shipped next to the client executable (see
     /// `wsl::BundledServerBinary::discover`), falling back to the GitHub release
     /// download when no matching bundled asset is present.
-    pub fn discover(fetch: &'a dyn AssetFetcher) -> Self {
+    pub(crate) fn discover(fetch: &'a dyn AssetFetcher) -> Self {
         Self {
             fetch,
             bundled: Some(wsl::BundledServerBinary::discover()),
@@ -281,14 +281,17 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-pub fn with_install_confirm<T>(confirm: Arc<dyn InstallConfirm>, f: impl FnOnce() -> T) -> T {
+pub(crate) fn with_install_confirm<T>(
+    confirm: Arc<dyn InstallConfirm>,
+    f: impl FnOnce() -> T,
+) -> T {
     let previous = SCOPED_CONFIRM.with(|slot| slot.borrow_mut().replace(confirm));
     let out = f();
     SCOPED_CONFIRM.with(|slot| *slot.borrow_mut() = previous);
     out
 }
 
-pub fn install_confirm() -> Arc<dyn InstallConfirm> {
+pub(crate) fn install_confirm() -> Arc<dyn InstallConfirm> {
     if let Some(scoped) = SCOPED_CONFIRM.with(|slot| slot.borrow().clone()) {
         return scoped;
     }
@@ -347,14 +350,17 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-pub fn with_install_progress<T>(progress: Arc<dyn InstallProgress>, f: impl FnOnce() -> T) -> T {
+pub(crate) fn with_install_progress<T>(
+    progress: Arc<dyn InstallProgress>,
+    f: impl FnOnce() -> T,
+) -> T {
     let previous = SCOPED_PROGRESS.with(|slot| slot.borrow_mut().replace(progress));
     let out = f();
     SCOPED_PROGRESS.with(|slot| *slot.borrow_mut() = previous);
     out
 }
 
-pub fn install_progress() -> Arc<dyn InstallProgress> {
+pub(crate) fn install_progress() -> Arc<dyn InstallProgress> {
     if let Some(scoped) = SCOPED_PROGRESS.with(|slot| slot.borrow().clone()) {
         return scoped;
     }
@@ -415,7 +421,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-pub fn with_mismatch_sink<T>(
+pub(crate) fn with_mismatch_sink<T>(
     sink: Arc<Mutex<Vec<MismatchedRemoteDaemon>>>,
     f: impl FnOnce() -> T,
 ) -> T {
@@ -624,7 +630,7 @@ impl<'a> Installer<'a> {
         }
     }
 
-    pub fn with_source(
+    pub(crate) fn with_source(
         ops: &'a dyn RemoteOps,
         source: &'a dyn ServerBinarySource,
         confirm: &'a dyn InstallConfirm,
@@ -644,13 +650,15 @@ impl<'a> Installer<'a> {
         }
     }
 
-    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = version.into();
         self.dialect.build = self.version.clone();
         self
     }
 
-    pub fn with_dialect(mut self, control: u32, protocol: u32) -> Self {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn with_dialect(mut self, control: u32, protocol: u32) -> Self {
         self.dialect.control = control;
         self.dialect.protocol = protocol;
         self
@@ -702,7 +710,8 @@ impl<'a> Installer<'a> {
             .is_some_and(|spoken| spoken.serves(&self.dialect)))
     }
 
-    pub fn with_timeouts(mut self, startup: Duration, poll: Duration) -> Self {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn with_timeouts(mut self, startup: Duration, poll: Duration) -> Self {
         self.startup_timeout = startup;
         self.poll_interval = poll;
         self
@@ -712,7 +721,8 @@ impl<'a> Installer<'a> {
     /// away. Its own knob rather than a third argument to `with_timeouts`,
     /// because the only caller that shortens it is the test that watches a
     /// stop fail, and every other caller wants the shipped ten seconds.
-    pub fn with_shutdown_timeout(mut self, shutdown: Duration) -> Self {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn with_shutdown_timeout(mut self, shutdown: Duration) -> Self {
         self.shutdown_timeout = shutdown;
         self
     }
@@ -1145,12 +1155,15 @@ fn connection_label(conn: &SshConnection) -> String {
     conn.key().as_str().to_string()
 }
 
-pub fn ensure_remote_server(conn: &Arc<SshConnection>) -> io::Result<String> {
+pub(crate) fn ensure_remote_server(conn: &Arc<SshConnection>) -> io::Result<String> {
     let host = connection_label(conn);
     ensure_remote_server_labeled(conn, &host)
 }
 
-pub fn ensure_remote_server_labeled(conn: &Arc<SshConnection>, host: &str) -> io::Result<String> {
+pub(crate) fn ensure_remote_server_labeled(
+    conn: &Arc<SshConnection>,
+    host: &str,
+) -> io::Result<String> {
     let ops = ssh_ops::SshRemoteOps::new(conn.clone());
     let fetch = default_fetcher();
     let confirm = install_confirm();
@@ -1178,7 +1191,7 @@ pub fn ensure_remote_server_labeled(conn: &Arc<SshConnection>, host: &str) -> io
     Ok(report.paths.binary)
 }
 
-pub fn restart_remote_daemon(conn: &Arc<SshConnection>) -> io::Result<()> {
+pub(crate) fn restart_remote_daemon(conn: &Arc<SshConnection>) -> io::Result<()> {
     let host = connection_label(conn);
     let ops = ssh_ops::SshRemoteOps::new(conn.clone());
     let fetch = default_fetcher();

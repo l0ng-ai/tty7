@@ -1664,13 +1664,13 @@ impl DaemonPane {
         Ok(pane)
     }
 
-    pub fn deliver_auth_response(&self, request_id: u64, response: AuthResponse) {
+    pub(crate) fn deliver_auth_response(&self, request_id: u64, response: AuthResponse) {
         if let Some(broker) = &self.broker {
             broker.deliver(request_id, response);
         }
     }
 
-    pub fn ssh_connection(&self) -> Option<Arc<crate::daemon::ssh::SshConnection>> {
+    pub(crate) fn ssh_connection(&self) -> Option<Arc<crate::daemon::ssh::SshConnection>> {
         match &self.backend {
             PaneBackend::NativeSsh(b) => b.connection.lock().unwrap().upgrade(),
             PaneBackend::Pty(_) => None,
@@ -1932,7 +1932,7 @@ impl DaemonPane {
         observe_subscriber(&mut st, observer, gate)
     }
 
-    pub fn unobserve(&self, observer_id: u64) {
+    pub(crate) fn unobserve(&self, observer_id: u64) {
         let mut st = self.state.lock().unwrap();
         st.observers.retain(|obs| obs.id != observer_id);
     }
@@ -1949,7 +1949,7 @@ impl DaemonPane {
         self.gate.clone()
     }
 
-    pub fn write_input(&self, bytes: &[u8]) {
+    pub(crate) fn write_input(&self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
@@ -2028,11 +2028,11 @@ impl DaemonPane {
     /// answer "nothing changed". A pane that moves between this read and the
     /// snapshot is fine — the snapshot returns its own mark, and that pair is
     /// what gets recorded.
-    pub fn scrollback_mark(&self) -> u64 {
+    pub(crate) fn scrollback_mark(&self) -> u64 {
         self.state.lock().unwrap().ring.appended
     }
 
-    pub fn scrollback_snapshot(&self) -> (Vec<crate::daemon::scrollback::Segment>, u64) {
+    pub(crate) fn scrollback_snapshot(&self) -> (Vec<crate::daemon::scrollback::Segment>, u64) {
         let st = self.state.lock().unwrap();
         let mut segments = st.ring.snapshot();
         crate::daemon::scrollback::trim_to(&mut segments, crate::daemon::scrollback::SNAPSHOT_CAP);
