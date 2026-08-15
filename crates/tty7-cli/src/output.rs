@@ -302,19 +302,23 @@ pub fn status_lines(status: &ServerStatus) -> String {
     table(&["SERVER", ""], &rows)
 }
 
-pub fn routes_table(routes: &[RouteInfo]) -> String {
-    let mut rows = vec![vec![
-        "local".to_string(),
-        "local".to_string(),
-        "yes".to_string(),
-    ]];
-    rows.extend(routes.iter().map(|r| {
-        vec![
-            r.key.clone(),
-            r.kind.clone(),
-            if r.connected { "yes" } else { "no" }.to_string(),
-        ]
-    }));
+/// Renders exactly the machines it is given, local one included.
+///
+/// It used to prepend the local row itself, which is how the table and the
+/// `--json` of the same command came to disagree: the caller passed the
+/// server's routes to both, the table added a machine and the JSON did not.
+/// Whoever assembles the list now owns it, and both renderings read from it.
+pub fn routes_table(machines: &[RouteInfo]) -> String {
+    let rows: Vec<Vec<String>> = machines
+        .iter()
+        .map(|r| {
+            vec![
+                r.key.clone(),
+                r.kind.clone(),
+                if r.connected { "yes" } else { "no" }.to_string(),
+            ]
+        })
+        .collect();
     table(&["MACHINE", "KIND", "CONNECTED"], &rows)
 }
 

@@ -5,7 +5,9 @@ use tty7_core::core::agent_hooks::{HookAgent, HooksState};
 use tty7_core::core::machine::{Axis, Machine, PaneSeed, Workspace};
 use tty7_core::core::session::WorkspaceId;
 use tty7_core::core::tab_view::tab_views_of;
-use tty7_core::daemon::control::{CONTROL_VERSION, ControlEvent, ControlRequest, ReplyOk};
+use tty7_core::daemon::control::{
+    CONTROL_VERSION, ControlEvent, ControlRequest, ReplyOk, RouteInfo,
+};
 use tty7_core::daemon::protocol::PROTOCOL_VERSION;
 
 use crate::address::{self, Context, WorkspaceAddress};
@@ -1358,10 +1360,27 @@ fn status(backend: &mut dyn Backend) -> Result<Outcome> {
 
 fn machine_ls(backend: &mut dyn Backend) -> Result<Outcome> {
     match backend.control(ControlRequest::Routes)? {
-        ReplyOk::Routes(routes) => report(
-            output::routes_table(&routes),
-            json!({ "machines": serde_json::to_value(&routes)? }),
-        ),
+        ReplyOk::Routes(routes) => {
+            // The local machine is not a route — a route is a link to some
+            // *other* machine — but `machine ls` is "the local machine plus
+            // every link", so it belongs in the answer. Assembled once here
+            // and handed to both renderings: while the table synthesized this
+            // row on its own, `--json` served the routes alone, and a machine
+            // with no remotes answered the machine-readable half with an empty
+            // list. An agent enumerating machines concluded there were none,
+            // including the one it was running on.
+            let machines: Vec<RouteInfo> = std::iter::once(RouteInfo {
+                key: "local".to_string(),
+                kind: "local".to_string(),
+                connected: true,
+            })
+            .chain(routes)
+            .collect();
+            report(
+                output::routes_table(&machines),
+                json!({ "machines": serde_json::to_value(&machines)? }),
+            )
+        }
         other => bail!("the server answered Routes with {other:?}"),
     }
 }
@@ -3480,7 +3499,7 @@ mod tests {
 
     #[test]
     fn status_and_machine_ls_are_single_aggregate_requests() {
-        use tty7_core::daemon::control::{RouteInfo, ServerStatus};
+        use tty7_core::daemon::control::ServerStatus;
 
         let mut backend = mock();
         backend.replies.push_back(ReplyOk::Status(ServerStatus {
@@ -3516,6 +3535,59 @@ mod tests {
             "machine 0 is always listed: {rendered}"
         );
         assert!(rendered.contains("me@build-box:22"), "{rendered}");
+    }
+
+    /// `machine ls` is documented as "the local machine plus every link", and
+    /// the two halves of it have to say the same thing.
+    ///
+    /// They did not: the table synthesized the local row while `--json`
+    /// serialized the server's routes alone, so a machine with no remotes —
+    /// which is every machine until someone connects one — printed a row for
+    /// itself and answered `--json` with `{"machines":[]}`. An agent
+    /// enumerating machines read that as "there are none", including the one
+    /// it was running on.
+    #[test]
+    fn machine_ls_lists_the_local_machine_in_json_as_well_as_the_table() {
+        let mut backend = mock();
+        backend.replies.push_back(ReplyOk::Routes(Vec::new()));
+        let out = run_cli(
+            &["tty7", "machine", "ls"],
+            &Context::default(),
+            &mut backend,
+        );
+        let (rendered, json) = match out {
+            Outcome::Report(r) => (r.human, r.json),
+            Outcome::Exit(code, _) => panic!("expected a report, got exit {code}"),
+        };
+        assert!(
+            rendered.contains("local"),
+            "the table lists the local machine: {rendered}"
+        );
+        assert_eq!(
+            json,
+            json!({ "machines": [{ "key": "local", "kind": "local", "connected": true }] }),
+            "and so does the JSON, on a machine with no remotes"
+        );
+
+        // With a link, both carry both, local first.
+        let mut backend = mock();
+        backend.replies.push_back(ReplyOk::Routes(vec![RouteInfo {
+            key: "me@build-box:22".into(),
+            kind: "ssh".into(),
+            connected: false,
+        }]));
+        let out = run_cli(
+            &["tty7", "machine", "ls"],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(
+            json_of(out),
+            json!({ "machines": [
+                { "key": "local", "kind": "local", "connected": true },
+                { "key": "me@build-box:22", "kind": "ssh", "connected": false },
+            ] })
+        );
     }
 
     fn doctor_backend() -> MockBackend {
