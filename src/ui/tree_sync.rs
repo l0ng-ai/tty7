@@ -3848,6 +3848,35 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_grafted_above_a_whole_layout_still_converges() {
+        let ws = WorkspaceId::new();
+        let (host, guest) = (TabId::new(), TabId::new());
+        let mut mirror = WsMirror::default();
+        let before = vec![
+            tab(host, split(TreeAxis::Horizontal, 0.5, leaf(1), leaf(2))),
+            tab(guest, leaf(3)),
+        ];
+        diff(ws, &mut mirror, &before, Some(host), SyncScope::Full, &[]);
+
+        // Dropped against the host's outer edge, so the newcomer sits above the
+        // whole two-pane layout rather than beside one of its panes. No single
+        // `PaneMove` can say that, and `migrate_panes` says nothing at all: the
+        // passes after it have to land the tab anyway, by the rebuild they have
+        // always fallen back to.
+        let after = vec![tab(
+            host,
+            split(
+                TreeAxis::Horizontal,
+                0.33,
+                leaf(3),
+                split(TreeAxis::Horizontal, 0.5, leaf(1), leaf(2)),
+            ),
+        )];
+        diff(ws, &mut mirror, &after, Some(host), SyncScope::Full, &[]);
+        assert_converged(&mirror, &after);
+    }
+
+    #[test]
     fn a_pane_leaving_for_a_tab_of_its_own_gives_it_up_before_it_asks_for_it() {
         let ws = WorkspaceId::new();
         let (held, fresh) = (TabId::new(), TabId::new());
