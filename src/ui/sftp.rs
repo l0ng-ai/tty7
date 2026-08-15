@@ -20,6 +20,7 @@ use crate::daemon::protocol::{
 };
 use crate::daemon::ssh::sftp::{remote_basename, remote_join, remote_parent, safe_local_name};
 use crate::terminal::RemoteTerminal;
+use crate::terminal::view::one_line;
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_SM, TILE_SIZE_SM, Tty7App};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::right_panel::{META, TEXT};
@@ -1484,10 +1485,15 @@ impl Tty7App {
         } else {
             human_size(entry.size)
         };
+        // Folded exactly as the file tree folds its rows, and for a name with
+        // more claim to it: this one came off another machine's listing, so it
+        // is bytes chosen somewhere this window has no say over. `entry.name`
+        // itself is untouched — it is what `remote_join` builds the download's
+        // path from, and a `↵` spliced into that names nothing on the server.
         let name_label = if is_symlink {
-            format!("{} →", entry.name)
+            format!("{} →", one_line(&entry.name))
         } else {
-            entry.name.clone()
+            one_line(&entry.name)
         };
         let row_id = SharedString::from(format!("sftp-row-{}", entry.name));
 
@@ -1841,7 +1847,7 @@ impl Tty7App {
                             .text_xs()
                             .text_color(foreground)
                             .truncate()
-                            .child(format!("{arrow} {name}")),
+                            .child(format!("{arrow} {}", one_line(&name))),
                     )
                     .when(done_download, |this| {
                         this.child(
