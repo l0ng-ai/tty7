@@ -310,11 +310,14 @@ fn mode_string(mode: u32) -> String {
     )
 }
 
+/// Where a download lands when nothing else says.
+///
+/// The relative `.` is a last resort rather than a failure because a
+/// download has to be offered somewhere; every other caller of
+/// [`path_display::local_home`](crate::ui::path_display::local_home) wants
+/// the `None` and shows the path whole instead.
 fn local_home() -> PathBuf {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::ui::path_display::local_home().unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn local_download_dir() -> PathBuf {

@@ -941,9 +941,9 @@ impl FillFile {
 fn expand_path(p: &str) -> PathBuf {
     let p = p.trim();
     if let Some(rest) = p.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
+        && let Some(home) = crate::ui::path_display::local_home()
     {
-        return PathBuf::from(home).join(rest);
+        return home.join(rest);
     }
     let path = PathBuf::from(p);
     if path.is_absolute() {

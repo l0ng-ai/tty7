@@ -782,9 +782,9 @@ impl Tty7App {
         }
         if roots.is_empty()
             && id.is_local()
-            && let Some(home) = std::env::var_os("HOME")
+            && let Some(home) = crate::ui::path_display::local_home()
         {
-            roots.push(PathBuf::from(home));
+            roots.push(home);
         }
         let _ = window;
         let Some(code) = self.tab_code_mut_or_init() else {
