@@ -999,7 +999,11 @@ impl Tty7App {
                 L10nKey::RemoteRestartFailedBody,
                 &[("error", error)],
             )),
-            &[t(L10nKey::Ok)],
+            // Spelled out rather than passed as a string: gpui's `&str`
+            // conversion decides a button's role by matching the English word,
+            // so a localized "确定" would come out as a plain Other and answer
+            // neither Return nor Escape.
+            &[gpui::PromptButton::ok(t(L10nKey::Ok))],
             cx,
         );
         cx.spawn(async move |_, _| {

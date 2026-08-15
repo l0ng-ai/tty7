@@ -124,11 +124,11 @@ impl Tty7App {
             PromptLevel::Warning,
             &confirm_question(&op, loss),
             None,
-            &[t(L10nKey::Cancel), confirm_verb(&op, loss)],
+            &crate::ui::confirm_answers(confirm_verb(&op, loss), t(L10nKey::Cancel)),
             cx,
         );
         cx.spawn_in(window, async move |app, cx| {
-            let Ok(1) = answer.await else { return };
+            let Ok(0) = answer.await else { return };
             let _ = app.update_in(cx, |app, window, cx| {
                 app.run_git_op(host, repo.root, op, then, window, cx)
             });
@@ -313,11 +313,11 @@ impl Tty7App {
             PromptLevel::Warning,
             t(L10nKey::ScmDiscardAllConfirm),
             None,
-            &[t(L10nKey::Cancel), t(L10nKey::ScmDiscard)],
+            &crate::ui::confirm_answers(t(L10nKey::ScmDiscard), t(L10nKey::Cancel)),
             cx,
         );
         cx.spawn_in(window, async move |app, cx| {
-            let Ok(1) = answer.await else { return };
+            let Ok(0) = answer.await else { return };
             let _ = app.update_in(cx, |app, window, cx| {
                 app.run_git_op(
                     host,

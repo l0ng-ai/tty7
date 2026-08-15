@@ -70,4 +70,37 @@ mod tests {
         assert_eq!(keep.label(), "Cancel");
         assert!(keep.is_cancel(), "only a cancel answer is given Escape");
     }
+
+    /// Why a dialog has to build its buttons instead of passing strings.
+    ///
+    /// `window.prompt` takes anything `Into<PromptButton>`, and gpui's
+    /// conversion decides the role by matching the English word: "cancel"
+    /// becomes a cancel answer and everything else becomes a plain `Other`,
+    /// which answers neither Escape nor Return. So handing it `t(Cancel)`
+    /// gives a working dialog in English and a Chinese or Japanese one with
+    /// nothing on Escape — the failure is invisible to whoever writes it.
+    ///
+    /// That is the whole reason [`confirm_answers`](super::confirm_answers)
+    /// exists. If this test ever fails, gpui started reading roles some other
+    /// way and the rule can be relaxed.
+    #[test]
+    fn a_localized_cancel_label_does_not_become_a_cancel_button() {
+        let english: gpui::PromptButton = "Cancel".into();
+        assert!(english.is_cancel(), "the English word still works");
+
+        for localized in ["取消", "キャンセル"] {
+            let button: gpui::PromptButton = localized.into();
+            assert!(
+                !button.is_cancel(),
+                "{localized:?} became a cancel answer on its own — gpui now \
+                 reads roles some other way, so passing t(Cancel) is safe and \
+                 this rule can go"
+            );
+        }
+
+        // The helper says which is which, so the language never comes into it.
+        let [action, keep] = super::confirm_answers("丢弃", "取消");
+        assert!(!action.is_cancel());
+        assert!(keep.is_cancel(), "the cancel is marked, not guessed");
+    }
 }
