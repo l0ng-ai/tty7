@@ -148,6 +148,23 @@ impl<L: Clone> Pane<L> {
         Pane::Leaf(view)
     }
 
+    /// `clamp` is the whole guard here, and it is weaker than it looks:
+    /// `f32::clamp` **returns NaN for a NaN input** rather than rejecting it,
+    /// so a NaN reaching this would be stored and then multiplied through
+    /// every size below it.
+    ///
+    /// Nothing can supply one, and it is worth writing down which "nothing"
+    /// that is, because the three sources are in three different files:
+    /// the machine tree refuses a non-finite ratio outright
+    /// (`machine::clamp_ratio`); a session file cannot carry one, since JSON
+    /// has no NaN literal and an out-of-range number becomes an infinity,
+    /// which clamps to `MAX_RATIO` like any other large value; and the two
+    /// places that compute a ratio are guarded — `set_run_shares` divides only
+    /// `if total > 0.` (false for NaN as well as zero), and `resize_focused`
+    /// adds a caller's constant step.
+    ///
+    /// So a NaN here means one of those three changed, and this is the line
+    /// that would have to grow an `is_finite` check to match the daemon's.
     pub fn split_node(axis: Axis, ratio: f32, a: Pane<L>, b: Pane<L>) -> Self {
         Pane::Split {
             axis,
