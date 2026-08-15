@@ -1327,7 +1327,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::RemoteNoRouteToHost => "tty7 は {machine} に到達する手段を失いました",
         L10nKey::RemoteMachineTreeUnexpectedReply => {
-            "サーバーがマシンツリーに {reply} で応答しました"
+            "サーバーがマシンツリー要求に {reply} で応答しました"
         }
         L10nKey::RemoteMismatchVersionFromExe => "{version}（{exe} から）",
         L10nKey::AppNoRunningCodingAgent => {

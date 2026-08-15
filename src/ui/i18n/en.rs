@@ -1296,7 +1296,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::RemoteNoRouteToHost => "tty7 no longer has a way to reach {machine}",
         L10nKey::RemoteMachineTreeUnexpectedReply => {
-            "the server answered a machine tree with {reply}"
+            "the server answered the machine-tree request with {reply}"
         }
         L10nKey::RemoteMismatchVersionFromExe => "{version} (from {exe})",
         L10nKey::AppNoRunningCodingAgent => {
