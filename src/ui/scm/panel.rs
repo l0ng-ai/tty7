@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, Context, Focusable as _, SharedString, Window, div, prelude::*, px, rems};
+use gpui::{
+    AnyElement, Context, Focusable as _, SharedString, Window, div, prelude::*, px, relative, rems,
+};
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
@@ -34,7 +36,7 @@ use crate::ui::right_panel::{
 };
 use crate::ui::rounding::{CARD_RADIUS, HAIRLINE, RoundedCorners as _, segment_corners};
 use crate::ui::scm::ScmIntent;
-use crate::ui::scm::path::{elide_middle, split_display_path};
+use crate::ui::scm::path::split_display_path;
 use crate::ui::scm::state::{RepoKey, ScmGroup};
 use crate::ui::scm::status::{status_color, status_glyph};
 
@@ -71,10 +73,6 @@ pub(crate) const COMMIT_KEY_CONTEXT: &str = "ScmCommit";
 
 /// Past this many, the branch switcher scrolls instead of growing.
 const BRANCHES_IN_MENU: usize = 12;
-
-/// How much of a branch name survives the row. Long names carry their
-/// meaning at both ends (`feature/…/auth-retry`), so the middle is what goes.
-const BRANCH_NAME_CHARS: usize = 24;
 
 /// Untracked files past this many start folded. A fresh clone of a repository
 /// with a stale `.gitignore` can put thousands of them in front of the three
@@ -342,54 +340,97 @@ impl Tty7App {
             // read as one size — which is the rule this comment is stating.
             // The height is spelled out because `.small()` also carries a 24px
             // box and the row's own air is budgeted below.
+            // The wrapper is what carries `flex_1`, not the button.
+            // `dropdown_menu_with_anchor` hands the button to a `Popover`,
+            // which wraps it in a plain `div` of its own and drops the
+            // trigger's style on the floor — so `flex_1` set on the button
+            // lands *inside* a box that still measures its own content and
+            // refuses to shrink. At the panel's 216px floor a 24-character
+            // branch name is wider than the row, and what got pushed off the
+            // end was the sync tile: gone entirely, with no way to reach it
+            // (#549).
             .child(
-                Button::new("scm-branch")
-                    .ghost()
-                    .small()
-                    .dropdown_caret(true)
-                    .label(elide_middle(&head_label(&status.head), BRANCH_NAME_CHARS).to_string())
-                    .flex_1()
-                    .min_w(px(0.))
-                    .h(px(24.))
-                    .rounded(px(5.))
-                    .text_color(fg)
-                    .when(detached, |s| s.font_family(mono.clone()))
-                    .dropdown_menu_with_anchor(
-                        gpui::Anchor::TopLeft,
-                        self.scm_branch_menu(repo, status, cx),
-                    ),
+                div().flex_1().min_w(px(0.)).child(
+                    Button::new("scm-branch")
+                        .ghost()
+                        .small()
+                        .dropdown_caret(true)
+                        // A child rather than `.label`, because a label is
+                        // laid out `flex_none` and cannot be told to
+                        // truncate. This is the cut that knows the real
+                        // width, and it is the only cut here — an
+                        // `elide_middle` character budget on top of it put
+                        // two ellipses in a row (`fix/new-tab-……`) and threw
+                        // away the tail it was there to keep.
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .line_height(relative(1.))
+                                .truncate()
+                                .child(head_label(&status.head)),
+                        )
+                        .w_full()
+                        .h(px(24.))
+                        .rounded(px(5.))
+                        .text_color(fg)
+                        .when(detached, |s| s.font_family(mono.clone()))
+                        .dropdown_menu_with_anchor(
+                            gpui::Anchor::TopLeft,
+                            self.scm_branch_menu(repo, status, cx),
+                        ),
+                ),
             )
-            .children(others.map(|count| branch_note(&format!("+{count}"), muted, &mono)))
-            .when(detached, |this| {
-                this.child(info_chip(
-                    t(L10nKey::ScmDetached),
-                    warning.opacity(0.16),
-                    warning,
-                    &mono,
-                ))
-            })
-            .children(status.operation.map(|op| {
-                info_chip(
-                    t(operation_label(op)),
-                    warning.opacity(0.16),
-                    warning,
-                    &mono,
-                )
-            }))
-            // Armed-amend is a mode you can forget you are in, which puts it in
-            // the same class as `detached` and a rebase in progress above — so
-            // it gets their tint, not a chip of its own invention.
-            .when(self.scm.amend, |this| {
-                this.child(info_chip(
-                    t(L10nKey::ScmAmendBadge),
-                    warning.opacity(0.16),
-                    warning,
-                    &mono,
-                ))
-            })
-            .children(
-                tracking_chip(status.upstream.as_deref(), status.ahead_behind)
-                    .map(|text| branch_note(&text, muted, &mono)),
+            // One box for every note and chip, and it is allowed to lose.
+            // Each of them is `flex_none` on its own, so a detached HEAD
+            // mid-rebase used to add up past the row and shove the sync tile
+            // out of the panel — the same disappearance the branch name caused
+            // (#549). The order of who gives way is now spelled out: the
+            // branch name first (`flex_1`), this group second, and the tile
+            // never, because a control you cannot reach is worse than a badge
+            // you cannot finish reading.
+            .child(
+                h_flex()
+                    .gap(px(6.))
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .children(others.map(|count| branch_note(&format!("+{count}"), muted, &mono)))
+                    .when(detached, |this| {
+                        this.child(info_chip(
+                            t(L10nKey::ScmDetached),
+                            warning.opacity(0.16),
+                            warning,
+                            &mono,
+                        ))
+                    })
+                    .children(status.operation.map(|op| {
+                        info_chip(
+                            t(operation_label(op)),
+                            warning.opacity(0.16),
+                            warning,
+                            &mono,
+                        )
+                    }))
+                    // Armed-amend is a mode you can forget you are in, which
+                    // puts it in the same class as `detached` and a rebase in
+                    // progress above — so it gets their tint, not a chip of
+                    // its own invention.
+                    .when(self.scm.amend, |this| {
+                        this.child(info_chip(
+                            t(L10nKey::ScmAmendBadge),
+                            warning.opacity(0.16),
+                            warning,
+                            &mono,
+                        ))
+                    })
+                    .children(
+                        tracking_chip(
+                            status.upstream.as_deref(),
+                            status.ahead_behind,
+                            unpushable.is_none(),
+                        )
+                        .map(|text| branch_note(&text, muted, &mono)),
+                    ),
             )
             .child(
                 crate::ui::tab_strip::chrome_tile_sized(
@@ -1787,7 +1828,11 @@ pub(crate) fn head_label(head: &HeadState) -> String {
 ///
 /// A branch that is level with its upstream says nothing at all: the quiet
 /// state is the common one, and a token that is always there stops being read.
-/// A branch with no upstream offers to publish instead.
+/// A branch with no upstream offers to publish instead — but only if there is
+/// a branch to publish. A detached or unborn HEAD has no upstream *by
+/// definition*, and the offer there is one the sync tile already refuses
+/// (#545); it was the widest token on the row while naming the one thing that
+/// could not happen.
 ///
 /// Once there *is* something to say, both halves are said, zero included. The
 /// pair is one reading of one distance, and dropping the empty half makes it
@@ -1797,9 +1842,10 @@ pub(crate) fn head_label(head: &HeadState) -> String {
 pub(crate) fn tracking_chip(
     upstream: Option<&str>,
     ahead_behind: Option<(u32, u32)>,
+    pushable: bool,
 ) -> Option<String> {
     if upstream.is_none() {
-        return Some(t(L10nKey::ScmPublishBranch).to_string());
+        return pushable.then(|| t(L10nKey::ScmPublishBranch).to_string());
     }
     match ahead_behind? {
         (0, 0) => None,
@@ -2466,30 +2512,35 @@ mod tests {
 
     #[test]
     fn a_branch_level_with_its_upstream_says_nothing() {
-        assert_eq!(tracking_chip(Some("origin/main"), Some((0, 0))), None);
+        assert_eq!(tracking_chip(Some("origin/main"), Some((0, 0)), true), None);
         // Both halves once there is anything to say, so the reading keeps its
         // shape as the numbers move.
         assert_eq!(
-            tracking_chip(Some("origin/main"), Some((2, 0))).as_deref(),
+            tracking_chip(Some("origin/main"), Some((2, 0)), true).as_deref(),
             Some("↑2 ↓0")
         );
         assert_eq!(
-            tracking_chip(Some("origin/main"), Some((0, 1))).as_deref(),
+            tracking_chip(Some("origin/main"), Some((0, 1)), true).as_deref(),
             Some("↑0 ↓1")
         );
         assert_eq!(
-            tracking_chip(Some("origin/main"), Some((2, 1))).as_deref(),
+            tracking_chip(Some("origin/main"), Some((2, 1)), true).as_deref(),
             Some("↑2 ↓1")
         );
         // Nothing to compare against is not the same as being level: the chip
         // becomes the offer to publish.
         assert_eq!(
-            tracking_chip(None, None).as_deref(),
+            tracking_chip(None, None, true).as_deref(),
             Some(t(L10nKey::ScmPublishBranch))
         );
+        // Unless there is no branch to publish. A detached HEAD has no
+        // upstream by definition, and the tile beside this token already
+        // refuses the operation (#545) — offering it here only made the row
+        // wider while naming the one thing that cannot happen.
+        assert_eq!(tracking_chip(None, None, false), None);
         // An upstream git could not count against says nothing rather than
         // claiming zero.
-        assert_eq!(tracking_chip(Some("origin/main"), None), None);
+        assert_eq!(tracking_chip(Some("origin/main"), None, true), None);
     }
 
     #[test]
