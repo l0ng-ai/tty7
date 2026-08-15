@@ -499,6 +499,20 @@ fn confirm_question(op: &GitOp, loss: Destructive) -> String {
     ) {
         return t(L10nKey::ScmResetHardConfirm).to_string();
     }
+    // The arm below is written for the two losses that are about *files*, and
+    // its wording says so: "unstaged and untracked changes … staged changes are
+    // kept" describes nothing that happens when commits go. `LosesCommits` can
+    // only arrive as a hard reset, answered above, or as `GitOp::DeleteBranch`,
+    // which nothing in the UI builds — so today it never gets here. Wiring one
+    // up without writing its own question would hand someone deleting a branch
+    // a dialog about their working tree, and a Discard button to confirm it
+    // with.
+    debug_assert_ne!(
+        loss,
+        Destructive::LosesCommits,
+        "{} loses commits and needs its own question, not the discard one",
+        op.label()
+    );
     match loss {
         Destructive::RewritesHistory => t(L10nKey::ScmAmendConfirm).to_string(),
         // One file gets named; a whole group does not, because a list of two
