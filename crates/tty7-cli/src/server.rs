@@ -79,9 +79,26 @@ pub fn start() -> Result<Outcome> {
         }
         std::thread::sleep(POLL_INTERVAL);
     }
+    // Which pid ended up serving, which is not always the child just spawned.
+    // Clients that all find no server race to start one; the singleton seat
+    // admits exactly one and the losers exit immediately — but every one of
+    // them then sees `running()` go true and would report its own dead child.
+    // Six concurrent starts reported six different pids, five already gone,
+    // and `pid` is a field scripts keep in order to watch or stop the server.
+    //
+    // Readable by then: the daemon writes the pidfile after `bind`, and
+    // `running()` needs an answered request, which is later still.
+    let serving = tty7_core::daemon::pidfile::read().unwrap_or(pid);
+    let won = serving == pid;
     report(
-        format!("started {} (pid {pid})", exe.display()),
-        json!({ "started": true, "pid": pid, "exe": exe.display().to_string() }),
+        match won {
+            true => format!("started {} (pid {pid})", exe.display()),
+            false => format!(
+                "{} is already serving this config dir (pid {serving}) — another start won the race",
+                exe.display()
+            ),
+        },
+        json!({ "started": won, "running": true, "pid": serving, "exe": exe.display().to_string() }),
     )
 }
 
