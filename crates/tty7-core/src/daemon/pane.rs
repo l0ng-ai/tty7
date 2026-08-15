@@ -2947,7 +2947,21 @@ pub(crate) fn parse_osc_title(payload: &[u8]) -> Option<String> {
         .strip_prefix(b"0;")
         .or_else(|| payload.strip_prefix(b"2;"))?;
     let title = String::from_utf8_lossy(rest);
-    let title = title.trim();
+    // Whatever is running in the pane writes this, and the tokenizer above ends
+    // an OSC only on BEL or ESC — every other byte, newlines included, is part
+    // of the payload. A title is drawn as a tab label and kept in the machine
+    // file, and gpui breaks a label on `\n` whatever its wrapping says, painting
+    // the tail over whatever sits below it. So one line in, one line stored: a
+    // control character becomes a space here rather than at each of the places
+    // that draw one.
+    //
+    // Character for character, so the cap below still counts what the user will
+    // see, and trimmed afterwards because folding can leave the edges blank.
+    let folded: String = title
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let title = folded.trim();
     Some(match title.chars().count() > MAX_OSC_TITLE {
         true => title.chars().take(MAX_OSC_TITLE).collect(),
         false => title.to_string(),
@@ -3755,6 +3769,25 @@ mod tests {
         assert_eq!(
             s.feed(long.as_bytes()).title.map(|t| t.chars().count()),
             Some(MAX_OSC_TITLE)
+        );
+
+        // Anything running in the pane writes this, and the tokenizer ends an
+        // OSC only on BEL or ESC — so a newline is payload, not a terminator.
+        // A tab label carrying one is drawn over whatever sits below it.
+        assert_eq!(
+            s.feed(b"\x1b]2;first\nsecond\x07").title.as_deref(),
+            Some("first second"),
+            "an embedded newline is folded rather than reaching a label"
+        );
+        assert_eq!(
+            s.feed(b"\x1b]2;a\tb\r\x07").title.as_deref(),
+            Some("a b"),
+            "every control character folds, and the trailing one trims away"
+        );
+        assert_eq!(
+            s.feed(b"\x1b]2;\n\n\x07").title.as_deref(),
+            Some(""),
+            "a title of nothing but newlines is still the empty reset"
         );
     }
 
