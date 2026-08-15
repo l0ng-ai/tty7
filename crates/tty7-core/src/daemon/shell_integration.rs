@@ -726,6 +726,18 @@ pub(crate) struct Injection {
 }
 
 const ZDOTDIR_PREFIX: &str = "tty7-zdotdir-";
+const NU_PREFIX: &str = "tty7-nu-";
+const BASHRC_PREFIX: &str = "tty7-bashrc-";
+const WSLRC_PREFIX: &str = "tty7-wslrc-";
+
+/// Every prefix [`throwaway_dir`] hands out for a shell's scratch directory.
+///
+/// The sweep reads this list rather than one prefix it happened to know about,
+/// which is the difference between clearing zsh's leavings and clearing all of
+/// them: bash's had piled up to 607 on this machine while zsh's were being
+/// swept. A shell added to the `setup_*` functions below is covered the moment
+/// it takes its directory from one of these.
+const THROWAWAY_PREFIXES: [&str; 4] = [ZDOTDIR_PREFIX, NU_PREFIX, BASHRC_PREFIX, WSLRC_PREFIX];
 
 fn is_our_zdotdir(path: &str) -> bool {
     Path::new(path)
@@ -833,24 +845,22 @@ fn throwaway_dir(prefix: &str) -> Option<PathBuf> {
 
 /// The `<pid>` a throwaway directory's name carries, if it carries one.
 ///
-/// `tty7-zdotdir-<pid>-<seq>`, so the owner is the text between the prefix and
-/// the first `-` after it. Anything else — the `tty7-zdotdir-wsl` a WSL route
-/// writes inside its own directory, a name someone else happened to choose —
-/// answers `None` and is left alone.
-fn zdotdir_owner(name: &str) -> Option<u32> {
-    name.strip_prefix(ZDOTDIR_PREFIX)?
-        .split_once('-')?
-        .0
-        .parse()
-        .ok()
+/// [`throwaway_dir`] names them `<prefix><pid>-<seq>`, so the owner is the text
+/// between a known prefix and the first `-` after it. Anything else — the
+/// `tty7-zdotdir-wsl` a WSL route writes inside its own directory, a name
+/// someone else happened to choose — answers `None` and is left alone.
+fn throwaway_owner(name: &str) -> Option<u32> {
+    THROWAWAY_PREFIXES
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix)?.split_once('-')?.0.parse().ok())
 }
 
-/// Remove the throwaway ZDOTDIRs left by daemons that are gone.
+/// Remove the throwaway shell directories left by daemons that are gone.
 ///
 /// A pane's teardown removes its own, so a daemon that stops cleanly leaves
 /// none. One that is killed never runs that teardown, and its directories then
-/// stay in the temp dir for good — four files each, and nothing ever looks at
-/// them again. This machine had 3,850 of them from months of crashes and
+/// stay in the temp dir for good — and nothing ever looks at them again. This
+/// machine had 3,850 of zsh's and 607 of bash's from months of crashes and
 /// `kill -9`s, which is the same shape as the socket a killed daemon used to
 /// leave: litter only a later startup is in a position to notice.
 ///
@@ -869,7 +879,7 @@ pub(crate) fn sweep_dead_zdotdirs() {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some(owner) = zdotdir_owner(name) else {
+        let Some(owner) = throwaway_owner(name) else {
             continue;
         };
         if owner == mine || crate::daemon::spawn::daemon_process_alive(owner) {
@@ -943,7 +953,7 @@ fn setup_nushell() -> Option<Injection> {
 /// Split from `setup_nushell` so a test can drive the whole wrapper against a
 /// config.nu of its own without writing into the real one.
 fn setup_nushell_with(user_config: Option<&Path>) -> Option<Injection> {
-    let dir = throwaway_dir("tty7-nu-")?;
+    let dir = throwaway_dir(NU_PREFIX)?;
     let config = dir.join("config.nu");
     std::fs::write(&config, nushell_config_script_with(user_config)).ok()?;
 
@@ -1124,7 +1134,7 @@ fn bash_path(path: &Path) -> String {
 }
 
 fn setup_bash() -> Option<Injection> {
-    let dir = throwaway_dir("tty7-bashrc-")?;
+    let dir = throwaway_dir(BASHRC_PREFIX)?;
     let rcfile = dir.join("bashrc");
     std::fs::write(&rcfile, bash_rcfile()).ok()?;
 
@@ -1249,7 +1259,7 @@ fn wsl_zdotdir(dir: &Path) -> Option<String> {
 #[cfg(windows)]
 fn setup_wsl(args: &[String]) -> Option<Injection> {
     let distro = wsl_distro(args);
-    let dir = throwaway_dir("tty7-wslrc-")?;
+    let dir = throwaway_dir(WSLRC_PREFIX)?;
     let env = wsl_integration_env(&dir, std::env::var("WSLENV").ok().as_deref())?;
 
     let mut argv: Vec<String> = Vec::new();
@@ -2817,6 +2827,27 @@ mod tests {
         String::from_utf16(&units).expect("valid UTF-16LE")
     }
 
+    /// A prefix a shell can take is a prefix the sweep recognises.
+    ///
+    /// This is the check that was missing: zsh's directories were swept for a
+    /// while and bash's, nushell's and WSL's were not, because the sweep knew
+    /// one prefix and `throwaway_dir` handed out four. Adding a const here
+    /// without adding it to the list fails this.
+    #[test]
+    fn every_prefix_a_shell_can_take_is_one_the_sweep_knows() {
+        for prefix in [ZDOTDIR_PREFIX, NU_PREFIX, BASHRC_PREFIX, WSLRC_PREFIX] {
+            assert!(
+                THROWAWAY_PREFIXES.contains(&prefix),
+                "{prefix} is handed to a shell but never swept"
+            );
+            assert_eq!(
+                throwaway_owner(&format!("{prefix}4242-0")),
+                Some(4242),
+                "{prefix} names its owner in the shape the sweep reads"
+            );
+        }
+    }
+
     /// Only our own directories, and only ones with a pid in them.
     ///
     /// The sweep deletes, so what it declines to match matters more than what
@@ -2824,13 +2855,22 @@ mod tests {
     /// pid is the one thing that makes a directory safe to judge.
     #[test]
     fn only_a_named_pid_makes_a_directory_ours_to_sweep() {
-        assert_eq!(zdotdir_owner("tty7-zdotdir-4242-0"), Some(4242));
-        assert_eq!(zdotdir_owner("tty7-zdotdir-1-17"), Some(1));
-        assert_eq!(zdotdir_owner("tty7-zdotdir-wsl"), None);
-        assert_eq!(zdotdir_owner("tty7-zdotdir-4242"), None, "no seq, no pid");
-        assert_eq!(zdotdir_owner("tty7-covtest-4242-0"), None, "another prefix");
-        assert_eq!(zdotdir_owner("something-else"), None);
-        assert_eq!(zdotdir_owner(".hidden"), None);
+        // Every shell that takes a scratch directory, not just zsh: bash's had
+        // outnumbered zsh's six to one while only zsh was being swept.
+        assert_eq!(throwaway_owner("tty7-zdotdir-4242-0"), Some(4242));
+        assert_eq!(throwaway_owner("tty7-bashrc-4242-0"), Some(4242));
+        assert_eq!(throwaway_owner("tty7-nu-4242-1"), Some(4242));
+        assert_eq!(throwaway_owner("tty7-wslrc-9-0"), Some(9));
+        assert_eq!(throwaway_owner("tty7-zdotdir-1-17"), Some(1));
+        assert_eq!(throwaway_owner("tty7-zdotdir-wsl"), None);
+        assert_eq!(throwaway_owner("tty7-zdotdir-4242"), None, "no seq, no pid");
+        assert_eq!(
+            throwaway_owner("tty7-covtest-4242-0"),
+            None,
+            "another prefix"
+        );
+        assert_eq!(throwaway_owner("something-else"), None);
+        assert_eq!(throwaway_owner(".hidden"), None);
     }
 
     /// A live owner's directory is left where it is.
