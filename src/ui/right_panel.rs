@@ -1373,8 +1373,8 @@ pub(crate) const BADGE_W: f32 = 14.;
 ///
 /// Mono and SEMIBOLD so `M`, `A`, `D` and `U` all read as the same kind of
 /// mark at a glance, and centred in a cell wide enough for the widest of them
-/// at [`PANEL_TEXT_META`] — that is what makes a column of them line up
-/// instead of drifting with the glyph widths.
+/// at [`META_MONO`] — that is what makes a column of them line up instead of
+/// drifting with the glyph widths.
 pub(crate) fn git_badge(letter: &str, color: gpui::Hsla, mono: &gpui::SharedString) -> AnyElement {
     div()
         .flex_none()
@@ -1434,12 +1434,17 @@ fn status_pip(rgb: u32, hollow: bool, hole: gpui::Hsla) -> AnyElement {
 
 /// A small filled pill around a mono token — a pid, a port number.
 ///
-/// The padding and the radius are derived from the text size: at
-/// [`PANEL_TEXT_META`] the line box is `round(10.5 × 1.618) = 17px`, so 1.5px
-/// of vertical padding makes the pill 20px tall — one pixel more than the 19px
-/// line of [`PANEL_TEXT`] beside it, which is what sets the height of a ports
-/// row. Horizontal padding of 5px is about half an em of breathing room on
-/// each side, and radius 4 is a fifth of the pill's height.
+/// The text is [`META_MONO`], a step below the [`TEXT_MONO`] it sits beside in
+/// a ports row, so the pill reads as an annotation on that line rather than as
+/// a second thing to read. Vertical padding is deliberately small — the pill
+/// has to end up about the height of the line next to it, and a chip taller
+/// than its row is what makes a list of ports look ragged.
+///
+/// The padding and radius are in pixels while the text is in rems, so the two
+/// stop being derived from each other once the interface font scale leaves
+/// 100%: the text grows and the padding does not. That is the same trap
+/// [`PIP_SIZE`] below is written in rems to avoid, and this chip has not been
+/// through it yet.
 pub(crate) fn info_chip(
     text: &str,
     bg: gpui::Hsla,

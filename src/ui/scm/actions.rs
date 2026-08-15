@@ -102,7 +102,8 @@ impl Tty7App {
         self.scm_op_then(repo, op, None, window, cx);
     }
 
-    /// [`scm_op`], with something to run once this operation has succeeded.
+    /// [`Self::scm_op`], with something to run once this operation has
+    /// succeeded.
     /// Cancelling the confirmation drops the follow-up along with the op.
     pub(crate) fn scm_op_then(
         &mut self,

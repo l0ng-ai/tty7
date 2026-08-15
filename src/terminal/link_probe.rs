@@ -6,7 +6,7 @@
 //! machine cannot: the answer costs a round trip, and the click that wanted it
 //! is long gone by the time it lands. So a remote pane keeps this cache
 //! instead. A lookup either finds a recorded answer or reports
-//! [`Probe::Unknown`](super::search::Probe::Unknown) and remembers the path as
+//! [`Probe::Unknown`] and remembers the path as
 //! wanted; the view then asks the host once for everything wanted and files
 //! the replies here, so the *next* hover — a mouse-move away — is a hit.
 //!

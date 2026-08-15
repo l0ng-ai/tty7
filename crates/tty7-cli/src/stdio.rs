@@ -18,7 +18,7 @@
 //!   [`out`] is the stand-in that recognizes the hang-up and leaves quietly.
 //!
 //! Which is why every stdout write in this binary goes through [`out`] or
-//! [`line`]: the `print!` family has no way to express "the reader left".
+//! [`line()`]: the `print!` family has no way to express "the reader left".
 
 use std::io::Write as _;
 
