@@ -323,11 +323,39 @@ smallvec = "1"
 smol = "2"
 
 [patch.crates-io]
-# Temporary until upstream russh releases gssapi-with-mic client auth support
-# (https://github.com/Eugeny/russh/pull/737) — remove this patch and take the
-# crates.io release once it lands. Pinned to an exact rev (never a branch):
-# russh is the SSH protocol layer handling user credentials, and a moving
-# branch on a third-party fork could change what `cargo update` builds.
+# Temporary until upstream russh *releases* gssapi-with-mic client auth
+# support — remove this patch and take the crates.io release once it lands.
+# Pinned to an exact rev (never a branch): russh is the SSH protocol layer
+# handling user credentials, and a moving branch on a third-party fork could
+# change what `cargo update` builds.
+#
+# Status as of 2026-08-15 (the PR this used to cite as #737 does not exist;
+# the real one is #738):
+#
+#   - Eugeny/russh#738 "feat(client): support gssapi-with-mic auth" was MERGED
+#     upstream on 2026-08-11T09:27:51Z. v0.62.6 was published at 09:26:56Z the
+#     same day — one minute *before* the merge — so no release carries it yet.
+#     The next release after that should; check before assuming this patch is
+#     still needed.
+#
+#   - THIS REV IS OLDER THAN THE UPSTREAM SECURITY FIXES. It is dated
+#     2026-07-14 and branched before v0.62.3, so it does not contain:
+#       v0.62.4 (2026-07-22) GHSA-cqjc-rmpq-xprq, GHSA-g9hv-x236-4qp3,
+#                            GHSA-5xvq-cp9x-6p6r — malformed PTY request,
+#                            malformed Curve25519 KEX packet, zero Curve25519
+#                            key. Upstream describes them as a client crashing
+#                            its own session, but "fix mpint encoding and
+#                            validate curve25519 keys" (a7fc1eb) is in key
+#                            exchange, which a *client* also runs against
+#                            whatever server it dials — worth assessing rather
+#                            than assuming it is server-only.
+#       v0.62.5 (2026-07-31) GHSA-m65r-rprj-r5rg — channel IDs not validated.
+#       v0.62.6 (2026-08-11) GHSA-g6xm-f9xp-qq35 — max_auth_attempts.
+#
+#     The last two are described as server-side and tty7 runs no SSH server, so
+#     they most likely do not apply; the KEX ones are the reason this note
+#     exists. Until #738 ships in a release, the fix is to rebase the fork onto
+#     v0.62.6 (or later) and move this rev forward.
 russh = { git = "https://github.com/ayamir/russh", rev = "0d1d073350ed823069252075cbf3db9672d5b490" }
 
 [workspace.lints.clippy]
