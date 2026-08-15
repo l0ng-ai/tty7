@@ -1773,7 +1773,11 @@ fn client_id_for(cx: &gpui::App, host: HostId, store_key: &str) -> Option<Worksp
 }
 
 fn launch_attempt(cx: &mut gpui::App, host: HostId, target: RemoteTarget) {
-    let label = target.to_string();
+    // Not `target.to_string()`: a `Profile` target spells itself as its config
+    // UUID, and this label is what the failure the strip shows names the
+    // machine (#485). The reconnect banner beside it already reads the live
+    // config for the same name, so the two disagreed mid-sentence.
+    let label = remote_connect::target_label(cx, &target);
     let header = match remote_connect::control_route(&target, cx) {
         Ok(header) => header,
         Err(e) => {
@@ -1833,7 +1837,7 @@ fn finish_attempt(
     target: &RemoteTarget,
     outcome: Result<(remote_connect::Connected, Vec<String>), String>,
 ) {
-    let label = target.to_string();
+    let label = remote_connect::target_label(cx, target);
     match outcome {
         Ok((connected, sent)) => {
             let restarted = server_restarted(cx, host, &connected.host);
