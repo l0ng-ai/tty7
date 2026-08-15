@@ -663,8 +663,10 @@ impl Config {
                     "failed to read config at {}: {e}; using defaults, writes suppressed",
                     path.display()
                 );
-                let mut cfg = Config::default();
-                cfg.quarantined = true;
+                let cfg = Config {
+                    quarantined: true,
+                    ..Config::default()
+                };
                 return (cfg, LoadOutcome::Unreadable);
             }
         };
@@ -684,8 +686,10 @@ impl Config {
                     path.display()
                 );
                 quarantine(&path);
-                let mut cfg = Config::default();
-                cfg.quarantined = true;
+                let cfg = Config {
+                    quarantined: true,
+                    ..Config::default()
+                };
                 (cfg, LoadOutcome::Quarantined)
             }
         }
@@ -1249,10 +1253,12 @@ mod tests {
         // The palette rescue defaults on, and survives a round trip either way.
         assert!(cfg.theme_legible_palette);
 
-        let mut cfg = Config::default();
-        cfg.theme_follow_system = true;
-        cfg.theme_preset_light = "one_light".to_string();
-        cfg.theme_preset_dark = "dracula".to_string();
+        let cfg = Config {
+            theme_follow_system: true,
+            theme_preset_light: "one_light".to_string(),
+            theme_preset_dark: "dracula".to_string(),
+            ..Config::default()
+        };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(back.theme_follow_system);
@@ -1359,6 +1365,10 @@ mod tests {
         assert_eq!(sanitized(15.0, 1.4), (15.0, 1.4));
     }
 
+    // Asserts a relationship between compile-time constants on purpose: the
+    // point is that editing one of them without the other is caught here.
+    // clippy reads a constant condition as a mistake; this one is the test.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn sanitize_clamps_to_the_same_bounds_the_gui_steps_within() {
         // The GUI used to clamp to its own, narrower pair, so a config-legal

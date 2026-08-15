@@ -23,7 +23,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::HomeSplitRight => "Split Right",
         L10nKey::HomeSplitDown => "Split Down",
         L10nKey::HomeSettings => "Settings…",
-        L10nKey::TrayQuitStopServer => "Quit and Stop Server…",
         L10nKey::Reconnect => "Reconnect",
         L10nKey::None => "None.",
         L10nKey::TryAgain => "Try Again",
@@ -877,7 +876,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AddSshHost => "Add SSH Host…",
         L10nKey::ClickForNewWindow => "click for a new window",
         L10nKey::RestartServer => "Restart Server",
-        L10nKey::OtherMachines => "Other Machines",
         L10nKey::Ok => "OK",
         L10nKey::SftpNoTransfers => "No transfers yet.",
         L10nKey::SftpPanelTitleFiles => "Files",
@@ -1756,12 +1754,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TabContextCloseTab => "Close Tab",
         L10nKey::TabContextCloseTabsBelow => "Close Tabs Below",
         L10nKey::AppAgentHooksOpFailed => "Failed: {error}",
-        L10nKey::AppMenuEnterFullscreen => "Enter Full Screen",
-        L10nKey::HomeTimeOverWeekAgo => "over a week ago",
-        L10nKey::Search => "Search",
-        L10nKey::SettingsDaemonStaleRestart => "Restart Service",
-        L10nKey::SettingsNoneLower => "none",
-        L10nKey::SettingsSearchCommandLineToolTitle => "Command line tool",
         L10nKey::TabContextMarkUnread => "Mark as Unread",
     }
 }

@@ -148,12 +148,12 @@ fn server_exe() -> Result<PathBuf> {
     } else {
         "tty7-server"
     };
-    if let Ok(own) = std::env::current_exe() {
-        if let Some(dir) = own.parent() {
-            let sibling = dir.join(name);
-            if sibling.exists() {
-                return Ok(sibling);
-            }
+    if let Ok(own) = std::env::current_exe()
+        && let Some(dir) = own.parent()
+    {
+        let sibling = dir.join(name);
+        if sibling.exists() {
+            return Ok(sibling);
         }
     }
     if let Some(paths) = std::env::var_os("PATH") {

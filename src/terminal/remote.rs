@@ -1375,10 +1375,10 @@ impl RemoteTerminal {
 
     pub fn take_auth_banner(&self) -> Option<String> {
         let mut q = self.auth_prompts.lock().ok()?;
-        if matches!(q.front(), Some((_, AuthPromptKind::Banner { .. }))) {
-            if let Some((_, AuthPromptKind::Banner { text })) = q.pop_front() {
-                return Some(text);
-            }
+        if matches!(q.front(), Some((_, AuthPromptKind::Banner { .. })))
+            && let Some((_, AuthPromptKind::Banner { text })) = q.pop_front()
+        {
+            return Some(text);
         }
         None
     }
@@ -2771,8 +2771,10 @@ mod tests {
 
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
         let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
-        let mut user_config = crate::core::config::Config::default();
-        user_config.cursor_style = ConfigCursorStyle::Underline;
+        let user_config = crate::core::config::Config(crate::core::config::CoreConfig {
+            cursor_style: ConfigCursorStyle::Underline,
+            ..Default::default()
+        });
         term.apply_user_config(&user_config);
 
         let mut shape = term.term.lock().cursor_style().shape;

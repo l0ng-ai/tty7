@@ -751,10 +751,10 @@ fn resolve_alias(alias: &str, blocks: &[HostBlock]) -> ResolvedHost {
                     r.port = first_word(val).and_then(|p| p.parse::<u16>().ok());
                 }
                 "identityfile" => {
-                    if let Some(file) = first_word(val) {
-                        if !r.identity_files.contains(&file) {
-                            r.identity_files.push(file);
-                        }
+                    if let Some(file) = first_word(val)
+                        && !r.identity_files.contains(&file)
+                    {
+                        r.identity_files.push(file);
                     }
                 }
                 "proxyjump" if r.proxy_jump.is_none() => {

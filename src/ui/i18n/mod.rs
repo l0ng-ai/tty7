@@ -58,6 +58,17 @@ thread_local! {
 /// list now, and it is the one the compiler reads.
 macro_rules! l10n_keys {
     ($($key:ident),* $(,)?) => {
+        // Whether a key is reachable is a per-platform question, so no single
+        // build can answer it: the backdrop keys are read only by the Windows
+        // appearance page, the update-hint keys only by the platform whose hint
+        // they are. `dead_code` on a macOS build therefore flags a dozen keys
+        // that Windows and Linux do use, and there is no `cfg` that covers all
+        // three at once.
+        //
+        // To audit for keys nothing reads any more: drop this attribute, run
+        // `cargo clippy` once per platform, and take the intersection of what
+        // each one reports. That is how the last sweep found eight.
+        #[allow(dead_code)]
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub enum L10nKey { $($key),* }
 
@@ -76,7 +87,6 @@ l10n_keys! {
     FilterHosts,
     SearchCommandsOrHost,
     SearchTheme,
-    Search,
     SearchWorkspacesAndMachines,
     SearchFonts,
     SearchFind,
@@ -91,7 +101,6 @@ l10n_keys! {
     HomeSplitRight,
     HomeSplitDown,
     HomeSettings,
-    TrayQuitStopServer,
     Reconnect,
     None,
     TryAgain,
@@ -271,7 +280,6 @@ l10n_keys! {
     SettingsJumpHostUnknown,
     SettingsJumpHostSelf,
     SettingsNoneSummary,
-    SettingsNoneLower,
     SettingsPortForwarding,
     SettingsRulesOpenedWithConnection,
     SettingsAddRule,
@@ -525,7 +533,6 @@ l10n_keys! {
     SettingsUpdateChannelNightly,
     SettingsDaemonStale,
     SettingsDaemonStaleDesc,
-    SettingsDaemonStaleRestart,
     UpdateDialogTitle,
     UpdateDialogDetail,
     UpdateDialogDetailWindows,
@@ -579,7 +586,6 @@ l10n_keys! {
     SettingsSearchClaudeCodeKeywords,
     SettingsSearchCodexKeywords,
     SettingsSearchCommandLineToolKeywords,
-    SettingsSearchCommandLineToolTitle,
     SettingsSearchCopilotCliKeywords,
     SettingsSearchCopyOnSelectKeywords,
     SettingsSearchCursorBlinkKeywords,
@@ -638,7 +644,6 @@ l10n_keys! {
     AddSshHost,
     ClickForNewWindow,
     RestartServer,
-    OtherMachines,
     Ok,
     SftpNoTransfers,
     SftpPanelTitleFiles,
@@ -896,7 +901,6 @@ l10n_keys! {
     HomeTimeHoursAgo,
     HomeTimeYesterday,
     HomeTimeDaysAgo,
-    HomeTimeOverWeekAgo,
     HomeTimeWeeksAgo,
     HomeTimeMonthsAgo,
     HomeTimeOverYearAgo,
@@ -953,7 +957,6 @@ l10n_keys! {
     AppMenuFocusPreviousPane,
     AppMenuZoomPane,
     AppMenuClearScrollback,
-    AppMenuEnterFullscreen,
     AppMenuDocumentation,
     AppMenuKeyboardShortcuts,
     AppMenuJoinDiscord,
@@ -1424,15 +1427,6 @@ pub fn t_plural(key: L10nKey, count: usize, args: &[(&str, &str)]) -> String {
     )
 }
 
-/// Select a named branch of a translation and fill placeholders.
-pub fn t_select(key: L10nKey, branch: &'static str, args: &[(&str, &str)]) -> String {
-    apply_template(
-        translate_variant(current_locale_index(), key, branch),
-        args,
-        None,
-    )
-}
-
 fn apply_template(template: &'static str, args: &[(&str, &str)], count: Option<usize>) -> String {
     let mut text = template.to_string();
     if let Some(n) = count {
@@ -1453,19 +1447,19 @@ fn current_locale_index() -> usize {
 }
 
 fn translate(locale_idx: usize, key: L10nKey) -> &'static str {
-    if let Some(lang) = SUPPORTED_LANGUAGES.get(locale_idx) {
-        if let Some(text) = (lang.translate_fn)(key) {
-            return text;
-        }
+    if let Some(lang) = SUPPORTED_LANGUAGES.get(locale_idx)
+        && let Some(text) = (lang.translate_fn)(key)
+    {
+        return text;
     }
     translate_en(key)
 }
 
 fn translate_variant(locale_idx: usize, key: L10nKey, branch: &'static str) -> &'static str {
-    if let Some(lang) = SUPPORTED_LANGUAGES.get(locale_idx) {
-        if let Some(text) = (lang.translate_variant_fn)(key, branch) {
-            return text;
-        }
+    if let Some(lang) = SUPPORTED_LANGUAGES.get(locale_idx)
+        && let Some(text) = (lang.translate_variant_fn)(key, branch)
+    {
+        return text;
     }
     translate_variant_en(key, branch).unwrap_or_else(|| translate(locale_idx, key))
 }

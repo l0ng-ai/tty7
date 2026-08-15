@@ -77,10 +77,10 @@ pub fn check_in_str(contents: &str, host: &str, port: u16, key: &PublicKey) -> H
         if entry.marker != Some(Marker::Revoked) || !entry.matches_host(&token) {
             continue;
         }
-        if let Some(stored) = entry.key() {
-            if &stored == key {
-                return HostKeyStatus::Revoked;
-            }
+        if let Some(stored) = entry.key()
+            && &stored == key
+        {
+            return HostKeyStatus::Revoked;
         }
     }
 
@@ -301,14 +301,13 @@ pub fn delete_in_str(contents: &str, id: &KnownHostId) -> (String, bool) {
     for segment in split_keep_terminators(contents) {
         if !removed {
             let line = segment.trim_end_matches(['\n', '\r']);
-            if let Some(entry) = KnownHostsLine::parse(line) {
-                if entry.hosts == id.host
-                    && entry.keytype == id.key_type
-                    && entry.keyblob == id.keyblob
-                {
-                    removed = true;
-                    continue;
-                }
+            if let Some(entry) = KnownHostsLine::parse(line)
+                && entry.hosts == id.host
+                && entry.keytype == id.key_type
+                && entry.keyblob == id.keyblob
+            {
+                removed = true;
+                continue;
             }
         }
         out.push_str(segment);

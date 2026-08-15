@@ -23,7 +23,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::HomeSplitRight => "右に分割",
         L10nKey::HomeSplitDown => "下に分割",
         L10nKey::HomeSettings => "設定…",
-        L10nKey::TrayQuitStopServer => "終了してサーバーを停止…",
         L10nKey::Reconnect => "再接続",
         L10nKey::None => "なし",
         L10nKey::TryAgain => "再試行",
@@ -926,7 +925,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AddSshHost => "SSH ホストを追加…",
         L10nKey::ClickForNewWindow => "クリックで新しいウィンドウを開く",
         L10nKey::RestartServer => "サーバーを再起動",
-        L10nKey::OtherMachines => "その他のマシン",
         L10nKey::Ok => "OK",
         L10nKey::SftpNoTransfers => "転送はまだありません",
         L10nKey::SftpPanelTitleFiles => "ファイル",
@@ -1803,12 +1801,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabContextCloseTab => "タブを閉じる",
         L10nKey::TabContextCloseTabsBelow => "下のタブを閉じる",
         L10nKey::AppAgentHooksOpFailed => "失敗: {error}",
-        L10nKey::AppMenuEnterFullscreen => "全画面表示",
-        L10nKey::HomeTimeOverWeekAgo => "1 週間以上前",
-        L10nKey::Search => "検索",
-        L10nKey::SettingsDaemonStaleRestart => "サービスを再起動",
-        L10nKey::SettingsNoneLower => "なし",
-        L10nKey::SettingsSearchCommandLineToolTitle => "コマンドラインツール",
         L10nKey::TabContextMarkUnread => "未読としてマーク",
     })
 }

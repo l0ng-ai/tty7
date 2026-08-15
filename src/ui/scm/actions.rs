@@ -310,7 +310,7 @@ impl Tty7App {
         // untracked files.
         let answer = window.prompt(
             PromptLevel::Warning,
-            &t(L10nKey::ScmDiscardAllConfirm).to_string(),
+            t(L10nKey::ScmDiscardAllConfirm),
             None,
             &[t(L10nKey::Cancel), t(L10nKey::ScmDiscard)],
             cx,

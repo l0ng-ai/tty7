@@ -277,7 +277,7 @@ fn group_thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.char_indices() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -7511,6 +7511,10 @@ mod tests {
     /// a half-width window with it open rendered a description one character
     /// wide. It now shrinks with everything else, and stops being a column at
     /// all once even that is not enough.
+    // Asserts a relationship between compile-time constants on purpose: the
+    // point is that editing one of them without the other is caught here.
+    // clippy reads a constant condition as a mistake; this one is the test.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn the_theme_panel_yields_before_the_page_does() {
         use SettingsSection::*;
@@ -7606,8 +7610,10 @@ mod tests {
 
     #[test]
     fn synced_windows_backdrop_is_only_a_local_override_on_windows() {
-        let mut config = Config::default();
-        config.window_backdrop = WindowBackdrop::MicaAlt;
+        let config = Config(crate::core::config::CoreConfig {
+            window_backdrop: WindowBackdrop::MicaAlt,
+            ..Default::default()
+        });
 
         assert!(window_overrides_active(&config, true));
         assert!(!window_overrides_active(&config, false));
@@ -7615,12 +7621,16 @@ mod tests {
 
     #[test]
     fn opacity_and_blur_are_local_overrides_on_every_platform() {
-        let mut opacity = Config::default();
-        opacity.window_opacity = Some(0.8);
-        opacity.window_backdrop = WindowBackdrop::Mica;
-        let mut blur = Config::default();
-        blur.window_blur = Some(true);
-        blur.window_backdrop = WindowBackdrop::Acrylic;
+        let opacity = Config(crate::core::config::CoreConfig {
+            window_opacity: Some(0.8),
+            window_backdrop: WindowBackdrop::Mica,
+            ..Default::default()
+        });
+        let blur = Config(crate::core::config::CoreConfig {
+            window_blur: Some(true),
+            window_backdrop: WindowBackdrop::Acrylic,
+            ..Default::default()
+        });
 
         assert!(window_overrides_active(&opacity, false));
         assert!(window_overrides_active(&blur, false));
@@ -7661,7 +7671,7 @@ mod tests {
     #[test]
     fn previously_unsearchable_settings_are_findable() {
         use SettingsSection::*;
-        let mut cases: Vec<(&str, SettingsSection)> = vec![
+        let cases: Vec<(&str, SettingsSection)> = vec![
             ("opacity", Appearance),
             ("blur", Appearance),
             ("completion", Input),
@@ -7913,7 +7923,7 @@ mod tests {
             jump: "bastion".to_string(),
             ..draft_with_host()
         };
-        let (profile, errors) = validate_ssh_draft(draft, &[bastion.clone()]);
+        let (profile, errors) = validate_ssh_draft(draft, std::slice::from_ref(&bastion));
         assert_eq!(profile.jump_host, Some(bastion.id));
         assert!(errors.is_empty());
     }

@@ -1857,7 +1857,7 @@ fn arm_rehydrate_retry(cx: &mut App, client_ws: WorkspaceId, epoch: u64, attempt
     let delay = rehydrate_backoff(attempts);
     cx.spawn(async move |cx| {
         cx.background_executor().timer(delay).await;
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             if !still_owed(cx, client_ws, epoch) {
                 return;
             }
@@ -2923,7 +2923,7 @@ mod tests {
         cx.update(|cx| {
             // Removing a workspace saves the views, and a test has no business
             // writing the real ones.
-            let _ = tty7_core::core::config::set_config_dir(
+            tty7_core::core::config::set_config_dir(
                 std::env::temp_dir().join(format!("tty7-deleted-test-{}", std::process::id())),
             );
             crate::ui::windows::WindowRegistry::init(cx);
@@ -3290,7 +3290,7 @@ mod tests {
     #[gpui::test]
     fn the_backoff_count_ends_with_the_run_of_failures(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            let _ = tty7_core::core::config::set_config_dir(
+            tty7_core::core::config::set_config_dir(
                 std::env::temp_dir().join(format!("tty7-backoff-count-{}", std::process::id())),
             );
             let view = crate::core::session::WindowView::default();

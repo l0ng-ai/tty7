@@ -486,13 +486,13 @@ pub fn stop() {
     // installer starts replacing files that are still locked.
     let recorded = pidfile::read().filter(|&pid| pid > 4 && pid != std::process::id());
 
-    if let Ok(mut stream) = transport::connect() {
-        if ClientMsg::Shutdown.encode(&mut stream).is_ok() {
-            let _ = stream.flush();
-            let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
-            while Instant::now() < deadline && transport::connect().is_ok() {
-                std::thread::sleep(POLL_INTERVAL);
-            }
+    if let Ok(mut stream) = transport::connect()
+        && ClientMsg::Shutdown.encode(&mut stream).is_ok()
+    {
+        let _ = stream.flush();
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+        while Instant::now() < deadline && transport::connect().is_ok() {
+            std::thread::sleep(POLL_INTERVAL);
         }
     }
 

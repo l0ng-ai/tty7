@@ -215,6 +215,168 @@ pub(crate) fn action_from_id(id: &str) -> Option<TrayAction> {
     }
 }
 
+fn app_snapshot(cx: &mut App) -> TraySnapshot {
+    let windows = crate::ui::windows::WindowRegistry::open_windows(cx);
+    let mut agents = Vec::new();
+    for (_, weak) in windows {
+        let Some(app) = weak.upgrade() else { continue };
+        agents.extend(app.read(cx).agent_rows(cx));
+    }
+    agents.sort_by_key(|a| std::cmp::Reverse(urgency(a.status)));
+    TraySnapshot {
+        agents,
+        notify_mode: cx.global::<Config>().notify_on_command_finish,
+    }
+}
+
+fn dispatch(action: TrayAction, cx: &mut App) {
+    use crate::ui::windows::WindowRegistry;
+
+    let target = match action {
+        TrayAction::RevealPane { leaf_id } => WindowRegistry::open_windows(cx)
+            .into_iter()
+            .find(|(_, weak)| {
+                weak.upgrade()
+                    .is_some_and(|app| app.read(cx).owns_leaf(leaf_id))
+            })
+            .map(|(workspace, _)| workspace),
+        _ => None,
+    }
+    .or_else(|| WindowRegistry::most_recent(cx));
+
+    let Some(workspace) = target else {
+        // No window on screen. The tray is then the app's only presence, so
+        // bring the most recent workspace back the way a pathless launch would
+        // and let the action run against it.
+        //
+        // Quit especially: retiring to the tray leaves every shell running, so
+        // by the time the tray menu is the only way in there can be a whole
+        // session behind it. `quit_stop_sessions` — "anything still running in
+        // your shells is terminated" — is the one thing standing between this
+        // menu item and all of it, and a confirmation needs a window to appear
+        // in. Stopping the server here instead would take the shells with no
+        // way to say no.
+        let restore = crate::ui::windows::restore_target(cx, None);
+        crate::ui::windows::open_at(cx, restore.map(|(id, _)| id), None);
+        match WindowRegistry::most_recent(cx) {
+            Some(restored) => deliver(action, restored, cx),
+            // The window would not open, so nothing can be confirmed in it.
+            // Quit still has to work — a tray whose only exit is inert strands
+            // the app — but every other action wanted the window it failed to
+            // get.
+            None if matches!(action, TrayAction::Quit) => {
+                log::warn!("no window to confirm the quit in; stopping the server anyway");
+                cx.spawn(async move |cx| {
+                    cx.background_spawn(async { crate::daemon::spawn::stop() })
+                        .await;
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+            None => {}
+        }
+        return;
+    };
+    deliver(action, workspace, cx);
+}
+
+/// Hand an action to the window that owns `workspace`.
+fn deliver(action: TrayAction, workspace: tty7_core::core::session::WorkspaceId, cx: &mut App) {
+    use crate::ui::windows::WindowRegistry;
+
+    let (Some(handle), Some(weak)) = (
+        WindowRegistry::window_for(cx, workspace),
+        WindowRegistry::app_for(cx, workspace),
+    ) else {
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        if let Some(app) = weak.upgrade() {
+            app.update(cx, |app, cx| app.handle_tray_action(action, window, cx));
+        }
+    });
+}
+
+pub(crate) fn init(cx: &mut App) {
+    // One tray per process. Every window's constructor calls this, and the
+    // tray-persist flow builds and retires windows without the app ever
+    // exiting — a second backend loop here would add a second icon that the
+    // window close cannot remove. The channel and both loops are created
+    // exactly once; later calls must not touch them.
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
+
+    let (tx, rx) = smol::channel::unbounded::<TrayAction>();
+    if let Ok(mut slot) = SENDER.lock() {
+        *slot = Some(tx.clone());
+    }
+
+    cx.spawn(async move |cx| {
+        while let Ok(action) = rx.recv().await {
+            cx.update(|cx| dispatch(action, cx));
+        }
+    })
+    .detach();
+
+    cx.spawn(async move |cx| {
+        let mut backend: Option<Backend> = None;
+        let mut shown: Option<TraySnapshot> = None;
+        const MAX_ATTEMPTS: u32 = 10;
+        const RETRY_EVERY: u32 = 30;
+        let mut attempts = 0u32;
+        let mut cooldown = 0u32;
+        loop {
+            cx.background_executor().timer(POLL).await;
+            let (enabled, snap) =
+                cx.update(|cx| (cx.global::<Config>().show_tray_icon, app_snapshot(cx)));
+            if !enabled {
+                backend = None;
+                shown = None;
+                attempts = 0;
+                cooldown = 0;
+                ICON_UP.store(false, std::sync::atomic::Ordering::Relaxed);
+                // Closing the last window only keeps the app alive because the
+                // tray is its window. If the icon is turned off while no
+                // window is up (a config edit is the only way there), staying
+                // would leave an invisible process that can never be reached.
+                if cx.update(crate::ui::windows::WindowRegistry::count) == 0 {
+                    cx.update(|cx| cx.quit());
+                    continue;
+                }
+                continue;
+            }
+            if backend.is_none() && attempts < MAX_ATTEMPTS {
+                if cooldown > 0 {
+                    cooldown -= 1;
+                    continue;
+                }
+                attempts += 1;
+                backend = Backend::create(tx.clone(), cx).await;
+                ICON_UP.store(backend.is_some(), std::sync::atomic::Ordering::Relaxed);
+                if backend.is_none() {
+                    cooldown = RETRY_EVERY;
+                    if attempts == MAX_ATTEMPTS {
+                        log::warn!(
+                            "tray icon unavailable after {MAX_ATTEMPTS} attempts; \
+                             running without one — the last window closing now quits"
+                        );
+                    }
+                }
+                shown = None;
+            }
+            if let Some(backend) = backend.as_mut()
+                && shown.as_ref() != Some(&snap)
+            {
+                backend.update(&snap);
+                shown = Some(snap);
+            }
+        }
+    })
+    .detach();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,166 +471,4 @@ mod tests {
             SpecItem::Item { id, avatar: Some(_), .. } if id == "agent:42"
         )));
     }
-}
-
-fn app_snapshot(cx: &mut App) -> TraySnapshot {
-    let windows = crate::ui::windows::WindowRegistry::open_windows(cx);
-    let mut agents = Vec::new();
-    for (_, weak) in windows {
-        let Some(app) = weak.upgrade() else { continue };
-        agents.extend(app.read(cx).agent_rows(cx));
-    }
-    agents.sort_by_key(|a| std::cmp::Reverse(urgency(a.status)));
-    TraySnapshot {
-        agents,
-        notify_mode: cx.global::<Config>().notify_on_command_finish,
-    }
-}
-
-fn dispatch(action: TrayAction, cx: &mut App) {
-    use crate::ui::windows::WindowRegistry;
-
-    let target = match action {
-        TrayAction::RevealPane { leaf_id } => WindowRegistry::open_windows(cx)
-            .into_iter()
-            .find(|(_, weak)| {
-                weak.upgrade()
-                    .is_some_and(|app| app.read(cx).owns_leaf(leaf_id))
-            })
-            .map(|(workspace, _)| workspace),
-        _ => None,
-    }
-    .or_else(|| WindowRegistry::most_recent(cx));
-
-    let Some(workspace) = target else {
-        // No window on screen. The tray is then the app's only presence, so
-        // bring the most recent workspace back the way a pathless launch would
-        // and let the action run against it.
-        //
-        // Quit especially: retiring to the tray leaves every shell running, so
-        // by the time the tray menu is the only way in there can be a whole
-        // session behind it. `quit_stop_sessions` — "anything still running in
-        // your shells is terminated" — is the one thing standing between this
-        // menu item and all of it, and a confirmation needs a window to appear
-        // in. Stopping the server here instead would take the shells with no
-        // way to say no.
-        let restore = crate::ui::windows::restore_target(cx, None);
-        crate::ui::windows::open_at(cx, restore.map(|(id, _)| id), None);
-        match WindowRegistry::most_recent(cx) {
-            Some(restored) => deliver(action, restored, cx),
-            // The window would not open, so nothing can be confirmed in it.
-            // Quit still has to work — a tray whose only exit is inert strands
-            // the app — but every other action wanted the window it failed to
-            // get.
-            None if matches!(action, TrayAction::Quit) => {
-                log::warn!("no window to confirm the quit in; stopping the server anyway");
-                cx.spawn(async move |cx| {
-                    cx.background_spawn(async { crate::daemon::spawn::stop() })
-                        .await;
-                    let _ = cx.update(|cx| cx.quit());
-                })
-                .detach();
-            }
-            None => {}
-        }
-        return;
-    };
-    deliver(action, workspace, cx);
-}
-
-/// Hand an action to the window that owns `workspace`.
-fn deliver(action: TrayAction, workspace: tty7_core::core::session::WorkspaceId, cx: &mut App) {
-    use crate::ui::windows::WindowRegistry;
-
-    let (Some(handle), Some(weak)) = (
-        WindowRegistry::window_for(cx, workspace),
-        WindowRegistry::app_for(cx, workspace),
-    ) else {
-        return;
-    };
-    let _ = handle.update(cx, |_, window, cx| {
-        if let Some(app) = weak.upgrade() {
-            app.update(cx, |app, cx| app.handle_tray_action(action, window, cx));
-        }
-    });
-}
-
-pub(crate) fn init(cx: &mut App) {
-    // One tray per process. Every window's constructor calls this, and the
-    // tray-persist flow builds and retires windows without the app ever
-    // exiting — a second backend loop here would add a second icon that the
-    // window close cannot remove. The channel and both loops are created
-    // exactly once; later calls must not touch them.
-    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    if STARTED.set(()).is_err() {
-        return;
-    }
-
-    let (tx, rx) = smol::channel::unbounded::<TrayAction>();
-    if let Ok(mut slot) = SENDER.lock() {
-        *slot = Some(tx.clone());
-    }
-
-    cx.spawn(async move |cx| {
-        while let Ok(action) = rx.recv().await {
-            cx.update(|cx| dispatch(action, cx));
-        }
-    })
-    .detach();
-
-    cx.spawn(async move |cx| {
-        let mut backend: Option<Backend> = None;
-        let mut shown: Option<TraySnapshot> = None;
-        const MAX_ATTEMPTS: u32 = 10;
-        const RETRY_EVERY: u32 = 30;
-        let mut attempts = 0u32;
-        let mut cooldown = 0u32;
-        loop {
-            cx.background_executor().timer(POLL).await;
-            let (enabled, snap) =
-                cx.update(|cx| (cx.global::<Config>().show_tray_icon, app_snapshot(cx)));
-            if !enabled {
-                backend = None;
-                shown = None;
-                attempts = 0;
-                cooldown = 0;
-                ICON_UP.store(false, std::sync::atomic::Ordering::Relaxed);
-                // Closing the last window only keeps the app alive because the
-                // tray is its window. If the icon is turned off while no
-                // window is up (a config edit is the only way there), staying
-                // would leave an invisible process that can never be reached.
-                if cx.update(|cx| crate::ui::windows::WindowRegistry::count(cx)) == 0 {
-                    let _ = cx.update(|cx| cx.quit());
-                    continue;
-                }
-                continue;
-            }
-            if backend.is_none() && attempts < MAX_ATTEMPTS {
-                if cooldown > 0 {
-                    cooldown -= 1;
-                    continue;
-                }
-                attempts += 1;
-                backend = Backend::create(tx.clone(), cx).await;
-                ICON_UP.store(backend.is_some(), std::sync::atomic::Ordering::Relaxed);
-                if backend.is_none() {
-                    cooldown = RETRY_EVERY;
-                    if attempts == MAX_ATTEMPTS {
-                        log::warn!(
-                            "tray icon unavailable after {MAX_ATTEMPTS} attempts; \
-                             running without one — the last window closing now quits"
-                        );
-                    }
-                }
-                shown = None;
-            }
-            if let Some(backend) = backend.as_mut()
-                && shown.as_ref() != Some(&snap)
-            {
-                backend.update(&snap);
-                shown = Some(snap);
-            }
-        }
-    })
-    .detach();
 }

@@ -64,6 +64,11 @@ pub(super) fn parse_loopback_url(input: &str) -> Option<LoopbackUrl> {
         ("http", input)
     };
 
+    // The three spellings of loopback stay as three parallel arms. Folding the
+    // last one into the `else` as a `?` — which is what clippy::question_mark
+    // asks for — makes it read as a different kind of check from the two above
+    // it, when all three are the same question asked of a different literal.
+    #[allow(clippy::question_mark)]
     let (host, after_host) = if let Some(rest) = rest.strip_prefix("[::1]") {
         (LoopbackHost::Ipv6, rest)
     } else if let Some(rest) = strip_prefix_ignore_ascii_case(rest, "localhost") {

@@ -12,6 +12,16 @@
 //! running GUI through `GuiOpen`, then continues normal startup when no GUI
 //! receives it.
 
+// Everything here that describes the *shape* of the entries — the two key
+// paths, the verb labels, the `%1`/`%V` placeholders, the quoted command — is
+// read by the `#[cfg(windows)] mod windows` below and by the tests, and by
+// nothing else. The tests are deliberately not `#[cfg(windows)]`: pinning the
+// registry layout is exactly the kind of thing a macOS or Linux CI run should
+// still catch, and none of it needs a registry to check. So on a non-Windows
+// build with tests off that half is unreachable by construction, which is what
+// this allow is saying — not that dead code here is expected.
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -104,6 +114,10 @@ fn quoted_open_command(executable: &Path, placeholder: &str) -> OsString {
     command
 }
 
+/// Unlike the rest of the shape half, this one reads the running executable
+/// rather than taking a path, so there is nothing here for a cross-platform
+/// test to pin and only the Windows half ever calls it.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn application_path() -> Result<PathBuf> {
     let app = std::env::current_exe().context("locating the running tty7 application")?;
     app.parent()

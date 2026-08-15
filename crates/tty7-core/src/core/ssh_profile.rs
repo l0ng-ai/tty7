@@ -94,20 +94,11 @@ impl SshProfile {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct HostPort {
     pub host: String,
     pub port: u16,
-}
-
-impl Default for HostPort {
-    fn default() -> Self {
-        Self {
-            host: String::new(),
-            port: 0,
-        }
-    }
 }
 
 impl HostPort {
@@ -303,10 +294,10 @@ fn expand_tilde_with(path: &str, home: Option<&str>) -> String {
             let sep = if home.ends_with('/') { "" } else { "/" };
             return format!("{home}{sep}{rest}");
         }
-    } else if path == "~" {
-        if let Some(home) = home {
-            return home.to_string();
-        }
+    } else if path == "~"
+        && let Some(home) = home
+    {
+        return home.to_string();
     }
     path.to_string()
 }
@@ -344,6 +335,18 @@ fn default_identity_candidates_in(home: &str) -> Vec<String> {
         .into_iter()
         .map(|name| expand_tilde_with(&format!("~/.ssh/{name}"), Some(home)))
         .collect()
+}
+
+fn new_id() -> Uuid {
+    Uuid::new_v4()
+}
+
+fn default_port() -> u16 {
+    22
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -590,16 +593,4 @@ mod tests {
         let m: AuthMode = serde_json::from_str("\"agent\"").unwrap();
         assert_eq!(m, AuthMode::Agent);
     }
-}
-
-fn new_id() -> Uuid {
-    Uuid::new_v4()
-}
-
-fn default_port() -> u16 {
-    22
-}
-
-fn default_true() -> bool {
-    true
 }

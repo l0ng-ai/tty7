@@ -501,6 +501,12 @@ impl WireErrorKind {
     }
 }
 
+// Built on the stack, handed straight to `send`, encoded, dropped — never
+// queued and never held in a collection outside tests. Boxing the wide variant
+// would trade a few bytes of a stack frame that already exists for a heap
+// allocation per event, which is the wrong way round for the thing the daemon
+// does most.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlEvent {
@@ -778,6 +784,9 @@ impl ControlClientMsg {
     }
 }
 
+// Same shape of decision as `ControlEvent` above: constructed at the call to
+// `send`, encoded there, and gone.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum ControlServerMsg {
     HelloOk(ControlHelloOk),

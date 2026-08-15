@@ -23,7 +23,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::HomeSplitRight => "向右分屏",
         L10nKey::HomeSplitDown => "向下分屏",
         L10nKey::HomeSettings => "设置…",
-        L10nKey::TrayQuitStopServer => "退出并停止 server…",
         L10nKey::Reconnect => "重新连接",
         L10nKey::None => "无。",
         L10nKey::TryAgain => "重试",
@@ -832,7 +831,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AddSshHost => "添加 SSH 主机…",
         L10nKey::ClickForNewWindow => "点击打开新窗口",
         L10nKey::RestartServer => "重启 server",
-        L10nKey::OtherMachines => "其他机器",
         L10nKey::Ok => "确定",
         L10nKey::SftpNoTransfers => "还没有传输任务。",
         L10nKey::SftpPanelTitleFiles => "文件",
@@ -1650,12 +1648,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabContextCloseTab => "关闭标签页",
         L10nKey::TabContextCloseTabsBelow => "关闭下方标签页",
         L10nKey::AppAgentHooksOpFailed => "失败：{error}",
-        L10nKey::AppMenuEnterFullscreen => "进入全屏",
-        L10nKey::HomeTimeOverWeekAgo => "一周多前",
-        L10nKey::Search => "搜索",
-        L10nKey::SettingsDaemonStaleRestart => "重启 server",
-        L10nKey::SettingsNoneLower => "无",
-        L10nKey::SettingsSearchCommandLineToolTitle => "命令行工具",
         L10nKey::TabContextMarkUnread => "标记为未读",
     })
 }

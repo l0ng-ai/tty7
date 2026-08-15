@@ -76,7 +76,7 @@ impl RemoteLink {
     }
 }
 
-fn wsl_link_argv<'a>(server: &'a str, channel: RouteChannel) -> Vec<&'a str> {
+fn wsl_link_argv(server: &str, channel: RouteChannel) -> Vec<&str> {
     let mut argv = vec![server, "--stdio"];
     if channel == RouteChannel::Pane {
         argv.push("--pane");

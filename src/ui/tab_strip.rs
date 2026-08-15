@@ -319,7 +319,7 @@ pub(crate) fn elide_keep_edges(
     let longest_tail = |head_n: usize| -> usize {
         let (mut lo, mut hi) = (0usize, cells.len() - head_n);
         while lo < hi {
-            let mid = (lo + hi + 1) / 2;
+            let mid = (lo + hi).div_ceil(2);
             if shaped(head_n, mid) <= max_width {
                 lo = mid;
             } else {
@@ -395,7 +395,7 @@ fn elide_tail_clusters(
     let cells = clusters(text);
     let (mut lo, mut hi) = (0usize, cells.len());
     while lo < hi {
-        let mid = (lo + hi + 1) / 2;
+        let mid = (lo + hi).div_ceil(2);
         let s = cells[cells.len() - mid..].concat();
         if measure_text(text_system, font, size, &s) <= budget {
             lo = mid;

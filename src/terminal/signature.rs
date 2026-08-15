@@ -164,11 +164,11 @@ fn spec_source() -> &'static [PathBuf] {
         if let Some(cfg) = crate::core::config::config_dir_path() {
             dirs.push(cfg.join("completions"));
         }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                dirs.push(dir.join("../Resources/completions"));
-                dirs.push(dir.join("completions"));
-            }
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            dirs.push(dir.join("../Resources/completions"));
+            dirs.push(dir.join("completions"));
         }
         dirs.push(PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),

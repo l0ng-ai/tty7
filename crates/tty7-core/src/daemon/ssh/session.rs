@@ -307,6 +307,12 @@ impl SshConnection {
     }
 }
 
+impl Drop for SshConnection {
+    fn drop(&mut self) {
+        self.mark_dead();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,11 +360,5 @@ mod tests {
         let n = bridge.reader.read(&mut buf).unwrap();
         assert_eq!(n, 1);
         assert!(bridge.data_tx.try_send(vec![0xff]).is_ok());
-    }
-}
-
-impl Drop for SshConnection {
-    fn drop(&mut self) {
-        self.mark_dead();
     }
 }

@@ -22,9 +22,9 @@ impl Log for FileLogger {
             return;
         }
         let mut line = String::new();
-        let _ = write!(
+        let _ = writeln!(
             line,
-            "{} {:5} {} [{}] {}\n",
+            "{} {:5} {} [{}] {}",
             timestamp(),
             record.level(),
             self.role,

@@ -308,7 +308,7 @@ impl Tty7App {
                         // the card has to be able to spell the name back out.
                         let full = SharedString::from(name.trim().to_string());
                         let shown = elide_label(
-                            &window.text_system(),
+                            window.text_system(),
                             title_font,
                             title_size,
                             &full,
@@ -330,7 +330,7 @@ impl Tty7App {
                         } else {
                             let full = SharedString::from(raw.as_ref());
                             let shown = elide_label(
-                                &window.text_system(),
+                                window.text_system(),
                                 title_font,
                                 title_size,
                                 &full,
@@ -365,7 +365,7 @@ impl Tty7App {
                     let mut counts_w = 0.;
                     if g.added > 0 {
                         counts_w += measure_text(
-                            &window.text_system(),
+                            window.text_system(),
                             &font,
                             meta_size,
                             &format!("+{}", g.added),
@@ -373,7 +373,7 @@ impl Tty7App {
                     }
                     if g.removed > 0 {
                         counts_w += measure_text(
-                            &window.text_system(),
+                            window.text_system(),
                             &font,
                             meta_size,
                             &format!("−{}", g.removed),
@@ -392,7 +392,7 @@ impl Tty7App {
                         (label_avail - row_metrics::BRANCH_ICON - row_metrics::META_GAP - counts_w)
                             .max(0.);
                     let shown = elide_keep_edges(
-                        &window.text_system(),
+                        window.text_system(),
                         &font,
                         meta_size,
                         &g.branch,
@@ -463,7 +463,7 @@ impl Tty7App {
                                 abbreviate_home(&text, home.as_deref()).into_owned(),
                             );
                             let shown = elide_path_keep_tail(
-                                &window.text_system(),
+                                window.text_system(),
                                 &font,
                                 meta_size,
                                 &full,
@@ -519,7 +519,7 @@ impl Tty7App {
                                 // per call instead of being moved out.
                                 let info = info.clone();
                                 gpui_component::tooltip::Tooltip::element(move |_window, _cx| {
-                                    let card = v_flex()
+                                    v_flex()
                                         .gap_1()
                                         // The card is the one place that
                                         // promised the whole string, so a long
@@ -592,8 +592,7 @@ impl Tty7App {
                                                     )
                                                     .child(div().truncate().child(host)),
                                             )
-                                        });
-                                    card
+                                        })
                                 })
                                 .build(window, cx)
                             })
@@ -1296,7 +1295,7 @@ struct Section {
 fn sidebar_sections(keys: &[Option<PathBuf>]) -> Vec<Section> {
     let mut group_order: Vec<&PathBuf> = Vec::new();
     for k in keys.iter().flatten() {
-        if !group_order.iter().any(|g| *g == k) {
+        if !group_order.contains(&k) {
             group_order.push(k);
         }
     }
@@ -1363,7 +1362,7 @@ fn regrouped_order(keys: &[Option<PathBuf>], from: &Path, to: &Path) -> Option<V
     }
     let mut order: Vec<&PathBuf> = Vec::new();
     for k in keys.iter().flatten() {
-        if !order.iter().any(|g| *g == k) {
+        if !order.contains(&k) {
             order.push(k);
         }
     }

@@ -833,7 +833,7 @@ fn unquote_path(s: &str) -> String {
 /// value is assembled as bytes and read back as UTF-8 at the end.
 fn c_unescape(s: &str) -> String {
     let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
-    let mut push_char = |bytes: &mut Vec<u8>, ch: char| {
+    let push_char = |bytes: &mut Vec<u8>, ch: char| {
         let mut buf = [0u8; 4];
         bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
     };

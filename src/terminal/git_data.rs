@@ -379,6 +379,7 @@ impl ScmData {
     /// there". A directory that is not a repository is a perfectly normal
     /// thing for a pane to be sitting in, and without somewhere to record the
     /// negative answer the next look asks again — every frame.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn known_status(
         &self,
         host: HostId,
@@ -386,11 +387,6 @@ impl ScmData {
     ) -> Option<Option<Arc<WorkingTreeStatus>>> {
         self.read_at.get(host, root)?;
         Some(self.status_for(host, root))
-    }
-
-    /// Whether this root has been read at all, whatever the answer was.
-    pub fn probed(&self, host: HostId, root: &Path) -> bool {
-        self.read_at.get(host, root).is_some()
     }
 
     pub fn epoch(&self, host: HostId, root: &Path) -> u64 {
@@ -1080,10 +1076,8 @@ impl Tty7App {
                 app.on_git_op_done(result, window, cx);
                 // The second half of a compound verb starts only now, against
                 // the repository this operation produced — never alongside it.
-                if ok {
-                    if let Some(follow) = then {
-                        app.scm_follow_up(id, root, follow, window, cx);
-                    }
+                if ok && let Some(follow) = then {
+                    app.scm_follow_up(id, root, follow, window, cx);
                 }
             },
         );

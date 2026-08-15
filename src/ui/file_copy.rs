@@ -458,7 +458,12 @@ mod tests {
         let dest_dir = root.join("into");
         write(&dest_dir.join("note.txt"), "old");
 
-        let asked = copy_into_dir(&*LocalHost::shared(), &[src.clone()], &dest_dir, false);
+        let asked = copy_into_dir(
+            &*LocalHost::shared(),
+            std::slice::from_ref(&src),
+            &dest_dir,
+            false,
+        );
         assert_eq!(asked.conflicts, vec!["note.txt".to_string()]);
 
         let answered = copy_into_dir(&*LocalHost::shared(), &[src], &dest_dir, true);
@@ -542,7 +547,12 @@ mod tests {
         let pkg = root.join("pkg");
         std::fs::create_dir_all(&pkg).unwrap();
 
-        let report = copy_into_dir(&*LocalHost::shared(), &[pkg.clone()], &pkg, false);
+        let report = copy_into_dir(
+            &*LocalHost::shared(),
+            std::slice::from_ref(&pkg),
+            &pkg,
+            false,
+        );
 
         assert!(report.copied.is_empty());
         assert!(

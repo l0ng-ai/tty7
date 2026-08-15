@@ -735,10 +735,10 @@ fn is_our_zdotdir(path: &str) -> bool {
 }
 
 fn real_user_zdotdir() -> Option<String> {
-    if let Ok(z) = std::env::var("TTY7_USER_ZDOTDIR") {
-        if !z.is_empty() {
-            return Some(z);
-        }
+    if let Ok(z) = std::env::var("TTY7_USER_ZDOTDIR")
+        && !z.is_empty()
+    {
+        return Some(z);
     }
     std::env::var("ZDOTDIR")
         .ok()
@@ -1701,10 +1701,10 @@ mod tests {
             // the A mark) are separate writes: breaking the moment the mark
             // arrives can sample the transcript before the report does. Hold
             // the pty open briefly so the cycle's tail lands.
-            if let Some(at) = seen_fail {
-                if at.elapsed() >= std::time::Duration::from_millis(500) {
-                    break;
-                }
+            if let Some(at) = seen_fail
+                && at.elapsed() >= std::time::Duration::from_millis(500)
+            {
+                break;
             }
         }
         // Reap before asserting: a panic here would otherwise leave the shell

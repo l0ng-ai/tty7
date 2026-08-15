@@ -671,10 +671,11 @@ impl Tty7App {
         query: Option<&str>,
     ) -> Arc<Vec<usize>> {
         let key = Arc::as_ptr(page) as usize;
-        if let Some((held_query, held_page, rows)) = &self.scm.graph.filter_cache {
-            if *held_page == key && held_query.as_deref() == query {
-                return rows.clone();
-            }
+        if let Some((held_query, held_page, rows)) = &self.scm.graph.filter_cache
+            && *held_page == key
+            && held_query.as_deref() == query
+        {
+            return rows.clone();
         }
         let rows: Arc<Vec<usize>> = Arc::new(match query {
             None => (0..page.commits.len()).collect(),
@@ -1750,6 +1751,10 @@ mod tests {
     /// The partial row at the bottom is deliberate: it is the only thing a
     /// fixed-height list says to admit there is more below it, so the assertion
     /// is that a real strip of that row survives at both ends.
+    // Asserts a relationship between compile-time constants on purpose: the
+    // point is that editing one of them without the other is caught here.
+    // clippy reads a constant condition as a mistake; this one is the test.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn the_section_is_sized_in_commits() {
         let rows = |h: f32| (h - GRAPH_HEADER_H) / GRAPH_ROW_H;
@@ -1786,6 +1791,10 @@ mod tests {
     /// others. Nothing about the paint code looks wrong when a node grows past
     /// its column — it simply overlaps the neighbouring line — so the fit is
     /// asserted here rather than left to be noticed.
+    // Asserts a relationship between compile-time constants on purpose: the
+    // point is that editing one of them without the other is caught here.
+    // clippy reads a constant condition as a mistake; this one is the test.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn nodes_fit_inside_their_row_and_column() {
         let widest = GRAPH_DOT_R + 1.;

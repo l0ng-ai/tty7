@@ -93,10 +93,11 @@ pub(super) fn meta_chord_bypasses_ime(ks: &gpui::Keystroke, option_as_alt: bool)
 }
 
 pub(super) fn keystroke_to_bytes(ks: &gpui::Keystroke, flags: KeyFlags) -> Option<Vec<u8>> {
-    if flags.kitty_active() && !ks.modifiers.platform {
-        if let Some(bytes) = encode_kitty(ks, flags) {
-            return Some(bytes);
-        }
+    if flags.kitty_active()
+        && !ks.modifiers.platform
+        && let Some(bytes) = encode_kitty(ks, flags)
+    {
+        return Some(bytes);
     }
     legacy_keystroke_to_bytes(ks, flags)
 }
@@ -147,11 +148,11 @@ fn encode_kitty(ks: &gpui::Keystroke, kitty: KeyFlags) -> Option<Vec<u8>> {
     }
 
     let modified = m.control || m.alt;
-    if modified || kitty.report_all_keys {
-        if let Some(code) = text_key_code(ks) {
-            let text = kitty.report_text.then(|| associated_text(ks)).flatten();
-            return Some(csi_u(code, mods, text.as_deref()));
-        }
+    if (modified || kitty.report_all_keys)
+        && let Some(code) = text_key_code(ks)
+    {
+        let text = kitty.report_text.then(|| associated_text(ks)).flatten();
+        return Some(csi_u(code, mods, text.as_deref()));
     }
 
     None
@@ -308,15 +309,15 @@ fn legacy_keystroke_to_bytes(ks: &gpui::Keystroke, flags: KeyFlags) -> Option<Ve
     if m.platform {
         return None;
     }
-    if let Some(ch) = &ks.key_char {
-        if !ch.is_empty() {
-            let mut v = Vec::new();
-            if m.alt {
-                v.push(0x1b);
-            }
-            v.extend_from_slice(ch.as_bytes());
-            return Some(v);
+    if let Some(ch) = &ks.key_char
+        && !ch.is_empty()
+    {
+        let mut v = Vec::new();
+        if m.alt {
+            v.push(0x1b);
         }
+        v.extend_from_slice(ch.as_bytes());
+        return Some(v);
     }
     None
 }

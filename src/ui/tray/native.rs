@@ -43,16 +43,14 @@ impl Backend {
         };
 
         #[cfg(target_os = "macos")]
-        if let Some(status_item) = tray.ns_status_item() {
-            if let Some(mtm) = objc2::MainThreadMarker::new() {
-                if let Some(button) = status_item.button(mtm) {
-                    if let Some(nsimage) = button.image() {
-                        let target_h: f64 = 22.0;
-                        let aspect = nsimage.size().width / nsimage.size().height;
-                        nsimage.setSize(objc2_foundation::NSSize::new(target_h * aspect, target_h));
-                    }
-                }
-            }
+        if let Some(status_item) = tray.ns_status_item()
+            && let Some(mtm) = objc2::MainThreadMarker::new()
+            && let Some(button) = status_item.button(mtm)
+            && let Some(nsimage) = button.image()
+        {
+            let target_h: f64 = 22.0;
+            let aspect = nsimage.size().width / nsimage.size().height;
+            nsimage.setSize(objc2_foundation::NSSize::new(target_h * aspect, target_h));
         }
         Some(Self {
             tray,

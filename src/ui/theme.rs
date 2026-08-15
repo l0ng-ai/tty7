@@ -288,7 +288,9 @@ pub(crate) const SYSTEM_MATERIAL_OPACITY: f32 = 0.82;
 /// down the chain when the OS build predates a material: Mica needs Windows
 /// 11 22H2 (build 22621), acrylic needs 1809 (build 17763); below that plain
 /// translucency is the best Windows can do. Pure function so the fallback
-/// table is unit-testable on every platform.
+/// table is unit-testable on every platform — which is also why it is not
+/// `#[cfg(windows)]`, and why a non-Windows build needs the `dead_code` allow.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn windows_background_appearance(
     backdrop: WindowBackdrop,
     blur: bool,
@@ -348,7 +350,10 @@ pub(crate) fn windows_background_appearance(
 /// `Blur` already offers, so listing them would present several choices that
 /// render identically — hiding them beats misrepresenting them. Below 1809
 /// (17763) there is no blur API at all, so only plain translucency is left.
-/// Pure function so the table is unit-testable on every platform.
+/// Pure function so the table is unit-testable on every platform — which is
+/// also why it is not `#[cfg(windows)]`, and why a non-Windows build needs the
+/// `dead_code` allow.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn supported_backdrops_for(build: u32) -> &'static [WindowBackdrop] {
     if build >= 22_621 {
         &[
@@ -416,6 +421,7 @@ pub(crate) fn resolved_background_appearance(
         // defers to the legacy toggle. (A Windows-synced "off" therefore
         // does not force transparency on macOS/Linux; the local blur switch
         // stays authoritative.)
+        let _ = backdrop;
         if blur {
             WindowBackgroundAppearance::Blurred
         } else {
@@ -786,7 +792,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // it would wash out that panel. The workspace sidebar/right-panel
     // surfaces get their translucent variant at render time instead —
     // see `workspace_surface_color`.
-    t.sidebar = sidebar_bg.into();
+    t.sidebar = sidebar_bg;
     t.tokens.sidebar = sidebar_bg.into();
     t.sidebar_border = rgb(m.border).into();
     t.sidebar_foreground = rgb(surfaces.sidebar.text_resting).into();
@@ -841,7 +847,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     t.highlight_theme = std::sync::Arc::new(highlight);
 
     #[cfg(target_os = "macos")]
-    if let Some(window) = window.as_deref_mut() {
+    if let Some(window) = window {
         window.set_traffic_light_position(traffic_light_position());
     }
 }

@@ -1017,10 +1017,10 @@ pub fn watch_set_dirs_adds_and_drops(h: &dyn Host, sb: &dyn Sandbox) {
     mkdir(h, &a);
     mkdir(h, &b);
 
-    let sub = h.watch(&[a.clone()]).unwrap();
+    let sub = h.watch(std::slice::from_ref(&a)).unwrap();
     drain(&sub);
 
-    sub.set_dirs(&[b.clone()]).unwrap();
+    sub.set_dirs(std::slice::from_ref(&b)).unwrap();
     drain(&sub);
 
     write(h, &h.join(&b, "in-b.txt"), "x");

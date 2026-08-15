@@ -1789,6 +1789,10 @@ mod tests {
         assert_eq!(img.to_rgba8(), None, "the clamp has to reject it");
     }
 
+    // Asserts a relationship between compile-time constants on purpose: the
+    // point is that editing one of them without the other is caught here.
+    // clippy reads a constant condition as a mistake; this one is the test.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn a_transmission_cap_leaves_room_for_the_wire_frame() {
         // `MAX_TRANSMISSION_BASE64` has to decode to something that still fits

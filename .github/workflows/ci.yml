@@ -54,6 +54,55 @@ jobs:
       - uses: actions/checkout@v4
       - run: bash .github/scripts/check-host-boundary.sh
 
+  # Lints, at deny. `cargo fmt --check` above has always guarded the shape of the
+  # code and nothing has guarded its content, which is how ~200 clippy findings
+  # accumulated unnoticed — including two the compiler could not see: a
+  # `let _ =` hiding a unit-returning call, and a parameter used only inside a
+  # `#[cfg(windows)]` block.
+  #
+  # Linux only, and deliberately. Lint *coverage* is per-platform (a
+  # `#[cfg(windows)]` body is not even parsed here), but the failures that
+  # actually break a build on another platform are compile errors, and the
+  # `build & test` matrix below already builds all three. What one runner buys
+  # is the regression gate on the cross-platform 90% of the tree, for one
+  # runner's worth of time — and macOS slots are the scarce ones (see the
+  # `concurrency` note above).
+  #
+  # `--all-targets` so test code is linted too: about a third of the original
+  # findings were in `#[cfg(test)]` modules, which is exactly where sloppiness
+  # goes unread.
+  #
+  # Must stay *non-required* until it has a few weeks of green, for the same
+  # branch-protection reason spelled out on `host-boundary` above: main's
+  # required checks are `rustfmt` and the three `build & test (<target>)` names,
+  # and making this one required on the day it lands would wedge every open PR
+  # on a check it has never run.
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same set the `build` job installs: clippy compiles the GUI crate, so it
+      # needs gpui's x11/wayland/xkb/font dev packages exactly as a build does.
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config cmake clang libxkbcommon-dev \
+            libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libx11-dev libxcb1-dev libzstd-dev libssl-dev \
+            libkrb5-dev
+          echo "LIBGSSAPI_IMPL=mit" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
   build:
     name: build & test (${{ matrix.target }})
     strategy:

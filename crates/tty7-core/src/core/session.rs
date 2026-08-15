@@ -492,11 +492,11 @@ impl WindowViews {
         let Some(path) = Self::path() else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                log::warn!("failed to create views dir {}: {e}", parent.display());
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            log::warn!("failed to create views dir {}: {e}", parent.display());
+            return;
         }
         let json = match serde_json::to_string_pretty(self) {
             Ok(j) => j,

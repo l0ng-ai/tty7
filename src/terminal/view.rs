@@ -2158,12 +2158,13 @@ impl TerminalView {
             }
             "left" => self.editor_move_h(false, m.shift, m.alt),
             "right" => {
-                if !m.shift && self.cmd.selection().is_none() {
-                    if let Some(full) = self.ghost_suggestion() {
-                        self.cmd.set(&full);
-                        cx.notify();
-                        return;
-                    }
+                if !m.shift
+                    && self.cmd.selection().is_none()
+                    && let Some(full) = self.ghost_suggestion()
+                {
+                    self.cmd.set(&full);
+                    cx.notify();
+                    return;
                 }
                 self.editor_move_h(true, m.shift, m.alt);
             }
@@ -2192,13 +2193,15 @@ impl TerminalView {
                 return;
             }
             _ => {
-                if !m.control && !m.platform && !m.alt {
-                    if let Some(ch) = ks.key_char.as_deref() {
-                        if !ch.is_empty() && ch.chars().all(|c| c >= '\u{20}' && c != '\u{7f}') {
-                            self.commit_text(ch, cx);
-                            return;
-                        }
-                    }
+                if !m.control
+                    && !m.platform
+                    && !m.alt
+                    && let Some(ch) = ks.key_char.as_deref()
+                    && !ch.is_empty()
+                    && ch.chars().all(|c| c >= '\u{20}' && c != '\u{7f}')
+                {
+                    self.commit_text(ch, cx);
+                    return;
                 }
                 if m.alt && !m.control && !m.platform && key.chars().count() == 1 {
                     let bytes = super::input::keystroke_to_bytes(ks, self.key_flags())
@@ -2612,15 +2615,15 @@ impl TerminalView {
     }
 
     pub fn copy_contextual(&mut self, clear_on_copy: bool, cx: &mut Context<Self>) -> bool {
-        if self.input_active() {
-            if let Some(text) = self.cmd.selected_text() {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                if clear_on_copy {
-                    self.cmd.clear_selection();
-                    cx.notify();
-                }
-                return true;
+        if self.input_active()
+            && let Some(text) = self.cmd.selected_text()
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            if clear_on_copy {
+                self.cmd.clear_selection();
+                cx.notify();
             }
+            return true;
         }
         if self.has_selection() {
             self.copy_selection(cx);
@@ -3943,16 +3946,18 @@ impl TerminalView {
 
     fn handle_reverse_search_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
         let m = &ks.modifiers;
-        if !m.control && !m.platform && !m.alt {
-            if let Some(ch) = ks.key_char.as_deref() {
-                if !ch.is_empty() && ch.chars().all(|c| c >= '\u{20}' && c != '\u{7f}') {
-                    if let Some(rs) = self.reverse_search.as_mut() {
-                        rs.push_query(ch, &self.history, &self.history_frecency);
-                    }
-                    cx.notify();
-                    return;
-                }
+        if !m.control
+            && !m.platform
+            && !m.alt
+            && let Some(ch) = ks.key_char.as_deref()
+            && !ch.is_empty()
+            && ch.chars().all(|c| c >= '\u{20}' && c != '\u{7f}')
+        {
+            if let Some(rs) = self.reverse_search.as_mut() {
+                rs.push_query(ch, &self.history, &self.history_frecency);
             }
+            cx.notify();
+            return;
         }
         let Some(rs) = self.reverse_search.as_mut() else {
             return;
@@ -6648,15 +6653,15 @@ fn wrapped_click_index(
             return Some(i);
         }
     }
-    if let Some(fi) = positions.iter().position(|&(pr, _, _)| pr == target) {
-        if col < positions[fi].1 {
-            return Some(fi);
-        }
+    if let Some(fi) = positions.iter().position(|&(pr, _, _)| pr == target)
+        && col < positions[fi].1
+    {
+        return Some(fi);
     }
-    if let Some(last) = positions.iter().rposition(|&(pr, _, _)| pr == target) {
-        if chars[last] == '\n' {
-            return Some(last);
-        }
+    if let Some(last) = positions.iter().rposition(|&(pr, _, _)| pr == target)
+        && chars[last] == '\n'
+    {
+        return Some(last);
     }
     match positions.iter().position(|&(pr, _, _)| pr > target) {
         Some(ni) => Some(ni),
@@ -9812,7 +9817,7 @@ mod gpui_tests {
     fn shift_enter_reaches_a_foreground_tui_with_kitty_encoding(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
         let (window, mut daemon) = harness(cx);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         DaemonMsg::Output(b"\x1b[>1u".to_vec())
             .encode(&mut daemon)
             .unwrap();
@@ -9847,7 +9852,7 @@ mod gpui_tests {
     fn shift_enter_reaches_a_foreground_tui_as_lf_without_kitty(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
         let (window, mut daemon) = harness(cx);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         window
             .update(cx, |view, window, cx| {
                 assert!(!view.input_active(), "the foreground TUI owns input");
@@ -9866,7 +9871,7 @@ mod gpui_tests {
     fn alt_enter_keeps_its_legacy_encoding_in_a_foreground_tui(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
         let (window, mut daemon) = harness(cx);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         window
             .update(cx, |view, window, cx| {
                 assert!(!view.input_active(), "the foreground TUI owns input");
@@ -9901,7 +9906,7 @@ mod gpui_tests {
     #[gpui::test]
     fn the_keymap_routes_both_newline_chords_to_the_action(cx: &mut TestAppContext) {
         let (window, mut daemon) = harness(cx);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         prompt_ready(&window, cx, &mut daemon);
         window
             .update(cx, |view, window, cx| {
@@ -9924,7 +9929,7 @@ mod gpui_tests {
             })
             .unwrap();
 
-        cx.update(|cx| crate::ui::keymap::rebind(cx));
+        cx.update(crate::ui::keymap::rebind);
         vcx.simulate_keystrokes("shift-enter");
         window
             .update(cx, |view, _, _| {
@@ -10989,7 +10994,7 @@ mod gpui_tests {
     ) {
         crate::core::config::pin_test_config_dir();
         let (window, mut daemon) = harness(cx);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         DaemonMsg::Prompt {
             active: true,
             at_prompt: true,

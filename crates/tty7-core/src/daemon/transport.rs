@@ -111,15 +111,14 @@ mod imp_unix {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
             let owns_parent = config::config_dir_path().is_some_and(|c| c.as_path() == parent);
-            if owns_parent {
-                if let Err(e) =
+            if owns_parent
+                && let Err(e) =
                     std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                {
-                    log::warn!(
-                        "could not chmod 0700 daemon socket dir {}: {e}",
-                        parent.display()
-                    );
-                }
+            {
+                log::warn!(
+                    "could not chmod 0700 daemon socket dir {}: {e}",
+                    parent.display()
+                );
             }
         }
         let listener = UnixListener::bind(&path)

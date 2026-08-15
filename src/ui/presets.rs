@@ -821,7 +821,7 @@ fn id_and_name(path: &std::path::Path) -> (String, String) {
         .unwrap_or("theme")
         .to_string();
     let name = stem
-        .split(|c| c == '_' || c == '-' || c == ' ')
+        .split(['_', '-', ' '])
         .filter(|w| !w.is_empty())
         .map(|w| {
             let mut cs = w.chars();
@@ -940,10 +940,10 @@ impl FillFile {
 
 fn expand_path(p: &str) -> PathBuf {
     let p = p.trim();
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    if let Some(rest) = p.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
     }
     let path = PathBuf::from(p);
     if path.is_absolute() {
@@ -972,10 +972,10 @@ fn load_iterm_theme(path: &std::path::Path) -> Result<Theme, String> {
     };
 
     let mut ansi16 = [(0u8, 0u8, 0u8); 16];
-    for i in 0..16 {
+    for (i, slot) in ansi16.iter_mut().enumerate() {
         let c = color(&format!("Ansi {i} Color"))
             .ok_or_else(|| format!("missing or malformed 'Ansi {i} Color'"))?;
-        ansi16[i] = ((c >> 16) as u8, (c >> 8) as u8, c as u8);
+        *slot = ((c >> 16) as u8, (c >> 8) as u8, c as u8);
     }
 
     let background = color("Background Color").ok_or("missing 'Background Color'")?;

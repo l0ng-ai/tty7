@@ -36,9 +36,7 @@ use crate::ui::palette::{
 use crate::ui::pane::{CloseOutcome, Dir, Pane, PaneSlot};
 use crate::ui::presets::Fill;
 use crate::ui::scm::ScmIntent;
-use crate::ui::settings::{
-    Recording, SettingsSection, SettingsState, ThemeEditor, humanize_action,
-};
+use crate::ui::settings::{Recording, SettingsSection, SettingsState, ThemeEditor};
 use crate::ui::theme::{apply_theme, set_menus};
 
 /// What to start in a pane that is about to be opened.
@@ -992,7 +990,7 @@ impl Tty7App {
                 let _ = this.update_in(cx, |this, _window, cx| this.restart_daemon_confirmed(cx));
             }
             Ok(_) => {
-                let _ = cx.update(|cx| cx.quit());
+                cx.update(|cx| cx.quit());
             }
             // Dismissed without an answer: the window went away before the
             // question was settled. Arm it again so the next window asks, rather
@@ -1003,6 +1001,7 @@ impl Tty7App {
         .detach();
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn with_session(
         workspace: Option<WorkspaceId>,
         session: Option<Session>,
@@ -1320,7 +1319,7 @@ impl Tty7App {
                     cx.global::<Config>().show_tray_icon && crate::ui::tray::icon_is_up();
                 if !retire_to_tray {
                     cx.spawn(async move |cx| {
-                        let _ = cx.update(|cx| cx.quit());
+                        cx.update(|cx| cx.quit());
                     })
                     .detach();
                 }
@@ -1680,7 +1679,7 @@ impl Tty7App {
             }
             cx.background_spawn(async { crate::daemon::spawn::stop() })
                 .await;
-            let _ = cx.update(|cx| cx.quit());
+            cx.update(|cx| cx.quit());
         })
         .detach();
     }
@@ -2280,21 +2279,20 @@ impl Tty7App {
             prompt: None,
         });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await {
-                if let Some(path) = paths.into_iter().next() {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.mutate_active_theme(
-                            |theme| {
-                                let opacity =
-                                    theme.image.as_ref().map(|i| i.opacity).unwrap_or(0.3);
-                                theme.image = Some(crate::ui::presets::Image { path, opacity });
-                            },
-                            window,
-                            cx,
-                        );
-                        this.rebuild_theme_editor(window, cx);
-                    });
-                }
+            if let Ok(Ok(Some(paths))) = rx.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.mutate_active_theme(
+                        |theme| {
+                            let opacity = theme.image.as_ref().map(|i| i.opacity).unwrap_or(0.3);
+                            theme.image = Some(crate::ui::presets::Image { path, opacity });
+                        },
+                        window,
+                        cx,
+                    );
+                    this.rebuild_theme_editor(window, cx);
+                });
             }
         })
         .detach();
@@ -3019,10 +3017,10 @@ impl Tty7App {
 
     pub(crate) fn remember_active_pane(&mut self, window: &Window, cx: &App) {
         let active = self.active;
-        if let Some(tab) = self.tabs.get_mut(active) {
-            if let Some(leaf) = tab.pane.focused_leaf(window, cx) {
-                tab.last_focused = Some(leaf.entity_id());
-            }
+        if let Some(tab) = self.tabs.get_mut(active)
+            && let Some(leaf) = tab.pane.focused_leaf(window, cx)
+        {
+            tab.last_focused = Some(leaf.entity_id());
         }
     }
 
@@ -3340,16 +3338,15 @@ impl Tty7App {
                 }
             }
         };
-        if let Some(tab) = self.tabs.get_mut(self.active) {
-            if tab
+        if let Some(tab) = self.tabs.get_mut(self.active)
+            && tab
                 .pane
                 .split_leaf(target.entity_id(), axis, false, new.clone())
-            {
-                self.maximized = None;
-                self.focus_leaf(&new, window, cx);
-                self.save_session(cx);
-                cx.notify();
-            }
+        {
+            self.maximized = None;
+            self.focus_leaf(&new, window, cx);
+            self.save_session(cx);
+            cx.notify();
         }
     }
 
@@ -3498,12 +3495,12 @@ impl Tty7App {
         } else {
             (from + len - 1) % len
         };
-        if let Some(tab) = self.tabs.get_mut(self.active) {
-            if tab.pane.swap_leaf_indices(from, to) {
-                self.maximized = None;
-                self.save_session(cx);
-                cx.notify();
-            }
+        if let Some(tab) = self.tabs.get_mut(self.active)
+            && tab.pane.swap_leaf_indices(from, to)
+        {
+            self.maximized = None;
+            self.save_session(cx);
+            cx.notify();
         }
     }
 
@@ -4362,27 +4359,27 @@ impl Tty7App {
         };
         let name = agent.display_name();
         if agent.fork_label().is_none() {
-            window.push_notification(t_fmt(L10nKey::AppForkNoCommand, &[("name", &name)]), cx);
+            window.push_notification(t_fmt(L10nKey::AppForkNoCommand, &[("name", name)]), cx);
             return None;
         }
         if remote.is_some() {
-            window.push_notification(t_fmt(L10nKey::AppForkLocalOnly, &[("name", &name)]), cx);
+            window.push_notification(t_fmt(L10nKey::AppForkLocalOnly, &[("name", name)]), cx);
             return None;
         }
         let session = session.unwrap_or_default();
         let Some(id) = session.session_id.as_deref() else {
-            window.push_notification(t_fmt(L10nKey::AppForkNoSessionId, &[("name", &name)]), cx);
+            window.push_notification(t_fmt(L10nKey::AppForkNoSessionId, &[("name", name)]), cx);
             return None;
         };
         let Some(cmd) = agent.fork_command(id, session.launch_argv.as_deref()) else {
             window.push_notification(
-                t_fmt(L10nKey::AppForkSessionIdNotToken, &[("name", &name)]),
+                t_fmt(L10nKey::AppForkSessionIdNotToken, &[("name", name)]),
                 cx,
             );
             return None;
         };
         if session.status == AgentStatus::Working {
-            window.push_notification(t_fmt(L10nKey::AppForkMidTurn, &[("name", &name)]), cx);
+            window.push_notification(t_fmt(L10nKey::AppForkMidTurn, &[("name", name)]), cx);
         }
         Some(cmd)
     }
@@ -5200,10 +5197,10 @@ impl Tty7App {
             move |this, _select, ev: &SelectEvent<SearchableVec<String>>, window, cx| {
                 if let SelectEvent::Confirm(Some(label)) = ev {
                     let rows = labels();
-                    if let Some(idx) = rows.iter().position(|r| r == label) {
-                        if let Some(lang) = crate::ui::i18n::SUPPORTED_LANGUAGES.get(idx) {
-                            this.set_gui_language(lang.code, window, cx);
-                        }
+                    if let Some(idx) = rows.iter().position(|r| r == label)
+                        && let Some(lang) = crate::ui::i18n::SUPPORTED_LANGUAGES.get(idx)
+                    {
+                        this.set_gui_language(lang.code, window, cx);
                     }
                 }
             },
@@ -7638,13 +7635,13 @@ fn session_to_pane(
                 // still attempted first and still gives way to a fresh spawn.
                 false => (*pane_id).filter(|id| same_daemon && pane_free_for(alive, *id, owner)),
             };
-            if restore.is_none() {
-                if let Some(spec) = ssh_spec.clone() {
-                    let resolved = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
-                    match new_terminal_native(font_size, cwd.clone(), resolved, window, cx) {
-                        Ok(view) => return Some(Pane::leaf(PaneSlot::Ready(view))),
-                        Err(e) => log::error!("restoring native SSH pane failed: {e}"),
-                    }
+            if restore.is_none()
+                && let Some(spec) = ssh_spec.clone()
+            {
+                let resolved = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
+                match new_terminal_native(font_size, cwd.clone(), resolved, window, cx) {
+                    Ok(view) => return Some(Pane::leaf(PaneSlot::Ready(view))),
+                    Err(e) => log::error!("restoring native SSH pane failed: {e}"),
                 }
             }
             let view = match new_terminal(
@@ -8877,7 +8874,6 @@ pub(crate) mod test_window {
                 root.view()
                     .clone()
                     .downcast::<Tty7App>()
-                    .ok()
                     .expect("window root wraps a Tty7App")
             })
             .unwrap();
@@ -9281,7 +9277,6 @@ mod shell_menu_gpui_tests {
                 root.view()
                     .clone()
                     .downcast::<Tty7App>()
-                    .ok()
                     .expect("window root wraps a Tty7App")
             })
             .unwrap();

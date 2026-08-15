@@ -84,6 +84,6 @@ mod tests {
 
         assert!(reg.hosts.remove(&id).is_some());
         assert!(reg.hosts.contains_key(&HostId::LOCAL));
-        assert!(reg.hosts.get(&id).is_none());
+        assert!(!reg.hosts.contains_key(&id));
     }
 }

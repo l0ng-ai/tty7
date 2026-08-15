@@ -265,13 +265,14 @@ fn initial_working_directory(cwd: Option<PathBuf>) -> Option<PathBuf> {
     // now, but a hand-edited config.json can still hold one — name it, with
     // the reason, at the moment it actually costs something (an explicit cwd
     // that resolves never consults the config, so that case stays quiet).
-    if let Some(dir) = &forced {
-        if !dir.is_dir() && cwd.as_ref().is_none_or(|d| !d.is_dir()) {
-            log::warn!(
-                "configured working directory {} is not a directory; new panes fall back",
-                dir.display()
-            );
-        }
+    if let Some(dir) = &forced
+        && !dir.is_dir()
+        && cwd.as_ref().is_none_or(|d| !d.is_dir())
+    {
+        log::warn!(
+            "configured working directory {} is not a directory; new panes fall back",
+            dir.display()
+        );
     }
     [cwd, forced, fallback]
         .into_iter()
@@ -742,10 +743,10 @@ fn resize_state(st: &mut PaneState, size: WinSize) {
 /// each carry their own gate and their own budget: one that has stopped
 /// draining is dropped rather than allowed to hold the pane's output forever.
 fn fan_out_one(st: &mut PaneState, msg: DaemonMsg, len: usize, gate: &OutputGate) {
-    if let Some(sub) = &st.subscriber {
-        if sub.send(msg.clone()).is_ok() {
-            gate.add(len);
-        }
+    if let Some(sub) = &st.subscriber
+        && sub.send(msg.clone()).is_ok()
+    {
+        gate.add(len);
     }
     st.observers.retain(|obs| {
         if obs.gate.queued_bytes() + len as i64 > OBSERVER_BUDGET {
@@ -1980,10 +1981,10 @@ impl DaemonPane {
         resize_state(&mut self.state.lock().unwrap(), size);
         match &self.backend {
             PaneBackend::Pty(p) => {
-                if let Ok(master) = p.master.lock() {
-                    if let Some(master) = master.as_ref() {
-                        let _ = master.resize(pty_size(size));
-                    }
+                if let Ok(master) = p.master.lock()
+                    && let Some(master) = master.as_ref()
+                {
+                    let _ = master.resize(pty_size(size));
                 }
             }
             PaneBackend::NativeSsh(b) => b.handle.resize(size),
@@ -2124,11 +2125,11 @@ impl DaemonPane {
             .lock()
             .ok()
             .and_then(|m| m.as_ref().and_then(|m| m.process_group_leader()));
-        if let Some(fg) = fg {
-            if Some(fg as u32) != pty.shell_pid {
-                unsafe {
-                    libc::killpg(fg, sig);
-                }
+        if let Some(fg) = fg
+            && Some(fg as u32) != pty.shell_pid
+        {
+            unsafe {
+                libc::killpg(fg, sig);
             }
         }
     }
@@ -2182,18 +2183,18 @@ impl Drop for DaemonPane {
             crate::daemon::ssh::SshManager::global().teardown_pane_forwards(self.id);
         }
         self.hangup();
-        if let PaneBackend::Pty(p) = &self.backend {
-            if let Ok(mut child) = p.child.lock() {
-                let _ = child.wait();
-            }
+        if let PaneBackend::Pty(p) = &self.backend
+            && let Ok(mut child) = p.child.lock()
+        {
+            let _ = child.wait();
         }
         if let Some(handle) = self.reader.lock().unwrap().take() {
             join_bounded(handle, Duration::from_secs(2));
         }
-        if let PaneBackend::Pty(p) = &mut self.backend {
-            if let Some(dir) = p.integration_dir.take() {
-                let _ = std::fs::remove_dir_all(&dir);
-            }
+        if let PaneBackend::Pty(p) = &mut self.backend
+            && let Some(dir) = p.integration_dir.take()
+        {
+            let _ = std::fs::remove_dir_all(&dir);
         }
         // The pane is over — by a kill, by the shell exiting, or by the daemon
         // shutting down — so whatever it typed goes back to the history file it
@@ -2504,11 +2505,11 @@ fn agent_facts_changed(
 }
 
 fn apply_signals(st: &mut PaneState, signals: SniffSignals) {
-    if let Some(cwd) = signals.cwd {
-        if st.cwd.as_ref() != Some(&cwd) {
-            notify(st, DaemonMsg::Cwd(cwd.clone()));
-            st.cwd = Some(cwd);
-        }
+    if let Some(cwd) = signals.cwd
+        && st.cwd.as_ref() != Some(&cwd)
+    {
+        notify(st, DaemonMsg::Cwd(cwd.clone()));
+        st.cwd = Some(cwd);
     }
     if let Some(title) = signals.title {
         // No `notify`: a window renders its own tabs from its own terminal,
@@ -2856,10 +2857,10 @@ impl OscSniffer {
                 }
             } else if let Some(event) = crate::core::cli_agent::parse_agent_event(payload) {
                 signals.agent_events.push(event);
-            } else if let Some((title, body)) = crate::core::osc::parse_notification(payload) {
-                if title.as_deref() != Some(crate::core::cli_agent::AGENT_EVENT_SENTINEL) {
-                    signals.notification = Some(body);
-                }
+            } else if let Some((title, body)) = crate::core::osc::parse_notification(payload)
+                && title.as_deref() != Some(crate::core::cli_agent::AGENT_EVENT_SENTINEL)
+            {
+                signals.notification = Some(body);
             }
         });
         signals
@@ -2958,12 +2959,13 @@ fn percent_decode(input: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(input.len());
     let mut i = 0;
     while i < input.len() {
-        if input[i] == b'%' && i + 2 < input.len() {
-            if let (Some(h), Some(l)) = (hex_val(input[i + 1]), hex_val(input[i + 2])) {
-                out.push((h << 4) | l);
-                i += 3;
-                continue;
-            }
+        if input[i] == b'%'
+            && i + 2 < input.len()
+            && let (Some(h), Some(l)) = (hex_val(input[i + 1]), hex_val(input[i + 2]))
+        {
+            out.push((h << 4) | l);
+            i += 3;
+            continue;
         }
         out.push(input[i]);
         i += 1;
@@ -3474,7 +3476,7 @@ mod tests {
         let mut ring = ReplayRing::new(ws(80, 24));
         ring.append(&vec![b'a'; RING_CAP]);
         assert_eq!(ring.len, RING_CAP);
-        ring.append(&vec![b'b'; 100]);
+        ring.append(&[b'b'; 100]);
         assert_eq!(ring.len, RING_CAP);
         let flat = ring.flatten();
         assert_eq!(&flat[..RING_CAP - 100], &vec![b'a'; RING_CAP - 100][..]);
@@ -4442,9 +4444,7 @@ mod tests {
         apply_probed_cwd(&mut st, Some(PathBuf::from("/Users/alice/dev/tty7")));
 
         assert_eq!(st.cwd.as_deref(), Some(Path::new("/Users/alice/dev/tty7")));
-        assert!(
-            matches!(rx.try_recv(), Ok(DaemonMsg::Cwd(p)) if p == PathBuf::from("/Users/alice/dev/tty7"))
-        );
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Cwd(p)) if p == *"/Users/alice/dev/tty7"));
     }
 
     #[cfg(unix)]
@@ -4542,9 +4542,7 @@ mod tests {
 
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(_))));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(_))));
-        assert!(
-            matches!(rx.try_recv(), Ok(DaemonMsg::Cwd(p)) if p == PathBuf::from("/Users/alice/clone/tty7"))
-        );
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Cwd(p)) if p == *"/Users/alice/clone/tty7"));
     }
 
     #[test]
@@ -4590,9 +4588,7 @@ mod tests {
 
         assert!(matches!(observer_rx.try_recv(), Ok(DaemonMsg::Size(_))));
         assert!(matches!(observer_rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"screen"));
-        assert!(
-            matches!(observer_rx.try_recv(), Ok(DaemonMsg::Cwd(p)) if p == PathBuf::from("/work"))
-        );
+        assert!(matches!(observer_rx.try_recv(), Ok(DaemonMsg::Cwd(p)) if p == *"/work"));
         assert!(
             controller_rx.try_recv().is_err(),
             "an observer joining must be invisible to the controller"
@@ -5269,7 +5265,7 @@ mod tests {
         );
         assert!(matches!(sub_rx.try_recv(), Ok(DaemonMsg::Output(_))));
         assert!(
-            matches!(sub_rx.try_recv(), Ok(DaemonMsg::Cwd(p)) if p == PathBuf::from("/Users/alice/dev/tty7"))
+            matches!(sub_rx.try_recv(), Ok(DaemonMsg::Cwd(p)) if p == *"/Users/alice/dev/tty7")
         );
     }
 

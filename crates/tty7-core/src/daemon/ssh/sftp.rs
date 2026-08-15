@@ -458,10 +458,10 @@ async fn list_dir(sftp: &SftpSession, path: &str) -> Result<Vec<SftpEntry>, Stri
         }
         let attrs = entry.metadata();
         let mut e = entry_from_attrs(&name, &attrs);
-        if e.kind == SftpEntryKind::Symlink {
-            if let Ok(target) = sftp.metadata(remote_join(path, &name)).await {
-                e.target_is_dir = target.is_dir();
-            }
+        if e.kind == SftpEntryKind::Symlink
+            && let Ok(target) = sftp.metadata(remote_join(path, &name)).await
+        {
+            e.target_is_dir = target.is_dir();
         }
         out.push(e);
     }

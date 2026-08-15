@@ -492,30 +492,32 @@ fn map_auth_mode(auth: AuthMode) -> SshAuthMode {
 }
 
 fn map_proxy(profile: &SshProfile) -> SshProxy {
-    if let Some(cmd) = &profile.proxy_command {
-        if !cmd.trim().is_empty() {
-            return SshProxy::Command(cmd.clone());
-        }
+    if let Some(cmd) = &profile.proxy_command
+        && !cmd.trim().is_empty()
+    {
+        return SshProxy::Command(cmd.clone());
     }
     // Port 0 is not somewhere a proxy listens. The settings form used to write
     // it whenever the address had no port or an unparseable one, so configs
     // carrying it are already on disk; connecting direct is the honest reading
     // of an address that names nowhere.
-    if let Some(HostPort { host, port }) = &profile.socks_proxy {
-        if !host.is_empty() && *port != 0 {
-            return SshProxy::Socks {
-                host: host.clone(),
-                port: *port,
-            };
-        }
+    if let Some(HostPort { host, port }) = &profile.socks_proxy
+        && !host.is_empty()
+        && *port != 0
+    {
+        return SshProxy::Socks {
+            host: host.clone(),
+            port: *port,
+        };
     }
-    if let Some(HostPort { host, port }) = &profile.http_proxy {
-        if !host.is_empty() && *port != 0 {
-            return SshProxy::Http {
-                host: host.clone(),
-                port: *port,
-            };
-        }
+    if let Some(HostPort { host, port }) = &profile.http_proxy
+        && !host.is_empty()
+        && *port != 0
+    {
+        return SshProxy::Http {
+            host: host.clone(),
+            port: *port,
+        };
     }
     SshProxy::None
 }

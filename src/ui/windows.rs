@@ -380,8 +380,8 @@ pub fn menu_order(cx: &App) -> Vec<(WorkspaceId, bool)> {
     let all = WorkspaceStore::all(cx);
     let mut open: Vec<_> = all.views.iter().filter(|w| w.open).collect();
     let mut closed: Vec<_> = all.views.iter().filter(|w| !w.open).collect();
-    open.sort_by(|a, b| b.last_active.cmp(&a.last_active));
-    closed.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+    open.sort_by_key(|w| std::cmp::Reverse(w.last_active));
+    closed.sort_by_key(|w| std::cmp::Reverse(w.last_active));
     open.into_iter()
         .map(|w| (w.id, true))
         .chain(closed.into_iter().map(|w| (w.id, false)))
@@ -461,7 +461,7 @@ fn confirm_destructive(
         };
 
         if live == Some(0) && verb == "Stop" {
-            let _ = cx.update(|cx| act(cx, workspace));
+            cx.update(|cx| act(cx, workspace));
             return;
         }
 
@@ -489,7 +489,7 @@ fn confirm_destructive(
         };
 
         if let Ok(0) = answer.await {
-            let _ = cx.update(|cx| act(cx, workspace));
+            cx.update(|cx| act(cx, workspace));
         }
     })
     .detach();
@@ -1100,7 +1100,7 @@ mod tests {
 
         // `WorkspaceStore::remove` saves; a test has no business writing the
         // real views.
-        let _ = tty7_core::core::config::set_config_dir(
+        tty7_core::core::config::set_config_dir(
             std::env::temp_dir().join(format!("tty7-windows-test-{}", std::process::id())),
         );
         cx.update(|cx| {

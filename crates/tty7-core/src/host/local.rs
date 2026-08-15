@@ -428,10 +428,7 @@ fn coalesce(
         take(first, &mut batch, &mut seen);
 
         let deadline = Instant::now() + COALESCE_WINDOW;
-        loop {
-            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-                break;
-            };
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
             match raw_rx.recv_timeout(left) {
                 Ok(paths) => take(paths, &mut batch, &mut seen),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
@@ -576,7 +573,7 @@ mod tests {
         let listed = h.read_dir(&root, Some(&root)).unwrap();
         assert!(listed.iter().any(|e| e.name == "a.log" && e.ignored));
 
-        let sub = h.watch(&[root.clone()]).unwrap();
+        let sub = h.watch(std::slice::from_ref(&root)).unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut cleared = false;

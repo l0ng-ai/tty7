@@ -41,9 +41,7 @@ pub(crate) fn parse_ssh_invocation(argv: &[String]) -> Option<SshInvocation> {
             && short.len() > 1
         {
             let mut chars = short.chars();
-            let Some(flag) = chars.next() else {
-                return None;
-            };
+            let flag = chars.next()?;
             if option_takes_value(flag) {
                 if chars.as_str().is_empty() {
                     i += 1;

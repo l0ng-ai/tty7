@@ -831,15 +831,15 @@ mod tests {
                             other => vec![other],
                         };
                         for generator in gens {
-                            if let Some(Value::Array(parts)) = generator.get("script") {
-                                if parts.iter().all(|p| p.is_string()) {
-                                    let joined = parts
-                                        .iter()
-                                        .filter_map(Value::as_str)
-                                        .collect::<Vec<_>>()
-                                        .join(" ");
-                                    out.insert(joined);
-                                }
+                            if let Some(Value::Array(parts)) = generator.get("script")
+                                && parts.iter().all(|p| p.is_string())
+                            {
+                                let joined = parts
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                out.insert(joined);
                             }
                         }
                     }

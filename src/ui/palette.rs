@@ -1076,10 +1076,6 @@ pub struct PaletteView {
 }
 
 impl PaletteView {
-    pub fn new(commands: Vec<Command>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::seeded(commands, "", window, cx)
-    }
-
     /// The palette, opened with something already typed into it.
     ///
     /// For the callers that know what part of the palette they mean. A menu
@@ -1323,11 +1319,11 @@ impl Render for PaletteView {
             .key_context("Palette")
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
                 let ks = &ev.keystroke;
-                if is_edit_gesture(ks) {
-                    if let Some(edit) = this.selected_edit_command(cx) {
-                        cx.stop_propagation();
-                        cx.emit(PaletteEvent::Confirm(edit));
-                    }
+                if is_edit_gesture(ks)
+                    && let Some(edit) = this.selected_edit_command(cx)
+                {
+                    cx.stop_propagation();
+                    cx.emit(PaletteEvent::Confirm(edit));
                 }
             }))
             .on_mouse_down(

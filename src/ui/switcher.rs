@@ -234,6 +234,11 @@ pub(crate) fn orphan_panes_of(
 }
 
 /// Which face the card is showing: the workspace list, or the create form.
+// One of these exists at a time — it is the switcher card's own state, not
+// something passed around or collected — so the wide `Create` variant costs
+// 224 bytes once, against an indirection on every field the form's render
+// touches.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Page {
     List,
     Create(CreateForm),
@@ -834,10 +839,10 @@ impl Tty7App {
             {
                 group.error = Some(error.clone());
             }
-            if group.error.is_none() {
-                if let Some(error) = self.remote_host_errors.get(&target.to_string()) {
-                    group.error = Some(error.clone());
-                }
+            if group.error.is_none()
+                && let Some(error) = self.remote_host_errors.get(&target.to_string())
+            {
+                group.error = Some(error.clone());
             }
             // The supervisor's own attempts never touch this window's `connect`,
             // so without this last fallback the route it could not build, and

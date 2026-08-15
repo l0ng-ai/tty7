@@ -158,7 +158,7 @@ impl<L: Clone> Pane<L> {
         }
     }
 
-    pub fn collect_leaves<'a>(&'a self, out: &mut Vec<L>) {
+    pub fn collect_leaves(&self, out: &mut Vec<L>) {
         match self {
             Pane::Leaf(v) => out.push(v.clone()),
             Pane::Split { a, b, .. } => {
@@ -815,13 +815,13 @@ impl<L: Clone> Pane<L> {
         }
         let target_axis = dir.axis();
         for (node, went_a) in path.iter().rev() {
-            if let Pane::Split { axis, ratio, .. } = node {
-                if *axis == target_axis {
-                    let delta = if *went_a == dir.grows() { step } else { -step };
-                    let r = (ratio.get() + delta).clamp(MIN_RATIO, MAX_RATIO);
-                    ratio.set(r);
-                    return true;
-                }
+            if let Pane::Split { axis, ratio, .. } = node
+                && *axis == target_axis
+            {
+                let delta = if *went_a == dir.grows() { step } else { -step };
+                let r = (ratio.get() + delta).clamp(MIN_RATIO, MAX_RATIO);
+                ratio.set(r);
+                return true;
             }
         }
         false

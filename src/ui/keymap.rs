@@ -876,12 +876,12 @@ pub(crate) fn key_tokens(spec: &str) -> Vec<String> {
     'outer: loop {
         for (name, glyph) in MODS {
             let prefix = format!("{name}-");
-            if let Some(stripped) = rest.strip_prefix(&prefix) {
-                if !stripped.is_empty() {
-                    tokens.push(glyph.to_string());
-                    rest = stripped;
-                    continue 'outer;
-                }
+            if let Some(stripped) = rest.strip_prefix(&prefix)
+                && !stripped.is_empty()
+            {
+                tokens.push(glyph.to_string());
+                rest = stripped;
+                continue 'outer;
             }
         }
         break;

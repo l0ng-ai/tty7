@@ -326,7 +326,7 @@ mod tests {
     #[gpui::test]
     fn restore_one_keeps_one_window_and_reports_the_rest(cx: &mut gpui::TestAppContext) {
         // `restore_one` saves, and a test has no business writing the real views.
-        let _ = tty7_core::core::config::set_config_dir(
+        tty7_core::core::config::set_config_dir(
             std::env::temp_dir().join(format!("tty7-session-test-{}", std::process::id())),
         );
         cx.update(|cx| {
@@ -360,7 +360,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         // `claim` saves, and a test has no business writing the real views.
-        let _ = tty7_core::core::config::set_config_dir(
+        tty7_core::core::config::set_config_dir(
             std::env::temp_dir().join(format!("tty7-session-test-{}", std::process::id())),
         );
         cx.update(|cx| {
@@ -393,7 +393,7 @@ mod tests {
         // #485: the snapshot is written at creation, refreshed on every
         // re-open while the profile still exists, and — once the profile is
         // gone — kept as the last name the entry has.
-        let _ = tty7_core::core::config::set_config_dir(
+        tty7_core::core::config::set_config_dir(
             std::env::temp_dir().join(format!("tty7-session-test-{}", std::process::id())),
         );
         cx.update(|cx| {
@@ -471,7 +471,7 @@ mod tests {
     #[gpui::test]
     fn connect_time_sync_mirrors_the_machines_listing(cx: &mut gpui::TestAppContext) {
         // `sync_remote` saves; a test has no business writing the real views.
-        let _ = tty7_core::core::config::set_config_dir(
+        tty7_core::core::config::set_config_dir(
             std::env::temp_dir().join(format!("tty7-session-test-{}", std::process::id())),
         );
         cx.update(|cx| {

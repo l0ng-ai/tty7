@@ -1,0 +1,14 @@
+# Lint thresholds. Lint *levels* live in `[workspace.lints.clippy]` in
+# Cargo.toml; only the tunables clippy reads from its own file belong here.
+
+# gpui hands every render, event and constructor path a `&mut Window` and a
+# `&mut Context<_>`, so two of any such function's arguments are the framework's
+# and not the design's. Seven leaves five for the actual parameters, which is
+# tighter than it looks: `new_terminal` and `Pane::spawn` take a cwd, a shell, a
+# workspace, an owner and a restore id, all genuinely independent and all better
+# read at the call site than bundled into a single-use struct.
+#
+# Nine is therefore where the lint starts telling us something we did not
+# already know. It still fires — this is a threshold, not an `allow` — and a
+# function that reaches ten arguments should be taken as the design smell it is.
+too-many-arguments-threshold = 9

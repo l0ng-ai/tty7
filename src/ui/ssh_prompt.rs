@@ -368,36 +368,36 @@ impl Tty7App {
             self.ssh_prompt.phase = phase;
         }
 
-        if let Some((request_id, kind)) = next {
-            if let Some(model) = PromptModel::from_prompt(kind, endpoint, auto_supplied) {
-                let inputs = build_inputs(&model, window, cx);
-                let mut subs = Vec::new();
-                for input in &inputs {
-                    subs.push(cx.subscribe_in(
-                        input,
-                        window,
-                        |this, _input, ev: &InputEvent, window, cx| match ev {
-                            InputEvent::PressEnter { .. } => this.submit_ssh_prompt(window, cx),
-                            // The changed-host sheet enables Override off the
-                            // typed text, so the flag has to be recomputed
-                            // between keystrokes rather than at whatever
-                            // repaint happened to come along.
-                            InputEvent::Change => cx.notify(),
-                            _ => {}
-                        },
-                    ));
-                }
-                if let Some(first) = inputs.first() {
-                    first.update(cx, |s, cx| s.focus(window, cx));
-                }
-                self.ssh_prompt.pane = Some(view.clone());
-                self.ssh_prompt.pane_id = Some(pane_id);
-                self.ssh_prompt.request_id = request_id;
-                self.ssh_prompt.model = Some(model);
-                self.ssh_prompt.inputs = inputs;
-                self.ssh_prompt.remember = false;
-                self.ssh_prompt._subs = subs;
+        if let Some((request_id, kind)) = next
+            && let Some(model) = PromptModel::from_prompt(kind, endpoint, auto_supplied)
+        {
+            let inputs = build_inputs(&model, window, cx);
+            let mut subs = Vec::new();
+            for input in &inputs {
+                subs.push(cx.subscribe_in(
+                    input,
+                    window,
+                    |this, _input, ev: &InputEvent, window, cx| match ev {
+                        InputEvent::PressEnter { .. } => this.submit_ssh_prompt(window, cx),
+                        // The changed-host sheet enables Override off the
+                        // typed text, so the flag has to be recomputed
+                        // between keystrokes rather than at whatever
+                        // repaint happened to come along.
+                        InputEvent::Change => cx.notify(),
+                        _ => {}
+                    },
+                ));
             }
+            if let Some(first) = inputs.first() {
+                first.update(cx, |s, cx| s.focus(window, cx));
+            }
+            self.ssh_prompt.pane = Some(view.clone());
+            self.ssh_prompt.pane_id = Some(pane_id);
+            self.ssh_prompt.request_id = request_id;
+            self.ssh_prompt.model = Some(model);
+            self.ssh_prompt.inputs = inputs;
+            self.ssh_prompt.remember = false;
+            self.ssh_prompt._subs = subs;
         }
         cx.notify();
     }
@@ -473,10 +473,10 @@ impl Tty7App {
         // closed either way. So Enter on a half-typed answer looked like the
         // app had swallowed the connection. Leave the sheet up instead; the
         // rejection stays available on Abort, where the user meant it.
-        if let PromptModel::HostKeyChanged { .. } = &model {
-            if !changed_confirmed(values.first().map(String::as_str).unwrap_or_default()) {
-                return;
-            }
+        if let PromptModel::HostKeyChanged { .. } = &model
+            && !changed_confirmed(values.first().map(String::as_str).unwrap_or_default())
+        {
+            return;
         }
 
         let (response, write) = match &model {
@@ -932,7 +932,7 @@ impl Tty7App {
                         .font_family("monospace")
                         .child(crate::ui::i18n::t_fmt(
                             crate::ui::i18n::L10nKey::SshPromptNewKey,
-                            &[("fingerprint", &fingerprint)],
+                            &[("fingerprint", fingerprint)],
                         )),
                 )
                 .child(
@@ -942,7 +942,7 @@ impl Tty7App {
                         .text_color(cx.theme().muted_foreground)
                         .child(crate::ui::i18n::t_fmt(
                             crate::ui::i18n::L10nKey::SshPromptOldKey,
-                            &[("old_fingerprint", &old_fingerprint)],
+                            &[("old_fingerprint", old_fingerprint)],
                         )),
                 )
                 .child(div().text_xs().child(crate::ui::i18n::t(

@@ -1988,6 +1988,13 @@ impl PackageOffer {
 
 /// The release package this installation can replace itself with, or the
 /// reason it cannot.
+// One `#[cfg]` block per platform, each answering the whole question. Every
+// block `return`s rather than trailing off, because only one of them survives
+// preprocessing and *which* one is last is a property of the target, not of the
+// source: dropping the keyword compiles wherever that block happens to land at
+// the end and breaks on every other target. clippy only ever sees the one block
+// this host builds, so it reads the keyword as redundant.
+#[allow(clippy::needless_return)]
 fn package_for_current_install(version: &str) -> Result<PackageOffer, UpdateInstallHint> {
     #[cfg(target_os = "macos")]
     {
@@ -2091,6 +2098,9 @@ fn capabilities_cover_elevation(stdout: &[u8]) -> bool {
         .all(|capability| tokens.contains(capability))
 }
 
+// Per-platform `#[cfg]` blocks, each `return`ing for the reason spelled out
+// over `package_for_current_install`.
+#[allow(clippy::needless_return)]
 fn prepare_update(
     version: &str,
     asset: &ReleaseAsset,
@@ -3431,6 +3441,29 @@ mod tests {
         // No machine entry, but the directory refuses writes — a relocated or
         // pruned installation Setup could not replace either.
         assert!(windows_inno_needs_elevation_for(None, &per_user, false));
+    }
+
+    /// The two hints that are not about one platform's packaging, and so are
+    /// the two every build can reach. Both name the thing that is missing —
+    /// a hint that only says "the update failed" leaves the reader with
+    /// nowhere to go, and both of these have somewhere: the release page, or
+    /// a release that is simply not installable and should say so.
+    #[test]
+    fn the_cross_platform_hints_name_what_is_missing() {
+        let missing = UpdateInstallHint::MissingPackage("tty7-1.0-mystery.tar.gz".to_string());
+        let text = missing.english();
+        assert!(
+            text.contains("tty7-1.0-mystery.tar.gz"),
+            "the hint has to name the package it looked for: {text}"
+        );
+        assert!(text.contains("release page"), "{text}");
+
+        let checksums = UpdateInstallHint::MissingChecksums.english();
+        assert!(checksums.contains("checksums.txt"), "{checksums}");
+        assert!(
+            checksums.contains("refuses"),
+            "the hint has to say tty7 declined on purpose, not that it broke: {checksums}"
+        );
     }
 
     #[cfg(target_os = "windows")]
