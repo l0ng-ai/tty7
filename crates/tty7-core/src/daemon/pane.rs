@@ -661,6 +661,34 @@ pub(crate) const OBSERVER_BUDGET: i64 = 8 * 1024 * 1024;
 /// is a pane that looks frozen to every attached client, so it stays short.
 const EXIT_CODE_PROBE_WINDOW: Duration = Duration::from_millis(500);
 
+/// What a finished child's status is worth reporting as, or `None` when the
+/// honest answer is that we do not know.
+///
+/// `portable-pty` stores a signalled child as `code: 1` — `ExitStatus::code()`
+/// is `None` on Unix for one, and its `From` impl falls back to 1 — while
+/// keeping the signal in a private field with no accessor. `success()` and
+/// `exit_code()` therefore read *identically* for a child killed by SIGKILL
+/// and one that exited 1 of its own accord, and only `Display` tells them
+/// apart. Passing that 1 along would land in the CLI's `exit_code_known: true`,
+/// which is documented as the thing that "tells a real 1 from a stand-in".
+///
+/// So: signalled reports unknown, which the CLI already renders as an exit of
+/// 1 *with* `exit_code_known: false` and a line on stderr. Not the `128 + n`
+/// an adopted pane gets from its own `waitpid` — the name here comes from
+/// `strsignal`, which is localized, so mapping it back to a number is a guess
+/// dressed as a fact.
+///
+/// Sniffing `Display` is the only discrimination the crate's public API
+/// offers; `signalled_status_is_not_reported_as_a_plain_exit` pins it against
+/// the crate's own constructor so an upstream rewording fails there rather
+/// than here.
+fn reported_exit_code(status: &portable_pty::ExitStatus) -> Option<i32> {
+    match status.to_string().starts_with("Terminated by") {
+        true => None,
+        false => Some(status.exit_code() as i32),
+    }
+}
+
 const EXIT_CODE_PROBE_INTERVAL: Duration = Duration::from_millis(10);
 
 struct Observer {
@@ -1401,7 +1429,7 @@ impl DaemonPane {
                     // below is the only thing clients should ever wait on.
                     if let Ok(mut child) = child.try_lock() {
                         match child.try_wait() {
-                            Ok(Some(status)) => return Some(status.exit_code() as i32),
+                            Ok(Some(status)) => return reported_exit_code(&status),
                             Ok(None) => {}
                             Err(_) => return None,
                         }
@@ -4531,6 +4559,42 @@ mod tests {
 
         assert_eq!(st.cwd, None);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn signalled_status_is_not_reported_as_a_plain_exit() {
+        use portable_pty::ExitStatus;
+
+        // An ordinary exit keeps its code, whatever the code is.
+        assert_eq!(reported_exit_code(&ExitStatus::with_exit_code(0)), Some(0));
+        assert_eq!(reported_exit_code(&ExitStatus::with_exit_code(1)), Some(1));
+        assert_eq!(
+            reported_exit_code(&ExitStatus::with_exit_code(137)),
+            Some(137)
+        );
+
+        // A signalled one reads as `code: 1` through the whole public API —
+        // `exit_code()` says 1 and `success()` says false, exactly as they do
+        // for the honest exit above — so reporting it as a code would be
+        // reporting a number the child never chose.
+        let killed = ExitStatus::with_signal("Killed");
+        assert_eq!(killed.exit_code(), 1, "the trap this guards");
+        assert_eq!(reported_exit_code(&killed), None);
+
+        // The discrimination is `Display`, which is the only thing the crate
+        // exposes that differs. Built from the crate's own constructor so an
+        // upstream rewording fails here, next to the reason, rather than
+        // silently turning every signalled pane back into an exit of 1.
+        assert!(
+            killed.to_string().starts_with("Terminated by"),
+            "portable-pty changed how it renders a signalled status: {killed}"
+        );
+        assert!(
+            !ExitStatus::with_exit_code(1)
+                .to_string()
+                .starts_with("Terminated by"),
+            "an ordinary exit must not read as signalled"
+        );
     }
 
     #[test]
