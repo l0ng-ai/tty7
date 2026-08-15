@@ -1597,6 +1597,11 @@ impl Tty7App {
                     .flex_1()
                     .min_w_0()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    // The chip switches tabs on the *release* now, so holding
+                    // the press back is no longer enough: a click landing in
+                    // the field would reach the chip behind it and switch away
+                    // from the name being typed, taking the focus with it.
+                    .on_click(|_, _, cx| cx.stop_propagation())
                     .child(Input::new(&input).appearance(false))
                     .into_any_element(),
                 None => div()
@@ -1758,8 +1763,14 @@ impl Tty7App {
                                             .xsmall(),
                                     )
                                     .tooltip(t(L10nKey::TabContextCloseTab))
+                                    // Held here, because the chip behind it
+                                    // switches tabs on the release too: without
+                                    // this the same click closes tab `i` and
+                                    // then activates whichever tab slid into
+                                    // its place.
                                     .on_click(cx.listener(
                                         move |this, _, window, cx| {
+                                            cx.stop_propagation();
                                             this.close_tab(i, window, cx);
                                         },
                                     )),
