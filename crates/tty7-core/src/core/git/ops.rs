@@ -221,7 +221,36 @@ impl GitOp {
                 force_with_lease: true,
                 ..
             } => Destructive::RewritesHistory,
-            _ => return None,
+
+            // Spelled out rather than left to a `_`, because the default of a
+            // catch-all here is "needs no confirmation": a verb added later
+            // would reach the user ungated, and the compile error that a new
+            // variant does produce lands on `label` above, which is a
+            // different question. Listing them makes the compiler ask this
+            // one at the place the answer belongs.
+            //
+            // None of these can lose committed or staged work. `Reset` here is
+            // soft or mixed, which move the branch pointer and leave the
+            // worktree alone; `CherryPick` and `Revert` only ever add; `Stash`
+            // files changes away where `stash pop` gets them back; a `Push`
+            // without the lease is refused by the remote rather than
+            // overwriting it; and git itself refuses a `Checkout` that would
+            // clobber local edits.
+            GitOp::Stage { .. }
+            | GitOp::StageAll
+            | GitOp::Unstage { .. }
+            | GitOp::UnstageAll
+            | GitOp::Commit { .. }
+            | GitOp::CheckoutBranch { .. }
+            | GitOp::CheckoutDetached { .. }
+            | GitOp::CreateBranch { .. }
+            | GitOp::CherryPick { .. }
+            | GitOp::Revert { .. }
+            | GitOp::Reset { .. }
+            | GitOp::Stash { .. }
+            | GitOp::Fetch { .. }
+            | GitOp::Pull { .. }
+            | GitOp::Push { .. } => return None,
         })
     }
 
