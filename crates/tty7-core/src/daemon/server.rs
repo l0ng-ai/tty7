@@ -329,6 +329,22 @@ pub fn run_daemon() -> anyhow::Result<()> {
 
     let registry = Arc::new(Registry::new());
 
+    // Before anything else spawns a thread, and that is the whole point of it
+    // being here rather than further down with the other startup work.
+    // `pthread_sigmask` blocks a signal on the *calling thread* only, and a
+    // signal sent to the process goes to any one thread that has not blocked
+    // it — where SIGTERM's default disposition ends the process on the spot,
+    // `sigwait` never returns, and the shutdown that was supposed to write
+    // every pane's screen one last time does not happen. A thread started
+    // after this inherits the mask, so blocking here and nowhere else is what
+    // makes the whole process deaf to it except on the waiter.
+    //
+    // Nothing in this function has started a thread yet: `handoff::requested`
+    // and `singleton::claim` do not, and the control listener below is the
+    // first that does. Keep it that way, or move this up again.
+    #[cfg(unix)]
+    serve_sigterm(registry.clone());
+
     #[cfg(any(unix, windows))]
     {
         let mut services = control_services();
@@ -553,9 +569,6 @@ fn run_with(registry: Arc<Registry>) -> anyhow::Result<()> {
     report_conpty_host();
 
     crate::daemon::pidfile::write_current();
-
-    #[cfg(unix)]
-    serve_sigterm(registry.clone());
 
     if let Some(store) = crate::core::machine::observed_store() {
         registry.seed_ids_past(&store.machine());
