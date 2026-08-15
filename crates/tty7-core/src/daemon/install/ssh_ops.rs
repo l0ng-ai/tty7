@@ -11,7 +11,7 @@ use super::{ExecOutput, RemoteOps, RemoteStat};
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
 
-pub struct SshRemoteOps {
+pub(crate) struct SshRemoteOps {
     conn: Arc<SshConnection>,
 }
 

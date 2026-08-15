@@ -216,7 +216,7 @@ pub(crate) fn git_stream(
 }
 
 #[derive(Default)]
-pub struct LineSplitter {
+pub(crate) struct LineSplitter {
     tail: Vec<u8>,
     dropped: usize,
 }
@@ -262,7 +262,7 @@ impl LineSplitter {
 /// separator. Records come out as `&[u8]` rather than `&str` because a path in
 /// a `-z` status is raw bytes and need not be UTF-8 at all — deciding what to
 /// do about that belongs to the parser, not to the splitter.
-pub struct RecordSplitter {
+pub(crate) struct RecordSplitter {
     sep: u8,
     tail: Vec<u8>,
     /// The record being assembled overran [`MAX_RECORD`] and is now being

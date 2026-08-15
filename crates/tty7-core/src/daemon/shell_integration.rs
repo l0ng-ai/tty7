@@ -718,7 +718,7 @@ fn zsh_redirectors() -> [(&'static str, String); 4] {
     ]
 }
 
-pub struct Injection {
+pub(crate) struct Injection {
     pub env: HashMap<String, String>,
     pub args: Vec<String>,
     pub replaces_argv: bool,
@@ -1279,7 +1279,7 @@ pub mod remote {
     const HEREDOC: &str = "__TTY7_RC_EOF__";
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    pub enum RemoteShell {
+    pub(crate) enum RemoteShell {
         Zsh,
         Bash,
         Fish,

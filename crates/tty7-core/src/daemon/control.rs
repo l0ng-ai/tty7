@@ -384,7 +384,7 @@ impl ControlRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum ControlReply {
+pub(crate) enum ControlReply {
     #[serde(rename = "ok")]
     Ok(ReplyOk),
     #[serde(rename = "err")]
@@ -426,14 +426,14 @@ pub enum ReplyOk {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireError {
+pub(crate) struct WireError {
     pub kind: WireErrorKind,
     pub msg: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WireErrorKind {
+pub(crate) enum WireErrorKind {
     NotFound,
     PermissionDenied,
     AlreadyExists,
@@ -727,7 +727,7 @@ fn require_nonzero(req_id: u64, what: &str) -> io::Result<()> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum ControlClientMsg {
+pub(crate) enum ControlClientMsg {
     Hello(ControlHello),
     Request {
         req_id: u64,
@@ -822,7 +822,7 @@ impl ControlClientMsg {
 // `send`, encoded there, and gone.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
-pub enum ControlServerMsg {
+pub(crate) enum ControlServerMsg {
     HelloOk(ControlHelloOk),
     Response {
         req_id: u64,
@@ -837,6 +837,7 @@ pub enum ControlServerMsg {
 }
 
 impl ControlServerMsg {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn encode<W: Write>(&self, w: &mut W) -> io::Result<()> {
         let (k, payload) = self.to_frame()?;
         write_frame(w, k, &payload)

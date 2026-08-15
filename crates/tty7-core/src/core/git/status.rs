@@ -505,7 +505,7 @@ const MAX_PREFILLED_MESSAGE: u64 = 64 * 1024;
 /// from the filesystem, not from the parse. Keeping them apart is what lets the
 /// header and record parsing be tested without a repository.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct ParsedStatus {
+pub(crate) struct ParsedStatus {
     pub head: HeadState,
     pub upstream: Option<String>,
     /// `(ahead, behind)`. `None` means *unknown*, never *in sync*.

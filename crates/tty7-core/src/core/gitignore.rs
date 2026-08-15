@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ignore::gitignore::Gitignore;
 
 #[derive(Default, Clone)]
-pub struct GitignoreChain {
+pub(crate) struct GitignoreChain {
     matchers: HashMap<PathBuf, Option<Arc<Gitignore>>>,
 }
 
@@ -45,6 +45,10 @@ impl GitignoreChain {
         state
     }
 
+    /// Unused: the matcher sets are built whole rather than merged. Kept beside
+    /// `len`/`is_empty`, which are the same story -- a spare accessor is better
+    /// than half a type.
+    #[allow(dead_code)]
     pub fn absorb(&mut self, other: Self) {
         self.matchers.extend(other.matchers);
     }
@@ -53,10 +57,14 @@ impl GitignoreChain {
         self.matchers.clear();
     }
 
+    /// Unused, like `absorb` above and for the same reason.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.matchers.len()
     }
 
+    /// Unused, like `absorb` above and for the same reason.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.matchers.is_empty()
     }

@@ -41,7 +41,7 @@ impl SshSessionHandle {
     }
 }
 
-pub struct SshReader {
+pub(crate) struct SshReader {
     rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     leftover: Vec<u8>,
     pos: usize,
@@ -66,7 +66,7 @@ impl Read for SshReader {
     }
 }
 
-pub struct SshWriter {
+pub(crate) struct SshWriter {
     handle: Arc<SshSessionHandle>,
 }
 
@@ -81,7 +81,7 @@ impl Write for SshWriter {
     }
 }
 
-pub struct BridgeEnds {
+pub(crate) struct BridgeEnds {
     pub reader: SshReader,
     pub writer: SshWriter,
     pub handle: Arc<SshSessionHandle>,

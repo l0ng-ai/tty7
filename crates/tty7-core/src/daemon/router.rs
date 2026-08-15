@@ -158,7 +158,7 @@ impl RouteTarget {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InstallRequestWire {
+pub(crate) struct InstallRequestWire {
     pub host: String,
     pub version: String,
     pub asset: String,
@@ -196,7 +196,7 @@ impl InstallRequestWire {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RoutePrompt {
+pub(crate) enum RoutePrompt {
     Auth {
         request_id: u64,
         prompt: AuthPromptKind,
@@ -216,7 +216,7 @@ pub enum RoutePrompt {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RouteReply {
+pub(crate) enum RouteReply {
     Auth {
         request_id: u64,
         response: AuthResponse,

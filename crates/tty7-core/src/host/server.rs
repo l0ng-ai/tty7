@@ -85,6 +85,7 @@ impl AttachRegistry {
         self.handover.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn holder(&self, workspace: &str) -> Option<(String, String)> {
         self.locked()
             .iter()
@@ -92,10 +93,12 @@ impl AttachRegistry {
             .map(|l| (l.token.clone(), l.hostname.clone()))
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn len(&self) -> usize {
         self.locked().len()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

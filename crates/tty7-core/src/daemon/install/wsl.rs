@@ -20,7 +20,7 @@ const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 const PUT_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DistroNameError {
+pub(crate) enum DistroNameError {
     Empty,
     LeadingDash(String),
     Control(String),
@@ -293,7 +293,7 @@ fn truncate(s: &str) -> String {
     s.chars().take(200).collect::<String>() + "…"
 }
 
-pub struct WslRemoteOps {
+pub(crate) struct WslRemoteOps {
     distro: String,
 }
 
@@ -501,7 +501,7 @@ pub(crate) fn bundled_search_dirs(exe: Option<&Path>, override_dir: Option<&Path
     dirs
 }
 
-pub struct BundledServerBinary {
+pub(crate) struct BundledServerBinary {
     dirs: Vec<PathBuf>,
 }
 
@@ -518,6 +518,9 @@ impl BundledServerBinary {
         Self { dirs }
     }
 
+    /// Unreached on this platform: the bundled-directory override is a Windows
+    /// installer path, and nothing on a unix build has a reason to ask.
+    #[allow(dead_code)]
     pub(crate) fn from_env_only() -> Option<Self> {
         let dir = std::env::var_os(BUNDLED_DIR_ENV).filter(|v| !v.is_empty())?;
         Some(Self::in_dirs(vec![PathBuf::from(dir)]))

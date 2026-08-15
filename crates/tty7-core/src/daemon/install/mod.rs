@@ -29,7 +29,7 @@ const REMOTE_POLL_INTERVAL: Duration = Duration::from_millis(400);
 const REMOTE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExecOutput {
+pub(crate) struct ExecOutput {
     pub status: Option<u32>,
     pub stdout: String,
     pub stderr: String,
@@ -53,13 +53,13 @@ impl ExecOutput {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RemoteStat {
+pub(crate) struct RemoteStat {
     pub size: u64,
     pub mode: u32,
     pub is_dir: bool,
 }
 
-pub trait RemoteOps: Send + Sync {
+pub(crate) trait RemoteOps: Send + Sync {
     fn home_dir(&self) -> Result<String, String>;
     fn run(&self, cmd: &str) -> Result<ExecOutput, String>;
     fn spawn_detached(&self, cmd: &str) -> Result<(), String>;
@@ -100,7 +100,7 @@ pub trait AssetFetcher: Send + Sync {
     }
 }
 
-pub struct LoadedBinary {
+pub(crate) struct LoadedBinary {
     pub bytes: Vec<u8>,
     pub origin: String,
 }
@@ -114,7 +114,7 @@ impl std::fmt::Debug for LoadedBinary {
     }
 }
 
-pub trait ServerBinarySource: Send + Sync {
+pub(crate) trait ServerBinarySource: Send + Sync {
     fn load(&self, version: &str, asset: &'static str) -> Result<LoadedBinary, InstallError>;
 
     fn load_with_progress(
@@ -128,7 +128,7 @@ pub trait ServerBinarySource: Send + Sync {
     }
 }
 
-pub struct BundledOrRelease<'a> {
+pub(crate) struct BundledOrRelease<'a> {
     pub fetch: &'a dyn AssetFetcher,
     pub bundled: Option<wsl::BundledServerBinary>,
     /// When a bundled directory is configured but the requested asset is absent,
@@ -137,6 +137,9 @@ pub struct BundledOrRelease<'a> {
 }
 
 impl<'a> BundledOrRelease<'a> {
+    /// Unreached in this configuration; the release path is what the installer
+    /// takes, and the bundled one is chosen explicitly where it applies.
+    #[allow(dead_code)]
     pub fn from_env(fetch: &'a dyn AssetFetcher) -> Self {
         Self {
             fetch,
@@ -189,7 +192,7 @@ impl ServerBinarySource for BundledOrRelease<'_> {
     }
 }
 
-pub struct ReleaseDownload<'a> {
+pub(crate) struct ReleaseDownload<'a> {
     pub fetch: &'a dyn AssetFetcher,
 }
 
@@ -256,7 +259,7 @@ pub trait InstallConfirm: Send + Sync {
     fn confirm(&self, request: &InstallRequest) -> InstallDecision;
 }
 
-pub struct DenyInstall;
+pub(crate) struct DenyInstall;
 
 impl InstallConfirm for DenyInstall {
     fn confirm(&self, _request: &InstallRequest) -> InstallDecision {
@@ -327,7 +330,7 @@ pub trait InstallProgress: Send + Sync {
     fn report(&self, host: &str, phase: InstallPhase);
 }
 
-pub struct SilentProgress;
+pub(crate) struct SilentProgress;
 
 impl InstallProgress for SilentProgress {
     fn report(&self, _host: &str, _phase: InstallPhase) {}
@@ -472,7 +475,7 @@ pub fn take_mismatched_remote_daemons() -> Vec<MismatchedRemoteDaemon> {
 }
 
 #[derive(Debug)]
-pub enum InstallError {
+pub(crate) enum InstallError {
     Probe(String),
     Unsupported(UnsupportedTarget),
     NoHome(String),
@@ -586,7 +589,7 @@ impl From<InstallError> for io::Error {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InstallReport {
+pub(crate) struct InstallReport {
     pub asset: &'static str,
     pub paths: RemotePaths,
     pub installed: bool,
@@ -596,7 +599,7 @@ pub struct InstallReport {
     pub reused: Option<RemoteProtocol>,
 }
 
-pub struct Installer<'a> {
+pub(crate) struct Installer<'a> {
     ops: &'a dyn RemoteOps,
     fetch: Option<&'a dyn AssetFetcher>,
     source: Option<&'a dyn ServerBinarySource>,

@@ -595,7 +595,7 @@ const RING_CAP: usize = 8 * 1024 * 1024;
 const MAX_RING_SEGMENTS: usize = 64;
 const REMOTE_CONTEXT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-pub struct OutputGate {
+pub(crate) struct OutputGate {
     queued: AtomicI64,
     park: Mutex<()>,
     drained: Condvar,
@@ -835,7 +835,7 @@ struct NativeSshBackend {
     connection: crate::daemon::ssh::SharedConnection,
 }
 
-pub struct DaemonPane {
+pub(crate) struct DaemonPane {
     pub id: u64,
     owner: Option<String>,
     backend: PaneBackend,

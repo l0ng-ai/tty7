@@ -64,7 +64,7 @@ impl ConnectionKey {
 
 type ConnSlot = Arc<tokio::sync::Mutex<Weak<SshConnection>>>;
 
-pub struct SshManager {
+pub(crate) struct SshManager {
     runtime: tokio::runtime::Runtime,
     conns: Mutex<HashMap<ConnectionKey, ConnSlot>>,
     forwards: SshForwardRegistry,

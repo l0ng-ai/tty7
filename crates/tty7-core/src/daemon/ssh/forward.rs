@@ -132,7 +132,7 @@ where
 }
 
 #[derive(Clone, Default)]
-pub struct RemoteForwardTable {
+pub(crate) struct RemoteForwardTable {
     inner: Arc<Mutex<HashMap<(String, u16), (String, u16)>>>,
 }
 
@@ -260,7 +260,7 @@ struct ForwardEntry {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub enum ForwardOwner {
+pub(crate) enum ForwardOwner {
     Pane(u64),
     Workspace(WorkspaceId),
 }

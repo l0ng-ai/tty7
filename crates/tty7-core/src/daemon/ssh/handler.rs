@@ -11,7 +11,7 @@ use super::broker::PromptBroker;
 use super::forward::{self, RemoteForwardTable};
 use super::known_hosts::{self, HostKeyStatus};
 
-pub struct ClientHandler {
+pub(crate) struct ClientHandler {
     pub host: String,
     pub port: u16,
     pub verify_host_keys: bool,

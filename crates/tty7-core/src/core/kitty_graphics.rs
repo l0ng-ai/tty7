@@ -73,7 +73,7 @@ pub const MAX_IMAGE_BYTES: usize = crate::daemon::protocol::MAX_FRAME - HEADER_L
 /// intercept; everything else must reach the client's VT parser unchanged. State
 /// persists across `feed` calls, so a sequence split over several reads is still
 /// handled.
-pub struct ApcTokenizer {
+pub(crate) struct ApcTokenizer {
     /// Bytes of a `_G` command accumulated after `ESC _ G` while it can still
     /// terminate. Cleared whenever a command finishes or is abandoned.
     buf: Vec<u8>,
@@ -320,12 +320,13 @@ impl ApcTokenizer {
 /// returns the decoded graphics [`Event`]s — query replies to write back to the
 /// PTY, and images to forward out-of-band.
 #[derive(Default)]
-pub struct GraphicsSniffer {
+pub(crate) struct GraphicsSniffer {
     tokenizer: ApcTokenizer,
     parser: GraphicsParser,
 }
 
 impl GraphicsSniffer {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new() -> Self {
         Self::default()
     }
@@ -354,6 +355,7 @@ impl GraphicsSniffer {
     /// This drops the *relative order* of passthrough vs. events; for the daemon
     /// loop, prefer [`sniff`](Self::sniff), which preserves it. Retained as the
     /// low-level primitive the unit tests drive.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn feed(&mut self, bytes: &[u8], on_passthrough: impl FnMut(&[u8])) -> Vec<Event> {
         let Self { tokenizer, parser } = self;
         let mut events = Vec::new();
@@ -445,7 +447,7 @@ impl From<Event> for Segment {
 
 /// The result of [`GraphicsSniffer::sniff`]: either the whole chunk borrowed as
 /// output (the graphics-free fast path), or ordered [`Segment`]s.
-pub enum Sniffed<'a> {
+pub(crate) enum Sniffed<'a> {
     /// No graphics in this chunk: the input is output, verbatim and borrowed.
     Plain(&'a [u8]),
     /// Graphics present: apply these in order.
@@ -1167,7 +1169,7 @@ struct Pending {
 /// pane just forwards the resulting [`Image`] out-of-band and writes any
 /// [`Event::Query`] reply to the PTY.
 #[derive(Default)]
-pub struct GraphicsParser {
+pub(crate) struct GraphicsParser {
     pending: Option<Pending>,
     /// Whether the sender shares this host's filesystem (a local pane). Only
     /// then can we honor file/shm transfer, whose names are host-local; a pane
@@ -1176,6 +1178,7 @@ pub struct GraphicsParser {
 }
 
 impl GraphicsParser {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new() -> Self {
         Self::default()
     }

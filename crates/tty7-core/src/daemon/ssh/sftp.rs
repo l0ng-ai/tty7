@@ -112,7 +112,7 @@ fn entry_from_attrs(name: &str, attrs: &FileAttributes) -> SftpEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JobProgress {
+pub(crate) struct JobProgress {
     pub state: SftpJobState,
     pub current: String,
     pub bytes_done: u64,
@@ -255,7 +255,7 @@ struct CachedSession {
     sftp: Arc<SftpSession>,
 }
 
-pub struct SftpManager {
+pub(crate) struct SftpManager {
     sessions: Mutex<HashMap<ConnectionKey, Arc<SessionSlot>>>,
     jobs: Mutex<HashMap<u64, Arc<Job>>>,
     next_job: AtomicU64,

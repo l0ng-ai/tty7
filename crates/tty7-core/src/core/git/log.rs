@@ -203,7 +203,7 @@ pub struct CommitPage {
 /// row already on screen, which is only possible because a row says nothing
 /// about the rows below it — see [`Edge`].
 #[derive(Default)]
-pub struct LaneAlloc {
+pub(crate) struct LaneAlloc {
     /// Per lane, the oid that lane is currently waiting for. `None` is free.
     slots: Vec<Option<Oid>>,
     /// The reverse index. A `SmallVec` because one child is the common case
@@ -245,6 +245,7 @@ impl LaneAlloc {
     /// How many columns are live right now, i.e. one past the rightmost lane in
     /// use. Lanes are never compacted, so this only shrinks when the rightmost
     /// lane itself dies.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn width(&self) -> Lane {
         self.slots
             .iter()
@@ -406,7 +407,7 @@ const LOG_FIELDS: usize = 11;
 pub(crate) const REF_FORMAT: &str = "--format=%(objectname)%x1f%(refname)%x1f%(refname:short)%x1f%(upstream)%x1f%(HEAD)%x1f%(objecttype)%x1f%(*objectname)";
 
 /// What [`parse_log`] read, and whether it read all of it.
-pub struct ParsedLog {
+pub(crate) struct ParsedLog {
     pub commits: Vec<Commit>,
     /// The stream was cut short — by [`MAX_LOG_BYTES`], or by a record past
     /// `MAX_RECORD` being dropped whole. The caller must not present the
