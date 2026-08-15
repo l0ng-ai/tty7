@@ -3033,6 +3033,9 @@ impl Tty7App {
         )
     }
 
+    // Ten with `self`, against a threshold of nine. Every one is a distinct
+    // thing about the row being drawn, and a struct to carry them would be
+    // built inline at each of the call sites and read nowhere else.
     #[allow(clippy::too_many_arguments)]
     fn render_ssh_row(
         &self,

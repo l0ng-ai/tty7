@@ -299,7 +299,6 @@ impl RemoteTerminal {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn spawn_once(
         route: &PaneRoute,
         size: TermSize,

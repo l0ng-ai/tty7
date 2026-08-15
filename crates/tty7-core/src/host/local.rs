@@ -64,6 +64,10 @@ pub struct LocalHost {
 }
 
 impl LocalHost {
+    // Hands back the `SharedHost` rather than a bare `LocalHost` because that
+    // is the only shape anything uses one in: a host is reached through
+    // `Arc<dyn Host>`, and a caller given the struct would have to wrap it
+    // itself, every time, to do anything at all.
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> SharedHost {
         Arc::new(LocalHost {
