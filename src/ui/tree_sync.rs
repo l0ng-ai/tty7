@@ -903,6 +903,21 @@ struct WsState {
     /// `start_prime`, which spends it instead of the generated name, and
     /// cleared by `finish_prime` once the machine has confirmed a name.
     chosen_name: Option<String>,
+    /// Panes this window has put down that may have nothing left holding them.
+    ///
+    /// Parked rather than ended on the spot. At the moment a layout is
+    /// rewritten neither mirror can be trusted to say whether a pane is still
+    /// somebody's: the machine copy is missing whatever this window has just
+    /// done (a client is left out of the deltas its own ops raise, #612), and
+    /// even this workspace's own copy runs ahead of, or behind, ops still in
+    /// flight. Judging there ends live panes — measured, as the fuzz's `tree
+    /// names panes that do not exist`.
+    ///
+    /// So the question is asked later, against a tree that was just pulled and
+    /// is therefore authoritative, and only then is anything hung up. A pane
+    /// that came back into the tree or back onto the screen in the meantime is
+    /// exactly the one the mirrors were wrong about, and is simply forgotten.
+    parked: std::collections::HashSet<u64>,
     /// Whether this window has already been told why it opened empty.
     ///
     /// The retry is as quiet as the failure was, so a window whose machine
@@ -929,6 +944,7 @@ impl Default for WsState {
             rehydrate_attempts: 0,
             then_open: None,
             chosen_name: None,
+            parked: std::collections::HashSet::new(),
             said_why_empty: false,
         }
     }
@@ -1431,17 +1447,21 @@ fn finish_prime(
 /// detached, while the window has nothing on screen for it yet.
 fn shown_pane_ids(cx: &mut App, client_ws: WorkspaceId) -> Option<std::collections::HashSet<u64>> {
     let entity = crate::ui::windows::WindowRegistry::app_for(cx, client_ws)?.upgrade()?;
-    let app = entity.read(cx);
-    Some(
-        app.tabs
-            .iter()
-            .flat_map(|tab| tab.pane.leaves())
-            .filter_map(|slot| match slot {
-                PaneSlot::Ready(view) => Some(view.read(cx).pane_id),
-                PaneSlot::Connecting(pending) => pending.read(cx).spawn.restore_pane,
-            })
-            .collect(),
-    )
+    Some(pane_ids_of(entity.read(cx), cx))
+}
+
+/// The same question asked of a window already in hand, which is how a caller
+/// inside an `app.update` has to ask it: reading the entity back from there is
+/// the borrow conflict gpui answers by dropping the update.
+fn pane_ids_of(app: &Tty7App, cx: &App) -> std::collections::HashSet<u64> {
+    app.tabs
+        .iter()
+        .flat_map(|tab| tab.pane.leaves())
+        .filter_map(|slot| match slot {
+            PaneSlot::Ready(view) => Some(view.read(cx).pane_id),
+            PaneSlot::Connecting(pending) => pending.read(cx).spawn.restore_pane,
+        })
+        .collect()
 }
 
 /// Ends the shells behind panes the tree has just let go of.
@@ -1477,6 +1497,75 @@ fn hang_up_detached(cx: &mut App, client_ws: WorkspaceId, detached: Vec<u64>) {
             continue;
         }
         log::debug!("hanging up pane {pane}, which the tree no longer holds");
+        let route = route.clone();
+        cx.background_executor()
+            .spawn(async move { crate::terminal::RemoteTerminal::kill_pane_on(&route, pane) })
+            .detach();
+    }
+}
+
+/// Notes the panes a layout change has just put down, for [`sweep_parked`] to
+/// judge once there is a tree worth judging against.
+///
+/// The window drops a view whenever its layout is rewritten — a delta arriving
+/// for a tab it had built differently, a rebuild from the tree. Dropping a view
+/// does not end the shell behind it, because that is also what detaching is, so
+/// a pane the new shape does not want goes on running with nothing to reach it.
+/// Nothing is ended here; see [`WsState::parked`] for why not.
+fn park_dropped(
+    cx: &mut App,
+    client_ws: WorkspaceId,
+    before: &std::collections::HashSet<u64>,
+    after: &std::collections::HashSet<u64>,
+) {
+    if before.is_subset(after) {
+        return;
+    }
+    let dropped: Vec<u64> = before.difference(after).copied().collect();
+    if dropped.is_empty() {
+        return;
+    }
+    if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) {
+        state.parked.extend(dropped);
+    }
+}
+
+/// Ends the parked shells that a freshly pulled tree confirms nothing holds.
+///
+/// `tree` has to be a tree this window has just pulled — the whole machine's,
+/// not a mirror. That is the entire point of parking: the mirrors are wrong
+/// often enough, and in both directions, that judging a pane against them ends
+/// live ones.
+///
+/// Two conditions, and both have been seen to matter: the window is not showing
+/// the pane, and no workspace on the machine names it. Anything else is
+/// somebody's and is forgotten rather than ended. If the window cannot be read
+/// at all nothing is swept and the parked set is kept for the next pull — "I
+/// could not look" is not a reason to end a shell.
+fn sweep_parked(cx: &mut App, client_ws: WorkspaceId, tree: &std::collections::HashSet<u64>) {
+    let parked: Vec<u64> = cx
+        .default_global::<TreeSync>()
+        .windows
+        .get(&client_ws)
+        .map(|s| s.parked.iter().copied().collect())
+        .unwrap_or_default();
+    if parked.is_empty() {
+        return;
+    }
+    let Some(showing) = shown_pane_ids(cx, client_ws) else {
+        return;
+    };
+    if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) {
+        state.parked.clear();
+    }
+    let route = crate::terminal::PaneRoute::for_workspace(
+        crate::ui::remote_workspace::pane_workspace_for(cx, client_ws).as_ref(),
+    );
+    for pane in parked {
+        if showing.contains(&pane) || tree.contains(&pane) {
+            continue;
+        }
+        log::debug!("hanging up pane {pane}: the tree it was dropped from does not name it");
         let route = route.clone();
         cx.background_executor()
             .spawn(async move { crate::terminal::RemoteTerminal::kill_pane_on(&route, pane) })
@@ -2153,6 +2242,16 @@ fn settle_hydration(
         }
     };
     let host = WorkspaceStore::host_of(cx, client_ws);
+    // The pane ids this freshly pulled tree accounts for, across the whole
+    // machine: what `sweep_parked` judges against, and the only account of the
+    // machine in this file that was not assembled from deltas. Read here
+    // because installing it below moves it.
+    let tree_panes: std::collections::HashSet<u64> = machine
+        .workspaces
+        .iter()
+        .flat_map(|w| w.tabs.iter())
+        .flat_map(|t| t.root.pane_ids())
+        .collect();
     let machine_ws = tree_workspace_id(cx, client_ws);
     // What the tree that is about to be installed calls this workspace, which
     // for a pull that had to create it is the name that create proposed.
@@ -2236,6 +2335,9 @@ fn settle_hydration(
     //
     // Emptiness that came from a failure has to stay indistinguishable from not
     // knowing, because that is what it is.
+    // After the rebuild, so a pane the new layout took back is seen to be held.
+    sweep_parked(cx, client_ws, &tree_panes);
+
     let rebuilt = crate::ui::windows::WindowRegistry::app_for(cx, client_ws)
         .and_then(|app| app.upgrade())
         .is_some_and(|app| !app.read(cx).tabs.is_empty());
@@ -2325,11 +2427,26 @@ pub(crate) fn on_layout_delta(cx: &mut App, host: HostId, key: &str, delta: Layo
     let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, client_ws) else {
         return;
     };
-    let window_ok = handle
+    // Taken either side of the delta, from inside the update where the window
+    // is already in hand. A delta that reshapes a tab puts down whatever the
+    // new shape does not want, and that is where most stranded shells come
+    // from — more than refused ops and rebuilds together.
+    let applied = handle
         .update(cx, |_, window, cx| {
-            app.update(cx, |app, cx| app.apply_layout_delta(&delta, window, cx))
+            app.update(cx, |app, cx| {
+                let before = pane_ids_of(app, cx);
+                let ok = app.apply_layout_delta(&delta, window, cx);
+                (ok, before, pane_ids_of(app, cx))
+            })
         })
-        .unwrap_or(true);
+        .ok();
+    let window_ok = match applied {
+        Some((ok, before, after)) => {
+            park_dropped(cx, client_ws, &before, &after);
+            ok
+        }
+        None => true,
+    };
     if !mirror_ok || !window_ok {
         log::info!(
             "workspace {client_ws}: delta {delta:?} did not apply cleanly; re-pulling the tree"
