@@ -689,7 +689,11 @@ impl Tty7App {
                 .flex_col()
                 .items_center()
                 .justify_start()
-                .pt(px(48.))
+                // Window-level now, so the old 48px — measured from the top of
+                // the terminal area — would ride up under the title bar. The
+                // same drop the switcher, the palette and the worktree prompt
+                // take.
+                .pt(px(crate::ui::switcher::CARD_TOP))
                 .child(stack)
                 .into_any_element(),
         )

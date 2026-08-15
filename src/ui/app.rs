@@ -6474,9 +6474,6 @@ impl Render for Tty7App {
             )
             .child(body)
             .when_some(self.pane_landing(window, cx), |this, el| this.child(el))
-            .when_some(self.render_ssh_prompt_overlay(window, cx), |this, el| {
-                this.child(el)
-            })
             .when_some(ssh_status, |this, el| this.child(el))
             .when_some(self.render_remote_workspace_strip(cx), |this, el| {
                 this.child(el)
@@ -6912,6 +6909,13 @@ impl Render for Tty7App {
                 // clipped to the terminal area, which read as "only the
                 // terminal is busy".
                 .when_some(self.render_worktree_prompt_overlay(cx), |this, el| {
+                    this.child(el)
+                })
+                // Same reason, and the ssh prompt has more claim to it than any
+                // of them: nothing in the window can proceed until the password
+                // is answered, so the scrim has to cover the whole window and
+                // not stop at the terminal area.
+                .when_some(self.render_ssh_prompt_overlay(window, cx), |this, el| {
                     this.child(el)
                 })
                 .children(self.render_switcher(window, cx))
