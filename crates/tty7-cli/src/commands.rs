@@ -610,6 +610,23 @@ fn capture(args: CaptureArgs, ctx: &Context, backend: &mut dyn Backend) -> Resul
 fn procs(target: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     let pane = address::pane_or_context(target, ctx)?;
     let procs = backend.procs(pane)?;
+    // The daemon answers a pane it does not have exactly as it answers an idle
+    // one: `registry.get` misses and the reply is an empty `PaneProcs`. Every
+    // other verb taking a `%PANE` says when the pane is not there, and without
+    // this an agent cannot tell "nothing is running in it" from "there is no
+    // such pane" — both printed `nothing running in this pane` and exited 0.
+    //
+    // Asked only when the answer was empty, so a pane with anything in it
+    // still costs one request. Checked against the registry rather than the
+    // workspace tree, because a pane no workspace holds is still a pane whose
+    // processes are worth reporting — that is exactly what `pane ls --all`
+    // exists to surface.
+    if procs.procs.is_empty()
+        && procs.ports.is_empty()
+        && !backend.list_panes()?.iter().any(|p| p.pane_id == pane)
+    {
+        bail!("no pane %{pane} on this machine — `tty7 pane ls --all` lists them");
+    }
     report(output::procs_tables(&procs), serde_json::to_value(&procs)?)
 }
 
@@ -1608,6 +1625,43 @@ mod tests {
         }
     }
 
+    /// An empty answer from the daemon means one of two things and the caller
+    /// has to be told which. `registry.get` misses for a pane that does not
+    /// exist and the reply is an empty `PaneProcs` — the same reply an idle
+    /// pane gives — so without this both printed `nothing running in this
+    /// pane` and exited 0.
+    #[test]
+    fn procs_tells_an_idle_pane_apart_from_one_that_does_not_exist() {
+        let mut backend = mock();
+        backend.registry = vec![pane_info(1, None)];
+        let out = run_cli(&["tty7", "procs", "%1"], &Context::default(), &mut backend);
+        assert!(
+            human(out).contains("nothing running"),
+            "a pane that exists and is idle still reports as idle"
+        );
+
+        let mut backend = mock();
+        backend.registry = vec![pane_info(1, None)];
+        let error = execute(
+            cli(&["tty7", "procs", "%999"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect_err("a pane the server does not have must not read as an idle one");
+        assert!(error.to_string().contains("no pane %999"), "{error:#}");
+    }
+
+    /// A pane no workspace holds is still a pane, and its processes are the
+    /// whole reason `pane ls --all` surfaces it — so `procs` must answer for
+    /// one rather than deciding it does not exist.
+    #[test]
+    fn procs_answers_for_an_orphaned_pane() {
+        let mut backend = mock();
+        backend.registry = vec![pane_info(77, Some("tty7-cli"))];
+        let out = run_cli(&["tty7", "procs", "%77"], &Context::default(), &mut backend);
+        assert!(human(out).contains("nothing running"), "an orphan answers");
+    }
+
     #[test]
     fn pane_ls_all_surfaces_the_panes_no_workspace_holds() {
         let mut backend = mock();
@@ -2552,6 +2606,11 @@ mod tests {
             "without --plain the pane's bytes are passed through untouched"
         );
 
+        // The registry has to name %1 as well as the tree: `procs` reads an
+        // empty answer as "no such pane" unless the server is running one, and
+        // a server running the pane its tree names is what the real pair look
+        // like.
+        backend.registry = vec![pane_info(1, None)];
         run_cli(&["tty7", "procs", "%1"], &Context::default(), &mut backend);
         assert_eq!(backend.procs_calls, vec![1]);
     }

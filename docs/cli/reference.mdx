@@ -157,6 +157,11 @@ The process tree inside the pane, indented by depth, `*` on the foreground
 process — then a second table of ports those processes are listening on. Prints
 `nothing running in this pane` when both are empty.
 
+A pane the server is not running is an error, not an empty answer, so "nothing
+is running in it" and "there is no such pane" stay apart. A pane no workspace
+holds is still one the server runs, and still reports — that is what
+`pane ls --all` surfaces it for.
+
 JSON: `{"procs":[{"pid","name","depth","foreground"}],"ports":[{"port","pid","name","addr"}]}` —
 `addr` is the address the socket is bound to (`*`, `0.0.0.0`, `127.0.0.1`,
 `[::1]`, or a specific interface).
