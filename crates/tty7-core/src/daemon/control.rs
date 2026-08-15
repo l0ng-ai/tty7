@@ -529,6 +529,17 @@ pub enum ControlEvent {
         failed: bool,
     },
 
+    /// Nothing sends this. The variant, its encoding and the line
+    /// `tty7 events` would print for it all exist, and no code path anywhere
+    /// constructs one outside this file's own round-trip tests — so an agent
+    /// waiting on a pane-exit event waits for good.
+    ///
+    /// A pane exiting *is* reported, as `Layout` carrying a `PaneFacts` delta
+    /// whose pane has `live: false`, which is what the docs now tell readers to
+    /// watch. Worth resolving one way or the other: either something emits this
+    /// where the pane is reaped, or it goes, and the `event_line` arm in
+    /// `tty7-cli` goes with it. Left in place because removing a variant from a
+    /// wire enum is a dialect change and this is not one to make in passing.
     PaneExited {
         pane_id: u64,
         code: Option<i32>,

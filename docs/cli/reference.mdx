@@ -213,9 +213,30 @@ while you watched.
 
 ### `tty7 events`
 
-Streams server events until interrupted, one per line — pane exits, agent status
-changes, workspace preemption, layout deltas. `--json` makes it NDJSON. Blocks
-forever; run it with a timeout or in the background.
+Streams server events until interrupted, one per line — layout changes, agent
+status, workspace preemption. `--json` makes it NDJSON. Blocks forever; run it
+with a timeout or in the background.
+
+Each line is one externally tagged object, `{"<kind>": {…}}`:
+
+| Kind | Payload |
+|---|---|
+| `layout` | `{"workspace","delta"}` — the bulk of the stream |
+| `agent_status` | `{"pane_id","json"}` — whatever the agent's hooks reported |
+| `preempted` | `{"workspace","by"}` — another client took the workspace |
+| `layout_resync` | no payload; the tree moved in a way no delta describes, so re-read it |
+
+`delta` is externally tagged the same way. The kinds are `workspace_created`,
+`workspace_renamed`, `workspace_deleted`, `workspace_touched`,
+`active_tab_changed`, `tab_created`, `tab_closed`, `tab_renamed`, `tab_moved`,
+`tab_regrouped`, `tab_restructured`, `ratio_changed` and `pane_facts`.
+
+<Note>
+  **A pane exiting is not its own event.** It arrives as a `layout` delta:
+  `pane_facts` carrying that pane with `"live": false`. Watch for that rather
+  than for a pane-exit line — there is no such line, whatever the shape of the
+  wire protocol suggests.
+</Note>
 
 ### `tty7 status`
 
