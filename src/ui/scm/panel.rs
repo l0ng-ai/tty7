@@ -307,6 +307,45 @@ impl Tty7App {
         let busy = self.scm_network_busy(repo, cx);
         let others = self.scm_other_repos(repo);
 
+        let mut notes: Vec<AnyElement> = Vec::new();
+        if let Some(count) = others {
+            notes.push(branch_note(&format!("+{count}"), muted, &mono));
+        }
+        if detached {
+            notes.push(info_chip(
+                t(L10nKey::ScmDetached),
+                warning.opacity(0.16),
+                warning,
+                &mono,
+            ));
+        }
+        if let Some(op) = status.operation {
+            notes.push(info_chip(
+                t(operation_label(op)),
+                warning.opacity(0.16),
+                warning,
+                &mono,
+            ));
+        }
+        // Armed-amend is a mode you can forget you are in, which puts it in the
+        // same class as `detached` and a rebase in progress above — so it gets
+        // their tint, not a chip of its own invention.
+        if self.scm.amend {
+            notes.push(info_chip(
+                t(L10nKey::ScmAmendBadge),
+                warning.opacity(0.16),
+                warning,
+                &mono,
+            ));
+        }
+        if let Some(text) = tracking_chip(
+            status.upstream.as_deref(),
+            status.ahead_behind,
+            unpushable.is_none(),
+        ) {
+            notes.push(branch_note(&text, muted, &mono));
+        }
+
         h_flex()
             .flex_none()
             .items_center()
@@ -347,8 +386,7 @@ impl Tty7App {
             // lands *inside* a box that still measures its own content and
             // refuses to shrink. At the panel's 216px floor a 24-character
             // branch name is wider than the row, and what got pushed off the
-            // end was the sync tile: gone entirely, with no way to reach it
-            // (#549).
+            // end was the sync tile: gone entirely, with no way to reach it.
             .child(
                 div().flex_1().min_w(px(0.)).child(
                     Button::new("scm-branch")
@@ -385,53 +423,24 @@ impl Tty7App {
             // Each of them is `flex_none` on its own, so a detached HEAD
             // mid-rebase used to add up past the row and shove the sync tile
             // out of the panel — the same disappearance the branch name caused
-            // (#549). The order of who gives way is now spelled out: the
-            // branch name first (`flex_1`), this group second, and the tile
-            // never, because a control you cannot reach is worse than a badge
-            // you cannot finish reading.
-            .child(
-                h_flex()
-                    .gap(px(6.))
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .children(others.map(|count| branch_note(&format!("+{count}"), muted, &mono)))
-                    .when(detached, |this| {
-                        this.child(info_chip(
-                            t(L10nKey::ScmDetached),
-                            warning.opacity(0.16),
-                            warning,
-                            &mono,
-                        ))
-                    })
-                    .children(status.operation.map(|op| {
-                        info_chip(
-                            t(operation_label(op)),
-                            warning.opacity(0.16),
-                            warning,
-                            &mono,
-                        )
-                    }))
-                    // Armed-amend is a mode you can forget you are in, which
-                    // puts it in the same class as `detached` and a rebase in
-                    // progress above — so it gets their tint, not a chip of
-                    // its own invention.
-                    .when(self.scm.amend, |this| {
-                        this.child(info_chip(
-                            t(L10nKey::ScmAmendBadge),
-                            warning.opacity(0.16),
-                            warning,
-                            &mono,
-                        ))
-                    })
-                    .children(
-                        tracking_chip(
-                            status.upstream.as_deref(),
-                            status.ahead_behind,
-                            unpushable.is_none(),
-                        )
-                        .map(|text| branch_note(&text, muted, &mono)),
-                    ),
-            )
+            // above. The order of who gives way is now spelled out: the branch
+            // name first (`flex_1`), this group second, and the tile never,
+            // because a control you cannot reach is worse than a badge you
+            // cannot finish reading.
+            //
+            // The box only exists when it holds something. An empty one still
+            // counts as a flex item, and the row's `gap` would spend 6px on
+            // either side of nothing — pushing the caret away from the tile on
+            // the quiet branch that is most of what anyone looks at.
+            .when(!notes.is_empty(), |row| {
+                row.child(
+                    h_flex()
+                        .gap(px(6.))
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .children(notes),
+                )
+            })
             .child(
                 crate::ui::tab_strip::chrome_tile_sized(
                     Button::new("scm-sync").icon(if busy {
