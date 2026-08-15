@@ -6561,7 +6561,16 @@ fn description_budget(cell_width: f32, label_cells: usize, menu_w: f32) -> usize
 /// explains: a completion description is arbitrary text from a shell plugin,
 /// and cutting a cluster in half renders as a character the description never
 /// contained.
+///
+/// The line breaks go first, for the same reason and a nearer one: this exists
+/// to make a description fit a row, and a newline defeats that at any length.
+/// 122 of the specs shipped in `assets/completions` carry one — `go build
+/// -race` opens "Enable data race detection." and breaks at column 27, inside
+/// any budget this menu hands out — so without the fold the row grows and its
+/// tail paints over whatever the menu is floating above. Folding is one
+/// cluster for one cluster, so the budget still measures what is drawn.
 fn elide(text: &str, budget: usize) -> String {
+    let text = one_line(text);
     let clusters: Vec<&str> = text.graphemes(true).collect();
     if clusters.len() <= budget {
         return text.to_string();
@@ -8058,6 +8067,21 @@ mod tests {
         assert_eq!(elide("Show commit logs", 40), "Show commit logs");
         // Exactly the budget is still a fit; nothing is spent on an ellipsis.
         assert_eq!(elide("abcd", 4), "abcd");
+    }
+
+    #[test]
+    fn a_description_that_carries_a_line_break_still_draws_on_one_row() {
+        // Verbatim from `assets/completions/go.json`, which is one of 122
+        // shipped specs whose descriptions contain a newline. Nothing about
+        // the budget saves this: the break is at column 27.
+        let out = elide("Enable data race detection.\nSee more at docs.", 40);
+        assert!(!out.contains('\n'), "{out:?}");
+        assert!(out.starts_with("Enable data race detection.↵"), "{out:?}");
+
+        // Under budget is the case that used to slip through untouched — the
+        // early return handed the text straight back, newline and all.
+        let short = elide("a\nb", 40);
+        assert_eq!(short, "a↵b");
     }
 
     #[test]
