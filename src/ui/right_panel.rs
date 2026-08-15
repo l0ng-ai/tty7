@@ -15,7 +15,11 @@ use crate::ui::app::{
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::scrollbar::with_vertical_scrollbar;
 
-pub(crate) const MIN_WIDTH: f32 = 216.;
+/// The narrowest the right panel is drawn, and the floor `Config::sanitize`
+/// holds `right_panel_width` to — see [`MIN_SIDEBAR_WIDTH`] for the rule.
+///
+/// [`MIN_SIDEBAR_WIDTH`]: crate::ui::tab_sidebar::MIN_SIDEBAR_WIDTH
+pub(crate) const MIN_WIDTH: f32 = crate::core::config::RIGHT_PANEL_WIDTH_MIN;
 
 /// How wide a panel edge is to grab. Both edges a window can drag — the tab
 /// sidebar's and this panel's — are the same target, so they are one number.

@@ -740,11 +740,15 @@ impl Config {
         if !self.sidebar_width.is_finite() || self.sidebar_width <= 0.0 {
             self.sidebar_width = default_sidebar_width();
         }
-        self.sidebar_width = self.sidebar_width.clamp(100.0, 2000.0);
+        self.sidebar_width = self
+            .sidebar_width
+            .clamp(SIDEBAR_WIDTH_MIN, SIDE_PANEL_WIDTH_MAX);
         if !self.right_panel_width.is_finite() || self.right_panel_width <= 0.0 {
             self.right_panel_width = default_right_panel_width();
         }
-        self.right_panel_width = self.right_panel_width.clamp(100.0, 2000.0);
+        self.right_panel_width = self
+            .right_panel_width
+            .clamp(RIGHT_PANEL_WIDTH_MIN, SIDE_PANEL_WIDTH_MAX);
         if let Some(command) = &self.link_file_command
             && command.trim().is_empty()
         {
@@ -1083,6 +1087,24 @@ pub const FONT_SIZE_MIN: f32 = 4.0;
 pub const FONT_SIZE_MAX: f32 = 256.0;
 pub const LINE_HEIGHT_MIN: f32 = 0.5;
 pub const LINE_HEIGHT_MAX: f32 = 4.0;
+
+/// The side panels' width bounds, on the same #550 footing as the font pair.
+///
+/// The floors are what the panels can actually be drawn at — a sidebar
+/// narrower than its tab labels, or a right panel narrower than its own
+/// content clamp, is not a narrower panel but a broken one — so they belong
+/// with the value's validation rather than only in the widget. `sanitize`
+/// accepted 100 for both while the widgets floored them at these numbers,
+/// which meant a documented, config-legal `sidebar_width: 120` was quietly
+/// drawn at 180 and the file was never told.
+///
+/// The *ceiling* stays a config-level number rather than a shared one: the
+/// panels additionally cap themselves against the viewport, because a panel
+/// wider than its window is a different question from a panel wider than the
+/// setting allows.
+pub const SIDEBAR_WIDTH_MIN: f32 = 180.0;
+pub const RIGHT_PANEL_WIDTH_MIN: f32 = 216.0;
+pub const SIDE_PANEL_WIDTH_MAX: f32 = 2000.0;
 
 fn default_ui_font_size() -> f32 {
     UI_FONT_SIZE_DEFAULT
@@ -1462,6 +1484,49 @@ mod tests {
         // point: `50 + 1` and `3.0 - 0.05` are legal, so neither click can be
         // turned around by a clamp.
         assert!(50.0 + 1.0 <= FONT_SIZE_MAX && 3.0 - 0.05 >= LINE_HEIGHT_MIN);
+    }
+
+    // Same relationship, same reason — see the test above.
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
+    fn sanitize_holds_the_side_panels_to_the_widths_they_can_be_drawn_at() {
+        // These are the widths the sidebar and the right panel floor
+        // themselves at, and they are published in
+        // `docs/reference/configuration.mdx`; changing one without the other
+        // is what this pins.
+        assert_eq!(SIDEBAR_WIDTH_MIN, 180.0);
+        assert_eq!(RIGHT_PANEL_WIDTH_MIN, 216.0);
+        assert_eq!(SIDE_PANEL_WIDTH_MAX, 2000.0);
+
+        // The regression: both floors used to be 100 here while the widgets
+        // clamped to the numbers above, so a config-legal width was drawn at
+        // a different one and the file was never corrected.
+        let mut cfg = Config {
+            sidebar_width: 120.0,
+            right_panel_width: 120.0,
+            ..Config::default()
+        };
+        cfg.sanitize();
+        assert_eq!(cfg.sidebar_width, SIDEBAR_WIDTH_MIN);
+        assert_eq!(cfg.right_panel_width, RIGHT_PANEL_WIDTH_MIN);
+
+        // A width at either edge survives, so a drag that stops on the floor
+        // is not rewritten out from under the person doing the dragging.
+        let mut cfg = Config {
+            sidebar_width: SIDEBAR_WIDTH_MIN,
+            right_panel_width: SIDE_PANEL_WIDTH_MAX,
+            ..Config::default()
+        };
+        cfg.sanitize();
+        assert_eq!(cfg.sidebar_width, SIDEBAR_WIDTH_MIN);
+        assert_eq!(cfg.right_panel_width, SIDE_PANEL_WIDTH_MAX);
+
+        // And the defaults have to sit inside their own range, or every fresh
+        // config would be rewritten on its first sanitize.
+        let mut cfg = Config::default();
+        let (sw, rw) = (cfg.sidebar_width, cfg.right_panel_width);
+        cfg.sanitize();
+        assert_eq!((cfg.sidebar_width, cfg.right_panel_width), (sw, rw));
     }
 
     #[test]

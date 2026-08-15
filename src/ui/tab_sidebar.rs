@@ -24,7 +24,10 @@ use crate::ui::tab_strip::{
     elide_path_keep_tail, measure_text, strip_host_prefix,
 };
 
-pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.;
+/// The narrowest the sidebar is drawn, and — since #550's rule — the floor
+/// `Config::sanitize` holds `sidebar_width` to, so the file and the widget
+/// cannot disagree about what 120 means.
+pub(crate) const MIN_SIDEBAR_WIDTH: f32 = crate::core::config::SIDEBAR_WIDTH_MIN;
 
 const GRAB_HANDLE_W: f32 = 48.;
 

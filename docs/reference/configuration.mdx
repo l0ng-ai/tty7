@@ -71,10 +71,10 @@ their id from the file name. [More about themes →](/customization/themes)
 | `new_tab_position` | enum | `"after-current"` | Or `end`. |
 | `sidebar_grouping` | enum | `"repo"` | Or `repo-or-directory` to group non-repo tabs by their folder, or `none` for a flat list. |
 | `sidebar_diff_preview` | bool | `true` | Clicking a row's `+N −M` opens the diff overlay. |
-| `sidebar_width` | number | `220` | Pixels (100–2000). |
+| `sidebar_width` | number | `220` | Pixels (180–2000). Also capped to the window. |
 | `sidebar_collapsed` | bool | `false` | |
 | `right_panel_visible` | bool | `false` | |
-| `right_panel_width` | number | `260` | Pixels (100–2000). |
+| `right_panel_width` | number | `260` | Pixels (216–2000). Also capped to the window. |
 | `right_panel_tab` | enum | `"info"` | `info`, `changes`, `files`. |
 | `diff_view` | enum | `"split"` | Or `unified`. Global, not per file. |
 | `scm_graph_expanded` | bool | `false` | Whether the history section starts open. |
