@@ -96,6 +96,19 @@ pub struct ImageStore(Arc<Mutex<StoreInner>>);
 /// without ever deleting, dropping the oldest rather than growing without limit.
 const MAX_IMAGES: usize = 256;
 
+/// How much a PNG transmission may allocate while it decodes.
+///
+/// Everything else on this path is bounded by
+/// [`tty7_core::core::kitty_graphics::MAX_IMAGE_BYTES`], which is what a wire
+/// frame can carry. A PNG stays compressed across that frame, so it is the only
+/// transmission whose decoded size is not already settled by the time it gets
+/// here — see the note in [`decode`].
+///
+/// The value is the `image` crate's own default, restated so it belongs to
+/// tty7: a bound on untrusted input should not be able to move because a
+/// dependency changed its mind in a patch release.
+const MAX_PNG_DECODE_BYTES: u64 = 512 * 1024 * 1024;
+
 impl ImageStore {
     pub fn new() -> Self {
         Self::default()
@@ -603,7 +616,31 @@ pub fn decode(img: &mut Image) -> Option<(Arc<RenderImage>, u32, u32)> {
             // The one path pixels stay encoded through: decode with the `image`
             // crate (a direct dep, same version gpui uses) rather than the
             // protocol type, which declines PNG on purpose.
-            let dyn_img = image::load_from_memory(&img.data).ok()?;
+            //
+            // The ceiling is stated here rather than inherited. Every other
+            // bound on this path is `MAX_IMAGE_BYTES`, but that one comes from
+            // what a wire frame can carry, and a PNG crosses the wire still
+            // compressed — so its decoded size is decided by its own header,
+            // which is written by whatever program printed the escape.
+            // `image::load_from_memory` would leave the bound to
+            // `Limits::default()`, and that is *their* number: a patch release
+            // that relaxed it would silently hand a hostile escape sequence a
+            // bigger allocation, and this runs in the GUI process, so an OOM
+            // here takes every pane down rather than the pane that asked for
+            // the image. Pinned to the same value the default has today, so
+            // this changes no behaviour — it just stops the limit being a
+            // dependency's opinion. (`max_alloc` is documented as non-strict,
+            // so it is a budget the PNG decoder honours rather than a hard
+            // guarantee; lowering it toward `MAX_IMAGE_BYTES` would bound this
+            // properly, but that is a call about how large an image tty7 means
+            // to display, not a cleanup.)
+            let mut reader = image::ImageReader::new(std::io::Cursor::new(&img.data))
+                .with_guessed_format()
+                .ok()?;
+            let mut limits = image::Limits::default();
+            limits.max_alloc = Some(MAX_PNG_DECODE_BYTES);
+            reader.limits(limits);
+            let dyn_img = reader.decode().ok()?;
             let buf = dyn_img.into_rgba8();
             let (w, h) = buf.dimensions();
             (buf.into_raw(), w, h)
@@ -650,6 +687,81 @@ mod tests {
             format: WireFormat::Rgba,
             compressed: false,
         }
+    }
+
+    /// The PNG branch, which nothing else covered — it is the one format that
+    /// stays encoded all the way to the client, decodes through a different
+    /// crate, and takes its size from its own header rather than from the
+    /// `s=`/`v=` the sender wrote.
+    #[test]
+    fn a_png_transmission_decodes_at_its_own_dimensions() {
+        let mut buf = image::RgbaImage::new(2, 1);
+        buf.put_pixel(0, 0, image::Rgba([0xff, 0x00, 0x00, 0xff]));
+        buf.put_pixel(1, 0, image::Rgba([0x00, 0x00, 0xff, 0xff]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(buf)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encoding a 2x1 PNG");
+
+        let mut img = Image {
+            format: WireFormat::Png,
+            data: png,
+            // Deliberately wrong: a PNG carries its own dimensions and they win.
+            width: 99,
+            height: 99,
+            ..red_pixel()
+        };
+        let (_render, w, h) = decode(&mut img).expect("a PNG transmission must decode");
+        assert_eq!(
+            (w, h),
+            (2, 1),
+            "the PNG header decides the size, not the escape's s=/v="
+        );
+    }
+
+    /// A PNG whose header is a lie big enough to matter is refused rather than
+    /// allocated for. 0xffff x 0xffff at RGBA is ~17 GB, well past
+    /// `MAX_PNG_DECODE_BYTES`, and the compressed form of it is tiny — which is
+    /// the whole shape of the attack.
+    #[test]
+    fn a_png_that_declares_an_enormous_canvas_is_refused() {
+        let mut buf = image::RgbaImage::new(1, 1);
+        buf.put_pixel(0, 0, image::Rgba([0xff, 0xff, 0xff, 0xff]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(buf)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encoding a 1x1 PNG");
+        // Rewrite IHDR's width and height, then repair its CRC, so the decoder
+        // reaches the size check on a structurally valid file.
+        png[16..20].copy_from_slice(&0xffff_u32.to_be_bytes());
+        png[20..24].copy_from_slice(&0xffff_u32.to_be_bytes());
+        let crc = crc32(&png[12..29]);
+        png[29..33].copy_from_slice(&crc.to_be_bytes());
+
+        let mut img = Image {
+            format: WireFormat::Png,
+            data: png,
+            ..red_pixel()
+        };
+        assert!(
+            decode(&mut img).is_none(),
+            "a 17 GB canvas must be refused, not allocated"
+        );
+    }
+
+    /// PNG chunk CRC-32 (IEEE, reflected), so the test above can hand the
+    /// decoder a file it will actually parse instead of one it rejects for the
+    /// wrong reason.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xffff_ffff_u32;
+        for &b in bytes {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+            }
+        }
+        !crc
     }
 
     fn placed(id: u32, placement: u32) -> PlacedImage {
