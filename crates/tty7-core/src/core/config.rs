@@ -679,11 +679,23 @@ impl Config {
                 // file held the moment anything — a dragged sidebar divider —
                 // writes. Park a copy first, the way `WindowViews::load`
                 // does, and mark the stand-in so `save` refuses to run for it.
-                log::warn!(
+                // Said once per breakage, not once per read. This arm runs on
+                // every pane spawn and every palette command, so a single
+                // stray comma otherwise fills the log with one repeated line
+                // and buries everything else in it — measured at 23 copies
+                // after four CLI operations. `quarantine` already knows
+                // whether it has kept these bytes before; the first sighting
+                // is the one worth raising a voice about.
+                let first_sighting = quarantine(&path);
+                log::log!(
+                    if first_sighting {
+                        log::Level::Warn
+                    } else {
+                        log::Level::Debug
+                    },
                     "failed to parse config at {}: {e}; keeping it aside and using defaults",
                     path.display()
                 );
-                quarantine(&path);
                 let cfg = Config {
                     quarantined: true,
                     ..Config::default()
@@ -845,7 +857,13 @@ pub fn strip_bom(text: &str) -> &str {
 
 /// Sets a corrupt state file aside (copied, the original left in place) so the
 /// caller can fall back to defaults without silently destroying what was there.
-pub(crate) fn quarantine(path: &std::path::Path) {
+/// Keeps a copy of a file that could not be parsed, and answers whether this
+/// breakage is one it had not already kept.
+///
+/// The answer is worth having because the same broken file is read again and
+/// again, and a caller that logs every time turns one stray comma into a log
+/// full of the same line.
+pub(crate) fn quarantine(path: &std::path::Path) -> bool {
     // A broken file is read again and again — `Config::load` alone runs on
     // every pane spawn and every palette command — so this is reached over
     // and over for the same contents. A sibling already holding those bytes
@@ -855,13 +873,14 @@ pub(crate) fn quarantine(path: &std::path::Path) {
     if let Ok(bytes) = std::fs::read(path)
         && already_kept(path, &bytes)
     {
-        return;
+        return false;
     }
     let aside = quarantine_path(path);
     match std::fs::copy(path, &aside) {
         Ok(_) => log::warn!("the previous contents were kept at {}", aside.display()),
         Err(e) => log::warn!("could not keep a copy at {}: {e}", aside.display()),
     }
+    true
 }
 
 /// Whether an earlier quarantine of `path` already holds exactly `bytes`.
