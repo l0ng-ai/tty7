@@ -1766,6 +1766,63 @@ mod tests {
     }
 
     #[test]
+    fn every_config_key_survives_being_written_and_read_back() {
+        // `#[serde(default)]` is what makes this worth asserting: a key whose
+        // serialized name and deserialized name have drifted apart does not
+        // fail to load, it silently resolves to the default — the setting is
+        // simply forgotten the next time the file is read.
+        //
+        // Only bools and numbers are nudged. A string is usually an enum
+        // spelled in kebab-case, and `de_lenient` deliberately falls back to
+        // the default for a spelling it does not know, so an arbitrary string
+        // would report that deliberate behaviour as a failure.
+        let base = serde_json::to_value(Config::default()).expect("Config serializes");
+        let obj = base.as_object().expect("a config is a JSON object").clone();
+        let mut checked = 0;
+        for (key, value) in &obj {
+            let nudged = match value {
+                serde_json::Value::Bool(b) => serde_json::Value::Bool(!b),
+                serde_json::Value::Number(n) if n.is_u64() => {
+                    serde_json::Value::from(n.as_u64().unwrap() + 1)
+                }
+                serde_json::Value::Number(n) if n.is_f64() => {
+                    serde_json::Value::from(n.as_f64().unwrap() + 1.0)
+                }
+                _ => continue,
+            };
+            let mut doc = obj.clone();
+            doc.insert(key.clone(), nudged.clone());
+            let parsed: Config = serde_json::from_value(serde_json::Value::Object(doc))
+                .unwrap_or_else(|e| panic!("`{key}` set to {nudged} did not parse: {e}"));
+            let back = serde_json::to_value(parsed).expect("Config serializes");
+            let got = back.get(key).unwrap_or_else(|| panic!("`{key}` vanished"));
+            // The property that matters is that the written value came back
+            // rather than reverting to the default. Compared loosely for
+            // floats: several of these are `f32`, so a value nudged through
+            // `f64` comes back a fraction off and an exact compare would
+            // report arithmetic as a lost setting.
+            match (got.as_f64(), nudged.as_f64()) {
+                (Some(a), Some(b)) => assert!(
+                    (a - b).abs() < 1e-3 * b.abs().max(1.0),
+                    "`{key}` did not survive a write and read back: wrote {nudged}, read {got}"
+                ),
+                _ => assert_eq!(
+                    got, &nudged,
+                    "`{key}` did not survive a write and read back"
+                ),
+            }
+            assert_ne!(
+                got, value,
+                "`{key}` read back as its default, so the write was dropped"
+            );
+            checked += 1;
+        }
+        // A guard against this test quietly checking nothing if the shape of
+        // the config changes.
+        assert!(checked > 20, "only {checked} keys were nudged");
+    }
+
+    #[test]
     fn sanitize_normalizes_blank_http_proxy_to_none() {
         let normalize = |proxy: Option<&str>| {
             let mut cfg = Config {
