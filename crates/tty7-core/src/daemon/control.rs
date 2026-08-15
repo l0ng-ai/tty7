@@ -1557,6 +1557,64 @@ mod tests {
         ]
     }
 
+    /// Adding or removing a variant of either enum stops this compiling, which
+    /// is the reminder that [`CONTROL_VERSION`] moves with it.
+    ///
+    /// [`ControlRequest`] already gets that for free: `deadline` matches it
+    /// exhaustively, so a new request cannot be added without the compiler
+    /// asking about it. These two had nothing — a variant could be added to
+    /// either and the whole workspace still built — and that is the shape of
+    /// the drift v6 had to pay off, where the number never moved and every
+    /// server of that generation answers the hello and then drops the link on
+    /// the first call.
+    ///
+    /// The lists in `every_reply` and `every_event` below are hand-written, so
+    /// they cannot catch this themselves: a variant missing from both the enum
+    /// coverage and the list leaves every count in agreement.
+    fn wire_variants_are_pinned(reply: &ReplyOk, event: &ControlEvent) {
+        match reply {
+            ReplyOk::Unit
+            | ReplyOk::Pong
+            | ReplyOk::Entries(..)
+            | ReplyOk::Meta(..)
+            | ReplyOk::Bool(..)
+            | ReplyOk::Path(..)
+            | ReplyOk::OptPath(..)
+            | ReplyOk::FileMeta { .. }
+            | ReplyOk::Hits(..)
+            | ReplyOk::Output(..)
+            | ReplyOk::WatchId(..)
+            | ReplyOk::Shells(..)
+            | ReplyOk::Attached { .. }
+            | ReplyOk::MachineTree(..)
+            | ReplyOk::WorkspaceTree(..)
+            | ReplyOk::TabTree(..)
+            | ReplyOk::Panes(..)
+            | ReplyOk::AgentStates(..)
+            | ReplyOk::Routes(..)
+            | ReplyOk::Status(..) => {}
+        }
+        match event {
+            ControlEvent::Watch { .. }
+            | ControlEvent::WatchOverflow { .. }
+            | ControlEvent::GitChunk { .. }
+            | ControlEvent::GitEnd { .. }
+            | ControlEvent::PaneExited { .. }
+            | ControlEvent::AgentStatus { .. }
+            | ControlEvent::Preempted { .. }
+            | ControlEvent::GuiOpen { .. }
+            | ControlEvent::Layout { .. }
+            | ControlEvent::LayoutResync => {}
+        }
+    }
+
+    #[test]
+    fn a_new_wire_variant_has_to_move_the_dialect_number() {
+        // The two values are stand-ins. The exhaustive matches inside are the
+        // assertion, and the compiler is what checks them.
+        wire_variants_are_pinned(&ReplyOk::Unit, &ControlEvent::LayoutResync);
+    }
+
     fn every_reply() -> Vec<ControlReply> {
         vec![
             ControlReply::Ok(ReplyOk::Unit),
