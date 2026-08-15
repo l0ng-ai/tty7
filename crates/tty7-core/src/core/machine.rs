@@ -1135,10 +1135,27 @@ impl MachineStore {
             ws.attachment = None;
         }
         let bytes = serde_json::to_vec_pretty(&doc).map_err(io::Error::other)?;
+        // Named, because this one reaches the user. A config dir that cannot
+        // be written answers `tty7 new` with the raw errno and nothing else —
+        // "tty7: Permission denied (os error 13)" says neither what tty7 was
+        // doing nor which file it could not write. The kind is kept so callers
+        // that match on it still can.
+        self.write_document(&bytes).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "could not write the machine tree at {}: {e}",
+                    self.path.display()
+                ),
+            )
+        })
+    }
+
+    fn write_document(&self, bytes: &[u8]) -> io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        crate::core::config::write_atomic_private(&self.path, &bytes)
+        crate::core::config::write_atomic_private(&self.path, bytes)
     }
 
     fn notify_all(&self, deltas: &[(WorkspaceId, LayoutDelta)], origin: Option<SubscriberId>) {
@@ -1628,6 +1645,49 @@ mod tests {
     fn store() -> (Arc<MachineStore>, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
         (MachineStore::open(dir.path().join(MACHINE_FILE)), dir)
+    }
+
+    /// A tree that cannot be written says so, and says which file.
+    ///
+    /// This error is not an internal one: it travels the wire and lands on the
+    /// user as the whole of `tty7 new`'s output. Unnamed it read "tty7:
+    /// Permission denied (os error 13)" — the right refusal, but naming
+    /// neither the operation nor the file, on a machine where the config dir
+    /// is exactly the thing the reader has to go and fix.
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_that_cannot_be_written_names_the_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Root ignores the mode bits, so the write would succeed and the test
+        // would fail for a reason that is not the one it is about. CI in a
+        // container is routinely root.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(MACHINE_FILE);
+        let store = MachineStore::open(&path);
+        store
+            .workspace_create(None, None, None)
+            .expect("writable to begin with");
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let err = store
+            .workspace_create(None, None, None)
+            .expect_err("a read-only config dir cannot take a new workspace");
+        // Restore before asserting, so a failure still leaves a removable dir.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let said = err.to_string();
+        assert!(said.contains(&path.display().to_string()), "{said}");
+        assert!(said.contains("machine tree"), "{said}");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "the kind has to survive the wrapping: {said}"
+        );
     }
 
     /// The token is "proof that a connection is the one holding the
