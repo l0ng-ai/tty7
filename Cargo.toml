@@ -357,8 +357,23 @@ smol = "2"
 #     The first two are the ones that matter here: tty7 is the client, and the
 #     peer is whatever server a profile dials — or anything sitting in front of
 #     it, since this lands before authentication. The last two are server-side
-#     and tty7 runs no SSH server. Not reproduced against tty7; the ranges and
-#     the fork's position are verified, the exploitability is upstream's word.
+#     and tty7 runs no SSH server.
+#
+#     Read in the vendored fork rather than taken on the advisory's word
+#     (2026-08-16): `russh/Cargo.toml` says 0.62.2, and
+#     `russh/src/kex/curve25519.rs` still has, in `compute_shared_secret`,
+#     `remote_pubkey.0.clone_from_slice(remote_pubkey_)` into a `[0; 32]` with
+#     no length check on the peer-supplied slice — GHSA-g9hv-x236-4qp3 as
+#     described, on a value that arrives before authentication.
+#
+#     What it costs *here* is one connection, not the daemon. The panic lands
+#     in a task on `SshManager`'s tokio runtime, which unwinds the task and
+#     keeps its workers; and it cannot poison `conns` or `probes`, because
+#     nothing holds a `std::sync::Mutex` across an `.await` — clippy's
+#     `await_holding_lock` is warn-by-default and the gate is `-D warnings`,
+#     with no `allow` for it anywhere in `daemon/ssh`. Still worth the rebase;
+#     it is a hostile server hanging up a dial, not a way into the process.
+#     Not reproduced against a live tty7 — the reading above is static.
 #
 #     Until #738 ships in a release, the fix is to rebase the fork onto v0.62.6
 #     (or later) and move this rev forward. Re-checked 2026-08-15: there is
