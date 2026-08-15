@@ -408,6 +408,12 @@ pub enum LayoutDelta {
     WorkspaceTouched {
         last_active: u64,
     },
+    /// Which tab is active changed — by an explicit set, by a created tab
+    /// becoming active, or by the close paths healing a dangling active id.
+    /// Emitted for every *implicit* change too, so a mirroring client never
+    /// has to re-implement the server's heal rule; the one inexpressible case
+    /// (a workspace losing its last tab has no active tab) needs no delta,
+    /// because "no tabs → no active tab" is a fact, not surgery.
     ActiveTabChanged {
         tab: TabId,
     },
@@ -472,6 +478,13 @@ pub struct MachineStore {
     path: PathBuf,
     state: Mutex<Machine>,
     liveness: Mutex<Option<LivenessProbe>>,
+    /// Serializes each mutation *with its own delivery*. The state lock alone
+    /// orders the mutations, but deltas are delivered after it is released —
+    /// without this, writer B's deltas could overtake writer A's and every
+    /// subscriber would apply the store's history in the wrong order, ending
+    /// on the losing state with no error to trigger a re-pull. Cheap to hold
+    /// across delivery because a subscriber's callback is enqueue-only by
+    /// contract. Always taken before `state`, never inside it.
     notify_order: Mutex<()>,
     subscribers: Mutex<Vec<(SubscriberId, Notify)>>,
     next_subscriber: AtomicU64,
@@ -494,6 +507,12 @@ fn not_found(msg: impl Into<String>) -> io::Error {
 }
 
 impl MachineStore {
+    /// Open the store at `path`, reading whatever is there.
+    ///
+    /// Infallible by design: a machine whose tree file is missing or
+    /// unreadable must still serve panes and files. A file that does not parse
+    /// is copied aside as `machine.json.corrupt` before anything overwrites
+    /// it, so "the tree came up empty" is recoverable by hand.
     pub fn open(path: impl Into<PathBuf>) -> Arc<MachineStore> {
         let path = path.into();
         let machine = load_machine(&path);
@@ -509,6 +528,15 @@ impl MachineStore {
         })
     }
 
+    /// Install the pane server's answer to "is this pane alive right now",
+    /// consulted whenever a seed introduces a pane to the registry.
+    ///
+    /// A seed used to enter the registry `live: true` unconditionally — but a
+    /// pane that died between its spawn and its adopting operation had its
+    /// death observation dropped ([`MachineStore::note_pane_facts`] ignores
+    /// panes the tree does not hold), and nothing ever flipped the record back:
+    /// the leaf claimed a live pane forever and revival never offered. Asking
+    /// the process that owns the PTYs at registration time closes the window.
     pub fn set_liveness_probe(&self, probe: LivenessProbe) {
         *self.liveness.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe);
     }
