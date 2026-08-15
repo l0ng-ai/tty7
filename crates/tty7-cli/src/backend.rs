@@ -110,6 +110,9 @@ pub mod mock {
         pub events: Vec<ControlEvent>,
         /// Set to make `hello` fail — doctor's unreachable-server branch.
         pub unreachable: bool,
+        /// Make the Nth `control` call (0-based) fail, for the paths that have
+        /// already created something by the time the refusal lands.
+        pub fail_nth_control: Option<usize>,
         /// Whether this mock stands for the machine the tests run on.
         ///
         /// Off by default, and deliberately: the fixture machine is a Windows
@@ -142,6 +145,7 @@ pub mod mock {
                 events: Vec::new(),
                 unreachable: false,
                 this_machine: false,
+                fail_nth_control: None,
             }
         }
     }
@@ -158,6 +162,10 @@ pub mod mock {
     impl Backend for MockBackend {
         fn control(&mut self, req: ControlRequest) -> Result<ReplyOk> {
             let is_machine_get = req == ControlRequest::MachineGet;
+            if self.fail_nth_control == Some(self.control_calls.len()) {
+                self.control_calls.push(req);
+                anyhow::bail!("the server refused this one");
+            }
             self.control_calls.push(req);
             if is_machine_get {
                 return Ok(ReplyOk::MachineTree(Box::new(self.machine.clone())));

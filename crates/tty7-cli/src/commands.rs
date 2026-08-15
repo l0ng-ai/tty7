@@ -357,18 +357,26 @@ fn new_workspace(path: Option<String>, open: bool, backend: &mut dyn Backend) ->
         other => bail!("the server answered WorkspaceCreate with {other:?}"),
     };
     let pane = backend.spawn_shell(ws.id, path.clone())?;
-    backend.control(ControlRequest::TabCreate {
-        workspace: ws.id,
-        at: None,
-        pane: PaneSeed {
-            pane,
-            cwd: path,
-            ssh_spec: None,
-            agent: None,
-            shell: None,
-        },
-        tab: None,
-    })?;
+    // The workspace goes too. It was made by this command and holds nothing,
+    // so leaving it behind adds an empty row to `tty7 ls` that the caller
+    // never asked for and would have to clear by hand.
+    if let Err(e) = filing_or_hang_up(backend, pane, |b| {
+        b.control(ControlRequest::TabCreate {
+            workspace: ws.id,
+            at: None,
+            pane: PaneSeed {
+                pane,
+                cwd: path,
+                ssh_spec: None,
+                agent: None,
+                shell: None,
+            },
+            tab: None,
+        })
+    }) {
+        let _ = backend.control(ControlRequest::WorkspaceRemove { workspace: ws.id });
+        return Err(e);
+    }
     // Only when asked: a workspace made from a script has no business
     // stealing the screen, and the switcher lists it either way.
     let opened = match open {
@@ -505,6 +513,29 @@ fn run(args: RunArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcom
     ))
 }
 
+/// Do the filing that follows a spawn, hanging the pane up if it fails.
+///
+/// Every verb that puts a new pane in the tree spawns it first and asks the
+/// tree to hold it second, because the seed carries the daemon's own pane id.
+/// That leaves a window: a refusal in between — a workspace removed since it
+/// was resolved, a reply the client cannot read, a link that dropped — ends
+/// the command with a shell running that nothing references. `pane ls --all`
+/// shows it, the tree does not, and `pane close --orphans` is the only way to
+/// find it. Nobody asked for that pane, so it goes back down with the error.
+fn filing_or_hang_up<T>(
+    backend: &mut dyn Backend,
+    pane: u64,
+    file: impl FnOnce(&mut dyn Backend) -> Result<T>,
+) -> Result<T> {
+    match file(backend) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            let _ = backend.kill_pane(pane);
+            Err(e)
+        }
+    }
+}
+
 fn pane_split(args: SplitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     let pane = address::pane_or_context(args.target.as_deref(), ctx)?;
     let machine = fetch_machine(backend)?;
@@ -529,28 +560,22 @@ fn pane_split(args: SplitArgs, ctx: &Context, backend: &mut dyn Backend) -> Resu
         bail!("--ratio {} is not a finite number", args.ratio);
     }
     let new = backend.spawn_shell(workspace, cwd.clone())?;
-    let split = backend.control(ControlRequest::PaneSplit {
-        workspace,
-        pane,
-        axis,
-        ratio: args.ratio,
-        new: PaneSeed {
-            pane: new,
-            cwd,
-            ssh_spec: None,
-            agent: None,
-            shell: None,
-        },
-        first: false,
-    });
-    if let Err(e) = split {
-        // Whatever the refusal was, the pane spawned above is now running with
-        // nothing referencing it: `pane ls --all` shows it, the tree does not,
-        // and it takes `pane close --orphans` to be rid of it. Nobody asked for
-        // that pane, so take it back down rather than leave it for the user.
-        let _ = backend.kill_pane(new);
-        return Err(e);
-    }
+    filing_or_hang_up(backend, new, |b| {
+        b.control(ControlRequest::PaneSplit {
+            workspace,
+            pane,
+            axis,
+            ratio: args.ratio,
+            new: PaneSeed {
+                pane: new,
+                cwd,
+                ssh_spec: None,
+                agent: None,
+                shell: None,
+            },
+            first: false,
+        })
+    })?;
     report(format!("%{new}"), json!({ "pane": new }))
 }
 
@@ -807,21 +832,23 @@ fn tab_new(
     let machine = fetch_machine(backend)?;
     let id = resolve_ws(explicit, ctx, &machine)?;
     let pane = backend.spawn_shell(id, cwd.clone())?;
-    let tab = match backend.control(ControlRequest::TabCreate {
-        workspace: id,
-        at: None,
-        pane: PaneSeed {
-            pane,
-            cwd,
-            ssh_spec: None,
-            agent: None,
-            shell: None,
-        },
-        tab: None,
-    })? {
-        ReplyOk::TabTree(tab) => *tab,
-        other => bail!("the server answered TabCreate with {other:?}"),
-    };
+    let tab = filing_or_hang_up(backend, pane, |b| {
+        match b.control(ControlRequest::TabCreate {
+            workspace: id,
+            at: None,
+            pane: PaneSeed {
+                pane,
+                cwd,
+                ssh_spec: None,
+                agent: None,
+                shell: None,
+            },
+            tab: None,
+        })? {
+            ReplyOk::TabTree(tab) => Ok(*tab),
+            other => bail!("the server answered TabCreate with {other:?}"),
+        }
+    })?;
     report(
         format!("%{pane}"),
         json!({ "tab": tab.id.to_string(), "pane": pane }),
@@ -3027,6 +3054,52 @@ mod tests {
         )
         .expect("a routed cwd is the remote machine's to resolve");
         assert_eq!(backend.runs.len(), 1, "the routed run must still happen");
+    }
+
+    /// Filing a spawned pane can fail, and the pane must not survive it.
+    ///
+    /// Every verb that adds a pane spawns it first and files it second — the
+    /// seed carries the daemon's own pane id, so there is no other order. A
+    /// refusal in the gap used to end the command with a shell running that no
+    /// tree referenced: invisible to `tty7 ls`, visible only to `pane ls
+    /// --all`, and collectable only by `pane close --orphans`.
+    #[test]
+    fn a_pane_that_cannot_be_filed_does_not_outlive_the_command() {
+        // tab new: spawn, then TabCreate refuses.
+        let mut backend = mock();
+        backend.fail_nth_control = Some(1); // 0 is the MachineGet that resolves the workspace
+        let err = execute(
+            cli(&["tty7", "tab", "new", "api"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect_err("the tab was refused");
+        assert_eq!(backend.spawned.len(), 1, "the pane was already spawned");
+        assert_eq!(
+            backend.killed.len(),
+            1,
+            "and has to be hung up again: {err}"
+        );
+
+        // new <path>: spawn, then TabCreate refuses — and the workspace this
+        // command made along the way goes too, rather than staying empty.
+        let mut backend = mock();
+        backend
+            .replies
+            .push_back(ReplyOk::WorkspaceTree(Box::default()));
+        backend.fail_nth_control = Some(1);
+        let err = execute(cli(&["tty7", "new"]), &Context::default(), &mut backend)
+            .expect_err("the first tab was refused");
+        assert_eq!(backend.spawned.len(), 1, "the pane was already spawned");
+        assert_eq!(backend.killed.len(), 1, "and is hung up again: {err}");
+        assert!(
+            backend
+                .control_calls
+                .iter()
+                .any(|c| matches!(c, ControlRequest::WorkspaceRemove { .. })),
+            "the empty workspace is taken back too: {:?}",
+            backend.control_calls
+        );
     }
 
     /// A ratio the split cannot use is refused before a pane is spawned.
