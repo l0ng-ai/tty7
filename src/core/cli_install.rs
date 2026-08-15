@@ -730,12 +730,8 @@ mod unix_tests {
         std::fs::write(p, b"#!/bin/sh\n").unwrap();
     }
 
-    fn tmpdir(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("tty7-cli-install-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn tmpdir(tag: &str) -> crate::testutil::TempRoot {
+        crate::testutil::temp_root(&format!("cli-install-{tag}"))
     }
 
     #[test]
@@ -754,7 +750,10 @@ mod unix_tests {
     #[test]
     fn an_unrelated_binary_named_tty7_is_left_alone() {
         let dir = tmpdir("occupied");
-        let bin = tmpdir("occupied-src").join("tty7");
+        // Bound rather than chained: the guard removes the directory when it
+        // drops, and a temporary would drop before bin was used.
+        let occupied_src_dir = tmpdir("occupied-src");
+        let bin = occupied_src_dir.join("tty7");
         touch(&bin);
         // Someone's own build, installed by hand.
         touch(&dir.join("tty7"));
@@ -769,8 +768,14 @@ mod unix_tests {
     #[test]
     fn our_own_link_is_recognised_and_then_repointed_on_upgrade() {
         let dir = tmpdir("relink");
-        let v1 = tmpdir("relink-v1").join("tty7");
-        let v2 = tmpdir("relink-v2").join("tty7");
+        // Bound rather than chained: the guard removes the directory when it
+        // drops, and a temporary would drop before v1 was used.
+        let relink_v1_dir = tmpdir("relink-v1");
+        let v1 = relink_v1_dir.join("tty7");
+        // Bound rather than chained: the guard removes the directory when it
+        // drops, and a temporary would drop before v2 was used.
+        let relink_v2_dir = tmpdir("relink-v2");
+        let v2 = relink_v2_dir.join("tty7");
         touch(&v1);
         touch(&v2);
 
@@ -789,9 +794,15 @@ mod unix_tests {
     #[test]
     fn a_link_aimed_somewhere_deliberate_is_not_hijacked() {
         let dir = tmpdir("deliberate");
-        let bin = tmpdir("deliberate-src").join("tty7");
+        // Bound rather than chained: the guard removes the directory when it
+        // drops, and a temporary would drop before bin was used.
+        let deliberate_src_dir = tmpdir("deliberate-src");
+        let bin = deliberate_src_dir.join("tty7");
         touch(&bin);
-        let elsewhere = tmpdir("deliberate-other").join("my-terminal");
+        // Bound rather than chained: the guard removes the directory when it
+        // drops, and a temporary would drop before elsewhere was used.
+        let deliberate_other_dir = tmpdir("deliberate-other");
+        let elsewhere = deliberate_other_dir.join("my-terminal");
         touch(&elsewhere);
         std::os::unix::fs::symlink(&elsewhere, dir.join("tty7")).unwrap();
 
@@ -804,8 +815,14 @@ mod unix_tests {
     #[test]
     fn a_copy_we_made_stays_ours_after_the_user_moves_off_the_appimage() {
         let dir = tmpdir("appimage-migrate");
-        let v1 = tmpdir("appimage-mount-1").join("tty7");
-        let v2 = tmpdir("appimage-mount-2").join("tty7");
+        // Bound rather than chained: the guard removes the directory when it
+        // drops, and a temporary would drop before v1 was used.
+        let appimage_mount_1_dir = tmpdir("appimage-mount-1");
+        let v1 = appimage_mount_1_dir.join("tty7");
+        // Bound rather than chained: the guard removes the directory when it
+        // drops, and a temporary would drop before v2 was used.
+        let appimage_mount_2_dir = tmpdir("appimage-mount-2");
+        let v2 = appimage_mount_2_dir.join("tty7");
         touch(&v1);
         std::fs::write(&v2, b"#!/bin/sh\n# a later build\n").unwrap();
 
@@ -846,7 +863,10 @@ mod unix_tests {
     fn an_occupied_directory_does_not_end_the_search() {
         let taken = tmpdir("scan-taken");
         let free = tmpdir("scan-free");
-        let bin = tmpdir("scan-src").join("tty7");
+        // Bound rather than chained: the guard removes the directory when it
+        // drops, and a temporary would drop before bin was used.
+        let scan_src_dir = tmpdir("scan-src");
+        let bin = scan_src_dir.join("tty7");
         touch(&bin);
         touch(&taken.join("tty7"));
 
@@ -869,11 +889,11 @@ mod unix_tests {
         touch(&early.join("tty7"));
         touch(&ours.join("tty7"));
 
-        let path = vec![early.clone(), ours.clone()];
+        let path = vec![early.to_path_buf(), ours.to_path_buf()];
         assert_eq!(first_cli_on(&path), Some(early.join("tty7")));
         // Our own directory first: no shadow.
         assert_eq!(
-            first_cli_on(&[ours.clone(), early.clone()]),
+            first_cli_on(&[ours.to_path_buf(), early.to_path_buf()]),
             Some(ours.join("tty7"))
         );
 
@@ -881,7 +901,7 @@ mod unix_tests {
         let dangling = tmpdir("shadow-dangling");
         std::os::unix::fs::symlink(dangling.join("gone"), dangling.join("tty7")).unwrap();
         assert_eq!(
-            first_cli_on(&[dangling, ours.clone()]),
+            first_cli_on(&[dangling.to_path_buf(), ours.to_path_buf()]),
             Some(ours.join("tty7"))
         );
     }

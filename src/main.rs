@@ -6,6 +6,8 @@
 mod core;
 mod daemon;
 mod terminal;
+#[cfg(test)]
+mod testutil;
 mod ui;
 
 use crate::core::config::Config;

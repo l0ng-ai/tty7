@@ -9802,9 +9802,7 @@ mod gpui_tests {
 
     #[gpui::test]
     fn insert_newline_action_extends_the_line_and_enter_submits_it(cx: &mut TestAppContext) {
-        let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        crate::core::config::set_config_dir(dir);
+        crate::core::config::pin_test_config_dir();
 
         let (window, mut daemon) = harness(cx);
         prompt_ready(&window, cx, &mut daemon);
