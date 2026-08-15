@@ -573,7 +573,15 @@ impl NewTabMenu {
     fn build(&self, menu: PopupMenu, window: &Window) -> PopupMenu {
         // Whatever [`MENU_H`] asks for, a menu still has to fit the window it
         // hangs off — on a short one the list gives way, not the window.
-        let ceiling = MENU_H.min(window.window_bounds().get_bounds().size.height * 0.8);
+        //
+        // Measured off the viewport, not `window_bounds()`: that one answers
+        // "how should this window be reopened after it is closed", so on macOS
+        // a fullscreen window reports the small bounds it would restore to,
+        // not the screen it currently fills. A terminal spends much of its
+        // life fullscreen, and reading that would cap the menu at 80% of a
+        // window nobody is looking at — putting back the scrollbar and the
+        // cut-off `Local` this whole change is here to remove.
+        let ceiling = MENU_H.min(window.viewport_size().height * 0.8);
         let mut menu = menu
             .min_w(px(240.))
             // A menu is a list of names, not a place to read a full address.
@@ -633,13 +641,14 @@ impl NewTabMenu {
         for (id, name, endpoint) in &self.hosts {
             let (id, name, endpoint) = (*id, name.clone(), endpoint.clone());
             let app = self.app.clone();
-            let row = if endpoint.is_empty() {
-                PopupMenuItem::new(name.clone())
-            } else {
-                PopupMenuItem::element(move |_window, cx| {
-                    menu_row(name.clone(), endpoint.clone(), cx)
-                })
-            };
+            // Every host row is a custom element, note or not: a plain item
+            // renders its label as bare text with nothing to elide against,
+            // and a host saved on its address alone is *named* `user@host:port`
+            // — the longest string in the menu, on the row least able to cut
+            // it. [`menu_row`] drops the right half when there is no note.
+            let row = PopupMenuItem::element(move |_window, cx| {
+                menu_row(name.clone(), endpoint.clone(), cx)
+            });
             menu = menu.item(row.on_click(move |_, window, cx| {
                 let at = SpawnWhere::from_modifiers(window.modifiers());
                 if let Some(app) = app.upgrade() {
@@ -721,21 +730,28 @@ fn menu_hosts(
 /// and elides first, and the name takes everything left over. Sized the other
 /// way round (name growing from nothing, endpoint at its natural width) a long
 /// address squeezes the name down to `..` and the row names nothing at all.
+///
+/// An empty note drops the right half entirely rather than leaving a zero-width
+/// child to hold the `gap_3` open — the name is then free to use the full row,
+/// still eliding at the panel edge.
 fn menu_row(label: SharedString, note: SharedString, cx: &gpui::App) -> impl IntoElement + use<> {
+    let muted = cx.theme().muted_foreground;
     h_flex()
         .w_full()
         .items_center()
         .justify_between()
         .gap_3()
         .child(div().flex_1().min_w_0().truncate().child(label))
-        .child(
-            div()
-                .flex_shrink_0()
-                .max_w(relative(0.5))
-                .truncate()
-                .text_color(cx.theme().muted_foreground)
-                .child(note),
-        )
+        .when(!note.is_empty(), |this| {
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .max_w(relative(0.5))
+                    .truncate()
+                    .text_color(muted)
+                    .child(note),
+            )
+        })
 }
 
 /// The words behind the status dot's colour.
