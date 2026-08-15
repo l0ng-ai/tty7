@@ -3303,7 +3303,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.2"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#e48db6d4eb49528958cb70983f9cde6478930a28"
+source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#00c9a7d3927f461ed35725a64b4eaac2a4ecd23b"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3386,7 +3386,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-assets"
 version = "0.5.1"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#e48db6d4eb49528958cb70983f9cde6478930a28"
+source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#00c9a7d3927f461ed35725a64b4eaac2a4ecd23b"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3400,7 +3400,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#e48db6d4eb49528958cb70983f9cde6478930a28"
+source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#00c9a7d3927f461ed35725a64b4eaac2a4ecd23b"
 dependencies = [
  "proc-macro2",
  "quote",
