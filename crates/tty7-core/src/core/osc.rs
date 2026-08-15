@@ -100,6 +100,9 @@ impl OscTokenizer {
         }
     }
 
+    /// Whether the identifier accumulated so far can still become one of `ids`.
+    /// Before the first `;` it is a prefix being built up; once the `;` arrives
+    /// it must match exactly.
     fn identifier_could_match(&self) -> bool {
         match self.buf.iter().position(|&b| b == b';') {
             Some(pos) => self.ids.iter().any(|&id| id == &self.buf[..pos]),

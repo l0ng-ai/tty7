@@ -2867,6 +2867,12 @@ fn foreground_cwd(
             return None;
         }
         let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+        // A process whose directory was removed under it (`rm -rf` from another
+        // pane, `git clean`) reads back as `<path> (deleted)` — the kernel's own
+        // annotation, not a path. Harmless while this was only a `List` fallback;
+        // now that the reading is broadcast, it would send every new tab and
+        // split to a directory that cannot be opened. An unstat-able reading is
+        // therefore no reading, and the shell pid gets its turn.
         cwd.is_dir().then_some(cwd)
     };
     pty_foreground_pgid(master)

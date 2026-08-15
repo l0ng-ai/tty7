@@ -139,6 +139,14 @@ pub enum PaneRoute {
 }
 
 impl PaneRoute {
+    /// The route a pane of `workspace` takes; [`PaneRoute::Local`] when the pane
+    /// belongs to no remote workspace.
+    ///
+    /// Infallible on purpose: the callers that need a route most are the ones
+    /// with nowhere to put an error (a close, a restore probe), and for those
+    /// [`PaneRoute::Unroutable`] is the safe answer rather than the local
+    /// daemon. The reason still surfaces — at connect time, from the one place
+    /// that has somewhere to report it.
     pub fn for_workspace(workspace: Option<&PaneWorkspace>) -> PaneRoute {
         match workspace {
             None => PaneRoute::Local,

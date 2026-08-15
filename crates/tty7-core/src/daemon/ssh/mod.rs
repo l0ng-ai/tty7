@@ -68,6 +68,10 @@ pub(crate) struct SshManager {
     runtime: tokio::runtime::Runtime,
     conns: Mutex<HashMap<ConnectionKey, ConnSlot>>,
     forwards: SshForwardRegistry,
+    /// Memoized remote shell-integration probes, keyed like connections. A
+    /// present `None` means "probed, nothing to inject" — cached just as firmly
+    /// as a hit so an unintegrable host isn't re-probed on every new tab. See
+    /// [`SshManager::remote_bootstrap`].
     probes: Mutex<HashMap<ConnectionKey, Option<(remote::RemoteShell, String)>>>,
 }
 

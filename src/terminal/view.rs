@@ -34,6 +34,13 @@ use crate::daemon::protocol::{RemoteContext, ShellSpec};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use unicode_segmentation::UnicodeSegmentation as _;
 
+/// Inset (px) between the terminal-surface edge and the cell grid. The prompt
+/// editor and the floating completion / history menus are absolutely positioned
+/// over the grid, so they must offset their grid-aligned origin by the same
+/// amount the surface padding insets the grid. The surface container in
+/// `TerminalView::render` applies these same two constants as its `.px()/.py()`,
+/// which is what keeps the two in step — they are the single source of truth
+/// for that inset, so an overlay that hardcodes its own number will drift.
 const GRID_PAD_X: f32 = 8.;
 const GRID_PAD_Y: f32 = 4.;
 
