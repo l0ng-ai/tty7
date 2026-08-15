@@ -1,7 +1,7 @@
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Axis, Bounds, Context, FontWeight, MouseButton,
     MouseDownEvent, Pixels, SharedString, Window, canvas, deferred, div, ease_out_quint,
-    linear_color_stop, linear_gradient, prelude::*, px,
+    linear_color_stop, linear_gradient, prelude::*, px, relative,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::Input;
@@ -513,6 +513,19 @@ pub(crate) fn chrome_tile_sized(
 /// closes the section is where the rest are.
 const MENU_HOSTS: usize = 6;
 
+/// How wide the New Tab menu is allowed to get.
+const MENU_W: Pixels = px(360.);
+
+/// How tall, before it starts scrolling.
+///
+/// Enough for the menu's own full hand — the nine shells a stock macOS box
+/// reports, both headings, [`MENU_HOSTS`] hosts and the two rows that close the
+/// list, at the 26px a row occupies — so the shape everyone actually sees
+/// arrives whole. Past that (a pile of custom shells) it scrolls, and it is
+/// capped again against the window in [`NewTabMenu::build`], since a menu taller
+/// than what it hangs off is worse than one that scrolls.
+const MENU_H: Pixels = px(560.);
+
 /// What the row closing the SSH section types into the palette for you.
 ///
 /// Every saved host is a palette command titled `SSH: {name}`
@@ -557,14 +570,28 @@ struct NewTabMenu {
 }
 
 impl NewTabMenu {
-    fn build(&self, menu: PopupMenu) -> PopupMenu {
+    fn build(&self, menu: PopupMenu, window: &Window) -> PopupMenu {
+        // Whatever [`MENU_H`] asks for, a menu still has to fit the window it
+        // hangs off — on a short one the list gives way, not the window.
+        let ceiling = MENU_H.min(window.window_bounds().get_bounds().size.height * 0.8);
         let mut menu = menu
             .min_w(px(240.))
+            // A menu is a list of names, not a place to read a full address.
+            // Left to itself the panel widens to its longest row — one saved
+            // host with a descriptive name and a long `user@host` drags every
+            // other row out with it and the menu stops looking like chrome.
+            .max_w(MENU_W)
             // Shells are whatever this machine has plus whatever the user
             // added by hand, so the row count has no ceiling. Past the height
             // of the window an un-scrollable menu simply loses its last rows —
             // and the last rows here are the SSH section.
             .scrollable(true)
+            // Only the overflow case should scroll, and the default ceiling is
+            // too low to tell the two apart: a stock macOS box has nine shells,
+            // which with both headings, the hosts and the two closing rows
+            // already runs past `PopupMenu`'s built-in 450px. The menu would
+            // arrive scrolled on every machine, with `Local` cut off above.
+            .max_h(ceiling)
             .item(PopupMenuItem::label(t(L10nKey::TabMenuLocalShells)));
         for (label, spec) in &self.shells {
             let spec = spec.clone();
@@ -645,12 +672,13 @@ impl NewTabMenu {
         }));
 
         // The one place ⌥ is spelled out. Nothing else in the app teaches it,
-        // and a modifier nobody is told about is a feature nobody has.
-        menu.item(PopupMenuItem::separator())
-            .item(PopupMenuItem::label(t_fmt(
-                L10nKey::TabMenuSplitHint,
-                &[("key", split_modifier())],
-            )))
+        // and a modifier nobody is told about is a feature nobody has. No rule
+        // above it: a separator divides two lists of things to pick, and this
+        // is a footnote about the list it follows, not a section of its own.
+        menu.item(PopupMenuItem::label(t_fmt(
+            L10nKey::TabMenuSplitHint,
+            &[("key", split_modifier())],
+        )))
     }
 }
 
@@ -686,9 +714,13 @@ fn menu_hosts(
 
 /// A menu row that names a thing on the left and says what it is on the right.
 ///
-/// Both halves are cut rather than allowed to push: a menu is 500px wide at
-/// the most, and a descriptive host name next to a long `user@host:port` will
-/// ask for more than that. The name keeps whatever the endpoint leaves.
+/// Both halves are cut rather than allowed to push: the panel stops at
+/// [`MENU_W`], and a descriptive host name next to a long `user@host:port`
+/// asks for more than that. Which half gives way is the whole point — the name
+/// is what the reader is picking by, so the endpoint is capped at half the row
+/// and elides first, and the name takes everything left over. Sized the other
+/// way round (name growing from nothing, endpoint at its natural width) a long
+/// address squeezes the name down to `..` and the row names nothing at all.
 fn menu_row(label: SharedString, note: SharedString, cx: &gpui::App) -> impl IntoElement + use<> {
     h_flex()
         .w_full()
@@ -698,7 +730,8 @@ fn menu_row(label: SharedString, note: SharedString, cx: &gpui::App) -> impl Int
         .child(div().flex_1().min_w_0().truncate().child(label))
         .child(
             div()
-                .min_w_0()
+                .flex_shrink_0()
+                .max_w(relative(0.5))
                 .truncate()
                 .text_color(cx.theme().muted_foreground)
                 .child(note),
@@ -1235,11 +1268,13 @@ impl Tty7App {
             .tooltip(chord_hint(t(L10nKey::AppMenuNewTab), "NewTab", cx))
             // Built when the menu opens, not when the strip draws: this
             // closure runs once per press, and again after each dismissal.
-            .dropdown_menu(move |menu, _window, cx| {
+            .dropdown_menu(move |menu, window, cx| {
                 let Some(this) = app.upgrade() else {
                     return menu;
                 };
-                this.read(cx).new_tab_menu_rows(app.clone(), cx).build(menu)
+                this.read(cx)
+                    .new_tab_menu_rows(app.clone(), cx)
+                    .build(menu, window)
             })
     }
 
