@@ -1387,13 +1387,25 @@ impl Tty7App {
                 })
             })
         else {
+            log::warn!(
+                "workspace {:?} is closing with no pane left to address it, so its \
+                 forwards cannot be torn down; any it opened stay bound until the \
+                 daemon exits",
+                self.workspace
+            );
             return;
         };
         cx.background_executor()
             .spawn(async move {
-                let left = route.teardown();
-                if !left.is_empty() {
-                    log::warn!("{} forwards survived a workspace teardown", left.len());
+                match route.teardown() {
+                    None => log::warn!(
+                        "a workspace teardown could not be delivered; its forwards \
+                         stay bound until the daemon exits"
+                    ),
+                    Some(left) if !left.is_empty() => {
+                        log::warn!("{} forwards survived a workspace teardown", left.len())
+                    }
+                    Some(_) => {}
                 }
             })
             .detach();
@@ -6751,12 +6763,19 @@ impl ForwardRoute {
         Self::forwards(crate::terminal::RemoteTerminal::on_workspace(req))
     }
 
-    pub(crate) fn teardown(&self) -> Vec<crate::daemon::protocol::ManagedForward> {
-        let Some(req) = self.workspace_op(crate::daemon::protocol::WorkspaceOp::TeardownForwards)
-        else {
-            return Vec::new();
-        };
-        Self::forwards(crate::terminal::RemoteTerminal::on_workspace(req)).unwrap_or_default()
+    /// `None` when the teardown never happened — the route could not be
+    /// addressed at all, or the daemon did not answer. `Some` means the far
+    /// side acted, and the list is what it still holds.
+    ///
+    /// The distinction from `forwards` matters more here than on any read
+    /// path. A workspace teardown is the last chance to release forwards that
+    /// the daemon otherwise keeps bound for the rest of its life: nothing
+    /// daemon-side reaps a workspace's forwards, unlike a pane's, which
+    /// `DaemonPane::drop` always takes down. Answering `Vec::new()` for "never
+    /// asked" made every one of those leaks read as a clean teardown.
+    pub(crate) fn teardown(&self) -> Option<Vec<crate::daemon::protocol::ManagedForward>> {
+        let req = self.workspace_op(crate::daemon::protocol::WorkspaceOp::TeardownForwards)?;
+        Self::forwards(crate::terminal::RemoteTerminal::on_workspace(req))
     }
 
     pub(crate) fn remove(
@@ -8368,11 +8387,47 @@ mod window_drag_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseReason, TERMINAL_MIN_W, TabAgentSession, clear_window_override_values, close_prompt,
-        join_shell_args, leaf_shares_the_window_daemon, mru_order, pane_free_for,
+        CloseReason, ForwardRoute, TERMINAL_MIN_W, TabAgentSession, clear_window_override_values,
+        close_prompt, join_shell_args, leaf_shares_the_window_daemon, mru_order, pane_free_for,
         parse_ssh_connect_input, parse_ssh_option_words, side_panel_max, split_shell_args,
         wd_path_saveable,
     };
+
+    /// A teardown that was never delivered must not answer the way a teardown
+    /// that found nothing left answers.
+    ///
+    /// Nothing daemon-side reaps a workspace's forwards — only this request
+    /// does — so "could not ask" is the case that leaks bound ports, and it
+    /// used to come back as `Vec::new()`, i.e. indistinguishable from a clean
+    /// teardown. Both routes here fail before any I/O, so neither needs a
+    /// daemon to answer.
+    #[test]
+    fn an_undeliverable_workspace_teardown_is_not_an_empty_list() {
+        let unaddressable = ForwardRoute {
+            pane_id: 1,
+            workspace: None,
+        };
+        assert!(
+            unaddressable.teardown().is_none(),
+            "a route with no workspace never asked, so it cannot report nothing left"
+        );
+
+        let no_spec = ForwardRoute {
+            pane_id: 1,
+            workspace: Some(crate::terminal::PaneWorkspace {
+                workspace: crate::core::session::WorkspaceId::new(),
+                target: crate::core::session::RemoteTarget::Alias {
+                    alias: "somewhere".to_string(),
+                },
+                spec: None,
+                resize_echo: false,
+            }),
+        };
+        assert!(
+            no_spec.teardown().is_none(),
+            "a workspace with no ssh spec cannot be addressed either"
+        );
+    }
 
     const SIDEBAR_MIN: f32 = crate::ui::tab_sidebar::MIN_SIDEBAR_WIDTH;
     const PANEL_MIN: f32 = crate::ui::right_panel::MIN_WIDTH;
