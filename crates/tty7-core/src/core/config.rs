@@ -129,7 +129,6 @@ pub struct Config {
     /// the chrome was drawn at, so an existing config renders unchanged.
     #[serde(default = "default_ui_font_size")]
     pub ui_font_size: f32,
-    pub theme: String,
     pub theme_preset: String,
     pub theme_follow_system: bool,
     pub theme_preset_light: String,
@@ -530,7 +529,6 @@ impl Default for Config {
             font_size: 15.0,
             line_height: 1.4,
             ui_font_size: default_ui_font_size(),
-            theme: "light".to_string(),
             theme_preset: "light".to_string(),
             theme_follow_system: false,
             theme_preset_light: "light".to_string(),
@@ -1241,6 +1239,29 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.dim_inactive_panes);
+    }
+
+    /// `theme` was the theme id before `theme_preset` replaced it, and it went
+    /// on being written into every config.json for a month after nothing read
+    /// it. Dropping the field must not make those files unreadable — the
+    /// struct takes no `deny_unknown_fields`, so the stale key is ignored and
+    /// the rest of the config loads. It is not migrated: by the time it was
+    /// removed, no build in the wild still consulted it.
+    #[test]
+    fn a_config_still_carrying_the_retired_theme_key_loads() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"theme":"dracula","theme_preset":"one_light","font_size":18.0}"#,
+        )
+        .expect("a config with the retired key must still parse");
+        assert_eq!(cfg.theme_preset, "one_light");
+        assert_eq!(cfg.font_size, 18.0);
+
+        // And the key is gone from what tty7 writes back, so the file stops
+        // carrying a setting that has not meant anything since July.
+        let json = serde_json::to_string(&Config::default()).unwrap();
+        let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert!(!map.contains_key("theme"), "{json}");
+        assert!(map.contains_key("theme_preset"));
     }
 
     #[test]
