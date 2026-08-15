@@ -95,13 +95,26 @@ fn log_path() -> Option<PathBuf> {
     crate::core::config::config_path("tty7.log")
 }
 
+/// Time of day, UTC, and said so.
+///
+/// The `Z` is the whole point of this being a function worth a comment: the
+/// stamp is seconds since the epoch folded into a day, which is UTC, and a
+/// reader east or west of it sees a number hours away from their own clock
+/// with nothing to explain it. On this machine the log said 23:00 while the
+/// clock said 07:00, and the line looked eight hours stale rather than
+/// eight hours offset.
+///
+/// No date, deliberately: turning epoch seconds into a civil date is calendar
+/// arithmetic this crate would have to hand-roll, and the cost of getting it
+/// subtly wrong is worse than the cost of a reader checking the file's mtime
+/// for the day. `server logs` prints the path directly above the lines.
 fn timestamp() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let secs = now.as_secs() % 86_400;
     format!(
-        "{:02}:{:02}:{:02}.{:03}",
+        "{:02}:{:02}:{:02}.{:03}Z",
         secs / 3600,
         (secs % 3600) / 60,
         secs % 60,
@@ -129,6 +142,18 @@ mod tests {
         assert_eq!(parse_level("Warn"), LevelFilter::Warn);
         assert_eq!(parse_level("warning"), LevelFilter::Warn);
         assert_eq!(parse_level("TRACE"), LevelFilter::Trace);
+    }
+
+    /// A stamp with no zone reads as local time, and this one is not.
+    #[test]
+    fn the_stamp_says_which_clock_it_is_on() {
+        let stamp = timestamp();
+        assert!(
+            stamp.ends_with('Z'),
+            "a UTC time of day has to say so, or it reads as hours wrong: {stamp}"
+        );
+        let hh: u32 = stamp[..2].parse().expect("hours lead the stamp");
+        assert!(hh < 24, "{stamp}");
     }
 
     #[test]
