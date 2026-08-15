@@ -202,7 +202,6 @@ pub struct ImportReport {
     pub files_read: usize,
 }
 
-#[allow(dead_code)]
 pub fn import_profiles() -> Vec<ImportedProfile> {
     let Some(home) = home_dir() else {
         return Vec::new();
@@ -424,7 +423,6 @@ pub struct MergeStats {
     pub unchanged: usize,
 }
 
-#[allow(dead_code)]
 pub fn merge_imported(
     existing: &mut Vec<ManagedProfile>,
     imported: Vec<ImportedProfile>,
@@ -486,7 +484,6 @@ pub fn merge_imported(
     stats
 }
 
-#[allow(dead_code)]
 fn jump_alias(raw: &str) -> Option<String> {
     let first = raw.split(',').next().unwrap_or(raw).trim();
     if first.is_empty() {

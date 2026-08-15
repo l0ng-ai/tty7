@@ -531,7 +531,6 @@ pub enum SshTestNeed {
 }
 
 impl NativeSshSpec {
-    #[allow(dead_code)]
     pub fn without_secrets(&self) -> NativeSshSpec {
         NativeSshSpec {
             password: None,

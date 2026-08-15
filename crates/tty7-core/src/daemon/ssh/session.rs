@@ -160,7 +160,6 @@ pub async fn drive_channel(
 
 pub struct SshConnection {
     handle: tokio::sync::Mutex<russh::client::Handle<super::handler::ClientHandler>>,
-    #[allow(dead_code)]
     key: ConnectionKey,
     remote_forwards: RemoteForwardTable,
     alive: AtomicBool,
@@ -182,7 +181,6 @@ impl SshConnection {
         })
     }
 
-    #[allow(dead_code)]
     pub fn key(&self) -> &ConnectionKey {
         &self.key
     }

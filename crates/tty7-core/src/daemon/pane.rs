@@ -1670,7 +1670,6 @@ impl DaemonPane {
         }
     }
 
-    #[allow(dead_code)]
     pub fn ssh_connection(&self) -> Option<Arc<crate::daemon::ssh::SshConnection>> {
         match &self.backend {
             PaneBackend::NativeSsh(b) => b.connection.lock().unwrap().upgrade(),
