@@ -570,6 +570,11 @@ fn run_with(registry: Arc<Registry>) -> anyhow::Result<()> {
     let listener = transport::bind()?;
     log::info!("daemon listening on {}", transport::endpoint_display());
 
+    // Beside the endpoint above, for the same reason: a daemon that was killed
+    // could not tidy up after itself, and a later startup is the only thing
+    // that ever comes back to the temp directory to look.
+    crate::daemon::shell_integration::sweep_dead_zdotdirs();
+
     #[cfg(windows)]
     report_conpty_host();
 

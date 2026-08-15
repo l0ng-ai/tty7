@@ -141,6 +141,16 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// The endpoint is derived from the config dir, and `set_config_dir` is
+    /// first-wins, so every test in this process binds the *same* socket path.
+    /// Two that bind therefore cannot run at once — this is the lock that
+    /// keeps them apart, as `singleton`'s tests do for the same reason.
+    static ENDPOINT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn hold_endpoint() -> std::sync::MutexGuard<'static, ()> {
+        ENDPOINT.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn pin_config_dir() {
         let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();
@@ -149,6 +159,7 @@ mod tests {
 
     #[test]
     fn endpoint_lifecycle_bind_connect_and_clear() {
+        let _endpoint = hold_endpoint();
         pin_config_dir();
         remove_stale_endpoint();
         assert!(!endpoint_exists(), "no endpoint before bind");
@@ -177,6 +188,7 @@ mod tests {
     /// was load-bearing, and a `kill -9` then left the daemon unable to start.
     #[test]
     fn a_leftover_socket_file_blocks_the_next_bind_until_it_is_removed() {
+        let _endpoint = hold_endpoint();
         pin_config_dir();
         remove_stale_endpoint();
 

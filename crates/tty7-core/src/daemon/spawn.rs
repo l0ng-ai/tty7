@@ -174,17 +174,17 @@ fn recorded_daemon_is_dead_with(recorded: Option<u32>, alive: impl Fn(u32) -> bo
 }
 
 #[cfg(windows)]
-fn daemon_process_alive(pid: u32) -> bool {
+pub(crate) fn daemon_process_alive(pid: u32) -> bool {
     !crate::daemon::winproc::wait_for_exit(pid, Duration::ZERO)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn daemon_process_alive(pid: u32) -> bool {
+pub(crate) fn daemon_process_alive(pid: u32) -> bool {
     process_alive(pid as libc::pid_t)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-fn daemon_process_alive(_pid: u32) -> bool {
+pub(crate) fn daemon_process_alive(_pid: u32) -> bool {
     // No cheap liveness query on this platform: assume alive, which keeps
     // the TCP probe as the authority.
     true
@@ -571,9 +571,20 @@ fn signal_and_await_exit(pid: libc::pid_t, sig: libc::c_int, timeout: Duration) 
     wait_for_recorded_exit(pid as u32, timeout)
 }
 
+/// Whether `pid` names a process that exists.
+///
+/// Signal 0 asks the question without delivering anything, and there are two
+/// ways it can answer yes: `0` for a process we may signal, and `EPERM` for
+/// one that exists but belongs to someone else. Reading only the first —
+/// `kill(pid, 0) == 0` — calls another user's running process dead, which is
+/// the wrong direction for every caller here: one decides whether to clean up
+/// after a daemon, and the other whether to delete a directory it owns.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn process_alive(pid: libc::pid_t) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().kind() == std::io::ErrorKind::PermissionDenied
 }
 
 #[cfg(windows)]

@@ -831,6 +831,59 @@ fn throwaway_dir(prefix: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
+/// The `<pid>` a throwaway directory's name carries, if it carries one.
+///
+/// `tty7-zdotdir-<pid>-<seq>`, so the owner is the text between the prefix and
+/// the first `-` after it. Anything else — the `tty7-zdotdir-wsl` a WSL route
+/// writes inside its own directory, a name someone else happened to choose —
+/// answers `None` and is left alone.
+fn zdotdir_owner(name: &str) -> Option<u32> {
+    name.strip_prefix(ZDOTDIR_PREFIX)?
+        .split_once('-')?
+        .0
+        .parse()
+        .ok()
+}
+
+/// Remove the throwaway ZDOTDIRs left by daemons that are gone.
+///
+/// A pane's teardown removes its own, so a daemon that stops cleanly leaves
+/// none. One that is killed never runs that teardown, and its directories then
+/// stay in the temp dir for good — four files each, and nothing ever looks at
+/// them again. This machine had 3,850 of them from months of crashes and
+/// `kill -9`s, which is the same shape as the socket a killed daemon used to
+/// leave: litter only a later startup is in a position to notice.
+///
+/// Deliberately timid. It removes a directory only when the name is exactly
+/// ours, the pid parses, and that pid is not a live process — so a running
+/// daemon's directories are never touched, and a pid that has since been
+/// reused just means the directory waits for another day. On a platform with
+/// no cheap liveness query [`daemon_process_alive`](crate::daemon::spawn::daemon_process_alive)
+/// answers "alive", and this does nothing at all.
+pub(crate) fn sweep_dead_zdotdirs() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let mine = std::process::id();
+    let mut swept = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(owner) = zdotdir_owner(name) else {
+            continue;
+        };
+        if owner == mine || crate::daemon::spawn::daemon_process_alive(owner) {
+            continue;
+        }
+        if entry.path().is_dir() && std::fs::remove_dir_all(entry.path()).is_ok() {
+            swept += 1;
+        }
+    }
+    if swept > 0 {
+        log::info!("swept {swept} shell-integration directories left by daemons that are gone");
+    }
+}
+
 fn setup_zsh() -> Option<Injection> {
     let dir = throwaway_dir(ZDOTDIR_PREFIX)?;
     for (name, contents) in zsh_redirectors() {
@@ -2762,6 +2815,40 @@ mod tests {
             .map(|p| u16::from_le_bytes([p[0], p[1]]))
             .collect();
         String::from_utf16(&units).expect("valid UTF-16LE")
+    }
+
+    /// Only our own directories, and only ones with a pid in them.
+    ///
+    /// The sweep deletes, so what it declines to match matters more than what
+    /// it matches. `tty7-zdotdir-wsl` is a real name this module writes, and a
+    /// pid is the one thing that makes a directory safe to judge.
+    #[test]
+    fn only_a_named_pid_makes_a_directory_ours_to_sweep() {
+        assert_eq!(zdotdir_owner("tty7-zdotdir-4242-0"), Some(4242));
+        assert_eq!(zdotdir_owner("tty7-zdotdir-1-17"), Some(1));
+        assert_eq!(zdotdir_owner("tty7-zdotdir-wsl"), None);
+        assert_eq!(zdotdir_owner("tty7-zdotdir-4242"), None, "no seq, no pid");
+        assert_eq!(zdotdir_owner("tty7-covtest-4242-0"), None, "another prefix");
+        assert_eq!(zdotdir_owner("something-else"), None);
+        assert_eq!(zdotdir_owner(".hidden"), None);
+    }
+
+    /// A live owner's directory is left where it is.
+    #[test]
+    fn the_sweep_spares_a_living_daemon() {
+        let mine =
+            std::env::temp_dir().join(format!("{ZDOTDIR_PREFIX}{}-sweeptest", std::process::id()));
+        let init = std::env::temp_dir().join(format!("{ZDOTDIR_PREFIX}1-sweeptest"));
+        std::fs::create_dir_all(&mine).expect("one owned by this very process");
+        std::fs::create_dir_all(&init).expect("one owned by pid 1, which outlives everything");
+
+        sweep_dead_zdotdirs();
+
+        let (kept_mine, kept_init) = (mine.is_dir(), init.is_dir());
+        std::fs::remove_dir_all(&mine).ok();
+        std::fs::remove_dir_all(&init).ok();
+        assert!(kept_mine, "the sweep took the running process's own");
+        assert!(kept_init, "the sweep took a live owner's");
     }
 
     #[test]
