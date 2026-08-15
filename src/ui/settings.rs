@@ -7733,8 +7733,14 @@ mod tests {
         assert_eq!(entry.section.profile_label(), "settings:agents");
     }
 
+    /// Spot-checks that these titles are *in* the index, spelled the way the
+    /// rows spell them. It does not walk the rows, so it cannot say that every
+    /// row has an entry — a setting added without one is unsearchable and
+    /// nothing here notices. Walking them would mean rendering the page: the
+    /// rows are built inline rather than from a table, so there is no list to
+    /// compare against.
     #[test]
-    fn index_titles_match_rendered_row_labels() {
+    fn indexed_titles_are_spelled_the_way_the_rows_spell_them() {
         for title in [
             "Start in",
             "Restore last layout",
