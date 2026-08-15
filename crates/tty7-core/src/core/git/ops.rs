@@ -494,7 +494,31 @@ impl GitOp {
                 remote: Some(remote),
                 ..
             } => self.check_rev("remote", remote)?,
-            _ => {}
+
+            // Spelled out rather than left to a `_`, because the default of a
+            // catch-all here is "nothing to check": an op added later carrying
+            // a ref or a remote would reach git unvalidated, and the `Push`
+            // arm above is what that costs — a `:` in the wrong place is a
+            // second refspec, and `:foo` on its own deletes remote `foo`.
+            //
+            // Each of these has nothing left to check by the time it arrives.
+            // The four staging verbs and both discards carry only paths, and
+            // the pathspec check above has already run over every one of them.
+            // `Commit` and `Stash` carry a message, which git reads as the
+            // value of `-m` wherever it starts — `check_branch` rejects a
+            // leading `-` precisely because a *ref* does not get that. `Pull`
+            // names its mode with an enum, and this `Fetch` is the one with no
+            // remote to name.
+            GitOp::Stage { .. }
+            | GitOp::StageAll
+            | GitOp::Unstage { .. }
+            | GitOp::UnstageAll
+            | GitOp::DiscardWorktree { .. }
+            | GitOp::DiscardUntracked { .. }
+            | GitOp::Commit { .. }
+            | GitOp::Stash { .. }
+            | GitOp::Pull { .. }
+            | GitOp::Fetch { .. } => {}
         }
         Ok(())
     }
