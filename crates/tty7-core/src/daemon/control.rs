@@ -592,7 +592,7 @@ pub fn observe_event(host: crate::host::HostId, event: ControlEvent) {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlHello {
     pub control_version: u32,
     pub workspace: Option<String>,
@@ -600,6 +600,22 @@ pub struct ControlHello {
     pub client_hostname: String,
     #[serde(default)]
     pub gui: bool,
+}
+
+/// The token a client proves itself with, kept out of the formatter for the
+/// same reason [`Attachment`](crate::core::machine::Attachment)'s is: this
+/// file already logs protocol values with `{event:?}`, and a hello is the one
+/// message that carries the means to pose as its sender.
+impl std::fmt::Debug for ControlHello {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlHello")
+            .field("control_version", &self.control_version)
+            .field("workspace", &self.workspace)
+            .field("client_token", &"<redacted>")
+            .field("client_hostname", &self.client_hostname)
+            .field("gui", &self.gui)
+            .finish()
+    }
 }
 
 impl ControlHello {
@@ -1323,6 +1339,23 @@ mod tests {
     use crate::daemon::protocol::MAX_FRAME;
     use std::io::Cursor;
     use std::path::PathBuf;
+
+    /// This module logs protocol values with `{event:?}`, and the hello is the
+    /// message carrying the means to pose as its sender.
+    #[test]
+    fn a_hello_redacts_its_client_token_in_debug_output() {
+        let hello = ControlHello::host_rpc("tok-that-proves-identity", "laptop");
+        let dbg = format!("{hello:?}");
+        assert!(
+            !dbg.contains("tok-that-proves-identity"),
+            "token leaked: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"));
+        assert!(
+            dbg.contains("laptop"),
+            "the hostname is not a secret: {dbg}"
+        );
+    }
 
     fn meta() -> Meta {
         Meta {

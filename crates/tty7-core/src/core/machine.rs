@@ -70,7 +70,7 @@ pub struct Machine {
     pub panes: Vec<PaneRecord>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     /// Proof that a connection is the one holding the workspace, so it stays
     /// between that connection and the server: it goes over no wire and onto
@@ -82,6 +82,28 @@ pub struct Attachment {
     pub hostname: String,
     #[serde(default)]
     pub since: u64,
+}
+
+/// `#[serde(skip)]` keeps the token off the wire and off disk; this keeps it
+/// out of the log file, which is also disk.
+///
+/// `Attachment` is reached by the derived `Debug` of everything above it —
+/// `Workspace`, `Machine`, the whole tree — so one `{tree:?}` in a log line
+/// would print every live token.
+/// `#[serde(skip)]` keeps the token off the wire and off disk; this keeps it
+/// out of the log file, which is also disk.
+///
+/// `Attachment` is reached by the derived `Debug` of everything above it —
+/// `Workspace`, `Machine`, the whole tree — so one `{tree:?}` in a log line
+/// would print every live token.
+impl std::fmt::Debug for Attachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Attachment")
+            .field("token", &"<redacted>")
+            .field("hostname", &self.hostname)
+            .field("since", &self.since)
+            .finish()
+    }
 }
 
 impl Attachment {
@@ -1606,6 +1628,32 @@ mod tests {
     fn store() -> (Arc<MachineStore>, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
         (MachineStore::open(dir.path().join(MACHINE_FILE)), dir)
+    }
+
+    /// The token is "proof that a connection is the one holding the
+    /// workspace", so a log line is as bad a place for it as the wire or the
+    /// tree file. Checked through a `Workspace` too, since that is how it is
+    /// actually reached — nothing formats a bare `Attachment`.
+    #[test]
+    fn an_attachment_token_is_redacted_in_debug_output() {
+        let att = Attachment::new("s3cr3t-capability", "laptop");
+        let dbg = format!("{att:?}");
+        assert!(!dbg.contains("s3cr3t-capability"), "token leaked: {dbg}");
+        assert!(dbg.contains("<redacted>"));
+        assert!(
+            dbg.contains("laptop"),
+            "the hostname is not a secret: {dbg}"
+        );
+
+        let ws = Workspace {
+            attachment: Some(att),
+            ..Workspace::default()
+        };
+        let dbg = format!("{ws:?}");
+        assert!(
+            !dbg.contains("s3cr3t-capability"),
+            "token leaked through the workspace that holds it: {dbg}"
+        );
     }
 
     #[test]

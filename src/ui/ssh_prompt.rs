@@ -73,7 +73,7 @@ pub(crate) enum PromptModel {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum KeychainWrite {
     None,
     SetPassword {
@@ -94,6 +94,46 @@ pub(crate) enum KeychainWrite {
     DeleteKeyPassphrase {
         key_path: String,
     },
+}
+
+/// `secret` is the plaintext the user just typed, so it stays out of the
+/// formatter.
+///
+/// `password_submit` hands back this value and an [`AuthResponse`] carrying
+/// the very same string, and `AuthResponse` has spelled its own `Debug` out
+/// by hand to print `Secret(<redacted>)` since it was written. A derived
+/// `Debug` here left the other copy of that secret one `{:?}` away from the
+/// log file.
+impl std::fmt::Debug for KeychainWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KeychainWrite::None => f.write_str("None"),
+            KeychainWrite::SetPassword {
+                user, host, port, ..
+            } => f
+                .debug_struct("SetPassword")
+                .field("user", user)
+                .field("host", host)
+                .field("port", port)
+                .field("secret", &"<redacted>")
+                .finish(),
+            KeychainWrite::DeletePassword { user, host, port } => f
+                .debug_struct("DeletePassword")
+                .field("user", user)
+                .field("host", host)
+                .field("port", port)
+                .finish(),
+            KeychainWrite::SetKeyPassphrase { key_path, .. } => f
+                .debug_struct("SetKeyPassphrase")
+                .field("key_path", key_path)
+                .field("secret", &"<redacted>")
+                .finish(),
+            KeychainWrite::DeleteKeyPassphrase { key_path } => f
+                .debug_struct("DeleteKeyPassphrase")
+                .field("key_path", key_path)
+                .finish(),
+        }
+    }
 }
 
 impl PromptModel {
@@ -1073,6 +1113,29 @@ mod tests {
             host: "10.0.0.5".into(),
             port: 2222,
         }
+    }
+
+    /// `password_submit` returns this beside an `AuthResponse` holding the
+    /// same string, and that one has always printed `Secret(<redacted>)`.
+    /// Both copies have to be as quiet as each other.
+    #[test]
+    fn a_keychain_write_redacts_the_secret_in_debug_output() {
+        let (auth, write) =
+            password_submit("deploy", "10.0.0.5", 2222, "hunter2".into(), true, false);
+        let dbg = format!("{write:?}");
+        assert!(!dbg.contains("hunter2"), "password leaked: {dbg}");
+        assert!(dbg.contains("<redacted>"));
+        assert!(dbg.contains("deploy"), "the user is not a secret: {dbg}");
+        assert!(!format!("{auth:?}").contains("hunter2"));
+
+        let (_, write) =
+            passphrase_submit("/home/me/.ssh/id_ed25519", "topsecret".into(), true, false);
+        let dbg = format!("{write:?}");
+        assert!(!dbg.contains("topsecret"), "passphrase leaked: {dbg}");
+        assert!(
+            dbg.contains("id_ed25519"),
+            "the key path is not a secret: {dbg}"
+        );
     }
 
     #[test]
