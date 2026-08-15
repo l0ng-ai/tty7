@@ -339,7 +339,8 @@ mod macos {
                 }
                 Err(restore) => Err(format!(
                     "putting the staged app in place: {error}; \
-                     restoring the previous app: {restore}"
+                     restoring the previous app: {restore}; backup preserved at {}",
+                    backup.display()
                 )),
             };
             report(&result);
@@ -362,7 +363,11 @@ mod macos {
                         (Err(error), true)
                     }
                     Err(restore) => (
-                        Err(format!("{error}; restoring the previous app: {restore}")),
+                        Err(format!(
+                            "{error}; restoring the previous app: {restore}; \
+                             backup preserved at {}",
+                            backup.display()
+                        )),
                         false,
                     ),
                 };
