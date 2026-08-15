@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::core::cli_agent::{AGENT_EVENT_SENTINEL, CLIAgent};
 use crate::host::Host;
 
-pub const TTY7_ENV_MARKER: &str = "TTY7";
+pub(crate) const TTY7_ENV_MARKER: &str = "TTY7";
 
 const GROK_HOOK_ENV: &str = "GROK_HOOK_EVENT";
 

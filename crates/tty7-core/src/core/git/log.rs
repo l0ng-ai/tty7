@@ -18,7 +18,7 @@ use crate::host::Host;
 
 /// Full hex object id. Kept as `String` rather than `[u8; 20]` because sha256
 /// repositories exist and the extra allocation is noise next to the subject.
-pub type Oid = String;
+pub(crate) type Oid = String;
 
 /// Lane index as assigned by the layout pass — the *true* column, before the
 /// renderer folds anything past its width cap into an overflow column.
@@ -28,19 +28,19 @@ pub type Lane = u16;
 /// and never reassigned, which is what keeps a branch one colour for its whole
 /// life: a branch holds the same lane from its tip until it is merged, because
 /// the first parent inherits the lane in place and never migrates.
-pub type ColorIdx = u16;
+pub(crate) type ColorIdx = u16;
 
 pub const GRAPH_PAGE: usize = 200;
 pub const MAX_GRAPH_COMMITS: usize = 5_000;
 pub const MAX_LANES: Lane = 32;
-pub const MAX_REFS: usize = 2_000;
+pub(crate) const MAX_REFS: usize = 2_000;
 /// How many changed files one commit's detail view will hold. A vendored
 /// dependency landing in a single commit is tens of thousands of paths, and
 /// every one of them would become a row.
-pub const MAX_COMMIT_FILES: usize = 1_000;
-pub const MAX_SUBJECT_BYTES: usize = 512;
-pub const MAX_BODY_BYTES: usize = 8 * 1024;
-pub const MAX_LOG_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_COMMIT_FILES: usize = 1_000;
+pub(crate) const MAX_SUBJECT_BYTES: usize = 512;
+pub(crate) const MAX_BODY_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_LOG_BYTES: usize = 16 * 1024 * 1024;
 
 /// Record separator for `log --pretty`. Deliberately not NUL: `git log -z`
 /// already uses NUL between records, so a NUL field separator could only be
@@ -55,8 +55,8 @@ pub const MAX_LOG_BYTES: usize = 16 * 1024 * 1024;
 /// fabricate at worst a bogus row in the graph — whose `git show` then fails.
 /// Sealing that needs length-prefixed reads (`cat-file --batch`), a different
 /// data path entirely.
-pub const REC_SEP: u8 = 0x1e;
-pub const FIELD_SEP: u8 = 0x1f;
+pub(crate) const REC_SEP: u8 = 0x1e;
+pub(crate) const FIELD_SEP: u8 = 0x1f;
 
 /// A timestamp plus the author's own UTC offset, so times can be shown in the
 /// zone they were written in. Parsed from `%aI` / `%cI`.
@@ -398,12 +398,12 @@ fn row_span(row: &GraphRow) -> Lane {
 
 /// The eleven fields, in order: sha, parents, author name/email/date,
 /// committer name/email/date, decorations, subject, body.
-pub const LOG_PRETTY: &str =
+pub(crate) const LOG_PRETTY: &str =
     "--pretty=format:%x1e%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%D%x1f%s%x1f%b";
 
 const LOG_FIELDS: usize = 11;
 
-pub const REF_FORMAT: &str = "--format=%(objectname)%x1f%(refname)%x1f%(refname:short)%x1f%(upstream)%x1f%(HEAD)%x1f%(objecttype)%x1f%(*objectname)";
+pub(crate) const REF_FORMAT: &str = "--format=%(objectname)%x1f%(refname)%x1f%(refname:short)%x1f%(upstream)%x1f%(HEAD)%x1f%(objecttype)%x1f%(*objectname)";
 
 /// What [`parse_log`] read, and whether it read all of it.
 pub struct ParsedLog {

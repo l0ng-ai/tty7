@@ -47,10 +47,10 @@ use crate::daemon::protocol::WinSize;
 /// are counted, so this is "the last several screens" rather than "everything".
 /// The in-memory ring stays at its own, much larger, cap: this bound is about
 /// what is worth persisting, not what is worth keeping while running.
-pub const SNAPSHOT_CAP: usize = 256 * 1024;
+pub(crate) const SNAPSHOT_CAP: usize = 256 * 1024;
 
 /// How often the writer looks for panes whose ring has moved.
-pub const SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 const MAGIC: &[u8; 8] = b"TTY7SB\x01\x00";
 

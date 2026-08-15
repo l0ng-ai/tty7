@@ -17,18 +17,18 @@ use crate::host::Host;
 
 /// One argv can only carry so many paths before it hits `E2BIG` (~256 KiB on
 /// macOS), so a big stage is split into several calls.
-pub const MAX_PATHSPECS_PER_CALL: usize = 200;
+pub(crate) const MAX_PATHSPECS_PER_CALL: usize = 200;
 
 /// …and only so many *bytes*. The binding limit is not macOS's 256 KiB but
 /// Windows' `CreateProcess`, which caps the whole command line at 32,767
 /// UTF-16 units — 200 deep-tree paths at 200+ characters each sail past it.
 /// Sized with room for the prefix and the per-argument quoting the Windows
 /// join adds.
-pub const MAX_PATHSPEC_BYTES_PER_CALL: usize = 24 * 1024;
+pub(crate) const MAX_PATHSPEC_BYTES_PER_CALL: usize = 24 * 1024;
 
 /// Long enough for a push over a slow link. Only applied to network operations
 /// — the local path has no deadline at all.
-pub const GIT_NETWORK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
+pub(crate) const GIT_NETWORK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// How long a non-network write may take before the client stops waiting.
 ///
@@ -36,7 +36,7 @@ pub const GIT_NETWORK_DEADLINE: std::time::Duration = std::time::Duration::from_
 /// interactive query: a remote server never times a job out — it runs it to
 /// completion — so a deadline shorter than the job only *misreports* failure
 /// while the commit lands anyway, and the offered re-run doubles it.
-pub const GIT_WRITE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+pub(crate) const GIT_WRITE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// What the user stands to lose. Purely advisory data for the UI's gate.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

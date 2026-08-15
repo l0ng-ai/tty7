@@ -5,9 +5,9 @@ use crate::host::Host;
 
 pub const MAX_LINES_PER_FILE: usize = 2000;
 
-pub const MAX_TOTAL_LINES: usize = 20_000;
+pub(crate) const MAX_TOTAL_LINES: usize = 20_000;
 
-pub const MAX_FILES_WITH_HUNKS: usize = 500;
+pub(crate) const MAX_FILES_WITH_HUNKS: usize = 500;
 
 pub const AUTO_COLLAPSE_LINES: u32 = 400;
 
@@ -20,7 +20,7 @@ pub const MAX_RENDERED_FILES: usize = 300;
 pub const MAX_UNTRACKED: usize = 500;
 
 /// `-U<n>`. Git's own default, spelled out because the request carries it.
-pub const DEFAULT_CONTEXT: u32 = 3;
+pub(crate) const DEFAULT_CONTEXT: u32 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Truncation {
@@ -199,7 +199,7 @@ pub struct DiffBudget {
 
 impl DiffBudget {
     /// A whole tree at once: no single file may crowd out the rest.
-    pub const PANEL: DiffBudget = DiffBudget {
+    pub(crate) const PANEL: DiffBudget = DiffBudget {
         max_lines_per_file: MAX_LINES_PER_FILE,
         max_total_lines: MAX_TOTAL_LINES,
         max_files_with_hunks: MAX_FILES_WITH_HUNKS,

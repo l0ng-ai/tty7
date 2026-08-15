@@ -87,36 +87,36 @@ pub(crate) fn server_started() -> Instant {
     *STARTED.get_or_init(Instant::now)
 }
 
-pub const WATCH_BURST_CAP: usize = 1024;
+pub(crate) const WATCH_BURST_CAP: usize = 1024;
 
-pub const WATCH_COALESCE_WINDOW: Duration = Duration::from_millis(100);
+pub(crate) const WATCH_COALESCE_WINDOW: Duration = Duration::from_millis(100);
 
 pub mod kind {
 
-    pub const HELLO: u8 = 60;
-    pub const REQUEST: u8 = 61;
-    pub const REQUEST_BLOB: u8 = 62;
-    pub const CANCEL: u8 = 63;
+    pub(crate) const HELLO: u8 = 60;
+    pub(crate) const REQUEST: u8 = 61;
+    pub(crate) const REQUEST_BLOB: u8 = 62;
+    pub(crate) const CANCEL: u8 = 63;
 
-    pub const HELLO_OK: u8 = 60;
-    pub const RESPONSE: u8 = 61;
-    pub const RESPONSE_BLOB: u8 = 62;
-    pub const EVENT: u8 = 63;
+    pub(crate) const HELLO_OK: u8 = 60;
+    pub(crate) const RESPONSE: u8 = 61;
+    pub(crate) const RESPONSE_BLOB: u8 = 62;
+    pub(crate) const EVENT: u8 = 63;
 }
 
-pub const GIT_STREAM_CHUNK: usize = 64 * 1024;
+pub(crate) const GIT_STREAM_CHUNK: usize = 64 * 1024;
 
-pub const GIT_STREAM_CHUNK_MAX: usize = crate::daemon::protocol::MAX_FRAME / 2;
+pub(crate) const GIT_STREAM_CHUNK_MAX: usize = crate::daemon::protocol::MAX_FRAME / 2;
 
-pub const GIT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const GIT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub const MAX_CONCURRENT_GIT_STREAMS: usize = 8;
+pub(crate) const MAX_CONCURRENT_GIT_STREAMS: usize = 8;
 
 pub mod feature {
     pub const CONTROL: &str = "control";
-    pub const HOST_RPC: &str = "host-rpc";
+    pub(crate) const HOST_RPC: &str = "host-rpc";
     pub const MACHINE_TREE: &str = "machine-tree";
-    pub const STDIO_BRIDGE: &str = "stdio-bridge";
+    pub(crate) const STDIO_BRIDGE: &str = "stdio-bridge";
 }
 
 pub use crate::host::{Entry, MTime, Meta, Output, SearchHit};
@@ -571,7 +571,7 @@ pub enum ControlEvent {
     LayoutResync,
 }
 
-pub type EventObserver = Arc<dyn Fn(crate::host::HostId, ControlEvent) + Send + Sync>;
+pub(crate) type EventObserver = Arc<dyn Fn(crate::host::HostId, ControlEvent) + Send + Sync>;
 
 static EVENT_OBSERVER: Mutex<Option<EventObserver>> = Mutex::new(None);
 
@@ -913,11 +913,11 @@ impl ControlServerMsg {
     }
 }
 
-pub const KEEPALIVE_PING_INTERVAL: Duration = Duration::from_secs(15);
-pub const KEEPALIVE_IDLE_BEFORE_PING: Duration = Duration::from_secs(30);
-pub const KEEPALIVE_DEAD_AFTER: Duration = Duration::from_secs(45);
+pub(crate) const KEEPALIVE_PING_INTERVAL: Duration = Duration::from_secs(15);
+pub(crate) const KEEPALIVE_IDLE_BEFORE_PING: Duration = Duration::from_secs(30);
+pub(crate) const KEEPALIVE_DEAD_AFTER: Duration = Duration::from_secs(45);
 
-pub const CLOSE_GRACE: Duration = Duration::from_millis(500);
+pub(crate) const CLOSE_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ControlResponse {

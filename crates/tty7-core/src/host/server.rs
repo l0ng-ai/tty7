@@ -16,13 +16,13 @@ use crate::daemon::duplex::{Duplex, Halves};
 use crate::daemon::protocol::PaneInfo;
 use crate::host::{Host, SearchHit, SharedHost, WatchSub};
 
-pub const MAX_WORKERS: usize = 64;
+pub(crate) const MAX_WORKERS: usize = 64;
 
-pub const WORKER_LINGER: Duration = Duration::from_secs(10);
+pub(crate) const WORKER_LINGER: Duration = Duration::from_secs(10);
 
-pub const MAX_QUEUED: usize = 1024;
+pub(crate) const MAX_QUEUED: usize = 1024;
 
-pub const LAYOUT_EVENT_QUEUE: usize = 1024;
+pub(crate) const LAYOUT_EVENT_QUEUE: usize = 1024;
 
 pub trait PaneDirectory: Send + Sync {
     fn pane_count(&self) -> u64;
@@ -1366,7 +1366,7 @@ fn worker(inner: Arc<PoolInner>) {
     }
 }
 
-pub const CONTROL_SOCK_ENV: &str = "TTY7_CONTROL_SOCK";
+pub(crate) const CONTROL_SOCK_ENV: &str = "TTY7_CONTROL_SOCK";
 
 #[cfg(unix)]
 mod sock {
@@ -1543,7 +1543,7 @@ mod wsock {
     use crate::daemon::transport;
     use std::net::TcpListener;
 
-    pub const CONTROL_PORT_FILE: &str = "control.port";
+    pub(crate) const CONTROL_PORT_FILE: &str = "control.port";
 
     pub(crate) fn control_endpoint_path() -> io::Result<PathBuf> {
         transport::port_path_named(CONTROL_PORT_FILE).ok_or_else(|| {

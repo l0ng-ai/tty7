@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
-pub const SUPPORTED_GUI_LANGUAGES: &[&str] = &["en", "zh-CN", "ja-JP"];
+pub(crate) const SUPPORTED_GUI_LANGUAGES: &[&str] = &["en", "zh-CN", "ja-JP"];
 
 #[derive(Default, Clone, Eq, PartialEq, Hash)]
 pub struct FontFeatures(pub Arc<Vec<(String, u32)>>);

@@ -49,7 +49,7 @@ use crate::daemon::protocol::WinSize;
 
 /// The flag that tells a starting daemon it is the far side of a handoff. Its
 /// value is the descriptor number the blob can be read from.
-pub const HANDOFF_FLAG: &str = "--handoff";
+pub(crate) const HANDOFF_FLAG: &str = "--handoff";
 
 /// The descriptor holding this daemon's claim to be *the* daemon.
 ///
@@ -63,7 +63,7 @@ pub const HANDOFF_FLAG: &str = "--handoff";
 /// lost its panes is a bad afternoon; a daemon that exits because it cannot
 /// tell that the lock in its way is its own leaves the machine with no daemon
 /// at all.
-pub const SEAT_FLAG: &str = "--handoff-seat";
+pub(crate) const SEAT_FLAG: &str = "--handoff-seat";
 
 #[derive(Serialize, Deserialize)]
 struct Manifest {

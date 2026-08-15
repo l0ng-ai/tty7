@@ -221,7 +221,7 @@ pub struct LineSplitter {
     dropped: usize,
 }
 
-pub const MAX_LINE: usize = 1024 * 1024;
+pub(crate) const MAX_LINE: usize = 1024 * 1024;
 
 impl LineSplitter {
     pub fn push(&mut self, chunk: &[u8], mut on_line: impl FnMut(&str)) {
@@ -271,7 +271,7 @@ pub struct RecordSplitter {
     dropped: usize,
 }
 
-pub const MAX_RECORD: usize = 1024 * 1024;
+pub(crate) const MAX_RECORD: usize = 1024 * 1024;
 
 impl RecordSplitter {
     pub fn new(sep: u8) -> RecordSplitter {

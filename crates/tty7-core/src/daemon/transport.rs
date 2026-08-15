@@ -14,7 +14,7 @@ mod imp_unix {
     use std::path::{Path, PathBuf};
 
     pub type Stream = UnixStream;
-    pub type Listener = UnixListener;
+    pub(crate) type Listener = UnixListener;
 
     pub(super) const MAX_SOCKET_PATH_BYTES: usize = 100;
 
@@ -259,10 +259,10 @@ mod imp_windows {
     use std::sync::OnceLock;
 
     pub type Stream = TcpStream;
-    pub type Listener = TcpListener;
+    pub(crate) type Listener = TcpListener;
 
-    pub const TOKEN_LEN: usize = 32;
-    pub type Token = [u8; TOKEN_LEN];
+    pub(crate) const TOKEN_LEN: usize = 32;
+    pub(crate) type Token = [u8; TOKEN_LEN];
 
     const PANE_PORT_FILE: &str = "daemon.port";
 

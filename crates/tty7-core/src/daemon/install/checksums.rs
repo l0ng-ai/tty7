@@ -2,7 +2,7 @@ use std::fmt;
 
 use sha2::{Digest as _, Sha256};
 
-pub type Digest = [u8; 32];
+pub(crate) type Digest = [u8; 32];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChecksumError {

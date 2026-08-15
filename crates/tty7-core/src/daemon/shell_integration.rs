@@ -1272,7 +1272,7 @@ pub fn setup(program: Option<&str>, args: &[String], has_custom_args: bool) -> O
 pub mod remote {
     use super::{FISH_INTEGRATION, bash_rcfile, shell_quote, zsh_redirectors};
 
-    pub const PROBE_COMMAND: &str = "echo __tty7_shell; echo $SHELL";
+    pub(crate) const PROBE_COMMAND: &str = "echo __tty7_shell; echo $SHELL";
 
     const PROBE_MARKER: &str = "__tty7_shell";
 

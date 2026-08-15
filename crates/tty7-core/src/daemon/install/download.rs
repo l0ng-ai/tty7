@@ -50,7 +50,7 @@ impl Default for HttpsFetcher {
 
 /// Returned when `on_progress` asked to stop. Recognised by callers so a
 /// deliberate cancel is not reported to the user as a download failure.
-pub const CANCELLED: &str = "the download was cancelled";
+pub(crate) const CANCELLED: &str = "the download was cancelled";
 
 impl HttpsFetcher {
     /// `get_with_progress` with a callback that can call the transfer off.

@@ -12,16 +12,16 @@ use crate::daemon::protocol::{NativeSshSpec, ShellSpec};
 
 pub const MACHINE_FILE: &str = "machine.json";
 
-pub const APPEARANCE_FILE: &str = "appearance.json";
+pub(crate) const APPEARANCE_FILE: &str = "appearance.json";
 
-pub const DATA_DIR_ENV: &str = "TTY7_DATA_DIR";
+pub(crate) const DATA_DIR_ENV: &str = "TTY7_DATA_DIR";
 
-pub const MAX_WORKSPACES: usize = 1024;
+pub(crate) const MAX_WORKSPACES: usize = 1024;
 
-pub const MAX_PANES: usize = 16 * 1024;
+pub(crate) const MAX_PANES: usize = 16 * 1024;
 
 #[cfg(not(test))]
-pub const FACT_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
+pub(crate) const FACT_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
 pub const FACT_FLUSH_INTERVAL: Duration = Duration::from_secs(600);

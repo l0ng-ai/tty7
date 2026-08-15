@@ -1,20 +1,20 @@
 use std::fmt;
 
-pub const ASSET_LINUX_X86_64: &str = "tty7-server-linux-x86_64-musl";
-pub const ASSET_LINUX_AARCH64: &str = "tty7-server-linux-aarch64-musl";
+pub(crate) const ASSET_LINUX_X86_64: &str = "tty7-server-linux-x86_64-musl";
+pub(crate) const ASSET_LINUX_AARCH64: &str = "tty7-server-linux-aarch64-musl";
 
 /// The macOS servers carry no libc suffix because there is nothing to choose:
 /// they link the system libSystem every macOS has, which is as portable there
 /// as static musl is on Linux. Same flat, version-free shape as the others —
 /// the tag in the download URL carries the version.
-pub const ASSET_MACOS_X86_64: &str = "tty7-server-macos-x86_64";
-pub const ASSET_MACOS_AARCH64: &str = "tty7-server-macos-aarch64";
+pub(crate) const ASSET_MACOS_X86_64: &str = "tty7-server-macos-x86_64";
+pub(crate) const ASSET_MACOS_AARCH64: &str = "tty7-server-macos-aarch64";
 
-pub const CHECKSUMS_ASSET: &str = "checksums.txt";
+pub(crate) const CHECKSUMS_ASSET: &str = "checksums.txt";
 
-pub const RELEASE_BASE: &str = "https://github.com/l0ng-ai/tty7/releases/download";
+pub(crate) const RELEASE_BASE: &str = "https://github.com/l0ng-ai/tty7/releases/download";
 
-pub const INSTALL_DIR_COMPONENTS: [&str; 4] = [".local", "share", "tty7", "bin"];
+pub(crate) const INSTALL_DIR_COMPONENTS: [&str; 4] = [".local", "share", "tty7", "bin"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsupportedTarget {

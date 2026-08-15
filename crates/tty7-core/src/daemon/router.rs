@@ -17,9 +17,9 @@ use crate::daemon::transport::Stream;
 
 pub const ROUTE_KIND: u8 = 51;
 
-pub const ROUTE_PROMPT_KIND: u8 = 52;
+pub(crate) const ROUTE_PROMPT_KIND: u8 = 52;
 
-pub const ROUTE_REPLY_KIND: u8 = 53;
+pub(crate) const ROUTE_REPLY_KIND: u8 = 53;
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(240);
 

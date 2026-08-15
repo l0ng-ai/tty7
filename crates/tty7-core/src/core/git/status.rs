@@ -306,7 +306,7 @@ pub enum RepoOperation {
 
 /// Entries past this are dropped; `total_entries` still reports the real count
 /// so the panel can say so instead of quietly showing a short list.
-pub const MAX_STATUS_ENTRIES: usize = 10_000;
+pub(crate) const MAX_STATUS_ENTRIES: usize = 10_000;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct WorkingTreeStatus {

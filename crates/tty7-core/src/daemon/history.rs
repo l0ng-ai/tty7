@@ -32,7 +32,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// The pane's own history file, as handed to the shell.
-pub const FILE_ENV: &str = "TTY7_HISTFILE";
+pub(crate) const FILE_ENV: &str = "TTY7_HISTFILE";
 
 /// Shells whose integration snippet knows what to do with [`FILE_ENV`].
 ///

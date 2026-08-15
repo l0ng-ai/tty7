@@ -11,7 +11,7 @@ use super::{
     install_confirm, shell_quote,
 };
 
-pub const WSL_EXE: &str = "wsl.exe";
+pub(crate) const WSL_EXE: &str = "wsl.exe";
 
 const MARKER: &str = "__tty7_wsl__";
 
@@ -477,9 +477,9 @@ impl RemoteOps for WslRemoteOps {
     }
 }
 
-pub const BUNDLED_DIR_ENV: &str = "TTY7_BUNDLED_SERVER_DIR";
+pub(crate) const BUNDLED_DIR_ENV: &str = "TTY7_BUNDLED_SERVER_DIR";
 
-pub const BUNDLED_SUBDIR: &str = "server";
+pub(crate) const BUNDLED_SUBDIR: &str = "server";
 
 pub(crate) fn bundled_search_dirs(exe: Option<&Path>, override_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();

@@ -116,7 +116,13 @@ fn spawn_stdio_owned(program: &str, args: &[String]) -> io::Result<ProcessStream
     Ok(ProcessStream::from_parts(child, stdin, stdout))
 }
 
-pub const DEFAULT_REMOTE_SERVER_CMD: &str = "tty7-server --stdio";
+/// The command a remote is reached with when nothing else is configured.
+///
+/// Only the router's tests name it now — the production path builds the
+/// command from the install it found — so it stands as the statement of what
+/// that default is, and the tests hold it to it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const DEFAULT_REMOTE_SERVER_CMD: &str = "tty7-server --stdio";
 
 const MAX_SOCKET_PATH_BYTES: usize = 100;
 
@@ -161,7 +167,7 @@ pub struct RemoteEnv {
 
 const ENV_MARKER: &str = "__tty7_env__";
 
-pub const REMOTE_ENV_PROBE: &str = concat!(
+pub(crate) const REMOTE_ENV_PROBE: &str = concat!(
     "sh -c 'printf \"__tty7_env__ %s\\n\" ",
     "\"sock=${TTY7_CONTROL_SOCK-}\" \"cfg=${TTY7_CONFIG_DIR-}\" ",
     "\"xdg=${XDG_RUNTIME_DIR-}\" ",
