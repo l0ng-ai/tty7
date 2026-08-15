@@ -692,6 +692,26 @@ async fn download_file(
         let _ = tokio::fs::remove_file(&temp).await;
         return Err(e);
     }
+    // The name was free when the panel picked it, and `rename` replaces
+    // whatever it lands on without a word. A transfer is not instant and
+    // `~/Downloads` is somebody else's directory too — a browser, another
+    // tool, the user — so the gap between choosing the name and arriving at
+    // it is as long as the download. `claimed_downloads` closes that gap
+    // against tty7 racing itself and can say nothing about anyone else.
+    //
+    // Refusing costs a retry, which then numbers the file the way a second
+    // download does, and the panel's promise that this "cannot lose a file"
+    // survives. Still a check before an act — nothing portable makes a rename
+    // refuse an occupied name — but it narrows the window from a whole
+    // transfer to the moment either side of this line.
+    if tokio::fs::symlink_metadata(lpath).await.is_ok() {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(format!(
+            "something else wrote {} while it was downloading; nothing was \
+             replaced — download it again for a numbered copy",
+            lpath.display()
+        ));
+    }
     if let Err(e) = tokio::fs::rename(&temp, lpath).await {
         let _ = tokio::fs::remove_file(&temp).await;
         return Err(format!("rename into {}: {e}", lpath.display()));
@@ -940,6 +960,50 @@ mod tests {
         assert!(safe_local_name("项目"));
         assert!(safe_local_name("a.tar.gz"));
         assert!(safe_local_name(".hidden"));
+    }
+
+    #[test]
+    fn an_occupied_destination_is_seen_even_when_it_leads_nowhere() {
+        // The download refuses to rename onto an occupied name, and asks
+        // `symlink_metadata` rather than `metadata` because of the last case
+        // here: `metadata` follows the link, finds nothing, and reports the
+        // name free — and the rename would then replace a symlink the user
+        // made. Pinned because the two read as interchangeable.
+        struct Scratch(PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("tty7-sftp-dest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let scratch = Scratch(dir.clone());
+
+        let occupied = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+
+        assert!(!occupied(&dir.join("absent")), "a free name is free");
+
+        std::fs::write(dir.join("file"), b"x").expect("write");
+        assert!(occupied(&dir.join("file")));
+
+        std::fs::create_dir(dir.join("subdir")).expect("mkdir");
+        assert!(occupied(&dir.join("subdir")), "a directory occupies it too");
+
+        #[cfg(unix)]
+        {
+            let dangling = dir.join("dangling");
+            std::os::unix::fs::symlink(dir.join("nothing-here"), &dangling).expect("symlink");
+            assert!(
+                occupied(&dangling),
+                "a link to nothing is still something the rename would destroy"
+            );
+            assert!(
+                std::fs::metadata(&dangling).is_err(),
+                "and `metadata` is what would have called it free"
+            );
+        }
+        drop(scratch);
     }
 
     #[test]
