@@ -174,6 +174,20 @@ mod tests {
         assert!(writer_holds(true, None, Some(now)));
         assert!(!writer_holds(true, None, Some(now - GUARD_TTL * 2)));
         assert!(!writer_holds(true, None, None));
+
+        // A guard dated in the future — the clock stepped back under it, or a
+        // filesystem answered with a skewed timestamp — has no age that can be
+        // measured, so the TTL cannot bound it. Releasing is the deliberate
+        // answer, not an oversight in `is_ok_and`: this branch exists *because*
+        // an unverifiable pid may be a recycled one, and holding on an
+        // unmeasurable age would let some unrelated long-lived process wearing
+        // that number block every spawn for as long as it runs. The cost of
+        // releasing is bounded — one install window, in a case that needs a
+        // backwards clock step to reach — and the cost of holding is not.
+        assert!(
+            !writer_holds(true, None, Some(later)),
+            "an age that cannot be measured cannot be bounded by the TTL"
+        );
     }
 
     // One test for the file lifecycle, like the pidfile's: the guard file is
