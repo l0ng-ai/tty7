@@ -139,7 +139,7 @@ impl SshManager {
     }
 
     /// Always empty: loopback forwards are not a registry of their own. A
-    /// forward `ensure_loopback` sets up is an ordinary [`ForwardEntry`] under
+    /// forward `ensure_loopback` sets up is an ordinary `ForwardEntry` under
     /// the owning pane or workspace, so the managed list is where it shows up
     /// and where it is closed from.
     ///

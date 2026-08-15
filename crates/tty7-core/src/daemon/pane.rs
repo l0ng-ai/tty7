@@ -97,6 +97,11 @@ fn apply_shell_integration(
     resolved_program: &str,
     integration: &shell_integration::Injection,
 ) {
+    // `CommandBuilder::new_default_prog()` preserves the Unix login-shell argv0
+    // shape, but portable-pty intentionally panics if argv is appended to that
+    // sentinel builder. Integrations that need argv (fish `-C`, bash `--rcfile`,
+    // PowerShell flags) must use an explicit command builder first. Env-only zsh
+    // integration keeps the default login-shell path.
     if integration.replaces_argv || (cmd.is_default_prog() && !integration.args.is_empty()) {
         *cmd = CommandBuilder::new(resolved_program);
     }
@@ -437,6 +442,9 @@ fn shell_env_path(
         .find(|candidate| is_file(candidate))
 }
 
+/// Env keys that describe our emulator's real capabilities. A user's `env` map
+/// must not override these: the answer isn't a preference, it's a fact about
+/// what the pane on the other end can decode.
 const CAPABILITY_ENV: [&str; 2] = ["TERM", "COLORTERM"];
 
 fn names_capability_env(key: &str) -> bool {
@@ -592,16 +600,32 @@ fn apply_common_command_setup(
 
 const RING_CAP: usize = 8 * 1024 * 1024;
 
+/// Cap on the ring's geometry segments. The client does a full grid reflow per
+/// replayed `Size`, and drag-resizing a pane whose TUI redraws on every
+/// SIGWINCH cuts a segment per column change — tiny segments that never fill
+/// `RING_CAP`, so over a long-lived pane's life they would accumulate without
+/// bound and attach would degrade linearly. Past the cap the two *oldest*
+/// segments merge (the older one's bytes replay at the newer one's geometry):
+/// like the byte cap, precision degrades from the oldest scrollback first.
 const MAX_RING_SEGMENTS: usize = 64;
 const REMOTE_CONTEXT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 pub(crate) struct OutputGate {
+    /// Bytes handed to the writer channel but not yet written out. Atomic —
+    /// `add` runs per PTY read (~100k/s at full drain) and `sub` per socket
+    /// write, so the hot paths must not take a lock. Signed so a late
+    /// decrement racing a `reset` only drifts permissive (negative) instead
+    /// of underflowing.
     queued: AtomicI64,
     park: Mutex<()>,
     drained: Condvar,
 }
 
 impl OutputGate {
+    /// Max Output bytes in flight before the PTY reader pauses. Sized to
+    /// swallow a big burst whole (a 10+ MB `cat`, a build log dump) so the
+    /// PTY drains at device speed and the client parses in its own time —
+    /// while still bounding what a nonstop flood (`yes`) can pin per pane.
     const HIGH_WATER: i64 = 16 * 1024 * 1024;
     const MAX_WAIT: Duration = Duration::from_secs(2);
 
@@ -635,6 +659,10 @@ impl OutputGate {
         self.queued.load(Ordering::Relaxed)
     }
 
+    /// Park the caller (the PTY reader; it must hold no locks) while the
+    /// backlog is at/over the high-water mark, up to [`Self::MAX_WAIT`].
+    /// Lock-free when the backlog is below the mark — the common case, checked
+    /// before every PTY read.
     fn wait_below_high_water(&self) {
         if self.queued.load(Ordering::Relaxed) < Self::HIGH_WATER {
             return;
@@ -868,7 +896,15 @@ enum PaneBackend {
 
 struct ForegroundProbes {
     remote: Box<dyn Fn() -> Option<RemoteContext> + Send>,
+    /// Outer `None` means this backend has no process-table view of the PTY
+    /// foreground at all (native SSH; Windows, where ConPTY has no foreground
+    /// process group) — "no opinion", never applied, so it can't wipe an agent
+    /// identified another way. Inner `None` is a reading: nothing is running.
     agent: Box<dyn Fn() -> Option<Option<(crate::core::cli_agent::CLIAgent, Vec<String>)>> + Send>,
+    /// The PTY owner's cwd straight from the process table. `None` means "no
+    /// reading" (native SSH, Windows, or a process we can't inspect), never
+    /// "no cwd" — see [`apply_probed_cwd`] for how a reading is reconciled with
+    /// the shell's own OSC 7 report.
     cwd: Box<dyn Fn() -> Option<PathBuf> + Send>,
 }
 
