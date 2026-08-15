@@ -339,23 +339,29 @@ smol = "2"
 #     still needed.
 #
 #   - THIS REV IS OLDER THAN THE UPSTREAM SECURITY FIXES. It is dated
-#     2026-07-14 and branched before v0.62.3, so it does not contain:
-#       v0.62.4 (2026-07-22) GHSA-cqjc-rmpq-xprq, GHSA-g9hv-x236-4qp3,
-#                            GHSA-5xvq-cp9x-6p6r — malformed PTY request,
-#                            malformed Curve25519 KEX packet, zero Curve25519
-#                            key. Upstream describes them as a client crashing
-#                            its own session, but "fix mpint encoding and
-#                            validate curve25519 keys" (a7fc1eb) is in key
-#                            exchange, which a *client* also runs against
-#                            whatever server it dials — worth assessing rather
-#                            than assuming it is server-only.
-#       v0.62.5 (2026-07-31) GHSA-m65r-rprj-r5rg — channel IDs not validated.
-#       v0.62.6 (2026-08-11) GHSA-g6xm-f9xp-qq35 — max_auth_attempts.
+#     2026-07-14 and branched before v0.62.3, so it carries none of these —
+#     matched against the GitHub advisory database, which names two of them as
+#     reachable by a *client* before authentication:
 #
-#     The last two are described as server-side and tty7 runs no SSH server, so
-#     they most likely do not apply; the KEX ones are the reason this note
-#     exists. Until #738 ships in a release, the fix is to rebase the fork onto
-#     v0.62.6 (or later) and move this rev forward.
+#       GHSA-5xvq-cp9x-6p6r  Pre-auth remote panic via all-zero Curve25519 peer
+#                            public value (encode_mpint OOB).   patched 0.62.4
+#       GHSA-g9hv-x236-4qp3  Client wrong-length X25519 `clone_from_slice`
+#                            panic (pre-auth DoS).              patched 0.62.4
+#       GHSA-cqjc-rmpq-xprq  Post-auth remote panic via pty-req with more than
+#                            130 terminal-mode records.         patched 0.62.4
+#       GHSA-m65r-rprj-r5rg  Channel-scoped server callbacks reachable without
+#                            an open channel.                   patched 0.62.5
+#       GHSA-g6xm-f9xp-qq35  Server-side max_auth_attempts not enforced.
+#                                                               patched 0.62.6
+#
+#     The first two are the ones that matter here: tty7 is the client, and the
+#     peer is whatever server a profile dials — or anything sitting in front of
+#     it, since this lands before authentication. The last two are server-side
+#     and tty7 runs no SSH server. Not reproduced against tty7; the ranges and
+#     the fork's position are verified, the exploitability is upstream's word.
+#
+#     Until #738 ships in a release, the fix is to rebase the fork onto v0.62.6
+#     (or later) and move this rev forward.
 russh = { git = "https://github.com/ayamir/russh", rev = "0d1d073350ed823069252075cbf3db9672d5b490" }
 
 [workspace.lints.clippy]
