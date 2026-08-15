@@ -7371,13 +7371,18 @@ mod tests {
     }
 
     #[test]
-    fn file_command_template_keeps_path_only_token_and_unknown_placeholder() {
+    fn file_command_template_drops_a_token_that_shares_the_path_with_an_absent_value() {
         let argv = expand_file_command_template(
             "code --goto {path}:{line} {other}",
             Path::new("/tmp/foo.rs"),
             None,
             None,
         );
+        // The rule is "drop the whole token", and this is its sharp edge: a
+        // token holding the path *and* an absent value takes the path with
+        // it, so a `code --goto file:line` config opens no file at all when
+        // the link carries no line number. `{other}` survives because an
+        // unknown placeholder expands to itself rather than to nothing.
         assert_eq!(argv, vec!["code", "--goto", "{other}"]);
     }
 
