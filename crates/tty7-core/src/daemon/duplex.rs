@@ -66,15 +66,16 @@ pub struct StdioDuplex {
 #[cfg(unix)]
 impl StdioDuplex {
     pub fn take() -> io::Result<StdioDuplex> {
-        use std::os::fd::FromRawFd as _;
-
+        // Each descriptor is owned from the moment it exists, so the four `?`s
+        // below cannot strand one: a `redirect_to_null` that fails after both
+        // `dup`s used to return without closing either.
         let stdin_fd = dup_fd(libc::STDIN_FILENO)?;
         let stdout_fd = dup_fd(libc::STDOUT_FILENO)?;
         redirect_to_null(libc::STDIN_FILENO)?;
         redirect_to_null(libc::STDOUT_FILENO)?;
 
-        let read = unsafe { std::fs::File::from_raw_fd(stdin_fd) };
-        let write = unsafe { std::fs::File::from_raw_fd(stdout_fd) };
+        let read = std::fs::File::from(stdin_fd);
+        let write = std::fs::File::from(stdout_fd);
         Ok(StdioDuplex {
             read,
             write: StdioWriter {
@@ -147,13 +148,18 @@ impl LinkShutdown for StdioWriter {
     }
 }
 
+/// Hands back an *owned* descriptor rather than a raw one, so that a caller
+/// which gives up between one `dup` and the next drops it instead of leaking
+/// it. `dup` returns a fresh descriptor that nothing else holds, which is
+/// exactly the contract `OwnedFd` wants.
 #[cfg(unix)]
-fn dup_fd(fd: libc::c_int) -> io::Result<libc::c_int> {
+fn dup_fd(fd: libc::c_int) -> io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd as _;
     let new = unsafe { libc::dup(fd) };
     if new < 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(new)
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(new) })
 }
 
 #[cfg(unix)]
