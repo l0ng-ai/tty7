@@ -195,6 +195,10 @@ pub struct TerminalView {
     pub marked_text: String,
     last_mouse_cell: Option<(usize, usize)>,
     last_hover_cell: Option<(usize, usize)>,
+    /// Whether the platform modifier (⌘ on macOS) is currently held, as reported
+    /// by the window-level modifier listener. Mouse events can lag or omit this
+    /// state while a mouse-tracking TUI is foreground, so link hover must not
+    /// depend solely on each move event's modifier snapshot.
     link_modifier_down: bool,
     /// What this pane's host has said about paths printed in it, for panes
     /// that cannot answer that from the local filesystem. Empty and unused on
@@ -211,12 +215,25 @@ pub struct TerminalView {
     /// deferred callback, one turn after the click — can still see the
     /// modifiers the user actually held.
     context_menu_allowed: bool,
+    /// Fractional line debt carried between wheel events on the quantized
+    /// paths (mouse-tracking reports, alternate-scroll arrow keys), where the
+    /// app consumes whole lines. Trackpads report pixel deltas well under a
+    /// line per event; rounding each one separately discards them all and slow
+    /// scrolling never moves. Accumulate instead and spend whole lines as they
+    /// build up.
     scroll_debt: f32,
     /// Lines travelled under the zoom modifier that have not yet added up to a
     /// font-size step. Kept apart from [`scroll_debt`](Self::scroll_debt) so
     /// letting go of the modifier mid-gesture cannot hand the leftovers of one
     /// to the other.
     zoom_debt: f32,
+    /// Sub-line part of the scrollback position, in lines (`0.0..1.0`). The
+    /// emulator's `display_offset` holds the whole lines; together they form a
+    /// continuous, pixel-smooth scroll position. The element shifts the whole
+    /// grid down by `scroll_frac * line_height` at paint and fills the strip
+    /// above with the next older row, so trackpad scrolling moves every frame
+    /// instead of snapping line by line. Reset to 0 whenever something jumps
+    /// the view (typing, submit, clear).
     pub(super) scroll_frac: f32,
     /// The scrollback bar's end of the grid: where it thinks the viewport is,
     /// and where it has asked for it to go. See [`super::scrollbar`].
@@ -278,6 +295,11 @@ pub struct TerminalView {
     /// silence, and only one of them is normal (#585). Dismissed by the next
     /// keystroke, like the integration notice.
     remote_completion_notice: Option<String>,
+    /// Monotonic tag bumped every time a completion session opens or closes.
+    /// Dynamic generators run on background threads and land their results here
+    /// via `cx.spawn`; each task captures the generation it was spawned under and
+    /// its result is dropped unless it still matches — so output from a session
+    /// the user has since closed (or replaced) can never leak into a later menu.
     completion_generation: u64,
     editor_handoff: Option<u64>,
     editor_handoff_interrupt_seq: Option<u64>,
