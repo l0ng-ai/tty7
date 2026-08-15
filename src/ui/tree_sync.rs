@@ -1464,32 +1464,44 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
                 Err((op, e)) => {
                     log::warn!("tree operation {op:?} failed: {e}; re-pulling the tree");
                     if let Some(pane) = seeded_pane(&op) {
-                        // Known leak, and this line is how anyone hitting it
-                        // finds out. `TabCreate`, `PaneSplit` and `PaneReplace`
-                        // each name a pane this window has *already* spawned —
-                        // the shell is running on the machine before the tree
-                        // is told about it. When the op is refused the tree
-                        // never takes the pane, the re-pull below leaves the
-                        // window without the tab it was for, and the shell goes
-                        // on running with nothing referencing it.
+                        // One of the ways this window strands a shell, and the
+                        // only one that announces itself. `TabCreate`,
+                        // `PaneSplit` and `PaneReplace` each name a pane this
+                        // window has *already* spawned — the shell is running
+                        // on the machine before the tree is told about it. When
+                        // the op is refused the tree never takes the pane, the
+                        // re-pull below leaves the window without the tab it
+                        // was for, and the shell goes on running with nothing
+                        // referencing it.
                         //
-                        // Reproducible: with a window open, `tty7 tab new` and
-                        // `tty7 tab close` back to back. The GUI restores the
-                        // new tab, finds its pane already hung up, spawns a
-                        // replacement, and `PaneReplace` is refused because the
-                        // tab is gone. Four cycles in five leak; leave half a
-                        // second between the two and none do.
+                        // It is the *minority* path, which is worth knowing
+                        // before anyone tries to fix the leak here. Driving 70
+                        // ordinary tree operations from the CLI with a window
+                        // open left 10 orphaned shells; this line accounted for
+                        // 3 of them. The rest were spawned for a layout the
+                        // window then threw away without ever sending an op —
+                        // "dropping a superseded hydration", and a delta that
+                        // "did not apply cleanly" and forced a re-pull. Nothing
+                        // is refused on those paths, so nothing reaches here.
+                        // The same 70 operations against the daemon with no GUI
+                        // attached leak nothing at all.
                         //
-                        // Not swept here on purpose. At this point the window
-                        // still holds a view for the pane and only drops it
-                        // once the re-pull lands, so hanging it up here would
-                        // kill a pane that is still on screen. The sweep
-                        // belongs after the pull settles, and has to test the
-                        // whole machine tree rather than this workspace's
-                        // mirror — a pane of another workspace on the same host
-                        // is not this window's to end. Until then
-                        // `tty7 pane close --orphans` is the recovery, and
-                        // `tty7 pane ls --all` already points at it.
+                        // So the sweep cannot live here even setting aside the
+                        // timing: at this point the window still holds a view
+                        // for the pane and only drops it once the re-pull
+                        // lands, so hanging it up here would kill a pane that
+                        // is still on screen — and it would miss two paths out
+                        // of three anyway. It belongs after a hydration
+                        // settles, phrased against the end state rather than
+                        // against any one failure: a pane this window spawned
+                        // that neither the machine tree nor any live view holds
+                        // is stranded however it got there. It has to test the
+                        // whole tree rather than this workspace's mirror, since
+                        // a pane of another workspace on the same host is not
+                        // this window's to end.
+                        //
+                        // Until then `tty7 pane close --orphans` is the
+                        // recovery, and `tty7 pane ls --all` points at it.
                         log::warn!(
                             "pane {pane} was spawned for that operation and nothing holds it \
                              now; it will show up in `tty7 pane ls --all` as an orphan"
