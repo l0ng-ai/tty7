@@ -33,6 +33,33 @@ pub fn ordinal_of(machine: &Machine, tab: TabId) -> Option<u64> {
         .map(|e| e.ordinal)
 }
 
+/// What to say when nothing on this machine answers to `text`.
+///
+/// A workspace is addressed by bare name or id, so [`crate::address::parse_workspace`]
+/// takes any word at all — including one wearing another address's sigil.
+/// `tab ls @7` is the one that bites: `@7` is a well-formed tab address typed
+/// into a *tab* command, and its siblings `tab close` and `tab rename` both
+/// answer "no tab @7", so answering "no workspace named '@7'" reads as though
+/// the sigil were the problem rather than the slot.
+///
+/// Only reached once the lookup has already failed, so a workspace someone
+/// really did name `@7` is found before this and never sees the hint.
+fn nothing_named(text: &str) -> String {
+    let hint = match text.chars().next() {
+        Some('@') => Some(
+            "a tab address, not a workspace — `tty7 pane ls` shows which workspace holds a tab",
+        ),
+        Some('%') => {
+            Some("a pane address, not a workspace — `tty7 pane ls` maps panes to workspaces")
+        }
+        _ => None,
+    };
+    match hint {
+        Some(hint) => format!("'{text}' is {hint}"),
+        None => format!("no workspace named '{text}' — `tty7 ls` lists them"),
+    }
+}
+
 pub fn workspace<'m>(machine: &'m Machine, addr: &WorkspaceAddress) -> Result<&'m Workspace> {
     match addr {
         WorkspaceAddress::Id(id) => machine
@@ -65,7 +92,7 @@ pub fn workspace<'m>(machine: &'m Machine, addr: &WorkspaceAddress) -> Result<&'
                 .collect();
             match by_prefix.as_slice() {
                 [one] => Ok(one),
-                [] => bail!("no workspace named '{text}' — `tty7 ls` lists them"),
+                [] => bail!("{}", nothing_named(text)),
                 many => bail!(
                     "id prefix '{text}' matches {} workspaces — use more characters",
                     many.len()
@@ -81,7 +108,7 @@ pub fn tab(machine: &Machine, addr: &TabAddress) -> Result<(WorkspaceId, TabId)>
             .into_iter()
             .find(|e| e.ordinal == *n)
             .map(|e| (e.workspace, e.tab))
-            .ok_or_else(|| anyhow::anyhow!("no tab @{n} — `tty7 ls` shows the @ numbers")),
+            .ok_or_else(|| anyhow::anyhow!("no tab @{n} — `tty7 pane ls` shows the @ numbers")),
         TabAddress::Id(text) => {
             for ws in &machine.workspaces {
                 for tab in &ws.tabs {
@@ -181,6 +208,42 @@ mod tests {
             err.contains("tty7 ls"),
             "the error points at the listing: {err}"
         );
+    }
+
+    /// `tab ls @7` put a well-formed tab address in the workspace slot, and got
+    /// back "no workspace named '@7'" — as if the sigil were wrong rather than
+    /// the slot, while its own siblings `tab close @7` and `tab rename @7`
+    /// answer "no tab @7".
+    #[test]
+    fn an_address_wearing_another_sigil_is_named_as_one() {
+        let m = two_workspace_machine();
+
+        let tabbish = workspace(&m, &parse_workspace("@7"))
+            .unwrap_err()
+            .to_string();
+        assert!(tabbish.contains("tab address"), "{tabbish}");
+        assert!(
+            !tabbish.contains("no workspace named"),
+            "the name is not what is wrong with it: {tabbish}"
+        );
+
+        let panish = workspace(&m, &parse_workspace("%7"))
+            .unwrap_err()
+            .to_string();
+        assert!(panish.contains("pane address"), "{panish}");
+
+        // Both point at `pane ls`, the one listing carrying panes, their tabs'
+        // @ numbers and the workspace holding them. `tty7 ls` is workspaces
+        // only — it has no @ column, so it cannot answer "which holds @7".
+        for said in [&tabbish, &panish] {
+            assert!(said.contains("tty7 pane ls"), "{said}");
+        }
+
+        // A plain word is still a plain miss.
+        let plain = workspace(&m, &parse_workspace("nope"))
+            .unwrap_err()
+            .to_string();
+        assert!(plain.contains("no workspace named 'nope'"), "{plain}");
     }
 
     #[test]
