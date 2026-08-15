@@ -81,6 +81,16 @@ its code. The command must come after `--`.
 JSON: `{"pane","exit","exit_code_known","kept"}`, printed **after** the streamed
 output. The combined stream is not valid JSON — read the last line.
 
+`exit_code_known` is false when the pane ended without leaving a status behind
+for the server to read in the short window it waits. `run` then exits 1 as a
+stand-in and says so on stderr, and this flag is how a caller tells that 1 from
+a command that really did exit 1.
+
+A command **killed by a signal** also reports `exit: 1` — not the `128+N` a
+shell would give — but with `exit_code_known: true`, because a status was read.
+So `run` cannot distinguish a command the OOM killer took from one that exited
+1 on its own; read the pane's output if that difference matters.
+
 ### `tty7 new [PATH] [--open]`
 
 Creates a workspace plus its first tab and shell, at `PATH` if given. Prints the
