@@ -6,7 +6,7 @@
 
 use gpui::{Context, PromptLevel, Window};
 
-use tty7_core::core::git::ops::{Destructive, GitOp, PullMode};
+use tty7_core::core::git::ops::{Destructive, GitOp, PullMode, ResetMode};
 
 use crate::core::config::DiffViewMode;
 use crate::ui::app::Tty7App;
@@ -482,7 +482,21 @@ fn confirm_question(op: &GitOp, loss: Destructive) -> String {
     // Its own question, not the discard one: a hard reset to an older commit
     // drops commits off the branch, and a dialog that says "Discard every
     // change in this repository?" never mentions the part that hurts.
-    if matches!(op, GitOp::Reset { .. }) {
+    //
+    // The mode is matched, not just the op. Only a hard reset can arrive here
+    // — `GitOp::destructive` calls soft and mixed harmless, because they keep
+    // the worktree — and this question is written for that one mode:
+    // "uncommitted changes are discarded" is simply untrue of the other two.
+    // Naming the mode keeps the text and the operation from drifting apart if
+    // that classification ever widens, instead of resting on an invariant
+    // decided in another crate.
+    if matches!(
+        op,
+        GitOp::Reset {
+            mode: ResetMode::Hard,
+            ..
+        }
+    ) {
         return t(L10nKey::ScmResetHardConfirm).to_string();
     }
     match loss {
@@ -497,6 +511,8 @@ fn confirm_question(op: &GitOp, loss: Destructive) -> String {
 }
 
 fn confirm_verb(op: &GitOp, loss: Destructive) -> &'static str {
+    // Every mode, unlike the question above: "Reset" is the honest button for
+    // any of them, so there is nothing here to drift.
     if matches!(op, GitOp::Reset { .. }) {
         return t(L10nKey::ScmReset);
     }
