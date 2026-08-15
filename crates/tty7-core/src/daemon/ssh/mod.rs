@@ -138,10 +138,20 @@ impl SshManager {
         ))
     }
 
+    /// Always empty: loopback forwards are not a registry of their own. A
+    /// forward `ensure_loopback` sets up is an ordinary [`ForwardEntry`] under
+    /// the owning pane or workspace, so the managed list is where it shows up
+    /// and where it is closed from.
+    ///
+    /// Kept because the wire protocol still carries `ListLoopbackForwards` and
+    /// `CloseLoopbackForward`; nothing in this workspace sends either.
     pub fn list_loopback_forwards(&self) -> Vec<LoopbackForwardInfo> {
         Vec::new()
     }
 
+    /// Always false, for the reason on [`Self::list_loopback_forwards`]: there
+    /// is no separate registry to close from. Auto forwards go away with their
+    /// owner, or through the managed list.
     pub fn close_loopback_forward(&self, _id: &LoopbackForwardId) -> bool {
         false
     }

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::borrow::Cow;
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -20,8 +18,7 @@ use crate::core::cli_agent::{AgentSessionState, CLIAgent};
 use crate::core::config::CursorStyle as ConfigCursorStyle;
 use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
-    AuthPromptKind, AuthResponse, ClientMsg, DaemonMsg, KnownHostEntry, KnownHostId,
-    LoopbackForward, LoopbackForwardId, LoopbackForwardInfo, LoopbackForwardRequest,
+    AuthPromptKind, AuthResponse, ClientMsg, DaemonMsg, LoopbackForward, LoopbackForwardRequest,
     ManagedForward, NativeSshSpec, PaneProcs, RemoteContext, RestoreFrom, SftpEntry,
     SftpJobProgress, SftpOp, SftpOpResult, SftpTransferSpec, ShellSpec, SshForwardRule, SshPhase,
     SshTestReport, WinSize, WorkspaceOp, WorkspaceRequest,
@@ -233,25 +230,6 @@ fn spawn_workspace(owner: Option<&str>, route: &PaneRoute) -> Option<String> {
 }
 
 impl RemoteTerminal {
-    pub fn spawn(
-        size: TermSize,
-        cell_w: u16,
-        cell_h: u16,
-        cwd: Option<PathBuf>,
-        shell: Option<ShellSpec>,
-    ) -> anyhow::Result<(Self, u64)> {
-        Self::spawn_on(
-            &PaneRoute::Local,
-            size,
-            cell_w,
-            cell_h,
-            cwd,
-            shell,
-            None,
-            None,
-        )
-    }
-
     pub fn spawn_on(
         route: &PaneRoute,
         size: TermSize,
@@ -387,10 +365,6 @@ impl RemoteTerminal {
         if let Ok(mut guard) = self.cwd.lock() {
             guard.get_or_insert(cwd);
         }
-    }
-
-    pub fn attach(size: TermSize, cell_w: u16, cell_h: u16, pane_id: u64) -> anyhow::Result<Self> {
-        Self::attach_on(&PaneRoute::Local, size, cell_w, cell_h, pane_id)
     }
 
     pub fn attach_on(
@@ -1224,10 +1198,6 @@ impl RemoteTerminal {
         self.size
     }
 
-    pub fn list_panes() -> Vec<crate::daemon::protocol::PaneInfo> {
-        Self::list_panes_on(&PaneRoute::Local)
-    }
-
     pub fn list_panes_on(route: &PaneRoute) -> Vec<crate::daemon::protocol::PaneInfo> {
         Self::try_list_panes_on(route).unwrap_or_default()
     }
@@ -1241,10 +1211,6 @@ impl RemoteTerminal {
             DaemonMsg::PaneList(list) => Ok(list),
             other => Err(anyhow::anyhow!("unexpected reply to List: {other:?}")),
         }
-    }
-
-    pub fn kill_pane(pane_id: u64) {
-        Self::kill_pane_on(&PaneRoute::Local, pane_id)
     }
 
     pub fn kill_pane_on(route: &PaneRoute, pane_id: u64) {
@@ -1273,34 +1239,6 @@ impl RemoteTerminal {
                 "unexpected reply to EnsureLoopbackForward: {other:?}"
             )),
         }
-    }
-
-    pub fn list_loopback_forwards() -> Vec<LoopbackForwardInfo> {
-        fn query() -> anyhow::Result<Vec<LoopbackForwardInfo>> {
-            let mut stream = connect()?;
-            ClientMsg::ListLoopbackForwards.encode(&mut stream)?;
-            match DaemonMsg::read(&mut stream)? {
-                DaemonMsg::LoopbackForwardList(list) => Ok(list),
-                other => Err(anyhow::anyhow!(
-                    "unexpected reply to ListLoopbackForwards: {other:?}"
-                )),
-            }
-        }
-        query().unwrap_or_default()
-    }
-
-    pub fn close_loopback_forward(id: LoopbackForwardId) -> Vec<LoopbackForwardInfo> {
-        fn query(id: LoopbackForwardId) -> anyhow::Result<Vec<LoopbackForwardInfo>> {
-            let mut stream = connect()?;
-            ClientMsg::CloseLoopbackForward(id).encode(&mut stream)?;
-            match DaemonMsg::read(&mut stream)? {
-                DaemonMsg::LoopbackForwardList(list) => Ok(list),
-                other => Err(anyhow::anyhow!(
-                    "unexpected reply to CloseLoopbackForward: {other:?}"
-                )),
-            }
-        }
-        query(id).unwrap_or_default()
     }
 
     pub fn spawn_native_ssh(
@@ -1415,20 +1353,6 @@ impl RemoteTerminal {
         }
     }
 
-    pub fn list_known_hosts() -> Vec<KnownHostEntry> {
-        fn query() -> anyhow::Result<Vec<KnownHostEntry>> {
-            let mut stream = connect()?;
-            ClientMsg::ListKnownHosts.encode(&mut stream)?;
-            match DaemonMsg::read(&mut stream)? {
-                DaemonMsg::KnownHostsList(list) => Ok(list),
-                other => Err(anyhow::anyhow!(
-                    "unexpected reply to ListKnownHosts: {other:?}"
-                )),
-            }
-        }
-        query().unwrap_or_default()
-    }
-
     /// Ask the daemon to dial this spec and say what happened. Blocking, and
     /// bounded by the spec's own connect timeout on the far side — call it off
     /// the UI thread.
@@ -1444,20 +1368,6 @@ impl RemoteTerminal {
         query(spec).unwrap_or_else(|e| SshTestReport::Failed {
             reason: e.to_string(),
         })
-    }
-
-    pub fn delete_known_host(id: KnownHostId) -> Vec<KnownHostEntry> {
-        fn query(id: KnownHostId) -> anyhow::Result<Vec<KnownHostEntry>> {
-            let mut stream = connect()?;
-            ClientMsg::DeleteKnownHost(id).encode(&mut stream)?;
-            match DaemonMsg::read(&mut stream)? {
-                DaemonMsg::KnownHostsList(list) => Ok(list),
-                other => Err(anyhow::anyhow!(
-                    "unexpected reply to DeleteKnownHost: {other:?}"
-                )),
-            }
-        }
-        query(id).unwrap_or_default()
     }
 
     pub fn sftp_list(pane_id: u64, path: &str) -> Result<Vec<SftpEntry>, String> {
@@ -1591,20 +1501,6 @@ impl RemoteTerminal {
         match DaemonMsg::read(&mut stream)? {
             DaemonMsg::Error(msg) => Err(anyhow::anyhow!(msg)),
             reply => Ok(reply),
-        }
-    }
-
-    pub fn on_workspace_forwards(req: WorkspaceRequest) -> Vec<ManagedForward> {
-        match Self::on_workspace(req) {
-            Ok(DaemonMsg::ForwardList(list)) => list,
-            Ok(other) => {
-                log::warn!("unexpected reply to a workspace forward request: {other:?}");
-                Vec::new()
-            }
-            Err(e) => {
-                log::warn!("workspace forward request failed: {e}");
-                Vec::new()
-            }
         }
     }
 
