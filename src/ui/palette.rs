@@ -1077,7 +1077,31 @@ pub struct PaletteView {
 
 impl PaletteView {
     pub fn new(commands: Vec<Command>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::seeded(commands, "", window, cx)
+    }
+
+    /// The palette, opened with something already typed into it.
+    ///
+    /// For the callers that know what part of the palette they mean. A menu
+    /// row leading here has already narrowed the question down to one group,
+    /// and arriving at the unfiltered list would make the reader ask it again.
+    ///
+    /// The seed goes through the search field rather than around it, so what
+    /// the reader sees is a palette in the state they would have typed it
+    /// into: the text is there, selected rows are ranked against it, and the
+    /// next keystroke goes on refining instead of starting over.
+    pub fn seeded(
+        commands: Vec<Command>,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let list = Self::build_root_list(commands.clone(), window, cx);
+        if !query.is_empty() {
+            list.update(cx, |state, cx| {
+                state.set_query(query, window, cx);
+            });
+        }
         let _sub = cx.subscribe_in(&list, window, Self::on_list_event);
         Self {
             list,

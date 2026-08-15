@@ -20,7 +20,7 @@ use crate::core::actions::{
 use crate::core::config::RightPanelTab;
 use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
-use crate::ui::app::{TILE_GLYPH, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
+use crate::ui::app::{SpawnWhere, TILE_GLYPH, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
@@ -503,6 +503,179 @@ pub(crate) fn chrome_tile_sized(
         .with_size(px(glyph / BUTTON_ICON_SCALE))
         .w(px(tile))
         .h(px(tile))
+}
+
+/// How many saved hosts the New Tab menu names.
+///
+/// Sorted by frecency, so the ones actually used are the ones that fit. A menu
+/// is not a search field — past a handful the list stops being scannable, and
+/// the command palette already lists every host and can filter. The row that
+/// closes the section is where the rest are.
+const MENU_HOSTS: usize = 6;
+
+/// What the row closing the SSH section types into the palette for you.
+///
+/// Every saved host is a palette command titled `SSH: {name}`
+/// ([`L10nKey::AppCmdSshProfileTitle`], and the same in every language we
+/// ship), so this one word is the whole list, frecency-ordered, with the
+/// cursor left where the next keystroke narrows it further.
+///
+/// This is where filtering lives, and the reason the menu does not do any.
+/// A search field inside a [`PopupMenu`] is not possible — the menu holds the
+/// keyboard for its own navigation — and the branch that tried it had to
+/// become a popover carrying the palette's own list, which read as far too
+/// heavy hanging off a button in the chrome. The menu names the few worth
+/// naming; the palette, which already filters better than a menu could, holds
+/// the rest. This row is the seam between the two, and it only works if it
+/// lands in the palette *already filtered*: a row that says "all SSH hosts"
+/// and opens the unfiltered command list has made the reader ask twice.
+const PALETTE_SSH_QUERY: &str = "ssh";
+
+/// How this platform spells the key that turns a New Tab row into a split.
+fn split_modifier() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⌥"
+    } else {
+        "Alt"
+    }
+}
+
+/// What the New Tab menu offers, copied off the app before the menu is built.
+///
+/// The builder runs on the popup's own entity and cannot read `Tty7App` back,
+/// so everything a row needs to name itself is taken here and carried in.
+struct NewTabMenu {
+    app: gpui::WeakEntity<Tty7App>,
+    shells: Vec<(SharedString, ShellSpec)>,
+    default_shell: SharedString,
+    /// Saved host, its display name, and the `user@host:port` under it.
+    hosts: Vec<(uuid::Uuid, SharedString, SharedString)>,
+}
+
+impl NewTabMenu {
+    fn build(&self, menu: PopupMenu) -> PopupMenu {
+        let mut menu = menu
+            .min_w(px(240.))
+            .item(PopupMenuItem::label(t(L10nKey::TabMenuLocalShells)));
+        for (label, spec) in &self.shells {
+            let spec = spec.clone();
+            let app = self.app.clone();
+            let row = if *label == self.default_shell {
+                let label = label.clone();
+                PopupMenuItem::element(move |_window, cx| {
+                    menu_row(label.clone(), t(L10nKey::ShellDefault).into(), cx)
+                })
+            } else {
+                PopupMenuItem::new(label.clone())
+            };
+            menu = menu.item(row.on_click(move |_, window, cx| {
+                let at = SpawnWhere::from_modifiers(window.modifiers());
+                if let Some(app) = app.upgrade() {
+                    app.update(cx, |this, cx| {
+                        this.open_shell(Some(spec.clone()), at, window, cx)
+                    });
+                }
+            }));
+        }
+        // No inventory yet — the machine has not answered, or this is a host
+        // that reports none. The default shell is still openable.
+        if self.shells.is_empty() {
+            let app = self.app.clone();
+            menu = menu.item(PopupMenuItem::new(t(L10nKey::AppMenuNewTab)).on_click(
+                move |_, window, cx| {
+                    let at = SpawnWhere::from_modifiers(window.modifiers());
+                    if let Some(app) = app.upgrade() {
+                        app.update(cx, |this, cx| this.open_shell(None, at, window, cx));
+                    }
+                },
+            ));
+        }
+
+        menu = menu
+            .item(PopupMenuItem::separator())
+            .item(PopupMenuItem::label(t(L10nKey::CmdGroupSsh)));
+        for (id, name, endpoint) in &self.hosts {
+            let (id, name, endpoint) = (*id, name.clone(), endpoint.clone());
+            let app = self.app.clone();
+            menu = menu.item(
+                PopupMenuItem::element(move |_window, cx| {
+                    menu_row(name.clone(), endpoint.clone(), cx)
+                })
+                .on_click(move |_, window, cx| {
+                    let at = SpawnWhere::from_modifiers(window.modifiers());
+                    if let Some(app) = app.upgrade() {
+                        app.update(cx, |this, cx| {
+                            this.connect_ssh_profile_at(id, at, window, cx)
+                        });
+                    }
+                }),
+            );
+        }
+        // With no hosts saved, the row that closes the section is the one that
+        // gets you your first — the list of hosts is not somewhere to send
+        // someone who has none.
+        let app = self.app.clone();
+        let empty = self.hosts.is_empty();
+        let last = if empty {
+            L10nKey::TabMenuAddHost
+        } else {
+            L10nKey::TabMenuAllHosts
+        };
+        menu = menu.item(PopupMenuItem::new(t(last)).on_click(move |_, window, cx| {
+            if let Some(app) = app.upgrade() {
+                app.update(cx, |this, cx| {
+                    if empty {
+                        this.open_new_ssh_host(window, cx);
+                    } else {
+                        this.open_palette(PALETTE_SSH_QUERY, window, cx);
+                    }
+                });
+            }
+        }));
+
+        // The one place ⌥ is spelled out. Nothing else in the app teaches it,
+        // and a modifier nobody is told about is a feature nobody has.
+        menu.item(PopupMenuItem::separator())
+            .item(PopupMenuItem::label(t_fmt(
+                L10nKey::TabMenuSplitHint,
+                &[("key", split_modifier())],
+            )))
+    }
+}
+
+/// The hosts the menu names, in the order they were handed over — frecency,
+/// so the ones that fit are the ones actually used.
+///
+/// A host saved without a name has nothing to show but where it goes, so it
+/// shows that: the endpoint leads the row and repeats under it rather than
+/// leaving the row blank.
+fn menu_hosts(
+    profiles: Vec<crate::core::ssh_profile::SshProfile>,
+) -> Vec<(uuid::Uuid, SharedString, SharedString)> {
+    profiles
+        .into_iter()
+        .take(MENU_HOSTS)
+        .map(|p| {
+            let endpoint = crate::core::ssh_profile::to_connect_string(&p);
+            let name = if p.name.trim().is_empty() {
+                endpoint.clone()
+            } else {
+                p.name.clone()
+            };
+            (p.id, SharedString::from(name), SharedString::from(endpoint))
+        })
+        .collect()
+}
+
+/// A menu row that names a thing on the left and says what it is on the right.
+fn menu_row(label: SharedString, note: SharedString, cx: &gpui::App) -> impl IntoElement + use<> {
+    h_flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(label)
+        .child(div().text_color(cx.theme().muted_foreground).child(note))
 }
 
 /// The words behind the status dot's colour.
@@ -1006,61 +1179,50 @@ impl Tty7App {
         }
     }
 
-    pub(crate) fn attach_new_tab_menu(
+    /// The New Tab control: one `+` that drops the list of everything it could
+    /// open — the installed shells, and the saved SSH hosts.
+    ///
+    /// It was briefly split in two, a `+` that opened a tab outright next to a
+    /// caret for the list, the way Windows Terminal and VS Code split theirs.
+    /// That buys back the click the menu costs on the most common action, and
+    /// it costs a second mark in a row of single ones. This row is four icons
+    /// wide and reads as four icons; a fifth that was half of the fourth had
+    /// to earn its place by looking like a pair, and a pair is exactly what a
+    /// chrome row of plain icons has no vocabulary for.
+    ///
+    /// So: one tile, drawn and hovered like every other tile beside it, and
+    /// the click it costs is answered by ⌘T rather than by a second button.
+    pub(crate) fn new_tab_button(
         &self,
-        button: Button,
+        id: &'static str,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        let shells = self.shells.shells.clone();
-        let default_name = self.default_shell_label(cx);
-        let app = cx.entity().downgrade();
-        // Every other tile in this row names itself on hover — Switch
-        // Workspace, More, Hide Sidebar. The three New Tab buttons that come
-        // through here were the ones left silent.
-        let button = button.tooltip(chord_hint(t(L10nKey::AppMenuNewTab), "NewTab", cx));
-        button.dropdown_menu(move |menu, _window, _cx| {
-            let mut menu = menu.min_w(px(220.));
-            for shell in &shells {
-                let spec = shell_spec(shell);
-                let open = app.clone();
-                let item = if shell.label == default_name {
-                    let label: SharedString = shell.label.clone().into();
-                    PopupMenuItem::element(move |_window, cx| {
-                        h_flex()
-                            .w_full()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .child(label.clone())
-                            .child(
-                                div()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(t(L10nKey::ShellDefault)),
-                            )
-                    })
-                } else {
-                    PopupMenuItem::new(shell.label.clone())
-                };
-                menu = menu.item(item.on_click(move |_, window, cx| {
-                    if let Some(app) = open.upgrade() {
-                        app.update(cx, |this, cx| {
-                            this.new_tab_with_shell(Some(spec.clone()), window, cx);
-                        });
-                    }
-                }));
-            }
-            if shells.is_empty() {
-                let open_default = app.clone();
-                menu = menu.item(PopupMenuItem::new(t(L10nKey::AppMenuNewTab)).on_click(
-                    move |_, window, cx| {
-                        if let Some(app) = open_default.upgrade() {
-                            app.update(cx, |this, cx| this.new_tab(window, cx));
-                        }
-                    },
-                ));
-            }
-            menu
-        })
+        let open = self.new_tab_menu_rows(cx);
+        chrome_tile(Button::new(id).icon(Icon::new(IconName::Plus)), false, cx)
+            .rounded_lg()
+            // Every other tile in this row names itself on hover — Switch
+            // Workspace, More, Hide Sidebar. The three New Tab buttons that
+            // come through here were the ones left silent. The chord is worth
+            // more here than anywhere else in the row: it is the way back to
+            // opening a tab without reading a menu first.
+            .tooltip(chord_hint(t(L10nKey::AppMenuNewTab), "NewTab", cx))
+            .dropdown_menu(move |menu, _window, _cx| open.build(menu))
+    }
+
+    /// What the menu offers, read off the app before the menu is built — the
+    /// builder runs on the popup's own entity and cannot reach back here.
+    fn new_tab_menu_rows(&self, cx: &Context<Self>) -> NewTabMenu {
+        NewTabMenu {
+            app: cx.entity().downgrade(),
+            shells: self
+                .shells
+                .shells
+                .iter()
+                .map(|s| (SharedString::from(s.label.clone()), shell_spec(s)))
+                .collect(),
+            default_shell: SharedString::from(self.default_shell_label(cx)),
+            hosts: menu_hosts(crate::ui::ssh_connect::ssh_profiles_by_frecency(cx)),
+        }
     }
 
     pub(crate) fn tab_context_menu(
@@ -1533,17 +1695,10 @@ impl Tty7App {
             });
         }
 
-        let add_button = div().occlude().flex_shrink_0().child(
-            self.attach_new_tab_menu(
-                chrome_tile(
-                    Button::new("tab-add").icon(Icon::new(IconName::Plus)),
-                    false,
-                    cx,
-                )
-                .rounded_lg(),
-                cx,
-            ),
-        );
+        let add_button = div()
+            .occlude()
+            .flex_shrink_0()
+            .child(self.new_tab_button("tab-add", cx));
 
         let rail_collapsed = !show_chips && !self.left_panel_open(cx);
         let left_group = rail_collapsed.then(|| {
@@ -1563,18 +1718,10 @@ impl Tty7App {
                     )
                 })
                 .child(
-                    div().occlude().flex_shrink_0().child(
-                        self.attach_new_tab_menu(
-                            chrome_tile(
-                                Button::new("titlebar-add-collapsed")
-                                    .icon(Icon::new(IconName::Plus)),
-                                false,
-                                cx,
-                            )
-                            .rounded_lg(),
-                            cx,
-                        ),
-                    ),
+                    div()
+                        .occlude()
+                        .flex_shrink_0()
+                        .child(self.new_tab_button("titlebar-add-collapsed", cx)),
                 )
                 .child(
                     div().occlude().flex_shrink_0().child(
@@ -1639,6 +1786,59 @@ mod tests {
     /// gets in the app too (#580).
     fn short_title(raw: &str) -> String {
         super::short_title(raw, None)
+    }
+
+    fn host(name: &str, user: &str, addr: &str) -> crate::core::ssh_profile::SshProfile {
+        let mut p = crate::core::ssh_profile::SshProfile::new(name);
+        p.user = user.to_string();
+        p.host = addr.to_string();
+        p
+    }
+
+    #[test]
+    fn the_new_tab_menu_stops_naming_hosts_before_it_becomes_a_list() {
+        // Frecency has already put the useful ones first by the time this
+        // runs, so the cut can only ever drop the tail.
+        let many: Vec<_> = (0..MENU_HOSTS + 4)
+            .map(|i| host(&format!("box-{i}"), "dev", &format!("10.0.0.{i}")))
+            .collect();
+        let rows = menu_hosts(many);
+        assert_eq!(rows.len(), MENU_HOSTS);
+        assert_eq!(rows[0].1, "box-0", "the order handed in is the order shown");
+        assert_eq!(rows[0].2, "dev@10.0.0.0");
+    }
+
+    #[test]
+    fn a_host_saved_without_a_name_still_says_where_it_goes() {
+        // Settings lets a host be saved on its address alone. A row that led
+        // with an empty name would be a blank line you could click.
+        let rows = menu_hosts(vec![host("", "root", "build.lan")]);
+        assert_eq!(rows[0].1, "root@build.lan");
+        assert_eq!(rows[0].2, "root@build.lan");
+    }
+
+    #[test]
+    fn only_alt_turns_a_new_tab_row_into_a_split() {
+        use crate::ui::app::SpawnWhere;
+        use gpui::Modifiers;
+        assert_eq!(
+            SpawnWhere::from_modifiers(Modifiers::none()),
+            SpawnWhere::NewTab
+        );
+        assert_eq!(
+            SpawnWhere::from_modifiers(Modifiers::alt()),
+            SpawnWhere::Split
+        );
+        // One modifier means one thing. Every other one a hand might be
+        // resting on leaves the row doing what it says it does.
+        assert_eq!(
+            SpawnWhere::from_modifiers(Modifiers::secondary_key()),
+            SpawnWhere::NewTab
+        );
+        assert_eq!(
+            SpawnWhere::from_modifiers(Modifiers::shift()),
+            SpawnWhere::NewTab
+        );
     }
 
     #[test]

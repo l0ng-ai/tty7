@@ -41,6 +41,41 @@ use crate::ui::settings::{
 };
 use crate::ui::theme::{apply_theme, set_menus};
 
+/// What to start in a pane that is about to be opened.
+pub(crate) enum SpawnAs {
+    /// A local shell; `None` is whatever the default one is.
+    Shell(Option<ShellSpec>),
+    Ssh(Box<crate::daemon::protocol::NativeSshSpec>),
+}
+
+/// Where a row taken out of the new-tab menu lands.
+///
+/// Windows Terminal's rule, and the reason this is a parameter rather than two
+/// menus: the same list of shells and hosts serves both, and ⌥ at click time
+/// picks between them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpawnWhere {
+    NewTab,
+    /// Beside the pane in front of the user, on [`Axis::Horizontal`] — the
+    /// side `SplitRight` already puts a pane on. Deliberately not Windows
+    /// Terminal's aspect-ratio guess: a split that lands somewhere different
+    /// depending on the shape of the pane cannot be aimed.
+    Split,
+}
+
+impl SpawnWhere {
+    /// Read off the live keyboard state at click time. The menu hands its
+    /// handler a synthetic click with no modifiers on it, so there is nowhere
+    /// else the ⌥ the user is holding can be found.
+    pub(crate) fn from_modifiers(mods: gpui::Modifiers) -> Self {
+        if mods.alt {
+            SpawnWhere::Split
+        } else {
+            SpawnWhere::NewTab
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThemeEdit {
     Background,
@@ -3063,6 +3098,23 @@ impl Tty7App {
         self.new_tab_with_cwd(cwd, shell, window, cx);
     }
 
+    /// A shell taken out of the new-tab menu, wherever the ⌥ key said to put
+    /// it.
+    pub(crate) fn open_shell(
+        &mut self,
+        shell: Option<ShellSpec>,
+        at: SpawnWhere,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match at {
+            SpawnWhere::NewTab => self.new_tab_with_shell(shell, window, cx),
+            SpawnWhere::Split => {
+                self.split_into(Axis::Horizontal, Some(SpawnAs::Shell(shell)), window, cx)
+            }
+        }
+    }
+
     fn new_tab_with_cwd(
         &mut self,
         cwd: Option<std::path::PathBuf>,
@@ -3182,6 +3234,20 @@ impl Tty7App {
     }
 
     pub(crate) fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
+        self.split_into(axis, None, window, cx);
+    }
+
+    /// `spawn` of `None` is what ⌘D has always done: copy the pane being split
+    /// — same shell, or the same host dialled again. A `Some` names the new
+    /// pane outright, which is how a row taken out of the new-tab menu with ⌥
+    /// held lands beside the current pane instead of in a tab of its own.
+    pub(crate) fn split_into(
+        &mut self,
+        axis: Axis,
+        spawn: Option<SpawnAs>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(target) = self
             .tabs
             .get(self.active)
@@ -3193,43 +3259,55 @@ impl Tty7App {
             return;
         }
         let cwd = target.read(cx).spawnable_cwd();
-        let ssh_spec = target.read(cx).ssh_spec();
-        let new = if let Some(spec) = ssh_spec {
-            let resolved = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
-            match new_terminal_native(self.font_size, cwd, resolved, window, cx) {
-                Ok(view) => PaneSlot::Ready(view),
-                Err(e) => {
-                    log::error!("native SSH split spawn failed: {e}");
-                    window.push_notification(
-                        t_fmt(
-                            L10nKey::AppSshConnectionFailed,
-                            &[("error", &e.to_string())],
-                        ),
-                        cx,
-                    );
-                    return;
+        let spawn = match spawn {
+            Some(spawn) => spawn,
+            // A stored spec is resolved against the saved host before it is
+            // dialled; one handed in by a caller was just built from that host
+            // and needs no second pass.
+            None => match target.read(cx).ssh_spec() {
+                Some(spec) => {
+                    SpawnAs::Ssh(crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx))
+                }
+                None => SpawnAs::Shell(target.read(cx).shell_spec()),
+            },
+        };
+        let new = match spawn {
+            SpawnAs::Ssh(spec) => {
+                match new_terminal_native(self.font_size, cwd, spec, window, cx) {
+                    Ok(view) => PaneSlot::Ready(view),
+                    Err(e) => {
+                        log::error!("native SSH split spawn failed: {e}");
+                        window.push_notification(
+                            t_fmt(
+                                L10nKey::AppSshConnectionFailed,
+                                &[("error", &e.to_string())],
+                            ),
+                            cx,
+                        );
+                        return;
+                    }
                 }
             }
-        } else {
-            let shell = target.read(cx).shell_spec();
-            match new_terminal(
-                self.window_workspace(cx),
-                Some(self.workspace),
-                self.font_size,
-                cwd,
-                None,
-                shell,
-                window,
-                cx,
-            ) {
-                Ok(view) => view,
-                Err(e) => {
-                    log::error!("split spawn failed: {e}");
-                    window.push_notification(
-                        t_fmt(L10nKey::AppSplitPaneFailed, &[("error", &e.to_string())]),
-                        cx,
-                    );
-                    return;
+            SpawnAs::Shell(shell) => {
+                match new_terminal(
+                    self.window_workspace(cx),
+                    Some(self.workspace),
+                    self.font_size,
+                    cwd,
+                    None,
+                    shell,
+                    window,
+                    cx,
+                ) {
+                    Ok(view) => view,
+                    Err(e) => {
+                        log::error!("split spawn failed: {e}");
+                        window.push_notification(
+                            t_fmt(L10nKey::AppSplitPaneFailed, &[("error", &e.to_string())]),
+                            cx,
+                        );
+                        return;
+                    }
                 }
             }
         };
@@ -4243,8 +4321,22 @@ impl Tty7App {
             self.close_palette(window, cx);
             return;
         }
+        self.open_palette("", window, cx);
+    }
+
+    /// Open the palette with `query` already in its search field.
+    ///
+    /// Unlike [`Self::toggle_palette`] this always opens. A row that names
+    /// what it will show cannot also be the thing that dismisses it, and the
+    /// only ways in here are rows like that.
+    pub(crate) fn open_palette(
+        &mut self,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let commands = self.palette_commands(window, cx);
-        let view = cx.new(|cx| PaletteView::new(commands, window, cx));
+        let view = cx.new(|cx| PaletteView::seeded(commands, query, window, cx));
         self.palette_sub = Some(cx.subscribe_in(&view, window, Self::on_palette_event));
         self.palette = Some(view);
         cx.notify();

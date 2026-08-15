@@ -11,7 +11,7 @@ use crate::daemon::protocol::{
     NativeSshSpec, SshAlgorithms, SshAuthMode, SshForwardKind, SshForwardRule, SshProxy,
 };
 
-use super::app::Tty7App;
+use super::app::{SpawnAs, SpawnWhere, Tty7App};
 
 impl Tty7App {
     pub(crate) fn native_ssh_spec_for_profile(
@@ -34,6 +34,19 @@ impl Tty7App {
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
+        self.connect_ssh_profile_at(profile_id, SpawnWhere::NewTab, window, cx);
+    }
+
+    /// A saved host opened where the caller asks for it — a tab of its own, or
+    /// beside the pane in front of the user when the new-tab menu's row was
+    /// taken with ⌥ held.
+    pub(crate) fn connect_ssh_profile_at(
+        &mut self,
+        profile_id: uuid::Uuid,
+        at: SpawnWhere,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
         let Some(profile) = cx
             .global::<Config>()
             .ssh_profiles
@@ -45,7 +58,12 @@ impl Tty7App {
         };
         self.bump_ssh_frecency(profile_id, cx);
         let spec = Box::new(self.native_ssh_spec_for_profile(&profile, cx));
-        self.open_native_ssh_tab(spec, window, cx);
+        match at {
+            SpawnWhere::NewTab => self.open_native_ssh_tab(spec, window, cx),
+            SpawnWhere::Split => {
+                self.split_into(gpui::Axis::Horizontal, Some(SpawnAs::Ssh(spec)), window, cx)
+            }
+        }
     }
 
     pub(crate) fn quick_connect(

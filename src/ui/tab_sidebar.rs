@@ -938,17 +938,10 @@ impl Tty7App {
                 .child(div().flex_1().min_w(px(GRAB_HANDLE_W)))
             })
             .child(
-                div().occlude().flex_shrink_0().child(
-                    self.attach_new_tab_menu(
-                        crate::ui::tab_strip::chrome_tile(
-                            Button::new("sidebar-add").icon(Icon::new(IconName::Plus)),
-                            false,
-                            cx,
-                        )
-                        .rounded_lg(),
-                        cx,
-                    ),
-                ),
+                div()
+                    .occlude()
+                    .flex_shrink_0()
+                    .child(self.new_tab_button("sidebar-add", cx)),
             )
             .child(
                 div().occlude().flex_shrink_0().child(
