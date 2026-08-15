@@ -519,8 +519,17 @@ fn pane_split(args: SplitArgs, ctx: &Context, backend: &mut dyn Backend) -> Resu
     } else {
         Axis::Vertical
     };
+    // Before the spawn, because the pane exists before the tree hears about
+    // it. `--ratio nan` cannot even be put on the wire — serialising it breaks
+    // the control connection, so the daemon's own "a split ratio must be a
+    // finite number" never arrives — and by then a shell is already running
+    // that no tree holds. The daemon's clamp to a usable range is deliberate
+    // and stays its business; this only refuses what it would refuse too.
+    if !args.ratio.is_finite() {
+        bail!("--ratio {} is not a finite number", args.ratio);
+    }
     let new = backend.spawn_shell(workspace, cwd.clone())?;
-    backend.control(ControlRequest::PaneSplit {
+    let split = backend.control(ControlRequest::PaneSplit {
         workspace,
         pane,
         axis,
@@ -533,7 +542,15 @@ fn pane_split(args: SplitArgs, ctx: &Context, backend: &mut dyn Backend) -> Resu
             shell: None,
         },
         first: false,
-    })?;
+    });
+    if let Err(e) = split {
+        // Whatever the refusal was, the pane spawned above is now running with
+        // nothing referencing it: `pane ls --all` shows it, the tree does not,
+        // and it takes `pane close --orphans` to be rid of it. Nobody asked for
+        // that pane, so take it back down rather than leave it for the user.
+        let _ = backend.kill_pane(new);
+        return Err(e);
+    }
     report(format!("%{new}"), json!({ "pane": new }))
 }
 
@@ -3010,6 +3027,31 @@ mod tests {
         )
         .expect("a routed cwd is the remote machine's to resolve");
         assert_eq!(backend.runs.len(), 1, "the routed run must still happen");
+    }
+
+    /// A ratio the split cannot use is refused before a pane is spawned.
+    ///
+    /// `split` spawns the shell and only then asks the tree to hold it, so any
+    /// refusal in between leaves a pane running that nothing references —
+    /// visible to `pane ls --all`, absent from the tree, and removable only by
+    /// `pane close --orphans`. `--ratio nan` did exactly that twice over,
+    /// because a NaN cannot be serialised onto the control connection at all:
+    /// the link dropped, so the daemon's own "must be a finite number" never
+    /// came back, and two orphans were left behind.
+    #[test]
+    fn a_ratio_that_cannot_be_used_spawns_nothing() {
+        let mut backend = mock();
+        let err = execute(
+            cli(&["tty7", "split", "%1", "--horizontal", "--ratio", "nan"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .expect_err("a split needs a real ratio");
+        assert!(err.to_string().contains("finite"), "{err}");
+        assert!(
+            backend.spawned.is_empty(),
+            "the refusal has to come before the spawn, or it leaves an orphan"
+        );
     }
 
     /// `tty7 new <path>` refuses a path it cannot root the workspace at, and
