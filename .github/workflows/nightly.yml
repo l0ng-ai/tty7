@@ -107,12 +107,12 @@ jobs:
       - name: Install Linux system dependencies
         if: matrix.os == 'linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config cmake clang libxkbcommon-dev \
-            libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev \
-            libwayland-dev libx11-dev libxcb1-dev libzstd-dev libssl-dev \
-            libkrb5-dev libfuse2 file imagemagick
-          echo "LIBGSSAPI_IMPL=mit" >> "$GITHUB_ENV"
+          bash .github/scripts/install-linux-deps.sh
+          # Packaging only, and nothing to do with building tty7: libfuse2 is
+          # what an AppImage needs to run at all, `file` and imagemagick are
+          # used while assembling one. Kept separate from the build list so
+          # neither set is read as the reason for the other.
+          sudo apt-get install -y libfuse2 file imagemagick
 
       - uses: dtolnay/rust-toolchain@stable
         with:

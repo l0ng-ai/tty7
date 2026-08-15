@@ -1872,29 +1872,74 @@ mod pool_tests {
         pool.close();
     }
 
+    /// A job still on the queue when `close` lands must never run.
+    ///
+    /// Getting a job to *stay* on the queue takes a saturated pool, and that is
+    /// the whole reason this test is shaped the way it is. `submit` spawns a
+    /// worker whenever `jobs.len() > idle`, so blocking one worker and
+    /// submitting a second job does not queue anything — it grows the pool and
+    /// the second job runs at once. An earlier version of this test did exactly
+    /// that and leaned on `close()` beating a brand-new thread to the state
+    /// lock; it passed on an idle machine and failed roughly one run in six
+    /// under a loaded one, having never tested a queued job at all.
+    ///
+    /// With `MAX_WORKERS` jobs already parked, `wants_another_worker` is false,
+    /// every worker is busy in user code, and nothing can dequeue — so the
+    /// queued job is genuinely queued and the outcome no longer depends on who
+    /// wins a race.
     #[test]
     fn closing_the_pool_drops_queued_work() {
         let pool = Pool::new();
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
         let ran = Arc::new(AtomicBool::new(false));
+        let (parked_tx, parked_rx) = std::sync::mpsc::channel();
 
-        let blocker = Arc::clone(&gate);
-        assert!(pool.submit(move || {
-            let (lock, cv) = &*blocker;
-            let mut open = lock.lock().unwrap();
-            while !*open {
-                open = cv.wait(open).unwrap();
-            }
-        }));
-        std::thread::sleep(Duration::from_millis(100));
+        for _ in 0..MAX_WORKERS {
+            let gate = Arc::clone(&gate);
+            let parked_tx = parked_tx.clone();
+            assert!(pool.submit(move || {
+                let (lock, cv) = &*gate;
+                let mut open = lock.lock().unwrap();
+                let _ = parked_tx.send(());
+                while !*open {
+                    open = cv.wait(open).unwrap();
+                }
+            }));
+        }
+        for _ in 0..MAX_WORKERS {
+            parked_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        }
+        assert_eq!(
+            pool.inner.state.lock().unwrap().workers,
+            MAX_WORKERS,
+            "the pool has to be saturated for the next job to stay queued"
+        );
+
         let ran2 = Arc::clone(&ran);
-        pool.submit(move || ran2.store(true, Ordering::SeqCst));
+        assert!(pool.submit(move || ran2.store(true, Ordering::SeqCst)));
+        assert_eq!(
+            pool.inner.state.lock().unwrap().jobs.len(),
+            1,
+            "the job under test must be on the queue, not running"
+        );
 
         pool.close();
         let (lock, cv) = &*gate;
         *lock.lock().unwrap() = true;
         cv.notify_all();
-        std::thread::sleep(Duration::from_millis(200));
+
+        // The workers are released now; each one loops, finds the queue empty
+        // and the pool closed, and exits. Waiting for that to finish is what
+        // makes the assertion below meaningful rather than merely early.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while pool.inner.state.lock().unwrap().workers > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            pool.inner.state.lock().unwrap().workers,
+            0,
+            "every worker should have exited once the pool closed"
+        );
         assert!(
             !ran.load(Ordering::SeqCst),
             "a job queued at close still ran"

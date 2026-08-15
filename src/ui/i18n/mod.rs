@@ -1529,9 +1529,14 @@ mod tests {
             let en = translate_en(key);
             let zh = translate_zh(key).unwrap();
             let ja = translate_ja(key).unwrap();
-            if zh != en && ja != en {
-                println!("STALE ALLOWLIST ENTRY: {key:?} en={en:?} zh={zh:?} ja={ja:?}");
-            }
+            // Asserted, not printed: cargo swallows a passing test's stdout,
+            // so a `println!` here is read by nobody and the list rots into a
+            // set of permissions for translations that already happened.
+            assert!(
+                zh == en || ja == en,
+                "{key:?} is on KEPT_IN_ENGLISH but both locales now translate \
+                 it (en={en:?} zh={zh:?} ja={ja:?}) — drop the entry"
+            );
         }
         for &key in L10nKey::ALL {
             let en = translate_en(key);
@@ -1560,6 +1565,71 @@ mod tests {
         assert_eq!(current_locale_index(), 0);
         set_locale("ko");
         assert_eq!(current_locale_index(), 0);
+    }
+
+    /// Every `{placeholder}` the English string carries has to survive into
+    /// the other two, and neither may invent one.
+    ///
+    /// `apply_template` substitutes by name and silently leaves anything it
+    /// was not given alone, so the two ways to get this wrong both reach the
+    /// user as a finished-looking sentence: a dropped placeholder loses the
+    /// value (a prompt that named a host stops naming it), and an invented one
+    /// draws the braces on screen. Neither shows up as a missing or empty
+    /// translation, which is all the parity test above can see.
+    #[test]
+    fn a_translation_carries_exactly_the_placeholders_the_english_does() {
+        fn placeholders(text: &str) -> std::collections::BTreeSet<String> {
+            let mut found = std::collections::BTreeSet::new();
+            let mut rest = text;
+            while let Some(open) = rest.find('{') {
+                rest = &rest[open + 1..];
+                let Some(close) = rest.find('}') else { break };
+                let name = &rest[..close];
+                // `{count}` is filled by `t_plural` from the number itself
+                // rather than from the argument list, and a locale whose
+                // grammar puts the number elsewhere may legitimately not
+                // repeat it in every branch.
+                if name != "count" && !name.is_empty() {
+                    found.insert(name.to_string());
+                }
+                rest = &rest[close + 1..];
+            }
+            found
+        }
+
+        for &key in L10nKey::ALL {
+            let want = placeholders(translate_en(key));
+            for (name, text) in [("zh", translate_zh(key)), ("ja", translate_ja(key))] {
+                let got = placeholders(text.unwrap());
+                assert_eq!(
+                    got, want,
+                    "{name} translation of {key:?} does not carry the same \
+                     placeholders as the English one"
+                );
+            }
+
+            // The plural and select branches are the same contract, and there
+            // are three times as many of them. A branch the English does not
+            // have is not one this can check.
+            for branch in ["zero", "one", "other"] {
+                let Some(en) = translate_variant_en(key, branch) else {
+                    continue;
+                };
+                let want = placeholders(en);
+                for (name, text) in [
+                    ("zh", translate_variant_zh(key, branch)),
+                    ("ja", translate_variant_ja(key, branch)),
+                ] {
+                    let Some(text) = text else { continue };
+                    assert_eq!(
+                        placeholders(text),
+                        want,
+                        "the {name} {branch:?} branch of {key:?} does not carry \
+                         the same placeholders as the English one"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
