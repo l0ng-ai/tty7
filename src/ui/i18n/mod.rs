@@ -1632,6 +1632,58 @@ mod tests {
         }
     }
 
+    /// A pane and a panel are different parts of the window, and the
+    /// translations have to keep them apart.
+    ///
+    /// tty7 calls the split regions inside a tab *panes*, and the docked
+    /// regions around them *panels* — the right panel, the code panel, the
+    /// detail panel. Chinese and Japanese have a separate word for each
+    /// (窗格 / 面板, ペイン / パネル), so picking the wrong one does not read
+    /// as a clumsy synonym the way it would in English: it names a different
+    /// thing. The settings page shows both senses within a few rows of each
+    /// other — "text size … tabs, panels and settings" above "give each pane
+    /// its own shell history" — and calling the latter a 面板 told a Chinese
+    /// reader that panels have their own shell history, which they do not,
+    /// having no shell at all.
+    ///
+    /// Only the unambiguous strings can be checked: an English string using
+    /// both words is left to the translator.
+    #[test]
+    fn a_translation_keeps_panes_and_panels_apart() {
+        /// Whole-word match — "panel" contains "pane", so a substring test
+        /// would see every panel as a pane.
+        fn mentions(text: &str, words: &[&str]) -> bool {
+            text.split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|word| words.iter().any(|w| word.eq_ignore_ascii_case(w)))
+        }
+
+        for &key in L10nKey::ALL {
+            let en = translate_en(key);
+            // "palette" is the command palette, which is a panel, not a pane.
+            let pane = mentions(en, &["pane", "panes"]);
+            let panel = mentions(en, &["panel", "panels", "palette"]);
+            if pane == panel {
+                continue;
+            }
+
+            for (name, text, pane_word, panel_word) in [
+                ("zh", translate_zh(key).unwrap(), "窗格", "面板"),
+                ("ja", translate_ja(key).unwrap(), "ペイン", "パネル"),
+            ] {
+                let (wrong, sense) = if pane {
+                    (panel_word, "pane")
+                } else {
+                    (pane_word, "panel")
+                };
+                assert!(
+                    !text.contains(wrong),
+                    "the {name} translation of {key:?} renders a {sense} as \
+                     {wrong:?}: {text:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn plural_and_select_branches_are_translated() {
         let plural_keys = [

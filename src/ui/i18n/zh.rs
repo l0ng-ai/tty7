@@ -618,7 +618,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsRestartServer => "重启 server…",
         L10nKey::SettingsAppHttpProxy => "更新代理",
         L10nKey::SettingsAppHttpProxyDesc => {
-            "仅用于 tty7 自身的更新检查和下载，不影响面板中运行的程序。留空则跟随系统代理。"
+            "仅用于 tty7 自身的更新检查和下载，不影响窗格中运行的程序。留空则跟随系统代理。"
         }
         L10nKey::SettingsAppHttpProxyInvalid => "不是有效的代理地址，该值未保存。",
         L10nKey::SettingsAgentClaudeCode => "Claude Code",
@@ -1523,23 +1523,23 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::Replace => "覆盖",
         L10nKey::SftpErrorInvalidOctalMode => "无效的八进制模式",
         L10nKey::SettingsDaemonStaleDescInPlace => {
-            "tty7 是原地更新的，所以应用是新的，但你的面板仍由上一个版本在服务。\
+            "tty7 是原地更新的，所以应用是新的，但你的窗格仍由上一个版本在服务。\
              server 可以在不停止的情况下把自己换成新版本：你的 shell 和里面正在跑的东西会直接延续下来。\
-             用 tty7 内置 SSH 客户端的面板除外——那些连接会断开，需要重新打开。"
+             用 tty7 内置 SSH 客户端的窗格除外——那些连接会断开，需要重新打开。"
         }
         L10nKey::AppRestartServerBodyInPlace => {
             "后台 server 会在不停止的情况下把自己换成当前这个版本。\
-             你的 shell 会继续运行——面板里的命令、agent、`ssh` 会话都不会被打断——窗口稍后会重新连上它们。\
-             用 tty7 内置 SSH 客户端的面板除外：那些连接会断开，需要重新打开。"
+             你的 shell 会继续运行——窗格里的命令、agent、`ssh` 会话都不会被打断——窗口稍后会重新连上它们。\
+             用 tty7 内置 SSH 客户端的窗格除外：那些连接会断开，需要重新打开。"
         }
         L10nKey::PaneRestoredScreenBanner => {
             "已恢复的画面 —— 下面是新的 shell，上面的内容都已不在运行"
         }
-        L10nKey::SettingsPerPaneHistory => "每个面板用自己的 shell 历史",
+        L10nKey::SettingsPerPaneHistory => "每个窗格用自己的 shell 历史",
         L10nKey::SettingsPerPaneHistoryDescription => {
-            "上方向键翻的是这个面板里跑过的命令，而不是所有面板混在一起的结果。\
-             新面板会从你已有的历史开始，而不是一片空白；面板关闭时，它新增的部分会写回原来的历史文件，不会丢。\
-             只对 tty7 能接管的 bash 和 zsh 面板生效；用你自己参数启动的 shell 不受影响。"
+            "上方向键翻的是这个窗格里跑过的命令，而不是所有窗格混在一起的结果。\
+             新窗格会从你已有的历史开始，而不是一片空白；窗格关闭时，它新增的部分会写回原来的历史文件，不会丢。\
+             只对 tty7 能接管的 bash 和 zsh 窗格生效；用你自己参数启动的 shell 不受影响。"
         }
         L10nKey::IntegrationNoticeBlocked => {
             "此窗格中的 tty7 shell 集成被拦截——“{wrapper}”截获了 shell 上报，\
