@@ -1570,14 +1570,30 @@ mod tests {
             }
             _ => panic!("expected query"),
         }
-        // The shm/file medium probes must be refused so the sender falls back.
-        let ev = p.feed(b"Gi=299,a=q,t=s,f=32,s=1,v=1;L3B4LXE").unwrap();
-        match ev {
-            Event::Query { reply, honored } => {
-                assert!(!honored);
-                assert_eq!(reply, b"\x1b_Gi=299;ENOTSUPPORTED\x1b\\".to_vec());
+        // Every indirect medium, not just shm: `t=f` and `t=t` name a path on
+        // *this* machine, and the sender is on the other end of an ssh link.
+        // The local counterpart probes all three, and the refusing side is the
+        // one where a gap would matter.
+        for (id, probe) in [
+            (299, &b"Gi=299,a=q,t=s,f=32,s=1,v=1;L3B4LXE"[..]),
+            (300, &b"Gi=300,a=q,t=f,f=32,s=1,v=1;L3RtcC94"[..]),
+            (301, &b"Gi=301,a=q,t=t,f=32,s=1,v=1;L3RtcC94"[..]),
+        ] {
+            let ev = p.feed(probe).unwrap();
+            match ev {
+                Event::Query { reply, honored } => {
+                    assert!(
+                        !honored,
+                        "remote pane honored {}",
+                        String::from_utf8_lossy(probe)
+                    );
+                    assert_eq!(
+                        reply,
+                        format!("\x1b_Gi={id};ENOTSUPPORTED\x1b\\").into_bytes()
+                    );
+                }
+                _ => panic!("expected query"),
             }
-            _ => panic!("expected query"),
         }
     }
 
