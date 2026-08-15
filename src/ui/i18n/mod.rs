@@ -1684,6 +1684,43 @@ mod tests {
         }
     }
 
+    /// The background process has exactly one user-facing name: the server.
+    ///
+    /// "daemon" is what the *code* calls it — the `--daemon` flag,
+    /// `daemon/server.rs`, the `RemoteDaemon*` keys themselves — and the UI
+    /// deliberately does not. The dialogs say "Restart Server?" and "Quit and
+    /// Stop Server?", the settings section is headed "Server", and the
+    /// neighbouring errors say "tty7's local server". One string used to say
+    /// "this machine's tty7 daemon … (which stops the daemon)" while naming
+    /// the server on the far end in the same breath, which reads as two
+    /// different components and sends the user hunting for one the rest of
+    /// the app never mentions.
+    ///
+    /// The search-keyword lists are the exception, and are skipped: they exist
+    /// to match whatever the user types, so they carry "daemon" on purpose.
+    #[test]
+    fn the_ui_calls_the_background_process_a_server_not_a_daemon() {
+        for &key in L10nKey::ALL {
+            if format!("{key:?}").ends_with("Keywords") {
+                continue;
+            }
+            for (name, text) in [
+                ("en", translate_en(key)),
+                ("zh", translate_zh(key).unwrap()),
+                ("ja", translate_ja(key).unwrap()),
+            ] {
+                for word in ["daemon", "守护进程", "デーモン"] {
+                    assert!(
+                        !text.to_lowercase().contains(word),
+                        "the {name} string for {key:?} calls the background \
+                         process a {word:?}, but the UI's word is \"server\": \
+                         {text:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn plural_and_select_branches_are_translated() {
         let plural_keys = [

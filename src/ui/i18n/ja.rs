@@ -698,7 +698,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "起動時に同梱の `tty7` コマンドを PATH に入れ、スクリプトやコーディングエージェントが任意のターミナルから tty7 を操作できるようにします。tty7 のペイン内ではどちらでも機能します。自分でビルド・インストールした `tty7` を上書きされたくない場合はオフにしてください。次回起動時に有効になります"
         }
         L10nKey::SettingsInstallCliOnPath => "`tty7` コマンドを PATH にインストール",
-        L10nKey::SettingsServer => "デーモンサーバー",
+        L10nKey::SettingsServer => "サーバー",
         L10nKey::SettingsServerDesc => {
             "シェルを動かし続けているバックグラウンドサーバーを再起動します。このコンピュータ上のすべてのシェルが終了し、タブとレイアウトは新しいシェルで開き直します"
         }
@@ -1308,7 +1308,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "tty7 のローカルサーバーに到達できませんでした: {error}"
         }
         L10nKey::RemoteDaemonTooOld => {
-            "このマシンの tty7 デーモンは古いビルドのため、{machine} 上のサーバーを再起動できません。tty7 を終了（デーモンが停止します）して開き直し、再試行してください"
+            "tty7 のローカルサーバーは古いビルドのため、{machine} 上のサーバーを再起動できません。tty7 を終了（ローカルサーバーが停止します）して開き直し、再試行してください"
         }
         L10nKey::RemoteProfileMissing => "その保存済み SSH プロファイルはもう存在しません",
         L10nKey::RemoteAliasMissing => "`{alias}` は ~/.ssh/config にありません",

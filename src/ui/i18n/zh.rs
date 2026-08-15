@@ -1197,8 +1197,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteDaemonStartFailed => "无法启动 tty7 本地 server：{error}",
         L10nKey::RemoteDaemonUnreachable => "无法连接到 tty7 本地 server：{error}",
         L10nKey::RemoteDaemonTooOld => {
-            "此机器上的 tty7 守护进程版本较旧，无法重启 {machine} 上的 server。\
-             请退出 tty7（这会停止守护进程）并重新打开，然后重试。"
+            "tty7 本地 server 版本较旧，无法重启 {machine} 上的 server。\
+             请退出 tty7（这会停止本地 server）并重新打开，然后重试。"
         }
         L10nKey::RemoteProfileMissing => "该已保存的 SSH 主机配置已不存在",
         L10nKey::RemoteAliasMissing => "“{alias}”已不再位于 ~/.ssh/config 中",

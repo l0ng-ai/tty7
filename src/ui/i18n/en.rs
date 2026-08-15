@@ -1279,8 +1279,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteDaemonStartFailed => "tty7's local server could not be started: {error}",
         L10nKey::RemoteDaemonUnreachable => "could not reach tty7's local server: {error}",
         L10nKey::RemoteDaemonTooOld => {
-            "this machine's tty7 daemon is an older build and cannot restart the server on \
-             {machine}. Quit tty7 (which stops the daemon) and open it again, then retry."
+            "tty7's local server is an older build and cannot restart the server on \
+             {machine}. Quit tty7 (which stops the local server) and open it again, \
+             then retry."
         }
         L10nKey::RemoteProfileMissing => "that saved SSH profile no longer exists",
         L10nKey::RemoteAliasMissing => "\"{alias}\" is no longer in ~/.ssh/config",
