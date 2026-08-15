@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 
 use alacritty_terminal::event::{Event as AlacEvent, EventListener};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Osc52, Term, TermMode};
 use alacritty_terminal::vte::ansi::{self, CursorShape, CursorStyle};
 
 use crate::terminal::parked_cursor::{CursorCut, ParkedCursorRepair, ParkedCursorScanner};
@@ -2203,6 +2203,21 @@ fn terminal_config_from_user(user_config: &crate::core::config::Config) -> Confi
         // redraws its prompt that way per keystroke) lands rows off, shredding
         // the screen the first time a maximized pane draws anything.
         conpty_resize: cfg!(windows),
+        // OSC 52: a program may put text on the clipboard, and may never read
+        // it back. `OnlyCopy` is `alacritty_terminal`'s own default, so this
+        // line changes nothing today — it is here to say the policy out loud,
+        // because the safe half of it currently rests on a default this crate
+        // does not own.
+        //
+        // A paste request writes whatever is on the clipboard back down the
+        // PTY, and nothing in the sequence says who asked: the program can be
+        // on the far end of an SSH connection, and a clipboard routinely holds
+        // a password, a token or a private key. Every terminal that offers the
+        // read at all puts it behind a prompt or an opt-in for that reason.
+        // `TerminalView`'s `ClipboardLoad` arm is written and ready to serve
+        // one, which is the other half of why this is pinned rather than left
+        // to `Default::default()`.
+        osc52: Osc52::OnlyCopy,
         ..Config::default()
     }
 }
@@ -2221,6 +2236,22 @@ mod config_tests {
         assert_eq!(config.conpty_resize, cfg!(windows));
         #[cfg(windows)]
         assert!(config.conpty_resize);
+    }
+
+    /// The same shape of trap as the field above, with a worse failure: OSC 52
+    /// defaults to `OnlyCopy` upstream, so dropping the line compiles clean and
+    /// passes everything else — and an upstream default of `CopyPaste` would
+    /// then hand any program that can write to a pane, including one across an
+    /// SSH link, whatever is sitting on the user's clipboard. `TerminalView`
+    /// already has the `ClipboardLoad` arm that would answer it.
+    #[test]
+    fn osc52_never_accepts_a_clipboard_read() {
+        let config = terminal_config_from_user(&crate::core::config::Config::default());
+        assert!(
+            matches!(config.osc52, Osc52::Disabled | Osc52::OnlyCopy),
+            "a paste request must stay denied, got {:?}",
+            config.osc52
+        );
     }
 }
 

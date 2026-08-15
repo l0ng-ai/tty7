@@ -1683,6 +1683,12 @@ impl TerminalView {
             AlacEvent::ClipboardStore(_, text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
+            // Never reached as things stand: `terminal_config_from_user` pins
+            // `osc52: OnlyCopy`, so the grid refuses a paste request before it
+            // becomes an event. Serving one means writing the clipboard back
+            // down the PTY to a program that may be on the far end of an SSH
+            // connection, so if this is ever unlocked it needs to ask the user
+            // first — the pinned config, not this arm, is what says no today.
             AlacEvent::ClipboardLoad(_, fmt) => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
                     self.terminal.write(fmt(&text).into_bytes());
