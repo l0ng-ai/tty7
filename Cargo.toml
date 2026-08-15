@@ -361,7 +361,11 @@ smol = "2"
 #     the fork's position are verified, the exploitability is upstream's word.
 #
 #     Until #738 ships in a release, the fix is to rebase the fork onto v0.62.6
-#     (or later) and move this rev forward.
+#     (or later) and move this rev forward. Re-checked 2026-08-15: there is
+#     nothing to move it *to*. The fork's own branches all sit at or before
+#     v0.62.2 — its default branch head is still the v0.62.2 tag commit — so
+#     the rebase is work somebody has to do, not a newer rev waiting to be
+#     picked up. Upstream has published nothing since v0.62.6 either.
 russh = { git = "https://github.com/ayamir/russh", rev = "0d1d073350ed823069252075cbf3db9672d5b490" }
 
 [workspace.lints.clippy]
