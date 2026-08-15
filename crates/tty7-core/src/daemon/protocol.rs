@@ -942,10 +942,21 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<(u8, Vec<u8>)> {
     Ok((kind[0], payload))
 }
 
+/// The kind byte of the frame at the front of `buf`, once its 5-byte header has
+/// arrived — the payload need not have.
+///
+/// For the callers that have to classify a reply *before* paying for it. The
+/// motivating case is `Attach`, answered either by a tiny `Error` or by a
+/// `Size` + `Snapshot` replay that can run to megabytes: waiting for the whole
+/// first frame to tell them apart would stall every successful attach behind
+/// its own scrollback.
 pub fn peek_frame_kind(buf: &[u8]) -> Option<u8> {
     (buf.len() >= 5).then(|| buf[4])
 }
 
+/// Whether `kind` is the [`DaemonMsg::Error`] frame. The kind bytes themselves
+/// stay private — this is the one classification a client makes without
+/// decoding, and naming it keeps the numbering in one file.
 pub fn is_error_kind(kind: u8) -> bool {
     kind == kind::ERROR
 }

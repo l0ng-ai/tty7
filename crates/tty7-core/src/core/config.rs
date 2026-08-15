@@ -6,6 +6,25 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const SUPPORTED_GUI_LANGUAGES: &[&str] = &["en", "zh-CN", "ja-JP"];
 
+/// The OpenType features configured for terminal text, as an ordered tag → value
+/// list (`[("calt", 1), ("liga", 1)]`).
+///
+/// This is a deliberate, behavior-identical replica of `gpui::FontFeatures`: the
+/// field it backs is a real key in the user's `config.json`, so its wire format
+/// is frozen, but `Config` itself has to parse on a headless machine that never
+/// links gpui. The GUI crate converts this into the gpui type in its own
+/// `core::config::gpui_font_features`, and a test beside that function pins the
+/// two serializations together.
+///
+/// Wire format, matching gpui byte for byte:
+/// - a JSON object of four-character alphanumeric tags to `true` / `false` /
+///   a non-negative integer;
+/// - `true` → 1, `false` → 0, an integer passes through;
+/// - a tag that isn't four alphanumeric characters, a negative or fractional
+///   value, or a `null` value is logged and skipped rather than failing the
+///   whole config parse;
+/// - serialization always writes integers, so `{"calt":true}` round-trips as
+///   `{"calt":1}`.
 #[derive(Default, Clone, Eq, PartialEq, Hash)]
 pub struct FontFeatures(pub Arc<Vec<(String, u32)>>);
 

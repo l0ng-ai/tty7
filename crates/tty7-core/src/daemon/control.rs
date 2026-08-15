@@ -939,7 +939,28 @@ pub struct ControlResponse {
 
 pub type EventSink = Box<dyn Fn(ControlEvent) + Send + Sync + 'static>;
 
+/// Whatever can force a parked reader out of a blocking `read`.
+///
+/// **This is not optional politeness; without it a client cannot be closed.**
+/// The reader thread spends its whole life inside `read_frame`, which blocks
+/// until the peer sends something. Setting a "we're closed now" flag does not
+/// wake it, because nothing is looking at the flag — the thread is inside a
+/// syscall. And the peer has no reason to send anything: it is waiting for the
+/// next request. Both ends wait for the other forever.
+///
+/// So closing has to act on the file descriptor itself. Every transport has
+/// *some* way to do that, but they share no trait in std — a socket has
+/// `shutdown`, a child process has `kill`, an SSH channel has `close` — hence
+/// this one-method abstraction rather than a bound on the stream type.
+///
+/// The server side has the same problem in mirror image, and resolves it with
+/// this same trait rather than a parallel one: every
+/// [`Duplex::split`](crate::daemon::duplex::Duplex::split) hands back a
+/// [`Halves`](crate::daemon::duplex::Halves) carrying an
+/// `Arc<dyn LinkShutdown>` for its own read half.
 pub trait LinkShutdown: Send + Sync + 'static {
+    /// Force the read half to return. Called at most once, and may be called
+    /// while the reader is blocked inside `read`.
     fn shutdown_link(&self) -> io::Result<()>;
 }
 

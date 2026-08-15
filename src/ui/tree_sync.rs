@@ -16,6 +16,15 @@ use crate::ui::app::Tty7App;
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::pane::{Pane, PaneSlot};
 
+/// The control link to `host`'s daemon, if one is up right now.
+///
+/// The unification the whole design leans on: the local machine's link lives in
+/// [`LocalLink`](crate::ui::local_link::LocalLink), a remote machine's in
+/// [`HostLinks`](crate::ui::remote_connect::HostLinks), and
+/// everything above this function stops caring which. `None` is always
+/// transient (both holders have supervisors reconnecting), so callers treat it
+/// as "not now": mark dirty and let the re-pull that follows reconnection
+/// resend what still matters.
 pub(crate) fn control_for(cx: &mut App, host: HostId) -> Option<Arc<ControlClient>> {
     if host.is_local() {
         crate::ui::local_link::LocalLink::client(cx)
@@ -26,6 +35,16 @@ pub(crate) fn control_for(cx: &mut App, host: HostId) -> Option<Arc<ControlClien
     }
 }
 
+/// The control link to `host`, seen by a caller about to speak the tree verbs.
+///
+/// [`TreeLink::Unserved`] is the difference from [`control_for`]'s plain
+/// `None`: the peer is connected but does not advertise
+/// [`feature::MACHINE_TREE`](tty7_core::daemon::control::feature::MACHINE_TREE)
+/// — a server with no home directory to keep a tree in, or one predating the
+/// verbs. "Down" is transient and retried; "unserved" is a fact about the
+/// peer, and sending it tree verbs anyway would only trade this one clear
+/// state for a refusal (or, on an old enough peer, a decode failure) per
+/// operation.
 pub(crate) enum TreeLink {
     Ready(Arc<ControlClient>),
     Unserved,
@@ -36,6 +55,8 @@ pub(crate) fn tree_control_for(cx: &mut App, host: HostId) -> TreeLink {
     classify_tree_link(control_for(cx, host))
 }
 
+/// The judgement half of [`tree_control_for`]: what the handshake's
+/// capability bits say this link is good for.
 fn classify_tree_link(client: Option<Arc<ControlClient>>) -> TreeLink {
     match client {
         Some(client)
@@ -108,6 +129,19 @@ impl DesiredNode {
     }
 }
 
+/// Read the window's tabs into the daemon's shape. Tabs with nothing
+/// representable yet (every pane still spawning) are omitted from the desired
+/// list — but their identities are answered separately as *held*: the tab is
+/// occupied, its panes just have no ids yet, and a diff that read its absence
+/// as "closed" would delete the daemon tab (and spend the very records) a
+/// revival in flight is about to replace.
+///
+/// Held is strictly for the *transient* case. A remote window's tab that is
+/// native-SSH through and through is unrepresentable **forever** — its panes
+/// live in this client's daemon — and is neither desired nor held: as far as
+/// this machine's tree is concerned, it does not exist. Holding it instead
+/// would freeze the whole window's ordering and active-tab sync permanently,
+/// because [`diff`] waits out held tabs before touching either.
 pub(crate) fn desired_tabs(
     app: &Tty7App,
     cx: &App,
@@ -143,6 +177,12 @@ pub(crate) fn desired_tabs(
     (out, active, held)
 }
 
+/// Whether every leaf of `pane` is a *ready* native-SSH view — the one kind
+/// of leaf a remote window can never name in its machine's tree, because the
+/// pane lives in this client's own daemon. Only meaningful for a tab whose
+/// desired root came out `None`: it decides permanently-invisible versus
+/// held (see [`desired_tabs`]). A connecting or empty leaf answers `false` —
+/// those are pending, not foreign.
 fn every_leaf_is_native_ssh(pane: &Pane, cx: &App) -> bool {
     match pane {
         Pane::Leaf(PaneSlot::Ready(view)) => view.read(cx).ssh_spec().is_some(),
