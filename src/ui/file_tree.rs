@@ -1051,7 +1051,7 @@ impl Tty7App {
                             L10nKey::LinkFileOpenFailed,
                             &[
                                 ("path", &path.display().to_string()),
-                                ("error", &e.to_string()),
+                                ("error", &crate::ui::host_ops::explain_io(&e)),
                             ],
                         ),
                         cx,

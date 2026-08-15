@@ -494,7 +494,10 @@ impl Tty7App {
                     Err(e) => {
                         return Err(t_fmt(
                             L10nKey::EditorCantOpen,
-                            &[("path", &path.display().to_string()), ("e", &e.to_string())],
+                            &[
+                                ("path", &path.display().to_string()),
+                                ("e", &crate::ui::host_ops::explain_io(&e)),
+                            ],
                         ));
                     }
                 };
@@ -512,7 +515,10 @@ impl Tty7App {
                     Err(e) => {
                         return Err(t_fmt(
                             L10nKey::EditorCantRead,
-                            &[("path", &path.display().to_string()), ("e", &e.to_string())],
+                            &[
+                                ("path", &path.display().to_string()),
+                                ("e", &crate::ui::host_ops::explain_io(&e)),
+                            ],
                         ));
                     }
                 };

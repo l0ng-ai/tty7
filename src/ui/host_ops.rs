@@ -190,6 +190,15 @@ impl HostOps {
 /// rest. `Display` on an `io::Error` answers "what happened" for a developer
 /// reading a log; it does not answer "what now" for the person who just lost
 /// a save, and "Permission denied (os error 13)" is the shape of that gap.
+///
+/// This is the only way an `io::Error` should reach a person. Everything that
+/// goes through [`HostOps::notify_err`] gets it for free; the handful of
+/// places that build their own string have to ask. Opening a file used to
+/// print `os error 13` while saving the same file explained itself, because
+/// the save went through `notify_err` and the open did not.
+///
+/// The raw error still belongs in the log next to the call — the two readers
+/// want different things, so both are written rather than one chosen.
 pub fn explain_io(err: &std::io::Error) -> String {
     use std::io::ErrorKind;
     let key = match err.kind() {

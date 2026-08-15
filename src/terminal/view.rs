@@ -2943,7 +2943,10 @@ impl TerminalView {
     ) {
         log::warn!("failed to open file link {}: {reason}", path.display());
         let path = path.display().to_string();
-        let reason = reason.to_string();
+        // The log above keeps the exact error for whoever is debugging; the
+        // notification gets the sentence, because "os error 13" is not an
+        // answer to the question the reader actually has.
+        let reason = crate::ui::host_ops::explain_io(reason);
         window.push_notification(
             crate::ui::i18n::t_fmt(
                 crate::ui::i18n::L10nKey::LinkFileOpenFailed,
