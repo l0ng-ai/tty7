@@ -12,7 +12,6 @@ pub(crate) mod graph;
 pub(crate) mod panel;
 pub(crate) mod path;
 pub(crate) mod state;
-#[allow(dead_code)]
 pub(crate) mod status;
 
 pub(crate) use actions::ScmIntent;

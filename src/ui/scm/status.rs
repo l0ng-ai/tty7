@@ -47,6 +47,7 @@ pub(crate) fn status_color(s: DecoStatus, cx: &gpui::App) -> gpui::Hsla {
 /// disagreed would make a folder and the file inside it contradict each other.
 /// Written out longhand so reordering the enum trips the test below instead of
 /// silently reshuffling the UI.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn status_rank(s: DecoStatus) -> u8 {
     match s {
         DecoStatus::Ignored => 0,

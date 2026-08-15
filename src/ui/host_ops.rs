@@ -175,32 +175,6 @@ impl HostOps {
         .detach();
     }
 
-    pub fn run_or_notify<T, E, F, L>(
-        host: SharedHost,
-        window: &Window,
-        cx: &mut Context<E>,
-        context: impl Into<String>,
-        f: F,
-        land: L,
-    ) where
-        E: 'static,
-        T: Send + 'static,
-        F: FnOnce(&dyn Host) -> std::io::Result<T> + Send + 'static,
-        L: FnOnce(&mut E, T, &mut Window, &mut Context<E>) + 'static,
-    {
-        let context = context.into();
-        Self::run_in(
-            host,
-            window,
-            cx,
-            f,
-            move |view, result, window, cx| match result {
-                Ok(value) => land(view, value, window, cx),
-                Err(e) => HostOps::notify_err(window, cx, &context, &e),
-            },
-        );
-    }
-
     pub fn notify_err(window: &mut Window, cx: &mut App, context: &str, err: &std::io::Error) {
         window.push_notification(
             t_fmt(
@@ -280,6 +254,7 @@ impl<K: Eq + Hash + Clone> InFlight<K> {
         self.in_flight.iter()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn len(&self) -> usize {
         self.in_flight.len()
     }
@@ -336,6 +311,7 @@ impl<K: Eq + Hash, V> ByHost<K, V> {
         self.map.clear();
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn len(&self) -> usize {
         self.map.values().map(HashMap::len).sum()
     }

@@ -31,10 +31,6 @@ impl HostRegistry {
         }
     }
 
-    pub fn local(cx: &mut App) -> SharedHost {
-        HostRegistry::get(cx, HostId::LOCAL).expect("the local host is always registered")
-    }
-
     pub fn insert(cx: &mut App, host: SharedHost) -> Option<SharedHost> {
         let id = host.id();
         cx.default_global::<HostRegistry>().hosts.insert(id, host)
@@ -56,10 +52,6 @@ impl HostRegistry {
             .collect();
         ids.sort_unstable();
         ids
-    }
-
-    pub fn len(cx: &mut App) -> usize {
-        cx.default_global::<HostRegistry>().hosts.len()
     }
 }
 
