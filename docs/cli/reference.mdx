@@ -213,16 +213,15 @@ while you watched.
 
 ### `tty7 events`
 
-Streams server events until interrupted, one per line — layout changes, agent
-status, workspace preemption. `--json` makes it NDJSON. Blocks forever; run it
-with a timeout or in the background.
+Streams server events until interrupted, one per line — layout changes and
+workspace preemption. `--json` makes it NDJSON. Blocks forever; run it with a
+timeout or in the background.
 
 Each line is one externally tagged object, `{"<kind>": {…}}`:
 
 | Kind | Payload |
 |---|---|
 | `layout` | `{"workspace","delta"}` — the bulk of the stream |
-| `agent_status` | `{"pane_id","json"}` — whatever the agent's hooks reported |
 | `preempted` | `{"workspace","by"}` — another client took the workspace |
 | `layout_resync` | no payload; the tree moved in a way no delta describes, so re-read it |
 
@@ -232,10 +231,14 @@ Each line is one externally tagged object, `{"<kind>": {…}}`:
 `tab_regrouped`, `tab_restructured`, `ratio_changed` and `pane_facts`.
 
 <Note>
-  **A pane exiting is not its own event.** It arrives as a `layout` delta:
-  `pane_facts` carrying that pane with `"live": false`. Watch for that rather
-  than for a pane-exit line — there is no such line, whatever the shape of the
-  wire protocol suggests.
+  **Two things that sound like their own events are not.** A pane exiting and an
+  agent changing status both arrive as a `layout` delta — `pane_facts` carrying
+  that pane, with `"live": false` for the exit and `agent.status` for the agent.
+  There is no pane-exit line and no agent-status line, whatever the shape of the
+  wire protocol suggests, so watch `pane_facts` for both.
+
+  For agent status specifically, `tty7 wait` and `tty7 agents` are the
+  supported way to ask; neither is built on this stream.
 </Note>
 
 ### `tty7 status`

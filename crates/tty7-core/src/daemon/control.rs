@@ -529,21 +529,28 @@ pub enum ControlEvent {
         failed: bool,
     },
 
-    /// Nothing sends this. The variant, its encoding and the line
-    /// `tty7 events` would print for it all exist, and no code path anywhere
-    /// constructs one outside this file's own round-trip tests — so an agent
-    /// waiting on a pane-exit event waits for good.
+    /// Nothing sends this, or [`Self::AgentStatus`] below. Both variants
+    /// encode, both have a line `tty7 events` would print, and no code path
+    /// anywhere constructs either outside this file's own round-trip tests —
+    /// so an agent waiting on a pane-exit event waits for good. Every other
+    /// variant here has a real emitter (`Preempted` in `host::server`,
+    /// `LayoutResync` beside it, `GuiOpen`, `Layout`), which is what makes
+    /// these two easy to mistake for supported.
     ///
-    /// A pane exiting *is* reported, as `Layout` carrying a `PaneFacts` delta
-    /// whose pane has `live: false`, which is what the docs now tell readers to
-    /// watch. Worth resolving one way or the other: either something emits this
-    /// where the pane is reaped, or it goes, and the `event_line` arm in
-    /// `tty7-cli` goes with it. Left in place because removing a variant from a
-    /// wire enum is a dialect change and this is not one to make in passing.
+    /// Both facts *are* reported, over `Layout`: a `PaneFacts` delta carries
+    /// the pane, with `live: false` for the exit and `agent.status` for the
+    /// agent, and that is what the docs tell readers to watch.
+    ///
+    /// Worth resolving one way or the other — either something emits them
+    /// where the pane is reaped and where a hook lands, or they go, and the
+    /// `event_line` arms in `tty7-cli` go with them. Left in place because
+    /// taking a variant out of a wire enum is a dialect change and this is not
+    /// one to make in passing.
     PaneExited {
         pane_id: u64,
         code: Option<i32>,
     },
+    /// Never sent — see [`Self::PaneExited`].
     AgentStatus {
         pane_id: u64,
         json: serde_json::Value,
