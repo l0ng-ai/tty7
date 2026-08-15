@@ -52,6 +52,10 @@ fn main() {
         ),
         ("send_then_capture_round_trip", send_then_capture_round_trip),
         (
+            "concurrent_tab_creates_leave_the_tree_and_registry_agreeing",
+            concurrent_tab_creates_leave_the_tree_and_registry_agreeing,
+        ),
+        (
             "send_enter_submits_in_a_paste_aware_raw_mode_tui",
             send_enter_submits_in_a_paste_aware_raw_mode_tui,
         ),
@@ -497,6 +501,55 @@ fn run_streams_output_and_passes_the_exit_code(daemon: &Daemon) {
         Some(7),
         "the child's exit code must pass through: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Twelve clients adding a tab to one workspace at once, and every pane
+/// accounted for afterwards.
+///
+/// The store takes `notify_order` before its state lock and holds it across
+/// delivery so subscribers see mutations in the order they happened; each
+/// `tab new` also spawns its pane before the tree is asked to hold it. Neither
+/// is visible from a single-threaded test, and the failure they guard against
+/// is quiet: a pane the registry runs that no tree references shows up only as
+/// these two counts disagreeing, which is exactly what `pane close --orphans`
+/// exists to mop up.
+fn concurrent_tab_creates_leave_the_tree_and_registry_agreeing(daemon: &Daemon) {
+    const RACERS: usize = 12;
+
+    let ws = daemon.run_json(&["ws", "new", "racews"]);
+    let ws_id = ws["id"].as_str().expect("ws new prints the id").to_string();
+
+    std::thread::scope(|scope| {
+        for _ in 0..RACERS {
+            let ws_id = ws_id.clone();
+            scope.spawn(move || {
+                let out = daemon.run(&["tab", "new", &ws_id]);
+                assert!(
+                    out.status.success(),
+                    "a racing `tab new` failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            });
+        }
+    });
+
+    let tabs = daemon.run_json(&["tab", "ls", &ws_id]);
+    let tabs = tabs["tabs"].as_array().expect("tab ls lists tabs").len();
+    assert_eq!(tabs, RACERS, "every racing tab has to land, and land once");
+
+    let listed = daemon.run_json(&["ls"]);
+    let tree: u64 = listed["workspaces"]
+        .as_array()
+        .expect("ls lists workspaces")
+        .iter()
+        .map(|w| w["panes"].as_u64().unwrap_or_default())
+        .sum();
+    let running = daemon.run_json(&["pane", "ls", "--all"]);
+    let running = running["panes"].as_array().expect("pane ls --all").len() as u64;
+    assert_eq!(
+        tree, running,
+        "the tree and the registry disagree, so a pane is running that nothing holds"
     );
 }
 
