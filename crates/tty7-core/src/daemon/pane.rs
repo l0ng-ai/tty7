@@ -682,6 +682,46 @@ const EXIT_CODE_PROBE_WINDOW: Duration = Duration::from_millis(500);
 /// offers; `signalled_status_is_not_reported_as_a_plain_exit` pins it against
 /// the crate's own constructor so an upstream rewording fails there rather
 /// than here.
+/// Lifts this thread's SIGTERM block for as long as it is held, and puts the
+/// thread's own mask back when dropped.
+///
+/// Only a spawn wants this: `fork` copies the calling thread's mask into the
+/// child, and nothing else here does. Restores the whole saved mask rather
+/// than re-blocking SIGTERM, so a thread that never had it blocked — a test,
+/// or a build where `serve_sigterm` never ran — is left as it was found.
+#[cfg(unix)]
+struct SigtermUnblocked(Option<libc::sigset_t>);
+
+#[cfg(unix)]
+impl SigtermUnblocked {
+    fn for_spawn() -> Self {
+        unsafe {
+            let mut just_sigterm: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut just_sigterm);
+            libc::sigaddset(&mut just_sigterm, libc::SIGTERM);
+            let mut previous: libc::sigset_t = std::mem::zeroed();
+            match libc::pthread_sigmask(libc::SIG_UNBLOCK, &just_sigterm, &mut previous) {
+                0 => Self(Some(previous)),
+                // Nothing was changed, so there is nothing to put back. The
+                // pane still starts; it just starts with the mask it would
+                // have had before this existed.
+                _ => Self(None),
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SigtermUnblocked {
+    fn drop(&mut self) {
+        if let Some(previous) = self.0 {
+            unsafe {
+                libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut());
+            }
+        }
+    }
+}
+
 fn reported_exit_code(status: &portable_pty::ExitStatus) -> Option<i32> {
     match status.to_string().starts_with("Terminated by") {
         true => None,
@@ -1319,6 +1359,25 @@ impl DaemonPane {
 
         let pair = native_pty_system().openpty(pty_size)?;
         let spawn = build_spawn_config(id, cwd, shell, workspace.as_deref())?;
+
+        // The unix half of the same problem the Windows line above solves: the
+        // daemon's own signal state reaching a pane it has no business in.
+        // `serve_sigterm` blocks SIGTERM on every daemon thread so that only
+        // its `sigwait` waiter ends the process; `fork` hands the calling
+        // thread's mask to the child and `execve` keeps it. portable-pty does
+        // reset the child's SIGTERM *disposition* to `SIG_DFL`, but a blocked
+        // signal is never delivered for a disposition to apply — so every pane
+        // ran a shell that `kill`, `pkill` and `timeout` could not stop, and
+        // only `kill -9` would end.
+        //
+        // Lifted for the spawn alone: the mask the child forks with is the one
+        // it keeps, and this thread takes its own back immediately. The cost is
+        // a window of a fork's width where a SIGTERM aimed at the daemon could
+        // land on this thread and end it on the spot, losing the scrollback
+        // save that `serve_sigterm` exists to perform. That is a millisecond
+        // against every pane in the process being unstoppable.
+        #[cfg(unix)]
+        let _sigterm_unblocked = SigtermUnblocked::for_spawn();
 
         let child = pair.slave.spawn_command(spawn.cmd)?;
         let shell_pid = child.process_id();
@@ -4559,6 +4618,47 @@ mod tests {
 
         assert_eq!(st.cwd, None);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    fn sigterm_is_blocked_here() -> bool {
+        unsafe {
+            let mut current: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut current);
+            libc::sigismember(&current, libc::SIGTERM) == 1
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_spawn_guard_lifts_sigterm_and_hands_the_mask_back() {
+        // Start where every daemon thread starts once `serve_sigterm` has run.
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGTERM);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        }
+        assert!(
+            sigterm_is_blocked_here(),
+            "the state the guard is written for"
+        );
+
+        {
+            let _guard = SigtermUnblocked::for_spawn();
+            assert!(
+                !sigterm_is_blocked_here(),
+                "a `fork` here must hand the child an unblocked SIGTERM — this is \
+                 the whole fix: `execve` keeps the mask, so a pane that inherits \
+                 the block cannot be stopped by `kill`"
+            );
+        }
+
+        assert!(
+            sigterm_is_blocked_here(),
+            "and the daemon's own thread takes its mask back, so `sigwait` keeps \
+             its claim on shutdown"
+        );
     }
 
     #[test]
