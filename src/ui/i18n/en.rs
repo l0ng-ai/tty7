@@ -1322,7 +1322,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherNoTabMatch => "No tab matches.",
         L10nKey::SwitcherTabsAfterOpening => "Open this workspace to see its tabs.",
         L10nKey::SwitcherOpenToManage => "Open this workspace to rename or stop it.",
-        L10nKey::SwitcherConnectToUse => "Connect to this machine to open a workspace on it.",
         L10nKey::SwitcherOrphanPanes => {
             "Background panes — shells still running outside any window:"
         }
@@ -1599,12 +1598,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppSshParseBadHost => "Invalid host \"{host}\"",
         L10nKey::AppMenuMinimize => "Minimize",
         L10nKey::AppMenuZoom => "Zoom",
-        L10nKey::SwitcherStatusRestarting => "restarting…",
-        L10nKey::SwitcherStatusInstalling => "installing…",
-        L10nKey::SwitcherStatusConnecting => "connecting…",
-        L10nKey::SwitcherStatusConnectFailed => "couldn't connect",
-        L10nKey::SwitcherStatusNotConnected => "not connected",
-        L10nKey::SwitcherStatusReconnecting => "reconnecting…",
         L10nKey::SwitcherStatusTakenOver => "taken over",
         L10nKey::SettingsFontDefault => "Default (match primary)",
         L10nKey::ForwardDescriptionPlaceholder => "what it's for",
@@ -1752,7 +1745,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SidebarScratchGroup => "Scratch",
         L10nKey::TabContextCloseTab => "Close Tab",
         L10nKey::TabContextCloseTabsBelow => "Close Tabs Below",
-        L10nKey::AppAgentHooksOpFailed => "Failed: {error}",
         L10nKey::TabContextMarkUnread => "Mark as Unread",
     }
 }

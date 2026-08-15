@@ -1231,7 +1231,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherNoTabMatch => "没有匹配的标签页。",
         L10nKey::SwitcherTabsAfterOpening => "打开这个工作区后才能看到它的标签页。",
         L10nKey::SwitcherOpenToManage => "打开这个工作区后才能重命名或停止它。",
-        L10nKey::SwitcherConnectToUse => "连接这台机器后才能在上面新建工作区。",
         L10nKey::SwitcherOrphanPanes => "后台窗格——仍在运行、但不属于任何窗口的 shell：",
         L10nKey::SwitcherTabCount => "{n} 个标签页",
         L10nKey::SwitcherTabCountOne => "1 个标签页",
@@ -1500,12 +1499,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppSshParseBadHost => "无法解析主机“{host}”",
         L10nKey::AppMenuMinimize => "最小化",
         L10nKey::AppMenuZoom => "缩放",
-        L10nKey::SwitcherStatusRestarting => "正在重启…",
-        L10nKey::SwitcherStatusInstalling => "正在安装…",
-        L10nKey::SwitcherStatusConnecting => "正在连接…",
-        L10nKey::SwitcherStatusConnectFailed => "连接失败",
-        L10nKey::SwitcherStatusNotConnected => "未连接",
-        L10nKey::SwitcherStatusReconnecting => "正在重连…",
         L10nKey::SwitcherStatusTakenOver => "已被接管",
         L10nKey::SettingsFontDefault => "默认（匹配主字体）",
         L10nKey::ForwardDescriptionPlaceholder => "用途说明",
@@ -1645,7 +1638,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarScratchGroup => "草稿",
         L10nKey::TabContextCloseTab => "关闭标签页",
         L10nKey::TabContextCloseTabsBelow => "关闭下方标签页",
-        L10nKey::AppAgentHooksOpFailed => "失败：{error}",
         L10nKey::TabContextMarkUnread => "标记为未读",
     })
 }

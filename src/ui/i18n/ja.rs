@@ -1353,7 +1353,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherNoTabMatch => "一致するタブがありません",
         L10nKey::SwitcherTabsAfterOpening => "このワークスペースを開くとタブが表示されます",
         L10nKey::SwitcherOpenToManage => "このワークスペースを開くと名前の変更や停止ができます",
-        L10nKey::SwitcherConnectToUse => "このマシンに接続するとワークスペースを作成できます",
         L10nKey::SwitcherOrphanPanes => {
             "バックグラウンドペイン — どのウィンドウにも属さずに実行中のシェル:"
         }
@@ -1646,12 +1645,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppSshParseBadHost => "ホスト「{host}」を解析できません",
         L10nKey::AppMenuMinimize => "最小化",
         L10nKey::AppMenuZoom => "ズーム",
-        L10nKey::SwitcherStatusRestarting => "再起動中…",
-        L10nKey::SwitcherStatusInstalling => "インストール中…",
-        L10nKey::SwitcherStatusConnecting => "接続中…",
-        L10nKey::SwitcherStatusConnectFailed => "接続できませんでした",
-        L10nKey::SwitcherStatusNotConnected => "未接続",
-        L10nKey::SwitcherStatusReconnecting => "再接続中…",
         L10nKey::SwitcherStatusTakenOver => "他のクライアントが使用中",
         L10nKey::SettingsFontDefault => "デフォルト（メインに合わせる）",
         L10nKey::ForwardDescriptionPlaceholder => "用途",
@@ -1798,7 +1791,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarScratchGroup => "スクラッチ",
         L10nKey::TabContextCloseTab => "タブを閉じる",
         L10nKey::TabContextCloseTabsBelow => "下のタブを閉じる",
-        L10nKey::AppAgentHooksOpFailed => "失敗: {error}",
         L10nKey::TabContextMarkUnread => "未読としてマーク",
     })
 }
