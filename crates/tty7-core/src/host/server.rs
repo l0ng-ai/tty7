@@ -671,7 +671,15 @@ fn run_request(
             Vec::new(),
         ),
         ControlRequest::WorkspaceDetach { id } => {
-            detach_workspace(conn, &id)?;
+            // `detach_workspace` can say whether there was a claim to release,
+            // and the answer is dropped on purpose. `Unit` is what this request
+            // has always replied, and the dialect is spoken across versions —
+            // a remote `tty7-server` is whatever build was pushed to that
+            // machine, so widening the reply to `Bool` would make a new client
+            // fail against every server already out there. Detach is idempotent
+            // from the caller's side anyway: "you do not hold this" is the
+            // outcome either way.
+            let _released = detach_workspace(conn, &id)?;
             (ReplyOk::Unit, Vec::new())
         }
         ControlRequest::GuiOpen { path, workspace } => (

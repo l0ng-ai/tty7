@@ -58,8 +58,13 @@ GUI on *this* machine.
 Same as `ws ls`. Table: `WORKSPACE NAME TABS PANES ATTACHED`.
 JSON: `{"workspaces":[{"id","name","tabs","panes","attached"}]}`.
 
-`ATTACHED` names the host holding the workspace — a GUI window, or another
-client — and is `-` when nobody is.
+`ATTACHED` names the client that has *claimed* the workspace over a control
+link, and a claim lasts exactly as long as that client's link. A GUI claims a
+workspace it is showing as a **remote** one; a GUI window on a workspace of its
+own machine does not claim anything, because there is no second client to
+arbitrate against. So `-` for a local workspace means "no remote client holds
+this", not "nothing has it open" — with a window sitting on it, `tty7 ls` still
+prints `-`.
 
 ### `tty7 run [--keep] [--cwd DIR] [--ws WORKSPACE] -- CMD...`
 
@@ -243,8 +248,18 @@ candidates.
 | `ws new [NAME]` | An empty workspace (no tab, no pane) | `{"id","name"}` |
 | `ws rename WORKSPACE NAME` | Name or rename | `{"id","name"}` |
 | `ws rm WORKSPACE` | Delete the workspace and hang up its panes | `{"removed"}` |
-| `ws attach WORKSPACE` | Become its controlling client | `{"attached","took_over_from"}` |
+| `ws attach WORKSPACE` | Take it back from whoever holds it | `{"attached","took_over_from"}` |
 | `ws detach WORKSPACE` | Let go without interrupting anything | `{"detached"}` |
+
+`ws attach` is a takeover, not a subscription: the claim belongs to the
+connection that made it, and the CLI's connection ends when the command does.
+So it prints `took over from HOST` when it displaced someone and nothing when
+it did not, and either way the workspace reads as unattached again immediately
+afterwards. Displacing the holder is the whole of what it does from here —
+staying attached is a thing only a client that keeps its link open can do.
+
+For the same reason `ws detach` reports `{"detached"}` whether or not there was
+a claim to release: it says "you do not hold this", which was already true.
 
 <Warning>
   `ws rm` hangs up the panes the workspace held. If the command reports that
@@ -273,6 +288,13 @@ resolve it immediately before use. A full tab UUID also works: `@<uuid>`.
 | `tab close @TAB` | Close the tab and every pane in it | `{"closed"}` |
 | `tab rename @TAB NAME` | Name or rename | `{"tab","name"}` |
 | `tab move @TAB INDEX` | Reposition within its workspace | `{"tab","to"}` |
+
+`INDEX` counts from **0**, unlike the `@N` address beside it — `tab move @1 0`
+leaves the first tab where it is, and `tab move @1 1` puts it second. It is a
+position in the workspace's own tab list, not an `@N`, so it does not move a tab
+between workspaces. Past the end it clamps to last rather than failing, the way
+`split --ratio` does; `to` in the JSON echoes the number you asked for, so read
+the position back from `tab ls` rather than from the reply.
 
 `GROUP` is the heading the GUI's sidebar files the tab under, shown by its last
 segment. Read-only from here: with the default repo grouping the GUI recomputes
