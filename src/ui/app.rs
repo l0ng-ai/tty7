@@ -7292,10 +7292,14 @@ pub(crate) fn new_terminal(
         owner,
         font_size,
     };
+    // The same leak the reconnect banner had: this name is read out as
+    // "Connecting to {machine}…" and "Could not reach {machine}", and a
+    // `Profile` target spells itself as its config UUID (#485). The pane's own
+    // notifications already resolve it through the live config.
     let machine = spawn
         .workspace
         .as_ref()
-        .map(|w| w.target.to_string())
+        .map(|w| crate::ui::remote_connect::target_label(cx, &w.target))
         .unwrap_or_else(|| t(L10nKey::AppLocalServerName).to_string());
     let pending = cx.new(|cx| crate::ui::pending_pane::PendingPane::new(machine, spawn, cx));
     cx.subscribe_in(
