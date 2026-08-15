@@ -24,6 +24,21 @@ use std::path::{Path, PathBuf};
 /// looked at it.
 pub struct TempRoot(PathBuf);
 
+impl TempRoot {
+    /// The same directory with symlinks resolved, still owned by this guard.
+    ///
+    /// macOS puts the temp dir behind `/var` → `/private/var`, so a fixture
+    /// that compares paths it got back from the system against this one needs
+    /// the resolved spelling. Resolving in place rather than handing back a
+    /// bare `PathBuf` keeps the removal attached to it.
+    pub fn canonicalized(mut self) -> Self {
+        if let Ok(real) = std::fs::canonicalize(&self.0) {
+            self.0 = real;
+        }
+        self
+    }
+}
+
 impl Drop for TempRoot {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);

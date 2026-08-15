@@ -285,11 +285,8 @@ mod tests {
     use super::*;
     use tty7_core::host::local::LocalHost;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tty7-drop-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::canonicalize(&dir).unwrap()
+    fn scratch(name: &str) -> crate::testutil::TempRoot {
+        crate::testutil::temp_root(&format!("drop-{name}")).canonicalized()
     }
 
     fn write(path: &Path, body: &str) {

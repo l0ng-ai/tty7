@@ -889,7 +889,7 @@ mod tests {
     fn generator_arg_pends_scripts_and_suppresses_path_fallback() {
         let dir = temp_tree("gen-checkout", &[("sentinel.txt", false), ("subdir", true)]);
         let line = "git checkout ";
-        let c = complete(line, line.chars().count(), Some(dir.as_path()))
+        let c = complete(line, line.chars().count(), Some(&*dir))
             .expect("generator slot is a completion");
         assert!(
             !c.pending.is_empty(),
@@ -965,7 +965,7 @@ mod tests {
     fn dir_only_commands_complete_only_directories() {
         let dir = temp_tree("dironly", &[("target", true), ("tar.gz", false)]);
         let only_dirs = |line: &str| {
-            complete(line, line.chars().count(), Some(dir.as_path()))
+            complete(line, line.chars().count(), Some(&*dir))
                 .map(|c| c.candidates.into_iter().map(|c| c.text).collect::<Vec<_>>())
                 .unwrap_or_default()
         };
@@ -985,7 +985,7 @@ mod tests {
         let c = complete(
             "frobnicate read",
             "frobnicate read".chars().count(),
-            Some(dir.as_path()),
+            Some(&*dir),
         )
         .unwrap();
         assert_eq!(c.candidates[0].text, "readme.md");
@@ -1067,10 +1067,8 @@ mod tests {
         assert_eq!(s.common_prefix().unwrap(), "appl");
     }
 
-    fn temp_tree(tag: &str, entries: &[(&str, bool)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tty7-comp-{}-{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn temp_tree(tag: &str, entries: &[(&str, bool)]) -> crate::testutil::TempRoot {
+        let dir = crate::testutil::temp_root(&format!("comp-{tag}"));
         for (name, is_dir) in entries {
             if *is_dir {
                 std::fs::create_dir_all(dir.join(name)).unwrap();
@@ -1098,7 +1096,7 @@ mod tests {
             &[("apple.txt", false), ("apply.sh", false), ("assets", true)],
         );
         let line = "cat a";
-        let c = complete(line, line.chars().count(), Some(dir.as_path())).unwrap();
+        let c = complete(line, line.chars().count(), Some(&*dir)).unwrap();
         let names: Vec<&str> = c.candidates.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(names, vec!["assets", "apply.sh", "apple.txt"]);
         let assets = c.candidates.iter().find(|c| c.text == "assets").unwrap();
@@ -1110,7 +1108,7 @@ mod tests {
     fn completion_reenters_a_directory_inserted_with_an_escaped_space() {
         let dir = temp_tree("escaped-path", &[("My Documents/notes.txt", false)]);
         let line = r"cat My\ Documents/no";
-        let c = complete(line, line.chars().count(), Some(dir.as_path())).unwrap();
+        let c = complete(line, line.chars().count(), Some(&*dir)).unwrap();
         assert_eq!(c.candidates[0].text, "My Documents/notes.txt");
         assert_eq!(
             (c.candidates[0].start, c.candidates[0].end),
@@ -1123,7 +1121,7 @@ mod tests {
         let dir = temp_tree("nested", &[("sub", true)]);
         std::fs::write(dir.join("sub/file.rs"), b"").unwrap();
         let line = "cat sub/f";
-        let c = complete(line, line.chars().count(), Some(dir.as_path())).unwrap();
+        let c = complete(line, line.chars().count(), Some(&*dir)).unwrap();
         assert_eq!(c.candidates[0].text, "sub/file.rs");
         assert_eq!(c.candidates[0].start, 4);
     }
@@ -1131,9 +1129,9 @@ mod tests {
     #[test]
     fn hidden_files_only_with_dot_prefix() {
         let dir = temp_tree("hidden", &[(".secret", false), ("visible", false)]);
-        let c = complete("ls v", 4, Some(dir.as_path())).unwrap();
+        let c = complete("ls v", 4, Some(&*dir)).unwrap();
         assert!(c.candidates.iter().all(|c| !c.text.starts_with('.')));
-        let c = complete("ls .", 4, Some(dir.as_path())).unwrap();
+        let c = complete("ls .", 4, Some(&*dir)).unwrap();
         assert!(c.candidates.iter().any(|c| c.text == ".secret"));
     }
 
@@ -1149,7 +1147,7 @@ mod tests {
             ],
         );
         let line = "cat x";
-        let c = complete(line, line.chars().count(), Some(dir.as_path())).unwrap();
+        let c = complete(line, line.chars().count(), Some(&*dir)).unwrap();
         let names: Vec<&str> = c.candidates.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(names, vec!["xa", "xy", "xyz", "xyzzy"]);
     }
@@ -1158,7 +1156,7 @@ mod tests {
     fn a_remote_pane_completes_commands_but_never_local_paths() {
         let dir = temp_tree("remote", &[("only-here.txt", false), ("subdir", true)]);
 
-        let c = complete("cat only", 8, Some(dir.as_path())).expect("local pane completes paths");
+        let c = complete("cat only", 8, Some(&*dir)).expect("local pane completes paths");
         assert!(c.candidates.iter().any(|c| c.text.starts_with("only-here")));
 
         assert!(complete("cat only", 8, None).is_none());
@@ -1199,12 +1197,12 @@ mod tests {
     fn a_foreign_pane_lists_paths_but_never_runs_this_machine() {
         let dir = temp_tree("foreign", &[("apple.txt", false), ("apricot", true)]);
         let line = "cat ap";
-        let c = complete_foreign(line, line.chars().count(), dir.as_path())
+        let c = complete_foreign(line, line.chars().count(), &dir)
             .expect("the share lists like any directory");
         let names: Vec<&str> = c.candidates.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(names, vec!["apricot", "apple.txt"]);
 
-        let commands: Vec<String> = complete_foreign("l", 1, dir.as_path())
+        let commands: Vec<String> = complete_foreign("l", 1, &dir)
             .map(|c| c.candidates.into_iter().map(|c| c.text).collect())
             .unwrap_or_default();
         assert!(
@@ -1213,7 +1211,7 @@ mod tests {
         );
 
         let line = "git checkout ";
-        if let Some(c) = complete_foreign(line, line.chars().count(), dir.as_path()) {
+        if let Some(c) = complete_foreign(line, line.chars().count(), &dir) {
             assert!(
                 c.pending.is_empty(),
                 "a generator would run Windows tools against a Linux checkout: {:?}",
@@ -1222,7 +1220,7 @@ mod tests {
         }
 
         // `~` is the distro's home, not this machine's — leave it to the shell.
-        assert!(complete_foreign("cat ~/ap", 8, dir.as_path()).is_none());
+        assert!(complete_foreign("cat ~/ap", 8, &dir).is_none());
     }
 
     #[cfg(windows)]
@@ -1370,15 +1368,15 @@ mod tests {
     #[test]
     fn no_candidates_returns_none() {
         let dir = temp_tree("empty", &[("zzz", false)]);
-        assert!(complete("cat q", 5, Some(dir.as_path())).is_none());
-        assert!(complete("", 0, Some(dir.as_path())).is_none());
-        assert!(complete("   ", 3, Some(dir.as_path())).is_none());
+        assert!(complete("cat q", 5, Some(&*dir)).is_none());
+        assert!(complete("", 0, Some(&*dir)).is_none());
+        assert!(complete("   ", 3, Some(&*dir)).is_none());
     }
 
     #[test]
     fn mid_line_cursor_completes_only_the_word_before_it() {
         let dir = temp_tree("midline", &[("apple.txt", false)]);
-        let c = complete("cat ap x.log", 6, Some(dir.as_path())).unwrap();
+        let c = complete("cat ap x.log", 6, Some(&*dir)).unwrap();
         let apple = c.candidates.iter().find(|c| c.text == "apple.txt").unwrap();
         assert_eq!((apple.start, apple.end), (4, 6));
         let (line, cursor) = Replacement {
