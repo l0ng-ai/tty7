@@ -277,6 +277,7 @@ pub(crate) fn diff(
     let mut ops = Vec::new();
 
     if scope == SyncScope::Full {
+        migrate_panes(workspace, mirror, desired, &mut ops);
         let mut index = 0;
         while index < mirror.tabs.len() {
             let id = mirror.tabs[index].id;
@@ -293,17 +294,25 @@ pub(crate) fn diff(
         }
     }
 
-    for (index, want) in desired.iter().enumerate() {
-        match mirror.tabs.iter().position(|t| t.id == want.id) {
-            None => {
-                let at = match scope {
-                    SyncScope::Full => index,
-                    SyncScope::Additive => mirror.tabs.len(),
-                };
-                create_tab(workspace, mirror, at, want, &mut ops);
-            }
-            Some(at) => reconcile_tab(workspace, mirror, at, want, &mut ops),
+    // The tabs the machine already has are settled first, and only then are the
+    // new ones built. A pane that left its tab to become one of its own is in
+    // both halves of that — the machine refuses to register a pane it already
+    // holds, so the tab it left has to give it up before the tab it is
+    // becoming can ask for it.
+    for want in desired {
+        if let Some(at) = mirror.tabs.iter().position(|t| t.id == want.id) {
+            reconcile_tab(workspace, mirror, at, want, &mut ops);
         }
+    }
+    for (index, want) in desired.iter().enumerate() {
+        if mirror.tabs.iter().any(|t| t.id == want.id) {
+            continue;
+        }
+        let at = match scope {
+            SyncScope::Full => index,
+            SyncScope::Additive => mirror.tabs.len(),
+        };
+        create_tab(workspace, mirror, at, want, &mut ops);
     }
 
     if scope == SyncScope::Additive || !held.is_empty() {
@@ -339,6 +348,119 @@ pub(crate) fn diff(
     }
 
     ops
+}
+
+/// Carries panes across to the tab that now wants them, before anything else
+/// gets a chance to read their old tab as one to close.
+///
+/// This is a tab dragged into another tab's layout: every pane it brought
+/// keeps running and changes tab, and the tab it came from goes away once it
+/// has nothing left. Told as `PaneMove`, which is the one op that can say that
+/// — closing the old tab and building the new one would say instead that a
+/// tab's worth of panes went away and a tab's worth arrived.
+///
+/// One move per round, because each move changes where the next one can go:
+/// a pane may only land beside a pane its destination already holds, so a
+/// two-pane tab crosses as its first pane and then the rest beside it. A round
+/// that finds nothing left to do ends the pass, which is also what happens
+/// when a move cannot be spelled this way at all — the passes below then treat
+/// it as the reshape it is.
+fn migrate_panes(
+    workspace: WorkspaceId,
+    mirror: &mut WsMirror,
+    desired: &[DesiredTab],
+    ops: &mut Vec<ControlRequest>,
+) {
+    while let Some((pane, to, axis, first)) = next_migration(mirror, desired) {
+        let holders = |m: &WsMirror, p: u64| m.tabs.iter().position(|t| t.root.contains(p));
+        let (Some(from), Some(dest)) = (holders(mirror, pane), holders(mirror, to)) else {
+            return;
+        };
+        // The destination takes the pane before its old tab gives it up, so a
+        // split that somehow will not take leaves the mirror as it was rather
+        // than a pane short of the tree the daemon has.
+        if !mirror.tabs[dest]
+            .root
+            .split_leaf(to, pane, axis, 0.5, first)
+        {
+            return;
+        }
+        // The rest of the bookkeeping `Machine::pane_move` does at the other
+        // end: a tab that has just lost its last pane is gone, and the active
+        // tab heals onto whatever took its place.
+        if mirror.tabs[from].root.remove_leaf(pane).is_none() {
+            mirror.tabs.remove(from);
+            heal_active(mirror, from);
+        }
+        ops.push(ControlRequest::PaneMove {
+            workspace,
+            pane,
+            to,
+            axis,
+            first,
+        });
+    }
+}
+
+/// The next pane sitting in a tab that no longer wants it, and the pane in the
+/// tab that does that it can be put beside.
+fn next_migration(mirror: &WsMirror, desired: &[DesiredTab]) -> Option<(u64, u64, TreeAxis, bool)> {
+    for want in desired {
+        let Some(at) = mirror.tabs.iter().position(|t| t.id == want.id) else {
+            continue;
+        };
+        let root = want.root.to_pane_node();
+        // Panes the machine has never heard of are splits, not moves: a side
+        // holding one of those is not a side that can cross over.
+        let arriving = |node: &PaneNode| {
+            let ids = node.pane_ids();
+            !ids.is_empty()
+                && ids.iter().all(|p| {
+                    mirror
+                        .tabs
+                        .iter()
+                        .position(|t| t.root.contains(*p))
+                        .is_some_and(|holder| holder != at)
+                })
+        };
+        let settled = |node: &PaneNode| match node {
+            PaneNode::Leaf { pane } => mirror.tabs[at].root.contains(*pane).then_some(*pane),
+            _ => None,
+        };
+        if let Some(step) = arrival_site(&root, &arriving, &settled) {
+            return Some(step);
+        }
+    }
+    None
+}
+
+/// The split in the shape a tab wants where panes still living in another tab
+/// meet a pane that is already here, read as a pane to move and the pane to
+/// put it beside.
+///
+/// The side that is arriving may be a whole subtree — only its first pane
+/// crosses on this round, and the ones behind it follow on later rounds, by
+/// which time this same reading finds them the sites they want inside it. The
+/// side that is staying has to be a single pane, because that is all a move can
+/// split. Nothing else can be said in one move: a tab dropped against the outer
+/// edge of a layout that is more than one pane deep has to go in above the
+/// whole of it, and the passes after this one rebuild the tab instead.
+fn arrival_site(
+    node: &PaneNode,
+    arriving: &impl Fn(&PaneNode) -> bool,
+    settled: &impl Fn(&PaneNode) -> Option<u64>,
+) -> Option<(u64, u64, TreeAxis, bool)> {
+    let PaneNode::Split { axis, a, b, .. } = node else {
+        return None;
+    };
+    let first = |side: &PaneNode| side.pane_ids().first().copied();
+    if let (Some(to), true) = (settled(a), arriving(b)) {
+        return Some((first(b)?, to, *axis, false));
+    }
+    if let (true, Some(to)) = (arriving(a), settled(b)) {
+        return Some((first(a)?, to, *axis, true));
+    }
+    arrival_site(a, arriving, settled).or_else(|| arrival_site(b, arriving, settled))
 }
 
 fn heal_active(mirror: &mut WsMirror, removed: usize) {
@@ -3673,6 +3795,89 @@ mod tests {
                 first: false,
             }],
             "the tab is reshaped in place, not closed and rebuilt"
+        );
+        assert_converged(&mirror, &after);
+    }
+
+    #[test]
+    fn merging_a_tab_into_another_moves_its_panes_and_takes_the_tab_with_them() {
+        let ws = WorkspaceId::new();
+        let (host, guest) = (TabId::new(), TabId::new());
+        let mut mirror = WsMirror::default();
+        let before = vec![
+            tab(host, leaf(1)),
+            tab(guest, split(TreeAxis::Horizontal, 0.5, leaf(2), leaf(3))),
+        ];
+        diff(ws, &mut mirror, &before, Some(host), SyncScope::Full, &[]);
+
+        // The guest tab dropped on the right of pane 1, arriving as the column
+        // of two it already was.
+        let after = vec![tab(
+            host,
+            split(
+                TreeAxis::Horizontal,
+                0.5,
+                leaf(1),
+                split(TreeAxis::Vertical, 0.5, leaf(2), leaf(3)),
+            ),
+        )];
+        let ops = diff(ws, &mut mirror, &after, Some(host), SyncScope::Full, &[]);
+        assert_eq!(
+            ops,
+            vec![
+                ControlRequest::PaneMove {
+                    workspace: ws,
+                    pane: 2,
+                    to: 1,
+                    axis: TreeAxis::Horizontal,
+                    first: false,
+                },
+                ControlRequest::PaneMove {
+                    workspace: ws,
+                    pane: 3,
+                    to: 2,
+                    axis: TreeAxis::Vertical,
+                    first: false,
+                },
+            ],
+            "the panes cross one at a time and the emptied tab goes with them, \
+             rather than a tab's worth of panes being closed and respawned"
+        );
+        assert_converged(&mirror, &after);
+        assert_eq!(mirror.active, Some(host));
+    }
+
+    #[test]
+    fn a_pane_leaving_for_a_tab_of_its_own_gives_it_up_before_it_asks_for_it() {
+        let ws = WorkspaceId::new();
+        let (held, fresh) = (TabId::new(), TabId::new());
+        let mut mirror = WsMirror::default();
+        let before = vec![tab(
+            held,
+            split(TreeAxis::Horizontal, 0.5, leaf(1), leaf(2)),
+        )];
+        diff(ws, &mut mirror, &before, Some(held), SyncScope::Full, &[]);
+
+        // Pane 2 dropped on the strip ahead of the tab it came from, so the tab
+        // it becomes is desired *first*.
+        let after = vec![tab(fresh, leaf(2)), tab(held, leaf(1))];
+        let ops = diff(ws, &mut mirror, &after, Some(fresh), SyncScope::Full, &[]);
+        assert_eq!(
+            ops,
+            vec![
+                ControlRequest::PaneClose {
+                    workspace: ws,
+                    pane: 2,
+                },
+                ControlRequest::TabCreate {
+                    workspace: ws,
+                    at: Some(0),
+                    pane: seed(2),
+                    tab: Some(fresh),
+                },
+            ],
+            "the machine refuses a pane that is in two tabs at once, so the old \
+             tab lets go before the new one is built"
         );
         assert_converged(&mirror, &after);
     }

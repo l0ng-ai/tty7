@@ -82,6 +82,35 @@ Where you drop it decides what happens:
 The landing lights up while you drag, and only ever lights up when the drop
 would actually change the layout.
 
+## Making one tab a pane of another
+
+Two sessions you keep switching between belong in one tab. Drag a tab — by its
+chip in the tab bar, or by its row in the sidebar — out over the panes and drop
+it where you want it: it becomes a pane of the tab you are looking at, and the
+tab it came from is gone.
+
+The landing reads exactly as it does for a pane, minus the middle: a tab has
+nothing here to trade places with, so a pane's middle means "split it the way it
+is longest". A tab that was itself split arrives with its panes still arranged
+the way you left them, taking one share of whatever row or column it joined.
+
+Nothing restarts on the way over. A shell mid-command, an SSH session, a coding
+agent halfway through a turn — all of them keep running; only the tab they were
+in goes away. The tab's *name* does not come along.
+
+Picking a tab up does not switch to it, so the tab you drop into is the one you
+were already looking at. A plain click still switches, as always.
+
+## Making a pane a tab of its own
+
+The same move backwards. Drag a pane by its grip up to the tab bar — or out to
+the sidebar, if that is where your tabs live — and a caret shows which two tabs
+it would go between. Drop it and it leaves the split it was in and becomes a tab
+of its own, at that spot.
+
+Nothing restarts here either. The last pane in a tab has nowhere to go, since it
+is already a tab on its own, so no caret appears for it.
+
 ## Closing something that is busy
 
 Closing a pane or tab with a command still running asks first, and says what is

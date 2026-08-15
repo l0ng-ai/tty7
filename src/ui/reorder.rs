@@ -2,6 +2,7 @@ use gpui::{Axis, Bounds, Pixels, Point, Styled, px};
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
+use tty7_core::core::machine::TabId;
 
 pub(crate) type ReorderState = Rc<RefCell<Option<Reorder>>>;
 
@@ -34,7 +35,10 @@ pub(crate) fn preview(
     pointer: Point<Pixels>,
 ) -> Option<Preview> {
     let state = state.borrow();
-    let r = state.as_ref().filter(|r| r.covers(surface, len))?;
+    let r = state
+        .as_ref()
+        .filter(|r| !r.suspended.get())
+        .filter(|r| r.covers(surface, len))?;
     let target = r.target(pointer);
     let (generation, prev) = r.begin_frame(target);
     Some(Preview {
@@ -65,6 +69,29 @@ pub(crate) fn take_pending(state: &ReorderState) -> Option<Vec<usize>> {
     state.borrow_mut().take()?.pending.into_inner()
 }
 
+/// The tab a drag in flight picked up, when it picked one up.
+///
+/// A tab is dragged to reorder it, and — once the pointer leaves the strip for
+/// the layout — to merge it into the tab on screen. Both are the same drag, so
+/// the reorder is where the answer to "which tab is in the air" lives.
+pub(crate) fn dragged_tab(state: &ReorderState) -> Option<TabId> {
+    state.borrow().as_ref()?.tab
+}
+
+/// Holds the reorder off while the drag is asking for something else.
+///
+/// A suspended reorder offers no preview and records nothing pending, so the
+/// chips sit still while the pointer is out over the layout and a drop there
+/// cannot also shuffle the strip.
+pub(crate) fn suspend(state: &ReorderState, yes: bool) {
+    if let Some(r) = state.borrow().as_ref() {
+        r.suspended.set(yes);
+        if yes {
+            r.pending.borrow_mut().take();
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Surface {
     Strip,
@@ -82,6 +109,11 @@ pub(crate) struct Reorder {
     prev: Cell<usize>,
     generation: Cell<usize>,
     pending: RefCell<Option<Vec<usize>>>,
+    /// The tab this drag picked up, for the surfaces that drag tabs. `None` on
+    /// a surface that drags something else — a sidebar group, say, which is
+    /// several tabs and cannot be merged into one.
+    tab: Option<TabId>,
+    suspended: Cell<bool>,
 }
 
 impl Reorder {
@@ -103,7 +135,15 @@ impl Reorder {
             prev: Cell::new(from),
             generation: Cell::new(0),
             pending: RefCell::new(None),
+            tab: None,
+            suspended: Cell::new(false),
         }
+    }
+
+    /// Names the tab this drag is carrying.
+    pub(crate) fn of_tab(mut self, tab: TabId) -> Self {
+        self.tab = Some(tab);
+        self
     }
 
     pub(crate) fn covers(&self, surface: &Surface, len: usize) -> bool {

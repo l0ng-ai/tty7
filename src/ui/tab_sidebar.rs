@@ -132,6 +132,10 @@ impl Tty7App {
         let max_width = self.sidebar_max_px(window, cx);
         let width = self.sidebar_width.get().clamp(MIN_SIDEBAR_WIDTH, max_width);
         let query = self.sidebar_search.read(cx).value().trim().to_lowercase();
+        // Blanked here, written again from paint: a row filtered out by the
+        // search — or hidden with its collapsed group — must leave no rectangle
+        // behind for a pane to be dropped between.
+        *self.sidebar_slots.borrow_mut() = vec![Bounds::default(); self.tabs.len()];
         // Every group drops itself when its rows filter out, so a query that
         // matches nothing left the sidebar showing only its own search box.
         let mut any_rows = false;
@@ -620,16 +624,20 @@ impl Tty7App {
                         let state = self.reorder.clone();
                         let slots = row_slots.clone();
                         let group_key = group_key.clone();
+                        let id = tab.tree_id.get();
                         move |_drag, grab, _window, cx| {
                             cx.stop_propagation();
-                            *state.borrow_mut() = Some(Reorder::new(
-                                Surface::SidebarRows(group_key.clone()),
-                                slot,
-                                slots.borrow().clone(),
-                                Axis::Vertical,
-                                px(ROW_GAP),
-                                grab,
-                            ));
+                            *state.borrow_mut() = Some(
+                                Reorder::new(
+                                    Surface::SidebarRows(group_key.clone()),
+                                    slot,
+                                    slots.borrow().clone(),
+                                    Axis::Vertical,
+                                    px(ROW_GAP),
+                                    grab,
+                                )
+                                .of_tab(id),
+                            );
                             cx.new(|_| DragTab)
                         }
                     })
@@ -656,8 +664,15 @@ impl Tty7App {
                         canvas(
                             {
                                 let slots = row_slots.clone();
+                                // The row by tab as well as by slot: reordering
+                                // reads the slots of one group, a pane dropped
+                                // on the sidebar reads every row there is.
+                                let by_tab = self.sidebar_slots.clone();
                                 move |bounds, _window, _cx| {
                                     if let Some(s) = slots.borrow_mut().get_mut(slot) {
+                                        *s = bounds;
+                                    }
+                                    if let Some(s) = by_tab.borrow_mut().get_mut(i) {
                                         *s = bounds;
                                     }
                                 }
@@ -667,13 +682,15 @@ impl Tty7App {
                         .absolute()
                         .inset_0(),
                     )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                            cx.stop_propagation();
-                            this.activate(i, window, cx);
-                        }),
-                    )
+                    // Switched on the release, not the press: a press that turns
+                    // into a drag is the tab being picked up, and a tab on its
+                    // way into another tab's layout must not put itself on
+                    // screen on the way there.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.activate(i, window, cx);
+                    }))
                     .child(self.tab_avatar(
                         ("sidebar-avatar", i),
                         agent,

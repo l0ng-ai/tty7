@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A tab can be dropped into another tab, as a pane of it** (#621). Drag a tab
+  by its chip or by its sidebar row, out over the panes, and it lands where the
+  highlight says — the same reading as dragging a pane, minus the middle, which
+  for a tab means "split this pane the way it is longest" rather than "trade
+  places". A tab that was itself split arrives with its panes still arranged the
+  way you left them and takes one share of the row or column it joined. Nothing
+  restarts on the way over: a shell mid-command, an SSH session, an agent
+  halfway through a turn all carry on, and only the tab they were in goes away.
+  Picking a tab up no longer switches to it, so the tab you drop into is the one
+  you were already looking at; a plain click still switches.
+
+- **And back out again: a pane dragged onto the tab bar becomes a tab of its
+  own** (#621). Take a pane by its grip up to the strip — or out to the sidebar,
+  wherever the tabs are — and a caret says which two tabs it would go between.
+  The last pane in a tab is offered nothing, being a tab of its own already.
+
 - **Give the prompt back to the shell** — a new **Settings → Input → Prompt →
   Prompt editor** switch (`prompt_editor` in `config.json`, on by default).
   Turned off, tty7 stops editing the shell prompt: every keystroke there —

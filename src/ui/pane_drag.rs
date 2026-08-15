@@ -308,6 +308,139 @@ pub(crate) fn apply<L: Clone + PartialEq>(pane: &mut Pane<L>, from: &L, zone: Dr
     }
 }
 
+/// Grafts a whole tab's worth of panes in the way `zone` says, handing them
+/// back when the zone has nowhere to put them.
+pub(crate) fn graft<L: Clone + PartialEq>(
+    pane: &mut Pane<L>,
+    sub: Pane<L>,
+    zone: DropZone<L>,
+) -> Result<(), Pane<L>> {
+    match zone {
+        DropZone::Edge(dir) => pane.graft_at_edge(sub, dir),
+        DropZone::Side(dst, dir) => pane.graft_beside(sub, &dst, dir),
+        // A tab arriving has no place of its own to trade for one here.
+        DropZone::Swap(_) => Err(sub),
+    }
+}
+
+/// Where a dragged tab would end up, as the patch of screen its panes would
+/// fill between them.
+///
+/// Measured the same way as a pane's landing — by carrying the drop out on a
+/// copy — so the highlight is wrong exactly when the drop is.
+pub(crate) fn graft_landing<L: Clone + PartialEq>(
+    pane: &Pane<L>,
+    sub: &Pane<L>,
+    zone: DropZone<L>,
+    area: Bounds<Pixels>,
+) -> Option<Bounds<Pixels>> {
+    let arrivals = sub.leaves();
+    let mut trial = pane.deep_clone();
+    graft(&mut trial, sub.deep_clone(), zone).ok()?;
+    let bounds = leaf_bounds(&trial, area);
+    trial
+        .leaves()
+        .iter()
+        .zip(bounds)
+        .filter(|(leaf, _)| arrivals.contains(leaf))
+        .map(|(_, b)| b)
+        .reduce(union)
+}
+
+/// The smallest rectangle holding both — the patch a grafted tab's panes cover
+/// between them, which is the one rectangle they always tile.
+fn union(a: Bounds<Pixels>, b: Bounds<Pixels>) -> Bounds<Pixels> {
+    let x = a.origin.x.min(b.origin.x);
+    let y = a.origin.y.min(b.origin.y);
+    let right = (a.origin.x + a.size.width).max(b.origin.x + b.size.width);
+    let bottom = (a.origin.y + a.size.height).max(b.origin.y + b.size.height);
+    Bounds {
+        origin: point(x, y),
+        size: size(right - x, bottom - y),
+    }
+}
+
+/// Where the pointer is asking a dragged *tab* to go.
+///
+/// The same reading as a pane's, minus the middle: a tab has nothing here to
+/// trade places with, so a pane's core means "split it the way it is longest"
+/// instead. Without that, the middle of a single-pane tab — most of the window
+/// it is showing — would be a dead spot.
+pub(crate) fn tab_zone_at(
+    area: Bounds<Pixels>,
+    leaves: &[Bounds<Pixels>],
+    pointer: Point<Pixels>,
+) -> Option<DropZone> {
+    match zone_at(area, leaves, pointer)? {
+        DropZone::Swap(index) => {
+            let leaf = leaves.get(index)?;
+            let dir = if leaf.size.width >= leaf.size.height {
+                Dir::Right
+            } else {
+                Dir::Down
+            };
+            Some(DropZone::Side(index, dir))
+        }
+        zone => Some(zone),
+    }
+}
+
+/// How thick the caret between two tabs is, and how far past the outermost
+/// tab it sits when the gap it marks is at one end of the row.
+const CARET: f32 = 3.;
+const CARET_REACH: f32 = 5.;
+
+/// Which gap in a row of tabs the pointer is in — how many of them it is past
+/// — and the caret that marks it.
+///
+/// `row` is the tabs in the order they were drawn, along `axis`. The answer
+/// counts gaps, so a row of three has four of them: `0` before the first tab
+/// and `3` after the last.
+pub(crate) fn insertion(
+    row: &[Bounds<Pixels>],
+    axis: gpui::Axis,
+    pointer: Point<Pixels>,
+) -> Option<(usize, Bounds<Pixels>)> {
+    let across = axis == gpui::Axis::Vertical;
+    let lead = |b: &Bounds<Pixels>| if across { b.origin.y } else { b.origin.x };
+    let trail = |b: &Bounds<Pixels>| {
+        if across {
+            b.origin.y + b.size.height
+        } else {
+            b.origin.x + b.size.width
+        }
+    };
+    let along = if across { pointer.y } else { pointer.x };
+    // Past a tab's middle is past the tab: the gap the pointer is in is the one
+    // it is nearest, and the halfway line is where "nearest" changes hands.
+    let gap = row
+        .iter()
+        .take_while(|b| (lead(b) + trail(b)) / 2. < along)
+        .count();
+    let before = gap.checked_sub(1).and_then(|k| row.get(k));
+    let after = row.get(gap);
+    let cut = match (before, after) {
+        (Some(a), Some(b)) => (trail(a) + lead(b)) / 2.,
+        (Some(a), None) => trail(a) + px(CARET_REACH),
+        (None, Some(b)) => lead(b) - px(CARET_REACH),
+        (None, None) => return None,
+    };
+    // Drawn as tall as the tab it is beside, so the caret reads as belonging to
+    // the row rather than to the window.
+    let neighbour = after.or(before)?;
+    let caret = match axis {
+        gpui::Axis::Horizontal => Bounds {
+            origin: point(cut - px(CARET / 2.), neighbour.origin.y),
+            size: size(px(CARET), neighbour.size.height),
+        },
+        gpui::Axis::Vertical => Bounds {
+            origin: point(neighbour.origin.x, cut - px(CARET / 2.)),
+            size: size(neighbour.size.width, px(CARET)),
+        },
+    };
+    Some((gap, caret))
+}
+
 /// Where the dragged pane would end up, as the patch of screen it would fill.
 ///
 /// Worked out by carrying the drop out on a copy and measuring where the pane
@@ -599,6 +732,119 @@ mod tests {
             at(DropZone::Swap(9)),
             None,
             "a zone naming a pane that is not in this tab lands nothing"
+        );
+    }
+
+    #[test]
+    fn a_tab_has_nothing_to_trade_places_with_so_the_middle_splits() {
+        let square = rect(0., 0., 400., 400.);
+        let wide = rect(0., 0., 900., 300.);
+        let tall = rect(0., 0., 300., 900.);
+        let middle =
+            |b: Bounds<Pixels>| tab_zone_at(b, &[b], point(b.size.width / 2., b.size.height / 2.));
+        assert_eq!(middle(wide), Some(DropZone::Side(0, Dir::Right)));
+        assert_eq!(middle(tall), Some(DropZone::Side(0, Dir::Down)));
+        assert_eq!(
+            middle(square),
+            Some(DropZone::Side(0, Dir::Right)),
+            "a square pane splits the way a split command would"
+        );
+        assert_eq!(
+            tab_zone_at(area(), &grid(), point(px(4.), px(150.))),
+            Some(DropZone::Edge(Dir::Left)),
+            "everything outside the middle reads as it does for a pane"
+        );
+    }
+
+    #[test]
+    fn a_grafted_tab_lands_on_the_patch_its_panes_fill_between_them() {
+        let tab = rect(0., 0., 900., 600.);
+        let sub = Pane::split_node(gpui::Axis::Vertical, 0.5, Pane::leaf(8), Pane::leaf(9));
+        let at = |zone| graft_landing(&columns(), &sub, zone, tab);
+
+        assert_eq!(
+            at(DropZone::Side(0, Dir::Right)),
+            Some(rect(337.5, 0., 225., 600.)),
+            "the tab is one column of the four, with its own two stacked inside"
+        );
+        assert_eq!(
+            at(DropZone::Edge(Dir::Left)),
+            Some(rect(0., 0., 225., 600.)),
+            "a band beside three columns is the fourth of them"
+        );
+        assert_eq!(
+            at(DropZone::Swap(0)),
+            None,
+            "there is nothing here for an arriving tab to trade places with"
+        );
+    }
+
+    /// Three chips of 100, 10 apart, along a strip.
+    fn chips() -> Vec<Bounds<Pixels>> {
+        (0..3)
+            .map(|i| rect(20. + i as f32 * 110., 4., 100., 30.))
+            .collect()
+    }
+
+    #[test]
+    fn a_pane_carried_to_the_strip_lands_in_the_gap_it_is_nearest() {
+        let at = |x: f32| {
+            insertion(&chips(), gpui::Axis::Horizontal, point(px(x), px(18.))).map(|(gap, _)| gap)
+        };
+        assert_eq!(at(0.), Some(0), "before the first chip");
+        assert_eq!(
+            at(60.),
+            Some(0),
+            "the near half of a chip is the gap before it"
+        );
+        assert_eq!(at(80.), Some(1), "the far half is the gap after it");
+        assert_eq!(at(135.), Some(1), "the gap itself");
+        assert_eq!(
+            at(400.),
+            Some(3),
+            "past the last chip is the end of the row"
+        );
+    }
+
+    #[test]
+    fn the_caret_stands_in_the_gap_and_is_as_tall_as_the_tabs() {
+        let caret = |x: f32| {
+            insertion(&chips(), gpui::Axis::Horizontal, point(px(x), px(18.))).map(|(_, c)| c)
+        };
+        assert_eq!(
+            caret(135.),
+            Some(rect(123.5, 4., 3., 30.)),
+            "between two chips it splits the space between them"
+        );
+        assert_eq!(
+            caret(0.),
+            Some(rect(13.5, 4., 3., 30.)),
+            "at the head of the row it stands off the first chip"
+        );
+        assert_eq!(
+            caret(400.),
+            Some(rect(343.5, 4., 3., 30.)),
+            "at the end it stands off the last one"
+        );
+    }
+
+    #[test]
+    fn a_sidebar_reads_the_same_way_down_its_rows() {
+        let rows: Vec<Bounds<Pixels>> = (0..3)
+            .map(|i| rect(0., 50. + i as f32 * 44., 220., 40.))
+            .collect();
+        let at = |y: f32| insertion(&rows, gpui::Axis::Vertical, point(px(110.), px(y)));
+        assert_eq!(at(55.).map(|(gap, _)| gap), Some(0));
+        assert_eq!(at(140.).map(|(gap, _)| gap), Some(2));
+        assert_eq!(
+            at(300.),
+            Some((3, rect(0., 181.5, 220., 3.))),
+            "below the last row the caret lies across it"
+        );
+        assert_eq!(
+            insertion(&[], gpui::Axis::Vertical, point(px(0.), px(0.))),
+            None,
+            "no rows drawn, no gap to name"
         );
     }
 

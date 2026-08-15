@@ -217,6 +217,35 @@ impl<L: Clone> Pane<L> {
         }
     }
 
+    /// Puts a whole subtree where the leaf `is_target` names stands.
+    ///
+    /// The subtree arrives in an `Option` the walk takes it out of: a tree of
+    /// live panes cannot be cloned for every branch that might hold the target,
+    /// and a caller whose target was not there gets it back to put somewhere
+    /// else.
+    fn replace_leaf_with(
+        &mut self,
+        is_target: &impl Fn(&L) -> bool,
+        new: &mut Option<Pane<L>>,
+    ) -> bool {
+        match self {
+            Pane::Leaf(v) => {
+                if !is_target(v) {
+                    return false;
+                }
+                let Some(new) = new.take() else {
+                    return false;
+                };
+                *self = new;
+                true
+            }
+            Pane::Split { a, b, .. } => {
+                a.replace_leaf_with(is_target, new) || b.replace_leaf_with(is_target, new)
+            }
+            Pane::Empty => false,
+        }
+    }
+
     fn replace_leaf_where(&mut self, is_target: &impl Fn(&L) -> bool, new: L) -> bool {
         match self {
             Pane::Leaf(v) => {
@@ -578,6 +607,75 @@ impl<L: Clone> Pane<L> {
         L: PartialEq,
     {
         self.move_leaf_to_edge_where(&|v| v == src, dir)
+    }
+
+    /// Lifts a leaf out of this tree, for whoever is taking it somewhere this
+    /// tree cannot reach — a tab of its own, say.
+    ///
+    /// `None` when the tree holds nothing else: the last pane in a tab has
+    /// nowhere to go that is not where it already is.
+    pub fn take_leaf(&mut self, target: &L) -> Option<L>
+    where
+        L: PartialEq,
+    {
+        self.take_leaf_where(&|v| v == target)
+    }
+
+    /// Grafts a whole subtree in on the `dir` side of `dst`.
+    ///
+    /// The same reading as [`Self::move_leaf_beside`], with a tab's worth of
+    /// panes arriving instead of one of this tab's own: the newcomer joins the
+    /// run it faces as an equal where there is one, and splits `dst` where
+    /// there is not. Whatever shape it brought with it it keeps.
+    ///
+    /// A graft with nowhere to go hands the subtree back rather than dropping
+    /// it: what is being passed around is the live panes themselves, and a
+    /// refusal that swallowed them would take a tab's worth of terminals down.
+    ///
+    /// Carried out as a one-pane move and then a swap — one of the newcomer's
+    /// own panes goes in first and is traded for the whole tab once the row it
+    /// joined has shared itself out. Grafting the tab straight in would have it
+    /// dissolve into that row wherever the two split the same way: three panes
+    /// arriving into a row of two would come out as five columns sharing a
+    /// fifth each, rather than as one column of three beside the other two.
+    pub fn graft_beside(&mut self, sub: Pane<L>, dst: &L, dir: Dir) -> Result<(), Pane<L>>
+    where
+        L: PartialEq,
+    {
+        let Some(anchor) = sub.first_leaf() else {
+            return Err(sub);
+        };
+        let mut next = self.shallow_clone();
+        if !next.split_leaf_where(&|v| v == dst, dir.axis(), dir.leads(), anchor.clone()) {
+            return Err(sub);
+        }
+        next.share_out_run(dir.axis(), &|v| *v == anchor, dir.leads());
+        let mut held = Some(sub);
+        if !next.replace_leaf_with(&|v| *v == anchor, &mut held) {
+            return Err(held.expect("the anchor this graft just planted is still here"));
+        }
+        *self = next;
+        Ok(())
+    }
+
+    /// Grafts a whole subtree against an outer edge of the tab, beside
+    /// everything already here — one more band along `dir`, sized like the
+    /// bands it joins. Refused the same way as [`Self::graft_beside`].
+    pub fn graft_at_edge(&mut self, sub: Pane<L>, dir: Dir) -> Result<(), Pane<L>> {
+        if sub.leaves().is_empty() || matches!(self, Pane::Empty) {
+            return Err(sub);
+        }
+        let slices = self.slices_along(dir.axis()).max(1);
+        let share = 1. / (slices + 1) as f32;
+        let rest = self.shallow_clone();
+        let (a, b) = if dir.leads() {
+            (sub, rest)
+        } else {
+            (rest, sub)
+        };
+        let ratio = if dir.leads() { share } else { 1. - share };
+        *self = Pane::split_node(dir.axis(), ratio, a, b);
+        Ok(())
     }
 
     /// Trades two panes' places, each keeping the other's size.
@@ -1808,6 +1906,80 @@ mod tests {
         assert!(pane.swap_leaves_where(&is(0), &is(3)));
         assert_eq!(pane.leaves(), vec![3, 1, 2, 0]);
         assert!(!pane.swap_leaves_where(&is(0), &is(99)));
+        assert_well_formed(&pane);
+    }
+
+    /// The tab arriving from somewhere else: two panes, side by side.
+    fn newcomer() -> TestPane {
+        TestPane::split_node(Axis::Horizontal, 0.5, Pane::Leaf(8), Pane::Leaf(9))
+    }
+
+    #[test]
+    fn a_grafted_tab_splits_the_pane_it_landed_on() {
+        let mut pane = TestPane::leaf(0);
+        assert!(pane.graft_beside(newcomer(), &0, Dir::Right).is_ok());
+        assert_eq!(pane.leaves(), vec![0, 8, 9]);
+        match &pane {
+            Pane::Split { axis, a, b, .. } => {
+                assert!(matches!(axis, Axis::Horizontal));
+                assert!(matches!(**a, Pane::Leaf(0)));
+                assert_eq!(b.leaves(), vec![8, 9], "the tab kept its own shape");
+            }
+            _ => panic!("the leaf should have become a split"),
+        }
+        assert_eq!(widths(&pane), vec![0.5, 0.25, 0.25]);
+        assert_well_formed(&pane);
+    }
+
+    #[test]
+    fn a_grafted_tab_joins_a_row_as_one_of_its_columns() {
+        let mut pane = row_over();
+        assert!(pane.graft_beside(newcomer(), &0, Dir::Right).is_ok());
+        assert_eq!(pane.leaves(), vec![0, 8, 9, 1, 2]);
+        assert_eq!(
+            widths(&pane),
+            vec![0.333, 0.167, 0.167, 0.333, 1.0],
+            "the newcomer is one column of three, split between its own two"
+        );
+        assert_well_formed(&pane);
+    }
+
+    #[test]
+    fn a_tab_grafted_at_an_edge_is_a_band_beside_everything() {
+        let mut pane = grid();
+        assert!(pane.graft_at_edge(newcomer(), Dir::Right).is_ok());
+        assert_eq!(pane.leaves(), vec![0, 1, 2, 3, 8, 9]);
+        match &pane {
+            Pane::Split {
+                axis, a, b, ratio, ..
+            } => {
+                assert!(matches!(axis, Axis::Horizontal));
+                assert_eq!(a.leaves(), vec![0, 1, 2, 3]);
+                assert_eq!(b.leaves(), vec![8, 9]);
+                assert!(
+                    (ratio.get() - 2. / 3.).abs() < 1e-6,
+                    "two columns receive a third, not a half"
+                );
+            }
+            _ => panic!("an edge graft is always a split at the root"),
+        }
+        assert_well_formed(&pane);
+    }
+
+    #[test]
+    fn a_graft_with_nowhere_to_go_hands_the_panes_back() {
+        let mut pane = TestPane::leaf(0);
+        let refused = pane
+            .graft_beside(newcomer(), &99, Dir::Right)
+            .expect_err("there is no pane 99 to land beside");
+        assert_eq!(refused.leaves(), vec![8, 9], "the tab came back intact");
+        assert_eq!(pane.leaves(), vec![0]);
+
+        let empty = pane
+            .graft_beside(Pane::Empty, &0, Dir::Right)
+            .expect_err("an empty tab has nothing to graft");
+        assert!(matches!(empty, Pane::Empty));
+        assert_eq!(pane.leaves(), vec![0]);
         assert_well_formed(&pane);
     }
 

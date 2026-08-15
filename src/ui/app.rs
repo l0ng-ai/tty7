@@ -1,6 +1,6 @@
 use gpui::{
     App, Axis, Bounds, Context, Entity, Focusable, Pixels, PromptLevel, Subscription, Window, div,
-    img, prelude::*, px,
+    img, point, prelude::*, px, size,
 };
 use gpui_component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{InputEvent, InputState};
@@ -644,6 +644,31 @@ pub struct Tty7App {
     /// The pane the pointer is over, so only that one offers its drag handle.
     pub(crate) pane_hover: Rc<Cell<Option<gpui::EntityId>>>,
     pub(crate) pane_drag: crate::ui::pane_drag::PaneDragState,
+    /// Where a tab held over the layout would be grafted in, as the last
+    /// painted frame read it. The same bargain the pane drag's landing keeps:
+    /// offered only once the tree agrees it changes something, so releasing
+    /// over a highlight always does what the highlight showed.
+    pub(crate) tab_merge: Cell<
+        Option<(
+            tty7_core::core::machine::TabId,
+            crate::ui::pane_drag::DropZone<gpui::EntityId>,
+        )>,
+    >,
+    /// The pane a drag would put down as a tab of its own, and where among the
+    /// tabs it would go. Read back a frame later by the drop, like the two
+    /// landings above.
+    pub(crate) pane_detach: Cell<Option<(gpui::EntityId, usize)>>,
+    /// Where the strip drew each tab's chip and where the sidebar drew each
+    /// tab's row, by tab — the geometry a pane dropped on either of them reads
+    /// its new place out of.
+    ///
+    /// Written from paint, so what a frame reads is where things were on the
+    /// frame before. That is exactly as good as it needs to be: neither the
+    /// strip nor the sidebar moves while a drag is in flight. A tab with no
+    /// rectangle was not drawn — scrolled out of a full strip, filtered out of
+    /// the sidebar — and takes no part in the reading.
+    pub(crate) strip_slots: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    pub(crate) sidebar_slots: Rc<RefCell<Vec<Bounds<Pixels>>>>,
     /// Where the active tab's panes were last drawn, which is the frame of
     /// reference a drag's landing is worked out in.
     pub(crate) pane_area: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -1209,6 +1234,10 @@ impl Tty7App {
             reorder: Rc::new(RefCell::new(None)),
             pane_hover: Rc::new(Cell::new(None)),
             pane_drag: Rc::new(RefCell::new(None)),
+            tab_merge: Cell::new(None),
+            pane_detach: Cell::new(None),
+            strip_slots: Rc::new(RefCell::new(Vec::new())),
+            sidebar_slots: Rc::new(RefCell::new(Vec::new())),
             pane_area: Rc::new(Cell::new(None)),
             sidebar_search,
             _sidebar_search_sub: sidebar_search_sub,
@@ -3516,6 +3545,309 @@ impl Tty7App {
                 .bg(accent.opacity(0.15))
                 .into_any_element(),
         )
+    }
+
+    /// The patch of the layout a tab held over it would be grafted into, lit
+    /// up — and, while that is on offer, the strip held still underneath it.
+    ///
+    /// A tab is dragged with the same grip that reorders it, so the two
+    /// readings share one gesture: over the strip or the sidebar it is a
+    /// reorder, out over the panes it is a merge. Suspending the reorder is
+    /// what keeps the drop from being both.
+    fn tab_landing(&self, window: &Window, cx: &App) -> Option<gpui::AnyElement> {
+        self.tab_merge.set(None);
+        let dragged = crate::ui::reorder::dragged_tab(&self.reorder);
+        let offer = dragged.and_then(|id| self.tab_landing_rect(id, window));
+        crate::ui::reorder::suspend(&self.reorder, offer.is_some());
+        let (zone, rect) = offer?;
+        let area = self.pane_area.get()?;
+        self.tab_merge.set(Some((dragged?, zone)));
+
+        let accent = cx.theme().drag_border;
+        Some(
+            div()
+                .absolute()
+                .left(rect.origin.x - area.origin.x)
+                .top(rect.origin.y - area.origin.y)
+                .w(rect.size.width)
+                .h(rect.size.height)
+                .rounded(px(6.))
+                .border_2()
+                .border_color(accent)
+                .bg(accent.opacity(0.15))
+                .into_any_element(),
+        )
+    }
+
+    /// Where the tab `id` would land in the tab on screen, if it can land there
+    /// at all — it cannot land in itself, and there is nothing to land in while
+    /// a pane is zoomed over the layout.
+    fn tab_landing_rect(
+        &self,
+        id: tty7_core::core::machine::TabId,
+        window: &Window,
+    ) -> Option<(
+        crate::ui::pane_drag::DropZone<gpui::EntityId>,
+        Bounds<Pixels>,
+    )> {
+        use crate::ui::pane_drag;
+
+        if self.maximized.is_some() {
+            return None;
+        }
+        let area = self.pane_area.get()?;
+        let host = self.tabs.get(self.active)?;
+        if host.tree_id.get() == id {
+            return None;
+        }
+        let sub = &self.tabs.iter().find(|t| t.tree_id.get() == id)?.pane;
+        let leaves = host.pane.leaves();
+        let bounds = pane_drag::leaf_bounds(&host.pane, area);
+        let zone = pane_drag::tab_zone_at(area, &bounds, window.mouse_position())?;
+        // Named by pane rather than by position for the drop a frame later,
+        // the same way a pane drag's landing is.
+        let here = zone.map(|i| leaves.get(i).cloned())?;
+        let pinned = zone.map(|i| leaves.get(i).map(|l| l.entity_id()))?;
+        let rect = pane_drag::graft_landing(&host.pane, sub, here, area)?;
+        Some((pinned, rect))
+    }
+
+    /// Merges a dragged tab into the tab on screen, where the last painted
+    /// frame said it would go.
+    ///
+    /// The panes come across as they were arranged, and the tab they came from
+    /// goes away with them — nothing is killed and nothing is respawned, so a
+    /// shell mid-command carries on through the move. What the source tab held
+    /// besides panes is the tab's own: its name goes, and its overlays come
+    /// along only where the tab receiving them has none of its own to lose.
+    fn merge_tab(
+        &mut self,
+        source: tty7_core::core::machine::TabId,
+        zone: crate::ui::pane_drag::DropZone<gpui::EntityId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pane_hover.set(None);
+        let Some(from) = self.tabs.iter().position(|t| t.tree_id.get() == source) else {
+            return;
+        };
+        let Some(host) = self.tabs.get(self.active) else {
+            return;
+        };
+        if host.tree_id.get() == source {
+            return;
+        }
+        let leaves = host.pane.leaves();
+        let Some(zone) = zone.map(|id| leaves.iter().find(|l| l.entity_id() == id).cloned()) else {
+            return;
+        };
+
+        let mut moved = self.tabs.remove(from);
+        if from < self.active {
+            self.active -= 1;
+        }
+        // Lifted out rather than cloned: these are the live terminals, and a
+        // graft that finds nowhere to put them has to be able to hand them
+        // back intact.
+        let sub = std::mem::replace(&mut moved.pane, crate::ui::pane::Pane::Empty);
+        let first = sub.first_leaf();
+        let grafted = match self.tabs.get_mut(self.active) {
+            Some(host) => crate::ui::pane_drag::graft(&mut host.pane, sub, zone),
+            None => Err(sub),
+        };
+        if let Err(sub) = grafted {
+            moved.pane = sub;
+            self.tabs.insert(from, moved);
+            if from <= self.active {
+                self.active += 1;
+            }
+            return;
+        }
+        let host = &mut self.tabs[self.active];
+        if host.code.is_none() {
+            host.code = moved.code;
+        }
+        if host.diff_overlay.is_none() {
+            host.diff_overlay = moved.diff_overlay;
+        }
+        if self
+            .renaming
+            .as_ref()
+            .is_some_and(|r| !self.tabs.iter().any(|t| t.tree_id.get() == r.tab))
+        {
+            self.renaming = None;
+        }
+        self.maximized = None;
+        if let Some(leaf) = first {
+            self.focus_leaf(&leaf, window, cx);
+        }
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// The caret between two tabs where a pane carried up to the strip — or
+    /// out to the sidebar — would become a tab of its own.
+    ///
+    /// The reverse of grafting a tab in, and read the same way: offered only
+    /// when the drop would change something, which for a detach means the pane
+    /// has somewhere to leave. The last pane in a tab is already a tab, so
+    /// nothing lights up for it.
+    fn detach_caret(&self, window: &Window, cx: &App) -> Option<gpui::AnyElement> {
+        self.pane_detach.set(None);
+        let pane = crate::ui::pane_drag::lifted(&self.pane_drag)?;
+        let tab = self.tabs.get(self.active)?;
+        if tab.pane.leaves().len() < 2 {
+            return None;
+        }
+        if !tab.pane.leaves().iter().any(|l| l.entity_id() == pane) {
+            return None;
+        }
+        // The pane's own landing is read later in the frame and answers nothing
+        // while the pointer is up here, so the two are never both on offer;
+        // the drop takes this one first regardless.
+        let (at, caret) = self.detach_slot(window, cx)?;
+        self.pane_detach.set(Some((pane, at)));
+
+        let accent = cx.theme().drag_border;
+        Some(
+            div()
+                .absolute()
+                .left(caret.origin.x)
+                .top(caret.origin.y)
+                .w(caret.size.width)
+                .h(caret.size.height)
+                .rounded_full()
+                .bg(accent)
+                .into_any_element(),
+        )
+    }
+
+    /// Which gap between tabs the pointer is in, as the tab a newcomer would
+    /// be inserted before and the caret marking it — on the strip, or on the
+    /// sidebar, whichever the pointer is over.
+    fn detach_slot(&self, window: &Window, cx: &App) -> Option<(usize, Bounds<Pixels>)> {
+        /// How far above its first row the sidebar's band starts, so the gap
+        /// over that row is inside it.
+        const BAND_REACH: f32 = 6.;
+
+        let pointer = window.mouse_position();
+        // The two surfaces never share a window: the sidebar *is* the tab bar
+        // when it is up, and the strip is what stands in for it when it is not.
+        let vertical = matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
+            && !self.tabs.is_empty();
+        let viewport = window.viewport_size();
+        // The band each surface claims, read off the tabs it drew rather than
+        // measured as an element of its own: the chips and the rows are the
+        // only part of either surface a drop has anything to say about, and a
+        // band derived from them cannot disagree with the gaps measured inside
+        // it. Stretched past the outermost tab so the empty space beyond —
+        // where the strip keeps its New Tab button, where the sidebar keeps
+        // nothing at all — still reads as "after everything".
+        let band = |axis: Axis, drawn: &[(usize, Bounds<Pixels>)]| {
+            let top = drawn.iter().map(|(_, b)| b.origin.y).reduce(Pixels::min)?;
+            let left = drawn.iter().map(|(_, b)| b.origin.x).reduce(Pixels::min)?;
+            let right = drawn
+                .iter()
+                .map(|(_, b)| b.origin.x + b.size.width)
+                .reduce(Pixels::max)?;
+            Some(match axis {
+                Axis::Horizontal => Bounds {
+                    origin: point(px(0.), px(0.)),
+                    size: size(viewport.width, px(TITLE_BAR_HEIGHT)),
+                },
+                Axis::Vertical => Bounds {
+                    origin: point(left, top - px(BAND_REACH)),
+                    size: size(
+                        right - left,
+                        (viewport.height - top + px(BAND_REACH)).max(px(0.)),
+                    ),
+                },
+            })
+        };
+
+        // Sorted by where they were drawn rather than by tab: the sidebar
+        // groups its rows, and a strip that has scrolled shows a window of
+        // chips. What the pointer is between is a matter of the screen.
+        let measured = |slots: &[Bounds<Pixels>]| -> Vec<(usize, Bounds<Pixels>)> {
+            slots
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.size.width > px(0.) && b.size.height > px(0.))
+                .map(|(i, b)| (i, *b))
+                .collect()
+        };
+        let surfaces = [
+            (!vertical).then(|| (Axis::Horizontal, measured(&self.strip_slots.borrow()))),
+            self.sidebar_open(cx)
+                .then(|| (Axis::Vertical, measured(&self.sidebar_slots.borrow()))),
+        ];
+        let (axis, mut drawn) = surfaces
+            .into_iter()
+            .flatten()
+            .find(|(axis, drawn)| band(*axis, drawn).is_some_and(|b| b.contains(&pointer)))?;
+        let lead = |b: &Bounds<Pixels>| match axis {
+            Axis::Horizontal => b.origin.x,
+            Axis::Vertical => b.origin.y,
+        };
+        drawn.sort_by(|(_, a), (_, b)| lead(a).as_f32().total_cmp(&lead(b).as_f32()));
+
+        let row: Vec<Bounds<Pixels>> = drawn.iter().map(|(_, b)| *b).collect();
+        let (gap, caret) = crate::ui::pane_drag::insertion(&row, axis, pointer)?;
+        // The gap counts tabs on screen; what an insert needs is a place in the
+        // list. Past the last tab drawn is the end of the list, which is not
+        // the same thing as the last tab drawn plus one: a strip too narrow to
+        // show every chip has tabs on either side of the ones it drew.
+        let at = drawn.get(gap).map(|(i, _)| *i).unwrap_or(self.tabs.len());
+        Some((at, caret))
+    }
+
+    /// Takes a dragged pane out of its tab and gives it one of its own, where
+    /// the last painted frame's caret said.
+    ///
+    /// Nothing is spawned and nothing is killed: the pane that leaves is the
+    /// same pane, still running whatever it was running.
+    fn detach_pane(
+        &mut self,
+        pane: gpui::EntityId,
+        at: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pane_hover.set(None);
+        // Which pane the tab being left comes back to, settled while the one
+        // that is leaving is still in it to be ruled out.
+        self.remember_active_pane(window, cx);
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let Some(slot) = tab
+            .pane
+            .leaves()
+            .into_iter()
+            .find(|l| l.entity_id() == pane)
+        else {
+            return;
+        };
+        // Refused for the last pane in a tab, which is what makes a drop that
+        // would change nothing do nothing.
+        let Some(slot) = tab.pane.take_leaf(&slot) else {
+            return;
+        };
+        let cwd = slot
+            .terminal()
+            .and_then(|view| view.read(cx).spawnable_cwd());
+        let group = self.spawn_group(cwd.as_deref(), cx);
+        let fresh = Tab::new(crate::ui::pane::Pane::leaf(slot));
+        if let Some(group) = group {
+            *fresh.sidebar_group.borrow_mut() = group;
+        }
+        let at = at.min(self.tabs.len());
+        self.tabs.insert(at, fresh);
+        self.maximized = None;
+        self.active = at;
+        self.focus_active(window, cx);
+        self.save_session(cx);
+        cx.notify();
     }
 
     /// Puts a dragged pane down where the last painted frame said it would go.
@@ -6480,10 +6812,20 @@ impl Render for Tty7App {
             crate::ui::reorder::clear_pending(&self.reorder);
             crate::ui::pane_drag::clear_landing(&self.pane_drag);
         } else {
-            if let Some(order) = crate::ui::reorder::take_pending(&self.reorder) {
+            // Taken first either way: this is what ends the drag, and the merge
+            // below must not find the tab it just moved still in the air.
+            let order = crate::ui::reorder::take_pending(&self.reorder);
+            if let Some((tab, zone)) = self.tab_merge.take() {
+                self.merge_tab(tab, zone, window, cx);
+            } else if let Some(order) = order {
                 self.apply_tab_order(&order, cx);
             }
-            if let Some((from, zone)) = crate::ui::pane_drag::take_landing(&self.pane_drag) {
+            // Also what ends the pane drag, so it is taken whichever of the two
+            // readings the last frame left behind.
+            let landing = crate::ui::pane_drag::take_landing(&self.pane_drag);
+            if let Some((pane, at)) = self.pane_detach.take() {
+                self.detach_pane(pane, at, window, cx);
+            } else if let Some((from, zone)) = landing {
                 self.drop_pane(from, zone, window, cx);
             }
         }
@@ -6506,6 +6848,13 @@ impl Render for Tty7App {
         // two spellings of "is the rail up" is one more than the layout can
         // afford to have disagree.
         let rail = self.sidebar_open(cx);
+        // Both read before the strip and the sidebar are built: a tab held out
+        // over the layout suspends the reorder, which is what those two ask
+        // what to draw, and a pane held over *them* is measured against where
+        // they put their tabs last frame — which is what they are about to
+        // blank and write again.
+        let tab_landing = self.tab_landing(window, cx);
+        let detach_caret = self.detach_caret(window, cx);
         let strip = self.tab_strip(!vertical, window, cx);
         let sidebar = rail.then(|| self.tab_sidebar(window, cx));
         let ssh_status = self
@@ -6566,6 +6915,7 @@ impl Render for Tty7App {
             )
             .child(body)
             .when_some(self.pane_landing(window, cx), |this, el| this.child(el))
+            .when_some(tab_landing, |this, el| this.child(el))
             .when_some(ssh_status, |this, el| this.child(el))
             .when_some(self.render_remote_workspace_strip(cx), |this, el| {
                 this.child(el)
@@ -6994,6 +7344,11 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|_, _: &ReportIssue, _window, cx| cx.open_url(ISSUES_URL)))
                 .children(bg_image)
                 .child(main_layout)
+                // Window-level because the strip lives in the title bar and the
+                // sidebar down the side: the caret between two tabs is in
+                // neither of the boxes the rest of the drag feedback is drawn
+                // in.
+                .when_some(detach_caret, |this, caret| this.child(caret))
                 .when_some(settings_overlay, |this, overlay| this.child(overlay))
                 // Window-level, like the switcher and the palette: the prompt
                 // blocks the whole app, so its scrim has to reach the title bar

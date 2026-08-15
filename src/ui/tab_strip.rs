@@ -1,14 +1,12 @@
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Axis, Bounds, Context, FontWeight, MouseButton,
-    MouseDownEvent, Pixels, SharedString, Window, canvas, deferred, div, ease_out_quint,
-    linear_color_stop, linear_gradient, prelude::*, px, relative,
+    Pixels, SharedString, Window, canvas, deferred, div, ease_out_quint, linear_color_stop,
+    linear_gradient, prelude::*, px, relative,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex};
-use std::cell::RefCell;
-use std::rc::Rc;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::core::actions::{
@@ -1552,8 +1550,13 @@ impl Tty7App {
             .max_w(chips_avail)
             .overflow_hidden();
 
-        let slots: Rc<RefCell<Vec<Bounds<Pixels>>>> =
-            Rc::new(RefCell::new(vec![Bounds::default(); self.tabs.len()]));
+        // Held by the app rather than by the frame: a pane dropped up here has
+        // to read the gaps between the chips, and it is asking a frame later
+        // than the one that drew them. Blanked here and written again from
+        // paint, so a chip that is not drawn this time — the strip is hidden,
+        // or the chip scrolled out of it — leaves nothing behind to aim at.
+        let slots = self.strip_slots.clone();
+        *slots.borrow_mut() = vec![Bounds::default(); self.tabs.len()];
         let preview = reorder::preview(
             &self.reorder,
             &Surface::Strip,
@@ -1617,16 +1620,20 @@ impl Tty7App {
                 .on_drag(DragTab, {
                     let state = self.reorder.clone();
                     let slots = slots.clone();
+                    let id = tab.tree_id.get();
                     move |_drag, grab, _window, cx| {
                         cx.stop_propagation();
-                        *state.borrow_mut() = Some(Reorder::new(
-                            Surface::Strip,
-                            i,
-                            slots.borrow().clone(),
-                            Axis::Horizontal,
-                            px(CHIP_GAP),
-                            grab,
-                        ));
+                        *state.borrow_mut() = Some(
+                            Reorder::new(
+                                Surface::Strip,
+                                i,
+                                slots.borrow().clone(),
+                                Axis::Horizontal,
+                                px(CHIP_GAP),
+                                grab,
+                            )
+                            .of_tab(id),
+                        );
                         cx.new(|_| DragTab)
                     }
                 })
@@ -1665,17 +1672,21 @@ impl Tty7App {
                     .absolute()
                     .inset_0(),
                 )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        if ev.click_count >= 2 {
-                            window.titlebar_double_click();
-                        } else {
-                            this.activate(i, window, cx);
-                        }
-                    }),
-                )
+                // The press is kept from the title bar under it, but it is the
+                // release that switches tabs: a press that turns into a drag is
+                // the tab being picked up, and picking a tab up to drop it into
+                // another one must not first put it on screen.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    let double =
+                        matches!(ev, gpui::ClickEvent::Mouse(e) if e.down.click_count >= 2);
+                    if double {
+                        window.titlebar_double_click();
+                    } else {
+                        this.activate(i, window, cx);
+                    }
+                }))
                 .when_some(ssh_dot, |c, rgb| {
                     c.child(
                         div()
