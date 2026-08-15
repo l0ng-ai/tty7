@@ -1517,8 +1517,11 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
             rows.push(vec![
                 "status".to_string(),
                 format!(
-                    "pid {}, up {}s, {} panes",
-                    status.pid, status.uptime_secs, status.panes
+                    "pid {}, up {}s, {} pane{}",
+                    status.pid,
+                    status.uptime_secs,
+                    status.panes,
+                    if status.panes == 1 { "" } else { "s" }
                 ),
             ]);
             let routes = match backend.control(ControlRequest::Routes)? {
@@ -3851,6 +3854,45 @@ mod tests {
         };
         let out = human(run_cli(&["tty7", "doctor"], &ctx, &mut doctor_backend()));
         assert!(out.contains("set (/cfg/tty7)"), "{out}");
+    }
+
+    /// A server running one pane said "1 panes".
+    ///
+    /// The count comes straight off the status reply, so every fresh server
+    /// says it — `doctor` is the first thing a new user runs, and the first
+    /// line it shows them was ungrammatical.
+    #[test]
+    fn doctor_counts_one_pane_in_the_singular() {
+        use tty7_core::daemon::control::ServerStatus;
+
+        let status = |panes: u64| ServerStatus {
+            pid: 4242,
+            uptime_secs: 61,
+            panes,
+            control_version: CONTROL_VERSION,
+            protocol_version: PROTOCOL_VERSION,
+            build: "26.7.5".into(),
+            socket: "127.0.0.1:5555".into(),
+        };
+        let line = |panes: u64| {
+            let mut backend = mock();
+            backend.replies.push_back(ReplyOk::Status(status(panes)));
+            backend.replies.push_back(ReplyOk::Routes(Vec::new()));
+            human(run_cli(
+                &["tty7", "doctor"],
+                &Context::default(),
+                &mut backend,
+            ))
+        };
+
+        assert!(
+            line(1).contains("1 pane\n") || line(1).contains("1 pane "),
+            "{}",
+            line(1)
+        );
+        assert!(!line(1).contains("1 panes"), "{}", line(1));
+        assert!(line(0).contains("0 panes"), "{}", line(0));
+        assert!(line(2).contains("2 panes"), "{}", line(2));
     }
 
     /// Missing hooks are the reason a perfectly healthy-looking agent never

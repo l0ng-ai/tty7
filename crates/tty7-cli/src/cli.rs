@@ -95,7 +95,18 @@ pub enum Command {
 
     #[command(
         about = "Block until a pane's agent needs input, finishes its turn, or the pane \
-                 exits — the orchestration primitive: `tty7 wait %3 && tty7 capture %3 --plain`"
+                 exits — the orchestration primitive: `tty7 wait %3 && tty7 capture %3 \
+                 --plain`",
+        long_about = "Block until a pane's agent needs input, finishes its turn, or the \
+                      pane exits — the orchestration primitive:\n\n    \
+                      tty7 wait %3 && tty7 capture %3 --plain\n\n\
+                      That pairs with an agent, whose pane is still alive in `waiting` and \
+                      `done`. For a plain command, wait for `free` instead:\n\n    \
+                      tty7 wait %3 --until free && tty7 capture %3 --plain\n\n\
+                      `exit` is the one end state with nothing left to read: the pane's \
+                      output goes with the pane, and the workspace keeps only a leaf the \
+                      GUI can revive into a fresh shell. Capture before the shell exits, \
+                      or run the command under `tty7 run`, which streams it."
     )]
     Wait(WaitArgs),
 
