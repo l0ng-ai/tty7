@@ -555,7 +555,8 @@ fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
     let pane = address::pane_or_context(target, ctx)?;
     let mut already_wrote = false;
     if let Some(text) = text {
-        backend.send_input(pane, text.as_bytes().to_vec())?;
+        let attempt = backend.send_input(pane, text.as_bytes().to_vec());
+        or_no_such_pane(attempt, pane, backend)?;
         already_wrote = true;
     }
     for key in &pressed {
@@ -567,7 +568,8 @@ fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
         if already_wrote {
             std::thread::sleep(KEY_GAP);
         }
-        backend.send_input(pane, key.bytes.clone())?;
+        let attempt = backend.send_input(pane, key.bytes.clone());
+        or_no_such_pane(attempt, pane, backend)?;
         already_wrote = true;
     }
     report(
@@ -592,9 +594,33 @@ fn tried_to_write_an_address(s: &str) -> bool {
         .is_some_and(|c| c.is_ascii_digit())
 }
 
+/// Says the pane is not there, when that is what went wrong.
+///
+/// The daemon's own refusal makes a fine diagnostic and a poor sentence: it
+/// names the wire request rather than the verb that was typed, so `capture %99`
+/// answered "observing pane %99: daemon refused Observe: no such pane 99" while
+/// `procs %99` answered `no_such_pane` and `send %99` a third thing — three
+/// readings of one condition, one of them naming a request no user has heard
+/// of.
+///
+/// The registry is consulted only once something has already failed, so the
+/// ordinary path still costs a single round trip, and a registry that cannot be
+/// read leaves the original error alone: it is the better answer when the
+/// daemon is the thing that is wrong.
+fn or_no_such_pane<T>(result: Result<T>, pane: u64, backend: &mut dyn Backend) -> Result<T> {
+    let Err(original) = result else {
+        return result;
+    };
+    match backend.list_panes() {
+        Ok(panes) if !panes.iter().any(|p| p.pane_id == pane) => Err(resolve::no_such_pane(pane)),
+        _ => Err(original),
+    }
+}
+
 fn capture(args: CaptureArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     let pane = address::pane_or_context(args.target.as_deref(), ctx)?;
-    let segments = backend.capture(pane, args.scrollback)?;
+    let attempt = backend.capture(pane, args.scrollback);
+    let segments = or_no_such_pane(attempt, pane, backend)?;
     // Raw is the default and stays byte-for-byte what the daemon stored, joined
     // in replay order; `--plain` hands the same bytes to a grid instead. Either
     // way `--json` carries whatever was printed, so a caller reads one field.
@@ -625,7 +651,7 @@ fn procs(target: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> Resu
         && procs.ports.is_empty()
         && !backend.list_panes()?.iter().any(|p| p.pane_id == pane)
     {
-        bail!("no pane %{pane} on this machine — `tty7 pane ls --all` lists them");
+        return Err(resolve::no_such_pane(pane));
     }
     report(output::procs_tables(&procs), serde_json::to_value(&procs)?)
 }
@@ -1641,6 +1667,43 @@ mod tests {
             alive: true,
             owner: owner.map(str::to_string),
         }
+    }
+
+    /// One condition, one sentence.
+    ///
+    /// `capture %999` used to answer with the wire request's name — "daemon
+    /// refused Observe: no such pane 999" — `send %999` with the daemon's bare
+    /// refusal, and `procs %999` with the line below. Three readings of one
+    /// state of the world, one of them naming a request no user has heard of,
+    /// on the surface agents read stderr from.
+    #[test]
+    fn a_pane_that_is_not_there_gets_the_same_answer_whatever_failed() {
+        let mut backend = mock();
+        backend.registry = vec![pane_info(1, None)];
+
+        // Not in the registry: whatever the daemon said, the useful sentence is
+        // that the pane does not exist.
+        let swapped = or_no_such_pane::<()>(
+            Err(anyhow::anyhow!("daemon refused Observe: no such pane 999")),
+            999,
+            &mut backend,
+        )
+        .expect_err("still a failure");
+        assert_eq!(
+            swapped.to_string(),
+            "no pane %999 on this machine — `tty7 pane ls --all` lists them"
+        );
+
+        // The pane is there, so the failure was about something else and its
+        // own words are the better ones — this must not swallow real errors.
+        let kept = or_no_such_pane::<()>(Err(anyhow::anyhow!("connection reset")), 1, &mut backend)
+            .expect_err("still a failure");
+        assert_eq!(kept.to_string(), "connection reset");
+
+        assert!(
+            or_no_such_pane(Ok(7), 999, &mut backend).is_ok(),
+            "a success is never reconsidered, so the happy path costs no extra request"
+        );
     }
 
     /// An empty answer from the daemon means one of two things and the caller

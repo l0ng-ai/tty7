@@ -95,14 +95,22 @@ pub fn tab(machine: &Machine, addr: &TabAddress) -> Result<(WorkspaceId, TabId)>
     }
 }
 
+/// The one answer to "that pane is not there", so every verb taking a `%PANE`
+/// gives the same one.
+///
+/// `pane ls --all` rather than plain `pane ls`: a pane no workspace holds is
+/// exactly the one somebody is most likely to be asking after, and it is only
+/// listed with the flag.
+pub fn no_such_pane(pane: u64) -> anyhow::Error {
+    anyhow::anyhow!("no pane %{pane} on this machine — `tty7 pane ls --all` lists them")
+}
+
 pub fn workspace_of_pane(machine: &Machine, pane: u64) -> Result<&Workspace> {
     machine
         .workspaces
         .iter()
         .find(|ws| ws.tabs.iter().any(|tab| tab.root.contains(pane)))
-        .ok_or_else(|| {
-            anyhow::anyhow!("no pane %{pane} on this machine — `tty7 pane ls` lists them")
-        })
+        .ok_or_else(|| no_such_pane(pane))
 }
 
 pub fn short_id(id: &WorkspaceId) -> String {
