@@ -91,6 +91,15 @@ pub(crate) const WATCH_BURST_CAP: usize = 1024;
 
 pub(crate) const WATCH_COALESCE_WINDOW: Duration = Duration::from_millis(100);
 
+/// Control frame kind bytes.
+///
+/// Client→server and server→client are independent spaces (a connection always
+/// knows which direction it is reading), so the numeric overlap between, say,
+/// [`kind::REQUEST`] and [`kind::RESPONSE`] is deliberate and mirrors how
+/// `protocol`'s two spaces already work.
+///
+/// 64-69 are held open for later control frames (streaming replies,
+/// backpressure signals) so the dialect never has to claim a second range.
 pub mod kind {
 
     pub(crate) const HELLO: u8 = 60;
@@ -344,6 +353,17 @@ pub struct ServerStatus {
 }
 
 impl ControlRequest {
+    /// How long the client waits before giving up on this request.
+    ///
+    /// Per-method rather than one global figure because the spread is real: a
+    /// `stat` that hasn't answered in five seconds is not going to, while a
+    /// `git status` on a cold large repo legitimately takes ten. A single
+    /// conservative timeout would make the fast paths feel broken; a single
+    /// aggressive one would break the slow paths.
+    ///
+    /// A timeout **never drops the connection**: the request fails with
+    /// `TimedOut`, a [`kind::CANCEL`] goes out, and every other in-flight
+    /// request is untouched.
     pub fn deadline(&self) -> Duration {
         use ControlRequest::*;
         match self {
@@ -579,6 +599,19 @@ pub enum ControlEvent {
         workspace: String,
         delta: LayoutDelta,
     },
+    /// The server dropped at least one [`Layout`](Self::Layout) push for this
+    /// connection (its per-connection delta queue overflowed — see
+    /// [`crate::host::server::LAYOUT_EVENT_QUEUE`]): the peer's mirrors are
+    /// now wrong in a way no later delta repairs. So the client re-pulls the
+    /// machine whole and resyncs its windows — the identical recovery a delta
+    /// that will not apply already triggers, just server-announced instead of
+    /// stumbled into. Connection-wide, because drops happen at the queue, not
+    /// per workspace; the watch dialect's `WatchOverflow` is the precedent.
+    ///
+    /// It arrives *instead of* the deltas the queue was still holding, not
+    /// ahead of them: those are older than the gap and already inside the tree
+    /// the client is about to pull, so delivering them after the pull would
+    /// walk the client backwards through history it has already left behind.
     LayoutResync,
 }
 
