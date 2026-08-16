@@ -1,7 +1,15 @@
 ---
 title: "Command reference"
-description: "Every verb, its flags, and the JSON it emits under --json."
+description: "The verbs an agent drives, their flags, and the JSON they emit under --json."
 ---
+
+The verbs below are the ones a script or an agent reaches for. tty7 also groups
+its management verbs under `ws`, `tab`, `pane`, `machine` and `server`; two of
+the verbs documented here are shortcuts into them — `ls` is `ws ls` and `split`
+is `pane split`. (`new` is not: it creates a workspace *and* its first tab,
+where `ws new` leaves it empty.) Those groups are not repeated on this page.
+`tty7 ws --help` and its siblings list them, and being generated from the same
+definitions the CLI runs on, they cannot drift from it.
 
 ## Global flags
 
