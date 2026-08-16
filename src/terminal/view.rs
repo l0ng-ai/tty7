@@ -6413,19 +6413,41 @@ fn expand_file_command_token(
 ) -> Option<String> {
     let mut out = String::with_capacity(token.len());
     let mut rest = token;
+    let mut carries_path = false;
     while let Some(open) = rest.find('{') {
         let Some(close_rel) = rest[open..].find('}') else {
             break;
         };
         let close = open + close_rel;
+        // Where the literal before this placeholder starts. If the placeholder
+        // turns out to have no value, that literal was its glue — the `:` in
+        // `{path}:{line}` — and goes with it rather than trailing the argument.
+        let glue = out.len();
         out.push_str(&rest[..open]);
         let value = match &rest[open + 1..close] {
-            "path" => Some(path.to_string()),
+            "path" => {
+                carries_path = true;
+                Some(path.to_string())
+            }
             "line" => line.map(|l| l.to_string()),
             "column" => column.map(|c| c.to_string()),
             other => Some(format!("{{{other}}}")),
         };
-        out.push_str(&value?);
+        match value {
+            Some(value) => out.push_str(&value),
+            // A token that has already produced the path keeps it. Dropping
+            // the whole token is right for `--line={line}`, where the flag is
+            // meaningless without its value, but `code --goto {path}:{line}`
+            // is VS Code's own documented spelling, and dropping that token
+            // took the file with it: clicking a link that carried no line
+            // number ran `code --goto` and opened nothing.
+            None if carries_path => {
+                out.truncate(glue);
+                return Some(out);
+            }
+            // Only the absent value here, so the token is the flag and goes.
+            None => return None,
+        }
         rest = &rest[close + 1..];
     }
     out.push_str(rest);
@@ -7413,19 +7435,46 @@ mod tests {
     }
 
     #[test]
-    fn file_command_template_drops_a_token_that_shares_the_path_with_an_absent_value() {
+    fn file_command_template_keeps_the_path_when_it_shares_a_token_with_an_absent_value() {
+        // `code --goto file:line:column` is VS Code's own spelling, and a link
+        // without a line number must still open the file. The absent value
+        // takes its separator with it so the argument ends at the path rather
+        // than at a bare `:`. `{other}` survives because an unknown
+        // placeholder expands to itself rather than to nothing.
         let argv = expand_file_command_template(
             "code --goto {path}:{line} {other}",
             Path::new("/tmp/foo.rs"),
             None,
             None,
         );
-        // The rule is "drop the whole token", and this is its sharp edge: a
-        // token holding the path *and* an absent value takes the path with
-        // it, so a `code --goto file:line` config opens no file at all when
-        // the link carries no line number. `{other}` survives because an
-        // unknown placeholder expands to itself rather than to nothing.
-        assert_eq!(argv, vec!["code", "--goto", "{other}"]);
+        assert_eq!(argv, vec!["code", "--goto", "/tmp/foo.rs", "{other}"]);
+
+        // A column with no line is the same shape one placeholder further in.
+        let argv = expand_file_command_template(
+            "code --goto {path}:{line}:{column}",
+            Path::new("/tmp/foo.rs"),
+            Some(42),
+            None,
+        );
+        assert_eq!(argv, vec!["code", "--goto", "/tmp/foo.rs:42"]);
+
+        let argv = expand_file_command_template(
+            "code --goto {path}:{line}:{column}",
+            Path::new("/tmp/foo.rs"),
+            Some(42),
+            Some(7),
+        );
+        assert_eq!(argv, vec!["code", "--goto", "/tmp/foo.rs:42:7"]);
+
+        // The flag rule is untouched: a token with no path in it still goes
+        // entirely rather than leaving a bare `--line=`.
+        let argv = expand_file_command_template(
+            "herdr {path} --line={line}",
+            Path::new("/tmp/foo.rs"),
+            None,
+            None,
+        );
+        assert_eq!(argv, vec!["herdr", "/tmp/foo.rs"]);
     }
 
     /// #542's contract: a failed open is an `Err` the click site can toast,

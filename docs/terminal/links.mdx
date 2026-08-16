@@ -53,9 +53,10 @@ zed {path}:{line}
 herdr edit {path} --line={line}
 ```
 
-`{path}`, `{line}`, and `{column}` are filled in from the link. A flag whose
-value is not available is dropped rather than passed empty — so
-`--line={line}` simply disappears when the link had no line number.
+`{path}`, `{line}`, and `{column}` are filled in from the link. A value the
+link does not carry is dropped rather than passed empty, along with whatever
+introduced it: `--line={line}` disappears entirely, and `{path}:{line}` on a
+link with no line number becomes just the path, with no trailing colon.
 
 The settings are `link_file_open` (`internal`, `system`, or `command`) and
 `link_file_command` in `config.json`. A config written before `link_file_open`
