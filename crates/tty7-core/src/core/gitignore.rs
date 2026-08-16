@@ -2,11 +2,15 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ignore::gitignore::Gitignore;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 #[derive(Default, Clone)]
 pub(crate) struct GitignoreChain {
     matchers: HashMap<PathBuf, Option<Arc<Gitignore>>>,
+    /// `<repo>/.git/info/exclude`, per repository root.
+    excludes: HashMap<PathBuf, Option<Arc<Gitignore>>>,
+    /// `core.excludesFile`, or the XDG default. One per process.
+    global: Option<Option<Arc<Gitignore>>>,
 }
 
 impl GitignoreChain {
@@ -25,6 +29,40 @@ impl GitignoreChain {
             return true;
         }
         let mut state = false;
+        // git reads these below every `.gitignore`, so they are consulted
+        // first and a `.gitignore` further down can still whitelist what they
+        // exclude — checked against `git check-ignore`, which calls a file
+        // `!both.txt` re-includes not ignored even with `both.txt` in
+        // `info/exclude`.
+        let global = self
+            .global
+            .get_or_insert_with(|| {
+                let (gi, _err) = Gitignore::global();
+                (gi.num_ignores() > 0 || gi.num_whitelists() > 0).then(|| Arc::new(gi))
+            })
+            .clone();
+        let exclude = self
+            .excludes
+            .entry(root.to_path_buf())
+            .or_insert_with(|| {
+                let file = root.join(".git/info/exclude");
+                if !file.is_file() {
+                    return None;
+                }
+                // Rooted at the repository, not at `.git/info`, so its patterns
+                // are read against the paths they are written about.
+                let mut builder = GitignoreBuilder::new(root);
+                builder.add(&file);
+                builder.build().ok().map(Arc::new)
+            })
+            .clone();
+        for gi in [global, exclude].into_iter().flatten() {
+            match gi.matched(path, is_dir) {
+                ignore::Match::Ignore(_) => state = true,
+                ignore::Match::Whitelist(_) => state = false,
+                ignore::Match::None => {}
+            }
+        }
         let mut chain: Vec<&Path> = parent
             .ancestors()
             .take_while(|a| a.starts_with(root))
@@ -65,6 +103,8 @@ impl GitignoreChain {
 
     pub fn clear(&mut self) {
         self.matchers.clear();
+        self.excludes.clear();
+        self.global = None;
     }
 
     /// Unused, like `absorb` above and for the same reason.
@@ -82,6 +122,49 @@ impl GitignoreChain {
 
 #[cfg(test)]
 mod tests {
+
+    /// `.git/info/exclude` counts, and a `.gitignore` still outranks it.
+    ///
+    /// It is where a person puts an ignore they do not want in the shared
+    /// file, so a tree that reads only `.gitignore` marks files git does not.
+    /// Checked against `git check-ignore` on this layout, including the
+    /// precedence: `!both.txt` in `.gitignore` re-includes a name that
+    /// `info/exclude` lists, because git reads the exclude file below every
+    /// `.gitignore`.
+    ///
+    /// The global `core.excludesFile` is the third source and is left to
+    /// `Gitignore::global()`, which reads `GIT_CONFIG_GLOBAL` and the XDG
+    /// path the way git does. It is not exercised here: proving it means
+    /// setting an environment variable, and this suite runs in parallel in
+    /// one process.
+    #[test]
+    fn a_repo_exclude_file_is_read_and_a_gitignore_still_wins() {
+        let root = std::env::temp_dir().join(format!("tty7-exclude-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git/info")).unwrap();
+        std::fs::write(root.join(".git/info/exclude"), "secret.txt\nboth.txt\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "!both.txt\n").unwrap();
+        for name in ["secret.txt", "both.txt", "normal.txt"] {
+            std::fs::write(root.join(name), "x").unwrap();
+        }
+
+        let mut chain = GitignoreChain::default();
+        let ignored = |chain: &mut GitignoreChain, name: &str| {
+            chain.is_ignored(&root.join(name), false, &root)
+        };
+
+        assert!(
+            ignored(&mut chain, "secret.txt"),
+            "a name in .git/info/exclude is ignored"
+        );
+        assert!(
+            !ignored(&mut chain, "both.txt"),
+            "a .gitignore whitelist outranks the exclude file"
+        );
+        assert!(!ignored(&mut chain, "normal.txt"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// Nothing under an excluded directory can be brought back.
     ///
