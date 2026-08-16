@@ -506,6 +506,23 @@ fn not_found(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, msg.into())
 }
 
+/// A name the tree will keep: trimmed, and nothing left means unnamed.
+///
+/// The rename box in the GUI trims and maps an empty result to unnamed
+/// already, but the CLI handed `tty7 ws new "  "` straight through, and a
+/// workspace named with spaces prints as a blank cell — it looks unnamed
+/// without being unnamed, so it sorts, compares and resolves as a name nobody
+/// can see or retype. One rule at the store settles it for both front doors
+/// and for anything added beside them later.
+fn normalize_name(name: Option<String>) -> Option<String> {
+    let name = name?;
+    let trimmed = name.trim();
+    match trimmed.is_empty() {
+        true => None,
+        false => Some(trimmed.to_string()),
+    }
+}
+
 impl MachineStore {
     /// Open the store at `path`, reading whatever is there.
     ///
@@ -604,7 +621,7 @@ impl MachineStore {
             }
             let workspace = Workspace {
                 id: id.unwrap_or_default(),
-                name: name.clone(),
+                name: normalize_name(name.clone()),
                 ..Workspace::default()
             };
             m.workspaces.push(workspace.clone());
@@ -627,6 +644,7 @@ impl MachineStore {
         name: Option<String>,
         origin: Option<SubscriberId>,
     ) -> io::Result<()> {
+        let name = normalize_name(name);
         self.mutate(origin, |m| {
             let ws = find_workspace(m, id)?;
             ws.name = name.clone();
@@ -754,6 +772,7 @@ impl MachineStore {
         name: Option<String>,
         origin: Option<SubscriberId>,
     ) -> io::Result<()> {
+        let name = normalize_name(name);
         self.mutate(origin, |m| {
             let t = find_tab(m, workspace, tab)?;
             t.name = name.clone();
@@ -2033,6 +2052,40 @@ mod tests {
             }
             other => panic!("expected TabRestructured, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_name_that_is_only_spaces_is_no_name() {
+        let (store, _dir) = store();
+        // The GUI's rename box trims and maps empty to unnamed; `tty7 ws new
+        // "  "` used to get a workspace whose name printed as a blank cell,
+        // which looks unnamed without being unnamed.
+        let ws = store
+            .workspace_create(None, Some("   ".into()), None)
+            .unwrap();
+        assert_eq!(ws.name, None, "a name of spaces is not a name");
+
+        let named = store
+            .workspace_create(None, Some("  web  ".into()), None)
+            .unwrap();
+        assert_eq!(
+            named.name.as_deref(),
+            Some("web"),
+            "surrounding space is dropped"
+        );
+
+        store
+            .workspace_rename(named.id, Some(" \t ".into()), None)
+            .unwrap();
+        assert_eq!(store.workspace(named.id).unwrap().name, None);
+
+        store
+            .workspace_rename(named.id, Some(" api ".into()), None)
+            .unwrap();
+        assert_eq!(
+            store.workspace(named.id).unwrap().name.as_deref(),
+            Some("api")
+        );
     }
 
     #[test]
