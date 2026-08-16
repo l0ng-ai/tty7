@@ -687,7 +687,8 @@ impl Config {
                 // nothing readable to keep a copy of, so nothing is parked —
                 // the file itself is still where the user left it.
                 log::warn!(
-                    "failed to read config at {}: {e}; using defaults, writes suppressed",
+                    "failed to read config at {}: {e}; returning defaults for this load, \
+                     writes suppressed",
                     path.display()
                 );
                 let cfg = Config {
@@ -723,7 +724,14 @@ impl Config {
                     } else {
                         log::Level::Debug
                     },
-                    "failed to parse config at {}: {e}; keeping it aside and using defaults",
+                    // "returns" rather than "uses": this load is shared by
+                    // startup and by hot-reload, and only startup goes on to
+                    // run the defaults. A reload that fails keeps the settings
+                    // the app is already running on, so saying it uses defaults
+                    // here would send whoever reads this log looking for a
+                    // reset that did not happen.
+                    "failed to parse config at {}: {e}; keeping it aside and returning defaults \
+                     for this load",
                     path.display()
                 );
                 let cfg = Config {
