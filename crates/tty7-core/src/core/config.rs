@@ -2239,6 +2239,46 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A hand-edited config is clamped on the way in, not just in theory.
+    ///
+    /// `sanitize_clamps_degenerate_font_metrics` holds what `sanitize` does;
+    /// nothing held that the load path calls it, and deleting `cfg.sanitize()`
+    /// there left the whole suite green. The file is the one place these
+    /// values arrive unchecked — the settings page has its own bounds — so a
+    /// zero font size or a NaN reaches the layout from here or nowhere.
+    #[test]
+    fn a_hand_edited_config_is_clamped_as_it_is_read() {
+        let _guard = lock_config_file();
+        pin_config_dir();
+        let path = Config::path().expect("pinned config dir");
+        clear_quarantines(&path);
+        std::fs::write(
+            &path,
+            r#"{"font_size": 0.0, "line_height": 900.0, "ui_font_size": 1e9}"#,
+        )
+        .unwrap();
+
+        let (loaded, outcome) = Config::load_with_outcome();
+        assert_eq!(outcome, LoadOutcome::Parsed, "the file is valid JSON");
+        assert_eq!(
+            loaded.font_size,
+            Config::default().font_size,
+            "a zero font size is not a size to draw with"
+        );
+        assert!(
+            loaded.line_height <= LINE_HEIGHT_MAX,
+            "line_height {} was let through",
+            loaded.line_height
+        );
+        assert!(
+            loaded.ui_font_size <= UI_FONT_SIZE_MAX,
+            "ui_font_size {} was let through, and the whole chrome is a              multiple of it",
+            loaded.ui_font_size
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn a_corrupt_config_is_kept_aside_and_never_overwritten() {
         let _guard = lock_config_file();
