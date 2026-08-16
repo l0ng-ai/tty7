@@ -1778,7 +1778,7 @@ impl Tty7App {
         let dirty = self.tab_code().is_some_and(|c| {
             c.files
                 .iter()
-                .any(|f| f.dirty && f.host == tree_host && f.path == *path)
+                .any(|f| f.dirty && f.host.id() == tree_host && f.path == *path)
         });
 
         let renaming = matches!(

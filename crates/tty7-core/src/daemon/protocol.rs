@@ -347,9 +347,11 @@ pub enum SftpOpResult {
     Stat(SftpEntry),
     Link(String),
     Error(String),
-    /// Reply to [`SftpOp::ReadFile`]: the bytes plus the stat they were read
-    /// under, in one round trip — the editor needs the mtime alongside the
-    /// body to notice later external changes.
+    /// Reply to [`SftpOp::ReadFile`]: the bytes, plus the stat they were
+    /// actually read under. The stat costs nothing — the size check before
+    /// the read has it in hand either way — and it is the only description of
+    /// the body that cannot disagree with it, which a separate `Stat` round
+    /// trip either side of the read can.
     File {
         entry: SftpEntry,
         #[serde(with = "crate::host::b64")]

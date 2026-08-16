@@ -15,7 +15,6 @@ use gpui_component::{
 
 use crate::ui::app::Tty7App;
 use crate::ui::host_ops::{HostId, HostOps, MTime, SharedHost, WatchSub};
-use crate::ui::host_registry::HostRegistry;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -24,10 +23,12 @@ const RELOAD_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(20
 
 pub(crate) struct OpenFile {
     pub(crate) path: PathBuf,
-    /// The machine `path` lives on. Saves, reloads and duplicate detection
-    /// all key on it: an SFTP file and a local file can share the string
-    /// `/etc/hosts` without being the same file.
-    pub(crate) host: HostId,
+    /// The machine `path` lives on, held rather than looked up. Saves,
+    /// reloads and duplicate detection all key on its id — an SFTP file and a
+    /// local file can share the string `/etc/hosts` without being the same
+    /// file — and saving goes straight through this handle, so a buffer stays
+    /// saveable however the window's own machine has changed underneath it.
+    pub(crate) host: SharedHost,
     pub(crate) input: Entity<InputState>,
     pub(crate) dirty: bool,
     disk_mtime: Option<MTime>,
@@ -301,7 +302,7 @@ impl Tty7App {
             .iter()
             .filter_map(|t| t.code.as_deref())
             .flat_map(|c| c.files.iter())
-            .filter(|f| f.host == watch_host)
+            .filter(|f| f.host.id() == watch_host)
             .map(|f| f.path.clone())
             .collect();
         let dirs: HashSet<PathBuf> = files
@@ -443,6 +444,7 @@ impl Tty7App {
     /// than throwing the cursor somewhere it was never meant to go.
     fn apply_pending_cursor(
         &mut self,
+        host: HostId,
         requested: &Path,
         opened: &Path,
         window: &mut Window,
@@ -461,10 +463,11 @@ impl Tty7App {
         let Some((_, line, column)) = self.editor.pending_cursor.take() else {
             return;
         };
-        let Some(file) = self
-            .tab_code()
-            .and_then(|c| c.files.iter().find(|f| f.path == *opened))
-        else {
+        let Some(file) = self.tab_code().and_then(|c| {
+            c.files
+                .iter()
+                .find(|f| f.host.id() == host && f.path == *opened)
+        }) else {
             return;
         };
         let input = file.input.clone();
@@ -509,7 +512,7 @@ impl Tty7App {
         let p = path.to_path_buf();
         let requested = p.clone();
         HostOps::run_in(
-            host,
+            host.clone(),
             window,
             cx,
             move |h| -> Result<(PathBuf, String, Option<MTime>), String> {
@@ -557,11 +560,11 @@ impl Tty7App {
             },
             move |app, opened, window, cx| match opened {
                 Ok((path, text, mtime)) => {
-                    app.editor_install_file(host_id, path.clone(), text, mtime, window, cx);
+                    app.editor_install_file(host, path.clone(), text, mtime, window, cx);
                     // Against `requested`, not `path`: the host canonicalised
                     // it on the way through, and a link that named a symlink
                     // would otherwise lose the line it asked for.
-                    app.apply_pending_cursor(&requested, &path, window, cx);
+                    app.apply_pending_cursor(host_id, &requested, &path, window, cx);
                 }
                 Err(message) => window.push_notification(message, cx),
             },
@@ -581,7 +584,7 @@ impl Tty7App {
         let Some(ix) = code
             .files
             .iter()
-            .position(|f| f.host == host && f.path == *path)
+            .position(|f| f.host.id() == host && f.path == *path)
         else {
             return false;
         };
@@ -590,21 +593,22 @@ impl Tty7App {
         code.files.insert(0, f);
         code.active = 0;
         self.focus_editor(window, cx);
-        self.apply_pending_cursor(path, path, window, cx);
+        self.apply_pending_cursor(host, path, path, window, cx);
         cx.notify();
         true
     }
 
     fn editor_install_file(
         &mut self,
-        host: HostId,
+        host: SharedHost,
         path: PathBuf,
         text: String,
         mtime: Option<MTime>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.editor_activate_open(host, &path, window, cx) {
+        let host_id = host.id();
+        if self.editor_activate_open(host_id, &path, window, cx) {
             return;
         }
         if self.tabs.get(self.active).is_none() {
@@ -635,7 +639,7 @@ impl Tty7App {
                         .iter_mut()
                         .filter_map(|t| t.code.as_deref_mut())
                         .flat_map(|c| c.files.iter_mut())
-                        .find(|f| f.host == host && f.path == path)
+                        .find(|f| f.host.id() == host_id && f.path == path)
                     else {
                         return;
                     };
@@ -766,11 +770,7 @@ impl Tty7App {
     ) {
         // The file's own host, not the active one: the buffer keeps pointing
         // at the machine it was read from, however the focus has moved since.
-        let Some(host) = self
-            .editor_file_mut(id)
-            .map(|f| f.host)
-            .and_then(|host| HostRegistry::lookup(cx, host))
-        else {
+        let Some(host) = self.editor_file_mut(id).map(|f| f.host.clone()) else {
             return;
         };
         let Some(f) = self.editor_file_mut(id) else {
@@ -994,7 +994,7 @@ impl Tty7App {
                 continue;
             };
             for (ix, f) in code.files.iter_mut().enumerate() {
-                if f.host != host || f.path != *path {
+                if f.host.id() != host || f.path != *path {
                     continue;
                 }
                 match classify_external_change(f.saving.is_some(), f.dirty, f.disk_mtime, mtime) {
@@ -1031,13 +1031,10 @@ impl Tty7App {
             return;
         };
         let target = f.path.clone();
-        let file_host = f.host;
+        let host = f.host.clone();
         let id = f.input.entity_id();
         f.reload_seq = f.reload_seq.wrapping_add(1);
         let seq = f.reload_seq;
-        let Some(host) = HostRegistry::lookup(cx, file_host) else {
-            return;
-        };
         HostOps::run_in(
             host,
             window,
@@ -1226,6 +1223,10 @@ impl Tty7App {
     }
 
     fn render_code_status_bar(&self, _window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        // The roots below belong to this window's own machine. A file read
+        // over SFTP is on another one, where they mean nothing, so it shows
+        // its own full path rather than borrowing the local repo's name.
+        let tree_host = self.spawn_host(cx);
         let code = self.tab_code();
         let muted = cx.theme().muted_foreground;
         let path_text: Option<SharedString> = code.map(|c| {
@@ -1236,6 +1237,7 @@ impl Tty7App {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             match c.active_file() {
+                Some(f) if f.host.id() != tree_host => f.path.display().to_string().into(),
                 Some(f) => {
                     let rel = c
                         .roots

@@ -601,26 +601,25 @@ impl Tty7App {
         let target = remote_join(&self.sftp_panel.cwd, &entry.name);
         if is_dir_like(&entry) {
             self.sftp_navigate(target, cx);
-        } else if let Some(host) = self.sftp_editor_host(cx) {
+        } else if let Some(host) = self.sftp_editor_host() {
             self.editor_open_on_host(host, Path::new(&target), window, cx);
         }
     }
 
-    /// The [`Host`] the editor reads and saves this pane's files through,
-    /// registered so saves can find it again long after the panel has moved
-    /// on. Rebuilt on every call: the host is stateless apart from its route,
-    /// and re-inserting is what keeps a re-opened pane's route fresh.
+    /// The [`Host`] the editor reads and saves this pane's files through.
+    ///
+    /// Handed to the editor rather than filed in `HostRegistry`: that table
+    /// means "a machine this window has a link to", and its entries are
+    /// listed as machines and swept when no workspace is left holding one.
+    /// An SFTP channel borrowed from a pane is neither, so the buffer holds
+    /// the host itself and stays saveable for as long as it is open.
     ///
     /// [`Host`]: crate::ui::host_ops::Host
-    fn sftp_editor_host(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> Option<crate::ui::host_ops::SharedHost> {
+    fn sftp_editor_host(&self) -> Option<crate::ui::host_ops::SharedHost> {
         self.sftp_panel.open_pane_id?;
-        let host: crate::ui::host_ops::SharedHost =
-            std::sync::Arc::new(crate::ui::sftp_host::SftpHost::new(self.sftp_route()));
-        crate::ui::host_registry::HostRegistry::insert(cx, host.clone());
-        Some(host)
+        Some(std::sync::Arc::new(crate::ui::sftp_host::SftpHost::new(
+            self.sftp_route(),
+        )))
     }
 
     pub(crate) fn sftp_download_entry(&mut self, entry: SftpEntry, cx: &mut Context<Self>) {
