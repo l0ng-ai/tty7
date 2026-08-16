@@ -2833,6 +2833,44 @@ mod tests {
     /// while and bash's, nushell's and WSL's were not, because the sweep knew
     /// one prefix and `throwaway_dir` handed out four. Adding a const here
     /// without adding it to the list fails this.
+    /// Every shell tty7 injects into is on the page that lists them.
+    ///
+    /// Nushell was not: it has had a `config.nu` wrapper for as long as the
+    /// others have had theirs, and the page's "Which shells" table left it
+    /// out, so a nushell user reading it concluded they got nothing.
+    ///
+    /// The list comes from the dispatch rather than from here, so a sixth
+    /// shell has to be written down before this passes.
+    #[test]
+    fn the_shell_integration_page_lists_every_shell_that_gets_one() {
+        const SOURCE: &str = include_str!("shell_integration.rs");
+        const PAGE: &str = include_str!("../../../../docs/reference/shell-integration.mdx");
+
+        let injected: Vec<&str> = SOURCE
+            .match_indices("ShellKind::")
+            .filter_map(|(at, marker)| {
+                let rest = &SOURCE[at + marker.len()..];
+                let (name, tail) = rest.split_once(" => ")?;
+                // Only the arms that actually build an injection; `Wsl => None`
+                // on unix is the same shell as the Windows arm above it.
+                tail.starts_with("setup_").then_some(name)
+            })
+            .collect();
+
+        assert!(
+            injected.len() >= 5,
+            "only {injected:?} were read out of the dispatch"
+        );
+        let missing: Vec<&&str> = injected
+            .iter()
+            .filter(|shell| !PAGE.to_lowercase().contains(&shell.to_lowercase()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these shells are injected into but not on the page: {missing:?}"
+        );
+    }
+
     #[test]
     fn every_prefix_a_shell_can_take_is_one_the_sweep_knows() {
         // Counted from the source rather than listed here. Listing them is

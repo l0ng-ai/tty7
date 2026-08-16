@@ -18,6 +18,7 @@ removes itself from the equation if you run the same shell elsewhere.
 | **zsh** | A throwaway `ZDOTDIR` whose files source yours first, then tty7's. Your `TTY7_USER_ZDOTDIR` is preserved. |
 | **bash** | An rcfile that sources your own first. |
 | **fish** | A `-C` init command. |
+| **nushell** | A throwaway `config.nu` passed with `--config`, which sources yours back in. `source` is parse-time in Nushell, so the path to your config is resolved as the wrapper is written rather than checked when it runs. |
 | **PowerShell** | An encoded init command that wraps your existing `prompt` function and PSReadLine's line reader. |
 | **WSL** *(Windows)* | The distro's shell is bootstrapped with the same scripts. |
 | **Remote panes** | The same three POSIX shells, bootstrapped over the SSH connection. Toggle per profile with **Settings → SSH → Session → Shell integration**. |
