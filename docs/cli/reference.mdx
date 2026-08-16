@@ -161,6 +161,11 @@ The pane's replay. Two independent choices:
 `--scrollback`. The ring splits into segments on resize, so for a pane that was
 never resized the two are identical.
 
+A pane restored after its daemon died counts as resized. The screen it was
+seeded with was recorded at whatever size it had then, so unless the new pane
+comes back that same shape, plain `capture` answers with the restore banner and
+the new prompt alone — everything above the banner needs `--scrollback`.
+
 **In what form** — without `--plain`, the stored bytes with ANSI escapes intact,
 decoded as UTF-8 (invalid bytes become U+FFFD). With `--plain`, those bytes
 replayed through a terminal grid and printed as the text they produced.

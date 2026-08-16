@@ -3660,6 +3660,44 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    /// The seam a restore leaves is the snapshot's *size*, not the restore.
+    ///
+    /// `tty7 capture` prints the last segment alone, so this decides whether a
+    /// restored pane answers with the screen it kept or with the banner and a
+    /// prompt. Restoring at the size the screen was recorded at leaves one
+    /// segment and the capture holds everything; a pane that comes back a
+    /// different shape does not, which is what the flag's help now says.
+    #[test]
+    fn a_restore_only_starts_a_segment_when_the_pane_comes_back_a_different_size() {
+        use crate::daemon::scrollback::Segment;
+
+        let seed = |at: WinSize, back: WinSize| {
+            let mut ring = ReplayRing::seeded(
+                vec![Segment {
+                    size: at,
+                    bytes: b"what the dead pane had on it".to_vec(),
+                }],
+                back,
+            );
+            ring.append(b"the new shell's prompt");
+            ring
+        };
+
+        let same = seed(ws(80, 24), ws(80, 24));
+        assert_eq!(
+            same.segments.len(),
+            1,
+            "the same size, so the new shell writes on into the restored screen"
+        );
+
+        let different = seed(ws(100, 24), ws(80, 30));
+        assert_eq!(
+            different.segments.len(),
+            2,
+            "a different size, so the restored screen is left behind in its own segment"
+        );
+    }
+
     #[test]
     fn a_seeded_ring_replays_the_old_screen_at_the_size_it_was_written() {
         use crate::daemon::scrollback::Segment;

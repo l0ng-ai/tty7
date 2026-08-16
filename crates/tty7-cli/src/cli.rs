@@ -409,8 +409,11 @@ pub struct CaptureArgs {
     #[arg(
         long,
         help = "Print the whole scrollback ring; the ring splits into segments on resize, \
-                and without this flag only the last segment is printed (for a \
-                never-resized pane the two are identical)"
+                and without this flag only the last segment is printed. A pane restored \
+                after its daemon died counts as resized: the screen it was seeded with was \
+                recorded at the size it had then, so it sits in an earlier segment unless \
+                the new pane happens to match it, and plain `capture` shows the banner and \
+                the new prompt alone"
     )]
     pub scrollback: bool,
 
