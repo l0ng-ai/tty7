@@ -2853,6 +2853,27 @@ mod tests {
     /// The sweep deletes, so what it declines to match matters more than what
     /// it matches. `tty7-zdotdir-wsl` is a real name this module writes, and a
     /// pid is the one thing that makes a directory safe to judge.
+    /// The daemon still calls the sweep on startup.
+    ///
+    /// The three tests below hold what [`sweep_dead_zdotdirs`] does; none of
+    /// them holds that anyone runs it, and deleting the call from the daemon's
+    /// startup left the whole suite green. That is how the directories piled
+    /// up in the first place — 4,457 of them — so the call is worth a guard of
+    /// its own.
+    ///
+    /// It reads the source because the only caller binds a listener and then
+    /// serves forever, which no unit test can enter. So this proves the call
+    /// is written, not that it is reached: a sweep moved somewhere that never
+    /// runs would still pass. It catches deletion, which is the way it broke.
+    #[test]
+    fn the_daemon_startup_still_calls_the_sweep() {
+        const STARTUP: &str = include_str!("server.rs");
+        assert!(
+            STARTUP.contains("shell_integration::sweep_dead_zdotdirs()"),
+            "nothing in the daemon calls the sweep any more"
+        );
+    }
+
     #[test]
     fn only_a_named_pid_makes_a_directory_ours_to_sweep() {
         // Every shell that takes a scratch directory, not just zsh: bash's had

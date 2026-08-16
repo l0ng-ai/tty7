@@ -1257,6 +1257,61 @@ fn spawn_writer(
 #[cfg(test)]
 mod tests {
 
+    /// A restore consumes the snapshot it was handed, either way.
+    ///
+    /// The privacy page says a restore consumes the file, and
+    /// [`restored_screen`]'s comment says why: a copy left behind could only
+    /// ever put the same screen into a second pane. Deleting the `forget` call
+    /// there left the suite green, so this holds the call rather than the
+    /// function.
+    ///
+    /// Both branches, because the comment is careful about the difference: an
+    /// empty snapshot is not a screen worth handing over, but the file still
+    /// goes. Only the return value turns on emptiness.
+    #[test]
+    fn a_restore_consumes_the_snapshot_even_when_it_holds_nothing() {
+        let dir = std::env::temp_dir().join(format!("tty7-restore-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        crate::core::config::set_config_dir(dir);
+
+        let size = crate::daemon::protocol::WinSize {
+            cols: 80,
+            rows: 24,
+            cell_w: 8,
+            cell_h: 16,
+        };
+        let request = |pane_id| crate::daemon::protocol::RestoreFrom {
+            pane_id,
+            banner: None,
+        };
+
+        let held = 92_001;
+        crate::daemon::scrollback::save(
+            held,
+            &[crate::daemon::scrollback::Segment {
+                size,
+                bytes: b"what the dead pane had on it".to_vec(),
+            }],
+        );
+        let restored = restored_screen(request(held)).expect("a screen to hand over");
+        assert_eq!(restored.segments.len(), 1, "the screen came back");
+        assert!(
+            crate::daemon::scrollback::load(held).is_none(),
+            "the snapshot outlived the restore that consumed it"
+        );
+
+        let empty = 92_002;
+        crate::daemon::scrollback::save(empty, &[]);
+        assert!(
+            restored_screen(request(empty)).is_none(),
+            "an empty snapshot is not a screen to restore"
+        );
+        assert!(
+            crate::daemon::scrollback::load(empty).is_none(),
+            "a file nobody will read again was left on disk"
+        );
+    }
+
     /// Closing a pane takes its stored screen with it.
     ///
     /// The privacy page promises the file goes "at once", and [`kill_pane`]'s
