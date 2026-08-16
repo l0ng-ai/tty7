@@ -990,13 +990,17 @@ impl Tty7App {
                 ),
             );
         // The tile inside asks for `w_full`, and a percentage is only a width
-        // while every box above it has one. This row had none of its own — it
-        // borrowed the column's by cross-axis stretch — so on any pass that
-        // sizes the column from its content the chain resolves against nothing
-        // and the tile falls back to hugging the workspace name. Declaring the
-        // width here anchors it to the rail, which is a fixed `w(px(width))`.
+        // while some box above it has a real one. This row used to have none of
+        // its own and borrowed the column's by cross-axis stretch, which did not
+        // always hold; `w_full` here swapped that for a second percentage, and a
+        // row whose width is `Percent` is no longer `auto`, so it lost stretch
+        // as well — on the passes that size the column from its content there
+        // was still nothing to resolve against and the tile fell back to hugging
+        // the workspace name. Hand the row real pixels: the rail is
+        // `w(px(width))` and layout is border-box, so its content is one pixel
+        // narrower than that because of the right border.
         let workspace_head = h_flex()
-            .w_full()
+            .w(px(width - 1.))
             .flex_shrink_0()
             .px(px(crate::ui::app::CONTENT_INSET - 7.))
             .pt(px(4.))
