@@ -628,6 +628,30 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
 mod tests {
     use super::*;
 
+    /// The READMEs count the agents tty7 detects, and the count is in prose.
+    ///
+    /// Both say "18 CLIs"; `CLIAgent::ALL` is what makes that true, and a
+    /// nineteenth agent would leave two sentences quietly wrong in the file
+    /// most people read first. Checked the way `keymap` checks its action
+    /// list and `aumid` checks the installer script: read the other file.
+    #[test]
+    fn the_readmes_count_the_agents_this_enum_holds() {
+        let n = CLIAgent::ALL.len();
+        for (name, text) in [
+            ("README.md", include_str!("../../../../README.md")),
+            (
+                "README.zh-CN.md",
+                include_str!("../../../../README.zh-CN.md"),
+            ),
+        ] {
+            assert!(
+                text.contains(&format!("{n} CLI")) || text.contains(&format!("{n} 个 CLI")),
+                "{name} does not say there are {n} CLI agents; \
+                 CLIAgent::ALL has {n} and the file has to agree"
+            );
+        }
+    }
+
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
     }
