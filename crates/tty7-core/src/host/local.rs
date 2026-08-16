@@ -448,6 +448,17 @@ fn coalesce(
         if batch.is_empty() {
             continue;
         }
+        // `.gitignore` only, though the chain also reads `.git/info/exclude`
+        // and the global excludes file. Watching those would mean asking for
+        // `<repo>/.git/info` in the set below, and the set is the tree's
+        // expanded directories — `.git` is marked ignored and never expanded,
+        // so no event for that file can reach here today. Matching its name
+        // as well would be a branch nothing takes.
+        //
+        // The cost is that an edit to `.git/info/exclude` shows up at the next
+        // `.gitignore` write or the next launch, rather than at once. Editing
+        // it is a once-in-a-while act, which is why that trade is this way
+        // round rather than watching inside `.git` for every open repository.
         if batch
             .iter()
             .any(|p| p.file_name().is_some_and(|n| n == ".gitignore"))
