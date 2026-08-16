@@ -146,34 +146,6 @@ pub enum UpdateInstallHint {
     MissingChecksums,
 }
 
-impl UpdateInstallHint {
-    /// The reason in plain English, pinned by tests. Anything a user reads
-    /// goes through `localized_update_install_hint` instead (#602).
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn english(&self) -> String {
-        match self {
-            #[cfg(target_os = "macos")]
-            Self::UnsupportedMacos => "This copy is not running from a writable tty7.app bundle, so replacing it would be unsafe. Move tty7 to Applications or another writable folder, or open the release page to install the update.".to_string(),
-            #[cfg(target_os = "linux")]
-            Self::UnsupportedLinux => "The release has no Linux package for this architecture. Build from source or use your package manager.".to_string(),
-            #[cfg(target_os = "linux")]
-            Self::LinuxManualPackage(name) => format!(
-                "Linux installations are updated by hand. Download {name} from the release page, or use your package manager."
-            ),
-            #[cfg(target_os = "windows")]
-            Self::UnsupportedWindows => "Automatic Windows updates are available for recognized Inno Setup and portable ZIP installations. This copy is missing a valid installation marker, updater, or writable portable directory, so open the release page to update it manually.".to_string(),
-            #[cfg(target_os = "windows")]
-            Self::WindowsAllUsersInstall => "tty7 is installed for all users, which needs administrator rights to replace. tty7 will not raise an elevation prompt on its own behalf, so open the release page and run the installer yourself to update it.".to_string(),
-            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-            Self::UnsupportedPlatform => "Automatic installation is not available on this platform. Open the release page.".to_string(),
-            Self::MissingPackage(name) => format!(
-                "The release has no {name} package for this installation. Open the release page to choose another package."
-            ),
-            Self::MissingChecksums => "The release has no checksums.txt, so tty7 refuses to install it automatically.".to_string(),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum UpdatePhase {
     #[default]
@@ -3450,15 +3422,16 @@ mod tests {
     /// a release that is simply not installable and should say so.
     #[test]
     fn the_cross_platform_hints_name_what_is_missing() {
+        crate::ui::i18n::set_locale("en");
         let missing = UpdateInstallHint::MissingPackage("tty7-1.0-mystery.tar.gz".to_string());
-        let text = missing.english();
+        let text = localized_update_install_hint(&missing);
         assert!(
             text.contains("tty7-1.0-mystery.tar.gz"),
             "the hint has to name the package it looked for: {text}"
         );
         assert!(text.contains("release page"), "{text}");
 
-        let checksums = UpdateInstallHint::MissingChecksums.english();
+        let checksums = localized_update_install_hint(&UpdateInstallHint::MissingChecksums);
         assert!(checksums.contains("checksums.txt"), "{checksums}");
         assert!(
             checksums.contains("refuses"),
@@ -3486,7 +3459,8 @@ mod tests {
             select_release_asset_for(Err(UpdateInstallHint::WindowsAllUsersInstall), &[]).reason,
             Some(UpdateInstallHint::WindowsAllUsersInstall)
         );
-        let hint = UpdateInstallHint::WindowsAllUsersInstall.english();
+        crate::ui::i18n::set_locale("en");
+        let hint = localized_update_install_hint(&UpdateInstallHint::WindowsAllUsersInstall);
         assert!(hint.contains("all users"), "{hint}");
         assert!(hint.contains("release page"), "{hint}");
     }
