@@ -258,6 +258,27 @@ fn restored_screen(
     })
 }
 
+/// Everything a new pane inherits from the one it replaces, before it spawns.
+///
+/// Both halves have to happen here rather than at the spawn: the spawn is what
+/// hands the shell the name of its history file, so the carry has to have put
+/// the predecessor's commands behind that name already, and the screen has to
+/// be in hand to seed the ring with.
+///
+/// They are one function because they are one decision — this pane is the
+/// continuation of that one — and because a caller that did half of it would
+/// give the reader back their scrollback with an empty Up key, or the reverse.
+/// `handle_conn` cannot be entered by a test, so this is the seam that can.
+fn take_over_from(
+    dead: Option<crate::daemon::protocol::RestoreFrom>,
+    id: u64,
+) -> Option<crate::daemon::pane::Restore> {
+    if let Some(pane_id) = dead.as_ref().map(|r| r.pane_id) {
+        crate::daemon::history::carry(pane_id, id);
+    }
+    dead.and_then(restored_screen)
+}
+
 /// Close a pane for good: stop it, drop it from the registry, and drop the copy
 /// of its screen.
 ///
@@ -700,13 +721,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             restore,
         } => {
             let id = registry.alloc_id();
-            if let Some(dead) = restore.as_ref().map(|r| r.pane_id) {
-                // Before the spawn, because the spawn is what hands the shell
-                // the name of its history file — and this is what puts the
-                // predecessor's commands behind that name.
-                crate::daemon::history::carry(dead, id);
-            }
-            let restore = restore.and_then(restored_screen);
+            let restore = take_over_from(restore, id);
             let on_dead = {
                 let registry = registry.clone();
                 move || {
@@ -1256,6 +1271,63 @@ fn spawn_writer(
 
 #[cfg(test)]
 mod tests {
+
+    /// A replacement pane inherits both halves, or neither is worth having.
+    ///
+    /// `history::carry` and `restored_screen` are each held by their own
+    /// tests; nothing held that a pane taking over from a dead one calls them.
+    /// Deleting the carry left the suite green, and what it costs is the thing
+    /// its own comment names — the commands the predecessor ran, which are the
+    /// ones a reader reaches for first after a restore.
+    #[test]
+    fn a_pane_taking_over_inherits_the_history_and_the_screen() {
+        let dir = std::env::temp_dir().join(format!("tty7-takeover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        crate::core::config::set_config_dir(dir);
+
+        let (dead, fresh) = (93_001, 93_002);
+        crate::daemon::scrollback::save(
+            dead,
+            &[crate::daemon::scrollback::Segment {
+                size: crate::daemon::protocol::WinSize {
+                    cols: 80,
+                    rows: 24,
+                    cell_w: 8,
+                    cell_h: 16,
+                },
+                bytes: b"what the dead pane had on it".to_vec(),
+            }],
+        );
+        let history = crate::daemon::history::path_for(dead).expect("a history path");
+        std::fs::create_dir_all(history.parent().expect("a parent")).ok();
+        std::fs::write(
+            &history,
+            "cargo test
+",
+        )
+        .expect("seed the predecessor's history");
+
+        let restore = take_over_from(
+            Some(crate::daemon::protocol::RestoreFrom {
+                pane_id: dead,
+                banner: None,
+            }),
+            fresh,
+        )
+        .expect("the screen comes across");
+        assert_eq!(restore.segments.len(), 1, "the screen came across");
+
+        let carried = crate::daemon::history::path_for(fresh).expect("a history path");
+        assert_eq!(
+            std::fs::read_to_string(&carried).unwrap_or_default(),
+            "cargo test\n",
+            "the replacement pane's Up key cannot reach what its predecessor ran"
+        );
+        assert!(!history.exists(), "the old name was left behind as a copy");
+
+        // No predecessor: nothing to inherit, and nothing to go wrong.
+        assert!(take_over_from(None, 93_003).is_none());
+    }
 
     /// A restore consumes the snapshot it was handed, either way.
     ///
