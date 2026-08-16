@@ -1,4 +1,4 @@
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use tty7_core::core::machine::{Machine, PaneNode, Workspace};
 use tty7_core::core::session::WorkspaceId;
@@ -36,12 +36,35 @@ pub fn tab_label(view: &TabView) -> String {
     }
 }
 
-/// `max` characters at most, with an ellipsis in place of what was dropped.
+/// `max` display columns at most, with an ellipsis in place of what was
+/// dropped.
+///
+/// Columns rather than characters, because the caller is bounding a table:
+/// counting characters let a CJK title through at two columns each, so a
+/// clamp to 40 came out 79 wide and widened every column in `tab ls` — the
+/// one thing the clamp is there to stop.
+///
+/// A wide character that would straddle the limit is dropped whole. Half of
+/// one is not a narrower character, it is a different one.
 fn clamp(s: &str, max: usize) -> String {
-    match s.chars().count() > max {
-        true => s.chars().take(max - 1).chain(['…']).collect(),
-        false => s.to_string(),
+    if width(s) <= max {
+        return s.to_string();
     }
+    // The ellipsis has to fit inside `max` as well; `saturating_sub` because a
+    // caller asking for zero columns should get the ellipsis, not a panic.
+    let budget = max.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 /// The last segment of a path, for columns that have room for a word and not
@@ -646,5 +669,38 @@ mod tests {
             starts.windows(2).all(|w| w[0] == w[1]),
             "columns drifted between rows: {starts:?} in {rendered:?}"
         );
+    }
+
+    /// The clamp exists to bound a column, so it has to count what a column
+    /// is measured in.
+    ///
+    /// Counting characters, a 40-char CJK title came out 79 columns wide and
+    /// pushed `tab ls` to 98 columns — past an 80-column terminal, and exactly
+    /// the runaway the clamp is there to prevent.
+    #[test]
+    fn a_clamp_bounds_columns_not_characters() {
+        let ascii = "a".repeat(100);
+        assert_eq!(width(&clamp(&ascii, 40)), 40, "ASCII fills the budget");
+
+        let cjk = "工作".repeat(50);
+        let clamped = clamp(&cjk, 40);
+        assert!(
+            width(&clamped) <= 40,
+            "{} columns from a 40-column clamp: {clamped}",
+            width(&clamped)
+        );
+        assert!(clamped.ends_with('…'), "something was dropped: {clamped}");
+
+        // An odd budget cannot be filled exactly by two-column characters, and
+        // half of a wide character is a different character, not a narrow one.
+        let odd = clamp(&cjk, 9);
+        assert!(width(&odd) <= 9, "{} columns: {odd}", width(&odd));
+
+        // Short enough to keep is returned whole, ellipsis and all.
+        assert_eq!(clamp("工作", 40), "工作");
+        assert_eq!(clamp("plain", 40), "plain");
+
+        // The old arithmetic underflowed here rather than returning anything.
+        assert_eq!(clamp(&ascii, 0), "…");
     }
 }
