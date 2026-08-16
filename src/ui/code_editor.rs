@@ -294,8 +294,14 @@ impl Tty7App {
     fn editor_rebuild_watcher(&mut self, cx: &mut Context<Self>) {
         // Only files on the host the watch itself runs on. A path from
         // another machine — an SFTP file, say — does not exist under that
-        // watcher's feet, and hosts without watching (SFTP again) fall back
-        // to the save-time conflict check instead.
+        // watcher's feet, and would either miss or, worse, match a local file
+        // that happens to share its name.
+        //
+        // A host that cannot watch therefore gets no external-change
+        // detection at all: an SFTP buffer will not notice the file changing
+        // underneath it, and saving overwrites whatever is there. Catching
+        // that at save time needs a "keep mine" that survives to the next
+        // save, which the conflict banner does not have yet.
         let watch_host = self.spawn_host(cx);
         let files: HashSet<PathBuf> = self
             .tabs
