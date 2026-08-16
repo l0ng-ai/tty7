@@ -72,9 +72,18 @@ enum State {
 /// the save/restore pair and DECSTBM, which homes it.
 const MOVES: &[u8] = b"ABCDEFGHIZ`adefsur";
 /// CSI finals that leave the cursor alone: SGR, the reports and queries, window
-/// operations, DECSCUSR. Anything else is a paint — erase, insert, delete,
-/// scroll, repeat — and ends the run on something other than a move.
-const NEUTRAL: &[u8] = b"mncpqtx";
+/// operations, DECSCUSR, and the settings that change how the terminal behaves
+/// without touching the screen — tab stops (`g`, `k`) and the ANSI modes
+/// (`h`, `l`, whose private `?` forms never reach here). Anything else is a
+/// paint — erase, insert, delete, scroll, repeat — and ends the run on
+/// something other than a move.
+///
+/// The distinction is not decoration. A final counted as a paint clears
+/// `last_was_move`, and a show after that is treated as parked: the cursor is
+/// put back where it was hidden. Clearing a tab stop between a frame's last
+/// move and its show was enough to drag the cursor off the cell the frame had
+/// chosen.
+const NEUTRAL: &[u8] = b"mncpqtxghkl";
 
 /// A CSI longer than this is not one of ours; keep the buffer bounded.
 const MAX_CSI: usize = 32;
@@ -280,6 +289,49 @@ mod tests {
             cursor_after(b"\x1b[6;4H\x1b[?25l\x1b[20;2H\x1b[K\x1b[m\x1b[22;42H\x1b[K\x1b[?25h"),
             (5, 3),
             "the erase chose that cell, not the renderer — put the cursor back"
+        );
+    }
+
+    /// A setting between the last move and the show is not a paint.
+    ///
+    /// Whether a show is "parked" turns on what the frame did last: a move
+    /// means it chose where the cursor sits, a paint means the position is
+    /// wherever the painting ended. Anything not on either list counted as a
+    /// paint, and the terminal's own settings are on neither — clearing a tab
+    /// stop, or setting an ANSI mode, between the frame's last move and its
+    /// show was enough to drag the cursor back to the cell it was hidden on,
+    /// undoing a position the frame had chosen.
+    ///
+    /// The finals here are the ones `vte` dispatches without touching the
+    /// grid: `g` clears tab stops, `h`/`l` set and unset ANSI modes (the `?`
+    /// forms return before this), and `k` is SCP.
+    #[test]
+    fn a_setting_between_the_move_and_the_show_does_not_park_the_cursor() {
+        let chosen = cursor_after(b"\x1b[6;4H\x1b[?25l\x1b[9;9H\x1b[?25h");
+        assert_eq!(chosen, (8, 8), "the frame chose this cell");
+
+        for settings in [
+            &b"\x1b[g"[..],  // TBC, clear a tab stop
+            &b"\x1b[3g"[..], // TBC, clear them all
+            &b"\x1b[4l"[..], // RM, leave insert mode
+            &b"\x1b[4h"[..], // SM, enter it
+        ] {
+            let mut stream = b"\x1b[6;4H\x1b[?25l\x1b[9;9H".to_vec();
+            stream.extend_from_slice(settings);
+            stream.extend_from_slice(b"\x1b[?25h");
+            assert_eq!(
+                cursor_after(&stream),
+                chosen,
+                "{:?} moved the cursor off the cell the frame chose",
+                String::from_utf8_lossy(settings)
+            );
+        }
+
+        // The paint case still parks, which is the whole point of the pairing.
+        assert_eq!(
+            cursor_after(b"\x1b[6;4H\x1b[?25l\x1b[9;9H\x1b[K\x1b[?25h"),
+            (5, 3),
+            "an erase leaves the cursor wherever it ended, so put it back"
         );
     }
 
