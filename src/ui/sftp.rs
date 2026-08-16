@@ -279,6 +279,19 @@ pub(crate) fn breadcrumb_segments(path: &str) -> Vec<(String, String)> {
     out
 }
 
+/// Percent complete of a transfer, as the integer the UI prints.
+///
+/// Floored, not rounded: the label is formatted `{:.0}`, which turns 99.6 into
+/// `100`, and a transfer that reads 100% while its row still reads Running has
+/// told the reader it finished when it has not. Flooring only moves that case —
+/// a transfer whose bytes really are all through still reads 100.
+fn transfer_pct(done: u64, total: u64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    ((done as f64 / total as f64) * 100.0).min(100.0).floor()
+}
+
 fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
     let mut value = bytes as f64;
@@ -1647,11 +1660,7 @@ impl Tty7App {
             .iter()
             .filter(|j| matches!(j.state, SftpJobState::Error))
             .count();
-        let pct = if total > 0 {
-            ((done as f64 / total as f64) * 100.0).min(100.0)
-        } else {
-            0.0
-        };
+        let pct = transfer_pct(done, total);
         // The failed poll outranks the counts, because the counts are only as
         // fresh as the last poll that got through and the summary is the one
         // line a collapsed tray gets to say.
@@ -1800,11 +1809,7 @@ impl Tty7App {
             SftpTransferKind::Download => "↓",
         };
         let name = remote_basename(&job.remote);
-        let pct = if job.bytes_total > 0 {
-            ((job.bytes_done as f64 / job.bytes_total as f64) * 100.0).min(100.0)
-        } else {
-            0.0
-        };
+        let pct = transfer_pct(job.bytes_done, job.bytes_total);
         let status = match job.state {
             SftpJobState::Running => t_fmt(
                 L10nKey::SftpTransferProgress,
@@ -2153,6 +2158,19 @@ mod tests {
     }
 
     #[test]
+    fn transfer_pct_never_reads_100_before_the_last_byte() {
+        // The label is `{:.0}`, so anything that reaches 100.0 here prints
+        // "100" next to a row that still says Running.
+        assert_eq!(transfer_pct(0, 0), 0.0, "nothing to transfer");
+        assert_eq!(transfer_pct(0, 100), 0.0);
+        assert_eq!(transfer_pct(50, 100), 50.0);
+        assert_eq!(transfer_pct(999, 1000), 99.0, "99.9% is not 100%");
+        assert_eq!(transfer_pct(9_999_999, 10_000_000), 99.0, "one byte short");
+        assert_eq!(transfer_pct(100, 100), 100.0, "all through");
+        assert_eq!(transfer_pct(200, 100), 100.0, "a server over-reporting");
+    }
+
+    #[test]
     fn mode_string_renders_rwx() {
         assert_eq!(mode_string(0o755), "rwxr-xr-x");
         assert_eq!(mode_string(0o644), "rw-r--r--");
@@ -2169,6 +2187,11 @@ mod gpui_tests {
     use gpui::{AppContext, Entity, TestAppContext, VisualTestContext};
 
     fn harness(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
+        // Without this the tests here pass only when something else in the
+        // process has already pinned the directory — `set_config_dir` is
+        // first-wins — so `cargo test ui::sftp` on its own failed on the guard
+        // that keeps a test out of the real `~/.config/tty7`.
+        crate::core::config::pin_test_config_dir();
         cx.executor().allow_parking();
         cx.update(|cx| {
             gpui_component::init(cx);
