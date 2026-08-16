@@ -440,7 +440,17 @@ pub enum WsCmd {
         ws: String,
     },
 
-    #[command(about = "Delete the workspace and hang up its panes")]
+    #[command(
+        about = "Delete the workspace and hang up its panes",
+        long_about = "Delete the workspace and hang up its panes.\n\n\
+                      A window still showing it does not close: the GUI puts the workspace \
+                      back under the same id rather than leave a window pointing at \
+                      nothing. The panes are gone either way — that part is not undone — \
+                      and what returns is empty, with a fresh shell and a new name. So \
+                      `tty7 ws rm X && tty7 ls` can still list X, and that is the window's \
+                      doing, not a failed delete.\n\n\
+                      With no window on it, the workspace simply goes."
+    )]
     Rm {
         #[arg(value_name = "WORKSPACE")]
         ws: String,
