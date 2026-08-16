@@ -61,7 +61,39 @@ fn width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
+/// Text with nothing in it that a terminal would obey.
+///
+/// These tables print names the CLI did not choose: a workspace or tab name,
+/// a path, and — by way of [`tab_label`] — a tab's OSC title, which is set by
+/// whatever program is running in the pane. An escape sequence reaching the
+/// terminal from any of them is a program deciding what the reader's screen
+/// does, and `\x1b[2J` in a directory name is the old `ls` trick, not a new
+/// one. It also throws the columns out: an escape is bytes with no width, so
+/// the padding counts characters the reader never sees.
+///
+/// Only control characters, which is the set that a terminal acts on. Bidi
+/// overrides reorder a name without obeying anything, and are left alone: the
+/// same codepoints carry ordinary right-to-left text.
+///
+/// `--json` is untouched. It has to round-trip the real name, and a JSON
+/// encoder already writes `\u001b` as six safe characters.
+fn printable(s: &str) -> std::borrow::Cow<'_, str> {
+    match s.contains(char::is_control) {
+        false => std::borrow::Cow::Borrowed(s),
+        true => std::borrow::Cow::Owned(
+            s.chars()
+                .map(|c| if c.is_control() { '?' } else { c })
+                .collect(),
+        ),
+    }
+}
+
 pub fn table(header: &[&str], rows: &[Vec<String>]) -> String {
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| row.iter().map(|c| printable(c).into_owned()).collect())
+        .collect();
+    let rows = &rows;
     let mut widths: Vec<usize> = header.iter().map(|h| width(h)).collect();
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
@@ -196,14 +228,14 @@ pub fn registry_table(panes: &[PaneInfo], held: &dyn Fn(u64) -> Option<String>) 
 pub fn workspace_tree(ws: &Workspace, machine: &Machine) -> String {
     let mut out = format!(
         "{} ({})\n",
-        ws.name.as_deref().unwrap_or("-"),
+        printable(ws.name.as_deref().unwrap_or("-")),
         resolve::short_id(&ws.id)
     );
     for (tab, view) in ws.tabs.iter().zip(tab_views_of(ws, &machine.panes)) {
         let ordinal = resolve::ordinal_of(machine, tab.id).unwrap_or(0);
         match view.label() {
             TabLabel::Unknown => out.push_str(&format!("  @{ordinal}\n")),
-            _ => out.push_str(&format!("  @{ordinal}  {}\n", tab_label(&view))),
+            _ => out.push_str(&format!("  @{ordinal}  {}\n", printable(&tab_label(&view)))),
         }
         render_node(&mut out, &tab.root, machine, 2);
     }
@@ -220,7 +252,7 @@ fn render_node(out: &mut String, node: &PaneNode, machine: &Machine, depth: usiz
                 .find(|p| p.id == *pane)
                 .and_then(|p| p.cwd.clone());
             match cwd {
-                Some(cwd) => out.push_str(&format!("{indent}%{pane}  {cwd}\n")),
+                Some(cwd) => out.push_str(&format!("{indent}%{pane}  {}\n", printable(&cwd))),
                 None => out.push_str(&format!("{indent}%{pane}\n")),
             }
         }
@@ -566,5 +598,52 @@ mod tests {
             "the foreground process is marked: {rendered}"
         );
         assert!(rendered.contains("3000"), "{rendered}");
+    }
+
+    /// A name the CLI did not choose must not be able to drive the terminal.
+    ///
+    /// `tty7 ws rename` takes whatever it is given, a directory can be named
+    /// with an escape in it, and a tab's title comes from the program in the
+    /// pane. Printed raw, `\x1b[31m` recolours the reader's terminal from a
+    /// table cell — and being bytes with no width, it also pushes every column
+    /// after it out of line, which is how this one was noticed.
+    #[test]
+    fn a_control_character_in_a_cell_neither_prints_nor_shifts_the_columns() {
+        let rendered = table(
+            &["NAME", "TABS"],
+            &[
+                vec!["evil\x1b[31mRED\x1b[0m".to_string(), "1".to_string()],
+                vec!["plain".to_string(), "2".to_string()],
+                vec!["中文工作区".to_string(), "3".to_string()],
+            ],
+        );
+
+        assert!(
+            !rendered.contains('\x1b'),
+            "an escape reached the terminal: {rendered:?}"
+        );
+
+        // Every row has to put its second column in the same place — including
+        // the CJK one, which is two columns per character and was already right.
+        // Measured by walking the line in display columns: the last place a run
+        // of spaces gives way to text is where the second column begins.
+        let starts: Vec<usize> = rendered
+            .lines()
+            .map(|line| {
+                let (mut at, mut col, mut prev_space) = (0, 0, true);
+                for c in line.chars() {
+                    if prev_space && c != ' ' {
+                        at = col;
+                    }
+                    prev_space = c == ' ';
+                    col += width(&c.to_string());
+                }
+                at
+            })
+            .collect();
+        assert!(
+            starts.windows(2).all(|w| w[0] == w[1]),
+            "columns drifted between rows: {starts:?} in {rendered:?}"
+        );
     }
 }
