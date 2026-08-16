@@ -1340,11 +1340,24 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
             // and neither is visible from a timeout alone. Say which door to
             // try rather than leaving the caller to poll harder.
             if current == WaitState::NoAgent {
-                human.push_str(
-                    "\nnothing is reporting agent status in this pane — for a plain command \
-                     wait `--until free`, and for an agent check `tty7 agents` for a missing \
-                     status hook",
-                );
+                // `free` is polled every cycle when it is asked for, so having
+                // asked and still be here means the foreground command simply
+                // has not exited. Offering `--until free` to someone already
+                // passing it reads as advice to do what they did, and hides
+                // the answer, which is that the command is still running.
+                if args.until.contains(&WaitState::Free) {
+                    human.push_str(
+                        "\nthe pane never came free, so its foreground command has not \
+                         exited — give it longer with --timeout, or see what is holding it \
+                         with `tty7 procs`",
+                    );
+                } else {
+                    human.push_str(
+                        "\nnothing is reporting agent status in this pane — for a plain command \
+                         wait `--until free`, and for an agent check `tty7 agents` for a missing \
+                         status hook",
+                    );
+                }
             }
             // `--changed` needs to have *seen* the pane busy, and a command
             // that starts and finishes inside one interval never is. That
@@ -3910,6 +3923,44 @@ mod tests {
         assert!(
             backend.procs_calls.is_empty(),
             "the default until-set names no pane-level state"
+        );
+    }
+
+    /// A timeout must not answer with the flag the caller already passed.
+    ///
+    /// `wait --until free` on a pane running `sleep 30` times out at
+    /// `no-agent` — nothing reports agent status in a plain shell — and the
+    /// hint for that state used to be "for a plain command wait `--until
+    /// free`". Advice to do what you just did, in place of the answer, which
+    /// is that the command is still running.
+    #[test]
+    fn a_timeout_does_not_recommend_the_flag_that_was_used() {
+        let ran = |args: &[&str]| {
+            let mut backend = mock();
+            // No entry for the pane at all is what `no-agent` *is*: a plain
+            // shell reports nothing rather than reporting "nothing".
+            backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+            match execute(cli(args), &Context::default(), &mut backend) {
+                Ok(Outcome::Exit(124, r)) => r.human,
+                other => panic!("expected exit 124, got {other:?}"),
+            }
+        };
+
+        let asked = ran(&["tty7", "wait", "%3", "--until", "free", "--timeout", "0"]);
+        assert!(
+            !asked.contains("wait `--until free`"),
+            "told to pass the flag it was passed: {asked}"
+        );
+        assert!(
+            asked.contains("has not exited"),
+            "the answer is that the command is still running: {asked}"
+        );
+
+        // Someone waiting on agent states still needs the original door.
+        let didnt = ran(&["tty7", "wait", "%3", "--until", "done", "--timeout", "0"]);
+        assert!(
+            didnt.contains("wait `--until free`"),
+            "a plain-command waiter still needs pointing at free: {didnt}"
         );
     }
 
