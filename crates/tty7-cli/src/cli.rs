@@ -614,6 +614,53 @@ mod tests {
     use super::*;
     use clap::error::ErrorKind;
 
+    /// Every flag of every verb the reference documents is on the page.
+    ///
+    /// The page promises "the verbs an agent drives, their flags, and the JSON
+    /// they emit", and an agent that cannot see a flag will not use it. Adding
+    /// one is a line in this file; the page is somewhere else entirely, so
+    /// nothing but this notices. Read from clap rather than a hand-kept list,
+    /// so the two cannot disagree about what the flags even are.
+    ///
+    /// Only the verbs the page covers: it says plainly that the `ws`, `tab`,
+    /// `pane`, `machine` and `server` groups live behind `--help` instead.
+    #[test]
+    fn the_reference_documents_every_flag_of_the_verbs_it_covers() {
+        use clap::CommandFactory as _;
+
+        const DOC: &str = include_str!("../../../docs/cli/reference.mdx");
+        // Global flags have their own table, and `--help` is clap's.
+        const EVERYWHERE: [&str; 4] = ["json", "quiet", "machine", "help"];
+
+        let cli = Cli::command();
+        let mut missing: Vec<String> = Vec::new();
+        let (mut covered, mut checked) = (0usize, 0usize);
+        for verb in cli.get_subcommands() {
+            let name = verb.get_name();
+            if !DOC.contains(&format!("`tty7 {name}")) {
+                continue;
+            }
+            covered += 1;
+            for arg in verb.get_arguments() {
+                let Some(long) = arg.get_long() else { continue };
+                if EVERYWHERE.contains(&long) {
+                    continue;
+                }
+                checked += 1;
+                if !DOC.contains(&format!("`--{long}")) {
+                    missing.push(format!("{name} --{long}"));
+                }
+            }
+        }
+        // Or the loop could pass by matching nothing at all.
+        assert!(covered >= 10, "only {covered} documented verbs were found");
+        assert!(checked >= 5, "only {checked} verb flags were checked");
+        assert!(
+            missing.is_empty(),
+            "the command reference does not mention these flags: {missing:?}"
+        );
+    }
+
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).expect("this invocation is part of the documented grammar")
     }
