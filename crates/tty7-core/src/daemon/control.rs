@@ -1364,12 +1364,37 @@ fn reader_loop<R: Read>(inner: Arc<ClientInner>, r: R, events: EventSink) {
     inner.reader_exit.notify_all();
 }
 
+/// Why a control connection ended, in words where std's are misleading.
+///
+/// `UnexpectedEof` prints as "failed to fill whole buffer" — accurate about the
+/// read and wrong about the event. Both ends of this link part that way in the
+/// ordinary case: a one-shot CLI call sends its request, reads its reply and
+/// exits, and the reader thread here stops the same way when the daemon goes.
+/// At debug level those are the most common lines in the file, and pasted in
+/// raw they read as the failure someone is hunting rather than the traffic they
+/// are hunting through.
+///
+/// Which kind still shows, because a reset peer and an exited one are worth
+/// telling apart when a connection dies mid-request. Anything else keeps its
+/// own text: this is only for the endings std words badly, and a decode failure
+/// or a refused socket has nothing misleading to fix.
+pub(crate) fn why_it_ended(e: &std::io::Error) -> String {
+    use std::io::ErrorKind as K;
+    match e.kind() {
+        K::UnexpectedEof => "peer exited".to_string(),
+        K::ConnectionReset => "reset by peer".to_string(),
+        K::ConnectionAborted => "aborted by peer".to_string(),
+        K::BrokenPipe => "peer stopped reading".to_string(),
+        _ => e.to_string(),
+    }
+}
+
 fn read_until_closed<R: Read>(inner: &Arc<ClientInner>, mut r: R, events: EventSink) {
     loop {
         let frame = match read_frame(&mut r) {
             Ok(f) => f,
             Err(e) => {
-                log::debug!("control reader stopping: {e}");
+                log::debug!("control reader stopping: {}", why_it_ended(&e));
                 inner.fail_all("control connection lost");
                 return;
             }

@@ -336,32 +336,13 @@ where
             Ok(())
         }
         Err(e) if is_disconnect(&e) => {
-            log::debug!("control connection ({label}) {}", went_away(&e));
+            log::debug!(
+                "control connection ({label}) {}",
+                crate::daemon::control::why_it_ended(&e)
+            );
             Ok(())
         }
         Err(e) => Err(e),
-    }
-}
-
-/// How a peer went away, in words rather than std's.
-///
-/// `UnexpectedEof` prints as "failed to fill whole buffer" — accurate about the
-/// read and wrong about the event. Every one-shot CLI call ends this way, having
-/// sent its request and read its reply, so at debug level it is the most common
-/// line in the file: `tty7 ls` alone leaves one behind. Pasted in raw it reads
-/// as the failure someone is hunting rather than the traffic they are hunting
-/// through.
-///
-/// Which kind still shows, because a reset peer and an exited one are worth
-/// telling apart when a connection dies mid-request. The fallback covers a kind
-/// added to [`is_disconnect`] and not named here; nothing reaches it today.
-fn went_away(e: &io::Error) -> &'static str {
-    match e.kind() {
-        io::ErrorKind::UnexpectedEof => "peer exited",
-        io::ErrorKind::ConnectionReset => "reset by peer",
-        io::ErrorKind::ConnectionAborted => "aborted by peer",
-        io::ErrorKind::BrokenPipe => "peer stopped reading",
-        _ => "disconnected",
     }
 }
 
@@ -2055,10 +2036,16 @@ mod tests {
     use crate::host::remote::RemoteHost;
     use crate::host::{Entry, HostId, Meta, Output};
 
-    /// A debug log is read while hunting a real failure, so the line every
+    /// A debug log is read while hunting a real failure, so the lines every
     /// ordinary CLI call leaves behind must not look like one.
+    ///
+    /// Both ends of the link are checked here: the daemon words the peer's
+    /// departure at the bottom of this file, and the client's reader thread
+    /// words the daemon's from `daemon::control`. They share one helper so the
+    /// two sides cannot drift into describing the same event differently.
     #[test]
     fn a_peer_going_away_is_never_described_as_a_failed_read() {
+        use crate::daemon::control::why_it_ended;
         for kind in [
             io::ErrorKind::UnexpectedEof,
             io::ErrorKind::ConnectionReset,
@@ -2067,17 +2054,21 @@ mod tests {
         ] {
             let e = io::Error::from(kind);
             assert!(is_disconnect(&e), "{kind:?} is a disconnect");
-            let said = went_away(&e);
-            assert_ne!(
-                said, "disconnected",
-                "{kind:?} reached the fallback unnamed"
-            );
+            let said = why_it_ended(&e);
             assert!(
                 !said.contains("buffer") && !said.contains("failed"),
                 "{kind:?} still reads as a failure: {said}"
             );
+            assert_ne!(said, e.to_string(), "{kind:?} was left in std's words");
         }
+
+        // Only the misleading endings are reworded; a real fault keeps its own
+        // text, which is the whole reason that line is in the log at all.
+        let broken = io::Error::new(io::ErrorKind::InvalidData, "control frame is not a frame");
+        assert!(!is_disconnect(&broken));
+        assert_eq!(why_it_ended(&broken), broken.to_string());
     }
+
     use std::os::unix::net::UnixStream;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
