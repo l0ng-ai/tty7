@@ -831,6 +831,45 @@ pub enum StatusProbe {
     Unreachable,
 }
 
+/// The three `rev-parse` answers, whatever the paths happen to contain.
+///
+/// One call answers all three because each is an RPC on a remote workspace,
+/// and that is worth keeping. But `rev-parse` has no `-z`, and git does not
+/// quote what it prints: a repository under `/tmp/nl\ntest-repo` comes back as
+/// four lines for three values, and splitting on lines then shifts everything
+/// along — the root loses its tail, and the git dir becomes `test-repo`.
+///
+/// So the batch is used when it is unambiguous, which is every ordinary
+/// repository, and anything else is re-asked one value at a time. A single
+/// answer is the whole output bar its final newline, which cannot be
+/// misread however many newlines are inside it.
+fn rev_parse_paths(host: &dyn Host, cwd: &Path, batched: &str) -> Option<[String; 3]> {
+    let lines: Vec<&str> = batched
+        .lines()
+        .map(|l| l.trim_end_matches(['\n', '\r']))
+        .collect();
+    if let [root, git_dir, common] = lines.as_slice() {
+        return Some([root.to_string(), git_dir.to_string(), common.to_string()]);
+    }
+    let mut one_at_a_time = Vec::with_capacity(3);
+    for flag in ["--show-toplevel", "--git-dir", "--git-common-dir"] {
+        let out = host
+            .git(cwd, &["rev-parse", "--path-format=absolute", flag])
+            .ok()?;
+        if !out.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let trimmed = text
+            .strip_suffix("\r\n")
+            .or_else(|| text.strip_suffix('\n'))
+            .unwrap_or(&text);
+        one_at_a_time.push(trimmed.to_string());
+    }
+    let [root, git_dir, common] = <[String; 3]>::try_from(one_at_a_time).ok()?;
+    Some([root, git_dir, common])
+}
+
 /// The whole working tree state for the repository containing `cwd`.
 ///
 /// Three round trips in the common case — `rev-parse`, `status`, `read_dir` —
@@ -861,15 +900,12 @@ pub fn probe_status(host: &dyn Host, cwd: &Path) -> StatusProbe {
         };
     }
     let paths = String::from_utf8_lossy(&out.stdout).into_owned();
-    let mut lines = paths.lines().map(|l| l.trim_end_matches(['\n', '\r']));
-    let Some(root) = lines.next().map(PathBuf::from) else {
+    let Some([root, git_dir, common]) = rev_parse_paths(host, cwd, &paths) else {
         return StatusProbe::Unreachable;
     };
-    let git_dir = lines.next();
-    let home = super::repo_home(&root, git_dir, lines.next());
-    let Some(git_dir) = git_dir.map(PathBuf::from) else {
-        return StatusProbe::Unreachable;
-    };
+    let root = PathBuf::from(root);
+    let home = super::repo_home(&root, Some(&git_dir), Some(&common));
+    let git_dir = PathBuf::from(git_dir);
 
     let Ok(out) = host.git(cwd, STATUS_ARGS) else {
         return StatusProbe::Unreachable;
@@ -1342,6 +1378,39 @@ mod tests {
                 modified_content: true,
                 has_untracked: true,
             })
+        );
+    }
+
+    /// A repository whose own path holds a newline must not be mis-split.
+    ///
+    /// `rev-parse` answers three flags in one call and has no `-z`, so
+    /// `/tmp/nl\ntest-repo` arrives as four lines for three values — checked
+    /// against real git, which quotes none of it. Splitting on lines then
+    /// hands back `/tmp/nl` as the root and `test-repo` as the git dir, and
+    /// the panel goes to work on a repository that does not exist.
+    #[test]
+    fn a_newline_in_the_repository_path_does_not_shift_the_rev_parse_answers() {
+        // Three lines, the ordinary case: taken as they come, no extra calls.
+        let ordinary = "/repo\n/repo/.git\n/repo/.git\n";
+        let host = crate::host::local::LocalHost::new();
+        assert_eq!(
+            rev_parse_paths(&*host, Path::new("/repo"), ordinary),
+            Some([
+                "/repo".to_string(),
+                "/repo/.git".to_string(),
+                "/repo/.git".to_string()
+            ])
+        );
+
+        // Four lines for three values is the shape the newline makes. The
+        // batch is unusable, and the old split would have returned
+        // ("/tmp/nl", "test-repo") without noticing.
+        let shifted = "/tmp/nl\ntest-repo\n/tmp/nl\ntest-repo/.git\n/tmp/nl\ntest-repo/.git\n";
+        assert_eq!(shifted.lines().count(), 6, "the shape being guarded");
+        let unusable = rev_parse_paths(&*host, Path::new("/nonexistent-for-this-test"), shifted);
+        assert!(
+            unusable.is_none_or(|got| got[0] != "/tmp/nl"),
+            "the truncated root must never be returned"
         );
     }
 
