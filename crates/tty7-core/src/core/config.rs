@@ -929,6 +929,17 @@ fn quarantine_candidates(path: &std::path::Path) -> impl Iterator<Item = PathBuf
         .chain((1..MAX_QUARANTINED).map(|n| path.with_extension(format!("json.corrupt.{n}"))))
 }
 
+/// Where the next quarantined copy of `path` goes.
+///
+/// The first free name, and once every name is taken the base one again — so
+/// `unwrap_or(base)` is the wrap, not a fallback for something that cannot
+/// happen. Eight is a cap on how much of a repeatedly-corrupted file's history
+/// a config directory may accumulate; past it the oldest copy is the one
+/// overwritten, and `.corrupt.1` through `.corrupt.7` keep the second through
+/// eighth corruptions from then on.
+///
+/// Nothing rotates the numbered names, which is worth knowing before reading
+/// them as a timeline: after the cap is reached only the base name moves.
 fn quarantine_path(path: &std::path::Path) -> PathBuf {
     let mut candidates = quarantine_candidates(path);
     let base = candidates.next().expect("the base name is always offered");
@@ -1158,6 +1169,59 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a ninth corruption does to the eight kept copies.
+    ///
+    /// `quarantine_path` ends in `unwrap_or(base)`, which reads like a
+    /// defensive branch and is the wrap: the cap is on how much history a
+    /// config directory may accumulate, and the oldest copy is what gives way.
+    /// The numbered names never rotate, so anyone reading them as a timeline
+    /// after the cap would be reading the second-to-eighth corruptions and a
+    /// base that has been overwritten however many times since.
+    #[test]
+    fn a_ninth_corruption_overwrites_the_oldest_kept_copy() {
+        let dir = std::env::temp_dir().join(format!("tty7-quar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("machine.json");
+
+        let mut used = Vec::new();
+        for n in 0..9 {
+            std::fs::write(&path, format!("corruption {n}")).expect("write the file");
+            let aside = quarantine_path(&path);
+            used.push(
+                aside
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .expect("a utf-8 name")
+                    .to_string(),
+            );
+            quarantine_by_rename(&path);
+        }
+
+        assert_eq!(
+            used[0], "machine.json.corrupt",
+            "the first goes to the base"
+        );
+        assert_eq!(used[1], "machine.json.corrupt.1");
+        assert_eq!(used[7], "machine.json.corrupt.7", "eight distinct slots");
+        assert_eq!(
+            used[8], "machine.json.corrupt",
+            "the ninth wraps onto the oldest rather than growing the directory"
+        );
+
+        let kept = std::fs::read_dir(&dir)
+            .expect("read the dir")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".corrupt"))
+            .count();
+        assert_eq!(kept, 8, "the cap holds: nine corruptions, eight files");
+
+        let base = std::fs::read_to_string(path.with_extension("json.corrupt"))
+            .expect("the base copy survives");
+        assert_eq!(base, "corruption 8", "and holds the newest, not the first");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn profile_usage_score_ranks_frequency_and_recency() {
