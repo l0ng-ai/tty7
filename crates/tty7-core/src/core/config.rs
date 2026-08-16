@@ -1257,6 +1257,46 @@ where
 mod tests {
     use super::*;
 
+    /// Every setting a person can write is on the configuration page.
+    ///
+    /// Adding one is a field here; the page is four directories away, and a
+    /// setting nobody can find is not far off one that does not exist. The
+    /// list comes from serialising the defaults, so `#[serde(skip)]` fields
+    /// drop out on their own and the check cannot disagree with the struct
+    /// about what a key is even called.
+    #[test]
+    fn the_configuration_page_lists_every_setting() {
+        const DOC: &str = include_str!("../../../../docs/reference/configuration.mdx");
+        // Written by the app as it is used, not authored by anyone: there is
+        // nothing to tell a reader to put in their config.json.
+        const NOT_SETTINGS: [&str; 2] = ["command_frecency", "ssh_profile_frecency"];
+
+        let serde_json::Value::Object(fields) =
+            serde_json::to_value(Config::default()).expect("the default serialises")
+        else {
+            panic!("a config is an object");
+        };
+
+        let mut undocumented: Vec<&String> = Vec::new();
+        let mut checked = 0usize;
+        for key in fields.keys() {
+            if NOT_SETTINGS.contains(&key.as_str()) {
+                continue;
+            }
+            checked += 1;
+            if !DOC.contains(&format!("`{key}`")) {
+                undocumented.push(key);
+            }
+        }
+
+        // Or an empty field list would pass this without reading anything.
+        assert!(checked > 50, "only {checked} settings were checked");
+        assert!(
+            undocumented.is_empty(),
+            "these settings are not on the configuration page: {undocumented:?}"
+        );
+    }
+
     /// What a ninth corruption does to the eight kept copies.
     ///
     /// `quarantine_path` ends in `unwrap_or(base)`, which reads like a
