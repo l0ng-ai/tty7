@@ -2,7 +2,7 @@ use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tty7_core::core::agent_hooks::{HookAgent, HooksState};
-use tty7_core::core::machine::{Axis, Machine, PaneSeed, Workspace};
+use tty7_core::core::machine::{Axis, LayoutDelta, Machine, PaneSeed, TabId, Workspace};
 use tty7_core::core::session::WorkspaceId;
 use tty7_core::core::tab_view::tab_views_of;
 use tty7_core::daemon::control::{
@@ -1173,10 +1173,90 @@ fn event_line(event: &ControlEvent) -> String {
             format!("workspace {workspace} taken over by {by}")
         }
         ControlEvent::Layout { workspace, delta } => {
-            format!("workspace {workspace} layout: {delta:?}")
+            format!("workspace {workspace} {}", layout_line(delta))
         }
         ControlEvent::LayoutResync => "layout resync".to_string(),
-        other => format!("{other:?}"),
+        ControlEvent::Watch { id, paths } => {
+            format!("watch {id}: {} path{}", paths.len(), plural(paths.len()))
+        }
+        ControlEvent::WatchOverflow { id } => format!("watch {id} overflowed"),
+        // Never the bytes themselves: `{:?}` on a `Vec<u8>` prints every
+        // element, so one chunk of a large diff would be pages of decimal
+        // numbers where a line was expected.
+        ControlEvent::GitChunk { id, bytes } => {
+            format!("git {id}: {} byte{}", bytes.len(), plural(bytes.len()))
+        }
+        ControlEvent::GitEnd { id, code, failed } => match (failed, code) {
+            (true, _) => format!("git {id} failed"),
+            (false, Some(code)) => format!("git {id} ended with code {code}"),
+            (false, None) => format!("git {id} ended"),
+        },
+        ControlEvent::GuiOpen { path, workspace } => {
+            let what = match (path.as_deref(), workspace) {
+                (Some(path), _) => format!(" {path}"),
+                (None, Some(ws)) => format!(" workspace {ws}"),
+                (None, None) => String::new(),
+            };
+            format!("gui asked to open{what}")
+        }
+    }
+}
+
+fn plural(n: usize) -> &'static str {
+    match n {
+        1 => "",
+        _ => "s",
+    }
+}
+
+/// One layout delta as a sentence.
+///
+/// This used to be `{delta:?}`, which put a Rust struct literal — internal
+/// field names, `Some(..)`, the lot — on a line the docs describe as an
+/// event. Debug output is not a format anyone should be reading, and it is
+/// certainly not one to keep stable: renaming a field would silently rewrite
+/// what `tty7 events` prints for anybody who had started parsing it.
+fn layout_line(delta: &LayoutDelta) -> String {
+    let short = |id: &TabId| id.to_string().chars().take(8).collect::<String>();
+    let named = |name: &Option<String>| match name {
+        Some(name) => format!("renamed to {name}"),
+        None => "name cleared".to_string(),
+    };
+    match delta {
+        LayoutDelta::WorkspaceCreated { workspace } => match &workspace.name {
+            Some(name) => format!("created ({name})"),
+            None => "created".to_string(),
+        },
+        LayoutDelta::WorkspaceRenamed { name } => named(name),
+        LayoutDelta::WorkspaceDeleted => "deleted".to_string(),
+        LayoutDelta::WorkspaceTouched { .. } => "touched".to_string(),
+        LayoutDelta::ActiveTabChanged { tab } => format!("active tab is now {}", short(tab)),
+        LayoutDelta::TabCreated { at, tab } => match &tab.name {
+            Some(name) => format!("tab {} created at {at} ({name})", short(&tab.id)),
+            None => format!("tab {} created at {at}", short(&tab.id)),
+        },
+        LayoutDelta::TabClosed { tab } => format!("tab {} closed", short(tab)),
+        LayoutDelta::TabRenamed { tab, name } => format!("tab {} {}", short(tab), named(name)),
+        LayoutDelta::TabMoved { tab, to } => format!("tab {} moved to {to}", short(tab)),
+        LayoutDelta::TabRegrouped { tab, group } => match group {
+            Some(group) => format!("tab {} grouped under {group}", short(tab)),
+            None => format!("tab {} ungrouped", short(tab)),
+        },
+        LayoutDelta::TabRestructured { tab, .. } => {
+            format!("tab {} split layout changed", short(&tab.id))
+        }
+        LayoutDelta::RatioChanged { tab, ratio, .. } => {
+            format!("tab {} split ratio now {ratio:.2}", short(tab))
+        }
+        // The delta that carries a pane's exit, which is what the docs tell
+        // readers of this stream to watch for.
+        LayoutDelta::PaneFacts { pane } => match pane.live {
+            false => format!("pane %{} is gone", pane.id),
+            true => match &pane.cwd {
+                Some(cwd) => format!("pane %{} in {cwd}", pane.id),
+                None => format!("pane %{} changed", pane.id),
+            },
+        },
     }
 }
 
@@ -4283,6 +4363,79 @@ mod tests {
                 { "key": "me@build-box:22", "kind": "ssh", "connected": false },
             ] })
         );
+    }
+
+    #[test]
+    fn an_event_line_is_a_sentence_and_never_a_debug_dump() {
+        use tty7_core::core::machine::{PaneNode, PaneRecord, Tab};
+
+        // `{:?}` on the delta put a Rust struct literal — internal field
+        // names, `Some(..)`, the lot — on a line the docs describe as an
+        // event, and renaming a field would have silently rewritten it.
+        let ev = |delta| ControlEvent::Layout {
+            workspace: "ws1".into(),
+            delta,
+        };
+        let mut pane = PaneRecord {
+            id: 7,
+            cwd: Some("/tmp".into()),
+            title: String::new(),
+            osc_title: None,
+            ssh_spec: None,
+            agent: None,
+            shell: None,
+            live: false,
+        };
+        let line = event_line(&ev(LayoutDelta::PaneFacts { pane: pane.clone() }));
+        assert_eq!(line, "workspace ws1 pane %7 is gone");
+
+        pane.live = true;
+        let line = event_line(&ev(LayoutDelta::PaneFacts { pane }));
+        assert_eq!(line, "workspace ws1 pane %7 in /tmp");
+
+        let line = event_line(&ev(LayoutDelta::WorkspaceRenamed {
+            name: Some("api".into()),
+        }));
+        assert_eq!(line, "workspace ws1 renamed to api");
+        assert_eq!(
+            event_line(&ev(LayoutDelta::WorkspaceRenamed { name: None })),
+            "workspace ws1 name cleared"
+        );
+
+        let tab = Tab {
+            id: TabId::new(),
+            name: Some("build".into()),
+            sidebar_group: None,
+            root: PaneNode::Leaf { pane: 1 },
+        };
+        let line = event_line(&ev(LayoutDelta::TabCreated { at: 2, tab }));
+        assert!(line.ends_with(" created at 2 (build)"), "{line}");
+
+        // A chunk of a large diff would otherwise arrive as pages of decimal
+        // numbers, one per byte.
+        let line = event_line(&ControlEvent::GitChunk {
+            id: 3,
+            bytes: vec![b'x'; 4096],
+        });
+        assert_eq!(line, "git 3: 4096 bytes");
+
+        // Nothing anywhere in the stream may carry Rust's struct syntax.
+        for line in [
+            event_line(&ControlEvent::LayoutResync),
+            event_line(&ControlEvent::WatchOverflow { id: 1 }),
+            event_line(&ControlEvent::GitEnd {
+                id: 1,
+                code: Some(0),
+                failed: false,
+            }),
+            event_line(&ControlEvent::GuiOpen {
+                path: Some("/repo".into()),
+                workspace: None,
+            }),
+        ] {
+            assert!(!line.contains(" { "), "debug syntax leaked: {line}");
+            assert!(!line.contains("Some("), "debug syntax leaked: {line}");
+        }
     }
 
     fn doctor_backend() -> MockBackend {

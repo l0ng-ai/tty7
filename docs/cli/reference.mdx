@@ -247,6 +247,10 @@ Streams server events until interrupted, one per line — layout changes and
 workspace preemption. `--json` makes it NDJSON. Blocks forever; run it with a
 timeout or in the background.
 
+Without `--json` each line is a sentence meant to be read, and its wording is
+not a format to parse — `--json` below is. The kinds and payloads are stable;
+the prose is not.
+
 Each line is one externally tagged object, `{"<kind>": {…}}`:
 
 | Kind | Payload |
