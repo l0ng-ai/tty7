@@ -626,7 +626,11 @@ impl TerminalView {
 fn search_pattern(query: &str, regex: bool, case_sensitive: bool) -> String {
     let base = match regex {
         true => query.to_string(),
-        false => regex_escape(query),
+        // `regex::escape` rather than a list of our own: what has to be
+        // neutralised is whatever *this engine* treats as meta, and the engine
+        // parses with `regex-syntax` — the crate this call goes to. A copied
+        // list is right only until that one grows.
+        false => regex::escape(query),
     };
     match case_sensitive {
         true => format!("(?-i){base}"),
@@ -675,36 +679,6 @@ fn scroll_match_into_view<T: EventListener>(term: &mut Term<T>, m: &Match, hidde
         Reveal::ToPoint => term.scroll_to_point(*m.start()),
         Reveal::Back(lines) => term.scroll_display(Scroll::Delta(lines)),
     }
-}
-
-fn regex_escape(query: &str) -> String {
-    let mut out = String::with_capacity(query.len());
-    for c in query.chars() {
-        if matches!(
-            c,
-            '\\' | '.'
-                | '+'
-                | '*'
-                | '?'
-                | '('
-                | ')'
-                | '|'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '^'
-                | '$'
-                | '#'
-                | '&'
-                | '-'
-                | '~'
-        ) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
 }
 
 #[cfg(test)]
@@ -1313,11 +1287,18 @@ mod tests {
     }
 
     #[test]
-    fn regex_escape_neutralizes_metacharacters() {
-        assert_eq!(regex_escape("a.b*c"), r"a\.b\*c");
-        assert_eq!(regex_escape("foo(bar)"), r"foo\(bar\)");
-        assert_eq!(regex_escape("1+1=2"), r"1\+1=2");
-        assert_eq!(regex_escape("hello"), "hello");
+    fn a_literal_search_does_not_match_as_a_pattern() {
+        // Through the engine, not against the escaped string: what matters is
+        // that `a.b` finds `a.b` and not `axb`, whatever spelling gets there.
+        const SCREEN: &str = "here is a.b and here is axb\r\n";
+        assert_eq!(matches_on_screen(SCREEN, "a.b", true), 1);
+        assert_eq!(matches_on_screen(SCREEN, "axb", true), 1);
+
+        // And the metacharacters a reader is most likely to type at all.
+        const CODE: &str = "fn f(x: u8) -> u8 { x + 1 }\r\n";
+        assert_eq!(matches_on_screen(CODE, "f(x: u8)", true), 1);
+        assert_eq!(matches_on_screen(CODE, "x + 1", true), 1);
+        assert_eq!(matches_on_screen(CODE, "{ x + 1 }", true), 1);
     }
 
     #[test]
