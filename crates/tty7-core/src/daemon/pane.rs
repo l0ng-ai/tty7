@@ -695,27 +695,6 @@ pub(crate) const OBSERVER_BUDGET: i64 = 8 * 1024 * 1024;
 /// is a pane that looks frozen to every attached client, so it stays short.
 const EXIT_CODE_PROBE_WINDOW: Duration = Duration::from_millis(500);
 
-/// What a finished child's status is worth reporting as, or `None` when the
-/// honest answer is that we do not know.
-///
-/// `portable-pty` stores a signalled child as `code: 1` — `ExitStatus::code()`
-/// is `None` on Unix for one, and its `From` impl falls back to 1 — while
-/// keeping the signal in a private field with no accessor. `success()` and
-/// `exit_code()` therefore read *identically* for a child killed by SIGKILL
-/// and one that exited 1 of its own accord, and only `Display` tells them
-/// apart. Passing that 1 along would land in the CLI's `exit_code_known: true`,
-/// which is documented as the thing that "tells a real 1 from a stand-in".
-///
-/// So: signalled reports unknown, which the CLI already renders as an exit of
-/// 1 *with* `exit_code_known: false` and a line on stderr. Not the `128 + n`
-/// an adopted pane gets from its own `waitpid` — the name here comes from
-/// `strsignal`, which is localized, so mapping it back to a number is a guess
-/// dressed as a fact.
-///
-/// Sniffing `Display` is the only discrimination the crate's public API
-/// offers; `signalled_status_is_not_reported_as_a_plain_exit` pins it against
-/// the crate's own constructor so an upstream rewording fails there rather
-/// than here.
 /// Lifts this thread's SIGTERM block for as long as it is held, and puts the
 /// thread's own mask back when dropped.
 ///
@@ -756,13 +735,27 @@ impl Drop for SigtermUnblocked {
     }
 }
 
-/// The exit code to report, or `None` when the pane did not leave one.
+/// What a finished child's status is worth reporting as, or `None` when the
+/// honest answer is that we do not know.
 ///
-/// A signal death is `None` rather than `128 + signal`: the shell convention
-/// is the *shell's*, and inventing it here would hand a caller a number the
-/// command never returned. `tty7 run` turns `None` into an exit 1 that says
-/// so — on stderr, and as `exit_code_known: false` — which is what lets an
-/// orchestrator tell a command the OOM killer took from one that exited 1.
+/// `portable-pty` stores a signalled child as `code: 1` — `ExitStatus::code()`
+/// is `None` on Unix for one, and its `From` impl falls back to 1 — while
+/// keeping the signal in a private field with no accessor. `success()` and
+/// `exit_code()` therefore read *identically* for a child killed by SIGKILL
+/// and one that exited 1 of its own accord, and only `Display` tells them
+/// apart. Passing that 1 along would land in the CLI's `exit_code_known: true`,
+/// which is documented as the thing that "tells a real 1 from a stand-in".
+///
+/// So: signalled reports unknown, which the CLI already renders as an exit of
+/// 1 *with* `exit_code_known: false` and a line on stderr. Not the `128 + n`
+/// an adopted pane gets from its own `waitpid` — the name here comes from
+/// `strsignal`, which is localized, so mapping it back to a number is a guess
+/// dressed as a fact.
+///
+/// Sniffing `Display` is the only discrimination the crate's public API
+/// offers; `signalled_status_is_not_reported_as_a_plain_exit` pins it against
+/// the crate's own constructor so an upstream rewording fails there rather
+/// than here.
 fn reported_exit_code(status: &portable_pty::ExitStatus) -> Option<i32> {
     match status.to_string().starts_with("Terminated by") {
         true => None,
@@ -4333,32 +4326,6 @@ mod tests {
         assert!(hex_val(b'g').is_none());
         assert!(hex_val(b' ').is_none());
         assert!(hex_val(b'/').is_none());
-    }
-
-    /// A signal is not an exit code, and must not be dressed up as one.
-    ///
-    /// `run` reports `exit_code_known: false` off the back of this `None`, and
-    /// the reference tells orchestrators to branch on that flag — it said the
-    /// opposite for a while, so this is here to keep the two agreeing.
-    #[test]
-    fn a_pane_killed_by_a_signal_reports_no_exit_code() {
-        assert_eq!(
-            reported_exit_code(&portable_pty::ExitStatus::with_exit_code(0)),
-            Some(0)
-        );
-        assert_eq!(
-            reported_exit_code(&portable_pty::ExitStatus::with_exit_code(42)),
-            Some(42)
-        );
-
-        // How portable_pty spells a signal death, and the only thing that
-        // separates one from an ordinary code here.
-        let signalled = portable_pty::ExitStatus::with_signal("SIGKILL");
-        assert!(
-            signalled.to_string().starts_with("Terminated by"),
-            "the spelling this turns on changed: {signalled}"
-        );
-        assert_eq!(reported_exit_code(&signalled), None);
     }
 
     #[test]
