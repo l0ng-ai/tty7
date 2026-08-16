@@ -5508,6 +5508,10 @@ impl TerminalView {
 
         let blank = move |w: gpui::Pixels| div().flex_none().w(w).h(lh);
 
+        // Seeded with one row, and rows are only ever pushed — never popped or
+        // drained. That is what makes the `lines.last_mut().unwrap()` below
+        // safe, several of them a long way from here: there is always a row to
+        // append to, including before the first newline is seen.
         let mut lines: Vec<Vec<gpui::AnyElement>> =
             vec![vec![blank(cell_w * (ccol as f32)).into_any_element()]];
 
