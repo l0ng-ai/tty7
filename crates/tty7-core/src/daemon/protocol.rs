@@ -294,15 +294,50 @@ pub struct SftpEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SftpOp {
-    Stat { path: String },
-    Mkdir { path: String },
-    CreateFile { path: String },
-    RemoveFile { path: String },
-    RemoveDir { path: String },
-    Rename { from: String, to: String },
-    Chmod { path: String, mode: u32 },
-    Readlink { path: String },
-    Realpath { path: String },
+    Stat {
+        path: String,
+    },
+    Mkdir {
+        path: String,
+    },
+    CreateFile {
+        path: String,
+    },
+    RemoveFile {
+        path: String,
+    },
+    RemoveDir {
+        path: String,
+    },
+    Rename {
+        from: String,
+        to: String,
+    },
+    Chmod {
+        path: String,
+        mode: u32,
+    },
+    Readlink {
+        path: String,
+    },
+    Realpath {
+        path: String,
+    },
+    /// Whole-file read, for the built-in editor. `max_bytes` is the reader's
+    /// own ceiling; a file larger than it answers with an error instead of a
+    /// truncated body that would later be saved back short.
+    ReadFile {
+        path: String,
+        max_bytes: u64,
+    },
+    /// Whole-file write, in place (truncate + write, no temp-and-rename): the
+    /// editor saves over a file the user already has open, and replacing the
+    /// inode would silently drop its mode and ownership.
+    WriteFile {
+        path: String,
+        #[serde(with = "crate::host::b64")]
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +347,14 @@ pub enum SftpOpResult {
     Stat(SftpEntry),
     Link(String),
     Error(String),
+    /// Reply to [`SftpOp::ReadFile`]: the bytes plus the stat they were read
+    /// under, in one round trip — the editor needs the mtime alongside the
+    /// body to notice later external changes.
+    File {
+        entry: SftpEntry,
+        #[serde(with = "crate::host::b64")]
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1572,6 +1615,20 @@ mod tests {
                 pane_id: 4,
                 op: SftpOp::Realpath { path: ".".into() },
             },
+            ClientMsg::SftpOp {
+                pane_id: 4,
+                op: SftpOp::ReadFile {
+                    path: "/etc/nginx/nginx.conf".into(),
+                    max_bytes: 4 * 1024 * 1024,
+                },
+            },
+            ClientMsg::SftpOp {
+                pane_id: 4,
+                op: SftpOp::WriteFile {
+                    path: "/home/deploy/笔记.md".into(),
+                    bytes: vec![0x00, 0xff, b'h', b'i'],
+                },
+            },
             ClientMsg::SftpTransferStart(SftpTransferSpec {
                 pane_id: 4,
                 kind: SftpTransferKind::Upload,
@@ -1741,6 +1798,17 @@ mod tests {
                 permissions: 0o100644,
                 target_is_dir: false,
             })),
+            DaemonMsg::SftpOpResult(SftpOpResult::File {
+                entry: SftpEntry {
+                    name: "nginx.conf".into(),
+                    kind: SftpEntryKind::File,
+                    size: 4,
+                    mtime: 1_700_000_000,
+                    permissions: 0o100644,
+                    target_is_dir: false,
+                },
+                bytes: vec![0x00, 0xff, 0x80, b'!'],
+            }),
             DaemonMsg::SftpTransferStarted { job_id: 3 },
             DaemonMsg::SftpTransferProgress(vec![SftpJobProgress {
                 job_id: 3,

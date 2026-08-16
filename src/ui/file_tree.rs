@@ -1774,9 +1774,12 @@ impl Tty7App {
         }
 
         let sf = cx.global::<crate::ui::presets::Surfaces>().popover;
-        let dirty = self
-            .tab_code()
-            .is_some_and(|c| c.files.iter().any(|f| f.dirty && f.path == *path));
+        let tree_host = self.spawn_host(cx);
+        let dirty = self.tab_code().is_some_and(|c| {
+            c.files
+                .iter()
+                .any(|f| f.dirty && f.host == tree_host && f.path == *path)
+        });
 
         let renaming = matches!(
             &self.file_tree.editing,

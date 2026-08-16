@@ -657,6 +657,7 @@ l10n_keys! {
     SftpLoading,
     SftpEmptyDirectory,
     SftpContextOpen,
+    SftpContextEdit,
     SftpContextFollowSymlink,
     SftpContextRename,
     SftpContextChmod,

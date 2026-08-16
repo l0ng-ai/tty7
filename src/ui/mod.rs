@@ -33,6 +33,7 @@ pub mod scm;
 pub mod scrollbar;
 pub mod settings;
 pub mod sftp;
+pub mod sftp_host;
 pub mod ssh_connect;
 pub mod ssh_prompt;
 pub mod switcher;

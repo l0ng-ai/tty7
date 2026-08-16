@@ -14,7 +14,8 @@ use gpui_component::{
 };
 
 use crate::ui::app::Tty7App;
-use crate::ui::host_ops::{HostOps, MTime, SharedHost, WatchSub};
+use crate::ui::host_ops::{HostId, HostOps, MTime, SharedHost, WatchSub};
+use crate::ui::host_registry::HostRegistry;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -23,6 +24,10 @@ const RELOAD_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(20
 
 pub(crate) struct OpenFile {
     pub(crate) path: PathBuf,
+    /// The machine `path` lives on. Saves, reloads and duplicate detection
+    /// all key on it: an SFTP file and a local file can share the string
+    /// `/etc/hosts` without being the same file.
+    pub(crate) host: HostId,
     pub(crate) input: Entity<InputState>,
     pub(crate) dirty: bool,
     disk_mtime: Option<MTime>,
@@ -286,11 +291,18 @@ impl Tty7App {
     }
 
     fn editor_rebuild_watcher(&mut self, cx: &mut Context<Self>) {
+        // Only files on the host the watch itself runs on. A path from
+        // another machine — an SFTP file, say — does not exist under that
+        // watcher's feet, and hosts without watching (SFTP again) fall back
+        // to the save-time conflict check instead.
+        let watch_host = self.spawn_host(cx);
         let files: HashSet<PathBuf> = self
             .tabs
             .iter()
             .filter_map(|t| t.code.as_deref())
-            .flat_map(|c| c.files.iter().map(|f| f.path.clone()))
+            .flat_map(|c| c.files.iter())
+            .filter(|f| f.host == watch_host)
+            .map(|f| f.path.clone())
             .collect();
         let dirs: HashSet<PathBuf> = files
             .iter()
@@ -471,16 +483,29 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(host) = self.active_host(cx) else {
+            return;
+        };
+        self.editor_open_on_host(host, path, window, cx);
+    }
+
+    /// [`Self::open_file_in_editor`] against an explicit host — the SFTP
+    /// browser's files live on a host that is never the active one.
+    pub(crate) fn editor_open_on_host(
+        &mut self,
+        host: SharedHost,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.tabs.get(self.active).is_none() {
             return;
         }
         self.raise_code_overlay();
-        if self.editor_activate_open(path, window, cx) {
+        if self.editor_activate_open(host.id(), path, window, cx) {
             return;
         }
-        let Some(host) = self.active_host(cx) else {
-            return;
-        };
+        let host_id = host.id();
         let p = path.to_path_buf();
         let requested = p.clone();
         HostOps::run_in(
@@ -532,7 +557,7 @@ impl Tty7App {
             },
             move |app, opened, window, cx| match opened {
                 Ok((path, text, mtime)) => {
-                    app.editor_install_file(path.clone(), text, mtime, window, cx);
+                    app.editor_install_file(host_id, path.clone(), text, mtime, window, cx);
                     // Against `requested`, not `path`: the host canonicalised
                     // it on the way through, and a link that named a symlink
                     // would otherwise lose the line it asked for.
@@ -545,6 +570,7 @@ impl Tty7App {
 
     fn editor_activate_open(
         &mut self,
+        host: HostId,
         path: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -552,7 +578,11 @@ impl Tty7App {
         let Some(code) = self.tab_code_mut() else {
             return false;
         };
-        let Some(ix) = code.files.iter().position(|f| f.path == *path) else {
+        let Some(ix) = code
+            .files
+            .iter()
+            .position(|f| f.host == host && f.path == *path)
+        else {
             return false;
         };
         code.visible = true;
@@ -567,13 +597,14 @@ impl Tty7App {
 
     fn editor_install_file(
         &mut self,
+        host: HostId,
         path: PathBuf,
         text: String,
         mtime: Option<MTime>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.editor_activate_open(&path, window, cx) {
+        if self.editor_activate_open(host, &path, window, cx) {
             return;
         }
         if self.tabs.get(self.active).is_none() {
@@ -604,7 +635,7 @@ impl Tty7App {
                         .iter_mut()
                         .filter_map(|t| t.code.as_deref_mut())
                         .flat_map(|c| c.files.iter_mut())
-                        .find(|f| f.path == path)
+                        .find(|f| f.host == host && f.path == path)
                     else {
                         return;
                     };
@@ -624,6 +655,7 @@ impl Tty7App {
             0,
             OpenFile {
                 path,
+                host,
                 input,
                 dirty: false,
                 disk_mtime: mtime,
@@ -732,7 +764,13 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(host) = self.active_host(cx) else {
+        // The file's own host, not the active one: the buffer keeps pointing
+        // at the machine it was read from, however the focus has moved since.
+        let Some(host) = self
+            .editor_file_mut(id)
+            .map(|f| f.host)
+            .and_then(|host| HostRegistry::lookup(cx, host))
+        else {
             return;
         };
         let Some(f) = self.editor_file_mut(id) else {
@@ -927,6 +965,7 @@ impl Tty7App {
         let Some(host) = self.active_host(cx) else {
             return;
         };
+        let host_id = host.id();
         let p = path.to_path_buf();
         let landed = p.clone();
         HostOps::run_in(
@@ -935,13 +974,14 @@ impl Tty7App {
             cx,
             move |h| h.stat(&p).ok().and_then(|m| m.mtime),
             move |app, mtime, window, cx| {
-                app.editor_apply_external_change(&landed, mtime, window, cx)
+                app.editor_apply_external_change(host_id, &landed, mtime, window, cx)
             },
         );
     }
 
     fn editor_apply_external_change(
         &mut self,
+        host: HostId,
         path: &Path,
         mtime: Option<MTime>,
         window: &mut Window,
@@ -954,7 +994,7 @@ impl Tty7App {
                 continue;
             };
             for (ix, f) in code.files.iter_mut().enumerate() {
-                if f.path != *path {
+                if f.host != host || f.path != *path {
                     continue;
                 }
                 match classify_external_change(f.saving.is_some(), f.dirty, f.disk_mtime, mtime) {
@@ -991,10 +1031,11 @@ impl Tty7App {
             return;
         };
         let target = f.path.clone();
+        let file_host = f.host;
         let id = f.input.entity_id();
         f.reload_seq = f.reload_seq.wrapping_add(1);
         let seq = f.reload_seq;
-        let Some(host) = self.active_host(cx) else {
+        let Some(host) = HostRegistry::lookup(cx, file_host) else {
             return;
         };
         HostOps::run_in(
