@@ -138,8 +138,14 @@ pub enum Command {
                       pane exits — the orchestration primitive:\n\n    \
                       tty7 wait %3 && tty7 capture %3 --plain\n\n\
                       That pairs with an agent, whose pane is still alive in `waiting` and \
-                      `done`. For a plain command, wait for `free` instead:\n\n    \
-                      tty7 wait %3 --until free && tty7 capture %3 --plain\n\n\
+                      `done`. For a plain command, wait for `free` instead — and after a \
+                      `send`, add --changed:\n\n    \
+                      tty7 send %3 'cargo test' --key enter\n    \
+                      tty7 wait %3 --until free --changed && tty7 capture %3 --plain\n\n\
+                      The states are levels, not edges: a pane that has not yet started \
+                      what you just sent it is still `free`, and a wait that gets there \
+                      first is answered by the state the pane was already in. --changed \
+                      holds out for a `free` that follows something running.\n\n\
                       `exit` is the one end state with nothing left to read: the pane's \
                       output goes with the pane, and the workspace keeps only a leaf the \
                       GUI can revive into a fresh shell. Capture before the shell exits, \
