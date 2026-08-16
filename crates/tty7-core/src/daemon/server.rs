@@ -1256,6 +1256,47 @@ fn spawn_writer(
 
 #[cfg(test)]
 mod tests {
+
+    /// Closing a pane takes its stored screen with it.
+    ///
+    /// The privacy page promises the file goes "at once", and [`kill_pane`]'s
+    /// own comment says why: a screen left behind is a screen that can turn up
+    /// in some later restore. Both were true and neither was held — deleting
+    /// the `forget` call from `kill_pane` left the whole suite green, because
+    /// what covered it tested `forget` rather than anyone calling it.
+    #[test]
+    fn closing_a_pane_drops_its_stored_screen() {
+        let dir = std::env::temp_dir().join(format!("tty7-killpane-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        crate::core::config::set_config_dir(dir);
+
+        let pane_id = 91_337;
+        crate::daemon::scrollback::save(
+            pane_id,
+            &[crate::daemon::scrollback::Segment {
+                size: crate::daemon::protocol::WinSize {
+                    cols: 80,
+                    rows: 24,
+                    cell_w: 8,
+                    cell_h: 16,
+                },
+                bytes: b"what the pane had on it".to_vec(),
+            }],
+        );
+        assert!(
+            crate::daemon::scrollback::load(pane_id).is_some(),
+            "the screen is on disk to begin with"
+        );
+
+        // No pane of that id is registered, which is the point: `kill_pane`
+        // must drop the screen whether or not it found something to stop.
+        kill_pane(&Registry::new(), pane_id);
+
+        assert!(
+            crate::daemon::scrollback::load(pane_id).is_none(),
+            "a pane the user closed left its screen on disk"
+        );
+    }
     use super::*;
 
     #[test]
