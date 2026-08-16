@@ -586,8 +586,15 @@ impl MachineStore {
     ) -> io::Result<Workspace> {
         let created = self.mutate(origin, |m| {
             if m.workspaces.len() >= MAX_WORKSPACES {
+                // The count, not the cap. They are the same number the moment
+                // the limit is first reached and differ ever after — a tree
+                // that arrived over the line, from a hand-edited file or a
+                // build that allowed more, otherwise reports a count nobody
+                // can reconcile with `tty7 ls`.
                 return Err(refuse(format!(
-                    "this machine already holds {MAX_WORKSPACES} workspaces"
+                    "this machine holds {} workspaces, and {MAX_WORKSPACES} is the limit — \
+                     close one before opening another",
+                    m.workspaces.len()
                 )));
             }
             if let Some(id) = id
@@ -1243,8 +1250,11 @@ fn register_pane(m: &mut Machine, seed: PaneSeed, live: bool) -> io::Result<()> 
         )));
     }
     if m.panes.len() >= MAX_PANES {
+        // The count rather than the cap, for the reason above.
         return Err(refuse(format!(
-            "this machine's tree already references {MAX_PANES} panes"
+            "this machine's tree references {} panes, and {MAX_PANES} is the limit — \
+             close one before opening another",
+            m.panes.len()
         )));
     }
     m.panes.push(seed.into_record(live));
@@ -1673,6 +1683,61 @@ mod tests {
     fn store() -> (Arc<MachineStore>, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
         (MachineStore::open(dir.path().join(MACHINE_FILE)), dir)
+    }
+
+    /// A tree already over the limit reports its own size, not the limit.
+    ///
+    /// The two are the same number the moment the cap is first reached, which
+    /// is why "this machine already holds 1024 workspaces" read plausibly. A
+    /// tree that arrived over the line — a hand-edited file, or a build that
+    /// allowed more — then told the reader a count they could not reconcile
+    /// with `tty7 ls`: 1024, against the 5001 rows in front of them.
+    ///
+    /// The file is built by duplicating what the store itself wrote, so this
+    /// cannot drift from the schema the way a hand-written fixture would.
+    #[test]
+    fn a_tree_over_the_limit_reports_how_many_it_holds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(MACHINE_FILE);
+
+        let seeded = MachineStore::open(path.clone());
+        seeded
+            .workspace_create(None, None, None)
+            .expect("the first workspace fits");
+        seeded.flush();
+        drop(seeded);
+
+        let mut tree: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let workspaces = tree["workspaces"].as_array_mut().expect("an array");
+        let proto = workspaces[0].clone();
+        let over = MAX_WORKSPACES + 7;
+        while workspaces.len() < over {
+            let mut copy = proto.clone();
+            copy["id"] = serde_json::json!(uuid::Uuid::new_v4().to_string());
+            workspaces.push(copy);
+        }
+        std::fs::write(&path, serde_json::to_string(&tree).unwrap()).unwrap();
+
+        let store = MachineStore::open(path);
+        assert_eq!(
+            store.machine().workspaces.len(),
+            over,
+            "the tree loads whole — refusing it would strand the rows"
+        );
+
+        let refused = store
+            .workspace_create(None, None, None)
+            .expect_err("the tree is over the limit");
+        let said = refused.to_string();
+        assert!(
+            said.contains(&over.to_string()),
+            "the message has to name what the tree holds: {said}"
+        );
+        assert!(
+            said.contains(&MAX_WORKSPACES.to_string()),
+            "and what the limit is: {said}"
+        );
     }
 
     /// A tree that cannot be written says so, and says which file.
