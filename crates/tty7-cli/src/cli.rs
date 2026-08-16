@@ -97,7 +97,20 @@ pub enum Command {
     #[command(
         about = "Print a pane's output — as text with `--plain`, otherwise with its ANSI \
                  escapes intact, decoded as UTF-8 (invalid bytes become U+FFFD): the \
-                 newest scrollback segment by default"
+                 newest scrollback segment by default",
+        long_about = "Print a pane's output — as text with `--plain`, otherwise with its \
+                      ANSI escapes intact, decoded as UTF-8 (invalid bytes become \
+                      U+FFFD): the newest scrollback segment by default.\n\n\
+                      What comes back depends on what the pane is showing. A pane running \
+                      a full-screen program — an editor, a pager, anything on the \
+                      alternate screen — answers with that program's screen, and the \
+                      scrollback behind it is not in the reply. Once the program exits \
+                      the scrollback is there again, with the alternate screen gone. So \
+                      an empty-looking capture from a pane that has produced plenty is \
+                      usually a TUI sitting in front of it, not lost output.\n\n\
+                      Long output is trimmed from the oldest end, so a capture after a \
+                      big build gives you the end of it — which is the part worth \
+                      reading."
     )]
     Capture(CaptureArgs),
 
