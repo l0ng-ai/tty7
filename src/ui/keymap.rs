@@ -1055,6 +1055,47 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
 mod tests {
     use super::*;
     use gpui::Action as _;
+    /// Every action the shortcuts page names still exists.
+    ///
+    /// The page is written by hand and lists most bindings by label and chord,
+    /// which no test should try to parse — but it also prints action names for
+    /// rebinding, and those are identifiers. A rename that misses the page
+    /// leaves a reader typing a name the Keybindings screen will not accept.
+    ///
+    /// Compound entries — `ResizePaneLeft/Right/Up/Down`, `ForkAgentSession`
+    /// (+ `Right`), the numbered families — are why the bare direction words
+    /// are skipped rather than expanded: expanding them is guesswork about a
+    /// notation a person chose, and the stems are checked either way.
+    #[test]
+    fn the_shortcuts_page_names_no_action_that_has_been_renamed() {
+        const PAGE: &str = include_str!("../../docs/reference/keyboard-shortcuts.mdx");
+
+        let known: Vec<&str> = default_bindings().into_iter().map(|(a, _)| a).collect();
+        let mut checked = 0usize;
+        let mut unknown: Vec<String> = Vec::new();
+
+        for token in PAGE.split('`').skip(1).step_by(2) {
+            for name in token.split('/') {
+                let name = name.trim();
+                // Two CamelCase words or more: `Right` on its own is part of a
+                // compound, and `Settings` is prose.
+                let words = name.chars().filter(|c| c.is_uppercase()).count();
+                if words < 2 || !name.chars().all(|c| c.is_ascii_alphanumeric()) {
+                    continue;
+                }
+                checked += 1;
+                if !known.contains(&name) {
+                    unknown.push(name.to_string());
+                }
+            }
+        }
+
+        assert!(checked > 30, "only {checked} action names were read");
+        assert!(
+            unknown.is_empty(),
+            "the page names actions the keymap does not have: {unknown:?}"
+        );
+    }
 
     /// The actions a keymap built from `action_bindings` dispatches for `keys`
     /// typed in `context`, in precedence order — the same lookup gpui performs
