@@ -622,6 +622,19 @@ fn parse_config_file(
                 options: Vec::new(),
             });
         } else if key.eq_ignore_ascii_case("match") {
+            // Everything until the next `Host` is skipped, on purpose:
+            // "No `Match` or `canonicalize*` directives" is what
+            // `docs/remote/ssh.mdx` promises, and this is where that is kept.
+            //
+            // Reading them would mean more than parsing them. `Match host`
+            // tests the *resolved* hostname, so it needs the pass this one is
+            // producing; `Match exec` runs a command, which is not something an
+            // import of a config file should do; `Match canonical` needs
+            // canonicalisation, which is on the same list of things tty7 does
+            // not do. A profile imported from a config with a `Match` block
+            // therefore carries the `Host` block's answer alone — `ssh -G`
+            // would say `user alice`, and this says the default — which is the
+            // documented shape rather than an oversight.
             if let Some(block) = current.take() {
                 blocks.push(block);
             }
@@ -1023,6 +1036,41 @@ mod tests {
     /// own directory agrees for `~/.ssh/config` and diverges one level down,
     /// where `Include extra.conf` inside `~/.ssh/conf.d/x.conf` would reach
     /// `~/.ssh/conf.d/extra.conf` instead of the file ssh reads.
+    /// A `Match` block's settings do not reach an imported profile.
+    ///
+    /// `docs/remote/ssh.mdx` lists "No `Match` or `canonicalize*` directives"
+    /// under what is not supported, and `ssh -G` on this config answers
+    /// `user alice` and `port 2222` where tty7 answers the defaults. That gap
+    /// is the documented one.
+    ///
+    /// If this ever fails because `Match` was implemented, the page saying it
+    /// is not supported has to change in the same commit — which is the only
+    /// reason to hold a limitation in a test.
+    #[test]
+    fn a_match_block_is_not_read_into_a_profile() {
+        let root = temp_root("match-block");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            "Host work\n    HostName work.example\n\n\
+             Match host work.example\n    User alice\n    Port 2222\n",
+        )
+        .unwrap();
+
+        let imported = import_profiles_from(ssh.join("config"), &root);
+        let work = imported
+            .iter()
+            .find(|p| p.profile.name == "work")
+            .expect("the Host block still imports");
+        assert_eq!(work.profile.host, "work.example");
+        assert_eq!(
+            (work.profile.user.as_str(), work.profile.port),
+            ("", 22),
+            "a Match block reached the profile; docs/remote/ssh.mdx says it does not"
+        );
+    }
+
     #[test]
     fn a_nested_include_resolves_against_ssh_not_the_including_file() {
         let root = temp_root("nested-includes");
