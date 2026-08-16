@@ -7644,9 +7644,10 @@ fn session_to_pane(
                 leaf_shares_the_window_daemon(workspace.is_some(), ssh_spec.is_some());
             let restore = match workspace.is_some() {
                 true => (*pane_id).filter(|_| same_daemon),
-                // Not `pane_attachable`: a dead pane's id is what the restore
-                // is keyed on, so it has to survive being dead. The attach is
-                // still attempted first and still gives way to a fresh spawn.
+                // Deliberately not an aliveness test: a dead pane's id is
+                // what the restore is keyed on, so it has to survive being
+                // dead. The attach is still attempted first and still gives
+                // way to a fresh spawn.
                 false => (*pane_id).filter(|id| same_daemon && pane_free_for(alive, *id, owner)),
             };
             if restore.is_none()

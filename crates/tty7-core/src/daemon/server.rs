@@ -594,7 +594,7 @@ fn run_with(registry: Arc<Registry>) -> anyhow::Result<()> {
     // that know which of a dead daemon's files are still wanted cannot say so
     // until the endpoint below is listening. Answering "is anyone going to ask
     // for this?" here answers it when nobody can — and the answer deletes. A
-    // tree that failed to parse makes it worse, because `read_machine`
+    // tree that failed to parse makes it worse, because `load_machine`
     // quarantines it and hands back an empty `Machine`, so one bad file would
     // take every pane's screen and every pane's history with it.
     //
