@@ -1713,63 +1713,54 @@ mod tests {
 
     #[test]
     fn plural_and_select_branches_are_translated() {
-        let plural_keys = [
-            L10nKey::SettingsDeleteProfileCascade,
-            L10nKey::SettingsAliasesLinked,
-            L10nKey::SettingsImportSummary,
-            L10nKey::SettingsImportIgnored,
-            L10nKey::SettingsRulesOpenedWithConnection,
-            L10nKey::SettingsOfflineMachines,
-            L10nKey::SettingsForgetPasswordSharedBody,
-            L10nKey::PanelMoreChangedFiles,
-            L10nKey::ScmFilesChanged,
-            L10nKey::ScmStagedFileCount,
-            L10nKey::WindowStopShells,
-            L10nKey::WindowDeleteShells,
-            L10nKey::DiffChangedFiles,
-            L10nKey::DiffUntrackedCount,
-            L10nKey::DiffMoreFiles,
-            L10nKey::DiffUntrackedHeader,
-            L10nKey::DiffMoreUntracked,
-            L10nKey::DiffUntrackedSummary,
-            L10nKey::HomeTimeMinutesAgo,
-            L10nKey::HomeTimeHoursAgo,
-            L10nKey::HomeTimeDaysAgo,
-            L10nKey::HomeTimeWeeksAgo,
-            L10nKey::HomeTimeMonthsAgo,
-        ];
-        for key in plural_keys {
+        // Derived from the English catalogue, never hand-listed: a key given a
+        // plural or select branch is picked up here the moment it exists. The
+        // list this used to carry had drifted four keys behind.
+        let mut checked = 0;
+        for &key in L10nKey::ALL {
+            let mut has_variants = false;
             for branch in ["zero", "one", "other"] {
-                assert!(
-                    !translate_variant(0, key, branch).is_empty(),
-                    "missing en plural/select branch {branch:?} for {key:?}"
-                );
-                assert!(
-                    !translate_variant(1, key, branch).is_empty(),
-                    "missing zh plural/select branch {branch:?} for {key:?}"
-                );
-                assert!(
-                    !translate_variant(2, key, branch).is_empty(),
-                    "missing ja plural/select branch {branch:?} for {key:?}"
-                );
-                // Not every key spells out a "zero" branch; the ones that do
-                // must spell it out in every language rather than lean on the
-                // English fallback.
-                if translate_variant_en(key, branch).is_some() {
+                let Some(en) = translate_variant_en(key, branch) else {
+                    continue;
+                };
+                has_variants = true;
+                assert!(!en.is_empty(), "empty en branch {branch:?} for {key:?}");
+                // The fallback in `translate_variant` would quietly serve the
+                // English to a reader who asked for another language, so a
+                // branch English spells out must be spelled out everywhere.
+                for (name, text) in [
+                    ("zh", translate_variant_zh(key, branch)),
+                    ("ja", translate_variant_ja(key, branch)),
+                ] {
+                    let text = text.unwrap_or_else(|| {
+                        panic!("{name} is missing plural/select branch {branch:?} for {key:?}")
+                    });
                     assert!(
-                        translate_variant_zh(key, branch).is_some(),
-                        "zh is missing plural/select branch {branch:?} for {key:?}"
-                    );
-                    assert!(
-                        translate_variant_ja(key, branch).is_some(),
-                        "ja is missing plural/select branch {branch:?} for {key:?}"
+                        !text.is_empty(),
+                        "empty {name} branch {branch:?} for {key:?}"
                     );
                 }
             }
-            // Smoke-check t_plural does not produce empty strings.
-            assert!(!t_plural(key, 0, &[]).is_empty());
-            assert!(!t_plural(key, 1, &[]).is_empty());
-            assert!(!t_plural(key, 5, &[]).is_empty());
+            if has_variants {
+                checked += 1;
+                // `t_plural` picks the branch; none of the counts may land on
+                // a hole.
+                for n in [0, 1, 5] {
+                    for lang in SUPPORTED_LANGUAGES {
+                        set_locale(lang.code);
+                        assert!(
+                            !t_plural(key, n, &[]).is_empty(),
+                            "{key:?} renders empty at count {n} in {}",
+                            lang.code
+                        );
+                    }
+                }
+                set_locale(default_language_code());
+            }
         }
+        assert!(
+            checked > 20,
+            "only {checked} keys have branches — did the catalogue move?"
+        );
     }
 }
