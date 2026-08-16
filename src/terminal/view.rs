@@ -2251,7 +2251,7 @@ impl TerminalView {
             }
             "w" => {
                 if !self.cmd.delete_selection() {
-                    self.cmd.delete_word_left();
+                    self.cmd.delete_path_component_left();
                 }
             }
             "u" => {

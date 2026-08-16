@@ -320,6 +320,50 @@ impl CmdEditor {
         self.kill_range(self.cursor, end);
     }
 
+    fn eat_left(&mut self, pred: impl Fn(char) -> bool) {
+        while self.cursor > 0 && pred(self.chars[self.cursor - 1]) {
+            self.cursor -= 1;
+        }
+    }
+
+    /// fish's ⌃W (`backward-kill-path-component`): stop at `/` and friends
+    /// instead of eating a whole whitespace-delimited token, so a path is
+    /// killed one component at a time (#658). Mirrors fish's word-motion
+    /// state machine: at most one run of each character class, and a
+    /// separator run next to whitespace ends the kill on its own.
+    pub fn delete_path_component_left(&mut self) {
+        fn sep(c: char) -> bool {
+            !c.is_whitespace() && "/={,}'\":@|;<>&".contains(c)
+        }
+        fn word(c: char) -> bool {
+            !c.is_whitespace() && !sep(c)
+        }
+        self.checkpoint();
+        let end = self.cursor;
+        let before = |cursor: usize, chars: &[char]| (cursor > 0).then(|| chars[cursor - 1]);
+        match before(self.cursor, &self.chars) {
+            Some(c) if c.is_whitespace() => {
+                self.eat_left(char::is_whitespace);
+                match before(self.cursor, &self.chars) {
+                    Some('/') => {
+                        self.eat_left(|c| c == '/');
+                        self.eat_left(word);
+                    }
+                    Some(c) if word(c) => self.eat_left(word),
+                    Some(_) => self.eat_left(sep),
+                    None => {}
+                }
+            }
+            Some(c) if word(c) => self.eat_left(word),
+            Some(_) => {
+                self.eat_left(sep);
+                self.eat_left(word);
+            }
+            None => {}
+        }
+        self.kill_range(self.cursor, end);
+    }
+
     pub fn delete_to_start(&mut self) {
         self.checkpoint();
         let end = self.cursor;
@@ -450,6 +494,38 @@ mod tests {
         d.delete_word_left();
         assert_eq!(d.text(), "git push ");
         assert_eq!(d.cursor(), 9);
+    }
+
+    #[test]
+    fn path_component_delete_walks_a_path_one_segment_at_a_time() {
+        let mut e = ed("ls /usr/local/bin", 17);
+        e.delete_path_component_left();
+        assert_eq!(e.text(), "ls /usr/local/");
+        e.delete_path_component_left();
+        assert_eq!(e.text(), "ls /usr/");
+        e.delete_path_component_left();
+        assert_eq!(e.text(), "ls /");
+        e.delete_path_component_left();
+        assert_eq!(e.text(), "ls ");
+        e.delete_path_component_left();
+        assert_eq!((e.text().as_str(), e.cursor()), ("", 0));
+        e.yank();
+        assert_eq!(e.text(), "ls ");
+
+        let mut f = ed("--out=/tmp/x", 12);
+        f.delete_path_component_left();
+        assert_eq!(f.text(), "--out=/tmp/");
+        f.delete_path_component_left();
+        assert_eq!(f.text(), "--out=/");
+        f.delete_path_component_left();
+        assert_eq!(f.text(), "");
+    }
+
+    #[test]
+    fn path_component_delete_matches_word_delete_on_plain_words() {
+        let mut e = ed("echo hello world", 16);
+        e.delete_path_component_left();
+        assert_eq!((e.text().as_str(), e.cursor()), ("echo hello ", 11));
     }
 
     #[test]
