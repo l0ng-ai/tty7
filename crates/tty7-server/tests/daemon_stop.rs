@@ -125,17 +125,31 @@ fn stop_reaps_a_lingering_daemon_even_after_the_pidfile_vanishes() {
 
     // The #653 state, as stop() meets it: the endpoint is gone before stop()
     // can ask for a shutdown, and the pidfile disappears while stop() is
-    // still waiting on the process.
+    // still waiting on the process. The delete must land inside stop()'s
+    // wait on the still-alive process (PROCESS_EXIT_TIMEOUT in spawn.rs),
+    // which the elapsed assertion below pins.
+    const SWEEP_DELAY: Duration = Duration::from_secs(1);
     std::fs::remove_file(dir.path().join("daemon.sock")).unwrap();
     let pidfile = dir.path().join("daemon.pid");
     let sweeper = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(1));
-        let _ = std::fs::remove_file(pidfile);
+        std::thread::sleep(SWEEP_DELAY);
+        std::fs::remove_file(pidfile).is_ok()
     });
 
+    let stop_started = Instant::now();
     tty7_core::daemon::spawn::stop();
 
-    sweeper.join().unwrap();
+    assert!(
+        stop_started.elapsed() >= SWEEP_DELAY,
+        "stop() returned before the sweeper's delete — the mid-stop pidfile \
+         removal this test exists to exercise never happened; lower SWEEP_DELAY \
+         below spawn.rs's PROCESS_EXIT_TIMEOUT"
+    );
+    assert!(
+        sweeper.join().unwrap(),
+        "the sweeper found no pidfile to delete — stop() removed it early, so \
+         the vanishing-pidfile ordering was not exercised"
+    );
     let deadline = Instant::now() + Duration::from_secs(2);
     while unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
         if Instant::now() >= deadline {

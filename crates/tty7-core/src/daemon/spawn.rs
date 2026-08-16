@@ -480,10 +480,12 @@ pub fn hand_off() -> anyhow::Result<()> {
 pub fn stop() {
     use std::io::Write as _;
 
-    // Read the pid before asking the daemon to die: a clean shutdown removes
-    // the pidfile, and the endpoint disappearing is not the same event as the
-    // process releasing its image — the gap between them is exactly where an
-    // installer starts replacing files that are still locked.
+    // Read the pid before asking the daemon to die: the endpoint disappearing
+    // is not the same event as the process releasing its image — the gap
+    // between them is exactly where an installer starts replacing files that
+    // are still locked — and an old build's shutdown still deletes the pidfile
+    // before the process is gone, so this is the last moment the pid is
+    // guaranteed readable.
     let recorded = pidfile::read().filter(|&pid| pid > 4 && pid != std::process::id());
 
     if let Ok(mut stream) = transport::connect() {
