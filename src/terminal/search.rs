@@ -923,6 +923,14 @@ pub(super) fn url_span_at(text: &str, col: usize) -> Option<(usize, usize, Strin
         }
         truncate_at_unbalanced_close(&mut token);
         trim_trailing_punct(&mut token);
+        // A scheme with nothing left after it is not a link, and offering one
+        // is worse than offering none: `https://例え.jp` truncates at the first
+        // non-ASCII character — [`is_url_char`] is deliberately ASCII, so that
+        // a URL run together with the CJK after it does not swallow the
+        // sentence — and what survived was `https://`, which opens nowhere.
+        if SCHEMES.contains(&token.as_str()) {
+            return None;
+        }
         let end = start + token.chars().count() - 1;
         return (start..=end).contains(&col).then_some((start, end, token));
     }
@@ -1470,6 +1478,31 @@ mod tests {
         assert_eq!(
             url_at("read https://a.com/x]next now", 8).as_deref(),
             Some("https://a.com/x")
+        );
+    }
+
+    /// A scheme on its own is not a link.
+    ///
+    /// [`is_url_char`] is ASCII by choice: CJK runs together with what
+    /// follows it, so accepting non-ASCII would let `https://example.com見て`
+    /// swallow the rest of the sentence. The cost is that an internationalised
+    /// domain truncates at its first character — and what came back was
+    /// `https://`, a clickable link that opens nowhere. Not offering one is
+    /// the honest answer.
+    #[test]
+    fn a_scheme_with_no_host_left_is_not_offered_as_a_link() {
+        assert_eq!(url_at("go to https://例え.jp now", 12), None);
+        assert_eq!(url_at("see http://中国.cn here", 8), None);
+
+        // The ASCII neighbours it must not disturb.
+        assert_eq!(
+            url_at("go to https://example.com now", 12).as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            url_at("mixed https://example.com/例 here", 12).as_deref(),
+            Some("https://example.com/"),
+            "the ASCII part is still a working link"
         );
     }
 
