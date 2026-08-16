@@ -251,6 +251,10 @@ Without `--json` each line is a sentence meant to be read, and its wording is
 not a format to parse — `--json` below is. The kinds and payloads are stable;
 the prose is not.
 
+Because it blocks forever, returning at all means the server closed the stream:
+that exits 1 and says so on stderr, so a loop consuming the lines does not read
+the end of its input as the end of the work.
+
 Each line is one externally tagged object, `{"<kind>": {…}}`:
 
 | Kind | Payload |

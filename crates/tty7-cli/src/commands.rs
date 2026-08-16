@@ -1157,7 +1157,25 @@ fn events(json_mode: bool, backend: &mut dyn Backend) -> Result<Outcome> {
         }
         Ok(())
     })?;
-    report("", Value::Null)
+    // This verb blocks forever by contract, so returning at all means the
+    // stream ended under it — and the only thing that ends it is the control
+    // connection going away with the server. Exiting 0 there told a reader
+    // that watched a server stop mid-run that nothing had happened, and the
+    // loop consuming the lines simply stopped receiving any. An interrupted
+    // run does not come through here: a signal takes the process, not this
+    // path.
+    //
+    // Nothing extra is written to stdout, so a reader parsing NDJSON is not
+    // handed a line of a shape it has never seen; the news goes to stderr and
+    // the exit code, which is the rule everywhere else in this CLI.
+    eprintln!("tty7: the server closed the event stream");
+    Ok(Outcome::Exit(
+        1,
+        Report {
+            human: String::new(),
+            json: Value::Null,
+        },
+    ))
 }
 
 fn event_line(event: &ControlEvent) -> String {
@@ -4363,6 +4381,20 @@ mod tests {
                 { "key": "me@build-box:22", "kind": "ssh", "connected": false },
             ] })
         );
+    }
+
+    #[test]
+    fn a_stream_that_ends_under_events_is_not_a_success() {
+        // `events` blocks forever by contract, so a return means the control
+        // connection went away with the server. Exiting 0 told a reader that
+        // watched a server stop mid-run that nothing had happened.
+        let mut backend = mock();
+        backend.events.push(ControlEvent::LayoutResync);
+        let out = run_cli(&["tty7", "events"], &Context::default(), &mut backend);
+        match out {
+            Outcome::Exit(1, _) => {}
+            other => panic!("a closed stream should exit nonzero, got {other:?}"),
+        }
     }
 
     #[test]
