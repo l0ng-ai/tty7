@@ -31,6 +31,10 @@ fn main() {
     let tests: &[(&str, fn(&Daemon))] = &[
         ("ls_on_an_empty_server", ls_on_an_empty_server),
         (
+            "an_error_quoting_a_name_cannot_drive_the_terminal",
+            an_error_quoting_a_name_cannot_drive_the_terminal,
+        ),
+        (
             "new_builds_a_workspace_with_a_live_pane",
             new_builds_a_workspace_with_a_live_pane,
         ),
@@ -377,6 +381,28 @@ fn one_shot(command: &str) -> Vec<String> {
     } else {
         vec!["/bin/sh".into(), "-c".into(), command.into()]
     }
+}
+
+/// An error quotes what was typed, so what was typed must not reach the
+/// terminal as instructions.
+///
+/// The unit test covers the sanitiser; only running the real binary covers
+/// the one call in `main` that puts it on the error path, which is the part
+/// a later edit could drop without any test noticing.
+fn an_error_quoting_a_name_cannot_drive_the_terminal(daemon: &Daemon) {
+    let hostile = "red\u{1b}[31mALERT\u{1b}[0m";
+    let out = daemon.run(&["ws", "rm", hostile]);
+    assert!(!out.status.success(), "no workspace has that name");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "an escape reached the terminal: {stderr:?}"
+    );
+    // Still legible: the reader has to see which name was refused, or the
+    // message has traded one failure for another.
+    assert!(stderr.contains("ALERT"), "{stderr:?}");
+    assert!(stderr.contains("no workspace named"), "{stderr:?}");
 }
 
 fn ls_on_an_empty_server(daemon: &Daemon) {

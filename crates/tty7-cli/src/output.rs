@@ -63,7 +63,8 @@ fn width(s: &str) -> usize {
 
 /// Text with nothing in it that a terminal would obey.
 ///
-/// These tables print names the CLI did not choose: a workspace or tab name,
+/// Tables and error messages alike print names the CLI did not choose: a
+/// workspace or tab name,
 /// a path, and — by way of [`tab_label`] — a tab's OSC title, which is set by
 /// whatever program is running in the pane. An escape sequence reaching the
 /// terminal from any of them is a program deciding what the reader's screen
@@ -77,7 +78,7 @@ fn width(s: &str) -> usize {
 ///
 /// `--json` is untouched. It has to round-trip the real name, and a JSON
 /// encoder already writes `\u001b` as six safe characters.
-fn printable(s: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn printable(s: &str) -> std::borrow::Cow<'_, str> {
     match s.contains(char::is_control) {
         false => std::borrow::Cow::Borrowed(s),
         true => std::borrow::Cow::Owned(

@@ -38,7 +38,13 @@ fn main() -> std::process::ExitCode {
         // --quiet suppresses output on success, not the reason for a failure:
         // swallowing this leaves a bare exit code and nothing to debug.
         Err(e) => {
-            eprintln!("tty7: {e:#}");
+            // Errors quote what was typed — `no workspace named 'X'` — and X
+            // can hold an escape, from a shell that expanded it or a name
+            // carried over from another machine. One boundary rather than one
+            // per message: nothing an error has to say needs a control
+            // character, and a message written later is covered by having
+            // been written at all.
+            eprintln!("tty7: {}", output::printable(&format!("{e:#}")));
             std::process::ExitCode::FAILURE
         }
     }
