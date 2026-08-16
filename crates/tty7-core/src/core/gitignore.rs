@@ -14,6 +14,16 @@ impl GitignoreChain {
         let Some(parent) = path.parent() else {
             return false;
         };
+        // "It is not possible to re-include a file if a parent directory of
+        // that file is excluded" — gitignore(5). git never descends into an
+        // excluded directory, so no `!pattern` below one can bring anything
+        // back. Applying each level to the whole path missed that: with
+        // `build/` ignored at the root and `!keep.txt` inside `build/`,
+        // `git check-ignore` says build/keep.txt is ignored and this said it
+        // was not, so an expanded directory showed a file git would not.
+        if parent != root && parent.starts_with(root) && self.is_ignored(parent, true, root) {
+            return true;
+        }
         let mut state = false;
         let mut chain: Vec<&Path> = parent
             .ancestors()
@@ -72,6 +82,47 @@ impl GitignoreChain {
 
 #[cfg(test)]
 mod tests {
+
+    /// Nothing under an excluded directory can be brought back.
+    ///
+    /// gitignore(5): "It is not possible to re-include a file if a parent
+    /// directory of that file is excluded." git never descends into one, so a
+    /// `!pattern` below it never runs. Applying each level of the chain to the
+    /// whole path missed that, and an expanded `build/` showed a file git
+    /// ignores.
+    ///
+    /// The three answers here are `git check-ignore`'s own, against this
+    /// layout: a whitelist under an ordinary directory still wins, and one
+    /// under an excluded directory does not.
+    #[test]
+    fn a_whitelist_under_an_excluded_directory_does_not_re_include() {
+        let root = std::env::temp_dir().join(format!("tty7-reinclude-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::create_dir_all(root.join("keep")).unwrap();
+        std::fs::write(root.join(".gitignore"), "*.log\nbuild/\n").unwrap();
+        std::fs::write(root.join("keep/.gitignore"), "!important.log\n").unwrap();
+        std::fs::write(root.join("build/.gitignore"), "!keep.txt\n").unwrap();
+
+        let mut chain = GitignoreChain::default();
+        let ignored = |chain: &mut GitignoreChain, rel: &str, is_dir: bool| {
+            chain.is_ignored(&root.join(rel), is_dir, &root)
+        };
+
+        assert!(ignored(&mut chain, "build", true), "build/ is excluded");
+        assert!(
+            ignored(&mut chain, "build/keep.txt", false),
+            "a file under an excluded directory cannot be re-included"
+        );
+        assert!(
+            !ignored(&mut chain, "keep/important.log", false),
+            "a whitelist under an ordinary directory still wins"
+        );
+        assert!(ignored(&mut chain, "keep/other.log", false));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     use super::*;
 
     fn write_ignore(dir: &Path, body: &str) {
