@@ -491,7 +491,9 @@ pub enum PaneCmd {
             long,
             conflicts_with = "ws",
             help = "Every pane the server runs, including ones no workspace holds \
-                    (an interrupted `run` leaves those behind)"
+                    (an interrupted `run` leaves those behind). Reports OWNER in place \
+                    of TAB, because a pane no workspace holds is in no tab — plain \
+                    `pane ls` is the one that gives @ numbers"
         )]
         all: bool,
     },
