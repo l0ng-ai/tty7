@@ -1590,10 +1590,30 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
         Some(value) => format!("set ({value})"),
         None => "missing".to_string(),
     };
+    // The directory rows above say where the config *should* be, which is not
+    // the same as whether it is being read — and a file that does not parse is
+    // exactly the state someone runs `doctor` in. Every setting is ignored, a
+    // copy has been kept aside and saving is suppressed, and none of that is
+    // visible from the rows around it.
+    let (config_state, config_ok) = match tty7_core::core::config::Config::load_with_outcome().1 {
+        tty7_core::core::config::LoadOutcome::Parsed => ("ok".to_string(), true),
+        tty7_core::core::config::LoadOutcome::Absent => ("none yet — the defaults are the config".to_string(), true),
+        tty7_core::core::config::LoadOutcome::Quarantined => (
+            "NOT VALID JSON — kept aside as config.json.corrupt; running on defaults and not saving"
+                .to_string(),
+            false,
+        ),
+        tty7_core::core::config::LoadOutcome::Unreadable => (
+            "UNREADABLE — running on defaults and not saving"
+                .to_string(),
+            false,
+        ),
+    };
     let mut rows = vec![
         vec![address::ENV_CONFIG_DIR.to_string(), mark(&ctx.config_dir)],
         vec![address::ENV_WS.to_string(), mark(&ctx.ws)],
         vec![address::ENV_PANE.to_string(), mark(&ctx.pane)],
+        vec!["config".to_string(), config_state.clone()],
     ];
     let mut server = json!({ "reachable": false });
     let mut hooks: Vec<(HookAgent, HooksState)> = Vec::new();
@@ -1672,15 +1692,26 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
                 "pane": ctx.pane.is_some(),
             },
             "server": server,
+            "config": { "ok": config_ok, "state": config_state },
             "hooks": hooks_json(&hooks),
         }),
     };
+    // Same reasoning as the server row below, applied to the other half of an
+    // install: a config that does not parse means every setting in it is being
+    // ignored and saving is suppressed. `tty7 doctor || alert` should fire for
+    // that too, and the row alone would let it exit 0.
+    if !config_ok {
+        eprintln!("tty7: doctor: the config file is not being used");
+    }
     if report.json["server"]["reachable"] == false {
         // doctor is the verb people run when something is not working, so an
         // unreachable server is *the* finding — not a row to exit 0 over:
         // `tty7 doctor || alert` has to fire (#592). The table and JSON go
         // out all the same, and stderr carries the headline under `-q`.
         eprintln!("tty7: doctor: the server is unreachable");
+        return Ok(Outcome::Exit(1, report));
+    }
+    if !config_ok {
         return Ok(Outcome::Exit(1, report));
     }
     Ok(Outcome::Report(report))
@@ -4187,6 +4218,34 @@ mod tests {
         assert!(!line(1).contains("1 panes"), "{}", line(1));
         assert!(line(0).contains("0 panes"), "{}", line(0));
         assert!(line(2).contains("2 panes"), "{}", line(2));
+    }
+
+    /// `doctor` says whether the config is being used, not just where it is.
+    ///
+    /// Its own description promises a config check, and the row beside it
+    /// reports `TTY7_CONFIG_DIR` — where the file *should* be, which is a
+    /// different question from whether it parsed. A file that does not is
+    /// exactly the state someone runs `doctor` in: every setting ignored,
+    /// saving suppressed, and nothing on the screen saying so.
+    #[test]
+    fn doctor_reports_whether_the_config_is_being_used() {
+        let out = human(run_cli(
+            &["tty7", "doctor"],
+            &Context::default(),
+            &mut doctor_backend(),
+        ));
+        let row = out
+            .lines()
+            .find(|l| l.starts_with("config "))
+            .expect("doctor has a config row");
+        assert!(
+            row.contains("ok") || row.contains("none yet"),
+            "an intact config reads as usable: {row}"
+        );
+        assert!(
+            !row.contains("NOT VALID"),
+            "and is not reported as broken: {row}"
+        );
     }
 
     /// Missing hooks are the reason a perfectly healthy-looking agent never
