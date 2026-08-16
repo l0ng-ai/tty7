@@ -60,13 +60,33 @@ fn nothing_named(text: &str) -> String {
     }
 }
 
+/// What to say when an id resolves to nothing.
+///
+/// Its sibling [`nothing_named`] answers a word someone typed. This one often
+/// answers a word nobody typed: [`crate::address::workspace_or_context`] falls
+/// back to `$TTY7_WS`, so `tab new` inside a shell whose workspace has since
+/// been removed — or a shell opened against another machine — fails with a
+/// uuid that appears nowhere in what was typed. Left bare, that reads as an
+/// internal error rather than something the reader can act on, which is why
+/// the second sentence is here at all.
+///
+/// The id stays whole rather than shortened the way an ambiguity is: this is
+/// the exact string to compare against `echo $TTY7_WS`.
+fn no_workspace_with_id(id: &WorkspaceId) -> String {
+    format!(
+        "no workspace with id {id} on this machine — `tty7 ls` lists them. If you did not type \
+         this id, it is the $TTY7_WS of the shell you are in, whose workspace has been removed \
+         or belongs to another machine"
+    )
+}
+
 pub fn workspace<'m>(machine: &'m Machine, addr: &WorkspaceAddress) -> Result<&'m Workspace> {
     match addr {
         WorkspaceAddress::Id(id) => machine
             .workspaces
             .iter()
             .find(|ws| ws.id == *id)
-            .ok_or_else(|| anyhow::anyhow!("no workspace with id {id} on this machine")),
+            .ok_or_else(|| anyhow::anyhow!("{}", no_workspace_with_id(id))),
         WorkspaceAddress::Named(text) => {
             let by_name: Vec<_> = machine
                 .workspaces
@@ -170,6 +190,30 @@ mod tests {
     use super::*;
     use crate::address::parse_workspace;
     use crate::testbed::two_workspace_machine;
+
+    /// The reader is holding a uuid they did not type; the message has to say
+    /// where it came from, not just that it failed.
+    #[test]
+    fn an_id_that_resolves_to_nothing_says_where_it_came_from() {
+        let m = two_workspace_machine();
+        let missing: WorkspaceId = "0d4e1a54-0000-4000-8000-00000000dead".parse().unwrap();
+        let err = workspace(&m, &WorkspaceAddress::Id(missing))
+            .expect_err("no workspace has that id")
+            .to_string();
+
+        assert!(
+            err.contains(&missing.to_string()),
+            "whole, to compare: {err}"
+        );
+        assert!(
+            err.contains("`tty7 ls`"),
+            "a way to see the real ones: {err}"
+        );
+        assert!(
+            err.contains("$TTY7_WS"),
+            "where an untyped id comes from: {err}"
+        );
+    }
 
     #[test]
     fn tab_ordinals_number_the_machine_in_tree_order() {
