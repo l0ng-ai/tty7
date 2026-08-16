@@ -1778,53 +1778,71 @@ impl Tty7App {
                     }
                 })
                 .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                match &restarted {
-                    Ok(()) => {
-                        // The link we held pointed at the server we just killed;
-                        // the reconnect finds a new process whose registry knows
-                        // nothing about these panes. The helper drops the dead
-                        // link first — a pull sent down it dies on a dead socket
-                        // before the reader notices — and rebuilds every local
-                        // window from the tree.
-                        crate::ui::tree_sync::resync_after_local_daemon_change(cx);
-                    }
-                    Err(e) => {
-                        // A refused handoff leaves the daemon exactly as it was,
-                        // still serving the panes this window just dropped. Leaving
-                        // it at the error here strands them: every restore path is
-                        // tree-driven, and the next sync of this emptied window
-                        // would diff into "close every tab" against the mirror —
-                        // deleting the pane records under the still-running shells,
-                        // or the whole workspace if the user simply closes the
-                        // window first (#554). Pull the layout back instead; where
-                        // the failure really did take the daemon away (an exec that
-                        // never re-listened), the pull misses and the rehydration
-                        // debt keeps the empty window from being pushed up.
-                        //
-                        // The invalidating helper, not the one the reconnect uses:
-                        // nothing here handshaked a link. Half of `hand_off`'s
-                        // failures happen *after* the exec — a daemon that never
-                        // started listening again is gone, and the client we still
-                        // hold points at its socket, which `is_connected` keeps
-                        // calling good until its reader sees the EOF.
-                        log::error!(
-                            "restart background service failed, resyncing from the tree: {e}"
-                        );
-                        let text = t_fmt(
-                            L10nKey::AppRestartServerFailed,
-                            &[("error", &e.to_string())],
-                        );
-                        this.startup_error = Some(gpui::SharedString::from(text.clone()));
-                        window.push_notification(text, cx);
-                        crate::ui::tree_sync::resync_after_local_daemon_change(cx);
-                    }
-                }
-                this.focus_active(window, cx);
-                cx.notify();
-            });
+            Self::settle_after_restart(this, restarted, cx).await;
         })
         .detach();
+    }
+
+    /// Put the window back together once the restart has been attempted, either
+    /// way it went.
+    ///
+    /// Split into three steps because the middle one must not run with this
+    /// window's entity leased. `resync_after_local_daemon_change` takes the
+    /// whole `App` and rebuilds *every* local window from the tree, and the
+    /// first thing it asks each one is which tabs it is showing — which it gets
+    /// by reading that window's `Tty7App` back out of the registry. Called from
+    /// inside `update_in`, the window it reaches for first is the one already
+    /// leased to the closure, and gpui's answer to a double lease is a panic
+    /// that takes the process with it: clicking Restart Server made the whole
+    /// app vanish.
+    async fn settle_after_restart(
+        this: gpui::WeakEntity<Self>,
+        restarted: anyhow::Result<()>,
+        cx: &mut gpui::AsyncApp,
+    ) {
+        // A refused handoff leaves the daemon exactly as it was, still serving
+        // the panes this window just dropped. Leaving it at the error here
+        // strands them: every restore path is tree-driven, and the next sync of
+        // this emptied window would diff into "close every tab" against the
+        // mirror — deleting the pane records under the still-running shells, or
+        // the whole workspace if the user simply closes the window first (#554).
+        // So the resync below runs either way; this step only says so on screen.
+        if this
+            .update_in(cx, |this, window, cx| {
+                if let Err(e) = &restarted {
+                    log::error!("restart background service failed, resyncing from the tree: {e}");
+                    let text = t_fmt(
+                        L10nKey::AppRestartServerFailed,
+                        &[("error", &e.to_string())],
+                    );
+                    this.startup_error = Some(gpui::SharedString::from(text.clone()));
+                    window.push_notification(text, cx);
+                }
+            })
+            .is_err()
+        {
+            return;
+        }
+
+        // The link we held pointed at the server we just killed; the reconnect
+        // finds a new process whose registry knows nothing about these panes.
+        // The helper drops the dead link first — a pull sent down it dies on a
+        // dead socket before the reader notices — and rebuilds every local
+        // window from the tree. Where the restart failed and the daemon is
+        // really gone, the pull misses and the rehydration debt keeps the empty
+        // window from being pushed back up.
+        //
+        // The invalidating helper, not the one the reconnect uses: nothing here
+        // handshaked a link. Half of `hand_off`'s failures happen *after* the
+        // exec — a daemon that never started listening again is gone, and the
+        // client we still hold points at its socket, which `is_connected` keeps
+        // calling good until its reader sees the EOF.
+        let _ = cx.update(crate::ui::tree_sync::resync_after_local_daemon_change);
+
+        let _ = this.update_in(cx, |this, window, cx| {
+            this.focus_active(window, cx);
+            cx.notify();
+        });
     }
 
     fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
@@ -9250,6 +9268,69 @@ mod keybinding_gpui_tests {
             app.active_settings().map(|s| s.recording.is_some())
         });
         assert_eq!(recording, Some(false));
+    }
+}
+
+#[cfg(test)]
+mod restart_server_gpui_tests {
+    use crate::core::config::Config;
+    use crate::core::session::Session;
+    use crate::ui::app::Tty7App;
+    use gpui::{AppContext, TestAppContext};
+
+    /// Clicking Restart Server made the whole app disappear.
+    ///
+    /// The work that puts the window back together after the restart ends by
+    /// rebuilding every local window from the machine tree, and the first thing
+    /// that rebuild asks each window is which tabs it is showing — which it
+    /// reads back out of the window registry. Run from inside `update_in` on
+    /// this window's own entity, the first window it reaches for is the one the
+    /// closure already holds leased, and gpui answers a double lease by
+    /// panicking, which on the main thread is the process.
+    ///
+    /// Driven through `settle_after_restart` with a restart that "succeeded",
+    /// because the crash is in the part that runs either way, not in the
+    /// restart itself.
+    #[gpui::test]
+    async fn settling_after_a_restart_does_not_lease_the_window_twice(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+            crate::ui::windows::WindowRegistry::init(cx);
+        });
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty7App::with_session(None, Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view()
+                    .clone()
+                    .downcast::<Tty7App>()
+                    .ok()
+                    .expect("window root wraps a Tty7App")
+            })
+            .unwrap();
+
+        // Registered the way an opened window registers itself: without this
+        // the rebuild finds no window to ask and never reaches for the entity,
+        // which is the whole thing under test.
+        let handle = window.into();
+        let weak = app.downgrade();
+        app.update(cx, |app, cx| {
+            crate::ui::windows::WindowRegistry::register(cx, app.workspace, handle, weak);
+        });
+
+        Tty7App::settle_after_restart(app.downgrade(), Ok(()), &mut cx.to_async()).await;
+
+        assert!(
+            app.update(cx, |app, _| app.startup_error.is_none()),
+            "a restart reported as successful must not leave an error banner"
+        );
     }
 }
 
