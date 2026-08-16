@@ -716,6 +716,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentPi => "Pi",
         L10nKey::SettingsAgentGrokBuild => "Grok Build",
         L10nKey::SettingsAgentOhMyPi => "Oh My Pi",
+        L10nKey::SettingsAgentGemini => "Gemini",
+        L10nKey::SettingsAgentDroid => "Droid",
+        L10nKey::SettingsAgentQwenCode => "Qwen Code",
+        L10nKey::SettingsAgentGoose => "Goose",
         L10nKey::SettingsSearchAboutKeywords => {
             "バージョン ライセンス クレジット ビルド 更新 確認 github about version license credits update check"
         }
@@ -831,6 +835,18 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchOhMyPiKeywords => {
             "エージェント 統合 拡張 インストール omp oh my pi agent integration extension install"
+        }
+        L10nKey::SettingsSearchGeminiKeywords => {
+            "エージェント 統合 フック インストール gemini google agent integration hooks install"
+        }
+        L10nKey::SettingsSearchDroidKeywords => {
+            "エージェント 統合 フック インストール droid factory agent integration hooks install"
+        }
+        L10nKey::SettingsSearchQwenCodeKeywords => {
+            "エージェント 統合 フック インストール qwen code agent integration hooks install"
+        }
+        L10nKey::SettingsSearchGooseKeywords => {
+            "エージェント 統合 フック プラグイン インストール goose agent integration hooks plugin install"
         }
         L10nKey::SettingsSearchPiKeywords => {
             "エージェント 統合 拡張 インストール pi agent integration extension install"

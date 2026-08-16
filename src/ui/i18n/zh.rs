@@ -625,6 +625,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentPi => "Pi",
         L10nKey::SettingsAgentGrokBuild => "Grok Build",
         L10nKey::SettingsAgentOhMyPi => "Oh My Pi",
+        L10nKey::SettingsAgentGemini => "Gemini",
+        L10nKey::SettingsAgentDroid => "Droid",
+        L10nKey::SettingsAgentQwenCode => "Qwen Code",
+        L10nKey::SettingsAgentGoose => "Goose",
         L10nKey::SettingsSearchAboutKeywords => {
             "关于 版本 许可证 致谢 构建 更新 检查 github about version license credits update"
         }
@@ -738,6 +742,18 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchOhMyPiKeywords => {
             "Oh My Pi agent 集成 扩展 安装 omp oh my pi agent integration extension install"
+        }
+        L10nKey::SettingsSearchGeminiKeywords => {
+            "Gemini agent 集成 钩子 安装 gemini google agent integration hooks install"
+        }
+        L10nKey::SettingsSearchDroidKeywords => {
+            "Droid agent 集成 钩子 安装 droid factory agent integration hooks install"
+        }
+        L10nKey::SettingsSearchQwenCodeKeywords => {
+            "Qwen Code 通义千问 agent 集成 钩子 安装 qwen code agent integration hooks install"
+        }
+        L10nKey::SettingsSearchGooseKeywords => {
+            "Goose agent 集成 钩子 插件 安装 goose agent integration hooks plugin install"
         }
         L10nKey::SettingsSearchPiKeywords => {
             "Pi agent 集成 扩展 安装 pi agent integration extension install"

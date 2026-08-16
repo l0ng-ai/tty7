@@ -62,7 +62,11 @@ impl CLIAgent {
             CLIAgent::Auggie => &["auggie"],
             CLIAgent::Hermes => &["hermes"],
             CLIAgent::Vibe => &["vibe", "vibe-acp"],
-            CLIAgent::Antigravity => &["agy", "antigravity"],
+            // `agy` only. The `antigravity` binary the IDE installs is a
+            // launcher shim in the shape of VS Code's `code`, not the terminal
+            // agent — and the name also collides with `python3 -m antigravity`,
+            // the standard way to trigger Python's own easter egg.
+            CLIAgent::Antigravity => &["agy"],
             CLIAgent::Grok => &["grok"],
             CLIAgent::Qwen => &["qwen", "qwen-code"],
             // Oh My Pi is a fork of Pi, but it ships one binary of its own and
@@ -137,7 +141,16 @@ impl CLIAgent {
             CLIAgent::Gemini => Some(format!("gemini{flags} --resume {session_id}")),
             CLIAgent::OpenCode => Some(format!("opencode{flags} --session {session_id}")),
             CLIAgent::Amp => Some(format!("amp threads continue {session_id}{flags}")),
+            CLIAgent::Auggie => Some(format!("auggie{flags} --resume {session_id}")),
+            CLIAgent::Hermes => Some(format!("hermes chat{flags} --resume {session_id}")),
+            CLIAgent::Qwen => Some(format!("qwen{flags} --resume {session_id}")),
+            CLIAgent::Goose => Some(format!(
+                "goose session{flags} --resume --session-id {session_id}"
+            )),
+            CLIAgent::Vibe => Some(format!("vibe{flags} --resume {session_id}")),
+            CLIAgent::Antigravity => Some(format!("agy{flags} --conversation {session_id}")),
             CLIAgent::Cursor => Some(format!("cursor-agent{flags} --resume {session_id}")),
+            CLIAgent::Droid => Some(format!("droid{flags} --resume {session_id}")),
             CLIAgent::Copilot => Some(format!("copilot{flags} --resume {session_id}")),
             CLIAgent::Grok => Some(format!("grok{flags} --resume {session_id}")),
             CLIAgent::Pi => Some(format!("pi{flags} --session {session_id}")),
@@ -149,6 +162,9 @@ impl CLIAgent {
     fn opts_out_of_sessions(self, argv: &[String]) -> bool {
         let ephemeral: &[&str] = match self {
             CLIAgent::Pi | CLIAgent::OhMyPi => &["--no-session"],
+            // "Do not save conversation history" — nothing is persisted, so
+            // there is no session left to resume from.
+            CLIAgent::Auggie => &["--dont-save-session"],
             _ => &[],
         };
         argv.iter().any(|t| ephemeral.contains(&t.as_str()))
@@ -167,6 +183,16 @@ impl CLIAgent {
             CLIAgent::Grok => Some(format!("grok{flags} --resume {session_id} --fork-session")),
             CLIAgent::OpenCode => Some(format!("opencode{flags} --session {session_id} --fork")),
             CLIAgent::OhMyPi => Some(format!("omp{flags} --fork {session_id}")),
+            // Droid forks with a standalone flag rather than resume-plus-a-switch.
+            CLIAgent::Droid => Some(format!("droid{flags} --fork {session_id}")),
+            // `fork` is missing from `amp threads --help`, but the subcommand is
+            // real — `amp threads fork --help` prints its own usage.
+            CLIAgent::Amp => Some(format!("amp threads fork {session_id}{flags}")),
+            CLIAgent::Qwen => Some(format!("qwen{flags} --resume {session_id} --fork-session")),
+            // Goose forks by adding a switch to the same resume invocation.
+            CLIAgent::Goose => Some(format!(
+                "goose session{flags} --resume --fork --session-id {session_id}"
+            )),
             _ => None,
         }
     }
@@ -177,7 +203,11 @@ impl CLIAgent {
             | CLIAgent::Codex
             | CLIAgent::Grok
             | CLIAgent::OpenCode
-            | CLIAgent::OhMyPi => Some("Fork Session"),
+            | CLIAgent::OhMyPi
+            | CLIAgent::Droid
+            | CLIAgent::Amp
+            | CLIAgent::Qwen
+            | CLIAgent::Goose => Some("Fork Session"),
             _ => None,
         }
     }
@@ -225,6 +255,33 @@ impl CLIAgent {
             }
         }
 
+        // Agents that reach their session through subcommands leave `stale`
+        // nothing to drop — `amp threads continue <id>` names the thread with a
+        // positional argument, and `goose session --resume` hides the flags one
+        // level down. Either way the prefix has to come off here, because the
+        // "a bare token must follow a flag" check below would otherwise reject
+        // the tail wholesale and take every launch flag down with it. The
+        // replacement command spells the subcommand out again itself.
+        let (groups, verbs): (&[&str], &[&str]) = match self {
+            CLIAgent::Amp => (
+                &["threads", "t"],
+                &["continue", "c", "fork", "f", "handoff", "h"],
+            ),
+            CLIAgent::Auggie => (&["session"], &["resume", "continue"]),
+            CLIAgent::Goose => (&["session", "s"], &[]),
+            CLIAgent::Hermes => (&["chat"], &[]),
+            _ => (&[], &[]),
+        };
+        if tail.first().is_some_and(|t| groups.contains(t)) {
+            tail.remove(0);
+            if tail.first().is_some_and(|t| verbs.contains(t)) {
+                tail.remove(0);
+                if tail.first().is_some_and(|t| !t.starts_with('-')) {
+                    tail.remove(0);
+                }
+            }
+        }
+
         let stale: &[&str] = match self {
             CLIAgent::Claude => &[
                 "--resume",
@@ -235,8 +292,18 @@ impl CLIAgent {
                 "--from-pr",
                 "--fork-session",
             ],
-            CLIAgent::Gemini | CLIAgent::Cursor => &["--resume", "-r"],
-            CLIAgent::Copilot => &["--resume", "-r", "--continue", "-c"],
+            // `--session-id` and `--session-file` name a session too, and Gemini
+            // rejects them outright alongside `--resume`.
+            CLIAgent::Gemini => &["--resume", "-r", "--session-id", "--session-file"],
+            CLIAgent::Cursor => &["--resume", "-r", "--continue"],
+            CLIAgent::Copilot | CLIAgent::Auggie | CLIAgent::Hermes => {
+                &["--resume", "-r", "--continue", "-c"]
+            }
+            CLIAgent::Qwen => &["--resume", "-r", "--continue", "-c", "--fork-session"],
+            CLIAgent::Droid => &["--resume", "-r", "--fork", "--session-id", "-s"],
+            CLIAgent::Goose => &["--resume", "-r", "--fork", "--session-id", "--name"],
+            CLIAgent::Vibe => &["--resume", "--continue"],
+            CLIAgent::Antigravity => &["--conversation", "--continue", "-c"],
             CLIAgent::OpenCode => &["--session", "-s", "--continue", "-c", "--fork"],
             CLIAgent::Codex => &["--last"],
             CLIAgent::Pi => &[
@@ -308,20 +375,20 @@ impl CLIAgent {
             CLIAgent::Claude => 0xD97757,
             CLIAgent::Codex => 0x000000,
             CLIAgent::Gemini => 0x4285F4,
-            CLIAgent::Aider => 0x14B8A6,
+            CLIAgent::Aider => 0x14B014,
             CLIAgent::Amp => 0xF34E3F,
             CLIAgent::OpenCode => 0x6E56CF,
             CLIAgent::Copilot => 0x8957E5,
             CLIAgent::Cursor => 0x9AA0A6,
-            CLIAgent::Goose => 0x9A8CFF,
-            CLIAgent::Droid => 0xF59E0B,
+            CLIAgent::Goose => 0x3ECC5F,
+            CLIAgent::Droid => 0xEF6F2E,
             CLIAgent::Pi => 0x0EA5E9,
             CLIAgent::Auggie => 0x16A34A,
             CLIAgent::Hermes => 0x8B5CF6,
-            CLIAgent::Vibe => 0xFF7000,
-            CLIAgent::Antigravity => 0x2563EB,
+            CLIAgent::Vibe => 0xFA520F,
+            CLIAgent::Antigravity => 0x3186FF,
             CLIAgent::Grok => 0x000000,
-            CLIAgent::Qwen => 0x7C3AED,
+            CLIAgent::Qwen => 0x6D44E8,
             CLIAgent::OhMyPi => 0xF97316,
         }
     }
@@ -340,12 +407,12 @@ impl CLIAgent {
             CLIAgent::Grok => "icons/agents/grok.svg",
             CLIAgent::Pi => "icons/agents/pi.svg",
             CLIAgent::OhMyPi => "icons/agents/omp.svg",
+            CLIAgent::Qwen => "icons/agents/qwen.svg",
             CLIAgent::Aider
             | CLIAgent::Auggie
             | CLIAgent::Hermes
             | CLIAgent::Vibe
-            | CLIAgent::Antigravity
-            | CLIAgent::Qwen => "icons/bot.svg",
+            | CLIAgent::Antigravity => "icons/bot.svg",
         }
     }
 
@@ -746,7 +813,7 @@ mod tests {
             .collect();
         assert_eq!(
             fallback,
-            ["aider", "auggie", "hermes", "vibe", "antigravity", "qwen"]
+            ["aider", "auggie", "hermes", "vibe", "antigravity"]
         );
         assert!(
             !fallback.contains(&"omp"),
@@ -1349,14 +1416,36 @@ mod tests {
             CLIAgent::OpenCode.fork_command("s-1", None).as_deref(),
             Some("opencode --session s-1 --fork")
         );
+        assert_eq!(
+            CLIAgent::Droid.fork_command("session-abc", None).as_deref(),
+            Some("droid --fork session-abc")
+        );
+        assert_eq!(
+            CLIAgent::Qwen.fork_command("q-1", None).as_deref(),
+            Some("qwen --resume q-1 --fork-session")
+        );
+        assert_eq!(
+            CLIAgent::Goose.fork_command("20260213_9", None).as_deref(),
+            Some("goose session --resume --fork --session-id 20260213_9")
+        );
+        // Undocumented in `amp threads --help`, but `amp threads fork --help`
+        // prints its own usage, so the subcommand is real.
+        assert_eq!(
+            CLIAgent::Amp.fork_command("T-abc", None).as_deref(),
+            Some("amp threads fork T-abc")
+        );
 
+        // Cursor and Antigravity fork only from inside a running TUI (`/fork`),
+        // which is not something a launch command line can reach.
         for agent in [
             CLIAgent::Gemini,
             CLIAgent::Copilot,
             CLIAgent::Cursor,
-            CLIAgent::Amp,
             CLIAgent::Aider,
-            CLIAgent::Qwen,
+            CLIAgent::Auggie,
+            CLIAgent::Hermes,
+            CLIAgent::Vibe,
+            CLIAgent::Antigravity,
         ] {
             assert_eq!(
                 agent.fork_command("abc", None),
@@ -1465,6 +1554,110 @@ mod tests {
                 )
                 .as_deref(),
             Some("opencode --session s-2")
+        );
+    }
+
+    #[test]
+    fn newly_wired_agents_resume_the_way_their_own_cli_spells_it() {
+        let argv = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        for (agent, id, want) in [
+            (CLIAgent::Droid, "session-abc", "droid --resume session-abc"),
+            (CLIAgent::Qwen, "q-1", "qwen --resume q-1"),
+            (CLIAgent::Auggie, "a-1", "auggie --resume a-1"),
+            (
+                CLIAgent::Goose,
+                "20260213_9",
+                "goose session --resume --session-id 20260213_9",
+            ),
+            (
+                CLIAgent::Hermes,
+                "20260812_213234_5de948",
+                "hermes chat --resume 20260812_213234_5de948",
+            ),
+            (CLIAgent::Vibe, "v-1", "vibe --resume v-1"),
+            (
+                CLIAgent::Antigravity,
+                "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                "agy --conversation a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            ),
+        ] {
+            assert_eq!(
+                agent.resume_command(id, None).as_deref(),
+                Some(want),
+                "{} resumes with the wrong command",
+                agent.slug()
+            );
+        }
+
+        // A subcommand-addressed session leaves nothing in `stale` to strip, so
+        // the prefix has to be dropped structurally — otherwise the launch flags
+        // go down with it.
+        assert_eq!(
+            CLIAgent::Amp
+                .resume_command(
+                    "T-2",
+                    Some(&argv(&[
+                        "amp",
+                        "threads",
+                        "continue",
+                        "T-1",
+                        "--dangerously-allow-all",
+                    ]))
+                )
+                .as_deref(),
+            Some("amp threads continue T-2 --dangerously-allow-all")
+        );
+        assert_eq!(
+            CLIAgent::Goose
+                .resume_command(
+                    "20260213_9",
+                    Some(&argv(&["goose", "session", "--resume", "--name", "old"]))
+                )
+                .as_deref(),
+            Some("goose session --resume --session-id 20260213_9")
+        );
+        assert_eq!(
+            CLIAgent::Auggie
+                .resume_command(
+                    "a-2",
+                    Some(&argv(&["auggie", "session", "resume", "a-1", "--verbose"]))
+                )
+                .as_deref(),
+            Some("auggie --verbose --resume a-2")
+        );
+        assert_eq!(
+            CLIAgent::Droid
+                .resume_command(
+                    "s-2",
+                    Some(&argv(&["droid", "--fork", "s-1", "--auto", "low"]))
+                )
+                .as_deref(),
+            Some("droid --auto low --resume s-2")
+        );
+
+        // Nothing was persisted, so there is nothing to resume or fork.
+        for id in ["a-1"] {
+            assert_eq!(
+                CLIAgent::Auggie
+                    .resume_command(id, Some(&argv(&["auggie", "--dont-save-session"]))),
+                None
+            );
+        }
+    }
+
+    /// `python3 -m antigravity` opens an xkcd comic. It is the standard way to
+    /// trigger Python's easter egg, and the interpreter branch used to read that
+    /// module name as an agent.
+    #[test]
+    fn the_python_easter_egg_is_not_a_coding_agent() {
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["python3", "-m", "antigravity"])),
+            None
+        );
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["agy"])),
+            Some(CLIAgent::Antigravity)
         );
     }
 

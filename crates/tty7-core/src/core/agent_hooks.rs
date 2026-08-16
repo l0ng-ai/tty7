@@ -43,9 +43,12 @@ fn effective_agent(agent: &str, ran_by_grok: bool) -> &str {
 }
 
 fn effective_event<'a>(agent: &str, event: &'a str, stdin_json: &str) -> Option<&'a str> {
-    if matches!(agent, "copilot" | "grok") && event == "notification" {
+    if matches!(agent, "copilot" | "grok" | "droid" | "gemini") && event == "notification" {
         let blocks = stdin_json.contains("elicitation_dialog")
-            || (agent == "copilot" && stdin_json.contains("permission_prompt"));
+            || (matches!(agent, "copilot" | "droid") && stdin_json.contains("permission_prompt"))
+            // Gemini's only notification kind so far, but naming it keeps a
+            // future non-blocking one from being read as a block.
+            || (agent == "gemini" && stdin_json.contains("ToolPermission"));
         return blocks.then_some("permission-request");
     }
     Some(event)
@@ -63,6 +66,8 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
         ("session_id", "sessionId"),
         ("message", "message"),
         ("cwd", "cwd"),
+        // Goose spells the working directory its own way.
+        ("cwd", "working_dir"),
     ] {
         if let Some(v) = payload
             .get(key)
@@ -214,10 +219,14 @@ pub enum HookAgent {
     Pi,
     Grok,
     OhMyPi,
+    Gemini,
+    Droid,
+    Qwen,
+    Goose,
 }
 
 impl HookAgent {
-    pub const ALL: [HookAgent; 7] = [
+    pub const ALL: [HookAgent; 11] = [
         HookAgent::Claude,
         HookAgent::Codex,
         HookAgent::Copilot,
@@ -225,6 +234,10 @@ impl HookAgent {
         HookAgent::Pi,
         HookAgent::Grok,
         HookAgent::OhMyPi,
+        HookAgent::Gemini,
+        HookAgent::Droid,
+        HookAgent::Qwen,
+        HookAgent::Goose,
     ];
 
     /// The hooks behind a detected agent process, if it has any.
@@ -241,17 +254,36 @@ impl HookAgent {
             CLIAgent::Pi => Some(HookAgent::Pi),
             CLIAgent::Grok => Some(HookAgent::Grok),
             CLIAgent::OhMyPi => Some(HookAgent::OhMyPi),
-            CLIAgent::Gemini
-            | CLIAgent::Aider
+            CLIAgent::Gemini => Some(HookAgent::Gemini),
+            CLIAgent::Droid => Some(HookAgent::Droid),
+            CLIAgent::Qwen => Some(HookAgent::Qwen),
+            CLIAgent::Goose => Some(HookAgent::Goose),
+            CLIAgent::Aider
             | CLIAgent::Amp
             | CLIAgent::Cursor
-            | CLIAgent::Goose
-            | CLIAgent::Droid
             | CLIAgent::Auggie
             | CLIAgent::Hermes
             | CLIAgent::Vibe
-            | CLIAgent::Antigravity
-            | CLIAgent::Qwen => None,
+            | CLIAgent::Antigravity => None,
+        }
+    }
+
+    /// The events this agent's hooks merge into a shared JSON config, if that
+    /// is how it takes them. `None` means the agent owns a generated file
+    /// instead — see [`owned_file_content`].
+    fn hook_map_events(self) -> Option<&'static [(&'static str, &'static str)]> {
+        match self {
+            HookAgent::Claude => Some(CLAUDE_HOOK_EVENTS),
+            HookAgent::Codex => Some(CODEX_HOOK_EVENTS),
+            HookAgent::Gemini => Some(GEMINI_HOOK_EVENTS),
+            HookAgent::Droid => Some(DROID_HOOK_EVENTS),
+            HookAgent::Qwen => Some(QWEN_HOOK_EVENTS),
+            HookAgent::Copilot
+            | HookAgent::OpenCode
+            | HookAgent::Pi
+            | HookAgent::Grok
+            | HookAgent::OhMyPi
+            | HookAgent::Goose => None,
         }
     }
 
@@ -264,6 +296,10 @@ impl HookAgent {
             HookAgent::Pi => "pi",
             HookAgent::Grok => "grok",
             HookAgent::OhMyPi => "omp",
+            HookAgent::Gemini => "gemini",
+            HookAgent::Droid => "droid",
+            HookAgent::Qwen => "qwen",
+            HookAgent::Goose => "goose",
         }
     }
 
@@ -276,6 +312,10 @@ impl HookAgent {
             HookAgent::Pi => "Pi",
             HookAgent::Grok => "Grok Build",
             HookAgent::OhMyPi => "Oh My Pi",
+            HookAgent::Gemini => "Gemini",
+            HookAgent::Droid => "Droid",
+            HookAgent::Qwen => "Qwen Code",
+            HookAgent::Goose => "Goose",
         }
     }
 
@@ -296,6 +336,15 @@ impl HookAgent {
             HookAgent::Grok => target.under_home(&[".grok", "hooks", OWNED_FILE_STEM_JSON]),
             HookAgent::OhMyPi => {
                 target.under_home(&[".omp", "agent", "extensions", "tty7", "index.ts"])
+            }
+            HookAgent::Gemini => target.under_home(&[".gemini", "settings.json"]),
+            HookAgent::Droid => target.under_home(&[".factory", "settings.json"]),
+            HookAgent::Qwen => target.under_home(&[".qwen", "settings.json"]),
+            // The Open Plugins layout, which Goose implements rather than
+            // inventing its own: any `.agents/plugins/<name>/hooks/hooks.json`
+            // is picked up at startup.
+            HookAgent::Goose => {
+                target.under_home(&[".agents", "plugins", "tty7", "hooks", "hooks.json"])
             }
         }
     }
@@ -449,20 +498,13 @@ pub enum HooksState {
 
 pub fn hooks_state(target: &HookTarget, agent: HookAgent) -> HooksState {
     let path = agent.target_path(target);
-    match agent {
-        HookAgent::Claude => hook_map_state(target, &path, agent, CLAUDE_HOOK_EVENTS),
-        HookAgent::Codex => hook_map_state(target, &path, agent, CODEX_HOOK_EVENTS),
-        HookAgent::Copilot
-        | HookAgent::OpenCode
-        | HookAgent::Pi
-        | HookAgent::Grok
-        | HookAgent::OhMyPi => {
-            let Some(expected) = owned_file_content(target, agent) else {
-                return HooksState::NotInstalled;
-            };
-            owned_file_state(target, &path, &expected, &agent.marker())
-        }
+    if let Some(events) = agent.hook_map_events() {
+        return hook_map_state(target, &path, agent, events);
     }
+    let Some(expected) = owned_file_content(target, agent) else {
+        return HooksState::NotInstalled;
+    };
+    owned_file_state(target, &path, &expected, &agent.marker())
 }
 
 /// What an install or uninstall actually did.
@@ -489,43 +531,30 @@ pub enum HookOutcome {
 
 pub fn install_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<HookOutcome> {
     let path = agent.target_path(target);
-    match agent {
-        HookAgent::Claude => {
-            hook_map_install(target, &path, agent, CLAUDE_HOOK_EVENTS)?;
-            Ok(HookOutcome::Installed)
+    if let Some(events) = agent.hook_map_events() {
+        hook_map_install(target, &path, agent, events)?;
+        if agent != HookAgent::Codex {
+            return Ok(HookOutcome::Installed);
         }
-        HookAgent::Codex => {
-            hook_map_install(target, &path, agent, CODEX_HOOK_EVENTS)?;
-            if !target.is_local() {
-                return Ok(HookOutcome::InstalledEnableCodexThere);
-            }
-            Ok(match enable_codex_hooks_feature() {
-                Ok(()) => HookOutcome::Installed,
-                Err(e) => HookOutcome::InstalledCodexEnableFailed(e.to_string()),
-            })
+        if !target.is_local() {
+            return Ok(HookOutcome::InstalledEnableCodexThere);
         }
-        HookAgent::Copilot
-        | HookAgent::OpenCode
-        | HookAgent::Pi
-        | HookAgent::Grok
-        | HookAgent::OhMyPi => {
-            let content = owned_file_content(target, agent)
-                .ok_or_else(|| anyhow::anyhow!("{agent:?} has no owned file"))?;
-            owned_file_install(target, &path, &content, &agent.marker())?;
-            Ok(HookOutcome::Installed)
-        }
+        return Ok(match enable_codex_hooks_feature() {
+            Ok(()) => HookOutcome::Installed,
+            Err(e) => HookOutcome::InstalledCodexEnableFailed(e.to_string()),
+        });
     }
+    let content = owned_file_content(target, agent)
+        .ok_or_else(|| anyhow::anyhow!("{agent:?} has no owned file"))?;
+    owned_file_install(target, &path, &content, &agent.marker())?;
+    Ok(HookOutcome::Installed)
 }
 
 pub fn uninstall_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<HookOutcome> {
     let path = agent.target_path(target);
-    match agent {
-        HookAgent::Claude | HookAgent::Codex => hook_map_uninstall(target, &path, agent),
-        HookAgent::Copilot
-        | HookAgent::OpenCode
-        | HookAgent::Pi
-        | HookAgent::Grok
-        | HookAgent::OhMyPi => owned_file_uninstall(target, &path, &agent.marker()),
+    match agent.hook_map_events() {
+        Some(_) => hook_map_uninstall(target, &path, agent),
+        None => owned_file_uninstall(target, &path, &agent.marker()),
     }
 }
 
@@ -598,6 +627,40 @@ const CODEX_HOOK_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "prompt-submit"),
     ("Stop", "stop"),
+];
+
+/// Gemini names the turn boundaries after the agent rather than the user, and
+/// omitting `matcher` matches everything (`hookPlanner.ts`, `!entry.matcher`),
+/// so the bare entries [`hook_map_install`] already writes are enough.
+const GEMINI_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("BeforeAgent", "prompt-submit"),
+    ("Notification", "notification"),
+    ("AfterTool", "tool-complete"),
+    ("AfterAgent", "stop"),
+    ("SessionEnd", "session-end"),
+];
+
+const DROID_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt-submit"),
+    ("Notification", "notification"),
+    ("PostToolUse", "tool-complete"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session-end"),
+];
+
+/// Qwen is the only agent here with a first-class permission event, so it needs
+/// none of the notification sniffing in [`effective_event`] — and it gets no
+/// `Notification` hook at all, which would only muddy a status the dedicated
+/// event already reports precisely.
+const QWEN_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt-submit"),
+    ("PermissionRequest", "permission-request"),
+    ("PostToolUse", "tool-complete"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session-end"),
 ];
 
 const GROK_HOOK_TIMEOUT_SECS: u32 = 10;
@@ -809,7 +872,12 @@ fn owned_file_content(target: &HookTarget, agent: HookAgent) -> Option<String> {
         HookAgent::OpenCode => opencode_plugin_js(target),
         HookAgent::Pi | HookAgent::OhMyPi => pi_extension_ts(target, agent),
         HookAgent::Grok => grok_hooks_json(target),
-        HookAgent::Claude | HookAgent::Codex => None,
+        HookAgent::Goose => goose_hooks_json(target),
+        HookAgent::Claude
+        | HookAgent::Codex
+        | HookAgent::Gemini
+        | HookAgent::Droid
+        | HookAgent::Qwen => None,
     }
 }
 
@@ -862,10 +930,26 @@ fn owned_file_uninstall(
         ));
     }
     target.host.remove(path, false)?;
-    if let Some(parent) = path.parent()
-        && parent.file_name().is_some_and(|n| n == "tty7")
-    {
-        let _ = target.host.remove(parent, false);
+    // Take the directories tty7 generated with it, innermost first, stopping at
+    // the one named after tty7. `remove` is not recursive, so a directory still
+    // holding someone else's file simply survives the attempt. Goose nests one
+    // level deeper than the rest (`.../tty7/hooks/hooks.json`), which is why
+    // this walks rather than checking a single parent.
+    let mut dir = path.parent();
+    while let Some(d) = dir {
+        if d.file_name().is_some_and(|n| n == "tty7") {
+            let _ = target.host.remove(d, false);
+            break;
+        }
+        if !d
+            .parent()
+            .and_then(|p| p.file_name())
+            .is_some_and(|n| n == "tty7")
+        {
+            break;
+        }
+        let _ = target.host.remove(d, false);
+        dir = d.parent();
     }
     Ok(HookOutcome::Removed)
 }
@@ -905,6 +989,33 @@ fn grok_hooks_json(target: &HookTarget) -> Option<String> {
             group["matcher"] = serde_json::Value::String((*matcher).to_string());
         }
         hooks.insert((*event).to_string(), serde_json::json!([group]));
+    }
+    serde_json::to_string_pretty(&serde_json::json!({ "hooks": hooks })).ok()
+}
+
+/// Goose has no permission hook — `PreToolUse` fires on every call, approved or
+/// not, so there is nothing here that could report a blocked turn. The four
+/// events it does have still carry the pane from idle to working to done.
+const GOOSE_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt-submit"),
+    ("PostToolUse", "tool-complete"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session-end"),
+];
+
+fn goose_hooks_json(target: &HookTarget) -> Option<String> {
+    let mut hooks = serde_json::Map::new();
+    for (event, sentinel) in GOOSE_HOOK_EVENTS {
+        hooks.insert(
+            (*event).to_string(),
+            serde_json::json!([{
+                "hooks": [{
+                    "type": "command",
+                    "command": target.hook_command(HookAgent::Goose, sentinel),
+                }]
+            }]),
+        );
     }
     serde_json::to_string_pretty(&serde_json::json!({ "hooks": hooks })).ok()
 }
@@ -1121,6 +1232,10 @@ mod tests {
         let mut events: Vec<&str> = CLAUDE_HOOK_EVENTS
             .iter()
             .chain(CODEX_HOOK_EVENTS)
+            .chain(GEMINI_HOOK_EVENTS)
+            .chain(DROID_HOOK_EVENTS)
+            .chain(QWEN_HOOK_EVENTS)
+            .chain(GOOSE_HOOK_EVENTS)
             .map(|(_, e)| *e)
             .chain(GROK_HOOK_EVENTS.iter().map(|(_, e, _)| *e))
             .collect();
@@ -1138,6 +1253,139 @@ mod tests {
             let kind_json = serde_json::to_value(ev.kind).unwrap();
             assert_eq!(kind_json, serde_json::Value::String(event.to_string()));
         }
+    }
+
+    #[test]
+    fn the_new_hook_agents_target_the_paths_their_clis_read() {
+        let host = FakeRemote::shared();
+        let t = HookTarget::remote(&*host, PathBuf::from("/home/me"));
+
+        for (agent, want) in [
+            (HookAgent::Gemini, "/home/me/.gemini/settings.json"),
+            (HookAgent::Droid, "/home/me/.factory/settings.json"),
+            (HookAgent::Qwen, "/home/me/.qwen/settings.json"),
+            (
+                HookAgent::Goose,
+                "/home/me/.agents/plugins/tty7/hooks/hooks.json",
+            ),
+        ] {
+            assert_eq!(
+                agent.target_path(&t),
+                PathBuf::from(want),
+                "{} writes somewhere its CLI does not read",
+                agent.slug()
+            );
+        }
+
+        let dir = std::env::temp_dir().join(format!("tty7-new-hooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = HookTarget::remote(&*host, dir.clone());
+
+        for agent in [
+            HookAgent::Gemini,
+            HookAgent::Droid,
+            HookAgent::Qwen,
+            HookAgent::Goose,
+        ] {
+            assert_eq!(hooks_state(&real, agent), HooksState::NotInstalled);
+            install_hooks(&real, agent).unwrap_or_else(|e| panic!("{}: {e}", agent.slug()));
+            assert_eq!(
+                hooks_state(&real, agent),
+                HooksState::Installed,
+                "{} does not read back what it wrote",
+                agent.slug()
+            );
+            let written = std::fs::read_to_string(agent.target_path(&real)).unwrap();
+            assert!(
+                written.contains(&format!("agent-hook {}", agent.slug())),
+                "{} wrote a config without its own emitter",
+                agent.slug()
+            );
+            uninstall_hooks(&real, agent).unwrap_or_else(|e| panic!("{}: {e}", agent.slug()));
+            assert_eq!(hooks_state(&real, agent), HooksState::NotInstalled);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Qwen is the one agent that reports a blocked turn outright, so it must
+    /// not also carry the `Notification` hook the others need — that event fires
+    /// for non-blocking alerts too and would strand the pane on "waiting".
+    #[test]
+    fn qwen_reports_permission_requests_natively() {
+        assert!(
+            QWEN_HOOK_EVENTS
+                .iter()
+                .any(|(hook, tty7)| *hook == "PermissionRequest" && *tty7 == "permission-request")
+        );
+        assert!(
+            !QWEN_HOOK_EVENTS
+                .iter()
+                .any(|(hook, _)| *hook == "Notification")
+        );
+        assert_eq!(
+            effective_event("qwen", "permission-request", "{}"),
+            Some("permission-request")
+        );
+    }
+
+    #[test]
+    fn gemini_and_droid_notifications_filter_to_permission_requests() {
+        assert_eq!(
+            effective_event(
+                "gemini",
+                "notification",
+                r#"{"notification_type":"ToolPermission"}"#
+            ),
+            Some("permission-request")
+        );
+        assert_eq!(
+            effective_event(
+                "droid",
+                "notification",
+                r#"{"notification_type":"permission_prompt"}"#
+            ),
+            Some("permission-request")
+        );
+        // A non-blocking alert must not strand the pane on "waiting".
+        for agent in ["gemini", "droid"] {
+            assert_eq!(
+                effective_event(
+                    agent,
+                    "notification",
+                    r#"{"notification_type":"auth_success"}"#
+                ),
+                None,
+                "{agent} reported an idle notification as a block"
+            );
+        }
+    }
+
+    #[test]
+    fn uninstalling_goose_takes_its_generated_plugin_dirs_with_it() {
+        let root = std::env::temp_dir().join(format!("tty7-goose-test-{}", std::process::id()));
+        let plugins = root.join("plugins");
+        let plugin = plugins.join("tty7");
+        let hooks_dir = plugin.join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let path = hooks_dir.join("hooks.json");
+
+        let host = local_host();
+        let t = HookTarget::local(&*host).expect("home resolves in tests");
+        let content = goose_hooks_json(&t).expect("goose content builds");
+        assert!(content.contains("agent-hook goose"));
+        let marker = "agent-hook goose";
+
+        owned_file_install(&t, &path, &content, marker).expect("install");
+        owned_file_uninstall(&t, &path, marker).expect("uninstall");
+
+        assert!(!path.exists());
+        assert!(!hooks_dir.exists(), "the generated hooks/ dir goes too");
+        assert!(!plugin.exists(), "and the tty7 plugin dir above it");
+        assert!(plugins.exists(), "but never the shared plugins/ dir");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

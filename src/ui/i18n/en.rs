@@ -707,6 +707,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAgentPi => "Pi",
         L10nKey::SettingsAgentGrokBuild => "Grok Build",
         L10nKey::SettingsAgentOhMyPi => "Oh My Pi",
+        L10nKey::SettingsAgentGemini => "Gemini",
+        L10nKey::SettingsAgentDroid => "Droid",
+        L10nKey::SettingsAgentQwenCode => "Qwen Code",
+        L10nKey::SettingsAgentGoose => "Goose",
         L10nKey::SettingsSearchAboutKeywords => "version license credits build update check github",
         L10nKey::SettingsSearchAppHttpProxyKeywords => {
             "proxy http https socks socks5 clash v2ray network download update"
@@ -787,6 +791,12 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "alt keyboard modifier escape macos option meta option acts as meta"
         }
         L10nKey::SettingsSearchOhMyPiKeywords => "agent integration extension install omp oh my pi",
+        L10nKey::SettingsSearchGeminiKeywords => "agent integration hooks install gemini google",
+        L10nKey::SettingsSearchDroidKeywords => "agent integration hooks install droid factory",
+        L10nKey::SettingsSearchQwenCodeKeywords => {
+            "agent integration hooks install qwen code qwen-code"
+        }
+        L10nKey::SettingsSearchGooseKeywords => "agent integration hooks plugin install goose",
         L10nKey::SettingsSearchPiKeywords => "agent integration extension install pi",
         L10nKey::SettingsSearchPortForwardingKeywords => {
             "ssh tunnel local remote dynamic socks forward rule"
