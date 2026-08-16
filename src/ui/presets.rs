@@ -1288,6 +1288,32 @@ mod tests {
         }
     }
 
+    /// Every built-in theme is on the page that lists them.
+    ///
+    /// The page names them one by one and calls them "Nine built-ins", so a
+    /// tenth added here leaves the page wrong in two places at once — a
+    /// reader counting the table against the picker finds a theme nobody
+    /// wrote down.
+    ///
+    /// Display names rather than ids, because the page is written for someone
+    /// reading the picker: `rose_pine` is "Rosé Pine" there, accent and all.
+    #[test]
+    fn every_built_in_theme_is_on_the_themes_page() {
+        const PAGE: &str = include_str!("../../docs/customization/themes.mdx");
+
+        let mut absent = Vec::new();
+        for theme in builtins() {
+            if !PAGE.contains(&theme.name) {
+                absent.push(theme.name.clone());
+            }
+        }
+        assert!(
+            absent.is_empty(),
+            "these built-in themes are not on the themes page: {absent:?}"
+        );
+        assert_eq!(builtins().len(), 9, "the page's description counts them");
+    }
+
     #[test]
     fn dark_is_inferred_from_background() {
         let dark: Vec<_> = builtins()
