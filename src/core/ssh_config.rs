@@ -52,10 +52,24 @@ fn strip_comment(line: &str) -> &str {
     }
 }
 
+/// `Keyword value`, and the `=` spellings OpenSSH accepts beside it.
+///
+/// ssh_config(5): keyword and argument "may be separated by whitespace or by
+/// whitespace and exactly one `=`". Splitting on whitespace alone dropped
+/// `Host=name` outright — the line has none — so a config written that way
+/// imported nothing and `alias_still_resolves` answered false for a host
+/// `ssh -G` resolves. That is the shape of a workspace parked as gone with
+/// nothing to say why (#525).
+///
+/// Only the separator is touched: a `=` inside the argument, as in
+/// `SetEnv FOO=bar`, is past the split and stays where it is.
 fn split_keyword(line: &str) -> Option<(&str, &str)> {
     let line = line.trim_start();
-    let ix = line.find(char::is_whitespace)?;
-    Some((&line[..ix], line[ix..].trim_start()))
+    let ix = line.find(|c: char| c.is_whitespace() || c == '=')?;
+    let (keyword, rest) = line.split_at(ix);
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('=').unwrap_or(rest);
+    Some((keyword, rest.trim_start()))
 }
 
 fn split_words(input: &str) -> Vec<String> {
@@ -910,6 +924,65 @@ fn forward_bind_host(host: String) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// `Host=name` is a config OpenSSH reads and tty7 used to skip whole.
+    ///
+    /// ssh_config(5) allows keyword and argument to be separated "by
+    /// whitespace or by whitespace and exactly one `=`", and `ssh -G eqhost`
+    /// against this very file answers `hostname example.com` and `user alice`.
+    /// Splitting on whitespace alone found no separator on those lines at all,
+    /// so the host imported as nothing and `alias_still_resolves` said false —
+    /// which parks a workspace as gone with nothing to say why (#525).
+    #[test]
+    fn a_config_written_with_equals_resolves_the_same_as_one_with_spaces() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = dir.path().join("config");
+        std::fs::write(
+            &cfg,
+            "Host=eqhost\n\
+             \x20   HostName=example.com\n\
+             \x20   User=alice\n\
+             \n\
+             Host = spacedhost\n\
+             \x20   HostName = example.net\n\
+             \n\
+             Host plainhost\n\
+             \x20   HostName example.org\n\
+             \x20   SetEnv FOO=bar\n",
+        )
+        .unwrap();
+
+        let imported = import_profiles_from(cfg.clone(), dir.path());
+        let named = |alias: &str| {
+            imported
+                .iter()
+                .find(|p| p.profile.name == alias)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{alias} was not imported: {:?}",
+                        imported.iter().map(|p| &p.profile.name).collect::<Vec<_>>()
+                    )
+                })
+        };
+
+        assert_eq!(named("eqhost").profile.host, "example.com");
+        assert_eq!(named("eqhost").profile.user, "alice");
+        assert_eq!(named("spacedhost").profile.host, "example.net");
+        assert_eq!(
+            named("plainhost").profile.host,
+            "example.org",
+            "an `=` inside an argument is past the split and must stay there"
+        );
+
+        let blocks = parse_config(&cfg, dir.path()).blocks;
+        for alias in ["eqhost", "spacedhost", "plainhost"] {
+            assert!(
+                alias_resolves_in(&blocks, alias),
+                "{alias} reads as gone, so its workspace would be parked"
+            );
+        }
+    }
+
     use super::*;
 
     #[test]
