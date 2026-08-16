@@ -177,7 +177,15 @@ fn action_bindings(effective: &[(String, String)]) -> Vec<KeyBinding> {
                     ));
                 }
             }
-            None => log::warn!("ignoring keybinding: unknown action '{action}'"),
+            // Not a typo in anyone's config: `set_binding` has already turned
+            // those away by name. Reaching here means the default list offers
+            // an action `make_binding` cannot build — a disagreement between
+            // two lists in this file, which `every_dispatchable_action_has_a_slot_to_bind_it_in`
+            // exists to keep from happening. Say so, rather than blaming the
+            // reader's config for tty7's own inconsistency.
+            None => log::warn!(
+                "keybinding for '{action}' dropped: tty7 offers this action but cannot                  bind it — please report it"
+            ),
         }
     }
     bindings
@@ -736,7 +744,12 @@ fn set_binding(effective: &mut [(String, String)], action: &str, key: String) {
         Some(slot) => slot.1 = key,
         // A hand-edited config.json with a typo used to vanish into this
         // branch. The Keybindings page lists every name that works.
-        None => log::warn!("keybinding for unknown action {action:?} ignored"),
+        //
+        // Worded like its neighbour in `action_bindings`: the two report the
+        // two halves of one line in config.json, and a reader scanning the log
+        // should not have to notice that "unknown action" and "invalid
+        // keystroke" are the same kind of news about the same setting.
+        None => log::warn!("ignoring keybinding for '{action}': no such action"),
     }
 }
 
