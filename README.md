@@ -27,7 +27,7 @@
 ## Why
 
 - **Performance** — ~2× the throughput of Alacritty, Ghostty, or Kitty ([benchmarks](#benchmarks))
-- **Persistent sessions** — quit or reboot; your shells and supported agent sessions keep running, no tmux
+- **Persistent sessions** — quit the app and your shells keep running; after a reboot the layout comes back and supported agent conversations resume, no tmux
 - **Editor-grade input** — suggestions, completion, highlighting, history search
 - **Remote development** — files, repos, panes, and git data stay on the remote machine
 - **Native SSH** — profiles, SFTP, port forwarding, and jump hosts
