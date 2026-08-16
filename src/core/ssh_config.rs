@@ -586,7 +586,18 @@ fn parse_config_file(
         return false;
     };
     files.push(path.clone());
-    let base = path.parent().unwrap_or(home).to_path_buf();
+    // `~/.ssh`, not this file's directory. ssh_config(5): a relative include
+    // is "assumed to be in ~/.ssh if included in a user configuration file",
+    // wherever the line itself sits — checked against ssh, which reads
+    // `Include conf.d/main.conf` from a config given with `-F` by looking
+    // under ~/.ssh and not beside that file. The two coincide for
+    // `~/.ssh/config` itself, which is why only a nested include ever noticed:
+    // an `Include extra.conf` inside `~/.ssh/conf.d/x.conf` means
+    // `~/.ssh/extra.conf` to ssh and meant `~/.ssh/conf.d/extra.conf` here.
+    //
+    // tty7 only ever reads the user config; the system file's includes resolve
+    // against /etc/ssh, and nothing here opens one.
+    let base = home.join(".ssh");
 
     let mut current: Option<HostBlock> = None;
     let mut global: Option<HostBlock> = None;
@@ -1003,8 +1014,58 @@ mod tests {
         assert_eq!(aliases, vec!["dev", "prod", "quoted host"]);
     }
 
+    /// A relative include means `~/.ssh`, wherever the line sits.
+    ///
+    /// ssh_config(5) puts a relative include "in ~/.ssh if included in a user
+    /// configuration file", and ssh does exactly that: given a config with
+    /// `-F`, it looks for `Include conf.d/main.conf` under ~/.ssh rather than
+    /// beside the file it is reading. Resolving against the including file's
+    /// own directory agrees for `~/.ssh/config` and diverges one level down,
+    /// where `Include extra.conf` inside `~/.ssh/conf.d/x.conf` would reach
+    /// `~/.ssh/conf.d/extra.conf` instead of the file ssh reads.
     #[test]
-    fn follows_includes_relative_to_config_file() {
+    fn a_nested_include_resolves_against_ssh_not_the_including_file() {
+        let root = temp_root("nested-includes");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(ssh.join("conf.d")).unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            "Include conf.d/main.conf
+",
+        )
+        .unwrap();
+        std::fs::write(
+            ssh.join("conf.d/main.conf"),
+            "Include extra.conf
+",
+        )
+        .unwrap();
+        std::fs::write(
+            ssh.join("extra.conf"),
+            "Host from-ssh-dir
+",
+        )
+        .unwrap();
+        std::fs::write(
+            ssh.join("conf.d/extra.conf"),
+            "Host from-beside-the-file
+",
+        )
+        .unwrap();
+
+        let aliases: Vec<_> = import_profiles_from(ssh.join("config"), &root)
+            .into_iter()
+            .map(|p| p.profile.name)
+            .collect();
+        assert_eq!(
+            aliases,
+            vec!["from-ssh-dir"],
+            "the include was read from the wrong directory"
+        );
+    }
+
+    #[test]
+    fn follows_includes_relative_to_the_ssh_directory() {
         let root = temp_root("includes");
         let ssh = root.join(".ssh");
         std::fs::create_dir_all(ssh.join("conf.d")).unwrap();
