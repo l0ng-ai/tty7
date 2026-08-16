@@ -63,7 +63,11 @@ pub enum Command {
                       Pass --cwd for anything that reads or writes files:\n\n    \
                       tty7 run --cwd \"$PWD\" -- cargo test\n\n\
                       (`working_directory` in config.json moves that default to your home \
-                      or a fixed path, for every pane rather than for one command.)"
+                      or a fixed path, for every pane rather than for one command.)\n\n\
+                      The environment comes from the server too, for the same reason, so \
+                      `FOO=bar tty7 run -- ...` does not reach the command. Set it where \
+                      the command can see it:\n\n    \
+                      tty7 run -- sh -c 'FOO=bar cargo test'"
     )]
     Run(RunArgs),
 
