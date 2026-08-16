@@ -93,7 +93,16 @@ impl CmdEditor {
         self.anchor = self.anchor.map(|a| a + n);
     }
 
+    /// Nothing to delete, so nothing to record.
+    ///
+    /// [`Self::checkpoint`] clears the redo stack, and a keystroke that cannot
+    /// change the line must not reach it: after an undo, one Backspace at
+    /// column 0 — or one Delete at the end — threw away the redo it had just
+    /// earned, and the line could not be brought back.
     pub fn backspace(&mut self) {
+        if self.selection().is_none() && self.cursor == 0 {
+            return;
+        }
         self.checkpoint();
         if self.delete_selection() {
             return;
@@ -105,6 +114,9 @@ impl CmdEditor {
     }
 
     pub fn delete(&mut self) {
+        if self.selection().is_none() && self.cursor == self.chars.len() {
+            return;
+        }
         self.checkpoint();
         if self.delete_selection() {
             return;
@@ -300,6 +312,9 @@ impl CmdEditor {
     }
 
     pub fn delete_word_right(&mut self) {
+        if self.cursor == self.chars.len() {
+            return;
+        }
         self.checkpoint();
         let n = self.chars.len();
         let mut e = self.cursor;
@@ -313,6 +328,9 @@ impl CmdEditor {
     }
 
     pub fn delete_word_left(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
         self.checkpoint();
         let end = self.cursor;
         self.move_word_left();
@@ -320,6 +338,9 @@ impl CmdEditor {
     }
 
     pub fn delete_to_start(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
         self.checkpoint();
         let end = self.cursor;
         self.cursor = 0;
@@ -327,6 +348,9 @@ impl CmdEditor {
     }
 
     pub fn delete_to_end(&mut self) {
+        if self.cursor == self.chars.len() {
+            return;
+        }
         self.checkpoint();
         let end = self.chars.len();
         self.kill_range(self.cursor, end);
@@ -366,6 +390,68 @@ impl CmdEditor {
 
 #[cfg(test)]
 mod tests {
+
+    /// A keystroke that changes nothing must not throw away the redo.
+    ///
+    /// Every delete took a checkpoint before looking at whether it had
+    /// anything to delete, and a checkpoint clears the redo stack. So after
+    /// undoing a line, one Backspace at column 0 — or Delete at the end, or
+    /// either word-delete, or a kill to an edge already at that edge — left
+    /// the line unrecoverable.
+    #[test]
+    fn a_delete_with_nothing_to_delete_keeps_the_redo() {
+        // Each case: the edge to sit at, and the keystroke that does nothing
+        // there.
+        let at_start: [(&str, fn(&mut CmdEditor)); 3] = [
+            ("backspace", |e| e.backspace()),
+            ("delete_word_left", |e| e.delete_word_left()),
+            ("delete_to_start", |e| e.delete_to_start()),
+        ];
+        let at_end: [(&str, fn(&mut CmdEditor)); 3] = [
+            ("delete", |e| e.delete()),
+            ("delete_word_right", |e| e.delete_word_right()),
+            ("delete_to_end", |e| e.delete_to_end()),
+        ];
+
+        for (name, keystroke) in at_start.into_iter().chain(at_end) {
+            let mut e = CmdEditor::new();
+            e.insert_str("cargo test");
+            e.undo();
+            assert_eq!(e.text(), "", "undo emptied the line first ({name})");
+
+            let cursor = e.cursor();
+            keystroke(&mut e);
+            assert_eq!(e.text(), "", "{name} had nothing to do and did nothing");
+            assert_eq!(e.cursor(), cursor, "{name} left the cursor alone");
+
+            e.redo();
+            assert_eq!(e.text(), "cargo test", "{name} threw away the redo");
+        }
+    }
+
+    /// The guards must not stop a delete that does have work.
+    #[test]
+    fn the_guards_do_not_block_a_delete_that_has_something_to_do() {
+        let mut e = CmdEditor::new();
+        e.insert_str("one two");
+        e.backspace();
+        assert_eq!(e.text(), "one tw");
+
+        e.move_home();
+        e.delete();
+        assert_eq!(e.text(), "ne tw");
+
+        // A selection is deletable from either edge, which is why backspace
+        // and delete ask about it and the kill-to-edge family does not.
+        let mut f = CmdEditor::new();
+        f.insert_str("abc");
+        f.move_home();
+        f.begin_selection();
+        f.move_end();
+        f.backspace();
+        assert_eq!(f.text(), "", "backspace at column 0 still eats a selection");
+    }
+
     use super::CmdEditor;
 
     fn ed(text: &str, cursor: usize) -> CmdEditor {
