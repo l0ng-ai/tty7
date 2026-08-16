@@ -51,7 +51,20 @@ pub enum Command {
     #[command(about = "This machine on one screen (= tty7 ws ls)")]
     Ls,
 
-    #[command(about = "Start a pane running a command, stream it, pass through the exit code")]
+    #[command(
+        about = "Start a pane running a command, stream it, pass through the exit code",
+        long_about = "Start a pane running a command, stream it, pass through the exit \
+                      code.\n\n\
+                      Without --cwd the command does NOT run where you typed it. The pane \
+                      is the server's child, so it starts in the server's own working \
+                      directory — wherever that process was launched from, which for a \
+                      server the app started is not a directory you chose. `tty7 run -- \
+                      cargo test` from your project therefore runs somewhere else.\n\n\
+                      Pass --cwd for anything that reads or writes files:\n\n    \
+                      tty7 run --cwd \"$PWD\" -- cargo test\n\n\
+                      (`working_directory` in config.json moves that default to your home \
+                      or a fixed path, for every pane rather than for one command.)"
+    )]
     Run(RunArgs),
 
     #[command(about = "Create a workspace and its first tab, print the id")]
