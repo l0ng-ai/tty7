@@ -2830,6 +2830,13 @@ mod tests {
         let _ = host.remove(&tmp, true);
     }
 
+    /// `Host::read_dir` follows symlinks, so a link to a directory is now an
+    /// expandable directory — which means the search walk can follow a cycle.
+    ///
+    /// There is no cycle detection anywhere in the tree, and this pins why none
+    /// is needed for termination: `SEARCH_MAX_DIRS` bounds the walk. What it
+    /// does not prevent is a cycle near a root eating the whole budget, so the
+    /// test also shows the walk still finds a real hit past the loop.
     #[cfg(unix)]
     #[test]
     fn a_symlink_cycle_cannot_make_the_search_walk_forever() {

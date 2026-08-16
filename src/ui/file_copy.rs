@@ -592,6 +592,15 @@ mod tests {
         assert!(report.copied.is_empty());
     }
 
+    /// A link back into its own parent makes the source tree infinitely deep,
+    /// and `Host::read_dir` follows links, so the walk would descend forever.
+    ///
+    /// Nothing detects the cycle; `MAX_DEPTH` is what ends it, and the pairing
+    /// with `file_tree`'s search walk is worth knowing because the two bound
+    /// themselves differently. Search has a whole-walk directory budget and
+    /// keeps whatever it found; a copy stops at 64 levels and *reports an
+    /// error*, because a tree it silently copied 64 levels of is not a copy
+    /// anyone asked for.
     #[cfg(unix)]
     #[test]
     fn a_symlink_cycle_cannot_make_the_copy_walk_forever() {

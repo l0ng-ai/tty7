@@ -445,6 +445,19 @@ impl InputHandler for TerminalInputHandler {
         if window.has_pending_keystrokes() {
             return false;
         }
+        // Route printable keys to the IME so CJK composes. Whether the committed
+        // text lands in the terminal or the search query is decided by focus in
+        // `input_text` — so opening the search bar no longer disables CJK input in
+        // the terminal, and the search field composes too.
+        //
+        // Linux exception: gpui's IBus integration does not reliably commit plain
+        // ASCII back through `replace_text_in_range`, so forcing IME routing here
+        // swallows ordinary letters — the key never reaches the terminal at all
+        // (Enter/Tab/arrows still work because they bypass the IME as non-printable
+        // keys). Until that gpui path handles pass-through ASCII, keep printable
+        // keys on the direct `on_key_down`/`key_char` path on Linux. Trade-off:
+        // CJK composition is disabled on Linux for now (Linux support is still
+        // experimental); ASCII typing is restored.
         !cfg!(target_os = "linux")
     }
 }
