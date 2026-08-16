@@ -80,7 +80,12 @@ pub enum Command {
 
     #[command(about = "Create a workspace and its first tab, print the id")]
     New {
-        #[arg(value_name = "PATH")]
+        #[arg(
+            value_name = "PATH",
+            help = "Directory to open it in, which must exist on this machine. Omitted, \
+                    the first shell starts where the server was started from — not where \
+                    you are"
+        )]
         path: Option<String>,
         #[arg(
             long,
@@ -123,7 +128,11 @@ pub enum Command {
 
     #[command(about = "Processes and listening ports inside a pane")]
     Procs {
-        #[arg(value_name = "%PANE")]
+        #[arg(
+            value_name = "%PANE",
+            help = "Pane to look inside — `tty7 pane ls` lists them. Omitted, the pane \
+                    you are in ($TTY7_PANE)"
+        )]
         target: Option<String>,
     },
 
@@ -254,10 +263,14 @@ pub struct SplitArgs {
 
 #[derive(Debug, Args)]
 pub struct SendArgs {
-    #[arg(value_name = "%PANE|TEXT")]
+    #[arg(
+        value_name = "%PANE|TEXT",
+        help = "The pane to type into. Give no pane and this is the text itself, typed \
+                into the pane you are in ($TTY7_PANE)"
+    )]
     pub first: Option<String>,
 
-    #[arg(value_name = "TEXT")]
+    #[arg(value_name = "TEXT", help = "The text, when a pane was named first")]
     pub second: Option<String>,
 
     #[arg(
@@ -416,27 +429,41 @@ pub enum WsCmd {
 
     #[command(about = "One workspace as a tree: tabs, splits, panes")]
     Tree {
-        #[arg(value_name = "WORKSPACE")]
+        #[arg(
+            value_name = "WORKSPACE",
+            help = "Name, id, or id prefix — `tty7 ls` lists them. Omitted, the workspace \
+                    of the shell you are in ($TTY7_WS)"
+        )]
         ws: Option<String>,
     },
 
     #[command(about = "Create an empty workspace")]
     New {
-        #[arg(value_name = "NAME")]
+        #[arg(
+            value_name = "NAME",
+            help = "Name for it. Omitted, it has none and is addressed by its id until \
+                    `tty7 ws rename` gives it one"
+        )]
         name: Option<String>,
     },
 
     #[command(about = "Name or rename a workspace")]
     Rename {
-        #[arg(value_name = "WORKSPACE")]
+        #[arg(
+            value_name = "WORKSPACE",
+            help = "Name, id, or id prefix — `tty7 ls` lists them"
+        )]
         ws: String,
-        #[arg(value_name = "NAME")]
+        #[arg(value_name = "NAME", help = "The new name, replacing any it had")]
         name: String,
     },
 
     #[command(about = "End the shells, keep the layout (not implemented yet)")]
     Stop {
-        #[arg(value_name = "WORKSPACE")]
+        #[arg(
+            value_name = "WORKSPACE",
+            help = "Name, id, or id prefix — `tty7 ls` lists them"
+        )]
         ws: String,
     },
 
@@ -452,7 +479,10 @@ pub enum WsCmd {
                       With no window on it, the workspace simply goes."
     )]
     Rm {
-        #[arg(value_name = "WORKSPACE")]
+        #[arg(
+            value_name = "WORKSPACE",
+            help = "Name, id, or id prefix — `tty7 ls` lists them"
+        )]
         ws: String,
     },
 
@@ -468,13 +498,19 @@ pub enum WsCmd {
                       dedicated one has been hung up."
     )]
     Attach {
-        #[arg(value_name = "WORKSPACE")]
+        #[arg(
+            value_name = "WORKSPACE",
+            help = "Name, id, or id prefix — `tty7 ls` lists them"
+        )]
         ws: String,
     },
 
     #[command(about = "Let go without interrupting anything")]
     Detach {
-        #[arg(value_name = "WORKSPACE")]
+        #[arg(
+            value_name = "WORKSPACE",
+            help = "Name, id, or id prefix — `tty7 ls` lists them"
+        )]
         ws: String,
     },
 }
@@ -483,13 +519,21 @@ pub enum WsCmd {
 pub enum TabCmd {
     #[command(about = "Tabs of a workspace")]
     Ls {
-        #[arg(value_name = "WORKSPACE")]
+        #[arg(
+            value_name = "WORKSPACE",
+            help = "Name, id, or id prefix — `tty7 ls` lists them. Omitted, the workspace \
+                    of the shell you are in ($TTY7_WS)"
+        )]
         ws: Option<String>,
     },
 
     #[command(about = "Add a tab with a fresh shell")]
     New {
-        #[arg(value_name = "WORKSPACE")]
+        #[arg(
+            value_name = "WORKSPACE",
+            help = "Name, id, or id prefix — `tty7 ls` lists them. Omitted, the workspace \
+                    of the shell you are in ($TTY7_WS)"
+        )]
         ws: Option<String>,
         #[arg(
             long,
@@ -501,23 +545,36 @@ pub enum TabCmd {
 
     #[command(about = "Close a tab and every pane in it")]
     Close {
-        #[arg(value_name = "@TAB")]
+        #[arg(
+            value_name = "@TAB",
+            help = "@n as numbered by `tty7 tab ls`, or @<full tab id>"
+        )]
         tab: String,
     },
 
     #[command(about = "Name or rename a tab")]
     Rename {
-        #[arg(value_name = "@TAB")]
+        #[arg(
+            value_name = "@TAB",
+            help = "@n as numbered by `tty7 tab ls`, or @<full tab id>"
+        )]
         tab: String,
-        #[arg(value_name = "NAME")]
+        #[arg(value_name = "NAME", help = "The new name, replacing any it had")]
         name: String,
     },
 
     #[command(about = "Move a tab to another position in its workspace")]
     Move {
-        #[arg(value_name = "@TAB")]
+        #[arg(
+            value_name = "@TAB",
+            help = "@n as numbered by `tty7 tab ls`, or @<full tab id>"
+        )]
         tab: String,
-        #[arg(value_name = "INDEX")]
+        #[arg(
+            value_name = "INDEX",
+            help = "Where to put it, counted from 0 — the first slot is 0, so `@3 0` \
+                    makes it the first tab. Past the end it lands last"
+        )]
         index: u64,
     },
 }
@@ -526,7 +583,11 @@ pub enum TabCmd {
 pub enum PaneCmd {
     #[command(about = "Panes of a workspace, or of the whole machine")]
     Ls {
-        #[arg(value_name = "WORKSPACE")]
+        #[arg(
+            value_name = "WORKSPACE",
+            help = "Name, id, or id prefix — `tty7 ls` lists them. Omitted, the workspace \
+                    of the shell you are in ($TTY7_WS)"
+        )]
         ws: Option<String>,
 
         #[arg(
@@ -569,13 +630,13 @@ pub enum MachineCmd {
 
     #[command(about = "Open a link to a machine from an SSH profile (not implemented yet)")]
     Connect {
-        #[arg(value_name = "PROFILE")]
+        #[arg(value_name = "PROFILE", help = "The SSH profile to open the link from")]
         profile: String,
     },
 
     #[command(about = "Drop the link; the remote server keeps running (not implemented yet)")]
     Disconnect {
-        #[arg(value_name = "MACHINE")]
+        #[arg(value_name = "MACHINE", help = "A machine from `tty7 machine ls`")]
         machine: String,
     },
 }
@@ -1006,5 +1067,42 @@ mod tests {
         );
         let err = Cli::try_parse_from(["tty7", "tab", "move", "@7", "not-a-number"]).unwrap_err();
         assert_eq!(err.exit_code(), 2);
+    }
+
+    /// `--help` is where a verb is learned, so no argument may arrive blank.
+    ///
+    /// Every flag carried help and every positional did not — 22 of them, the
+    /// main argument of each verb, printed as a bare `[WORKSPACE]` with an
+    /// empty column beside it. The gap was invisible to anyone reading the
+    /// source, where a `value_name` looks like documentation.
+    #[test]
+    fn every_argument_says_what_it_is() {
+        use clap::CommandFactory as _;
+
+        fn walk(cmd: &clap::Command, path: &str, blank: &mut Vec<String>, seen: &mut usize) {
+            for a in cmd.get_arguments() {
+                *seen += 1;
+                if a.get_help().is_none() && a.get_long_help().is_none() {
+                    blank.push(format!("{path} <{}>", a.get_id()));
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                walk(sub, &format!("{path} {}", sub.get_name()), blank, seen);
+            }
+        }
+
+        let (mut blank, mut seen) = (Vec::new(), 0usize);
+        walk(&Cli::command(), "tty7", &mut blank, &mut seen);
+
+        // Or a walk that visited nothing would pass as a clean bill of health.
+        // The count is well under the real one — this is a floor against a
+        // broken walk, not a second place to record how many arguments exist.
+        assert!(seen > 40, "only {seen} arguments were visited");
+        assert!(
+            blank.is_empty(),
+            "{} arguments print with no description:\n{}",
+            blank.len(),
+            blank.join("\n")
+        );
     }
 }
