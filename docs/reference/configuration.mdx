@@ -118,7 +118,7 @@ their id from the file name. [More about themes →](/customization/themes)
 | `macos_option_as_alt` | bool | `false` | <kbd>⌥</kbd>+key sends the escape chord instead of typing a special character. |
 | `keybindings` | object | `{}` | `{"SplitRight": "cmd-d"}`. [Syntax →](/customization/keybindings) |
 | `keybinding_preset` | string | `"default"` | Or `"tmux"`. |
-| `prefix` | string | `"ctrl-b"` | The tmux preset's prefix. |
+| `prefix` | string | `"ctrl-b"` | The tmux preset's prefix. One chord carrying a real modifier — anything else falls back to the default. |
 
 The default `word_separators` are a comma, a box-drawing bar, a backtick, a
 pipe, a colon, both quote characters, a space, the six bracket characters, the

@@ -1154,7 +1154,9 @@ fn default_notify_threshold_secs() -> u64 {
     10
 }
 
-fn default_prefix() -> String {
+/// The tmux preset's default prefix, and the one a prefix that cannot work
+/// falls back to.
+pub fn default_prefix() -> String {
     "ctrl-b".to_string()
 }
 

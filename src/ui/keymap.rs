@@ -753,9 +753,50 @@ fn set_binding(effective: &mut [(String, String)], action: &str, key: String) {
     }
 }
 
+/// The prefix the tmux preset may actually build its bindings from.
+///
+/// Every binding in the preset is `<prefix> <key>`, so a prefix that is not one
+/// modified chord does not make a sequence — it makes something that shares the
+/// keyboard with typing. An empty prefix (`"prefix": ""` in a hand-edited
+/// config) drops the sequence entirely and binds bare `c`, `x`, `z` and the
+/// digits onto NewTab, CloseActiveTab and the rest, so typing an `x` closes the
+/// tab. A bare-letter or shift-only prefix is the same trap one step removed:
+/// the letter starts a sequence and swallows whatever is typed next. A prefix
+/// of several chords is not what the setting means either.
+///
+/// None of those is a keyboard anyone can work in, so the default stands
+/// instead and the log says which prefix was refused. A prefix that simply
+/// fails to parse — `C-a`, tmux's own spelling — is caught here too; it used to
+/// reach `action_bindings`, which dropped the preset one binding at a time
+/// under a warning about each key rather than about the prefix that caused it.
+fn preset_prefix(prefix: &str) -> String {
+    let mut tokens = prefix.split_whitespace();
+    let single = match (tokens.next(), tokens.next()) {
+        (Some(one), None) => Some(one),
+        _ => None,
+    };
+    let modified = single
+        .and_then(|one| gpui::Keystroke::parse(one).ok())
+        .is_some_and(|ks| {
+            // Shift alone does not count: `shift-c` is how a capital C is typed.
+            ks.modifiers.control
+                || ks.modifiers.alt
+                || ks.modifiers.platform
+                || ks.modifiers.function
+        });
+    if modified {
+        return prefix.trim().to_string();
+    }
+    let fallback = crate::core::config::default_prefix();
+    log::warn!(
+        "keybinding prefix {prefix:?} is not a single modified chord;          using {fallback:?} instead"
+    );
+    fallback
+}
+
 fn preset_bindings(preset: &str, prefix: &str) -> Vec<(String, String)> {
     match preset {
-        "tmux" => tmux_preset(prefix),
+        "tmux" => tmux_preset(&preset_prefix(prefix)),
         _ => Vec::new(),
     }
 }
@@ -1308,6 +1349,55 @@ mod tests {
         assert_eq!(action_context("ScmCommit"), Some("ScmCommit"));
         assert_eq!(action_context("ScmCommitAmend"), Some("ScmCommit"));
         assert_eq!(action_context("ToggleFullscreen"), None);
+    }
+
+    #[test]
+    fn a_prefix_that_cannot_carry_a_sequence_falls_back_to_the_default() {
+        for good in ["ctrl-b", "ctrl-a", "alt-x", " ctrl-b "] {
+            assert_eq!(
+                preset_prefix(good),
+                good.trim(),
+                "{good:?} is a usable prefix and should be kept"
+            );
+        }
+        for bad in [
+            "",              // binds bare c/x/z and the digits
+            "   ",           // the same, spelled with spaces
+            "c",             // a letter that would start a sequence mid-typing
+            "shift-c",       // shift alone is just how a capital is typed
+            "C-a",           // tmux's own spelling, which gpui does not parse
+            "ctrl-b ctrl-b", // a sequence, not a prefix
+        ] {
+            assert_eq!(
+                preset_prefix(bad),
+                crate::core::config::default_prefix(),
+                "{bad:?} cannot work as a prefix and should fall back"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unusable_prefix_leaves_ordinary_typing_alone() {
+        // The failure this guards is a terminal that closes its own tab when
+        // an `x` is typed, which is what an empty prefix produced.
+        let mut effective: Vec<(String, String)> = default_bindings()
+            .into_iter()
+            .map(|(a, k)| (a.to_string(), k.to_string()))
+            .collect();
+        for (action, key) in preset_bindings("tmux", "") {
+            set_binding(&mut effective, &action, key);
+        }
+        for key in ["c", "x", "z", "n", "o", "1", "9"] {
+            assert!(
+                dispatched(&effective, key, "Terminal").is_empty(),
+                "typing a bare {key:?} fired an action"
+            );
+        }
+        // The preset still works, on the prefix it fell back to.
+        assert_eq!(
+            dispatched(&effective, "ctrl-b x", "Terminal"),
+            vec!["tty7::CloseActiveTab"]
+        );
     }
 
     #[test]
