@@ -117,10 +117,24 @@ pub(crate) fn printable(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// The widest a single cell may make its column.
+///
+/// A column as wide as its longest cell is unreadable the moment one cell is
+/// pathological: a 300-character workspace name padded every other row out
+/// past the edge of the terminal, so that a five-row listing arrived as a wall
+/// of spaces. That is the same failure `tab_label` already clamps a talkative
+/// OSC title to avoid, and bounding it here covers every column rather than
+/// the one that happened to be noticed — including the ones nobody types, like
+/// an agent's status message.
+///
+/// A full classic terminal width, so every realistic name and path still
+/// prints whole. `--json` is the output for anything that must not be cut.
+const MAX_CELL: usize = 80;
+
 pub fn table(header: &[&str], rows: &[Vec<String>]) -> String {
     let rows: Vec<Vec<String>> = rows
         .iter()
-        .map(|row| row.iter().map(|c| printable(c).into_owned()).collect())
+        .map(|row| row.iter().map(|c| clamp(&printable(c), MAX_CELL)).collect())
         .collect();
     let rows = &rows;
     let mut widths: Vec<usize> = header.iter().map(|h| width(h)).collect();
@@ -453,6 +467,34 @@ mod tests {
             "76698a44",
             "an orphan still remembers where it belongs"
         );
+    }
+
+    #[test]
+    fn one_pathological_cell_does_not_widen_the_whole_table() {
+        // A 300-character workspace name padded every other row out past the
+        // edge of the terminal, turning a five-row listing into a wall of
+        // spaces.
+        let long = "x".repeat(300);
+        let out = table(
+            &["WORKSPACE", "NAME", "TABS"],
+            &[
+                vec!["aaaa".into(), long.clone(), "0".into()],
+                vec!["bbbb".into(), "web".into(), "1".into()],
+            ],
+        );
+        let widest = out.lines().map(width).max().unwrap();
+        assert!(
+            widest <= MAX_CELL + 32,
+            "one long cell widened the table to {widest} columns"
+        );
+        // Cut, not dropped: the row still says which workspace it is and how
+        // the name starts.
+        assert!(out.contains("aaaa"));
+        assert!(out.contains(&"x".repeat(40)));
+        assert!(out.contains('…'));
+        // Every row is still padded to the same width.
+        let widths: Vec<usize> = out.lines().map(|l| width(l.trim_end())).collect();
+        assert!(widths.iter().all(|w| *w <= widest));
     }
 
     #[test]
