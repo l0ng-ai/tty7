@@ -67,7 +67,14 @@ pub enum Command {
                       The environment comes from the server too, for the same reason, so \
                       `FOO=bar tty7 run -- ...` does not reach the command. Set it where \
                       the command can see it:\n\n    \
-                      tty7 run -- sh -c 'FOO=bar cargo test'"
+                      tty7 run -- sh -c 'FOO=bar cargo test'\n\n\
+                      Nor is your stdin forwarded: the command reads from the pane's \
+                      terminal, which nothing is typing into. Output is streamed back, \
+                      input does not go the other way, so `echo hi | tty7 run -- cat` \
+                      waits for input that cannot arrive — with no error, because as far \
+                      as the pane is concerned a terminal is simply idle. Give the \
+                      command its input directly:\n\n    \
+                      tty7 run -- sh -c 'cat < input.txt'"
     )]
     Run(RunArgs),
 
