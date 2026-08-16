@@ -210,6 +210,18 @@ fn complete_inner(
 /// Finds the start of the shell word at `cursor`. A whitespace character
 /// preceded by an odd-length run of backslashes belongs to the word, as in
 /// `My\ Documents/` after a path candidate has been inserted.
+/// Where the word under the cursor begins, by whitespace and backslashes.
+///
+/// A quote does not start a word here, so `cat "My Doc` completes nothing:
+/// the word is `"My Doc`, and no file begins with a quotation mark. That is a
+/// gap rather than a decision — but closing it means more than moving this
+/// boundary. Accepting a candidate goes through `shell_escape_path`, which
+/// backslashes a space; inside double quotes a shell reads `\ ` as a literal
+/// backslash, so completing `"My Doc` and inserting `My\ Documents` would
+/// build a path that does not exist. The two have to move together.
+///
+/// `~` is fine and already works: it is not a quote, so the word starts after
+/// the space and the tilde travels with it.
 fn shell_word_start(chars: &[char], cursor: usize) -> usize {
     let mut start = cursor.min(chars.len());
     while start > 0 {
