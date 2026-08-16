@@ -916,7 +916,7 @@ pub(crate) fn write_frame<W: Write>(w: &mut W, kind: u8, payload: &[u8]) -> io::
     if len > MAX_FRAME {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "frame payload exceeds MAX_FRAME",
+            format!("pane frame of {len} bytes exceeds the {MAX_FRAME}-byte limit"),
         ));
     }
     w.write_all(&(len as u32).to_le_bytes())?;
@@ -932,7 +932,7 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<(u8, Vec<u8>)> {
     if len > MAX_FRAME {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "frame payload exceeds MAX_FRAME",
+            format!("pane frame of {len} bytes exceeds the {MAX_FRAME}-byte limit"),
         ));
     }
     let mut kind = [0u8; 1];
@@ -970,7 +970,7 @@ pub fn take_frame(buf: &mut Vec<u8>) -> io::Result<Option<(u8, Vec<u8>)>> {
     if len > MAX_FRAME {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "frame payload exceeds MAX_FRAME",
+            format!("pane frame of {len} bytes exceeds the {MAX_FRAME}-byte limit"),
         ));
     }
     if buf.len() < HEADER + len {
@@ -1979,7 +1979,17 @@ mod tests {
         bad.extend_from_slice(&(u32::MAX).to_le_bytes());
         bad.push(3);
         let mut cursor = std::io::Cursor::new(&bad);
-        assert!(read_frame(&mut cursor).is_err());
+        let refused = read_frame(&mut cursor).expect_err("4 GB is not a frame");
+
+        // Refused on the length alone, before anything that large is
+        // allocated — and said in numbers. `MAX_FRAME` is a name only this
+        // side of the wire knows, so a peer reading the log learns nothing
+        // from it.
+        let said = refused.to_string();
+        assert!(
+            said.contains(&u32::MAX.to_string()) && said.contains(&MAX_FRAME.to_string()),
+            "the refusal names neither what arrived nor what is allowed: {said}"
+        );
     }
 
     #[test]
