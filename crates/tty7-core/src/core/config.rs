@@ -699,6 +699,7 @@ impl Config {
         };
         match serde_json::from_str::<Config>(strip_bom(&text)) {
             Ok(mut cfg) => {
+                note_unknown_keys(strip_bom(&text));
                 cfg.sanitize();
                 (cfg, LoadOutcome::Parsed)
             }
@@ -1032,6 +1033,47 @@ pub fn config_dir_path() -> Option<PathBuf> {
 
 pub(crate) fn shell_command() -> Option<(String, Vec<String>)> {
     Config::load().shell.map(|s| (s.program, s.args))
+}
+
+/// Name the keys in the file that nothing reads.
+///
+/// The struct deliberately takes no `deny_unknown_fields`: a retired key must
+/// not make a whole config unreadable, which is what
+/// `a_config_still_carrying_the_retired_theme_key_loads` pins. But ignoring a
+/// key and never mentioning it are different things — a mistyped setting name
+/// behaves exactly like a setting that does not work, and there is nothing to
+/// tell the two apart from the outside.
+///
+/// The known set is the serialized default, so it cannot drift from the struct
+/// the way a hand-listed set would; `Config` skips no field on the way out.
+/// A retired key gets named too, which is true: nothing reads it.
+///
+/// Behind `log_enabled!` because this parses the file a second time, and this
+/// runs on a path that reloads per pane spawn.
+fn note_unknown_keys(text: &str) {
+    if !log::log_enabled!(log::Level::Warn) {
+        return;
+    }
+    for key in unknown_keys(text) {
+        log::warn!("config {key}: not a setting tty7 reads — check the spelling");
+    }
+}
+
+/// The comparison behind [`note_unknown_keys`], separated so the property that
+/// matters can be tested: no real field may ever be named here.
+fn unknown_keys(text: &str) -> Vec<String> {
+    let Ok(serde_json::Value::Object(found)) = serde_json::from_str::<serde_json::Value>(text)
+    else {
+        return Vec::new();
+    };
+    let Ok(serde_json::Value::Object(known)) = serde_json::to_value(Config::default()) else {
+        return Vec::new();
+    };
+    found
+        .keys()
+        .filter(|k| !known.contains_key(*k))
+        .cloned()
+        .collect()
 }
 
 /// Say when a configured value was not the one used.
@@ -1416,6 +1458,44 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.dim_inactive_panes);
+    }
+
+    /// Every field the struct has must be recognised, and only those.
+    ///
+    /// The known set comes from serialising the default, so this is really
+    /// asking whether that trick holds: a field the struct skips on the way
+    /// out would be reported to its owner as a typo. `Config` skips none
+    /// today, and this fails the day one does.
+    #[test]
+    fn no_real_setting_is_ever_called_a_typo() {
+        let serde_json::Value::Object(all) =
+            serde_json::to_value(Config::default()).expect("the default serialises")
+        else {
+            panic!("a config is an object");
+        };
+        assert!(all.len() > 20, "sanity: {} fields", all.len());
+
+        let whole = serde_json::to_string(&Config::default()).expect("serialise");
+        assert!(
+            unknown_keys(&whole).is_empty(),
+            "these real settings would be reported as typos: {:?}",
+            unknown_keys(&whole)
+        );
+
+        // One at a time, so a single skipped field cannot hide in the crowd.
+        for name in all.keys() {
+            let one = format!("{{\"{name}\": null}}");
+            assert!(
+                unknown_keys(&one).is_empty(),
+                "{name} is a real setting but reads as a typo"
+            );
+        }
+
+        assert_eq!(
+            unknown_keys(r#"{"font_siz": 1, "font_size": 12}"#),
+            vec!["font_siz".to_string()],
+            "and a real typo beside a real field is still caught"
+        );
     }
 
     /// `theme` was the theme id before `theme_preset` replaced it, and it went
