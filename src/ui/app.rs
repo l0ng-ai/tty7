@@ -2757,23 +2757,8 @@ impl Tty7App {
     fn open_typed_ssh_connect(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
         match parse_ssh_connect_input(input) {
             Ok(parsed) => {
-                let (profile, proxy_jump) =
-                    match ssh_config::resolve_alias_to_profile(&parsed.profile.host) {
-                        Some(resolved) => {
-                            let mut p = resolved.profile;
-                            if !parsed.profile.user.is_empty() {
-                                p.user = parsed.profile.user;
-                            }
-                            if parsed.profile.port != 22 {
-                                p.port = parsed.profile.port;
-                            }
-                            if !parsed.profile.identity_files.is_empty() {
-                                p.identity_files = parsed.profile.identity_files;
-                            }
-                            (p, parsed.proxy_jump.or(resolved.proxy_jump))
-                        }
-                        None => (parsed.profile, parsed.proxy_jump),
-                    };
+                let resolved = ssh_config::resolve_alias_to_profile(&parsed.profile.host);
+                let (profile, proxy_jump) = merge_typed_ssh_over_alias(parsed, resolved);
                 let verify = cx.global::<Config>().verify_host_keys;
                 let spec = crate::ui::ssh_connect::native_spec_from_transient_profile(
                     &profile,
@@ -8054,6 +8039,15 @@ pub(crate) fn parse_ssh_option_words(input: &str) -> Result<Vec<String>, ()> {
 pub(crate) struct ParsedSshConnect {
     pub profile: crate::core::ssh_profile::SshProfile,
     pub proxy_jump: Option<String>,
+    /// Whether the typed text named a port at all, either as `-p`/`-o Port=`
+    /// or as a `:port` on the target.
+    ///
+    /// `profile.port` cannot answer this: it holds 22 both for text that asked
+    /// for 22 and for text that asked for nothing, and the two have to merge
+    /// differently against an alias from `~/.ssh/config` that sets its own
+    /// port. `ssh -p 22 myalias` reaches port 22 even when the alias says
+    /// 2222, because the command line outranks the config file.
+    pub port_given: bool,
 }
 
 pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, String> {
@@ -8133,7 +8127,8 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
 
     let mut profile = SshProfile::new(qc.host.clone());
     profile.host = qc.host;
-    profile.port = port.or(qc.port).unwrap_or(22);
+    let port = port.or(qc.port);
+    profile.port = port.unwrap_or(22);
     if let Some(user) = user.or(qc.user) {
         profile.user = user;
     }
@@ -8142,7 +8137,35 @@ pub(crate) fn parse_ssh_connect_input(input: &str) -> Result<ParsedSshConnect, S
     Ok(ParsedSshConnect {
         profile,
         proxy_jump: jump,
+        port_given: port.is_some(),
     })
+}
+
+/// What the typed text and a matching `~/.ssh/config` alias add up to.
+///
+/// The alias supplies the ground, and anything the text actually named wins
+/// over it — the order `ssh` itself uses, where the command line outranks the
+/// config file. "Actually named" is the whole difficulty: an empty user and an
+/// empty identity list say nothing, but a port of 22 is indistinguishable from
+/// silence unless the parser is asked, which is what `port_given` is for.
+pub(crate) fn merge_typed_ssh_over_alias(
+    parsed: ParsedSshConnect,
+    resolved: Option<crate::core::ssh_config::ResolvedAlias>,
+) -> (crate::core::ssh_profile::SshProfile, Option<String>) {
+    let Some(resolved) = resolved else {
+        return (parsed.profile, parsed.proxy_jump);
+    };
+    let mut p = resolved.profile;
+    if !parsed.profile.user.is_empty() {
+        p.user = parsed.profile.user;
+    }
+    if parsed.port_given {
+        p.port = parsed.profile.port;
+    }
+    if !parsed.profile.identity_files.is_empty() {
+        p.identity_files = parsed.profile.identity_files;
+    }
+    (p, parsed.proxy_jump.or(resolved.proxy_jump))
 }
 
 fn ssh_short_flag(word: &str) -> Option<(char, String)> {
@@ -8404,9 +8427,9 @@ mod window_drag_tests {
 mod tests {
     use super::{
         CloseReason, ForwardRoute, TERMINAL_MIN_W, TabAgentSession, clear_window_override_values,
-        close_prompt, join_shell_args, leaf_shares_the_window_daemon, mru_order, pane_free_for,
-        parse_ssh_connect_input, parse_ssh_option_words, side_panel_max, split_shell_args,
-        wd_path_saveable,
+        close_prompt, join_shell_args, leaf_shares_the_window_daemon, merge_typed_ssh_over_alias,
+        mru_order, pane_free_for, parse_ssh_connect_input, parse_ssh_option_words, side_panel_max,
+        split_shell_args, wd_path_saveable,
     };
 
     /// A teardown that was never delivered must not answer the way a teardown
@@ -8797,6 +8820,51 @@ mod tests {
         let p = parse_ssh_connect_input("ssh me@host:22 -l other -p 2200").unwrap();
         assert_eq!(p.profile.user, "other");
         assert_eq!(p.profile.port, 2200);
+    }
+
+    #[test]
+    fn a_typed_port_of_22_still_outranks_an_alias_on_another_port() {
+        use crate::core::ssh_config::ResolvedAlias;
+        use crate::core::ssh_profile::SshProfile;
+
+        // `ssh -G -p 22 myalias` reports port 22 even where the alias sets
+        // 2222, checked against the real ssh. Port 22 doubles as the default,
+        // so asking `profile.port != 22` read the explicit request as silence
+        // and connected to the alias's port instead.
+        let alias = || {
+            let mut a = SshProfile::new("myalias".to_string());
+            a.host = "example.com".to_string();
+            a.user = "alice".to_string();
+            a.port = 2222;
+            Some(ResolvedAlias {
+                profile: a,
+                proxy_jump: None,
+            })
+        };
+
+        let typed = parse_ssh_connect_input("myalias -p 22").unwrap();
+        assert!(typed.port_given);
+        let (merged, _) = merge_typed_ssh_over_alias(typed, alias());
+        assert_eq!(merged.port, 22, "a typed -p 22 was ignored");
+        assert_eq!(merged.user, "alice", "the alias still supplies the user");
+
+        // The `:port` spelling of the same request.
+        let typed = parse_ssh_connect_input("myalias:22").unwrap();
+        assert!(typed.port_given);
+        assert_eq!(merge_typed_ssh_over_alias(typed, alias()).0.port, 22);
+
+        // Saying nothing about the port still leaves the alias in charge.
+        let typed = parse_ssh_connect_input("myalias").unwrap();
+        assert!(!typed.port_given);
+        assert_eq!(merge_typed_ssh_over_alias(typed, alias()).0.port, 2222);
+
+        // And a typed port that is not 22 was never in doubt.
+        let typed = parse_ssh_connect_input("myalias -p 2200").unwrap();
+        assert_eq!(merge_typed_ssh_over_alias(typed, alias()).0.port, 2200);
+
+        // With no alias at all the typed line stands on its own.
+        let typed = parse_ssh_connect_input("myalias -p 22").unwrap();
+        assert_eq!(merge_typed_ssh_over_alias(typed, None).0.port, 22);
     }
 
     #[test]
