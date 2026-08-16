@@ -336,10 +336,32 @@ where
             Ok(())
         }
         Err(e) if is_disconnect(&e) => {
-            log::debug!("control connection ({label}) ended: {e}");
+            log::debug!("control connection ({label}) {}", went_away(&e));
             Ok(())
         }
         Err(e) => Err(e),
+    }
+}
+
+/// How a peer went away, in words rather than std's.
+///
+/// `UnexpectedEof` prints as "failed to fill whole buffer" — accurate about the
+/// read and wrong about the event. Every one-shot CLI call ends this way, having
+/// sent its request and read its reply, so at debug level it is the most common
+/// line in the file: `tty7 ls` alone leaves one behind. Pasted in raw it reads
+/// as the failure someone is hunting rather than the traffic they are hunting
+/// through.
+///
+/// Which kind still shows, because a reset peer and an exited one are worth
+/// telling apart when a connection dies mid-request. The fallback covers a kind
+/// added to [`is_disconnect`] and not named here; nothing reaches it today.
+fn went_away(e: &io::Error) -> &'static str {
+    match e.kind() {
+        io::ErrorKind::UnexpectedEof => "peer exited",
+        io::ErrorKind::ConnectionReset => "reset by peer",
+        io::ErrorKind::ConnectionAborted => "aborted by peer",
+        io::ErrorKind::BrokenPipe => "peer stopped reading",
+        _ => "disconnected",
     }
 }
 
@@ -2032,6 +2054,30 @@ mod tests {
     use crate::host::local::LocalHost;
     use crate::host::remote::RemoteHost;
     use crate::host::{Entry, HostId, Meta, Output};
+
+    /// A debug log is read while hunting a real failure, so the line every
+    /// ordinary CLI call leaves behind must not look like one.
+    #[test]
+    fn a_peer_going_away_is_never_described_as_a_failed_read() {
+        for kind in [
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::BrokenPipe,
+        ] {
+            let e = io::Error::from(kind);
+            assert!(is_disconnect(&e), "{kind:?} is a disconnect");
+            let said = went_away(&e);
+            assert_ne!(
+                said, "disconnected",
+                "{kind:?} reached the fallback unnamed"
+            );
+            assert!(
+                !said.contains("buffer") && !said.contains("failed"),
+                "{kind:?} still reads as a failure: {said}"
+            );
+        }
+    }
     use std::os::unix::net::UnixStream;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
