@@ -299,6 +299,16 @@ pub struct Config {
 
     #[serde(default)]
     pub working_directory: WorkingDirectory,
+    /// Extra environment for every pane this machine starts.
+    ///
+    /// `TERM` and `COLORTERM` are the exception: an entry for either is dropped
+    /// rather than applied, because they are not preferences — they say what
+    /// the emulator on the other end can decode, and a pane that announces a
+    /// terminal it is not renders wrongly with nothing to point at. See
+    /// `daemon::pane::CAPABILITY_ENV`, which is where the filtering happens.
+    ///
+    /// Silently, which is worth knowing while reading a config that has one:
+    /// the rest of the map is applied as written.
     #[serde(default)]
     pub env: HashMap<String, String>,
 
