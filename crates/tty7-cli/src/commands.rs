@@ -1598,6 +1598,70 @@ fn machine_ls(backend: &mut dyn Backend) -> Result<Outcome> {
     }
 }
 
+/// The `context` half of the `doctor` report.
+///
+/// The three original fields stay booleans — whether the variable is set at
+/// all — because that is what they have always been and what a reader parses.
+/// The two `_gone` fields are added beside them rather than folded in, and are
+/// absent entirely when no server answered, so that a reader can tell "this id
+/// names nothing here" from "nobody could check".
+fn context_json(ctx: &Context, dangling: Option<(bool, bool)>) -> Value {
+    let mut out = json!({
+        "config_dir": ctx.config_dir.is_some(),
+        "workspace": ctx.ws.is_some(),
+        "pane": ctx.pane.is_some(),
+    });
+    if let Some((ws_gone, pane_gone)) = dangling
+        && let Some(map) = out.as_object_mut()
+    {
+        map.insert("workspace_gone".into(), json!(ws_gone));
+        map.insert("pane_gone".into(), json!(pane_gone));
+    }
+    out
+}
+
+/// Marks the `$TTY7_WS` / `$TTY7_PANE` rows whose ids this server does not
+/// have, and reports the same two answers for the JSON. Rows are found by name
+/// rather than by index so that reordering the table above cannot silently
+/// annotate the wrong one.
+fn note_dangling_context(
+    rows: &mut [Vec<String>],
+    ctx: &Context,
+    machine: &Machine,
+) -> (bool, bool) {
+    let mut annotate = |check: &str, dangling: bool| {
+        if !dangling {
+            return;
+        }
+        if let Some(row) = rows
+            .iter_mut()
+            .find(|r| r.first().is_some_and(|c| c == check))
+            && let Some(value) = row.get_mut(1)
+        {
+            value.push_str(" — GONE: this server has no such ");
+            value.push_str(match check == address::ENV_WS {
+                true => "workspace",
+                false => "pane",
+            });
+        }
+    };
+    let ws_dangling = ctx
+        .ws
+        .as_deref()
+        .is_some_and(|v| match v.parse::<WorkspaceId>() {
+            Ok(id) => !machine.workspaces.iter().any(|w| w.id == id),
+            // Unparseable is its own kind of gone, and the verbs treat it the same.
+            Err(_) => true,
+        });
+    annotate(address::ENV_WS, ws_dangling);
+    let pane_dangling = ctx.pane.as_deref().is_some_and(|v| match v.parse::<u64>() {
+        Ok(id) => !machine.panes.iter().any(|p| p.id == id),
+        Err(_) => true,
+    });
+    annotate(address::ENV_PANE, pane_dangling);
+    (ws_dangling, pane_dangling)
+}
+
 fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     let mark = |v: &Option<String>| match v {
         Some(value) => format!("set ({value})"),
@@ -1629,6 +1693,10 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
         vec!["config".to_string(), config_state.clone()],
     ];
     let mut server = json!({ "reachable": false });
+    // `None` until the server answers: with no tree to check against, "not
+    // gone" would be a claim rather than an answer, so the two fields are
+    // absent instead of falsely false.
+    let mut dangling: Option<(bool, bool)> = None;
     let mut hooks: Vec<(HookAgent, HooksState)> = Vec::new();
     match backend.hello() {
         Ok(hello) => {
@@ -1678,6 +1746,16 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
             // something is not working.
             hooks = hook_survey(backend);
             rows.push(vec!["agent hooks".to_string(), hooks_summary(&hooks)]);
+            // Saying only that `$TTY7_WS` is "set" is the reassurance a
+            // diagnostic must not give: a shell outlives the workspace it was
+            // opened in, and one opened against another machine names an id
+            // this server never had. Every address-taking verb then fails on
+            // an id the reader has no reason to doubt, which is the state
+            // `doctor` is run in. Only checked when the server answered —
+            // there is nothing to check against otherwise.
+            if let Ok(machine) = fetch_machine(backend) {
+                dangling = Some(note_dangling_context(&mut rows, ctx, &machine));
+            }
             server = json!({
                 "reachable": true,
                 "dialect_ok": dialect_ok,
@@ -1699,11 +1777,7 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     let report = Report {
         human,
         json: json!({
-            "context": {
-                "config_dir": ctx.config_dir.is_some(),
-                "workspace": ctx.ws.is_some(),
-                "pane": ctx.pane.is_some(),
-            },
+            "context": context_json(ctx, dangling),
             "server": server,
             "config": { "ok": config_ok, "state": config_state },
             "hooks": hooks_json(&hooks),
@@ -4252,6 +4326,75 @@ mod tests {
         };
         let out = human(run_cli(&["tty7", "doctor"], &ctx, &mut doctor_backend()));
         assert!(out.contains("set (/cfg/tty7)"), "{out}");
+    }
+
+    #[test]
+    fn doctor_says_when_the_inherited_context_names_nothing_here() {
+        // A shell outlives the workspace it was opened in, and one opened
+        // against another machine names an id this server never had. Reporting
+        // it as merely "set" sends the reader looking anywhere but at the
+        // reason their address-taking verbs fail.
+        let mut backend = doctor_backend();
+        let machine = backend.machine.clone();
+        let ctx = Context {
+            ws: Some(WorkspaceId::new().to_string()),
+            pane: Some("998".into()),
+            config_dir: Some("/cfg/tty7".into()),
+        };
+        let out = human(run_cli(&["tty7", "doctor"], &ctx, &mut backend));
+        assert!(out.contains("no such workspace"), "{out}");
+        assert!(out.contains("no such pane"), "{out}");
+
+        // An id this server does have is left alone.
+        let live_ws = machine.workspaces[0].id;
+        let live_pane = machine.panes[0].id;
+        let ctx = Context {
+            ws: Some(live_ws.to_string()),
+            pane: Some(live_pane.to_string()),
+            config_dir: Some("/cfg/tty7".into()),
+        };
+        let mut backend = doctor_backend();
+        backend.machine = machine.clone();
+        let out = human(run_cli(&["tty7", "doctor"], &ctx, &mut backend));
+        assert!(!out.contains("GONE"), "a live id was called gone: {out}");
+
+        // Text that is not an id at all is gone in the same way.
+        let ctx = Context {
+            ws: Some("not-a-uuid".into()),
+            pane: Some("not-a-number".into()),
+            config_dir: None,
+        };
+        let out = human(run_cli(&["tty7", "doctor"], &ctx, &mut doctor_backend()));
+        assert!(out.contains("no such workspace"), "{out}");
+        assert!(out.contains("no such pane"), "{out}");
+
+        // A reader on --json is told the same thing.
+        let ctx = Context {
+            ws: Some(WorkspaceId::new().to_string()),
+            pane: Some("998".into()),
+            config_dir: None,
+        };
+        let j = json_of(run_cli(
+            &["tty7", "doctor", "--json"],
+            &ctx,
+            &mut doctor_backend(),
+        ));
+        assert_eq!(j["context"]["workspace"], json!(true), "still a boolean");
+        assert_eq!(j["context"]["workspace_gone"], json!(true));
+        assert_eq!(j["context"]["pane_gone"], json!(true));
+
+        // With no server to ask, the two fields are absent rather than false.
+        let mut unreachable = mock();
+        unreachable.unreachable = true;
+        let out = run_cli(&["tty7", "doctor", "--json"], &ctx, &mut unreachable);
+        let Outcome::Exit(1, r) = out else {
+            panic!("an unreachable server is an exit 1: {out:?}");
+        };
+        assert!(
+            r.json["context"].get("workspace_gone").is_none(),
+            "{}",
+            r.json
+        );
     }
 
     /// A server running one pane said "1 panes".

@@ -285,6 +285,11 @@ how many machine links exist, and where each agent's
 [status hooks](/agents/status) stand. Adds a note when you are not inside a
 tty7 shell.
 
+A `$TTY7_WS` or `$TTY7_PANE` naming something this server does not have is
+marked `GONE` rather than reported as merely set — a shell outlives the
+workspace it was opened in, and that is why the address-taking verbs suddenly
+fail on an id you have no reason to doubt.
+
 The hooks row is the one that explains a mystery: without them an agent reports
 nothing, so `tty7 agents` shows it standing still and `tty7 wait` sits there
 until it times out. Outdated hooks fail the same quiet way. Hooks are a local
@@ -292,7 +297,9 @@ install, so under `-m` the row reads `unknown`.
 
 JSON: `{"context":{"config_dir","workspace","pane"},"server":{"reachable","dialect_ok","build","status","routes"},"hooks":{"installed","outdated","not_installed"}}`
 — the context fields are booleans, not values, and each `hooks` field is a list
-of agent slugs.
+of agent slugs. `context` also carries `workspace_gone` and `pane_gone` when a
+server answered and could be asked; both are absent when none did, so that "it
+names nothing here" stays distinct from "nobody could check".
 
 ## `ws` — workspaces
 
