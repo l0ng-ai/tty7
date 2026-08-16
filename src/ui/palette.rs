@@ -655,6 +655,11 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
         return None;
     }
 
+    // Only a single-word title can reach this: the needle drops whitespace so
+    // `newtab` and `new tab` both match, while the haystack keeps it, so
+    // `Settings` can equal its query and `New Tab` never can. Multi-word
+    // titles are carried by the word-start and run bonuses instead — which is
+    // enough, and worth knowing before tuning either of them.
     if hay == needle {
         score += 120;
     } else if hay.starts_with(&needle) {
