@@ -88,6 +88,22 @@ pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
 mod tests {
     use super::{civil_from_days, install, log_path};
 
+    /// A file written without being asked for belongs on the privacy page.
+    ///
+    /// The panic hook is installed unconditionally, so this one appears whether
+    /// or not anybody turned anything on — unlike `tty7.log`, which needs
+    /// `TTY7_LOG`. Both are listed there now; this keeps them listed.
+    #[test]
+    fn the_files_this_crate_leaves_behind_are_on_the_privacy_page() {
+        const PRIVACY: &str = include_str!("../../../../docs/reference/privacy.mdx");
+        for file in ["crash.log", "tty7.log"] {
+            assert!(
+                PRIVACY.contains(file),
+                "{file} is written to the config directory but not on the privacy page"
+            );
+        }
+    }
+
     #[test]
     fn a_panic_lands_in_the_crash_log() {
         let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
