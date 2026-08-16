@@ -18,7 +18,7 @@ Accepted anywhere on the line, before or after the subcommand.
 | Flag | Effect |
 |---|---|
 | `-m, --machine <MACHINE>` | Route to a linked machine over the local server's existing link. Matches the full link key (`me@devbox:22`) or the bare host (`devbox`). SSH links only; a down link, or a jump/proxy chain, is refused with a reason rather than dialled fresh. |
-| `--json` | One JSON object on stdout instead of the human table. A verb that *fails* prints its message on stderr and no JSON at all, so a reader parsing stdout must check the exit code first. Two verbs are exceptions, because there the bad news is the answer: `pane close` still prints `{"closed":[…],"failed":[…]}`, and `wait` still prints the state it gave up in. (`run` is not an exception — a child exiting nonzero is the verb succeeding, and its JSON is printed as usual.) |
+| `--json` | One JSON object on stdout instead of the human table. A verb that *fails* prints its message on stderr and no JSON at all, so a reader parsing stdout must check the exit code first. Three verbs are exceptions, because there the bad news is the answer: `pane close` still prints `{"closed":[…],"failed":[…]}`, `wait` still prints the state it gave up in, and `doctor` still prints its whole report — an unreachable server is the finding, and `tty7 doctor || alert` needs both the exit code and the rows. (`run` is not an exception — a child exiting nonzero is the verb succeeding, and its JSON is printed as usual.) |
 | `-q, --quiet` | No output on success. Errors still go to stderr. |
 
 ## Environment
@@ -94,10 +94,12 @@ for the server to read in the short window it waits. `run` then exits 1 as a
 stand-in and says so on stderr, and this flag is how a caller tells that 1 from
 a command that really did exit 1.
 
-A command **killed by a signal** also reports `exit: 1` — not the `128+N` a
-shell would give — but with `exit_code_known: true`, because a status was read.
-So `run` cannot distinguish a command the OOM killer took from one that exited
-1 on its own; read the pane's output if that difference matters.
+A command **killed by a signal** reports `exit: 1` — not the `128+N` a shell
+would give — with `exit_code_known: false` and the same stderr note as any
+other unknown code, because a status that says "terminated by a signal" is not
+an exit code the daemon will invent one from. That flag is exactly how a
+caller tells a command the OOM killer took from one that exited 1 on its own,
+so an orchestrator does not have to read the pane to find out.
 
 ### `tty7 new [PATH] [--open]`
 

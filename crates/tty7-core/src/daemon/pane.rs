@@ -756,6 +756,13 @@ impl Drop for SigtermUnblocked {
     }
 }
 
+/// The exit code to report, or `None` when the pane did not leave one.
+///
+/// A signal death is `None` rather than `128 + signal`: the shell convention
+/// is the *shell's*, and inventing it here would hand a caller a number the
+/// command never returned. `tty7 run` turns `None` into an exit 1 that says
+/// so — on stderr, and as `exit_code_known: false` — which is what lets an
+/// orchestrator tell a command the OOM killer took from one that exited 1.
 fn reported_exit_code(status: &portable_pty::ExitStatus) -> Option<i32> {
     match status.to_string().starts_with("Terminated by") {
         true => None,
@@ -4326,6 +4333,32 @@ mod tests {
         assert!(hex_val(b'g').is_none());
         assert!(hex_val(b' ').is_none());
         assert!(hex_val(b'/').is_none());
+    }
+
+    /// A signal is not an exit code, and must not be dressed up as one.
+    ///
+    /// `run` reports `exit_code_known: false` off the back of this `None`, and
+    /// the reference tells orchestrators to branch on that flag — it said the
+    /// opposite for a while, so this is here to keep the two agreeing.
+    #[test]
+    fn a_pane_killed_by_a_signal_reports_no_exit_code() {
+        assert_eq!(
+            reported_exit_code(&portable_pty::ExitStatus::with_exit_code(0)),
+            Some(0)
+        );
+        assert_eq!(
+            reported_exit_code(&portable_pty::ExitStatus::with_exit_code(42)),
+            Some(42)
+        );
+
+        // How portable_pty spells a signal death, and the only thing that
+        // separates one from an ordinary code here.
+        let signalled = portable_pty::ExitStatus::with_signal("SIGKILL");
+        assert!(
+            signalled.to_string().starts_with("Terminated by"),
+            "the spelling this turns on changed: {signalled}"
+        );
+        assert_eq!(reported_exit_code(&signalled), None);
     }
 
     #[test]
