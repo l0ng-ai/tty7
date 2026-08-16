@@ -2835,6 +2835,31 @@ mod tests {
     /// without adding it to the list fails this.
     #[test]
     fn every_prefix_a_shell_can_take_is_one_the_sweep_knows() {
+        // Counted from the source rather than listed here. Listing them is
+        // what this test used to do, and it could only ever confirm that four
+        // constants were among those same four — a fifth shell handed a
+        // throwaway directory would have been swept up by nobody, which is
+        // how bash's 607 of them were stranded in the first place.
+        const SOURCE: &str = include_str!("shell_integration.rs");
+        let production = SOURCE.split("mod tests").next().unwrap_or(SOURCE);
+        let handed_out: std::collections::BTreeSet<&str> = production
+            .match_indices("throwaway_dir(")
+            .filter_map(|(at, marker)| {
+                let rest = &production[at + marker.len()..];
+                let name = rest.split(')').next()?;
+                // The definition takes `prefix: &str`; a call names a constant.
+                name.starts_with(|c: char| c.is_ascii_uppercase())
+                    .then_some(name)
+            })
+            .collect();
+        assert_eq!(
+            handed_out.len(),
+            THROWAWAY_PREFIXES.len(),
+            "these prefixes reach a shell: {handed_out:?}, but the sweep knows \
+             {} of them",
+            THROWAWAY_PREFIXES.len()
+        );
+
         for prefix in [ZDOTDIR_PREFIX, NU_PREFIX, BASHRC_PREFIX, WSLRC_PREFIX] {
             assert!(
                 THROWAWAY_PREFIXES.contains(&prefix),
