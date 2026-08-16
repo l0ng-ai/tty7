@@ -66,7 +66,12 @@ fn utc_timestamp() -> String {
     )
 }
 
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+/// Civil date from a day count since the epoch (Howard Hinnant's algorithm).
+///
+/// Shared with [`crate::core::logfile`], which stamps every line: the two logs
+/// sit in one directory and a reader moving between them should not have to
+/// hold two date formats in their head.
+pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
