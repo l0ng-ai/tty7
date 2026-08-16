@@ -7188,6 +7188,36 @@ impl Tty7App {
 mod tests {
     use super::*;
 
+    /// The settings page documentation counts the sections, twice.
+    ///
+    /// A heading in words and one card per section, in a file that is not
+    /// opened when a section is added to `SettingsSection::ALL`. Same guard as
+    /// the READMEs' agent count: read the other file, so a ninth section is a
+    /// failing test rather than a page that quietly says eight.
+    #[test]
+    fn the_settings_page_documents_every_section() {
+        const DOC: &str = include_str!("../../docs/customization/settings.mdx");
+        let n = SettingsSection::ALL.len();
+
+        let word = [
+            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "eleven", "twelve",
+        ]
+        .get(n)
+        .copied()
+        .unwrap_or("many");
+        assert!(
+            DOC.contains(&format!("The {word} sections")),
+            "the page does not say it has {word} ({n}) sections"
+        );
+
+        let cards = DOC.matches("<Card title=").count();
+        assert_eq!(
+            cards, n,
+            "the page shows {cards} section cards for {n} sections"
+        );
+    }
+
     /// A shortcut is the first thing someone searching a settings window for a
     /// feature by name is after, and the Keybindings page was the one page the
     /// search could not see into: searching "split" found the settings that
