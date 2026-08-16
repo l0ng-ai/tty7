@@ -9862,6 +9862,7 @@ dependencies = [
 name = "tty7-server"
 version = "26.8.3"
 dependencies = [
+ "libc",
  "tempfile",
  "tty7-core",
 ]

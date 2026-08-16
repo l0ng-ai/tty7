@@ -273,7 +273,7 @@ pub fn ensure_running() -> anyhow::Result<()> {
     }
 
     if stale {
-        reap_recorded_daemon();
+        reap_recorded_daemon(None);
 
         if transport::endpoint_exists() {
             transport::remove_stale_endpoint();
@@ -502,7 +502,13 @@ pub fn stop() {
         log::warn!("daemon pid {pid} released its endpoint but has not exited yet");
     }
 
-    reap_recorded_daemon();
+    // With the pid read at the top, not from the pidfile: a shutdown that got
+    // as far as its cleanup deleted nothing we rely on here, but a build that
+    // still removes the pidfile mid-shutdown — or one whose exit stalled after
+    // the cleanup — would otherwise leave the reap with no pid to act on, and
+    // the survivor holding the singleton lock against every later launch
+    // (#653).
+    reap_recorded_daemon(recorded);
 
     if transport::endpoint_exists() {
         transport::remove_stale_endpoint();
@@ -534,16 +540,25 @@ fn wait_for_recorded_exit(_pid: u32, _timeout: Duration) -> bool {
     true
 }
 
+/// `recorded` is a pid the caller captured before asking the daemon to die;
+/// the pidfile is only the fallback, because a shutdown that stalled after its
+/// cleanup may have already deleted it.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn reap_recorded_daemon() {
-    let Some(pid) = pidfile::read() else { return };
+fn reap_recorded_daemon(recorded: Option<u32>) {
+    let Some(pid) = recorded.or_else(pidfile::read) else {
+        return;
+    };
     if pid <= 1 || pid == std::process::id() {
         pidfile::remove();
         return;
     }
     if process_matches_daemon_exe(pid as libc::pid_t) {
         log::warn!("reaping unreachable daemon (pid {pid}); its sessions will be hung up");
-        reap_process(pid as libc::pid_t);
+        if !reap_process(pid as libc::pid_t) {
+            // The pid is the only handle left on the survivor; keep the file
+            // so the next attempt still has someone to reap.
+            return;
+        }
     }
     pidfile::remove();
 }
@@ -555,14 +570,17 @@ fn process_matches_daemon_exe(pid: libc::pid_t) -> bool {
         .is_some_and(|name| is_reapable_daemon_name(&name))
 }
 
+/// Whether the process is gone by the end.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn reap_process(pid: libc::pid_t) {
+fn reap_process(pid: libc::pid_t) -> bool {
     if signal_and_await_exit(pid, libc::SIGTERM, REAP_TERM_TIMEOUT) {
-        return;
+        return true;
     }
-    if !signal_and_await_exit(pid, libc::SIGKILL, REAP_KILL_TIMEOUT) {
-        log::error!("daemon pid {pid} survived SIGKILL; leaving it behind");
+    if signal_and_await_exit(pid, libc::SIGKILL, REAP_KILL_TIMEOUT) {
+        return true;
     }
+    log::error!("daemon pid {pid} survived SIGKILL; leaving it behind");
+    false
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -577,10 +595,12 @@ fn process_alive(pid: libc::pid_t) -> bool {
 }
 
 #[cfg(windows)]
-fn reap_recorded_daemon() {
+fn reap_recorded_daemon(recorded: Option<u32>) {
     use crate::daemon::winproc;
 
-    let Some(pid) = pidfile::read() else { return };
+    let Some(pid) = recorded.or_else(pidfile::read) else {
+        return;
+    };
     if pid <= 4 || pid == std::process::id() {
         pidfile::remove();
         return;
@@ -691,7 +711,7 @@ fn wait_until_images_unlocked(dir: &Path, deadline: Instant) -> Result<(), Strin
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-fn reap_recorded_daemon() {}
+fn reap_recorded_daemon(_recorded: Option<u32>) {}
 
 fn spawn_detached() -> anyhow::Result<()> {
     let exe = std::env::current_exe()
