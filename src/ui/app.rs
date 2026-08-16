@@ -269,6 +269,14 @@ pub(crate) fn title_bar_drag(
     cx: &mut gpui::App,
 ) -> gpui::Stateful<gpui::Div> {
     window_move_gesture(row, key, window, cx).on_double_click(|_, window, _| {
+        // gpui only implements `titlebar_double_click` on macOS — the trait
+        // method is an empty default everywhere else, so on Linux this row
+        // swallowed the double-click and nothing zoomed. `zoom_window` is the
+        // maximise toggle there (x11 `_NET_WM_STATE_MAXIMIZED_*`, wayland
+        // `set_maximized`), and what gpui-component's own `TitleBar` calls on
+        // Linux for exactly this reason. Windows needs neither: the row is a
+        // drag area, which maps to HTCAPTION, and the OS has already restored
+        // or maximised the window before this could run.
         if cfg!(target_os = "linux") {
             window.zoom_window();
         } else {
@@ -277,6 +285,8 @@ pub(crate) fn title_bar_drag(
     })
 }
 
+/// The armed flag behind [`window_move_gesture`]. A single bool, but *where* it
+/// lives is the whole point — see there.
 pub(crate) struct WindowMoveArm {
     should_move: bool,
 }
@@ -341,6 +351,11 @@ pub(crate) fn window_mark() -> Option<impl IntoElement> {
 pub struct Tab {
     pub pane: Pane,
     pub name: Option<String>,
+    /// Entity id of the pane that last held focus in this tab. Recorded when we
+    /// leave the tab (see [`Tty7App::remember_active_pane`]) and restored on
+    /// return, so switching away and back keeps the active pane instead of
+    /// jumping to the first leaf. `None` for a tab never left, or after its
+    /// focused pane closed — both fall back to `first_leaf()`.
     last_focused: Option<gpui::EntityId>,
     /// The pane zoomed in this tab, stashed here by `activate` while another
     /// tab is on screen — zoom is a tab's view state, not the window's, so
