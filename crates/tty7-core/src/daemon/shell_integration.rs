@@ -2412,11 +2412,19 @@ mod tests {
     /// `None` means there is no usable bash on this box, so there is nothing to
     /// assert either way.
     #[cfg(unix)]
-    fn bashrc_sourcings(profile: Option<(&str, &str)>) -> Option<usize> {
+    fn bashrc_sourcings(files: &[(&str, &str)]) -> Option<Sourcings> {
         let home = throwaway_dir("tty7-rcfile-home-")?;
         let ticks = home.join("ticks");
-        if let Some((name, body)) = profile {
-            std::fs::write(home.join(name), body).expect("write profile");
+        let profile_ticks = home.join("profile-ticks");
+        for (name, body) in files {
+            // Every startup file the caller supplies leaves its own mark, so a
+            // rung of the chain that stops being walked is visible. Counting
+            // only `.bashrc` cannot see that: the unconditional fallback at the
+            // end sources it whether the profile ran or not, so dropping
+            // `.bash_login` from the chain entirely still leaves the count at
+            // one — checked by mutating the rung out, and it passed.
+            let body = format!("printf 'tick\n' >> '{}'\n{body}", profile_ticks.display());
+            std::fs::write(home.join(name), body).expect("write startup file");
         }
         std::fs::write(
             home.join(".bashrc"),
@@ -2432,14 +2440,28 @@ mod tests {
             .args(["-i", "-c", "true"])
             .env("HOME", &home)
             .output();
-        let sourced = ran.ok().map(|_| {
-            std::fs::read_to_string(&ticks)
+        let count = |path: &std::path::Path| {
+            std::fs::read_to_string(path)
                 .unwrap_or_default()
                 .lines()
                 .count()
+        };
+        let sourced = ran.ok().map(|_| Sourcings {
+            bashrc: count(&ticks),
+            profile: count(&profile_ticks),
         });
         let _ = std::fs::remove_dir_all(&home);
         sourced
+    }
+
+    /// How many times the throwaway `$HOME`'s files were read.
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct Sourcings {
+        bashrc: usize,
+        /// Across every startup file the case supplied — a case naming one
+        /// profile expects exactly one.
+        profile: usize,
     }
 
     /// The profile chain is first-match-wins, and a ~/.bash_profile that exists
@@ -2448,16 +2470,51 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_forwarding_bash_profile_does_not_pull_bashrc_in_twice() {
-        for forward in [
-            "if [ -f ~/.bashrc ]; then . ~/.bashrc; fi\n",
-            "source \"$HOME/.bashrc\"\n",
-        ] {
-            let Some(sourced) = bashrc_sourcings(Some((".bash_profile", forward))) else {
+        let shapes: [(&str, &[(&str, &str)]); 5] = [
+            (
+                "a guarded `.`",
+                &[(
+                    ".bash_profile",
+                    "if [ -f ~/.bashrc ]; then . ~/.bashrc; fi\n",
+                )],
+            ),
+            (
+                "an absolute `source`",
+                &[(".bash_profile", "source \"$HOME/.bashrc\"\n")],
+            ),
+            (
+                "a bare `source ~/.bashrc`",
+                &[(".bash_profile", "source ~/.bashrc\n")],
+            ),
+            // The wrapper has to survive being called from inside another
+            // sourced file, which is where a dotfile collection that splits
+            // itself up puts the forward.
+            (
+                "a forward one file further in",
+                &[
+                    (".bash_profile", "source ~/.bash_aliases\n"),
+                    (".bash_aliases", "source ~/.bashrc\n"),
+                ],
+            ),
+            // The middle rung of bash's own first-match-wins chain, which the
+            // replay has to walk the same way.
+            (
+                "a forwarding .bash_login",
+                &[(".bash_login", ". ~/.bashrc\n")],
+            ),
+        ];
+        for (what, files) in shapes {
+            let Some(sourced) = bashrc_sourcings(files) else {
                 return;
             };
             assert_eq!(
-                sourced, 1,
-                "~/.bashrc must be sourced exactly once for {forward:?}, got {sourced}",
+                sourced.bashrc, 1,
+                "~/.bashrc must be sourced exactly once with {what}, got {sourced:?}",
+            );
+            assert_eq!(
+                sourced.profile,
+                files.len(),
+                "every startup file must be read exactly once with {what}, got {sourced:?}",
             );
         }
     }
@@ -2468,18 +2525,31 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_profile_that_never_forwards_still_gets_bashrc_once() {
-        for profile in [
-            Some((".bash_profile", "export TTY7_PROFILE=1\n")),
-            Some((".profile", "export TTY7_PROFILE=1\n")),
+        let shapes: [(&str, &[(&str, &str)]); 4] = [
+            (
+                "a .bash_profile",
+                &[(".bash_profile", "export TTY7_PROFILE=1\n")],
+            ),
+            (
+                "a .bash_login",
+                &[(".bash_login", "export TTY7_PROFILE=1\n")],
+            ),
+            ("a .profile", &[(".profile", "export TTY7_PROFILE=1\n")]),
             // No profile at all — the plain macOS $HOME.
-            None,
-        ] {
-            let Some(sourced) = bashrc_sourcings(profile) else {
+            ("nothing at all", &[]),
+        ];
+        for (what, files) in shapes {
+            let Some(sourced) = bashrc_sourcings(files) else {
                 return;
             };
             assert_eq!(
-                sourced, 1,
-                "~/.bashrc must still arrive for {profile:?}, got {sourced}",
+                sourced.bashrc, 1,
+                "~/.bashrc must still arrive with {what}, got {sourced:?}",
+            );
+            assert_eq!(
+                sourced.profile,
+                files.len(),
+                "the profile must be read exactly once with {what}, got {sourced:?}",
             );
         }
     }
