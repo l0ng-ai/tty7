@@ -654,6 +654,7 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -829,6 +830,48 @@ mod tests {
         assert_eq!(
             check_in_str(&file, "example.com", 22, &ka),
             HostKeyStatus::Known
+        );
+    }
+
+    /// One line straight out of `ssh-keygen -H`, matched end to end.
+    ///
+    /// The digest itself is already pinned against outside vectors by
+    /// `sha1_matches_known_vectors` and `hmac_sha1_matches_rfc2202_vector`.
+    /// What no vector covers is everything wrapped around it: that the salt
+    /// and hash are base64 in the order this file reads them, that `|1|`
+    /// splits where OpenSSH puts the separator, and above all that
+    /// [`host_token`] spells a non-default port the same way `ssh-keygen`
+    /// did — `[example.com]:2222`, brackets and all. Get that spelling wrong
+    /// and every hashed entry for a non-22 host silently reads as a host
+    /// nobody has ever seen, which is a re-prompt rather than a wrong trust,
+    /// but a user with `HashKnownHosts` on would meet it at every connection.
+    ///
+    /// The digest covers the host token alone, which is why these pair with
+    /// this file's own key: the hashes say `example.com` and
+    /// `[example.com]:2222` and nothing about what key sat on the line.
+    #[test]
+    fn openssh_hashed_hosts_are_recognised() {
+        const HASHED_PLAIN: &str = "|1|mhBioT0otp5S/Ux0dinqUZ+0xJs=|XL4c/5K7LUzkBHUoDzK10wN1Yzg=";
+        const HASHED_PORT_2222: &str =
+            "|1|NuBKg6vw2CDaDM38U3/fjnHfAUE=|RPBwgouR+2rB4qexN4ESoPqnyP8=";
+
+        let ka = key(KEY_A);
+        let file = format!("{HASHED_PLAIN} {KEY_A}\n{HASHED_PORT_2222} {KEY_A}\n");
+
+        assert_eq!(
+            check_in_str(&file, "example.com", 22, &ka),
+            HostKeyStatus::Known,
+            "a plain host hashed by ssh-keygen"
+        );
+        assert_eq!(
+            check_in_str(&file, "example.com", 2222, &ka),
+            HostKeyStatus::Known,
+            "the [host]:port spelling has to hash the same way OpenSSH spells it"
+        );
+        assert_eq!(
+            check_in_str(&file, "other.com", 22, &ka),
+            HostKeyStatus::Unknown,
+            "a host these hashes do not name"
         );
     }
 
