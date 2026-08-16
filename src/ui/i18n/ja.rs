@@ -61,7 +61,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::Close => "閉じる",
         L10nKey::QuitStopServerTitle => "tty7 を終了してサーバーを停止しますか？",
         L10nKey::QuitStopServerBody => {
-            "tty7 を終了してバックグラウンドサーバーを停止します。シェルで実行中のものはすべて終了します。タブとレイアウトは保持され、次回起動時に新しいシェルで開きます。ウィンドウを閉じただけではアプリはトレイに退避し、シェルは動き続けます。"
+            "tty7 を終了してバックグラウンドサーバーを停止します。シェルで実行中のものはすべて終了します。タブとレイアウトは次回起動時に新しいシェルで開きます。（ウィンドウを閉じるだけならトレイに退避し、シェルは動き続けます）"
         }
         L10nKey::QuitAndStop => "終了して停止",
         L10nKey::CloseSshConnectionTitle => "この SSH 接続を閉じますか？",
@@ -176,7 +176,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ThemeSaveFailed => "テーマを保存できませんでした",
         L10nKey::OpenInFileManagerFailed => "{path} を開けませんでした",
         L10nKey::SettingsCustomThemesIntro => {
-            "テーマを複製して色を編集するか、テーマフォルダに自作テーマ（tty7 の YAML テーマまたは iTerm2 の .itermcolors スキーム）を置けます"
+            "テーマを複製して色を編集するか、tty7 の YAML テーマや iTerm2 の .itermcolors をテーマフォルダに置いてください"
         }
         L10nKey::SettingsDuplicateToEdit => "複製して編集",
         L10nKey::SettingsHosts => "ホスト",
@@ -230,9 +230,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "保存されたパスワードも一緒に削除されます。同じアドレスを使う接続が他にある場合は残ります。"
         }
         L10nKey::SettingsDeleteProfileCascade => {
-            "{endpoint} を参照しているリモートワークスペースのエントリが {count} 件あり、\
-             プロファイルと一緒にこのコンピュータから削除されます。リモートマシン上のセッションは\
-             維持され、新しいプロファイルで接続すればワークスペース一覧に再表示されます。"
+            "{endpoint} を参照するリモートワークスペースのエントリが {count} 件あり、一緒に削除されます。リモートマシン上のセッションは動いたままで、新しいプロファイルで接続すれば一覧に戻ります。"
         }
         L10nKey::SettingsCouldntForgetPassword => {
             "{endpoint} のパスワードを消去できませんでした: {error}"
@@ -241,7 +239,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSecurityIntro => "ホストは詳細設定でこれらを上書きできます",
         L10nKey::SettingsVerifyHostKeys => "ホストキーを検証",
         L10nKey::SettingsVerifyHostKeysDesc => {
-            "接続前に各サーバーのキーを known_hosts と照合し、未知のキーや変更されたキーを確認します。オフにすると接続時に確認しないため、なりすましサーバーに気づきません"
+            "接続前に各サーバーのキーを known_hosts と照合します。オフでは確認しないため、なりすましサーバーに気づきません"
         }
         L10nKey::WarnBeforeClosing => "閉じる前に警告",
         L10nKey::SettingsWarnBeforeClosingDesc => {
@@ -396,7 +394,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "このディレクトリは存在しないため、この値は保存されませんでした"
         }
         L10nKey::SettingsShellFooter => {
-            "継承元のないシェルに適用されます。ウィンドウの最初のタブなどです。新しいタブと分割はアクティブなペインのディレクトリを引き継ぎ、開いているシェルは動き続けます"
+            "継承元のないシェル（ウィンドウの最初のタブなど）に適用されます。新しいタブと分割はアクティブなペインのディレクトリを引き継ぎ、開いているシェルは動き続けます"
         }
         L10nKey::SettingsScrolling => "スクロール",
         L10nKey::SettingsScrollback => "スクロールバック",
@@ -441,7 +439,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsOpenFilesSystem => "デフォルトアプリ",
         L10nKey::SettingsOpenFilesCommand => "コマンド",
         L10nKey::SettingsOpenFilesModeDesc => {
-            "ファイルリンクを {modifier}+クリックしたときに開くもの。行番号へのジャンプとリモートホスト上のファイルを開けるのは内蔵エディタだけです"
+            "ファイルリンクを {modifier}+クリックしたときに開くもの。行番号へのジャンプとリモートファイルを開けるのは内蔵エディタだけです"
         }
         L10nKey::LinkFileNotUnder => "{path} — {dir} にそのファイルはありません",
         L10nKey::LinkFileNoDirectory => {
@@ -453,7 +451,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::OpenFilesWith => "ファイルを開くアプリケーション",
         L10nKey::SettingsOpenFilesWithDesc => {
-            "ファイルリンクを {modifier}+クリックで開くときに使うコマンドです。デフォルトアプリの代わりに実行します。{path}、{line}、{column} を使えます。値のないフラグは除外されます（例: herdr edit {path} --line={line}）。空欄ならデフォルトアプリを使います"
+            "ファイルリンクを {modifier}+クリックしたときに実行するコマンド。{path}、{line}、{column} を使えます — 値のないフラグは除外されます。空欄ならデフォルトアプリ"
         }
         L10nKey::SettingsBellModeOff => "オフ",
         L10nKey::SettingsBellModeVisual => "視覚的（画面点滅）",
@@ -465,7 +463,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsPromptEditor => "プロンプトエディター",
         L10nKey::SettingsPromptEditorDesc => {
-            "シェルプロンプトで入力する行を tty7 が持ちます — 選択、取り消し、そして下のメニュー。オフにすると、プロンプトでのキー、IME の確定、貼り付けはすべてシェルへ直接渡り、シェル自身の行エディター（zsh の ZLE、readline、fish）が編集を担当するため、そこでバインドしたキーがそのまま動きます。どちらの場合もシェル統合は有効なままです"
+            "シェルプロンプトで入力する行を tty7 が編集します — 選択、取り消し、下のメニュー。オフにするとシェル自身の行エディター（ZLE、readline、fish）に戻ります"
         }
         L10nKey::SettingsNeedsPromptEditor => {
             "プロンプトエディターが必要です。オフの間、このキーはすでにシェルのものです"
@@ -476,7 +474,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsHistorySearch => "履歴検索",
         L10nKey::SettingsHistorySearchDesc => {
-            "プロンプトで ⌃R を押すと tty7 のファジー履歴メニューが開きます。オフの場合、⌃R はシェルに渡されます — シェルの逆方向検索や、シェルでバインドしたもの（fzf、percol など）"
+            "プロンプトで ⌃R を押すと tty7 のファジー履歴メニューが開きます。オフなら ⌃R はシェルへ — 逆方向検索や、そこでバインドしたもの（fzf、percol）"
         }
         L10nKey::SettingsSelectionClipboard => "選択とクリップボード",
         L10nKey::SettingsSmartSelection => "スマート選択",
@@ -496,7 +494,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsAgentsIntro => "エージェント",
         L10nKey::SettingsAgentsIntroDesc => {
-            "フック統合により、これらのエージェントを実行するペインのセッション状態（作業中 / 待機中 / 完了）がタブバーに表示されます。tty7 内でのみ有効です"
+            "フックにより、これらのエージェントを実行するペインの状態（作業中 / 待機中 / 完了）がタブバーに表示されます。tty7 内でのみ有効"
         }
         L10nKey::SettingsReadingAgentConfig => "このマシンのエージェント設定を読み込んでいます…",
         L10nKey::SettingsStatusNotInstalled => "未インストール",
@@ -543,7 +541,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsShowTrayIcon => "システムトレイアイコンを表示",
         L10nKey::SettingsShowTrayIconDesc => {
-            "システムトレイ / メニューバーに状態を表示します。コーディングエージェントが入力を必要とするときに通知し、そのメニューからエージェントペインへ移動できます"
+            "システムトレイ / メニューバーの状態表示：エージェントが入力を必要とするときに通知し、メニューからそのペインへ移動できます"
         }
         L10nKey::SettingsTabs => "タブ",
         L10nKey::SettingsNewTabPosition => "新規タブの表示位置",
@@ -554,11 +552,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSidebarGrouping => "サイドバーのグループ化",
         L10nKey::SettingsSidebarGroupingDesc => {
-            "git リポジトリごとにサイドバータブをまとめます。リポジトリ外のタブはスクラッチセクションに置くか、「リポジトリ／フォルダ別」なら作業ディレクトリごとにまとめます。左サイドバーにのみ適用"
+            "サイドバータブを git リポジトリごとにまとめます。リポジトリ外のタブはスクラッチに、「リポジトリ／フォルダ別」なら作業ディレクトリごとに。左サイドバーのみ"
         }
         L10nKey::SettingsDiffPreviewFromCounts => "サイドバーのカウントから Diff プレビューを開く",
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
-            "行の +N −N をクリックすると、オーバーレイでワーキングツリーの Diff を開きます。オフならブランチとカウントは表示されますが、クリックできません"
+            "行の +N −N をクリックすると、オーバーレイでワーキングツリーの Diff を開きます。オフならカウントは表示されたまま、クリックだけできません"
         }
         L10nKey::SettingsNotifications => "通知",
         L10nKey::SettingsNotifyOnCommandFinish => "コマンド終了時に通知",
@@ -589,7 +587,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsPressKeys => "キーを入力…",
         L10nKey::SettingsPauseToSaveEsc => "一時停止して保存 · Esc",
         L10nKey::SettingsKeybindingsIntroDesc => {
-            "ショートカットをクリックして新しいキーを押すと、少し間を置いて保存されます。Ctrl-B の後に X を押すようなシーケンスでは、キーを続けて入力します。Esc でキャンセル。Backspace は最後のキーを削除し、最初に押すとデフォルトに戻します"
+            "ショートカットをクリックして新しいキーを押すと、少し間を置いて保存されます。Ctrl-B の後に X のようなシーケンスはキーを続けて入力。Esc でキャンセル、Backspace は最後のキーを削除し、最初に押すとデフォルトに戻します"
         }
         L10nKey::SettingsPrefixNote => {
             "プレフィックスが有効な場合、プレフィックスキーを単独で押すと約 1 秒後にシェルに渡され、プレフィックス + 未割り当てのキーはターミナルへそのまま送信されます"
@@ -634,7 +632,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateDiscard => "破棄",
         L10nKey::SettingsAutoDownload => "アップデートをバックグラウンドでダウンロード",
         L10nKey::SettingsAutoDownloadDesc => {
-            "新しいリリースを見つけ次第ダウンロードと検証を済ませておき、インストールは再起動するだけにします。確認なしにインストールすることはありません。従量制の回線ではオフにしてください（パッケージは約 30 MB です）"
+            "新しいリリースを見つけ次第ダウンロードと検証を済ませ、インストールは再起動するだけにします。確認なしにインストールすることはありません。パッケージは約 30 MB"
         }
         L10nKey::SettingsUpdateChannel => "更新チャンネル",
         L10nKey::SettingsUpdateChannelDesc => {
@@ -644,14 +642,14 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateChannelNightly => "ナイトリー",
         L10nKey::SettingsDaemonStale => "バックグラウンドサーバーは {build} のままです。",
         L10nKey::SettingsDaemonStaleDesc => {
-            "tty7 はその場で更新されたため、アプリは新しくなりましたが、各ペインは以前のビルドのサーバーが処理しています。サーバーを再起動すると新しいビルドに切り替わりますが、ペインで動いているプロセス（シェル、エージェント、SSH セッション）はすべて終了します。急ぐ必要はありません。ペインが空いているときに実行してください"
+            "tty7 はその場で更新されました。アプリは新しく、ペインはまだ以前のビルドのサーバーが処理しています。再起動すると新しいビルドに切り替わり、ペインで動いているプロセスはすべて終了します。急ぐ必要はなく、ペインが空いているときにどうぞ"
         }
         L10nKey::UpdateDialogTitle => "アップデートがあります",
         L10nKey::UpdateDialogDetail => {
-            "tty7 {version} が利用できます（現在 {current}）。インストールするとアプリが再起動します。バックグラウンドサーバーは動いたままなので、ペインで開いているものはそのまま残ります。"
+            "tty7 {version} が利用できます（現在 {current}）。インストールするとアプリが再起動します。バックグラウンドサーバーは動いたままなので、ペインの中身は残ります"
         }
         L10nKey::UpdateDialogDetailWindows => {
-            "tty7 {version} が利用できます（現在 {current}）。インストールするとアプリとバックグラウンドサービスが再起動します。ペインで実行中のプロセスは終了し、タブとレイアウトは新しいシェルで復元されます。"
+            "tty7 {version} が利用できます（現在 {current}）。インストールするとアプリとバックグラウンドサービスが再起動します。ペインのプロセスは終了し、タブとレイアウトは新しいシェルで復元されます"
         }
         L10nKey::UpdateDialogDetailManual => {
             "tty7 {version} が利用できます（現在 {current}）。{hint}"
@@ -660,13 +658,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::UpdateDialogLater => "後で",
         L10nKey::UpdateDialogNextLaunch => "次回起動時にインストール",
         L10nKey::UpdateDialogNeedsElevation => {
-            "この tty7 は全ユーザー向けにインストールされているため、インストール開始前に Windows の管理者承認が一度だけ求められます。tty7 自体が管理者権限で実行されることはなく、あなたの権限のまま再起動します。"
+            "tty7 は全ユーザー向けにインストールされているため、インストール前に Windows の管理者承認が一度求められます。tty7 自体が管理者権限で実行されることはありません"
         }
         L10nKey::SettingsUpdateCheckFailed => "アップデートを確認できませんでした: {error}",
         L10nKey::SettingsUpdatePrepareFailed => "アップデートに失敗しました: {error}",
         L10nKey::SettingsUpdateLaunchFailed => "インストーラーを起動できませんでした: {error}",
         L10nKey::SettingsUpdateUnsupportedMacos => {
-            "この tty7 は書き込み可能な tty7.app バンドルから実行されていないため、そのまま置き換えるのは安全ではありません。tty7 を「アプリケーション」など書き込み可能なフォルダへ移動するか、リリースページを開いてアップデートをインストールしてください"
+            "この tty7 は書き込み可能な tty7.app バンドルにないため、自分自身を置き換えられません。「アプリケーション」へ移動するか、リリースページから更新してください"
         }
         L10nKey::SettingsUpdateUnsupportedLinux => {
             "このアーキテクチャ向けの Linux パッケージはリリースにありません。ソースからビルドするか、パッケージマネージャーをご利用ください"
@@ -675,10 +673,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "Linux は手動で更新します。リリースページから {name} をダウンロードするか、パッケージマネージャーをご利用ください"
         }
         L10nKey::SettingsUpdateUnsupportedWindows => {
-            "Windows の自動更新は、認識可能な Inno Setup 版とポータブル ZIP 版に対応しています。この tty7 には有効なインストール情報・アップデーター・書き込み可能なポータブルディレクトリのいずれかが見つからないため、リリースページを開いて手動で更新してください"
+            "この tty7 は認識可能な Inno Setup 版でもポータブル ZIP 版でもないため、自動更新できません。リリースページを開いて手動で更新してください"
         }
         L10nKey::SettingsUpdateWindowsAllUsers => {
-            "tty7 はすべてのユーザー向けにインストールされているため、置き換えには管理者権限が必要です。tty7 が自ら昇格を要求することはありません。リリースページを開き、インストーラーを手動で実行して更新してください"
+            "tty7 はすべてのユーザー向けにインストールされており、置き換えには管理者権限が必要ですが、tty7 は自ら昇格を要求しません。リリースページからインストーラーを実行して更新してください"
         }
         L10nKey::SettingsUpdateUnsupportedPlatform => {
             "このプラットフォームでは自動インストールを利用できません。リリースページを開いてください"
@@ -696,15 +694,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCheckUpdatesOnLaunch => "起動時にアップデートを確認",
         L10nKey::SettingsCommandLine => "コマンドライン",
         L10nKey::SettingsCommandLineDesc => {
-            "起動時に同梱の `tty7` コマンドを PATH に入れ、スクリプトやコーディングエージェントが任意のターミナルから tty7 を操作できるようにします。tty7 のペイン内ではどちらでも機能します。自分でビルド・インストールした `tty7` を上書きされたくない場合はオフにしてください。次回起動時に有効になります"
+            "同梱の tty7 コマンドを PATH に入れ、スクリプトやエージェントが任意のターミナルから tty7 を操作できるようにします（ペイン内ではどちらでも動きます）。自分でビルドした tty7 を優先したい場合はオフに。次回起動時に有効"
         }
         L10nKey::SettingsInstallCliOnPath => "`tty7` コマンドを PATH にインストール",
         L10nKey::SettingsServer => "デーモンサーバー",
         L10nKey::SettingsServerDesc => {
             "シェルを動かし続けているバックグラウンドサーバーを再起動します。このコンピュータ上のすべてのシェルが終了し、タブとレイアウトは新しいシェルで開き直します"
-        }
-        L10nKey::SettingsHowShellsWorkBody => {
-            "シェルはこのウィンドウの中ではなく、バックグラウンドのサーバーで動いています。tty7 を終了してもシェルは動き続け、開き直せばタブ・レイアウト・作業ディレクトリが同じシェルのまま戻ります。タブを閉じるとそのシェルは終了し、「サーバーを再起動」と「終了してサーバーを停止」はすべてのシェルを終了します。"
         }
         L10nKey::SettingsRestartServer => "サーバーを再起動…",
         L10nKey::SettingsAppHttpProxy => "アップデート用プロキシ",
@@ -805,10 +800,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchHostsKeywords => {
             "ssh ホスト 接続 保存 プロファイル インポート ssh_config 管理 追加 編集 クイック接続 hosts ssh profile import connect manage"
         }
-        L10nKey::SettingsSearchHowShellsWorkKeywords => {
-            "シェル セッション デーモン サーバー デタッチ 永続化 バックグラウンド 閉じる 終了 停止 削除 ワークスペース レイアウト 再起動 tmux how shells work shell daemon persist survive reboot"
-        }
-        L10nKey::SettingsSearchHowShellsWorkTitle => "シェルの仕組み",
         L10nKey::SettingsSearchItalicFontKeywords => "タイプフェイス 斜体 italic oblique typeface",
         L10nKey::SettingsSearchKeybindingsKeywords => {
             "ショートカット ホットキー キーボード バインディング コード tmux プリセット 再バインド プレフィックス keybindings shortcut hotkey binding chord prefix"
@@ -1194,13 +1185,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "… さらに変更されたファイル {count} 個 — ターミナルで `git diff` を実行して確認してください"
         }
         L10nKey::DiffOversizedNotice => {
-            "このワーキングツリーは大きすぎて効率的に描画できません（{summary}）。すべてのファイルは折りたたまれています — 個々のファイルを展開するか、ターミナルで `git diff` を実行してください"
+            "このワーキングツリーは大きすぎて描画できません（{summary}）。すべて折りたたんであります — 個別に展開するか、ターミナルで `git diff` を実行してください"
         }
         L10nKey::DiffTruncatedPerFile => {
             "Diff は {limit} 行で切り詰められました — 残りはターミナルで `git diff` を実行してください"
         }
         L10nKey::DiffTruncatedBudget => {
-            "差分の内容は読み込まれていません — このワーキングツリーは tty7 の Diff 予算を超えています。ターミナルでこのファイルの `git diff` を実行してください"
+            "内容は読み込まれていません — tty7 の Diff 予算を超えています。ターミナルで `git diff` を実行してください"
         }
         L10nKey::DiffUntrackedHeader => "未追跡ファイル ({count})",
         L10nKey::DiffMoreUntracked => {
@@ -1248,8 +1239,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteStripFailed => "{machine} に未接続です — {error}",
         L10nKey::RemoteStripRouteLost => "{machine} の接続設定は存在しません — 再接続できません",
         L10nKey::RemoteRouteParkedHint => {
-            "接続設定が存在しないため、自動再接続しません。リモートのセッションは残っています — \
-             新しいプロファイルでこのマシンに接続すると、ワークスペース一覧に再表示されます。"
+            "接続設定が存在しないため、自動再接続しません。リモートのセッションは残っています — 新しいプロファイルで接続すると、ワークスペース一覧に戻ります。"
         }
         L10nKey::RemoteNoticePreempted => "別の場所で開かれました — 入力しても反映されません",
         L10nKey::RemoteNoticeDisconnected => "未接続です — 入力しても反映されません",
@@ -1259,13 +1249,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteActionRetry => "再試行",
         L10nKey::RemoteActionRemoveEntry => "エントリを削除",
         L10nKey::RemoteNoConnectionDetails => {
-            "このウィンドウは {machine} 上のワークスペースですが、tty7 には接続情報がありません。SSH プロファイルか ~/.ssh/config に項目があるか確認してください"
+            "このウィンドウは {machine} 上のワークスペースですが、tty7 に接続情報がありません。SSH プロファイルか ~/.ssh/config の項目が残っているか確認してください"
         }
         L10nKey::RemoteThisComputer => "このコンピュータ",
         L10nKey::RemoteProfileGone => "削除されたプロファイル",
         L10nKey::RemoteRestartTitle => "「{machine}」上の tty7 サーバーを再起動しますか？",
         L10nKey::RemoteRestartBody => {
-            "これにより {machine} 上のすべてのシェルが停止します。表示されていないものも含め、実行中のものはすべて終了します。ワークスペースとレイアウトは保持され、新しいシェルで開きます"
+            "{machine} 上のシェルは、表示されていないものも含めてすべて終了します。ワークスペースとレイアウトは保持され、新しいシェルで開きます"
         }
         L10nKey::RemoteReplaceBody => {
             "tty7 は {machine} に対応するサーバーをインストールして起動します。\n\n{machine} で実行中のすべてのセッションが終了します。このウィンドウが接続していないセッションも含みます"
@@ -1292,7 +1282,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteInstallBytes => "バイト",
         L10nKey::RemoteMismatchTitle => "「{machine}」上の tty7 サーバーを更新しますか？",
         L10nKey::RemoteMismatchDetail => {
-            "{machine} は {running} から tty7 セッションを提供していますが、このクライアント（{wanted}）はそのプロトコルを理解できません。tty7 は対応するサーバーをそこにインストール済みですが、セッションは実行中のサーバー上にあります。\n\n{replace_server}\u{2003}を選ぶと {wanted} に置き換えられ、そのサーバー上のセッションはすべて終了します。\n{cancel}\u{2003}を選ぶと {machine} はそのままです。このウィンドウは接続しません"
+            "{machine} はサーバー {running} で動いていますが、このクライアント（{wanted}）はそのプロトコルを話せません。対応するサーバーはインストール済みですが、セッションは実行中のサーバー上にあります。\n\n{replace_server}\u{2003}{wanted} に置き換え、そのサーバー上のセッションをすべて終了します。\n{cancel}\u{2003}{machine} はそのままです。このウィンドウは接続しません"
         }
         L10nKey::RemoteMismatchReplaceServer => "サーバーを更新",
         L10nKey::RemoteMismatchDowngradeServer => "サーバーを置き換え",
@@ -1311,7 +1301,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "tty7 のローカルサーバーに到達できませんでした: {error}"
         }
         L10nKey::RemoteDaemonTooOld => {
-            "このマシンの tty7 デーモンは古いビルドのため、{machine} 上のサーバーを再起動できません。tty7 を終了（デーモンが停止します）して開き直し、再試行してください"
+            "このマシンのデーモンは古いビルドのため、{machine} 上のサーバーを再起動できません。tty7 を終了（デーモンも停止します）して開き直し、再試行してください"
         }
         L10nKey::RemoteProfileMissing => "その保存済み SSH プロファイルはもう存在しません",
         L10nKey::RemoteAliasMissing => "`{alias}` は ~/.ssh/config にありません",
@@ -1396,7 +1386,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::IoBusy => "他のプログラムが使用中です。",
         L10nKey::IoTimedOut => "時間内に応答がありませんでした。",
         L10nKey::TreeWindowOpenedEmpty => {
-            "このウィンドウのサーバーがタブを渡さなかったため、空のまま開きました。失われたものはなく、応答すれば戻ります。戻らない場合はコマンドパレットの「サーバーを再起動」を実行してください"
+            "サーバーがこのウィンドウのタブを渡さなかったため、空のまま開きました。失われたものはなく、応答すれば戻ります。戻らない場合はコマンドパレットの「サーバーを再起動」を実行してください"
         }
         L10nKey::CmdGroupTabsPanes => "タブとペイン",
         L10nKey::CmdGroupWorkspaces => "ワークスペース",
@@ -1510,35 +1500,35 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "バックグラウンドサーバーを再起動できませんでした: {error}"
         }
         L10nKey::AppRestartServerMismatchDetail => {
-            "サーバーは v{build}、プロトコル {protocol}。このアプリは {ours} です。噛み合わないため、タブを取り出せません。\n\n終了：何も変わりません。サーバーもシェルも動き続けます。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
+            "サーバーはプロトコル {protocol}（ビルド v{build}）、このアプリは {ours} のため、タブを取り出せません。\n\n終了：何も変わりません。サーバーもシェルも動き続けます。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
         }
         L10nKey::AppRestartServerDialectDetail => {
-            "サーバーは v{build}：制御方言 v{dialect}、このアプリは v{ours} です。タブを渡せないため、ウィンドウはどれも空のまま開きます。\n\n終了：何も変わりません。サーバーもシェルも動き続けます。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
+            "サーバーは制御方言 v{dialect}（ビルド v{build}）、このアプリは v{ours} のため、ウィンドウはどれも空で開きます。\n\n終了：何も変わりません。サーバーもシェルも動き続けます。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
         }
         L10nKey::AppRestartServerDialectNewerDetail => {
-            "サーバーは v{build}：制御方言 v{dialect}、このアプリは v{ours} です。タブを渡せないため、ウィンドウはどれも空のまま開きます。\n\n終了して新しいビルドを入れる：根本的な解決で、シェルはそのまま残ります。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
+            "サーバーは制御方言 v{dialect}（ビルド v{build}）、このアプリは v{ours} のため、ウィンドウはどれも空で開きます。\n\n終了して新しいビルドを入れる：根本的な解決で、シェルはそのまま残ります。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
         }
         L10nKey::AppRestartServerOldDetail => {
             "サーバーはバージョン照合より前のもので、何を話すか分かりません。\n\n終了：何も変わりません。サーバーもシェルも動き続けます。\n再起動：タブは新しいシェルで戻り、いま実行中のものは終了します"
         }
         L10nKey::AppRestart => "再起動",
         L10nKey::AppRestartServerNoServer => {
-            "{label} には再起動できる tty7 自身のサーバーがありません。これはこのコンピュータが --stdio で実行しているプログラムです。代わりにそのワークスペースを止めてください"
+            "{label} には再起動できるサーバーがありません。このコンピュータが --stdio で実行しているプログラムです。代わりにワークスペースを止めてください"
         }
         L10nKey::AppRestartServerBody => {
-            "このコンピュータで実行中のすべてのシェルが停止します。タブとレイアウトは保持され、新しいシェルで開きます"
+            "このコンピュータのシェルはすべて終了します。タブとレイアウトは保持され、新しいシェルで開きます"
         }
         L10nKey::ConfigQuarantinedStartup => {
-            "config.json を解析できなかったため、デフォルト設定で実行しており、ファイルを上書きすることもありません。内容は config.json.corrupt として残しました——修正すれば自動で再読み込みされます。それまでは設定での変更は保存されません"
+            "config.json を解析できませんでした。デフォルト設定で実行しており、内容は config.json.corrupt として残しました。直せば自動で再読み込みされます。それまで設定の変更は保存されません"
         }
         L10nKey::ConfigQuarantinedReload => {
-            "編集された config.json を解析できなかったため、実行中の設定をそのまま保持し、ファイルの内容は config.json.corrupt として残しました。修正すれば自動で再読み込みされます。それまでに設定を保存すると、実行中の設定で上書きされます"
+            "編集された config.json を解析できませんでした。実行中の設定を保持し、内容は config.json.corrupt として残しました。直せば自動で再読み込みされます。それまでに設定を保存すると上書きされます"
         }
         L10nKey::ConfigUnreadableStartup => {
-            "config.json を読み込めなかったため、デフォルト設定で実行しており、ファイルを上書きすることもありません——ファイルはそのままです。権限か内容を直せば自動で再読み込みされます。それまでは設定での変更は保存されません"
+            "config.json を読み込めませんでした。デフォルト設定で実行しており、ファイルはそのままです。権限か内容を直せば自動で再読み込みされます。それまで設定の変更は保存されません"
         }
         L10nKey::ConfigUnreadableReload => {
-            "config.json を読み込めなかったため、実行中の設定をそのまま保持し、ファイルもそのままにしてあります。権限か内容を直せば自動で再読み込みされます。それまでに設定を保存すると、実行中の設定で上書きされます"
+            "config.json を読み込めませんでした。実行中の設定を保持し、ファイルもそのままです。権限か内容を直せば自動で再読み込みされます。それまでに設定を保存すると上書きされます"
         }
         L10nKey::AppWorktreeRemoveDetailDirty => {
             "閉じたタブの {path} にあるワークツリーには未コミットの変更があります"
@@ -1674,35 +1664,23 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::Replace => "置き換える",
         L10nKey::SftpErrorInvalidOctalMode => "無効な 8 進数モードです",
         L10nKey::SettingsDaemonStaleDescInPlace => {
-            "tty7 はその場で更新されたため、アプリは新しくても、ペインは前のビルドが提供したままです。\
-             サーバーは停止せずに新しいビルドへ自分自身を置き換えられます。\
-             シェルとその中で動いているものはそのまま引き継がれます。\
-             tty7 内蔵の SSH クライアントを使うペインだけは例外で、その接続は閉じられ、開き直しが必要です"
+            "tty7 はその場で更新されました。アプリは新しく、ペインはまだ前のビルドで動いています。サーバーは停止せずに新しいビルドへ置き換えられるので、シェルはそのまま引き継がれます。tty7 内蔵の SSH クライアントを使うペインだけは例外で、その接続は閉じられ、開き直しが必要です"
         }
         L10nKey::AppRestartServerBodyInPlace => {
-            "バックグラウンドサーバーは停止せずに、自分自身をこのビルドに置き換えます。\
-             シェルは動いたままで、ペイン内のコマンド・エージェント・`ssh` セッションは中断されません。\
-             ウィンドウはすぐに再接続します。\
-             tty7 内蔵の SSH クライアントを使うペインだけは例外で、その接続は閉じられ、開き直しが必要です"
+            "サーバーは停止せずに自分自身をこのビルドへ置き換えます。シェルは動いたままで、ウィンドウはすぐに再接続します。tty7 内蔵の SSH クライアントを使うペインだけは例外で、その接続は閉じられ、開き直しが必要です"
         }
         L10nKey::PaneRestoredScreenBanner => {
             "復元された画面 — 以下は新しいシェルで、これより上のものは動いていません"
         }
         L10nKey::SettingsPerPaneHistory => "ペインごとに独自のシェル履歴を持たせる",
         L10nKey::SettingsPerPaneHistoryDescription => {
-            "上キーでたどるのは、すべてのペインが混ざったものではなく、このペインで実行したコマンドです。\
-             新しいペインは空ではなく既存の履歴から始まり、追加された分はペインを閉じるときに書き戻されるので失われません。\
-             tty7 が設定できる bash と zsh のペインが対象で、独自の引数で起動したシェルはそのままです"
+            "上キーでたどるのは、全ペインが混ざったものではなくこのペインで実行したコマンドです。新しいペインは既存の履歴から始まり、追加分は閉じるときに書き戻されます。対象は tty7 が設定できる bash と zsh のペインで、独自の引数で起動したシェルはそのままです"
         }
         L10nKey::IntegrationNoticeBlocked => {
-            "このペインでは tty7 シェル統合がブロックされています。“{wrapper}”がシェルレポートを\
-             横取りしているため、インライン補完と Ctrl+R メニューは利用できません。\
-             シェル独自の履歴検索は引き続き使えます。"
+            "“{wrapper}”がこのペインのシェルレポートを横取りしているため、インライン補完と Ctrl+R メニューは使えません。シェル独自の履歴検索は引き続き使えます。"
         }
         L10nKey::IntegrationNoticeNotEngaged => {
-            "このペインでは tty7 シェル統合が有効になっていないため、インライン補完と Ctrl+R \
-             メニューは利用できません。独自の引数で起動したシェル、PTY ラッパー（figterm 系）、\
-             未対応のシェル設定が原因の可能性があります。"
+            "このペインでは tty7 シェル統合が有効になっておらず、インライン補完と Ctrl+R メニューは使えません。よくある原因は、独自の引数で起動したシェル、PTY ラッパー、未対応のシェルです。"
         }
         L10nKey::PaneTitleDisconnected => "{title} — 切断されました",
         L10nKey::PaneTitleProcessExited => "{title} — プロセスが終了しました",

@@ -55,7 +55,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::Close => "关闭",
         L10nKey::QuitStopServerTitle => "退出并停止 server？",
         L10nKey::QuitStopServerBody => {
-            "这会退出 tty7 并停止后台 server，所有仍在运行的 shell 都会被终止。你的标签页和布局会被保留，下次启动时以全新的 shell 重新打开。（关闭窗口只会把应用收起到托盘，shell 保持运行。）"
+            "这会退出 tty7 并停止后台 server，shell 里正在跑的东西都会被终止。标签页和布局会保留，下次启动时以全新的 shell 打开。（只关窗口的话应用收进托盘，shell 继续跑。）"
         }
         L10nKey::QuitAndStop => "退出并停止",
         L10nKey::CloseSshConnectionTitle => "关闭这个 SSH 连接？",
@@ -156,7 +156,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ThemeSaveFailed => "无法保存主题",
         L10nKey::OpenInFileManagerFailed => "无法打开 {path}",
         L10nKey::SettingsCustomThemesIntro => {
-            "复制一个主题后可在此编辑其颜色，或者把自定义主题放入主题文件夹：tty7 YAML 主题或 iTerm2 的 .itermcolors 方案。"
+            "复制一个主题即可在此编辑颜色，或把 tty7 YAML 主题、iTerm2 .itermcolors 文件放进主题文件夹。"
         }
         L10nKey::SettingsDuplicateToEdit => "复制以编辑",
         L10nKey::SettingsHosts => "主机",
@@ -204,15 +204,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "为它保存的密码也会一并删除，除非还有别的连接用着同一个地址。"
         }
         L10nKey::SettingsDeleteProfileCascade => {
-            "有 {count} 个已保存的远程工作区条目指向 {endpoint}，将随配置一并从本机清除；\
-             远端机器上的会话不受影响，新建配置连上同一台机器后即可在工作区列表找回。"
+            "有 {count} 个已保存的远程工作区条目指向 {endpoint}，会一并从本机清除。远端机器上的会话照常跑——新建配置连上去就能在工作区列表里找回。"
         }
         L10nKey::SettingsCouldntForgetPassword => "无法清除 {endpoint} 的已保存密码：{error}",
         L10nKey::SettingsSecurity => "安全",
         L10nKey::SettingsSecurityIntro => "主机可以在自己的高级选项中覆盖这些设置。",
         L10nKey::SettingsVerifyHostKeys => "校验主机密钥",
         L10nKey::SettingsVerifyHostKeysDesc => {
-            "在连接前对照 known_hosts 检查每台服务器的密钥，并确认未知或已更改的密钥。关闭后连接不做检查，被仿冒的服务器也不会被察觉。"
+            "连接前对照 known_hosts 检查服务器密钥。关闭后不做检查，被仿冒的服务器也不会被察觉。"
         }
         L10nKey::WarnBeforeClosing => "关闭前警告",
         L10nKey::SettingsWarnBeforeClosingDesc => {
@@ -341,7 +340,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsWdCustom => "自定义",
         L10nKey::SettingsWdPathInvalid => "这个目录不存在，该值未保存。",
         L10nKey::SettingsShellFooter => {
-            "仅适用于没有可继承目录的 shell，例如窗口的第一个标签页。新标签页和分屏仍会继承活动窗格的目录，已经打开的 shell 会继续运行。"
+            "仅适用于没有目录可继承的 shell，例如窗口的第一个标签页。新标签页和分屏仍继承活动窗格的目录，已打开的 shell 继续运行。"
         }
         L10nKey::SettingsScrolling => "滚动",
         L10nKey::SettingsScrollback => "回滚行数",
@@ -377,7 +376,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsOpenFilesSystem => "默认应用",
         L10nKey::SettingsOpenFilesCommand => "自定义命令",
         L10nKey::SettingsOpenFilesModeDesc => {
-            "{modifier}+点击 文件链接时用什么打开。只有内置编辑器能跳到指定行，也只有它能打开远程主机上的文件。"
+            "{modifier}+点击 文件链接时用什么打开。只有内置编辑器能跳到指定行、能打开远程主机上的文件。"
         }
         L10nKey::LinkFileNotUnder => "{path} —— {dir} 下没有这个文件",
         L10nKey::LinkFileNoDirectory => {
@@ -387,7 +386,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::LinkDirOutsideTree => "{path} —— 它在另一台机器上，也不在文件面板打开的任何目录里",
         L10nKey::OpenFilesWith => "打开文件方式",
         L10nKey::SettingsOpenFilesWithDesc => {
-            "{modifier}+点击 文件链接时运行的命令，而不是默认应用。可使用 {path}、{line}、{column}；参数值缺失的标志会被丢弃（例如 herdr edit {path} --line={line}）。留空使用默认应用。"
+            "{modifier}+点击 文件链接时运行的命令。可用 {path}、{line}、{column}——取值缺失的标志会被丢弃。留空则用默认应用。"
         }
         L10nKey::SettingsBellModeOff => "关",
         L10nKey::SettingsBellModeVisual => "闪烁",
@@ -399,7 +398,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsPromptEditor => "提示符编辑器",
         L10nKey::SettingsPromptEditorDesc => {
-            "由 tty7 接管你在 shell 提示符上敲的这一行：选择、撤销，以及下面这些菜单。关闭后，提示符处的每个按键、输入法上屏和粘贴都直接交给 shell，由它自己的行编辑器——zsh 的 ZLE、readline、fish——负责编辑，你在那里绑定的键位照常生效。两种模式下 shell 集成都保持开启。"
+            "由 tty7 编辑你在 shell 提示符上敲的这一行：选择、撤销，以及下面这些菜单。关闭后交还给 shell 自己的行编辑器——ZLE、readline、fish。"
         }
         L10nKey::SettingsNeedsPromptEditor => {
             "需要提示符编辑器：它关闭时，这个按键本就归 shell 所有。"
@@ -410,7 +409,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsHistorySearch => "历史搜索",
         L10nKey::SettingsHistorySearchDesc => {
-            "在提示符按 ⌃R 打开 tty7 的模糊历史菜单。关闭后 ⌃R 交由 shell 处理——它自带的反向搜索，或你在那里绑定的其它功能（fzf、percol）。"
+            "在提示符按 ⌃R 打开 tty7 的模糊历史菜单。关闭后 ⌃R 交给 shell——它自带的反向搜索，或你绑定的其它功能（fzf、percol）。"
         }
         L10nKey::SettingsSelectionClipboard => "选择与剪贴板",
         L10nKey::SettingsSmartSelection => "智能选择",
@@ -428,7 +427,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsAgentsIntro => "Agents",
         L10nKey::SettingsAgentsIntroDesc => {
-            "hook 集成让标签栏中的窗格实时显示这些 agent 的会话状态（进行中 / 等待中 / 已完成）。仅在 tty7 内生效。"
+            "hook 让跑这些 agent 的窗格在标签栏实时显示状态（进行中 / 等待中 / 已完成）。仅在 tty7 内生效。"
         }
         L10nKey::SettingsReadingAgentConfig => "正在读取这台机器的 agent 配置…",
         L10nKey::SettingsStatusNotInstalled => "未安装",
@@ -471,7 +470,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsShowTrayIcon => "显示托盘图标",
         L10nKey::SettingsShowTrayIconDesc => {
-            "在系统托盘/菜单栏保留状态项：当编码 agent 需要输入时发出提示，其菜单可跳转到该 agent 的窗格。"
+            "在系统托盘/菜单栏保留状态项：agent 需要输入时发出提示，菜单可跳到该 agent 的窗格。"
         }
         L10nKey::SettingsTabs => "标签页",
         L10nKey::SettingsNewTabPosition => "新标签页位置",
@@ -480,11 +479,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsTabBarPositionDesc => "将标签页显示为顶部横向条或左侧垂直侧栏。",
         L10nKey::SettingsSidebarGrouping => "侧栏分组",
         L10nKey::SettingsSidebarGroupingDesc => {
-            "按 git 仓库在标题下对侧栏标签页分组；非仓库标签页放在“草稿”分组，选“按仓库或文件夹”时则按其工作目录分组。仅适用于左侧栏。"
+            "按 git 仓库给侧栏标签页分组。仓库外的标签页归到“草稿”，选“按仓库或文件夹”时则按工作目录分。仅左侧栏。"
         }
         L10nKey::SettingsDiffPreviewFromCounts => "从侧栏计数打开 diff 预览",
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
-            "点击行上的 +N −N 可在浮层中打开 worktree diff。关闭时行上仍显示分支和计数，但不再可点击。"
+            "点击行上的 +N −N 在浮层中打开 worktree diff。关闭后计数仍显示，只是不可点击。"
         }
         L10nKey::SettingsNotifications => "通知",
         L10nKey::SettingsNotifyOnCommandFinish => "命令完成时通知",
@@ -513,7 +512,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsPressKeys => "按下按键…",
         L10nKey::SettingsPauseToSaveEsc => "暂停以保存 · Esc",
         L10nKey::SettingsKeybindingsIntroDesc => {
-            "点击某个快捷键，然后按下新按键，短暂停顿后便会保存。可连续按键组成序列，例如 Ctrl-B 后按 X。Esc 取消；Backspace 移除最后一个按键，若最先按下则重置为默认。"
+            "点击某个快捷键，再按下新按键，短暂停顿后保存。连续按键可组成序列，例如 Ctrl-B 后按 X。Esc 取消；Backspace 移除最后一个按键，最先按下则重置为默认。"
         }
         L10nKey::SettingsPrefixNote => {
             "启用前缀后，单独按前缀键约 1 秒后会传给 shell，前缀 + 未绑定的按键会直接发送到终端。"
@@ -550,7 +549,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateDiscard => "丢弃",
         L10nKey::SettingsAutoDownload => "后台下载更新",
         L10nKey::SettingsAutoDownloadDesc => {
-            "发现新版本就先下载并校验好，安装时只需重启一下。不会未经确认就安装。用移动流量时可以关掉——安装包约 30 MB。"
+            "发现新版本就先下载并校验好，安装时只需重启一下。不会未经确认就安装。安装包约 30 MB。"
         }
         L10nKey::SettingsUpdateChannel => "更新通道",
         L10nKey::SettingsUpdateChannelDesc => {
@@ -560,27 +559,27 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateChannelNightly => "每夜构建",
         L10nKey::SettingsDaemonStale => "后台 server 仍运行在 {build}。",
         L10nKey::SettingsDaemonStaleDesc => {
-            "tty7 是原地升级的，界面已经是新版本，但各个 pane 仍由旧版本的后台 server 托管。重启 server 才能用上新版本，代价是 pane 里正在跑的进程全部结束——shell、agent、SSH 会话都算。不急，挑个 pane 空闲的时候再重启。"
+            "tty7 是原地升级的：界面已是新版，pane 还由旧版 server 托管。重启 server 换成新版，代价是 pane 里正在跑的进程全部结束。不急，挑 pane 空闲时再重启。"
         }
         L10nKey::UpdateDialogTitle => "有可用更新",
         L10nKey::UpdateDialogDetail => {
-            "tty7 {version} 已发布，你现在是 {current}。安装会重启应用；后台 server 不动，pane 里开着的东西都还在。"
+            "tty7 {version} 已发布，你现在是 {current}。安装会重启应用；后台 server 不动，pane 里的东西都还在。"
         }
         L10nKey::UpdateDialogDetailWindows => {
-            "tty7 {version} 已发布，你现在是 {current}。安装会重启应用和后台 server：pane 里正在运行的进程会被结束，标签页和布局会以全新的 shell 恢复。"
+            "tty7 {version} 已发布，你现在是 {current}。安装会重启应用和后台 server：pane 里的进程会被结束，标签页和布局以全新的 shell 恢复。"
         }
         L10nKey::UpdateDialogDetailManual => "tty7 {version} 已发布，你现在是 {current}。{hint}",
         L10nKey::UpdateDialogCannotSelfUpdate => "这份安装无法自行更新。",
         L10nKey::UpdateDialogLater => "以后再说",
         L10nKey::UpdateDialogNextLaunch => "下次启动时安装",
         L10nKey::UpdateDialogNeedsElevation => {
-            "这份 tty7 是为所有用户安装的，开始安装前 Windows 会请求一次管理员批准。tty7 本身不会以管理员身份运行——重启后仍以你的身份回来。"
+            "tty7 是为所有用户安装的，安装前 Windows 会请求一次管理员批准。tty7 本身不会以管理员身份运行。"
         }
         L10nKey::SettingsUpdateCheckFailed => "无法检查更新：{error}",
         L10nKey::SettingsUpdatePrepareFailed => "更新失败：{error}",
         L10nKey::SettingsUpdateLaunchFailed => "无法启动安装程序：{error}",
         L10nKey::SettingsUpdateUnsupportedMacos => {
-            "当前副本并非从可写的 tty7.app 包运行，直接替换并不安全。请将 tty7 移到“应用程序”或其他可写文件夹，或者打开发布页面安装更新。"
+            "当前副本不在可写的 tty7.app 包里，无法自我替换。请把 tty7 移到“应用程序”，或打开发布页面更新。"
         }
         L10nKey::SettingsUpdateUnsupportedLinux => {
             "发布版本中没有适用于该架构的 Linux 包。请自行从源码构建，或使用包管理器。"
@@ -589,10 +588,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "Linux 需要手动更新。请到发布页面下载 {name}，或使用包管理器。"
         }
         L10nKey::SettingsUpdateUnsupportedWindows => {
-            "Windows 自动更新适用于可识别的 Inno Setup 安装版和便携 ZIP 版。当前副本缺少有效的安装标记、更新程序或可写的便携目录，请打开发布页面手动更新。"
+            "当前副本不是可识别的 Inno Setup 安装版或便携 ZIP 版，无法自我更新。请打开发布页面手动更新。"
         }
         L10nKey::SettingsUpdateWindowsAllUsers => {
-            "tty7 是为所有用户安装的，替换它需要管理员权限。tty7 不会自行弹出提权请求，请打开发布页面并自行运行安装程序进行更新。"
+            "tty7 是为所有用户安装的，替换需要管理员权限，而 tty7 不会自行提权。请打开发布页面，自行运行安装程序更新。"
         }
         L10nKey::SettingsUpdateUnsupportedPlatform => "此平台不支持自动安装，请打开发布页面。",
         L10nKey::SettingsUpdateMissingPackage => {
@@ -606,15 +605,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCheckUpdatesOnLaunch => "启动时检查更新",
         L10nKey::SettingsCommandLine => "命令行",
         L10nKey::SettingsCommandLineDesc => {
-            "启动时将自带的 tty7 命令加入 PATH，让脚本和编码 agent 可在任意终端驱动 tty7。在 tty7 窗格内两种情况都可用。如果你自己构建或安装了 tty7 且不希望被遮蔽，请关闭此选项。下次启动时生效。"
+            "把自带的 tty7 命令加入 PATH，让脚本和 agent 能从任意终端驱动 tty7——在 tty7 窗格内两种情况都可用。自己构建的 tty7 不想被遮蔽就关掉。下次启动生效。"
         }
         L10nKey::SettingsInstallCliOnPath => "将 `tty7` 命令安装到 PATH",
         L10nKey::SettingsServer => "Server",
         L10nKey::SettingsServerDesc => {
-            "重启在后台维持 shell 运行的 server。这会结束这台计算机上所有正在运行的 shell；你的标签页和布局会以全新的 shell 重新打开。"
-        }
-        L10nKey::SettingsHowShellsWorkBody => {
-            "你的 shell 跑在后台 server 里，不在这个窗口里。退出 tty7 后它们照常运行——再打开时标签页、布局和工作目录都会回来，里面还是原来那些 shell。关闭标签页会结束它那个 shell；“重启 server”和“退出并停止 server”会结束全部。"
+            "重启在后台维持 shell 运行的 server。这台计算机上所有 shell 都会结束；标签页和布局会以全新的 shell 重新打开。"
         }
         L10nKey::SettingsRestartServer => "重启 server…",
         L10nKey::SettingsAppHttpProxy => "更新代理",
@@ -711,10 +707,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchHostsKeywords => {
             "主机 SSH 连接 保存 主机配置 配置文件 导入 ssh_config 管理 添加 编辑 快速连接 hosts ssh profile import connect"
         }
-        L10nKey::SettingsSearchHowShellsWorkKeywords => {
-            "Shell工作原理 shell 会话 守护进程 持久化 后台 工作区 布局 survive reboot daemon how shells work"
-        }
-        L10nKey::SettingsSearchHowShellsWorkTitle => "Shell 工作原理",
         L10nKey::SettingsSearchItalicFontKeywords => "斜体 字体样式 italic oblique typeface",
         L10nKey::SettingsSearchKeybindingsKeywords => {
             "按键绑定 快捷键 热键 键盘 绑定 前缀 tmux keybindings shortcut hotkey binding prefix"
@@ -1073,13 +1065,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffUntrackedCount => " · {count} 个未跟踪文件",
         L10nKey::DiffMoreFiles => "…还有 {count} 个变更文件——在终端中运行 git diff 查看。",
         L10nKey::DiffOversizedNotice => {
-            "此 worktree 太大，无法高效渲染（{summary}）。每个文件都已折叠——可展开单个文件，或在终端中运行 git diff。"
+            "此 worktree 太大，渲染不动（{summary}）。每个文件都已折叠——可逐个展开，或在终端运行 git diff。"
         }
         L10nKey::DiffTruncatedPerFile => {
             "diff 在 {limit} 行处截断——在终端中运行 git diff 查看其余部分。"
         }
         L10nKey::DiffTruncatedBudget => {
-            "内容未加载——此 worktree 已超出 tty7 的 diff 预算。在终端中运行 git diff 查看此文件。"
+            "内容未加载——已超出 tty7 的 diff 预算。在终端运行 git diff 查看此文件。"
         }
         L10nKey::DiffUntrackedHeader => "未跟踪文件 ({count})",
         L10nKey::DiffMoreUntracked => "…还有 {count} 个——在终端中运行 git status 查看。",
@@ -1123,8 +1115,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteStripFailed => "未连接到 {machine}——{error}",
         L10nKey::RemoteStripRouteLost => "{machine} 的连接配置已不存在，无法重连",
         L10nKey::RemoteRouteParkedHint => {
-            "其连接配置已不存在，不会再自动重连。远端会话仍在——\
-             新建配置连上该机器后，可在工作区列表中找回。"
+            "其连接配置已不存在，不会再自动重连。远端会话仍在——新建配置连上去就能在工作区列表里找回。"
         }
         L10nKey::RemoteNoticePreempted => "已在别处打开——输入无效",
         L10nKey::RemoteNoticeDisconnected => "未连接——输入无效",
@@ -1134,15 +1125,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteActionRetry => "重试",
         L10nKey::RemoteActionRemoveEntry => "移除条目",
         L10nKey::RemoteNoConnectionDetails => {
-            "此窗口是 {machine} 上的工作区，但 tty7 已没有它的连接详情——\
-             请检查其 SSH 主机配置或 ~/.ssh/config 条目是否仍然存在。"
+            "此窗口是 {machine} 上的工作区，但 tty7 没有它的连接信息了——检查其 SSH 配置或 ~/.ssh/config 条目是否还在。"
         }
         L10nKey::RemoteThisComputer => "本机",
         L10nKey::RemoteProfileGone => "已删除的配置",
         L10nKey::RemoteRestartTitle => "重启“{machine}”上的 tty7 server？",
         L10nKey::RemoteRestartBody => {
-            "这将停止 {machine} 上的所有 shell——其中仍在运行的任何内容都会被终止，\
-             包括此窗口未显示的 shell。工作区和布局会被保留，并以全新的 shell 恢复。"
+            "这会结束 {machine} 上的所有 shell，包括此窗口没显示的。工作区和布局会保留，并以全新的 shell 恢复。"
         }
         L10nKey::RemoteReplaceBody => {
             "tty7 会在 {machine} 上安装匹配的 server 并启动它。\n\
@@ -1178,12 +1167,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteInstallBytes => "字节",
         L10nKey::RemoteMismatchTitle => "更新“{machine}”上的 tty7 server？",
         L10nKey::RemoteMismatchDetail => {
-            "{machine} 正在使用 {running} 提供 tty7 会话，该版本使用的协议无法被\
-             此客户端（{wanted}）识别。tty7 已在那里安装了匹配的 server，\
-             但正在运行的是你当前会话所在的版本。\n\
-             \n\
-             {replace_server}\u{2003}会将其替换为 {wanted} 并结束其托管的所有会话。\n\
-             {cancel}\u{2003}会保持 {machine} 现状不变。此窗口将不会连接。"
+            "{machine} 上跑的是 server {running}，此客户端（{wanted}）不认它的协议。匹配的 server 已经装好了，但你的会话在正在跑的那个上面。\n\n{replace_server}\u{2003}换成 {wanted}，并结束它托管的所有会话。\n{cancel}\u{2003}保持 {machine} 现状。此窗口不会连接。"
         }
         L10nKey::RemoteMismatchReplaceServer => "更新 server",
         L10nKey::RemoteMismatchDowngradeServer => "替换 server",
@@ -1200,8 +1184,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteDaemonStartFailed => "无法启动 tty7 本地 server：{error}",
         L10nKey::RemoteDaemonUnreachable => "无法连接到 tty7 本地 server：{error}",
         L10nKey::RemoteDaemonTooOld => {
-            "此机器上的 tty7 守护进程版本较旧，无法重启 {machine} 上的 server。\
-             请退出 tty7（这会停止守护进程）并重新打开，然后重试。"
+            "本机的 tty7 守护进程版本较旧，无法重启 {machine} 上的 server。请退出 tty7（这会停止守护进程）再打开，然后重试。"
         }
         L10nKey::RemoteProfileMissing => "该已保存的 SSH 主机配置已不存在",
         L10nKey::RemoteAliasMissing => "“{alias}”已不再位于 ~/.ssh/config 中",
@@ -1268,7 +1251,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::IoBusy => "有别的程序正占着它。",
         L10nKey::IoTimedOut => "对方没有在规定时间内响应。",
         L10nKey::TreeWindowOpenedEmpty => {
-            "这个窗口的 server 没有交出标签页，所以窗口是空的。什么都没丢，它一响应就会回来。如果一直不回来，在命令面板里执行「重启 server」。"
+            "server 没有交出这个窗口的标签页，所以窗口是空的。什么都没丢，它一响应就会回来。如果一直不回来，在命令面板里执行「重启 server」。"
         }
         L10nKey::CmdGroupTabsPanes => "标签页与窗格",
         L10nKey::CmdGroupWorkspaces => "工作区",
@@ -1380,35 +1363,35 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppRestartServerTitle => "重启 server？",
         L10nKey::AppRestartServerFailed => "无法重启后台 server：{error}",
         L10nKey::AppRestartServerMismatchDetail => {
-            "server 是 v{build}，协议 {protocol}；此应用使用 {ours}。两者无法对话，标签页取不出来。\n\n退出：什么都不变，server 和 shell 继续运行。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
+            "server 用协议 {protocol}（构建 v{build}），此应用用 {ours}，标签页取不出来。\n\n退出：什么都不变，server 和 shell 继续运行。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
         }
         L10nKey::AppRestartServerDialectDetail => {
-            "server 是 v{build}：control 方言 v{dialect}，而此应用使用 v{ours}。它交不出标签页，所以每个窗口都开成空的。\n\n退出：什么都不变，server 和 shell 继续运行。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
+            "server 用 control 方言 v{dialect}（构建 v{build}），此应用用 v{ours}，每个窗口都开成空的。\n\n退出：什么都不变，server 和 shell 继续运行。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
         }
         L10nKey::AppRestartServerDialectNewerDetail => {
-            "server 是 v{build}：control 方言 v{dialect}，而此应用使用 v{ours}。它交不出标签页，所以每个窗口都开成空的。\n\n退出并装上更新的构建：真正的解法，shell 全都还在。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
+            "server 用 control 方言 v{dialect}（构建 v{build}），此应用用 v{ours}，每个窗口都开成空的。\n\n退出并装上更新的构建：真正的解法，shell 全都还在。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
         }
         L10nKey::AppRestartServerOldDetail => {
             "server 早于版本握手，此应用无从得知它说的是什么。\n\n退出：什么都不变，server 和 shell 继续运行。\n重启：标签页带全新 shell 回来，现在跑着的东西会被杀掉。"
         }
         L10nKey::AppRestart => "重启",
         L10nKey::AppRestartServerNoServer => {
-            "{label} 上没有 tty7 自己的 server 可重启——它是本机通过 --stdio 运行的程序。请改为停止其工作区。"
+            "{label} 没有自己的 server 可重启——它是本机通过 --stdio 运行的程序。请改为停止其工作区。"
         }
         L10nKey::AppRestartServerBody => {
-            "这会停止本机上所有正在运行的 shell——其中仍在运行的任何内容都会被终止。你的标签页和布局会被保留，并以全新的 shell 重新打开。"
+            "这会结束本机上所有 shell。标签页和布局会保留，并以全新的 shell 重新打开。"
         }
         L10nKey::ConfigQuarantinedStartup => {
-            "config.json 无法解析，tty7 正以默认设置运行，也不会覆写该文件。原内容已保留为旁边的 config.json.corrupt——修好文件后会自动重载；在此之前，设置里的更改不会被保存。"
+            "config.json 无法解析。tty7 正以默认设置运行，原内容已保留为旁边的 config.json.corrupt。修好后会自动重载；在此之前，设置里的更改不会保存。"
         }
         L10nKey::ConfigQuarantinedReload => {
-            "修改后的 config.json 无法解析，已保留当前在用的设置，文件内容也已另存为旁边的 config.json.corrupt。修好文件后会自动重载；在此之前，任何一次保存设置都会用当前在用的设置覆盖它。"
+            "修改后的 config.json 无法解析。tty7 保留了当前在用的设置，文件内容另存为旁边的 config.json.corrupt。修好后会自动重载；在此之前保存设置会覆盖它。"
         }
         L10nKey::ConfigUnreadableStartup => {
-            "config.json 读取失败，tty7 正以默认设置运行，也不会覆写该文件——文件原样保留。修好它的权限或内容后会自动重载；在此之前，设置里的更改不会被保存。"
+            "config.json 读取失败。tty7 正以默认设置运行，文件原样保留。修好权限或内容后会自动重载；在此之前，设置里的更改不会保存。"
         }
         L10nKey::ConfigUnreadableReload => {
-            "config.json 读取失败，已保留当前在用的设置，文件也原样保留。修好它的权限或内容后会自动重载；在此之前，任何一次保存设置都会用当前在用的设置覆盖它。"
+            "config.json 读取失败。tty7 保留了当前在用的设置，文件也原样保留。修好权限或内容后会自动重载；在此之前保存设置会覆盖它。"
         }
         L10nKey::AppWorktreeRemoveDetailDirty => {
             "位于 {path} 的已关闭标签页的 worktree 有未提交的变更。"
@@ -1526,32 +1509,23 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::Replace => "覆盖",
         L10nKey::SftpErrorInvalidOctalMode => "无效的八进制模式",
         L10nKey::SettingsDaemonStaleDescInPlace => {
-            "tty7 是原地更新的，所以应用是新的，但你的面板仍由上一个版本在服务。\
-             server 可以在不停止的情况下把自己换成新版本：你的 shell 和里面正在跑的东西会直接延续下来。\
-             用 tty7 内置 SSH 客户端的面板除外——那些连接会断开，需要重新打开。"
+            "tty7 是原地更新的：应用是新的，面板还跑在旧版上。server 可以不停机就换成新版，shell 直接延续下来。用 tty7 内置 SSH 客户端的面板除外——那些连接会断开，需要重新打开。"
         }
         L10nKey::AppRestartServerBodyInPlace => {
-            "后台 server 会在不停止的情况下把自己换成当前这个版本。\
-             你的 shell 会继续运行——面板里的命令、agent、`ssh` 会话都不会被打断——窗口稍后会重新连上它们。\
-             用 tty7 内置 SSH 客户端的面板除外：那些连接会断开，需要重新打开。"
+            "后台 server 会原地把自己换成当前这个版本：shell 继续运行，窗口稍后自动连回去。用 tty7 内置 SSH 客户端的面板除外——那些连接会断开，需要重新打开。"
         }
         L10nKey::PaneRestoredScreenBanner => {
             "已恢复的画面 —— 下面是新的 shell，上面的内容都已不在运行"
         }
         L10nKey::SettingsPerPaneHistory => "每个面板用自己的 shell 历史",
         L10nKey::SettingsPerPaneHistoryDescription => {
-            "上方向键翻的是这个面板里跑过的命令，而不是所有面板混在一起的结果。\
-             新面板会从你已有的历史开始，而不是一片空白；面板关闭时，它新增的部分会写回原来的历史文件，不会丢。\
-             只对 tty7 能接管的 bash 和 zsh 面板生效；用你自己参数启动的 shell 不受影响。"
+            "上方向键翻的是这个面板里跑过的命令，而不是所有面板混在一起。新面板从已有历史开始，关闭时把新增的写回去。只对 tty7 能接管的 bash 和 zsh 面板生效；用你自己参数启动的 shell 不受影响。"
         }
         L10nKey::IntegrationNoticeBlocked => {
-            "此窗格中的 tty7 shell 集成被拦截——“{wrapper}”截获了 shell 上报，\
-             内联补全和 Ctrl+R 菜单不可用。shell 自带的历史搜索仍可使用。"
+            "“{wrapper}”截获了此窗格的 shell 上报，内联补全和 Ctrl+R 菜单不可用。shell 自带的历史搜索仍可使用。"
         }
         L10nKey::IntegrationNoticeNotEngaged => {
-            "此窗格中的 tty7 shell 集成尚未生效，内联补全和 Ctrl+R 菜单不可用。\
-             用你自己参数启动的 shell、PTY 包装器（figterm 类）或不受支持的 shell 配置\
-             都可能导致此问题。"
+            "此窗格的 tty7 shell 集成没生效，内联补全和 Ctrl+R 菜单不可用。常见原因：用自己参数启动的 shell、PTY 包装器，或不受支持的 shell。"
         }
         L10nKey::PaneTitleDisconnected => "{title} — 已断开",
         L10nKey::PaneTitleProcessExited => "{title} — 进程已退出",

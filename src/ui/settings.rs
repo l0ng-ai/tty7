@@ -675,11 +675,6 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: About,
-            title: SettingsSearchHowShellsWorkTitle,
-            keywords: SettingsSearchHowShellsWorkKeywords,
-        },
-        SearchEntry {
-            section: About,
             title: SettingsUpdateChannel,
             keywords: SettingsSearchUpdateChannelKeywords,
         },
@@ -748,8 +743,8 @@ pub(crate) fn section_match_count(section: SettingsSection, query: &str) -> usiz
 
 /// Whether a rendered row is one of the ones the section's `(n)` badge counted.
 /// A row can match on its own label, or through the keyword list the search
-/// index carries for it — "persist" finds "How shells work" and nothing on that
-/// page contains the word.
+/// index carries for it — "palette" finds "Theme" and nothing in that label
+/// contains the word.
 fn row_matches_query(section: SettingsSection, label: &str, query: &str) -> bool {
     if query.is_empty() {
         return false;
@@ -6895,18 +6890,6 @@ impl Tty7App {
                     .text_color(muted_fg)
                     .child(t(L10nKey::SettingsAboutDesc1)),
             )
-            // The search index has promised a "How shells work" entry on this
-            // page since it was written, and it pointed at nothing — the one
-            // thing that makes tty7 different from any other terminal was
-            // never stated in the app.
-            .child(self.section_rule(cx))
-            .child(self.section_header(t(L10nKey::SettingsSearchHowShellsWorkTitle), cx))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(muted_fg)
-                    .child(t(L10nKey::SettingsHowShellsWorkBody)),
-            )
             .child(self.section_rule(cx))
             .child(self.section_header(t(L10nKey::SettingsUpdates), cx))
             .child(
@@ -7552,19 +7535,19 @@ mod tests {
             "Blur",
             "blur"
         ));
-        // Keyword hit: nothing on the About page contains "persist", but the
-        // index says the "How shells work" block answers it.
+        // Keyword hit: the label says "Theme" and nothing more, but the index
+        // says that row answers "palette".
         assert!(row_matches_query(
-            SettingsSection::About,
-            t(L10nKey::SettingsSearchHowShellsWorkTitle),
-            "persist"
+            SettingsSection::Appearance,
+            t(L10nKey::SettingsThemeIntroTitle),
+            "palette"
         ));
         // A row on some other page is not a hit just because the query matches
         // an entry elsewhere.
         assert!(!row_matches_query(
             SettingsSection::Terminal,
             "Blur",
-            "persist"
+            "palette"
         ));
         // An empty query marks nothing at all, so no page ever renders greyed
         // out just because the field is focused.
@@ -7575,21 +7558,7 @@ mod tests {
     fn a_query_that_matches_nothing_is_distinguishable_from_one_that_does() {
         assert_eq!(total_match_count("zzqqxx"), 0);
         assert!(total_match_count("blur") > 0);
-        assert!(total_match_count("persist") > 0);
-    }
-
-    #[test]
-    fn the_how_shells_work_entry_has_something_to_point_at() {
-        // The index promised this page an explanation of the one thing that
-        // makes tty7 different; for a long time it pointed at nothing.
-        assert!(
-            !t(L10nKey::SettingsHowShellsWorkBody).is_empty(),
-            "the About page has no body copy for its own search entry"
-        );
-        assert_eq!(
-            best_matching_section("persist").map(|s| s.profile_label()),
-            Some(SettingsSection::About.profile_label())
-        );
+        assert!(total_match_count("palette") > 0);
     }
 
     #[test]
