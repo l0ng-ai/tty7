@@ -143,7 +143,11 @@ pub enum Command {
                       `exit` is the one end state with nothing left to read: the pane's \
                       output goes with the pane, and the workspace keeps only a leaf the \
                       GUI can revive into a fresh shell. Capture before the shell exits, \
-                      or run the command under `tty7 run`, which streams it."
+                      or run the command under `tty7 run`, which streams it.\n\n\
+                      Picking the wrong state is a hang, not an error. An idle shell is \
+                      `no-agent` forever: it never reaches `waiting`, `done` or `exit`, \
+                      so the default set waits on it for as long as you let it. Pass \
+                      --timeout to put a bound on being wrong."
     )]
     Wait(WaitArgs),
 
@@ -339,7 +343,9 @@ pub struct WaitArgs {
         long,
         value_name = "SECS",
         help = "Give up after this many seconds, with exit code 124 (the `timeout(1)` \
-                convention, so scripts can tell \"not yet\" from \"broken\")"
+                convention, so scripts can tell \"not yet\" from \"broken\"). There is \
+                no default: without it the wait is unbounded, and a pane that never \
+                reaches one of the --until states never returns"
     )]
     pub timeout: Option<u64>,
 
