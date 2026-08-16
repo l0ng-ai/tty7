@@ -96,6 +96,14 @@ fn segment_start(prefix: &str) -> usize {
     start
 }
 
+/// `segment_start` as a char index, which is how the callers here index.
+/// The scanner itself works on a `&str` because it tracks quoting.
+fn segment_start_char(prefix: &[char]) -> usize {
+    let text: String = prefix.iter().collect();
+    let byte = segment_start(&text);
+    text[..byte].chars().count()
+}
+
 /// True when the word being completed is the first word of its segment, so it
 /// names a command rather than an argument. `ls | gre` completes `grep`, not
 /// files called `gre*` — every shell does it this way.
@@ -140,7 +148,14 @@ fn complete_inner(
 ) -> Option<Completion> {
     let chars: Vec<char> = line.chars().collect();
     let cursor = cursor.min(chars.len());
-    let word_start = shell_word_start(&chars, cursor);
+    // Whitespace is not the only thing that ends a word. `echo $(gre` has
+    // one word by spaces, so the `(` that `segment_start` already treats as
+    // the start of a new command never reached it, and the completion went
+    // looking for a file called `$(gre`. Taking the later of the two
+    // boundaries fixes that without the backward walk having to learn about
+    // quoting: the segment scan is the one that knows `echo "a(b` is not a
+    // substitution.
+    let word_start = shell_word_start(&chars, cursor).max(segment_start_char(&chars[..cursor]));
     let word: String = chars[word_start..cursor].iter().collect();
 
     let is_command = at_command_position(&chars, word_start);
@@ -761,6 +776,43 @@ impl CompletionSession {
 
 #[cfg(test)]
 mod tests {
+
+    /// A command substitution starts a command, and the word starts after it.
+    ///
+    /// `segment_start` has always treated `(` as the start of a new command,
+    /// but the word was cut on whitespace alone, so `echo $(gre` was one word
+    /// and the `(` never reached the check — the completion looked for a file
+    /// called `$(gre` and found nothing.
+    ///
+    /// Driven through `complete` rather than the two boundary helpers, because
+    /// the helpers were always right on their own; what was wrong was which of
+    /// them the caller used. `echo` is in `BUILTINS`, so this does not depend
+    /// on what happens to be on PATH.
+    #[test]
+    fn a_command_substitution_completes_commands_not_files() {
+        let cwd = std::path::Path::new("/");
+        let done = |line: &str| complete(line, line.chars().count(), Some(cwd));
+
+        let inside = done("printf $(ech").expect("a command substitution completes");
+        let echo = inside
+            .candidates
+            .iter()
+            .find(|c| c.text == "echo")
+            .expect("`ech` inside `$(` names a command");
+        assert_eq!(
+            echo.start, 9,
+            "the word starts after `$(`, so accepting it keeps the substitution"
+        );
+
+        // The parenthesis is literal inside quotes, and the word is untouched.
+        let chars: Vec<char> = "printf \"a(ech".chars().collect();
+        assert_eq!(
+            shell_word_start(&chars, chars.len()).max(segment_start_char(&chars)),
+            7,
+            "a quoted parenthesis does not start a command"
+        );
+    }
+
     use super::*;
 
     fn cand(text: &str, kind: CandidateKind, start: usize, end: usize) -> Candidate {
