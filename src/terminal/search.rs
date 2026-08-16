@@ -480,16 +480,7 @@ impl TerminalView {
     }
 
     fn effective_search_pattern(&self, query: &str) -> String {
-        let base = if self.search_regex {
-            query.to_string()
-        } else {
-            regex_escape(query)
-        };
-        if self.search_case_sensitive {
-            format!("(?-i){base}")
-        } else {
-            base
-        }
+        search_pattern(query, self.search_regex, self.search_case_sensitive)
     }
 
     pub(super) fn render_search_bar(
@@ -619,6 +610,30 @@ impl TerminalView {
 }
 
 /// How many grid rows the floating bar covers, at this line height.
+/// The pattern the engine is given, with the case rule spelled out.
+///
+/// Both flags are written, and the insensitive one is the reason this is not
+/// simply the query. `RegexSearch` applies *smart case* — it turns matching
+/// insensitive only when the pattern has no uppercase letter of its own — so
+/// handing it `Error` with the toggle off searched case-sensitively, and a
+/// screen holding `error` and `ERROR` came back with nothing found. Smart
+/// case is a fine default for an editor that has no toggle; here there is a
+/// toggle, and it has to be the thing that decides.
+///
+/// A pattern of the caller's own wins, because `(?i)` is only a default the
+/// rest of the expression may override: in regex mode `(?-i)Foo` still means
+/// what it says.
+fn search_pattern(query: &str, regex: bool, case_sensitive: bool) -> String {
+    let base = match regex {
+        true => query.to_string(),
+        false => regex_escape(query),
+    };
+    match case_sensitive {
+        true => format!("(?-i){base}"),
+        false => format!("(?i){base}"),
+    }
+}
+
 fn rows_under_the_bar(line_height: f32) -> i32 {
     if line_height <= 0. {
         return 0;
@@ -1183,6 +1198,68 @@ pub(super) fn is_url_char(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Search a real grid the way the search bar does.
+    fn matches_on_screen(text: &str, query: &str, case_sensitive: bool) -> usize {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::term::test::TermSize;
+        use alacritty_terminal::term::{Config, Term};
+        use alacritty_terminal::vte::ansi::Processor;
+
+        let mut term = Term::new(Config::default(), &TermSize::new(80, 8), VoidListener);
+        let mut parser: Processor = Processor::new();
+        for byte in text.as_bytes() {
+            parser.advance(&mut term, &[*byte]);
+        }
+
+        let pattern = search_pattern(query, false, case_sensitive);
+        let mut regex = RegexSearch::new(&pattern).expect("the pattern compiles");
+        // The same walk `scan_matches` does, including its guard against a
+        // match that does not advance — without it the last one repeats.
+        let mut origin = Point::new(term.grid().topmost_line(), Column(0));
+        let mut starts: Vec<Point> = Vec::new();
+        while starts.len() < 8 {
+            let Some(m) = term.search_next(&mut regex, origin, Direction::Right, Side::Left, None)
+            else {
+                break;
+            };
+            if starts.last().is_some_and(|last| m.start() <= last) {
+                break;
+            }
+            origin = m.end().add(term.grid(), Boundary::None, 1);
+            let wrapped = origin <= *m.end();
+            starts.push(*m.start());
+            if wrapped {
+                break;
+            }
+        }
+        starts.len()
+    }
+
+    /// The case toggle has to be what decides, not the shape of the query.
+    ///
+    /// `RegexSearch` applies smart case, so an uppercase letter in the query
+    /// turned matching case-sensitive on its own: with the toggle *off*,
+    /// searching `Error` on a screen holding `error` and `ERROR` found
+    /// nothing at all.
+    #[test]
+    fn the_case_toggle_outranks_the_engines_smart_case() {
+        const SCREEN: &str = "the error and the ERROR and one Error\r\n";
+
+        // Toggle off: all three spellings, whatever case the query is typed in.
+        assert_eq!(matches_on_screen(SCREEN, "error", false), 3);
+        assert_eq!(
+            matches_on_screen(SCREEN, "Error", false),
+            3,
+            "an uppercase query with the toggle off still means insensitive"
+        );
+        assert_eq!(matches_on_screen(SCREEN, "ERROR", false), 3);
+
+        // Toggle on: exactly the spelling asked for.
+        assert_eq!(matches_on_screen(SCREEN, "error", true), 1);
+        assert_eq!(matches_on_screen(SCREEN, "Error", true), 1);
+        assert_eq!(matches_on_screen(SCREEN, "ERROR", true), 1);
+    }
 
     #[test]
     fn a_capped_match_count_says_it_is_capped() {
