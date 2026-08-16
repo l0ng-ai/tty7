@@ -540,7 +540,9 @@ pub fn human_bytes(n: u64) -> String {
     let units = ["KiB", "MiB", "GiB"];
     let mut value = n / KIB;
     for (i, unit) in units.iter().enumerate() {
-        if value < KIB || i == units.len() - 1 {
+        // Against the shown value, not the held one: 1023.999 KiB prints as
+        // `1024.0 KiB`, a number that disagrees with its unit.
+        if (value * 10.0).round() < 10_240.0 || i == units.len() - 1 {
             return format!("{value:.1} {unit}");
         }
         value /= KIB;
@@ -905,6 +907,10 @@ mod tests {
         assert_eq!(human_bytes(1024), "1.0 KiB");
         assert_eq!(human_bytes(1_572_864), "1.5 MiB");
         assert_eq!(human_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
+
+        // Rounding must not leave the number and the unit disagreeing.
+        assert_eq!(human_bytes(1_048_575), "1.0 MiB", "1 MiB - 1");
+        assert_eq!(human_bytes(1_073_741_823), "1.0 GiB", "1 GiB - 1");
     }
 
     #[test]

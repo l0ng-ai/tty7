@@ -283,7 +283,11 @@ fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
     let mut value = bytes as f64;
     let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
+    // The comparison is against what will be *shown*, not what is held.
+    // One byte under a mebibyte is 1023.999 KiB, which prints as `1024.0K` —
+    // a number and a unit that disagree. Rounding to the same one decimal the
+    // format uses moves it up with the value.
+    while unit < UNITS.len() - 1 && (value * 10.0).round() >= 10_240.0 {
         value /= 1024.0;
         unit += 1;
     }
@@ -1895,6 +1899,7 @@ impl Tty7App {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn upload(job_id: u64, state: SftpJobState) -> SftpJobProgress {
@@ -2139,6 +2144,12 @@ mod tests {
         assert_eq!(human_size(1024), "1.0K");
         assert_eq!(human_size(1536), "1.5K");
         assert_eq!(human_size(1024 * 1024), "1.0M");
+
+        // A byte under the next unit rounds to `1024.0` at one decimal, and a
+        // size column showing `1024.0K` beside `1.0M` reads as a mistake.
+        assert_eq!(human_size(1_048_575), "1.0M", "1 MiB - 1");
+        assert_eq!(human_size(1_073_741_823), "1.0G", "1 GiB - 1");
+        assert_eq!(human_size(1_048_524), "1023.9K", "just below the carry");
     }
 
     #[test]
