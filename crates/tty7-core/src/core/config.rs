@@ -740,23 +740,48 @@ impl Config {
         self.link_file_open.unwrap_or_default()
     }
 
+    /// Bring the file's values into the ranges the app can actually run at.
+    ///
+    /// Clamping, not rejecting: one silly number should not cost someone their
+    /// whole config. The file is deliberately **not** rewritten — what cannot
+    /// be read must not be overwritten, and the same restraint applies to what
+    /// merely disagrees with us — so a hand-edited `ui_font_size: 8` stays 8 on
+    /// disk while the app runs at 12.
+    ///
+    /// That divergence is invisible from the file, so each correction says so
+    /// in the log. The `FontFeatures` parser a few hundred lines down already
+    /// works this way for a tag it cannot use, and a value quietly replaced is
+    /// no easier to work out than a tag quietly dropped. Logging is off unless
+    /// `TTY7_LOG` asks for it, so this costs nothing until someone is looking.
     fn sanitize(&mut self) {
         if !self.font_size.is_finite() || self.font_size <= 0.0 {
             self.font_size = Config::default().font_size;
         }
-        self.font_size = self.font_size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+        clamped_note("font_size", self.font_size, {
+            self.font_size = self.font_size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+            self.font_size
+        });
         if !self.line_height.is_finite() || self.line_height <= 0.0 {
             self.line_height = Config::default().line_height;
         }
-        self.line_height = self.line_height.clamp(LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
+        clamped_note("line_height", self.line_height, {
+            self.line_height = self.line_height.clamp(LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
+            self.line_height
+        });
         if !self.ui_font_size.is_finite() || self.ui_font_size <= 0.0 {
             self.ui_font_size = default_ui_font_size();
         }
         // The whole chrome is a multiple of this, so a wild value does not
         // shrink one label — it makes the window unusable. Keep the range to
         // sizes the layout still holds together at.
-        self.ui_font_size = self.ui_font_size.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX);
-        self.scrollback_limit = self.scrollback_limit.clamp(100, MAX_SCROLLBACK);
+        clamped_note("ui_font_size", self.ui_font_size, {
+            self.ui_font_size = self.ui_font_size.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX);
+            self.ui_font_size
+        });
+        clamped_note("scrollback_limit", self.scrollback_limit as f32, {
+            self.scrollback_limit = self.scrollback_limit.clamp(100, MAX_SCROLLBACK);
+            self.scrollback_limit as f32
+        });
         if !self.mouse_scroll_multiplier.is_finite() || self.mouse_scroll_multiplier <= 0.0 {
             self.mouse_scroll_multiplier = Config::default().mouse_scroll_multiplier;
         }
@@ -1007,6 +1032,16 @@ pub fn config_dir_path() -> Option<PathBuf> {
 
 pub(crate) fn shell_command() -> Option<(String, Vec<String>)> {
     Config::load().shell.map(|s| (s.program, s.args))
+}
+
+/// Say when a configured value was not the one used.
+///
+/// Only when it actually moved: a file already inside the range is the normal
+/// case and has nothing to report.
+fn clamped_note(field: &str, before: f32, after: f32) {
+    if (before - after).abs() > f32::EPSILON {
+        log::warn!("config {field}: {before} is out of range; running at {after}");
+    }
 }
 
 pub(crate) fn working_directory_base() -> Option<PathBuf> {
