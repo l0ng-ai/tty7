@@ -1,5 +1,7 @@
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use serde_json::Value;
+use tty7_core::core::cli_agent::AgentStatus;
 use tty7_core::core::machine::{Machine, PaneNode, Workspace};
 use tty7_core::core::session::WorkspaceId;
 use tty7_core::core::tab_view::{TabLabel, TabView, strip_host_prefix, tab_views_of};
@@ -354,6 +356,23 @@ pub fn procs_tables(procs: &PaneProcs) -> String {
     out
 }
 
+/// The status column, spelled the way the JSON spells it.
+///
+/// Taken through serde rather than `{:?}` so the two cannot drift: the four
+/// current variants are single words, so lowercasing Debug happened to match
+/// the documented `idle`/`working`/`waiting`/`done`, but a variant named in
+/// two words would print `needsinput` in the table and `needs-input` in the
+/// JSON for the same pane.
+fn status_word(status: AgentStatus) -> String {
+    match serde_json::to_value(status) {
+        Ok(Value::String(word)) => word,
+        // `AgentStatus` is a plain unit-variant enum, so this is unreachable
+        // short of the derive changing shape. Say so rather than print a
+        // column of Rust.
+        _ => "?".to_string(),
+    }
+}
+
 pub fn agents_table(states: &[PaneAgentState]) -> String {
     if states.is_empty() {
         return "no agents running\n".to_string();
@@ -363,10 +382,16 @@ pub fn agents_table(states: &[PaneAgentState]) -> String {
         .map(|s| {
             vec![
                 format!("%{}", s.pane_id),
+                // `slug`, not a lowercased `{:?}`: the two agree for most
+                // variants and by luck rather than by rule, and where they
+                // part the table invented a third name for an agent that
+                // already had two — `OhMyPi` printed here as `ohmypi`, while
+                // its slug, the vocabulary the hook rows and the docs use, is
+                // `omp`.
                 s.agent
-                    .map(|a| format!("{a:?}").to_lowercase())
+                    .map(|a| a.slug().to_string())
                     .unwrap_or_else(|| "-".to_string()),
-                format!("{:?}", s.state.status).to_lowercase(),
+                status_word(s.state.status),
                 s.state.message.clone().unwrap_or_else(|| "-".to_string()),
             ]
         })
@@ -482,6 +507,60 @@ mod tests {
             "76698a44",
             "an orphan still remembers where it belongs"
         );
+    }
+
+    #[test]
+    fn the_agents_table_spells_an_agent_the_way_the_rest_of_the_cli_does() {
+        use tty7_core::core::cli_agent::{AgentSessionState, CLIAgent};
+
+        // Walked, not listed: the table used a lowercased `{:?}`, which agreed
+        // with the slug for most variants by luck and invented a third name
+        // where it did not — `OhMyPi` printed as `ohmypi` against a slug of
+        // `omp`.
+        for agent in CLIAgent::ALL {
+            let state = PaneAgentState {
+                pane_id: 1,
+                agent: Some(agent),
+                state: AgentSessionState::default(),
+            };
+            let out = agents_table(&[state]);
+            let cell = out
+                .lines()
+                .nth(1)
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap();
+            assert_eq!(
+                cell,
+                agent.slug(),
+                "the table calls {agent:?} something the rest of the CLI does not"
+            );
+        }
+    }
+
+    #[test]
+    fn the_status_column_is_spelled_the_way_the_json_spells_it() {
+        use tty7_core::core::cli_agent::AgentStatus;
+
+        for status in [
+            AgentStatus::Idle,
+            AgentStatus::Working,
+            AgentStatus::Waiting,
+            AgentStatus::Done,
+        ] {
+            let json = serde_json::to_value(status).unwrap();
+            assert_eq!(
+                Value::String(status_word(status)),
+                json,
+                "the table and the JSON disagree about {status:?}"
+            );
+        }
+        // And the four the docs promise.
+        assert_eq!(status_word(AgentStatus::Idle), "idle");
+        assert_eq!(status_word(AgentStatus::Working), "working");
+        assert_eq!(status_word(AgentStatus::Waiting), "waiting");
+        assert_eq!(status_word(AgentStatus::Done), "done");
     }
 
     #[test]
