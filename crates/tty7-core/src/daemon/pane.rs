@@ -2143,14 +2143,6 @@ impl DaemonPane {
         cached.or_else(|| self.foreground_remote_context())
     }
 
-    /// The pane's screen, capped for storage, with the mark that says how much
-    /// output it had produced when the copy was taken.
-    ///
-    /// Both come from one acquisition of the state lock. Reading them apart
-    /// would let output land in between, and the writer would then record a
-    /// mark that claims to cover bytes its snapshot does not have — a pane
-    /// that stopped producing at that moment would keep the stale copy for
-    /// good, because its mark would never move again.
     /// The mark alone, for deciding whether a snapshot is worth taking:
     /// [`scrollback_snapshot`](Self::scrollback_snapshot) clones the whole
     /// ring under the state lock, which is a lot to pay every tick for the
@@ -2161,6 +2153,14 @@ impl DaemonPane {
         self.state.lock().unwrap().ring.appended
     }
 
+    /// The pane's screen, capped for storage, with the mark that says how much
+    /// output it had produced when the copy was taken.
+    ///
+    /// Both come from one acquisition of the state lock. Reading them apart
+    /// would let output land in between, and the writer would then record a
+    /// mark that claims to cover bytes its snapshot does not have — a pane
+    /// that stopped producing at that moment would keep the stale copy for
+    /// good, because its mark would never move again.
     pub(crate) fn scrollback_snapshot(&self) -> (Vec<crate::daemon::scrollback::Segment>, u64) {
         let st = self.state.lock().unwrap();
         let mut segments = st.ring.snapshot();

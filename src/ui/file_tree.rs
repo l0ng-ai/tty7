@@ -999,6 +999,7 @@ impl Tty7App {
     /// along is context, and context that shoves the layout around while you
     /// are reading is not worth having. Use [`Self::file_tree_show`] when the
     /// tree *is* the answer.
+    ///
     /// Returns whether the tree could hold it — a path outside every root has
     /// no row to scroll to. An empty root list is not that: it means the panel
     /// has never drawn and does not know its roots yet, and the request

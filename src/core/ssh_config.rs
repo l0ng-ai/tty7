@@ -301,11 +301,6 @@ fn alias_resolves_in(blocks: &[HostBlock], alias: &str) -> bool {
     matched || resolve_alias(alias, blocks).hostname.is_some()
 }
 
-/// "Does this alias still resolve", asked by the route supervisor four times
-/// a second for every open alias workspace (#485). Re-parsing per tick would
-/// be the only file IO on that hot path, so the parse is cached by mtime:
-/// an edit made outside tty7 is seen on the first tick after the file
-/// changes, and an untouched file costs one stat.
 /// The parse behind [`alias_still_resolves`], kept only as long as none of
 /// the files it came from has moved.
 ///
@@ -361,6 +356,11 @@ fn stamps_of(paths: Vec<PathBuf>) -> Vec<(PathBuf, Option<std::time::SystemTime>
         .collect()
 }
 
+/// "Does this alias still resolve", asked by the route supervisor four times
+/// a second for every open alias workspace (#485). Re-parsing per tick would
+/// be the only file IO on that hot path, so the parse is cached by mtime:
+/// an edit made outside tty7 is seen on the first tick after the file
+/// changes, and an untouched file costs one stat.
 pub fn alias_still_resolves(alias: &str) -> bool {
     static CACHE: std::sync::Mutex<Option<AliasCache>> = std::sync::Mutex::new(None);
 

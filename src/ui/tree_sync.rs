@@ -1349,14 +1349,6 @@ pub(crate) fn fresh_workspace_name(cx: &App, host: HostId) -> String {
     tty7_core::core::codename::unique(|name| taken.iter().any(|t| t == name))
 }
 
-/// This workspace's layout, and the name the machine has for it.
-///
-/// The name comes back even from the create this client asked for, and
-/// especially from that one: a client is left out of the deltas its own ops
-/// raise, so the `WorkspaceCreated` delta carrying the name it just proposed
-/// never arrives. Dropping the name here left the mirror holding the workspace
-/// unnamed until something pulled the whole tree again, and the name it had had
-/// all along then landed on screen looking like a rename (#604).
 /// Settles the name a window asked for against the name its machine came back
 /// with, and returns what the workspace is really called.
 ///
@@ -1385,6 +1377,14 @@ fn settle_chosen_name(
     }
 }
 
+/// This workspace's layout, and the name the machine has for it.
+///
+/// The name comes back even from the create this client asked for, and
+/// especially from that one: a client is left out of the deltas its own ops
+/// raise, so the `WorkspaceCreated` delta carrying the name it just proposed
+/// never arrives. Dropping the name here left the mirror holding the workspace
+/// unnamed until something pulled the whole tree again, and the name it had had
+/// all along then landed on screen looking like a rename (#604).
 fn pull_or_create(
     client: &ControlClient,
     machine_ws: WorkspaceId,
