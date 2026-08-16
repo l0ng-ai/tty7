@@ -129,12 +129,27 @@ pub(crate) fn printable(s: &str) -> std::borrow::Cow<'_, str> {
 ///
 /// A full classic terminal width, so every realistic name and path still
 /// prints whole. `--json` is the output for anything that must not be cut.
+///
+/// The last column is exempt. Nothing is padded against it — `render_row`
+/// trims the end of every line — so its width cannot push anything out of
+/// line, and cutting it is pure loss: `doctor` puts its findings there, and a
+/// config path with its middle replaced by an ellipsis is the one thing the
+/// reader of a diagnostic needed whole.
 const MAX_CELL: usize = 80;
 
 pub fn table(header: &[&str], rows: &[Vec<String>]) -> String {
+    let last = header.len().saturating_sub(1);
     let rows: Vec<Vec<String>> = rows
         .iter()
-        .map(|row| row.iter().map(|c| clamp(&printable(c), MAX_CELL)).collect())
+        .map(|row| {
+            row.iter()
+                .enumerate()
+                .map(|(i, c)| match i == last {
+                    true => printable(c).into_owned(),
+                    false => clamp(&printable(c), MAX_CELL),
+                })
+                .collect()
+        })
         .collect();
     let rows = &rows;
     let mut widths: Vec<usize> = header.iter().map(|h| width(h)).collect();
@@ -495,6 +510,26 @@ mod tests {
         // Every row is still padded to the same width.
         let widths: Vec<usize> = out.lines().map(|l| width(l.trim_end())).collect();
         assert!(widths.iter().all(|w| *w <= widest));
+    }
+
+    #[test]
+    fn the_last_column_is_never_cut() {
+        // `doctor` reports its findings in the last column, and a config path
+        // with an ellipsis through the middle is the one thing the reader of a
+        // diagnostic needed whole. Nothing is padded against the last column,
+        // so its width costs no alignment.
+        let long = format!("/private/var/folders/{}/config", "x".repeat(200));
+        let out = table(
+            &["CHECK", "RESULT"],
+            &[
+                vec!["config".into(), long.clone()],
+                vec!["server".into(), "ok".into()],
+            ],
+        );
+        assert!(out.contains(&long), "the last column was cut");
+        // The row that says `ok` is not dragged out to meet it.
+        let ok_row = out.lines().find(|l| l.contains("server")).unwrap();
+        assert!(width(ok_row) < 40, "a short row was padded to the long one");
     }
 
     #[test]
