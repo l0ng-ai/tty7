@@ -87,13 +87,18 @@ fn width(s: &str) -> usize {
 /// Text with nothing in it that a terminal would obey.
 ///
 /// Tables and error messages alike print names the CLI did not choose: a
-/// workspace or tab name,
-/// a path, and — by way of [`tab_label`] — a tab's OSC title, which is set by
-/// whatever program is running in the pane. An escape sequence reaching the
-/// terminal from any of them is a program deciding what the reader's screen
-/// does, and `\x1b[2J` in a directory name is the old `ls` trick, not a new
-/// one. It also throws the columns out: an escape is bytes with no width, so
-/// the padding counts characters the reader never sees.
+/// workspace or tab name, and a path. A directory really can be called
+/// `evil\x1b[31mdir` — that is the old `ls` trick, not a new one — and opening
+/// a pane in one puts it in the CWD column. An escape arriving there is a
+/// program deciding what the reader's screen does, and it throws the columns
+/// out as well: an escape is bytes with no width, so the padding counts
+/// characters the reader never sees.
+///
+/// A tab's OSC title is the other thing a program chooses, and it reaches the
+/// CLI already folded — the daemon turns control characters into spaces when
+/// it stores one, because gpui breaks a label on a newline. This does not
+/// lean on that: the folding is there for the GUI's sake and could reasonably
+/// move.
 ///
 /// Only control characters, which is the set that a terminal acts on. Bidi
 /// overrides reorder a name without obeying anything, and are left alone: the
@@ -572,7 +577,9 @@ mod tests {
         );
         let long = "wondering ".repeat(8);
         let clamped = tab_label(&view(&|v| v.osc_title = Some(long.clone())));
-        assert_eq!(clamped.chars().count(), 40);
+        // Columns, which happen to equal characters for this ASCII title —
+        // saying `chars` here would read as the contract, and it is not.
+        assert_eq!(width(&clamped), 40);
         assert!(clamped.ends_with('…'));
         assert_eq!(
             tab_label(&view(&|v| v.cwd = Some("/Users/me/repo/tty7".into()))),
