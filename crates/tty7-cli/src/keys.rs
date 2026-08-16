@@ -83,6 +83,11 @@ pub fn send_long_help() -> String {
     let aliases: Vec<&str> = ALIASES.iter().map(|(from, _)| *from).collect();
     format!(
         "Types TEXT into the pane exactly as a keyboard would.\n\n\
+         Exactly as a keyboard would includes the newlines: one inside TEXT is \
+         Enter, and runs what stands before it. `send %1 $'deploy\\nyes'` runs \
+         `deploy` and leaves `yes` typed at the prompt it asked. Worth knowing \
+         before passing along text somebody else wrote — --enter is the way to \
+         submit on purpose.\n\n\
          --key sends a keystroke rather than characters, which is what a pane wants once \
          something is already running in it: answering a prompt that only takes arrow keys, \
          closing a TUI with escape, stopping a build with C-c. Repeat it for a sequence.\n\n\

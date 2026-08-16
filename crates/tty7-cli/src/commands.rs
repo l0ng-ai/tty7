@@ -2625,6 +2625,28 @@ mod tests {
         assert_eq!(backend.sent, vec![(3, b"echo hi".to_vec())]);
     }
 
+    /// A newline in TEXT goes out as a newline, which a shell runs.
+    ///
+    /// `--enter` exists to submit, so it reads as though TEXT alone cannot —
+    /// and text that came from somewhere else then runs a line at a time. The
+    /// behaviour is right for a verb that types what a keyboard would; what it
+    /// needs is to be written down, and both the `--help` and the reference
+    /// now say so. This keeps the bytes matching what they say.
+    #[test]
+    fn a_newline_in_the_text_is_sent_as_one() {
+        let mut backend = mock();
+        run_cli(
+            &["tty7", "send", "%1", "deploy\nyes"],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(
+            backend.sent,
+            vec![(1, b"deploy\nyes".to_vec())],
+            "neither stripped nor split into two writes"
+        );
+    }
+
     /// The keystrokes text cannot express. Each goes out as its own write, in
     /// the order given, because a pane reads them as separate key events —
     /// which is what walking a menu and then confirming it requires.

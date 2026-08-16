@@ -134,6 +134,11 @@ pane — while text that merely starts with `%` (`%s/foo/bar/`, `%!sort`) types
 as given, as does anything unmarked that is not a plain number (`3x`, `+5`). To
 type an address-shaped string, name the pane as well: `tty7 send %42 %3x`.
 
+A newline inside `TEXT` is Enter, because typing one is. `tty7 send %1
+$'deploy\nyes'` runs `deploy` and leaves `yes` typed at the prompt it asked
+for — so text that came from somewhere else runs a line at a time, and `--enter`
+is the way to submit on purpose.
+
 `--key` presses a key instead of typing characters, which is what a pane wants
 once something is already running in it: answering a prompt that only takes
 arrow keys, closing a TUI with `escape`, stopping a build with `C-c`. Repeat it
