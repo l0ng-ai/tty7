@@ -105,8 +105,10 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
         Some(Command::Server(ServerCmd::Stop)) => {
             local_server(machine.as_deref(), "stop", crate::server::stop)
         }
-        Some(Command::Server(ServerCmd::Restart)) => {
-            local_server(machine.as_deref(), "restart", crate::server::restart)
+        Some(Command::Server(ServerCmd::Restart { hard })) => {
+            local_server(machine.as_deref(), "restart", || {
+                crate::server::restart(hard)
+            })
         }
         Some(Command::Server(ServerCmd::Logs)) => {
             local_server(machine.as_deref(), "logs", crate::server::logs)
@@ -118,7 +120,7 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
 fn local_server(
     machine: Option<&str>,
     verb: &str,
-    act: fn() -> Result<Outcome>,
+    act: impl FnOnce() -> Result<Outcome>,
 ) -> Result<Outcome> {
     if let Some(machine) = machine {
         bail!(

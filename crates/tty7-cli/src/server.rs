@@ -6,6 +6,7 @@ use anyhow::{Result, bail};
 use serde_json::json;
 use tty7_core::client::PaneClient;
 use tty7_core::core::config;
+use tty7_core::daemon::protocol::FEATURE_HANDOFF;
 use tty7_core::daemon::spawn;
 
 use crate::commands::{Outcome, Report};
@@ -126,14 +127,95 @@ pub fn stop() -> Result<Outcome> {
     report("stopped", json!({ "stopped": true }))
 }
 
-pub fn restart() -> Result<Outcome> {
+pub fn restart(hard: bool) -> Result<Outcome> {
+    let client = PaneClient::local();
+    let Ok(old) = client.version() else {
+        return start();
+    };
+    if !hard && old.has_feature(FEATURE_HANDOFF) {
+        return restart_in_place(&client, &old);
+    }
+    // Either `--hard`, or a daemon that cannot replace itself in place —
+    // Windows, or a build from before the handoff existed. Stopping is the
+    // only restart that daemon has.
+    spawn::stop();
     if running() {
-        spawn::stop();
-        if running() {
-            bail!("the server did not shut down on request");
-        }
+        bail!("the server did not shut down on request");
     }
     start()
+}
+
+/// The daemon execs the tty7-server binary found by [`server_exe`]: same pid,
+/// same ptys, every session kept. The socket closing is the handoff being
+/// taken; the proof it *worked* is the version endpoint answering with a new
+/// `instance`, because that value is minted once per process image.
+fn restart_in_place(
+    client: &PaneClient,
+    old: &tty7_core::daemon::protocol::DaemonVersion,
+) -> Result<Outcome> {
+    let exe = server_exe()?;
+    client.hand_off(&exe).map_err(|e| {
+        anyhow::anyhow!(
+            "the server refused to restart in place and was left running: {e} — \
+             `tty7 server restart --hard` stops and starts it instead; sessions end"
+        )
+    })?;
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        if let Ok(new) = client.version()
+            && new.instance != old.instance
+        {
+            let human = if new.build == old.build {
+                format!(
+                    "restarted in place (build {}); sessions kept running",
+                    new.build
+                )
+            } else {
+                format!(
+                    "restarted in place (build {} -> {}); sessions kept running",
+                    old.build, new.build
+                )
+            };
+            return report(
+                human,
+                json!({
+                    "restarted": true,
+                    "in_place": true,
+                    "build": new.build,
+                    "sessions_kept": true,
+                }),
+            );
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    if client.version().is_ok() {
+        // Still the old instance answering: the handoff was accepted but the
+        // exec never landed. The daemon is intact, and so are its sessions.
+        bail!(
+            "the server took the handoff but is still running its old image — \
+             `tty7 server restart --hard` stops and starts it instead; sessions end"
+        );
+    }
+    // It went down mid-handoff, and its sessions with it; what is left to
+    // restore is a serving endpoint.
+    match start()? {
+        Outcome::Report(r) => report(
+            format!(
+                "the server went away during the handoff, ending its sessions; {}",
+                r.human
+            ),
+            json!({
+                "restarted": true,
+                "in_place": false,
+                "sessions_kept": false,
+                "start": r.json,
+            }),
+        ),
+        other => Ok(other),
+    }
 }
 
 pub fn logs() -> Result<Outcome> {

@@ -506,8 +506,11 @@ pub enum ServerCmd {
     #[command(about = "Stop the server; sessions end")]
     Stop,
 
-    #[command(about = "Stop, then start")]
-    Restart,
+    #[command(about = "Restart in place; sessions keep running (--hard: stop, then start)")]
+    Restart {
+        #[arg(long, help = "Stop, then start — every session ends")]
+        hard: bool,
+    },
 
     #[command(about = "Version, uptime, panes, links")]
     Status,
@@ -801,7 +804,7 @@ mod tests {
         for (verb, want) in [
             ("start", ServerCmd::Start),
             ("stop", ServerCmd::Stop),
-            ("restart", ServerCmd::Restart),
+            ("restart", ServerCmd::Restart { hard: false }),
             ("status", ServerCmd::Status),
             ("logs", ServerCmd::Logs),
         ] {
@@ -815,6 +818,10 @@ mod tests {
                 "server {verb} parsed as the wrong verb"
             );
         }
+        assert!(matches!(
+            parse(&["tty7", "server", "restart", "--hard"]).command,
+            Some(Command::Server(ServerCmd::Restart { hard: true }))
+        ));
     }
 
     #[test]
