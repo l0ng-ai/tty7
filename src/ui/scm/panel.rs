@@ -1668,7 +1668,9 @@ impl Tty7App {
                     let absolute = absolute.clone();
                     move |_, _window, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                            absolute.display().to_string(),
+                            crate::ui::path_display::native_separators(&absolute)
+                                .display()
+                                .to_string(),
                         ));
                     }
                 }),
@@ -1680,7 +1682,9 @@ impl Tty7App {
             menu = menu.item(
                 PopupMenuItem::new(crate::ui::right_panel::reveal_label()).on_click({
                     let absolute = absolute.clone();
-                    move |_, _window, cx| cx.reveal_path(&absolute)
+                    move |_, _window, cx| {
+                        cx.reveal_path(&crate::ui::path_display::native_separators(&absolute))
+                    }
                 }),
             );
         }

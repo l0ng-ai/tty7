@@ -686,7 +686,11 @@ impl Tty7App {
                         value: InfoValue::Path(compact_path(&cwd, home.as_deref())),
                         // The compacted `~/…` spelling is for reading; what
                         // goes on the clipboard is the path a shell can use.
-                        copy: Some(cwd.display().to_string()),
+                        copy: Some(
+                            crate::ui::path_display::native_separators(&cwd)
+                                .display()
+                                .to_string(),
+                        ),
                         // Reveal only means anything when the path is on the
                         // machine the file manager can see.
                         reveal: view.local_cwd().is_some().then(|| cwd.clone()),
@@ -970,7 +974,9 @@ impl Tty7App {
                     reveal_label(),
                     cx,
                 )
-                .on_click(move |_, _window, cx| cx.reveal_path(&cwd)),
+                .on_click(move |_, _window, cx| {
+                    cx.reveal_path(&crate::ui::path_display::native_separators(&cwd))
+                }),
             );
         }
         if let Some(text) = row.copy {

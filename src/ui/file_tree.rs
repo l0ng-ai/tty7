@@ -2052,7 +2052,11 @@ impl Tty7App {
             PopupMenuItem::new(t(L10nKey::FileTreeContextCopyPath)).on_click({
                 let p = p.clone();
                 move |_, _window, cx| {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(p.display().to_string()));
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                        crate::ui::path_display::native_separators(&p)
+                            .display()
+                            .to_string(),
+                    ));
                 }
             }),
         );
@@ -2061,7 +2065,7 @@ impl Tty7App {
                 PopupMenuItem::new(crate::ui::right_panel::reveal_label()).on_click({
                     let p = p.clone();
                     move |_, _window, cx| {
-                        cx.reveal_path(&p);
+                        cx.reveal_path(&crate::ui::path_display::native_separators(&p));
                     }
                 }),
             );

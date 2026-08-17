@@ -69,6 +69,24 @@ fn normalized(s: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Normalizes a path's separators to what the local OS expects. On Windows the
+/// shell's `IShellFolder::ParseDisplayName` bails out with `E_INVALIDARG` on a
+/// mixed-separator path — a forward-slash prefix joined with backslash
+/// entries. The forward slashes get in from two routes: the shell's PWD
+/// (OSC 7 from Git Bash / MSYS bash reports `/`, and that string survives
+/// `Path::ancestors()` when the file tree walks up to find `.git`), and
+/// `git rev-parse --show-toplevel` from Git for Windows (MSYS2), which always
+/// prints `/` regardless of the calling shell. `reveal_path` swallows that
+/// failure (it only logs), so handing it native separators is what makes
+/// "open folder" actually open.
+pub(crate) fn native_separators(path: &Path) -> Cow<'_, Path> {
+    #[cfg(windows)]
+    if path.as_os_str().to_string_lossy().contains('/') {
+        return Cow::Owned(path.as_os_str().to_string_lossy().replace('/', "\\").into());
+    }
+    Cow::Borrowed(path)
+}
+
 /// Shortens `path` to start from `~` when it is (inside) `home` — the home
 /// directory of the machine `path` is on, not of this one.
 ///
@@ -180,5 +198,59 @@ mod tests {
         // component before or after the home prefix cannot move it.
         assert_eq!(abbreviate_under("/home/日本/work", "/home/日本"), "~/work");
         assert_eq!(abbreviate_under("/home/xa/日本語", "/home/xa"), "~/日本語");
+    }
+
+    #[test]
+    fn native_separators_passes_through_a_path_with_nothing_to_fix() {
+        // No forward slashes → nothing to rewrite, and no allocation: the
+        // borrowed path is the caller's, handed back untouched.
+        assert!(matches!(
+            native_separators(Path::new("README.md")),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_separators_rewrites_forward_slashes_to_backslashes_on_windows() {
+        // The bug: a repo root from `git rev-parse` (forward slashes) joined
+        // with backslash-joined entries yields a mixed path, which
+        // `ParseDisplayName` rejects. Every `/` must become `\`.
+        assert_eq!(
+            native_separators(Path::new("D:/code/tty7\\skills")),
+            Path::new("D:\\code\\tty7\\skills")
+        );
+        assert_eq!(
+            native_separators(Path::new("D:/code/tty7")),
+            Path::new("D:\\code\\tty7")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_separators_leaves_unc_and_backslash_paths_alone() {
+        // A UNC path (`\\wsl$\…`, `\\?\…`) or an already-native path has no
+        // `/`, so it passes through borrowed — the replace is a no-op and
+        // must not allocate, nor touch the leading `\\`.
+        for p in ["\\\\wsl$\\Ubuntu\\home", "\\\\?\\C:\\code", "C:\\code\\tty7"] {
+            let got = native_separators(Path::new(p));
+            assert_eq!(got.as_ref(), Path::new(p), "{p:?}");
+            assert!(
+                matches!(got, Cow::Borrowed(_)),
+                "{p:?} should not allocate"
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn native_separators_is_a_no_op_off_windows() {
+        // On Unix the OS separator is `/`; a path that happens to contain
+        // backslashes is legitimate and must be left alone.
+        for p in ["/home/u/tty7", "C:\\Users\\dev", "mixed/path\\here"] {
+            let got = native_separators(Path::new(p));
+            assert_eq!(got.as_ref(), Path::new(p), "{p:?}");
+            assert!(matches!(got, Cow::Borrowed(_)));
+        }
     }
 }

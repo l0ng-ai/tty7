@@ -1047,7 +1047,8 @@ impl Tty7App {
     }
 
     pub(crate) fn sftp_reveal_download(&self, local: String, cx: &mut Context<Self>) {
-        cx.reveal_path(Path::new(&local));
+        let local = Path::new(&local);
+        cx.reveal_path(&crate::ui::path_display::native_separators(local));
     }
 
     fn sftp_poll_jobs(&mut self, cx: &mut Context<Self>) {
