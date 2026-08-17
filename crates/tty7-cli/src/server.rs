@@ -40,6 +40,10 @@ pub fn start() -> Result<Outcome> {
             json!({ "started": false, "running": true }),
         );
     }
+    // Nobody answered, so whatever is recorded or still holding the server
+    // seat is a stranded process (#667) — left alone it would make the spawn
+    // below stand down and time out with nothing to show for it.
+    spawn::reap_stranded();
     let exe = server_exe()?;
     let mut cmd = Command::new(&exe);
     cmd.arg("--daemon");
@@ -72,9 +76,13 @@ pub fn start() -> Result<Outcome> {
                 }
                 Err(_) => "its state could not be checked, so it was left alone",
             };
+            // A spawn that exited cleanly did so because it stood down
+            // against a seat holder — without naming it, the message points
+            // at nothing anyone can act on (#667).
             bail!(
-                "{} (pid {pid}) did not open its endpoints within {START_TIMEOUT:?} — {fate}",
-                exe.display()
+                "{} (pid {pid}) did not open its endpoints within {START_TIMEOUT:?} — {fate}{}",
+                exe.display(),
+                spawn::seat_holder_note()
             );
         }
         std::thread::sleep(POLL_INTERVAL);
@@ -87,9 +95,28 @@ pub fn start() -> Result<Outcome> {
 
 pub fn stop() -> Result<Outcome> {
     if !running() {
+        // Answering nothing is not the same as being gone: a stranded server
+        // (#667) still holds the seat, and stop is the verb people reach for
+        // to clear it. Only a free seat means there is truly nothing to stop.
+        let Some(stranded) = tty7_core::daemon::singleton::holder_pid() else {
+            return report(
+                "the server is not running",
+                json!({ "stopped": false, "running": false }),
+            );
+        };
+        spawn::stop();
+        // Compared against the pid, not mere occupancy: a fresh daemon may
+        // legitimately claim the freed seat in this very window, and it is
+        // not the thing this command failed to stop.
+        if tty7_core::daemon::singleton::holder_pid() == Some(stranded) {
+            bail!(
+                "the stranded server could not be reaped{}",
+                spawn::seat_holder_note()
+            );
+        }
         return report(
-            "the server is not running",
-            json!({ "stopped": false, "running": false }),
+            format!("stopped a stranded server (pid {stranded})"),
+            json!({ "stopped": true, "stranded": true, "pid": stranded }),
         );
     }
     spawn::stop();

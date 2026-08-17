@@ -103,12 +103,17 @@ fn a_clean_shutdown_keeps_the_pidfile_until_the_process_is_gone() {
     );
 }
 
-/// `spawn::stop` must reap a daemon that stopped listening but never exited,
-/// even when the pidfile vanishes under it mid-stop — the ordering an old
-/// build's shutdown produces when it wipes its files and then stalls (#653).
-/// The pid captured at the top of `stop` is what the reap has to act on.
+/// `spawn::stop` must reap a daemon that stopped listening but never exited
+/// (#653) — and without the shutdown wait: only a shutdown that was actually
+/// delivered earns `PROCESS_EXIT_TIMEOUT`, the time an *asked* daemon gets
+/// to finish exiting. To a survivor stop() could not even connect to, that
+/// wait was five seconds of watching nothing move (#667); the reap's own
+/// SIGTERM window is all the grace such a process gets.
+///
+/// (The companion ordering — the pidfile already gone when the reap needs a
+/// pid — is pinned by the `daemon_reap` suite through the seat record.)
 #[test]
-fn stop_reaps_a_lingering_daemon_even_after_the_pidfile_vanishes() {
+fn stop_reaps_an_unreachable_daemon_without_the_shutdown_wait() {
     let dir = tempfile::TempDir::new().unwrap();
     tty7_core::core::config::set_config_dir(dir.path().to_path_buf());
     let child = spawn_daemon(dir.path());
@@ -124,31 +129,19 @@ fn stop_reaps_a_lingering_daemon_even_after_the_pidfile_vanishes() {
     });
 
     // The #653 state, as stop() meets it: the endpoint is gone before stop()
-    // can ask for a shutdown, and the pidfile disappears while stop() is
-    // still waiting on the process. The delete must land inside stop()'s
-    // wait on the still-alive process (PROCESS_EXIT_TIMEOUT in spawn.rs),
-    // which the elapsed assertion below pins.
-    const SWEEP_DELAY: Duration = Duration::from_secs(1);
+    // can ask for a shutdown, and the process lives on.
     std::fs::remove_file(dir.path().join("daemon.sock")).unwrap();
-    let pidfile = dir.path().join("daemon.pid");
-    let sweeper = std::thread::spawn(move || {
-        std::thread::sleep(SWEEP_DELAY);
-        std::fs::remove_file(pidfile).is_ok()
-    });
 
     let stop_started = Instant::now();
     tty7_core::daemon::spawn::stop();
 
+    // Well under spawn.rs's PROCESS_EXIT_TIMEOUT (5s): a stop() that pays
+    // that wait for a shutdown it never delivered has regressed.
     assert!(
-        stop_started.elapsed() >= SWEEP_DELAY,
-        "stop() returned before the sweeper's delete — the mid-stop pidfile \
-         removal this test exists to exercise never happened; lower SWEEP_DELAY \
-         below spawn.rs's PROCESS_EXIT_TIMEOUT"
-    );
-    assert!(
-        sweeper.join().unwrap(),
-        "the sweeper found no pidfile to delete — stop() removed it early, so \
-         the vanishing-pidfile ordering was not exercised"
+        stop_started.elapsed() < Duration::from_secs(4),
+        "stop() spent {:?} on a daemon it never reached — the exit wait must \
+         be earned by a delivered shutdown",
+        stop_started.elapsed()
     );
     let deadline = Instant::now() + Duration::from_secs(2);
     while unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {

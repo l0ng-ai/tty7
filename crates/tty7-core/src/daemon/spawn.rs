@@ -273,17 +273,7 @@ pub fn ensure_running() -> anyhow::Result<()> {
     }
 
     if stale {
-        reap_recorded_daemon(None);
-
-        if transport::endpoint_exists() {
-            transport::remove_stale_endpoint();
-        }
-        // The daemon's control listener probes control.port for a live
-        // predecessor before binding; a stale file would cost it the same
-        // refused-connect delay the probe above just skipped. The recorded
-        // daemon is known dead here, so the file cannot be live.
-        #[cfg(windows)]
-        crate::host::server::remove_control_endpoint();
+        reap_stranded();
     }
 
     // While an installer is replacing the installation, spawning a daemon
@@ -321,13 +311,108 @@ pub fn ensure_running() -> anyhow::Result<()> {
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "daemon did not start listening at {} within {:?}",
+                "daemon did not start listening at {} within {:?}{}",
                 transport::endpoint_display(),
-                STARTUP_TIMEOUT
+                STARTUP_TIMEOUT,
+                seat_holder_note()
             );
         }
         std::thread::sleep(POLL_INTERVAL);
     }
+}
+
+/// Clears whatever is left of a server a connect probe already failed to
+/// reach: reaps the recorded (or seat-holding, #667) process and removes the
+/// endpoint files a fresh spawn would otherwise stand down against or pay a
+/// refusal delay on.
+///
+/// A healthy server is the caller's to detect first — everything here acts on
+/// the premise that nobody answered.
+pub fn reap_stranded() {
+    // A seat holder mid-handoff or mid-startup — claimed, not yet listening —
+    // looks exactly like a stranded one from out here, and it may be carrying
+    // every live session across an exec. Give it a moment to open its
+    // endpoint before concluding it never will; a genuinely stranded holder
+    // costs this wait once and then gets reaped.
+    //
+    // Health is an *answered handshake*, never a bare connect: a wedged
+    // daemon's listener still completes connections out of the kernel's
+    // backlog, and callers on the Unresponsive path have already proven that
+    // connecting says nothing. A holder that connects but will not answer is
+    // the reap's subject, not its exception — waiting out the rest of the
+    // grace on it would only delay what its silence already decided.
+
+    if crate::daemon::singleton::holder_pid().is_some() {
+        let deadline = Instant::now() + STRANDED_GRACE;
+        while Instant::now() < deadline {
+            if let Ok(mut stream) = transport::connect() {
+                match query_daemon_version(&mut stream) {
+                    VersionProbe::Speaks(_) | VersionProbe::Legacy => return,
+                    VersionProbe::Unresponsive => break,
+                }
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    reap_recorded_daemon(None);
+
+    if transport::endpoint_exists() {
+        transport::remove_stale_endpoint();
+    }
+    // The daemon's control listener probes control.port for a live
+    // predecessor before binding; a stale file would cost it the same
+    // refused-connect delay the reap above just made unnecessary.
+    #[cfg(windows)]
+    crate::host::server::remove_control_endpoint();
+}
+
+/// How long a seat holder that is not answering yet gets to be a daemon
+/// mid-handoff or mid-startup rather than a stranded one.
+const STRANDED_GRACE: Duration = Duration::from_secs(1);
+
+/// Names the process still holding the server seat, for the startup-timeout
+/// errors: a spawned daemon that stood down against a survivor used to time
+/// out with a message that pointed at nothing (#667). Empty when the seat is
+/// free — the timeout is then genuinely about a slow or crashed start.
+///
+/// The kill advice is identity-gated: the recorded pid can outlive the
+/// process it named (a pre-recording build holding the seat over an older
+/// number), and an ungated message would be telling the user to kill
+/// whatever process the OS reuses that pid for.
+pub fn seat_holder_note() -> String {
+    let Some(pid) = crate::daemon::singleton::holder_pid() else {
+        return String::new();
+    };
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        if !process_alive(pid as libc::pid_t) {
+            return format!(
+                "; the server seat is still held, but its recorded pid {pid} is no longer \
+                 alive — find the holder of daemon.lock before killing anything"
+            );
+        }
+        return match process_identity(pid as libc::pid_t) {
+            ProcessIdentity::OurDaemon => format!(
+                "; the server seat is still held by pid {pid}, which could not be reaped — \
+                 `kill {pid}` and retry"
+            ),
+            ProcessIdentity::Foreign => format!(
+                "; the server seat is still held, but its recorded pid {pid} now names an \
+                 unrelated process — find the holder of daemon.lock before killing anything"
+            ),
+            // Alive, seat held, executable unreadable: most likely this *is*
+            // the stranded server — saying otherwise would talk the user out
+            // of the one action that frees the seat.
+            ProcessIdentity::Unknown => format!(
+                "; the server seat is still held by pid {pid}, whose executable can no \
+                 longer be read — likely a stranded server; check it with `ps -p {pid}` \
+                 before killing it"
+            ),
+        };
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    format!("; the server seat is still held (recorded pid {pid})")
 }
 
 fn query_daemon_version(stream: &mut transport::Stream) -> VersionProbe {
@@ -468,9 +553,10 @@ pub fn hand_off() -> anyhow::Result<()> {
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "the daemon did not start listening again at {} within {:?}",
+                "the daemon did not start listening again at {} within {:?}{}",
                 transport::endpoint_display(),
-                STARTUP_TIMEOUT
+                STARTUP_TIMEOUT,
+                seat_holder_note()
             );
         }
         std::thread::sleep(POLL_INTERVAL);
@@ -485,12 +571,18 @@ pub fn stop() {
     // between them is exactly where an installer starts replacing files that
     // are still locked — and an old build's shutdown still deletes the pidfile
     // before the process is gone, so this is the last moment the pid is
-    // guaranteed readable.
-    let recorded = pidfile::read().filter(|&pid| pid > 4 && pid != std::process::id());
+    // guaranteed readable. When the pidfile is already gone (#667), the pid
+    // recorded in the singleton lock file is the remaining name for a
+    // survivor that is still holding the seat.
+    let recorded = pidfile::read()
+        .or_else(crate::daemon::singleton::holder_pid)
+        .filter(|&pid| pid > 4 && pid != std::process::id());
 
+    let mut asked = false;
     if let Ok(mut stream) = transport::connect() {
         if ClientMsg::Shutdown.encode(&mut stream).is_ok() {
             let _ = stream.flush();
+            asked = true;
             let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
             while Instant::now() < deadline && transport::connect().is_ok() {
                 std::thread::sleep(POLL_INTERVAL);
@@ -498,7 +590,13 @@ pub fn stop() {
         }
     }
 
-    if let Some(pid) = recorded
+    // Only a shutdown that was actually delivered earns this wait: it is the
+    // time a daemon that stopped listening gets to finish releasing its
+    // image. A daemon nobody could even connect to was never asked to die —
+    // waiting on it is five seconds spent watching a survivor not move
+    // (#667); the reap below has its own graceful SIGTERM window.
+    if asked
+        && let Some(pid) = recorded
         && !wait_for_recorded_exit(pid, PROCESS_EXIT_TIMEOUT)
     {
         log::warn!("daemon pid {pid} released its endpoint but has not exited yet");
@@ -543,33 +641,115 @@ fn wait_for_recorded_exit(_pid: u32, _timeout: Duration) -> bool {
 }
 
 /// `recorded` is a pid the caller captured before asking the daemon to die;
-/// the pidfile is only the fallback, because a shutdown that stalled after its
-/// cleanup may have already deleted it.
+/// the pidfile is the first fallback, because a shutdown that stalled after
+/// its cleanup may have already deleted it — and the pid in the singleton
+/// lock file is the last one, for the #667 state where the pidfile is gone
+/// entirely but a survivor still holds the seat.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn reap_recorded_daemon(recorded: Option<u32>) {
-    let Some(pid) = recorded.or_else(pidfile::read) else {
+    let Some(pid) = recorded
+        .or_else(pidfile::read)
+        .or_else(crate::daemon::singleton::holder_pid)
+    else {
         return;
     };
     if pid <= 1 || pid == std::process::id() {
-        pidfile::remove();
+        clear_daemon_records();
         return;
     }
-    if process_matches_daemon_exe(pid as libc::pid_t) {
-        log::warn!("reaping unreachable daemon (pid {pid}); its sessions will be hung up");
-        if !reap_process(pid as libc::pid_t) {
-            // The pid is the only handle left on the survivor; keep the file
-            // so the next attempt still has someone to reap.
+    if !process_alive(pid as libc::pid_t) {
+        clear_daemon_records();
+        return;
+    }
+    match process_identity(pid as libc::pid_t) {
+        ProcessIdentity::OurDaemon => {
+            log::warn!("reaping unreachable daemon (pid {pid}); its sessions will be hung up");
+            if !reap_process(pid as libc::pid_t) {
+                // The pid is the only handle left on the survivor; keep the
+                // file so the next attempt still has someone to reap.
+                return;
+            }
+        }
+        // The recorded pid now belongs to some unrelated program: the record
+        // is stale, not the process.
+        ProcessIdentity::Foreign => {}
+        ProcessIdentity::Unknown => {
+            // Alive but unnameable. Deleting the record here is what used to
+            // strand the machine (#667): the pid is the only handle on
+            // whatever this is, so it must outlive this attempt.
+            log::warn!(
+                "recorded daemon pid {pid} is alive but its executable cannot be identified; \
+                 keeping its record and leaving it alone"
+            );
             return;
         }
     }
+    clear_daemon_records();
+}
+
+/// Clears both records of a daemon the reap has confirmed dealt with — the
+/// pidfile, and the pid in the lock file (which is only touched if the seat
+/// is actually free; see `clear_record_if_free`).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn clear_daemon_records() {
     pidfile::remove();
+    crate::daemon::singleton::clear_record_if_free();
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn process_matches_daemon_exe(pid: libc::pid_t) -> bool {
-    process_path(pid)
+enum ProcessIdentity {
+    /// Named like a daemon of ours: safe to reap.
+    OurDaemon,
+    /// Named like something else: the recorded pid has been reused.
+    Foreign,
+    /// Alive, but neither its executable path nor its comm name is readable.
+    Unknown,
+}
+
+/// What the process behind `pid` is, judged by name — by executable path
+/// first, and by the kernel's comm name when the path is unreadable.
+///
+/// The path is unreadable in exactly the case the reap exists for: on macOS
+/// `proc_pidpath` fails outright for a live process whose binary has been
+/// deleted, which is every daemon still running through an update that
+/// replaced the installation. The comm name is recorded at `exec` time and
+/// survives the deletion on both platforms.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn process_identity(pid: libc::pid_t) -> ProcessIdentity {
+    let named = process_path(pid)
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .is_some_and(|name| is_reapable_daemon_name(&name))
+        .or_else(|| process_comm(pid));
+    match named {
+        Some(name) if is_reapable_daemon_name(&name) => ProcessIdentity::OurDaemon,
+        Some(_) => ProcessIdentity::Foreign,
+        None => ProcessIdentity::Unknown,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn process_comm(pid: libc::pid_t) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    // 2 * MAXCOMLEN, the buffer libproc's own callers use; proc_name refuses
+    // anything smaller.
+    let mut buf = [0u8; 64];
+    let len =
+        unsafe { libc::proc_name(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
+    if len <= 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf[..len as usize]).into_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn process_comm(pid: libc::pid_t) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let comm = comm.trim();
+    (!comm.is_empty()).then(|| comm.to_string())
 }
 
 /// Whether the process is gone by the end.
@@ -591,9 +771,53 @@ fn signal_and_await_exit(pid: libc::pid_t, sig: libc::c_int, timeout: Duration) 
     wait_for_recorded_exit(pid as u32, timeout)
 }
 
+/// Whether `pid` is a process that still exists — where a zombie does not
+/// count. A zombie answers `kill(pid, 0)` like the living, but it holds no
+/// lock, no endpoint and no image, and no signal can end it: counting it
+/// alive made the reap SIGTERM-then-SIGKILL a corpse for the full eight
+/// seconds of both timeouts before giving up on it. The GUI never waits on
+/// the daemons it spawns, so a crashed daemon *is* a zombie of a long-lived
+/// GUI, not a rare state.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn process_alive(pid: libc::pid_t) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
+    let exists = unsafe { libc::kill(pid, 0) == 0 };
+    exists && !is_zombie(pid)
+}
+
+#[cfg(target_os = "macos")]
+fn is_zombie(pid: libc::pid_t) -> bool {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if got == size {
+        return info.pbi_status == libc::SZOMB;
+    }
+    // Measured, not assumed: for a zombie this call fails outright while
+    // `kill(pid, 0)` still succeeds — unlike a live process with a deleted
+    // executable, whose state (though not its path) stays readable. A pid we
+    // may signal but cannot introspect is a corpse.
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn is_zombie(pid: libc::pid_t) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        // Readable state is the same boundary as on macOS: signalable but
+        // not introspectable is a corpse, not a daemon.
+        return true;
+    };
+    // The state field follows the comm's closing paren — the comm itself may
+    // contain spaces and parens.
+    stat.rsplit_once(')')
+        .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
 }
 
 #[cfg(windows)]
@@ -820,7 +1044,22 @@ fn process_path(pid: libc::pid_t) -> Option<PathBuf> {
     if pid <= 0 {
         return None;
     }
-    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+    let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    Some(PathBuf::from(strip_deleted_marker(
+        path.to_string_lossy().into_owned(),
+    )))
+}
+
+/// A deleted executable's `/proc/<pid>/exe` reads as "/path/name (deleted)".
+/// The marker is the kernel's, not part of the name — left in place it made a
+/// replaced daemon read as foreign, which dropped its record without reaping
+/// it (#667).
+#[cfg(any(target_os = "linux", test))]
+fn strip_deleted_marker(path: String) -> String {
+    match path.strip_suffix(" (deleted)") {
+        Some(stripped) => stripped.to_string(),
+        None => path,
+    }
 }
 
 #[cfg(unix)]
@@ -1124,6 +1363,68 @@ mod exe_name_tests {
         assert!(is_reapable_daemon_name("TTY7"));
     }
 
+    /// The kernel's " (deleted)" marker on a replaced executable is not part
+    /// of its name; treating it as one made an updated-under daemon read as
+    /// foreign, which dropped its record without reaping it (#667).
+    #[test]
+    fn the_deleted_marker_is_not_part_of_a_process_name() {
+        assert_eq!(
+            strip_deleted_marker("/opt/tty7/tty7-server (deleted)".into()),
+            "/opt/tty7/tty7-server"
+        );
+        assert_eq!(
+            strip_deleted_marker("/opt/tty7/tty7-server".into()),
+            "/opt/tty7/tty7-server"
+        );
+        // Only the trailing marker is the kernel's.
+        assert_eq!(
+            strip_deleted_marker("/tmp/x (deleted)/tty7-server".into()),
+            "/tmp/x (deleted)/tty7-server"
+        );
+    }
+
+    /// A zombie answers `kill(pid, 0)` like the living but holds nothing and
+    /// cannot be signalled dead; counting it alive made the reap spend both
+    /// kill timeouts on a corpse. The GUI never waits on the daemons it
+    /// spawns, so this is the ordinary afterlife of a crashed daemon.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_zombie_is_not_an_alive_process() {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let pid = child.id() as libc::pid_t;
+        // It has exited; nobody has waited: a zombie, once the exit lands.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !is_zombie(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "the unwaited child must read as a zombie"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            unsafe { libc::kill(pid, 0) == 0 },
+            "a zombie still answers signal 0 — that is the trap"
+        );
+        assert!(
+            !process_alive(pid),
+            "a corpse is not a process the reap can act on"
+        );
+        let _ = child.wait();
+    }
+
+    /// The comm fallback is what identifies a daemon whose executable path is
+    /// unreadable — on macOS `proc_pidpath` fails outright once the binary is
+    /// deleted. This process is alive and its own comm must resolve.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_live_process_resolves_its_own_comm_name() {
+        let comm = process_comm(std::process::id() as libc::pid_t)
+            .expect("this process is alive; its comm name must be readable");
+        assert!(!comm.is_empty());
+    }
+
     #[test]
     fn strip_exe_suffix_only_strips_a_trailing_exe() {
         assert_eq!(strip_exe_suffix("tty7-app.exe"), "tty7-app");
@@ -1216,8 +1517,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(
-            !process_matches_daemon_exe(pid),
-            "sleep must not match any daemon name; matching here would mean the reap could kill it"
+            matches!(process_identity(pid), ProcessIdentity::Foreign),
+            "sleep must read as a foreign process — OurDaemon would mean the reap \
+             could kill it, Unknown would mean its record is never cleared"
         );
 
         let _ = child.kill();

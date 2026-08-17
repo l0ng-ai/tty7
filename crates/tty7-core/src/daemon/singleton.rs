@@ -104,6 +104,10 @@ pub unsafe fn adopt(fd: std::os::fd::RawFd) -> Singleton {
     }
     let file = unsafe { <File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
     note_held(&file);
+    // The exec kept the pid, so this rewrites the same number — done anyway,
+    // so the recorded pid stays an invariant of holding the seat rather than
+    // a property of how the seat was acquired.
+    record_holder_pid(&file);
     Singleton { _file: file }
 }
 
@@ -118,11 +122,121 @@ pub fn claim() -> Claim {
     match open_exclusive(&path) {
         Ok(Some(file)) => {
             note_held(&file);
+            record_holder_pid(&file);
             Claim::Held(Singleton { _file: file })
         }
         Ok(None) => Claim::Taken,
         Err(e) => Claim::Unavailable(format!("{} could not be locked: {e}", path.display())),
     }
+}
+
+/// Writes this process's pid into the lock file it holds.
+///
+/// The lock file is the one name for the server that nothing ever deletes, so
+/// the pid in it is the handle of last resort: a daemon that unlinked its
+/// endpoint and lost its pidfile (#667) is otherwise unfindable — `flock` can
+/// say the seat is taken but not by whom — and every later launch stands down
+/// against a process nobody can name or reap.
+fn record_holder_pid(file: &File) {
+    use std::io::{Seek as _, Write as _};
+
+    let mut f = file;
+    let write = file
+        .set_len(0)
+        .and_then(|()| f.seek(std::io::SeekFrom::Start(0)))
+        .and_then(|_| f.write_all(std::process::id().to_string().as_bytes()))
+        .and_then(|()| f.sync_data());
+    if let Err(e) = write {
+        log::warn!("could not record this server's pid in its lock file: {e}");
+    }
+}
+
+/// The pid of the process currently holding this config dir's server seat, or
+/// `None` when the seat is free (or was never held by a build that records
+/// pids). For the reap paths: when the pidfile is gone, this is the only way
+/// left to name the survivor.
+///
+/// Probing takes the lock for a moment when it turns out to be free, so a
+/// server claiming in exactly that window is told `Taken` and stands down.
+/// On the reap paths a spawn follows and serves instead, so the outcome is
+/// the same either way; on the error-message paths nothing follows, and a
+/// claimant colliding with the probe would be lost — accepted, because that
+/// claimant is a stray arriving microseconds after its launcher already gave
+/// up a multi-second wait on it.
+#[cfg(unix)]
+pub fn holder_pid() -> Option<u32> {
+    use std::os::unix::io::AsRawFd as _;
+
+    let path = lock_path()?;
+    // No `create`: a lock file that does not exist has never had a holder.
+    let file = File::options().read(true).open(&path).ok()?;
+    loop {
+        // LOCK_SH is enough to conflict with a holder's LOCK_EX while keeping
+        // the probe as weak as possible.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+            return None;
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EWOULDBLOCK) => break,
+            Some(libc::EINTR) => continue,
+            _ => return None,
+        }
+    }
+    // Read only once the seat is known to be held: the content then names the
+    // holder, because every holder writes its pid the moment it claims. A
+    // pre-recording build holding the seat left older content or none; the
+    // caller's identity check on the pid is what keeps a stale number from
+    // reaping an innocent process.
+    let contents = std::fs::read_to_string(&path).ok()?;
+    contents.trim().parse::<u32>().ok().filter(|&pid| pid > 1)
+}
+
+/// Truncates the recorded pid — only when nobody holds the seat.
+///
+/// For the reap, after it confirms the recorded process is gone: the content
+/// would otherwise keep naming the dead holder forever, and a later
+/// pre-recording build holding the seat over it would make that number — by
+/// then possibly reused for an unrelated process — read as the holder. A
+/// claim that lands before this does wins the flock, and the truncation is
+/// skipped rather than erasing the new holder's record.
+///
+/// Like [`holder_pid`]'s probe, this holds the lock for a moment, so a claim
+/// colliding with it is told `Taken` — accepted for the same reason: every
+/// caller is a reap that has just confirmed the seat's holder dead, and a
+/// spawn follows on each of those paths.
+#[cfg(unix)]
+pub fn clear_record_if_free() {
+    use std::os::unix::io::AsRawFd as _;
+
+    let Some(path) = lock_path() else { return };
+    let Ok(file) = File::options().write(true).open(&path) else {
+        return;
+    };
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            let _ = file.set_len(0);
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+            return;
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => continue,
+            _ => return,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn clear_record_if_free() {}
+
+#[cfg(not(unix))]
+pub fn holder_pid() -> Option<u32> {
+    // The Windows seat is `share_mode(0)`: while it is held the file cannot
+    // even be opened to read a pid out of. The Windows reap therefore still
+    // has only the pidfile to act on — a seat-holding survivor whose pidfile
+    // is gone stays unfindable there, so the #667 recovery is unix-only for
+    // now.
+    None
 }
 
 /// `Ok(Some(file))` when the lock is ours, `Ok(None)` when someone else holds
@@ -283,6 +397,77 @@ mod tests {
             matches!(again, Claim::Held(_)),
             "the seat comes back once the last reference to it is gone, got {again:?}"
         );
+    }
+
+    /// The pid in the lock file is the reap's handle of last resort (#667):
+    /// held means it names the holder, free means it names nobody.
+    #[cfg(unix)]
+    #[test]
+    fn the_held_seat_names_its_holder_and_a_free_seat_names_nobody() {
+        let (dir, _guard) = pin_dir("holder-pid");
+        let seat = match claim_within(PATIENCE) {
+            Claim::Held(s) => s,
+            other => panic!("the claim must be granted, got {other:?}"),
+        };
+        assert_eq!(
+            std::fs::read_to_string(dir.join("daemon.lock"))
+                .unwrap()
+                .trim(),
+            std::process::id().to_string(),
+            "claiming records the holder's pid in the lock file"
+        );
+        assert_eq!(
+            holder_pid(),
+            Some(std::process::id()),
+            "while the seat is held, the probe names the holder"
+        );
+        drop(seat);
+        // A forked neighbour can keep the released seat referenced for a
+        // moment (see `claim_within`); what matters is that the answer
+        // becomes "nobody", not the microsecond it does.
+        let deadline = std::time::Instant::now() + PATIENCE;
+        while holder_pid().is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a released seat must stop naming a holder"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Clearing the record is fenced by the seat itself: a live holder's pid
+    /// must survive it, a dead holder's must not — stale content is what
+    /// could one day send a reap after a reused pid.
+    #[cfg(unix)]
+    #[test]
+    fn clearing_the_record_spares_a_live_holder_and_erases_a_dead_one() {
+        let (dir, _guard) = pin_dir("clear-record");
+        let path = dir.join("daemon.lock");
+        let seat = match claim_within(PATIENCE) {
+            Claim::Held(s) => s,
+            other => panic!("the claim must be granted, got {other:?}"),
+        };
+        clear_record_if_free();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim(),
+            std::process::id().to_string(),
+            "a held seat's record must survive the clear"
+        );
+        drop(seat);
+        // A forked neighbour can keep the seat referenced briefly; keep
+        // asking until the clear lands.
+        let deadline = std::time::Instant::now() + PATIENCE;
+        loop {
+            clear_record_if_free();
+            if std::fs::read_to_string(&path).unwrap().is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a free seat's stale record must be cleared"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]
