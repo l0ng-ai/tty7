@@ -3924,27 +3924,28 @@ impl Tty7App {
         self.activate(index, window, cx);
     }
 
-    /// Stamps whichever tab is active right now. Called once per frame rather
-    /// than from the ten places that assign `self.active` — it is idempotent,
-    /// so the stamp only advances on the first frame after a switch.
     /// Declare to the pane registry which terminals are on screen this
     /// frame: the active tab's, nobody else's. Stated per frame rather than
     /// maintained at every tab operation, the way `scm_sync_watchers` is.
     /// Entity ids only — reading the entities here would put them into the
     /// window's tracked set, which is exactly what the registry routes
     /// around.
-    fn declare_displayed_panes(&self) {
+    fn declare_displayed_panes(&self, cx: &App) {
         let active = self.active;
-        crate::terminal::view::declare_displayed(self.tabs.iter().enumerate().flat_map(
-            |(i, tab)| {
+        crate::terminal::view::declare_displayed(
+            cx,
+            self.tabs.iter().enumerate().flat_map(|(i, tab)| {
                 tab.pane
                     .leaves()
                     .into_iter()
                     .filter_map(move |slot| Some((slot.terminal()?.entity_id(), i == active)))
-            },
-        ));
+            }),
+        );
     }
 
+    /// Stamps whichever tab is active right now. Called once per frame rather
+    /// than from the ten places that assign `self.active` — it is idempotent,
+    /// so the stamp only advances on the first frame after a switch.
     pub(crate) fn touch_active_tab(&self) {
         let Some(tab) = self.tabs.get(self.active) else {
             return;
@@ -6843,7 +6844,7 @@ impl Render for Tty7App {
         window.set_rem_size(px(cx.global::<Config>().ui_font_size));
         self.claim_pending_tab(window, cx);
         self.touch_active_tab();
-        self.declare_displayed_panes();
+        self.declare_displayed_panes(cx);
         self.scm_sync_watchers(window, cx);
         if cx.has_active_drag() {
             crate::ui::reorder::clear_pending(&self.reorder);
@@ -9540,6 +9541,110 @@ mod rename_gpui_tests {
             assert!(app.renaming.is_some());
             app.close_tab_inner(0, true, window, cx);
             assert!(app.renaming.is_none(), "losing its own tab closes the box");
+        });
+    }
+}
+
+// The output gate: a pane repaints on PTY output only while it is on screen.
+// `Tty7App::render` declares the active tab's panes displayed each frame and
+// everything else hidden; a pane nobody has declared — or whose id nobody
+// registered — must err toward displayed, because the failure direction that
+// matters is a visible pane that stops repainting.
+#[cfg(all(test, unix))]
+mod displayed_gpui_tests {
+    use gpui::TestAppContext;
+
+    use crate::terminal::view::{declare_displayed, displayed_for_test, quiet_test_pane};
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    fn pane_id(app: &super::Tty7App, tab: usize) -> gpui::EntityId {
+        app.tabs[tab]
+            .pane
+            .first_leaf()
+            .expect("tab has a pane")
+            .entity_id()
+    }
+
+    #[gpui::test]
+    fn the_output_gate_follows_the_active_tab(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let (front, back) = (pane_id(app, 0), pane_id(app, 1));
+
+            app.declare_displayed_panes(cx);
+            assert_eq!(
+                displayed_for_test(cx, front),
+                Some(true),
+                "the active tab's pane repaints on output"
+            );
+            assert_eq!(
+                displayed_for_test(cx, back),
+                Some(false),
+                "a background tab's pane stays out of the frame loop"
+            );
+
+            app.activate(1, window, cx);
+            app.declare_displayed_panes(cx);
+            assert_eq!(displayed_for_test(cx, front), Some(false));
+            assert_eq!(
+                displayed_for_test(cx, back),
+                Some(true),
+                "switching tabs hands the frame loop to the new tab"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_pane_nobody_declared_counts_as_displayed(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        let _orphan = app.update_in(&mut vcx, |app, window, cx| {
+            // A pane that exists but sits in no tab — the shape of every
+            // "path that never declares": it registers as displayed and a
+            // declaration pass over the app's own tabs leaves it alone.
+            let (view, stream) = quiet_test_pane(99, window, cx);
+            let orphan = view.entity_id();
+            assert_eq!(
+                displayed_for_test(cx, orphan),
+                Some(true),
+                "a fresh pane defaults to displayed"
+            );
+
+            app.declare_displayed_panes(cx);
+            assert_eq!(
+                displayed_for_test(cx, orphan),
+                Some(true),
+                "declaring only speaks about panes the app holds"
+            );
+
+            // An id nobody registered is declared into the void, not
+            // inserted: the registry only ever holds live panes' flags.
+            let ghost = gpui::EntityId::from(u64::MAX);
+            declare_displayed(cx, [(ghost, false)]);
+            assert_eq!(displayed_for_test(cx, ghost), None);
+
+            (view, stream)
+        });
+    }
+
+    #[gpui::test]
+    fn a_released_pane_leaves_the_registry(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+
+        let back = app.update_in(&mut vcx, |app, _window, _cx| {
+            let back = pane_id(app, 1);
+            app.tabs.remove(1);
+            back
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |_, _, cx| {
+            assert_eq!(
+                displayed_for_test(cx, back),
+                None,
+                "a closed pane's flag does not outlive it"
+            );
         });
     }
 }

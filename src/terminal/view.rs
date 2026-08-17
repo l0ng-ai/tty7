@@ -43,24 +43,43 @@ const GRID_PAD_Y: f32 = 4.;
 /// the output pump consults instead. `Tty7App::render` declares it each frame
 /// for its own tabs; a pane nobody has declared yet counts as displayed, so a
 /// missed path can only cost extra repaints, never a frozen grid.
-fn displayed_registry() -> &'static std::sync::Mutex<
-    std::collections::HashMap<EntityId, std::sync::Arc<std::sync::atomic::AtomicBool>>,
-> {
-    static R: std::sync::OnceLock<
-        std::sync::Mutex<
-            std::collections::HashMap<EntityId, std::sync::Arc<std::sync::atomic::AtomicBool>>,
-        >,
-    > = std::sync::OnceLock::new();
-    R.get_or_init(Default::default)
-}
+///
+/// A gpui `Global` rather than a `static`: entity ids are only unique within
+/// one `App`, and parallel `#[gpui::test]` apps mint colliding ids — a
+/// process-wide map would let one test's declarations flip another's flags.
+/// In the shipped binary there is exactly one `App`, so the two are the same.
+#[derive(Default)]
+struct DisplayedRegistry(
+    std::sync::Mutex<
+        std::collections::HashMap<EntityId, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    >,
+);
 
-pub fn declare_displayed(panes: impl IntoIterator<Item = (EntityId, bool)>) {
-    let map = displayed_registry().lock().unwrap();
+impl gpui::Global for DisplayedRegistry {}
+
+pub fn declare_displayed(cx: &App, panes: impl IntoIterator<Item = (EntityId, bool)>) {
+    // No registry means no pane has ever been built in this app.
+    let Some(registry) = cx.try_global::<DisplayedRegistry>() else {
+        return;
+    };
+    let map = registry.0.lock().unwrap();
     for (id, on) in panes {
         if let Some(flag) = map.get(&id) {
             flag.store(on, std::sync::atomic::Ordering::Relaxed);
         }
     }
+}
+
+/// What the registry holds for `id`: `None` when the pane never registered
+/// (or already released), otherwise the flag the output gate would consult.
+#[cfg(all(test, unix))]
+pub(crate) fn displayed_for_test(cx: &App, id: EntityId) -> Option<bool> {
+    cx.try_global::<DisplayedRegistry>()?
+        .0
+        .lock()
+        .unwrap()
+        .get(&id)
+        .map(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 actions!(
@@ -1223,13 +1242,16 @@ impl TerminalView {
 
         let displayed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let entity_id = cx.entity().entity_id();
-        displayed_registry()
+        cx.default_global::<DisplayedRegistry>()
+            .0
             .lock()
             .unwrap()
             .insert(entity_id, displayed.clone());
 
         cx.on_release_in(window, move |view, window, cx| {
-            displayed_registry().lock().unwrap().remove(&entity_id);
+            if let Some(registry) = cx.try_global::<DisplayedRegistry>() {
+                registry.0.lock().unwrap().remove(&entity_id);
+            }
             view.terminal.detach_link();
             for image in view.terminal.images().take_for_release() {
                 cx.drop_image(image, Some(window));
