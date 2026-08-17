@@ -174,7 +174,7 @@ impl Theme {
             sidebar,
             // Blended, not bisected, so a palette's own softness carries into
             // the sidebar — but floored on the fill it is actually painted on
-            // (`sidebar`, not `background`), because four of the nine builtins
+            // (`sidebar`, not `background`), because four of the builtins
             // land this under 4.5:1 and it is the tab title, not a caption.
             sidebar_fg: at_least(mix(fg, bg, 0.28), fg, sidebar, TEXT_FLOOR),
             accent: legible_accent(bg, self.accent),
@@ -1276,7 +1276,9 @@ static BUILTINS: [BuiltinSpec; 13] = [
         background: 0x1e1e2e,
         foreground: 0xcdd6f4,
         accent: 0x89b4fa,
-        caret: None,
+        // Rosewater, the cursor colour Catppuccin's own terminal spec names —
+        // the accent fallback would paint it blue.
+        caret: Some(0xf5e0dc),
         ansi16: [
             (0x45, 0x47, 0x5a),
             (0xf3, 0x8b, 0xa8),
