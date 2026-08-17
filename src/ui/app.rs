@@ -3927,6 +3927,24 @@ impl Tty7App {
     /// Stamps whichever tab is active right now. Called once per frame rather
     /// than from the ten places that assign `self.active` — it is idempotent,
     /// so the stamp only advances on the first frame after a switch.
+    /// Declare to the pane registry which terminals are on screen this
+    /// frame: the active tab's, nobody else's. Stated per frame rather than
+    /// maintained at every tab operation, the way `scm_sync_watchers` is.
+    /// Entity ids only — reading the entities here would put them into the
+    /// window's tracked set, which is exactly what the registry routes
+    /// around.
+    fn declare_displayed_panes(&self) {
+        let active = self.active;
+        crate::terminal::view::declare_displayed(self.tabs.iter().enumerate().flat_map(
+            |(i, tab)| {
+                tab.pane
+                    .leaves()
+                    .into_iter()
+                    .filter_map(move |slot| Some((slot.terminal()?.entity_id(), i == active)))
+            },
+        ));
+    }
+
     pub(crate) fn touch_active_tab(&self) {
         let Some(tab) = self.tabs.get(self.active) else {
             return;
@@ -6825,6 +6843,7 @@ impl Render for Tty7App {
         window.set_rem_size(px(cx.global::<Config>().ui_font_size));
         self.claim_pending_tab(window, cx);
         self.touch_active_tab();
+        self.declare_displayed_panes();
         self.scm_sync_watchers(window, cx);
         if cx.has_active_drag() {
             crate::ui::reorder::clear_pending(&self.reorder);
