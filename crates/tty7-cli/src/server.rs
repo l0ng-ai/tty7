@@ -137,12 +137,29 @@ pub fn restart(hard: bool) -> Result<Outcome> {
     }
     // Either `--hard`, or a daemon that cannot replace itself in place —
     // Windows, or a build from before the handoff existed. Stopping is the
-    // only restart that daemon has.
+    // only restart that daemon has — and the report has to own that, because
+    // the default restart's promise is sessions kept.
     spawn::stop();
     if running() {
         bail!("the server did not shut down on request");
     }
-    start()
+    let how = if hard {
+        "stopped and started"
+    } else {
+        "stopped and started (this server cannot restart in place)"
+    };
+    match start()? {
+        Outcome::Report(r) => report(
+            format!("{how}; sessions ended; {}", r.human),
+            json!({
+                "restarted": true,
+                "in_place": false,
+                "sessions_kept": false,
+                "start": r.json,
+            }),
+        ),
+        other => Ok(other),
+    }
 }
 
 /// The daemon execs the tty7-server binary found by [`server_exe`]: same pid,
@@ -199,8 +216,20 @@ fn restart_in_place(
              `tty7 server restart --hard` stops and starts it instead; sessions end"
         );
     }
-    // It went down mid-handoff, and its sessions with it; what is left to
-    // restore is a serving endpoint.
+    // The endpoint is silent, but the seat still tells "becoming the new
+    // image" apart from "died": the singleton lock survives the exec, so a
+    // held seat is the handed-off daemon still coming up, carrying every
+    // session. `start` would grant it one second of grace and then reap it —
+    // ending exactly the sessions this command promised to keep.
+    if tty7_core::daemon::singleton::holder_pid().is_some() {
+        bail!(
+            "the server took the handoff but has not started answering within \
+             {START_TIMEOUT:?} — it still holds the server seat, so its sessions may yet \
+             survive; give it a moment and check `tty7 server status`"
+        );
+    }
+    // The seat is free: it went down mid-handoff, and its sessions with it;
+    // what is left to restore is a serving endpoint.
     match start()? {
         Outcome::Report(r) => report(
             format!(
