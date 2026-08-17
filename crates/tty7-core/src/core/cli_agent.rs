@@ -165,6 +165,9 @@ impl CLIAgent {
             // "Do not save conversation history" — nothing is persisted, so
             // there is no session left to resume from.
             CLIAgent::Auggie => &["--dont-save-session"],
+            // "If false, chat history is not saved and --continue/--resume
+            // will not work" — the yargs negation of `--chat-recording`.
+            CLIAgent::Qwen => &["--no-chat-recording"],
             _ => &[],
         };
         argv.iter().any(|t| ephemeral.contains(&t.as_str()))
@@ -299,10 +302,31 @@ impl CLIAgent {
             CLIAgent::Copilot | CLIAgent::Auggie | CLIAgent::Hermes => {
                 &["--resume", "-r", "--continue", "-c"]
             }
-            CLIAgent::Qwen => &["--resume", "-r", "--continue", "-c", "--fork-session"],
+            // `--session-id` names a *new* session and Qwen rejects it
+            // alongside `--resume`, so it is as stale as the resume flags.
+            CLIAgent::Qwen => &[
+                "--resume",
+                "-r",
+                "--continue",
+                "-c",
+                "--fork-session",
+                "--session-id",
+            ],
             CLIAgent::Droid => &["--resume", "-r", "--fork", "--session-id", "-s"],
-            CLIAgent::Goose => &["--resume", "-r", "--fork", "--session-id", "--name"],
-            CLIAgent::Vibe => &["--resume", "--continue"],
+            // `--session-id`/`--id`, `-n`/`--name` and the legacy `--path` are
+            // one mutually-exclusive clap group in Goose; any of them surviving
+            // next to the `--session-id` this command appends is a parse error.
+            CLIAgent::Goose => &[
+                "--resume",
+                "-r",
+                "--fork",
+                "--session-id",
+                "--id",
+                "--name",
+                "-n",
+                "--path",
+            ],
+            CLIAgent::Vibe => &["--resume", "--continue", "-c"],
             CLIAgent::Antigravity => &["--conversation", "--continue", "-c"],
             CLIAgent::OpenCode => &["--session", "-s", "--continue", "-c", "--fork"],
             CLIAgent::Codex => &["--last"],
@@ -1636,6 +1660,42 @@ mod tests {
             Some("droid --auto low --resume s-2")
         );
 
+        // `--id` is an alias of `--session-id` and `-n` of `--name`, and the
+        // three share one exclusive clap group — any of them surviving next to
+        // the `--session-id` the command appends would fail to parse.
+        assert_eq!(
+            CLIAgent::Goose
+                .resume_command(
+                    "20260213_9",
+                    Some(&argv(&["goose", "s", "--resume", "--id", "20260101_1"]))
+                )
+                .as_deref(),
+            Some("goose session --resume --session-id 20260213_9")
+        );
+        assert_eq!(
+            CLIAgent::Goose
+                .resume_command(
+                    "20260213_9",
+                    Some(&argv(&["goose", "session", "-r", "-n", "old"]))
+                )
+                .as_deref(),
+            Some("goose session --resume --session-id 20260213_9")
+        );
+        // Qwen rejects `--session-id` alongside `--resume`; Vibe spells
+        // `--continue` as `-c` too.
+        assert_eq!(
+            CLIAgent::Qwen
+                .resume_command("q-2", Some(&argv(&["qwen", "--session-id", "old"])))
+                .as_deref(),
+            Some("qwen --resume q-2")
+        );
+        assert_eq!(
+            CLIAgent::Vibe
+                .resume_command("v-2", Some(&argv(&["vibe", "-c"])))
+                .as_deref(),
+            Some("vibe --resume v-2")
+        );
+
         // Nothing was persisted, so there is nothing to resume or fork.
         for id in ["a-1"] {
             assert_eq!(
@@ -1644,6 +1704,17 @@ mod tests {
                 None
             );
         }
+        // "If false, chat history is not saved and --continue/--resume will
+        // not work" — so neither resume nor fork is offered.
+        let no_recording = argv(&["qwen", "--no-chat-recording"]);
+        assert_eq!(
+            CLIAgent::Qwen.resume_command("q-1", Some(&no_recording)),
+            None
+        );
+        assert_eq!(
+            CLIAgent::Qwen.fork_command("q-1", Some(&no_recording)),
+            None
+        );
     }
 
     /// `python3 -m antigravity` opens an xkcd comic. It is the standard way to
