@@ -293,6 +293,27 @@ pub(crate) fn title_bar_hug_offset() -> f32 {
     }
 }
 
+/// The bounds to remember for reopening this window at the same place.
+///
+/// The value goes back in through `WindowOptions::window_bounds`, which every
+/// backend reads as the *outer* rectangle, so outer is what to save — except
+/// on Wayland under client-side decorations, where the outer rectangle is the
+/// surface, shadow included, and the compositor's first sized configure adds
+/// the inset back onto whatever was asked for (`compute_outer_size`). Saving
+/// outer there grows the window by twice the shadow on every launch (the bug
+/// Zed fixed in ca9cee85e1); saving inner pre-deflates by exactly what the
+/// configure re-inflates, and the geometry holds still. X11 never re-inflates:
+/// it creates the window at the requested rectangle verbatim and its
+/// `inner_window_bounds` also shifts the origin by the inset, so saving inner
+/// there would shrink the window and walk it down-right by the shadow on
+/// every launch. macOS and Windows report no inset, so the two are the same.
+fn window_bounds_to_remember(window: &Window, cx: &App) -> Bounds<Pixels> {
+    match cx.compositor_name() {
+        "Wayland" => window.inner_window_bounds().get_bounds(),
+        _ => window.window_bounds().get_bounds(),
+    }
+}
+
 pub(crate) const WINDOW_MARK_SIZE: f32 = 20.;
 
 pub(crate) fn title_bar_drag(
@@ -1298,7 +1319,7 @@ impl Tty7App {
             settings: None,
             ssh_prompt: crate::ui::ssh_prompt::SshPromptState::new(cx),
             close_prompt_open: false,
-            window_bounds: window.window_bounds().get_bounds(),
+            window_bounds: window_bounds_to_remember(window, cx),
             workspace,
             workspace_rename: None,
             window_title: std::cell::RefCell::new(String::new()),
@@ -1322,8 +1343,8 @@ impl Tty7App {
         })
         .detach();
 
-        cx.observe_window_bounds(window, |this, window, _cx| {
-            this.window_bounds = window.window_bounds().get_bounds();
+        cx.observe_window_bounds(window, |this, window, cx| {
+            this.window_bounds = window_bounds_to_remember(window, cx);
         })
         .detach();
 
@@ -3817,6 +3838,11 @@ impl Tty7App {
         let vertical = matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
             && !self.tabs.is_empty();
         let viewport = window.viewport_size();
+        // The pointer and the viewport are in the window's outer coordinates;
+        // under client-side decorations the content — title bar included —
+        // sits inside the frame padding, so the strip's band starts there and
+        // not at the window's corner. Zero padding everywhere else.
+        let pad = gpui_component::window_paddings(window);
         // The band each surface claims, read off the tabs it drew rather than
         // measured as an element of its own: the chips and the rows are the
         // only part of either surface a drop has anything to say about, and a
@@ -3833,8 +3859,8 @@ impl Tty7App {
                 .reduce(Pixels::max)?;
             Some(match axis {
                 Axis::Horizontal => Bounds {
-                    origin: point(px(0.), px(0.)),
-                    size: size(viewport.width, px(TITLE_BAR_HEIGHT)),
+                    origin: point(pad.left, pad.top),
+                    size: size(viewport.width - pad.left - pad.right, px(TITLE_BAR_HEIGHT)),
                 },
                 Axis::Vertical => Bounds {
                     origin: point(left, top - px(BAND_REACH)),
