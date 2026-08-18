@@ -417,6 +417,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsHideMouseWhileTypingDesc => {
             "入力中はポインタを隠し、次のマウス移動で再表示する"
         }
+        L10nKey::SettingsMouseZoom => "ホイールで拡大縮小",
+        L10nKey::SettingsMouseZoomDesc => {
+            "この修飾キーを押しながらホイールを回すと、スクロールではなくフォントサイズが変わる"
+        }
+        L10nKey::SettingsMouseZoomOff => "オフ",
         L10nKey::SettingsReportMouseToApps => "マウスイベントをアプリに報告",
         L10nKey::SettingsReportMouseToAppsDesc => {
             "フルスクリーンアプリ（vim、tmux）にクリックとスクロールを処理させる。Shift を押している間はローカルで処理されます"

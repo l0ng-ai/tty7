@@ -259,6 +259,14 @@ pub struct Config {
     pub smooth_scroll: bool,
     #[serde(default = "default_true")]
     pub mouse_reporting: bool,
+    /// Which modifier turns the wheel into a font zoom over a terminal.
+    ///
+    /// Defaults to the platform modifier, which is what tty7 has always done —
+    /// but on macOS that is ⌘, a key people are holding half the time for
+    /// something else entirely, so the font jumps size while they scroll
+    /// (#668). Movable, and switchable off.
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub mouse_zoom_modifier: MouseZoomModifier,
     pub clipboard_trim_trailing_spaces: bool,
     pub copy_on_select: bool,
     /// Optional HTTP/SOCKS proxy for tty7's *own* update checks and release
@@ -450,6 +458,25 @@ pub enum UpdateChannel {
     Nightly,
 }
 
+/// The modifier that makes the mouse wheel resize the font.
+///
+/// `Platform` keeps the historical binding — ⌘ on macOS, Ctrl elsewhere — and
+/// is stored rather than the resolved key so one config file can be shared
+/// between machines that disagree about which key that is.
+///
+/// Shift is deliberately not offered: shift+wheel is the escape hatch that
+/// scrolls the scrollback out from under a mouse-reporting program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MouseZoomModifier {
+    #[default]
+    Platform,
+    Ctrl,
+    Alt,
+    /// The wheel never zooms; every scroll goes to the buffer.
+    None,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BellMode {
@@ -582,6 +609,7 @@ impl Default for Config {
             mouse_scroll_multiplier: 1.0,
             smooth_scroll: true,
             mouse_reporting: true,
+            mouse_zoom_modifier: MouseZoomModifier::default(),
             clipboard_trim_trailing_spaces: false,
             copy_on_select: false,
             http_proxy: None,
@@ -1633,6 +1661,30 @@ mod tests {
         assert_eq!(cfg.bell, BellMode::Visual);
 
         assert_eq!(serde_json::to_string(&BellMode::Both).unwrap(), "\"both\"");
+    }
+
+    /// #668: a config written on a Mac travels to a Linux box, where the
+    /// platform modifier is a different key — so the *choice* is stored, not
+    /// the key it resolves to. An unknown value must not silently disable
+    /// zooming either.
+    #[test]
+    fn the_zoom_modifier_round_trips_and_falls_back() {
+        let cfg: Config = serde_json::from_str(r#"{"mouse_zoom_modifier": "none"}"#).unwrap();
+        assert_eq!(cfg.mouse_zoom_modifier, MouseZoomModifier::None);
+
+        let cfg: Config = serde_json::from_str(r#"{"mouse_zoom_modifier": "alt"}"#).unwrap();
+        assert_eq!(cfg.mouse_zoom_modifier, MouseZoomModifier::Alt);
+
+        let cfg: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert_eq!(cfg.mouse_zoom_modifier, MouseZoomModifier::Platform);
+
+        let cfg: Config = serde_json::from_str(r#"{"mouse_zoom_modifier": "meta"}"#).unwrap();
+        assert_eq!(cfg.mouse_zoom_modifier, MouseZoomModifier::Platform);
+
+        assert_eq!(
+            serde_json::to_string(&MouseZoomModifier::None).unwrap(),
+            "\"none\""
+        );
     }
 
     #[test]

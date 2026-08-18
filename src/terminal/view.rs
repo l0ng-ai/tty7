@@ -29,7 +29,7 @@ use crate::core::actions::{
     ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab, SendBackTab, SendTab,
     SplitDown, SplitRight, ToggleMaximizePane,
 };
-use crate::core::config::{BellMode, Config, LinkFileOpen, NotifyMode};
+use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier, NotifyMode};
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
@@ -4707,11 +4707,11 @@ impl TerminalView {
     }
 
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // The platform modifier alone turns the wheel into a zoom, the way it
-        // does in a browser. Any other modifier alongside it is somebody else's
-        // gesture — shift in particular is the escape hatch that scrolls the
-        // scrollback out from under a mouse-reporting program.
-        if ev.modifiers.secondary() && ev.modifiers.number_of_modifiers() == 1 {
+        // One modifier turns the wheel into a zoom, the way it does in a
+        // browser. Which one is the user's to say, because the default is the
+        // platform modifier and on macOS that is a key half the world is
+        // already holding for something else (#668).
+        if zoom_wheel(cx.global::<Config>().mouse_zoom_modifier, &ev.modifiers) {
             self.zoom_scroll(ev, window, cx);
             return;
         }
@@ -6729,6 +6729,27 @@ fn wrapped_click_index(
     match positions.iter().position(|&(pr, _, _)| pr > target) {
         Some(ni) => Some(ni),
         None => Some(len),
+    }
+}
+
+/// Whether this wheel event is a zoom rather than a scroll.
+///
+/// Exactly one modifier, and it has to be the configured one: anything
+/// alongside it is somebody else's gesture — shift in particular is the escape
+/// hatch that scrolls the scrollback out from under a mouse-reporting program.
+///
+/// Off macOS the platform modifier *is* Ctrl, so `Platform` and `Ctrl` describe
+/// the same key there; the setting still round-trips, so a config file shared
+/// with a Mac keeps meaning what it meant.
+fn zoom_wheel(modifier: MouseZoomModifier, mods: &Modifiers) -> bool {
+    if mods.number_of_modifiers() != 1 {
+        return false;
+    }
+    match modifier {
+        MouseZoomModifier::Platform => mods.secondary(),
+        MouseZoomModifier::Ctrl => mods.control,
+        MouseZoomModifier::Alt => mods.alt,
+        MouseZoomModifier::None => false,
     }
 }
 
@@ -10484,6 +10505,55 @@ mod gpui_tests {
                 view.on_scroll(&ev, w, cx);
                 assert_eq!(display_offset(view), 10, "the wheel reached the grid");
                 assert!(view.scroll_anim.is_none(), "and queued more of it");
+            })
+            .unwrap();
+    }
+
+    /// #668: the platform modifier is the wrong key to hardwire a zoom to —
+    /// on a Mac it is ⌘, which people are already holding for something
+    /// else — so which key zooms is a setting, all the way down to none.
+    #[test]
+    fn the_zoom_modifier_is_configurable_and_can_be_turned_off() {
+        let secondary = Modifiers::secondary_key();
+        let alt = Modifiers::alt();
+        assert!(zoom_wheel(MouseZoomModifier::Platform, &secondary));
+        assert!(
+            !zoom_wheel(MouseZoomModifier::None, &secondary),
+            "off is off"
+        );
+        assert!(!zoom_wheel(MouseZoomModifier::Alt, &secondary));
+        assert!(zoom_wheel(MouseZoomModifier::Alt, &alt));
+        assert!(!zoom_wheel(MouseZoomModifier::Platform, &alt));
+        assert!(zoom_wheel(MouseZoomModifier::Ctrl, &Modifiers::control()));
+        assert_eq!(
+            zoom_wheel(MouseZoomModifier::Platform, &Modifiers::control()),
+            !cfg!(target_os = "macos"),
+            "off macOS the platform modifier is Ctrl itself"
+        );
+        // A second modifier is somebody else's gesture, whichever key is bound.
+        let both = Modifiers { shift: true, ..alt };
+        assert!(!zoom_wheel(MouseZoomModifier::Alt, &both));
+        assert!(!zoom_wheel(MouseZoomModifier::Platform, &Modifiers::none()));
+    }
+
+    /// The point of turning it off: the modifier goes back to being an
+    /// ordinary scroll, rather than eating the wheel.
+    #[gpui::test]
+    fn zooming_off_hands_the_wheel_back_to_the_scrollback(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        cx.update(|cx| {
+            cx.global_mut::<Config>().mouse_zoom_modifier = MouseZoomModifier::None;
+        });
+        window
+            .update(cx, |view, w, cx| {
+                scroll_into_history(view, 10);
+                let mut ev = notch(view, -4.9);
+                ev.modifiers = Modifiers::secondary_key();
+                view.on_scroll(&ev, w, cx);
+                assert!(
+                    view.scroll_anim.is_some(),
+                    "the wheel never reached the scrollback"
+                );
             })
             .unwrap();
     }

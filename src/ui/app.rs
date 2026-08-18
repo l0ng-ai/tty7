@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use crate::core::actions::*;
 use crate::core::config::{
-    Config, CursorStyle as ConfigCursorStyle, NewTabPosition, RightPanelTab, ShellConfig,
-    TabBarPosition, WindowBackdrop,
+    Config, CursorStyle as ConfigCursorStyle, MouseZoomModifier, NewTabPosition, RightPanelTab,
+    ShellConfig, TabBarPosition, WindowBackdrop,
 };
 use crate::core::session::{
     Session, SessionAxis, SessionPane, SessionTab, WorkspaceId, WorkspaceStore,
@@ -2953,6 +2953,16 @@ impl Tty7App {
 
     pub(crate) fn set_smooth_scroll(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.smooth_scroll = on);
+    }
+
+    /// Panes read the modifier off the global config as each wheel event
+    /// arrives, so there is nothing to push at them here.
+    pub(crate) fn set_mouse_zoom_modifier(
+        &mut self,
+        modifier: MouseZoomModifier,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.mouse_zoom_modifier = modifier);
     }
 
     pub(crate) fn set_clipboard_trim(&mut self, on: bool, cx: &mut Context<Self>) {

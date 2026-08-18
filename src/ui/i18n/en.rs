@@ -406,6 +406,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsHideMouseWhileTypingDesc => {
             "Hide the pointer as you type; it returns on the next move."
         }
+        L10nKey::SettingsMouseZoom => "Zoom with the wheel",
+        L10nKey::SettingsMouseZoomDesc => {
+            "Modifier that makes the mouse wheel resize the terminal font instead of scrolling."
+        }
+        L10nKey::SettingsMouseZoomOff => "Off",
         L10nKey::SettingsReportMouseToApps => "Report mouse to apps",
         L10nKey::SettingsReportMouseToAppsDesc => {
             "Let full-screen apps (vim, tmux) handle clicks and scrolling; hold Shift to keep a gesture local."

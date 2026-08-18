@@ -23,8 +23,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::core::config::{
-    BellMode, Config, CursorStyle, LinkFileOpen, NewTabPosition, NotifyMode, TabBarPosition,
-    UI_FONT_SIZE_DEFAULT, UpdateChannel, WindowBackdrop,
+    BellMode, Config, CursorStyle, LinkFileOpen, MouseZoomModifier, NewTabPosition, NotifyMode,
+    TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel, WindowBackdrop,
 };
 use crate::core::keychain::CredentialRef;
 use crate::core::ssh_profile::{
@@ -5232,6 +5232,7 @@ impl Tty7App {
         let scroll_mult = cfg.mouse_scroll_multiplier;
         let smooth_scroll = cfg.smooth_scroll;
         let mouse_reporting = cfg.mouse_reporting;
+        let mouse_zoom = cfg.mouse_zoom_modifier;
         let bell = cfg.bell;
         // A bucket highlights only on an exact match; any other value gets a
         // "Custom (N)" cell so the highlight never claims a number the config
@@ -5319,6 +5320,42 @@ impl Tty7App {
             .checked(mouse_reporting)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_mouse_reporting(*on, cx)))
             .into_any_element();
+        // Ctrl only earns a cell where it is a different key from the
+        // platform modifier: off macOS the two are the same key, and a
+        // segmented control with the same key twice is a bug the user has to
+        // decode. A config that names `ctrl` there still highlights it, in the
+        // one cell that means it.
+        let mac = cfg!(target_os = "macos");
+        let zoom_labels: Vec<&str> = if mac {
+            vec!["⌘", "⌃", "⌥", t(L10nKey::SettingsMouseZoomOff)]
+        } else {
+            vec!["Ctrl", "Alt", t(L10nKey::SettingsMouseZoomOff)]
+        };
+        let zoom_idx = match (mouse_zoom, mac) {
+            (MouseZoomModifier::Platform, _) => 0,
+            (MouseZoomModifier::Ctrl, true) => 1,
+            (MouseZoomModifier::Ctrl, false) => 0,
+            (MouseZoomModifier::Alt, true) => 2,
+            (MouseZoomModifier::Alt, false) => 1,
+            (MouseZoomModifier::None, true) => 3,
+            (MouseZoomModifier::None, false) => 2,
+        };
+        let zoom_control = self.segmented(
+            "term-mouse-zoom",
+            &zoom_labels,
+            zoom_idx,
+            cx,
+            move |this, ix, _w, cx| {
+                let modifier = match (ix, mac) {
+                    (0, _) => MouseZoomModifier::Platform,
+                    (1, true) => MouseZoomModifier::Ctrl,
+                    (1, false) => MouseZoomModifier::Alt,
+                    (2, true) => MouseZoomModifier::Alt,
+                    _ => MouseZoomModifier::None,
+                };
+                this.set_mouse_zoom_modifier(modifier, cx);
+            },
+        );
         let bell_idx = match bell {
             BellMode::None => 0,
             BellMode::Visual => 1,
@@ -5408,6 +5445,12 @@ impl Tty7App {
                 t(L10nKey::SettingsReportMouseToApps),
                 t(L10nKey::SettingsReportMouseToAppsDesc),
                 mouse_report_switch,
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsMouseZoom),
+                t(L10nKey::SettingsMouseZoomDesc),
+                zoom_control,
                 cx,
             ))
             .child(self.section_rule(cx))
@@ -8027,7 +8070,7 @@ mod tests {
 #[cfg(test)]
 mod gpui_tests {
     use super::SettingsSection;
-    use crate::core::config::Config;
+    use crate::core::config::{Config, MouseZoomModifier};
     use crate::core::session::Session;
     use crate::ui::app::Tty7App;
     use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
@@ -8081,6 +8124,34 @@ mod gpui_tests {
             matches!(section, Some(SettingsSection::Appearance)),
             "the panel should still be on Appearance after two paint passes",
         );
+    }
+
+    /// #668: the Terminal page carries the control that moves the zoom off the
+    /// platform modifier, so the page has to paint with it, and the pick has to
+    /// reach the config the wheel reads.
+    #[gpui::test]
+    fn the_terminal_page_paints_the_zoom_modifier_row(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Terminal, window, cx);
+        });
+        vcx.simulate_resize(size(px(1100.), px(800.)));
+        vcx.run_until_parked();
+
+        let modifier = vcx.update(|_, cx| cx.global::<Config>().mouse_zoom_modifier);
+        assert_eq!(
+            modifier,
+            MouseZoomModifier::Platform,
+            "the wheel still zooms out of the box"
+        );
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.set_mouse_zoom_modifier(MouseZoomModifier::None, cx)
+        });
+        vcx.run_until_parked();
+        let modifier = vcx.update(|_, cx| cx.global::<Config>().mouse_zoom_modifier);
+        assert_eq!(modifier, MouseZoomModifier::None, "and the pick sticks");
     }
 
     /// The Input page paints with the prompt editor off — that is the state

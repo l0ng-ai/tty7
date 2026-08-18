@@ -356,6 +356,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsFocusFollowsMouseDesc => "悬停窗格即聚焦，无需点击。",
         L10nKey::SettingsHideMouseWhileTyping => "输入时隐藏鼠标",
         L10nKey::SettingsHideMouseWhileTypingDesc => "输入时隐藏指针；下次移动鼠标时恢复。",
+        L10nKey::SettingsMouseZoom => "滚轮缩放",
+        L10nKey::SettingsMouseZoomDesc => "按住该修饰键滚轮时缩放终端字号，而不是滚动。",
+        L10nKey::SettingsMouseZoomOff => "关闭",
         L10nKey::SettingsReportMouseToApps => "向应用报告鼠标",
         L10nKey::SettingsReportMouseToAppsDesc => {
             "让全屏应用（如 vim、tmux）处理点击和滚动；按住 Shift 可让操作保持本地。"
