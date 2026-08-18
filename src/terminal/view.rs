@@ -1844,10 +1844,13 @@ impl TerminalView {
             }
         }
 
+        // Ctrl+Shift+C/V/X are the keymap's alone: rebinding Paste has to
+        // retire Ctrl+Shift+V, which it cannot if this path answers it too.
         if cfg!(not(target_os = "macos"))
             && m.control
             && !m.platform
             && !m.alt
+            && !m.shift
             && matches!(ks.key.as_str(), "c" | "v" | "x")
         {
             match self.handle_cmd_shortcut(ks, window, cx) {
@@ -1983,8 +1986,16 @@ impl TerminalView {
                 }
             }
             "v" => {
-                self.paste_from_clipboard(cx);
-                CmdKey::Consumed
+                // Off macOS Ctrl+V is a control code first: on the alternate
+                // screen the key is the program's (vim's blockwise select), the
+                // way Ctrl+C is SIGINT when there is nothing to copy. Cmd+V
+                // pastes anywhere.
+                if m.control && !m.platform && self.on_alt_screen() {
+                    CmdKey::FallThrough
+                } else {
+                    self.paste_from_clipboard(cx);
+                    CmdKey::Consumed
+                }
             }
             "a" => {
                 self.select_all_contextual(cx);
@@ -6139,16 +6150,16 @@ impl Render for TerminalView {
                     .menu_element_with_disabled(
                         Box::new(CopyText),
                         !has_selection,
-                        menu_row_with_hint(t(L10nKey::AppMenuCopy), Some("secondary-c")),
+                        menu_row_with_hint(t(L10nKey::AppMenuCopy), mac_only("secondary-c")),
                     )
                     .menu_element_with_disabled(
                         Box::new(CutText),
                         !has_selection,
-                        menu_row_with_hint(t(L10nKey::AppMenuCut), Some("secondary-x")),
+                        menu_row_with_hint(t(L10nKey::AppMenuCut), mac_only("secondary-x")),
                     )
                     .menu_element(
                         Box::new(PasteText),
-                        menu_row_with_hint(t(L10nKey::AppMenuPaste), Some("secondary-v")),
+                        menu_row_with_hint(t(L10nKey::AppMenuPaste), mac_only("secondary-v")),
                     )
                     .menu_element(
                         Box::new(SelectAll),
@@ -8355,6 +8366,27 @@ mod gpui_tests {
         panic!("the prompt report never reached the view");
     }
 
+    fn alt_screen_ready(
+        window: &gpui::WindowHandle<TerminalView>,
+        cx: &mut TestAppContext,
+        daemon: &mut UnixStream,
+    ) {
+        DaemonMsg::Output(b"\x1b[?1049h".to_vec())
+            .encode(daemon)
+            .unwrap();
+        for _ in 0..400 {
+            cx.run_until_parked();
+            if window
+                .update(cx, |view, _, _| view.on_alt_screen())
+                .unwrap()
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the alternate-screen switch never reached the grid");
+    }
+
     #[gpui::test]
     fn an_agent_that_has_finished_its_turn_is_not_busy(cx: &mut TestAppContext) {
         use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
@@ -9110,6 +9142,34 @@ mod gpui_tests {
             next_input_until_timeout(&mut daemon),
             None,
             "resuming the shell must not synthesize Ctrl-U after Ctrl-C"
+        );
+    }
+
+    #[gpui::test]
+    fn ctrl_v_on_the_alternate_screen_reaches_the_pty_as_syn(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("echo hi".into())));
+        alt_screen_ready(&window, cx, &mut daemon);
+        window
+            .update(cx, |view, window, cx| {
+                assert!(!view.input_active(), "the full-screen program owns input");
+                view.on_key_down(
+                    &KeyDownEvent {
+                        keystroke: key("ctrl-v"),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x16]));
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "the clipboard must stay where it is: vim's Ctrl+V is blockwise select, not paste"
         );
     }
 
@@ -12066,6 +12126,49 @@ mod gpui_tests {
             .unwrap();
         let text = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
         assert_eq!(text.as_deref(), Some("hello"));
+    }
+
+    #[gpui::test]
+    fn ctrl_v_reaches_a_tui_on_the_alternate_screen(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("echo hi".into())));
+        alt_screen_ready(&window, cx, &mut daemon);
+
+        window
+            .update(cx, |view, window, cx| {
+                let fell_through = view.handle_cmd_shortcut(&key("ctrl-v"), window, cx);
+                assert!(
+                    matches!(fell_through, CmdKey::FallThrough),
+                    "a full-screen program owns Ctrl+V"
+                );
+                let pasted = view.handle_cmd_shortcut(&key("cmd-v"), window, cx);
+                assert!(
+                    matches!(pasted, CmdKey::Consumed),
+                    "Cmd+V is a paste chord on every screen"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            next_input(&mut daemon),
+            b"echo hi".to_vec(),
+            "only the Cmd+V paste may reach the PTY"
+        );
+        assert_eq!(next_input_until_timeout(&mut daemon), None);
+    }
+
+    #[gpui::test]
+    fn ctrl_v_pastes_off_the_alternate_screen(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("echo hi".into())));
+
+        window
+            .update(cx, |view, window, cx| {
+                assert!(!view.on_alt_screen());
+                let consumed = view.handle_cmd_shortcut(&key("ctrl-v"), window, cx);
+                assert!(matches!(consumed, CmdKey::Consumed));
+            })
+            .unwrap();
+        assert_eq!(next_input(&mut daemon), b"echo hi".to_vec());
     }
 
     #[cfg(target_os = "macos")]

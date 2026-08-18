@@ -1328,6 +1328,12 @@ mod tests {
                 "{key} is a terminal chord and must not paste outside one"
             );
         }
+        // Plain Ctrl+V is the terminal's, not the keymap's: the pane pastes on
+        // it at a prompt and hands it to a full-screen program otherwise.
+        assert!(
+            dispatched(&effective, "ctrl-v", "Terminal").is_empty(),
+            "ctrl-v is a control code and no default may claim it"
+        );
         let rebound = vec![("PasteText".to_string(), "ctrl-alt-v".to_string())];
         assert!(
             !extra_keystrokes(&rebound)
