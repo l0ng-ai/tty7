@@ -1489,6 +1489,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdCopy => "コピー",
         L10nKey::CmdCut => "切り取り",
         L10nKey::CmdPaste => "貼り付け",
+        L10nKey::CmdAlternatePaste => "貼り付け（全画面アプリを除く）",
         L10nKey::CmdSelectAll => "すべて選択",
         L10nKey::CmdSshAddConnection => "SSH: 接続を追加…",
         L10nKey::CmdSshManageProfiles => "SSH: プロファイルを管理…",

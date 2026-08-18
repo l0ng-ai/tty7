@@ -1182,6 +1182,7 @@ l10n_keys! {
     CmdCopy,
     CmdCut,
     CmdPaste,
+    CmdAlternatePaste,
     CmdSelectAll,
     CmdSshAddConnection,
     CmdSshManageProfiles,

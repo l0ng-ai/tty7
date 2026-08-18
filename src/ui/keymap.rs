@@ -3,8 +3,8 @@ use gpui::{App, Global, KeyBinding, Keystroke, NoAction};
 use crate::core::actions::*;
 use crate::core::config::Config;
 use crate::terminal::view::{
-    ClearScrollback, CopyText, FindInTerminal, FindNext, FindPrevious, InsertNewline,
-    InsertNewlineFallback, PasteText,
+    AlternatePaste, ClearScrollback, CopyText, FindInTerminal, FindNext, FindPrevious,
+    InsertNewline, InsertNewlineFallback, PasteText,
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::palette::CommandGroup;
@@ -119,6 +119,18 @@ fn paste_text_default() -> &'static str {
     per_platform("", "ctrl-shift-v")
 }
 
+/// Windows and Linux paste with Ctrl+V everywhere else in the desktop, so the
+/// terminal answers it too — but only off the alternate screen, where the key
+/// is a control code a full-screen program is waiting for (#677). It is a
+/// binding of its own rather than a second keystroke on `PasteText` so that it
+/// can carry that narrower context, and so that a user who wants the Windows
+/// Terminal behaviour back can say so: `"AlternatePaste": ""` hands Ctrl+V to
+/// the shell at the prompt as well, and `"PasteText": "ctrl-v"` pastes with it
+/// on every screen.
+fn alternate_paste_default() -> &'static str {
+    per_platform("", "ctrl-v")
+}
+
 fn extra_defaults() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
         (
@@ -166,6 +178,20 @@ fn action_bindings(effective: &[(String, String)]) -> Vec<KeyBinding> {
             log::warn!("ignoring keybinding for '{action}': invalid keystroke '{key}'");
             continue;
         }
+        // Said once, and the binding still installs: a chord the user asked
+        // for by name is the user's to spend, the way the tmux preset spends
+        // Ctrl+B. The invariant this guards is that no *default* spends one
+        // without saying so — `no_default_binding_sits_on_a_terminal_control_code`
+        // is the half of it that fails a build. A single chord only, since a
+        // prefix like `ctrl-b n` is that choice made deliberately.
+        if !key.contains(' ')
+            && steals_a_control_code(key)
+            && !control_code_binding_allowed(action, key)
+        {
+            log::warn!(
+                "keybinding '{key}' for '{action}' takes a control code away from the shell"
+            );
+        }
         match make_binding(action, key) {
             Some(b) => {
                 bindings.push(b);
@@ -181,6 +207,44 @@ fn action_bindings(effective: &[(String, String)]) -> Vec<KeyBinding> {
         }
     }
     bindings
+}
+
+/// Whether a chord is one the terminal owes the PTY as a control code.
+///
+/// Ctrl and nothing else, over the keys that carry a C0 byte: the alphabet,
+/// `[ \ ] ^ _ / ?`, the digits 2..8 and Space. A binding sitting on one of
+/// these does not merely shadow the shell, it deletes a byte the program on
+/// the far end is waiting for — Ctrl+D is EOF, Ctrl+W deletes a word, Ctrl+^
+/// is vim's alternate file.
+fn steals_a_control_code(chord: &str) -> bool {
+    let Ok(ks) = Keystroke::parse(chord) else {
+        return false;
+    };
+    let m = &ks.modifiers;
+    if !m.control || m.alt || m.shift || m.platform || m.function {
+        return false;
+    }
+    ks.key == "space"
+        || ks.key.len() == 1
+            && ks.key.chars().next().is_some_and(|c| {
+                c.is_ascii_alphabetic() || "[]\\`^_/?@".contains(c) || ('2'..='8').contains(&c)
+            })
+}
+
+/// The bindings allowed to sit on a control code anyway.
+///
+/// `EditorSave` stays on Ctrl+S because its handler in `app.rs` calls
+/// `cx.propagate()` whenever the editor does not have focus, so the keystroke
+/// reaches the terminal as XOFF instead of dying at the window. Ctrl+V is the
+/// paste chord every Windows and Linux desktop trains its users on; tty7
+/// answers it the way Windows Terminal does, and keeps it off the alternate
+/// screen (see `alternate_paste_default`), so it is allowed under any action —
+/// including a `PasteText` a user deliberately moves onto it (#677).
+///
+/// Anything else added here needs a fall-through of its own; a binding that
+/// simply swallows the byte does not belong on this list.
+fn control_code_binding_allowed(action: &str, chord: &str) -> bool {
+    action == "EditorSave" || (cfg!(not(target_os = "macos")) && chord == "ctrl-v")
 }
 
 fn per_platform(mac: &'static str, other: &'static str) -> &'static str {
@@ -323,6 +387,7 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         ("InsertNewline", INSERT_NEWLINE_DEFAULT),
         ("CopyText", per_platform("", "ctrl-shift-c")),
         ("PasteText", paste_text_default()),
+        ("AlternatePaste", alternate_paste_default()),
         ("OpenSettings", "secondary-,"),
         (
             "ShowKeyboardShortcuts",
@@ -595,6 +660,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         ),
         "CopyText" => (CommandGroup::Terminal, t(L10nKey::CmdCopy).to_string()),
         "PasteText" => (CommandGroup::Terminal, t(L10nKey::CmdPaste).to_string()),
+        "AlternatePaste" => (
+            CommandGroup::Terminal,
+            t(L10nKey::CmdAlternatePaste).to_string(),
+        ),
         "InsertNewline" => (
             CommandGroup::Terminal,
             t(L10nKey::KeybindInsertNewline).to_string(),
@@ -921,6 +990,10 @@ fn action_context(action: &str) -> Option<&'static str> {
     match action {
         "FindInTerminal" | "FindNext" | "FindPrevious" | "ClearScrollback" | "InsertNewline"
         | "CopyText" | "PasteText" => Some("Terminal"),
+        // `alt_screen` is declared by the pane whenever a full-screen program
+        // owns the grid, so this binding is simply absent there and Ctrl+V
+        // carries on to the PTY as SYN (#677).
+        "AlternatePaste" => Some("Terminal && !alt_screen"),
         "ScmCommit" | "ScmCommitAmend" => Some("ScmCommit"),
         _ => None,
     }
@@ -1015,6 +1088,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "InsertNewline" => KeyBinding::new(keystroke, InsertNewline, action_context(action)),
         "CopyText" => KeyBinding::new(keystroke, CopyText, action_context(action)),
         "PasteText" => KeyBinding::new(keystroke, PasteText, action_context(action)),
+        "AlternatePaste" => KeyBinding::new(keystroke, AlternatePaste, action_context(action)),
         "OpenSettings" => KeyBinding::new(keystroke, OpenSettings, None),
         "ShowKeyboardShortcuts" => KeyBinding::new(keystroke, ShowKeyboardShortcuts, None),
         "About" => KeyBinding::new(keystroke, About, None),
@@ -1328,11 +1402,34 @@ mod tests {
                 "{key} is a terminal chord and must not paste outside one"
             );
         }
-        // Plain Ctrl+V is the terminal's, not the keymap's: the pane pastes on
-        // it at a prompt and hands it to a full-screen program otherwise.
+        // Plain Ctrl+V is `AlternatePaste`, and only where no full-screen
+        // program is running: on the alternate screen the chord belongs to
+        // that program and reaches it as SYN.
         assert!(
-            dispatched(&effective, "ctrl-v", "Terminal").is_empty(),
-            "ctrl-v is a control code and no default may claim it"
+            dispatched(&effective, "ctrl-v", "Terminal").contains(&AlternatePaste::name_for_type()),
+            "ctrl-v pastes at a prompt off macOS"
+        );
+        assert!(
+            dispatched(&effective, "ctrl-v", "Terminal alt_screen").is_empty(),
+            "a full-screen program owns ctrl-v"
+        );
+        assert!(
+            dispatched(&effective, "ctrl-shift-v", "Terminal alt_screen")
+                .contains(&PasteText::name_for_type()),
+            "Ctrl+Shift+V is the paste that works on every screen"
+        );
+        // The two ways out, both of which the control-code validator has to
+        // let through: retire the chord, or hand it the whole screen.
+        let retired = vec![("AlternatePaste".to_string(), String::new())];
+        assert!(
+            dispatched(&retired, "ctrl-v", "Terminal").is_empty(),
+            "an emptied AlternatePaste gives Ctrl+V back to the shell"
+        );
+        let everywhere = vec![("PasteText".to_string(), "ctrl-v".to_string())];
+        assert!(
+            dispatched(&everywhere, "ctrl-v", "Terminal alt_screen")
+                .contains(&PasteText::name_for_type()),
+            "a user may put Paste itself on Ctrl+V and have it everywhere"
         );
         let rebound = vec![("PasteText".to_string(), "ctrl-alt-v".to_string())];
         assert!(
@@ -1449,28 +1546,14 @@ mod tests {
     #[test]
     fn no_default_binding_sits_on_a_terminal_control_code() {
         // The invariant is "no default may *swallow* a terminal control code".
-        // EditorSave deliberately stays on Ctrl+S: its handler in `app.rs` calls
-        // `cx.propagate()` whenever the editor does not have focus, so the
-        // keystroke falls through to the terminal as XOFF instead of dying at
-        // the window. Anything added here must have such a fall-through.
-        const FALLS_THROUGH_TO_TERMINAL: [&str; 1] = ["EditorSave"];
+        // The exceptions are named and justified in
+        // `control_code_binding_allowed`; anything new needs a fall-through of
+        // its own to join them.
         for (action, spec) in default_bindings() {
-            if FALLS_THROUGH_TO_TERMINAL.contains(&action) {
-                continue;
-            }
             for chord in spec.split_whitespace() {
-                let ks = Keystroke::parse(chord).expect("default chords parse");
-                let m = &ks.modifiers;
-                if !m.control || m.alt || m.shift || m.platform || m.function {
-                    continue;
-                }
-                let steals = ks.key.len() == 1
-                    && ks.key.chars().next().is_some_and(|c| {
-                        c.is_ascii_alphabetic() || "[]\\`".contains(c) || ('2'..='8').contains(&c)
-                    })
-                    || ks.key == "space";
+                Keystroke::parse(chord).expect("default chords parse");
                 assert!(
-                    !steals,
+                    !steals_a_control_code(chord) || control_code_binding_allowed(action, chord),
                     "{action} is bound to {chord}, which the shell needs as a control code \
                      (Ctrl+[ is ESC, Ctrl+D is EOF, Ctrl+W deletes a word, \
                      Ctrl+2..8 are NUL/ESC/FS/GS/RS/US/DEL). \
@@ -1478,6 +1561,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_control_code_rule_knows_what_the_shell_needs() {
+        // The keys with a C0 byte behind them, and the modifier shape that
+        // reaches it: Ctrl alone. This is the predicate the defaults are held
+        // to above and the one `action_bindings` warns on.
+        for chord in [
+            "ctrl-d",
+            "ctrl-c",
+            "ctrl-[",
+            "ctrl-2",
+            "ctrl-6",
+            "ctrl-8",
+            "ctrl-/",
+            "ctrl-space",
+        ] {
+            assert!(steals_a_control_code(chord), "{chord} is a control code");
+        }
+        for chord in [
+            "ctrl-shift-v",
+            "ctrl-alt-v",
+            "secondary-shift-t",
+            "ctrl-1",
+            "ctrl-9",
+            "ctrl--",
+            "ctrl-f3",
+            "alt-enter",
+        ] {
+            assert!(
+                !steals_a_control_code(chord),
+                "{chord} carries no control code"
+            );
+        }
+        // Ctrl+V is allowed to anyone off macOS — it is how the default paste
+        // reaches the chord, and how a user moves the full-screen paste onto
+        // it — while Ctrl+D stays refused whoever asks.
+        assert_eq!(
+            control_code_binding_allowed("PasteText", "ctrl-v"),
+            cfg!(not(target_os = "macos"))
+        );
+        assert!(!control_code_binding_allowed("PasteText", "ctrl-d"));
+        assert!(control_code_binding_allowed("EditorSave", "secondary-s"));
     }
 
     #[test]
