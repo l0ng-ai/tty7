@@ -219,6 +219,10 @@ pub struct RemoteTerminal {
     /// flag under the term lock before every grid mutation, so once it is set
     /// the abandoned thread can only exit, never write.
     reader_quit: Arc<AtomicBool>,
+    /// Set by the first `Input` the link refused, so the loss is said once
+    /// rather than once per keystroke. Cleared when a relink installs a link
+    /// that has not refused anything yet.
+    input_lost: AtomicBool,
 }
 
 /// The workspace id a spawn carries, so the pane's shell gets `$TTY7_WS` and a
@@ -405,7 +409,36 @@ impl RemoteTerminal {
         let win = win_size(size, cell_w, cell_h);
 
         ClientMsg::Attach { pane_id, size: win }.encode(&mut stream)?;
-        let buffered = attach_reply_prefix(&mut stream, pane_id, attach_reply_wait(route))?;
+        let buffered = match attach_reply_prefix(&mut stream, pane_id, attach_reply_wait(route)) {
+            Ok(buffered) => buffered,
+            Err(e) if route.is_local() && attach_unanswered(&e) => {
+                // Silence on the attach socket has two readings, and only one
+                // of them is safe to act on. Ask the daemon on a fresh
+                // connection: if it answers `Version` there, it is up and
+                // serving, and the attach connection is one it will never
+                // serve — a socket some process holds open, or one from a
+                // listener no longer drained — so the verdict stands and the
+                // caller spawns fresh. If it does not answer there either, it
+                // is not serving anyone yet — mid-restart, mid-handoff — and
+                // a fresh pane spawned now would land on a live one the moment
+                // it comes up (its history carried across, its agent session
+                // resumed twice). There is no third path from a synchronous
+                // UI-thread call, so the attach still fails, but says which
+                // silence it was: the log line someone reads while diagnosing
+                // an orphaned shell must not claim the pane was gone.
+                //
+                // Only local routes probe: a remote attach already waits 15 s
+                // and a second routed connection is a second bridge process.
+                if local_daemon_answers() {
+                    return Err(e);
+                }
+                return Err(e.context(
+                    "the daemon answered nothing on a fresh connection either — it is not \
+                     serving yet (restarting?), so this pane may still be alive",
+                ));
+            }
+            Err(e) => return Err(e),
+        };
         let mut term = Self::from_stream_with(stream, size, buffered)?;
         term.route = route.clone();
         Ok(term)
@@ -480,6 +513,7 @@ impl RemoteTerminal {
         }
         self.reader_thread = Some(reader);
         self.reader_quit = quit;
+        self.input_lost.store(false, Ordering::SeqCst);
         self.route = route.clone();
         self.synced_size = false;
         self.resize(size, cell_w, cell_h);
@@ -577,6 +611,7 @@ impl RemoteTerminal {
             proxy,
             reader_thread: Some(reader_thread),
             reader_quit,
+            input_lost: AtomicBool::new(false),
         })
     }
 
@@ -1094,9 +1129,40 @@ impl RemoteTerminal {
         if bytes.is_empty() {
             return;
         }
-        if let Ok(mut writer) = self.writer.lock() {
-            let _ = ClientMsg::Input(bytes.into_owned()).encode(&mut *writer);
+        let Ok(mut writer) = self.writer.lock() else {
+            return;
+        };
+        if let Err(e) = ClientMsg::Input(bytes.into_owned()).encode(&mut *writer) {
+            drop(writer);
+            self.note_input_lost(&e);
         }
+    }
+
+    /// The link refused an `Input`. Every keystroke after the first would say
+    /// the same thing, so this side says it once; and unless the reader has
+    /// been retired for a relink or a release, the pane is marked exited the
+    /// way the reader marks it on EOF — it is the same socket, noticed from the
+    /// writing side first — so the window shows the pane as gone instead of
+    /// taking input into it that nothing will ever read. The reader still
+    /// raises its own `Exit` when it finds the same socket closed; the handler
+    /// is idempotent, so a link that is genuinely gone may be reported twice.
+    ///
+    /// This is hardening for a *closed* link, not the cure for #673: a socket
+    /// some process holds open and never reads accepts writes into its send
+    /// buffer, so they succeed and vanish until the buffer fills, and nothing
+    /// here fires. What stops that pane existing at all is `attach_on`
+    /// refusing to call a silent `Attach` attached.
+    fn note_input_lost(&self, err: &std::io::Error) {
+        if self.input_lost.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        log::warn!("the daemon link stopped taking this pane's input: {err}");
+        if self.reader_quit.load(Ordering::SeqCst) {
+            return;
+        }
+        self.exited_flag.store(true, Ordering::SeqCst);
+        self.proxy.send_event(AlacEvent::Wakeup);
+        self.proxy.send_event(AlacEvent::Exit);
     }
 
     /// Whether the daemon behind this pane echoes a `DaemonMsg::Size` into the
@@ -1646,6 +1712,21 @@ fn daemon_not_listening(err: &anyhow::Error) -> bool {
     })
 }
 
+/// How long an `Attach` may stay silent before it is called unanswered.
+///
+/// Only a silent connection ever pays this: a dead pane answers `Error` at
+/// once and a live one answers `Size` at once, so the budget is not a cost in
+/// the common case. What bounds it is the caller — a local restore attaches
+/// synchronously on the UI thread, one pane after another, so N silent panes
+/// hold the window still for N times this. What argues for more is the other
+/// side of the same silence: a daemon merely slow to serve — an execve handoff
+/// keeps the listener and its backlog across the exec, and a fresh daemon is
+/// adopting panes and seeding ids before it can take an `Attach` — would have
+/// served this connection a moment later, and calling it unanswered spawns a
+/// fresh pane over a live one, carries the live pane's history onto it and
+/// starts an agent resume against a session the old process still holds. The
+/// [`AttachUnanswered`] verdict is confirmed against that case in `attach_on`
+/// rather than by waiting longer here.
 fn attach_reply_wait(route: &PaneRoute) -> std::time::Duration {
     match route.is_local() {
         true => std::time::Duration::from_secs(2),
@@ -1653,6 +1734,48 @@ fn attach_reply_wait(route: &PaneRoute) -> std::time::Duration {
     }
 }
 
+/// An `Attach` that produced no bytes within its wait — nobody served the
+/// connection. Distinct from a refusal (`Error` frame) and from a hangup so
+/// the caller can say the true thing: the pane may well still exist.
+#[derive(Debug)]
+struct AttachUnanswered {
+    pane_id: u64,
+    wait: std::time::Duration,
+}
+
+impl std::fmt::Display for AttachUnanswered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the daemon did not answer Attach for pane {} within {:?} (an attached pane replays \
+             its screen at once, so nobody is serving this connection)",
+            self.pane_id, self.wait
+        )
+    }
+}
+
+impl std::error::Error for AttachUnanswered {}
+
+/// Whether `err` is an `Attach` that went unanswered, as opposed to refused or
+/// hung up on. The pane behind an unanswered attach may still be alive.
+pub fn attach_unanswered(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<AttachUnanswered>().is_some())
+}
+
+/// Reads far enough into the daemon's answer to an `Attach` to classify it, and
+/// hands back every byte read so the reader thread loses none of the replay.
+///
+/// Silence is a verdict, not a quiet pane. A daemon that attached replays the
+/// pane's ring before it reads a byte of our input, and the ring always holds
+/// a segment, so the first frame on a good attach is a `Size` — a quiet pane
+/// still sends that. An `Attach` that produced nothing within `wait` is one
+/// nobody is serving: a daemon still mid-restart, a socket held open by a
+/// process that will never read it. Taken for success it gave the window a
+/// pane drawn as restored whose every keystroke went into that socket — no
+/// fresh shell, no restored-screen banner, no agent resume, and Ctrl-C did
+/// nothing (#673). Taken for the failure it is, the caller spawns fresh and
+/// asks for the old screen back.
 fn attach_reply_prefix(
     stream: &mut Stream,
     pane_id: u64,
@@ -1684,6 +1807,9 @@ fn attach_reply_prefix(
         kind = crate::daemon::protocol::peek_frame_kind(&buffered);
     }
     let _ = stream.set_read_timeout(None);
+    if buffered.is_empty() {
+        return Err(anyhow::Error::new(AttachUnanswered { pane_id, wait }));
+    }
     if !kind.is_some_and(crate::daemon::protocol::is_error_kind) {
         return Ok(buffered);
     }
@@ -2153,6 +2279,30 @@ fn connect() -> anyhow::Result<Stream> {
             transport::endpoint_display()
         ))
     })
+}
+
+/// Whether the local daemon answers `Version` on a fresh connection right now.
+///
+/// The one question a silent `Attach` leaves open — is the daemon serving and
+/// this socket orphaned, or is nobody serving yet? A daemon answers `Version`
+/// before it touches any state, so this is the cheapest thing it can say. One
+/// second is the same budget `spawn` gives the same handshake; a healthy
+/// daemon answers in microseconds.
+fn local_daemon_answers() -> bool {
+    use std::io::Write as _;
+
+    let Ok(mut stream) = transport::connect() else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+    if ClientMsg::Version
+        .encode(&mut stream)
+        .and_then(|()| stream.flush())
+        .is_err()
+    {
+        return false;
+    }
+    matches!(DaemonMsg::read(&mut stream), Ok(DaemonMsg::Version(_)))
 }
 
 fn connect_routed(route: &PaneRoute) -> anyhow::Result<Stream> {
@@ -2760,6 +2910,61 @@ mod tests {
         );
     }
 
+    /// #673: a daemon that attached replays the pane's ring at once, and the
+    /// ring always holds a segment, so even a pane that has printed nothing
+    /// answers with a `Size`. A connection that stays silent for the whole wait
+    /// is therefore one nobody is serving — read as success, it became a pane
+    /// the window drew as restored while every keystroke, Ctrl-C included,
+    /// went into a socket nothing drained.
+    #[test]
+    fn an_attach_nobody_answers_is_not_an_attach() {
+        let (mut client_side, _daemon_side) = UnixStream::pair().unwrap();
+        let wait = std::time::Duration::from_millis(200);
+        let err = attach_reply_prefix(&mut client_side, 7, wait)
+            .expect_err("silence for the whole wait must not pass for an attached pane");
+        assert!(
+            format!("{err:#}").contains("did not answer"),
+            "the failure has to say the daemon never answered, not that the pane is gone: {err:#}"
+        );
+        assert!(
+            attach_unanswered(&err),
+            "silence is its own verdict, told apart from a refusal or a hangup"
+        );
+        // A refusal is not it: the pane really is gone then, and the caller
+        // may say so.
+        let (mut client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        DaemonMsg::Error("no such pane 7".into())
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+        let refused = attach_reply_prefix(&mut client_side, 7, wait).expect_err("refused");
+        assert!(!attach_unanswered(&refused));
+    }
+
+    /// The other side of the rule above: the frame a quiet pane does send is
+    /// enough. Nothing else is required of the daemon for the attach to stand.
+    #[test]
+    fn a_size_frame_alone_is_a_live_attach() {
+        let (mut client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        DaemonMsg::Size(WinSize {
+            cols: 80,
+            rows: 24,
+            cell_w: 8,
+            cell_h: 17,
+        })
+        .encode(&mut daemon_side)
+        .unwrap();
+        daemon_side.flush().unwrap();
+
+        let buffered =
+            attach_reply_prefix(&mut client_side, 7, std::time::Duration::from_millis(200))
+                .expect("the daemon's first frame is the attach ack");
+        assert!(
+            !buffered.is_empty(),
+            "the Size frame was read to classify the reply; it must reach the reader"
+        );
+    }
+
     #[test]
     fn a_local_attach_does_not_wait_as_long_as_a_remote_one() {
         let local = attach_reply_wait(&PaneRoute::Local);
@@ -3149,6 +3354,62 @@ mod tests {
             ClientMsg::Input(bytes) => assert_eq!(bytes, b"echo hi\r"),
             other => panic!("expected Input, got {other:?}"),
         }
+    }
+
+    /// Input the link refuses used to vanish: `write` threw the error away, so a
+    /// pane whose daemon had stopped reading kept taking keystrokes into
+    /// nothing. The refusal now marks the pane exited by the reader's own signal
+    /// — only our sending half is shut here, so the reader is still parked on
+    /// an open receiving half and the writing side is the one that finds out.
+    /// (Shutting the peer's receiving half instead is not portable: Linux
+    /// answers the next write with EPIPE, macOS buffers it.)
+    #[test]
+    fn a_write_the_link_refuses_marks_the_pane_gone_once() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, _daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        term.writer
+            .lock()
+            .unwrap()
+            .shutdown(std::net::Shutdown::Write)
+            .unwrap();
+
+        term.write(b"echo hi\r".to_vec());
+        assert!(
+            term.exited_flag.load(Ordering::SeqCst),
+            "a refused Input is the link gone, and the pane has to say so"
+        );
+        let mut exits = 0;
+        while let Ok(ev) = term.events.try_recv() {
+            exits += usize::from(matches!(ev, AlacEvent::Exit));
+        }
+        assert_eq!(
+            exits, 1,
+            "reported through the same event the reader raises on EOF"
+        );
+
+        term.write(b"echo again\r".to_vec());
+        while let Ok(ev) = term.events.try_recv() {
+            exits += usize::from(matches!(ev, AlacEvent::Exit));
+        }
+        assert_eq!(exits, 1, "said once, not once per keystroke");
+    }
+
+    /// A link retired for a relink refuses writes too — `stop_reader` shuts it
+    /// down — and that must not read as the pane dying under the swap, for the
+    /// same reason the retired reader exits silently.
+    #[test]
+    fn a_write_on_a_retired_link_does_not_mark_the_pane_gone() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, _daemon_side) = UnixStream::pair().unwrap();
+        let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        term.stop_reader();
+
+        term.write(b"echo hi\r".to_vec());
+        assert!(
+            !term.exited_flag.load(Ordering::SeqCst),
+            "the pane is being relinked or released, not dying"
+        );
     }
 
     #[test]

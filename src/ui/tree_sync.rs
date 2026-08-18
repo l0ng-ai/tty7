@@ -873,6 +873,19 @@ struct WsState {
     /// Rewritten by every attempt, and only ever read while `rehydrate` is
     /// outstanding, so it always describes the debt currently standing.
     owed_over: Vec<TabId>,
+    /// The tabs the last rebuild was handed and could not put up — on the
+    /// machine and in the mirror, but not on screen, because no pane in them
+    /// would start (`tabs_from_session` drops such a tab, and says so).
+    ///
+    /// Held out of every diff, the way a tab still connecting is: the window
+    /// cannot speak for them, and its licence to prune must not read their
+    /// absence as the user closing them. A rebuild that put up some of its tabs
+    /// earned the licence — it did put a layout up — and used it to `TabClose`
+    /// exactly the tabs it had failed to rebuild, deleting them off the machine,
+    /// panes and all (#672). Rewritten by the next rebuild, which either puts
+    /// them up or fails them again; a tab the machine drops meanwhile drops
+    /// out here too, so nothing stays held for a tab nobody has.
+    not_rebuilt: Vec<TabId>,
     /// How many pulls in a row this window has owed, which paces the retry.
     ///
     /// Counts consecutive failures, so it is cleared by anything that ends the
@@ -926,6 +939,7 @@ impl Default for WsState {
             epoch: 0,
             rehydrate: None,
             owed_over: Vec::new(),
+            not_rebuilt: Vec::new(),
             rehydrate_attempts: 0,
             then_open: None,
             chosen_name: None,
@@ -957,7 +971,7 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
         return;
     }
     adopt_tab_ids(app, cx);
-    let (desired, desired_active, held) = desired_tabs(app, cx);
+    let (desired, desired_active, mut held) = desired_tabs(app, cx);
     let machine_ws = tree_workspace_id(cx, client_ws);
 
     let state = cx
@@ -979,6 +993,13 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
             } else {
                 SyncScope::Additive
             };
+            // The tabs the last rebuild could not put up are the machine's to
+            // keep: not on screen, so `desired` cannot speak for them, and held
+            // so their absence is not read as a close.
+            state
+                .not_rebuilt
+                .retain(|id| mirror.tabs.iter().any(|t| t.id == *id));
+            held.extend(state.not_rebuilt.iter().copied());
             let ops = diff(machine_ws, mirror, &desired, desired_active, scope, &held);
             if !ops.is_empty() {
                 let (tabs, active) = (mirror.tabs.clone(), mirror.active);
@@ -2073,30 +2094,99 @@ fn settle_hydration(
         return false;
     };
     let wanted = session.tabs.len();
+    // `tree_id` is not serialized, so only a session built from the tree
+    // carries one on every tab (which is what reaches here today). The guard
+    // below counts the tabs asked for, not the ids found: a session with tabs
+    // and no ids must not read as "nothing was wanted".
+    let wanted_ids: Vec<TabId> = session.tabs.iter().filter_map(|t| t.tree_id).collect();
+    debug_assert_eq!(
+        wanted_ids.len(),
+        wanted,
+        "a session rebuilt from the tree names every tab it holds"
+    );
     log::info!("rebuilding {wanted} tab(s) of workspace {client_ws} from its machine's tree");
     let _ = handle.update(cx, move |_, window, cx| {
         app.update(cx, |app, cx| {
             app.adopt_workspace(client_ws, session, window, cx)
         });
     });
+    let showing = tabs_on_screen(cx, client_ws);
+    settle_rebuild(cx, client_ws, wanted, &wanted_ids, &showing);
+    true
+}
 
-    // Informed *after* the rebuild, and only if the rebuild produced something.
-    //
-    // The licence means "this window knows what belongs in this workspace", and
-    // `switch_workspace` / `detach_workspace` read it as permission to delete a
-    // workspace that has no tabs — from the machine tree and from the store
-    // both. Granting it before the rebuild handed that permission to a window
-    // whose rebuild had not happened yet, and a rebuild can produce nothing:
-    // `tabs_from_session` drops any tab whose panes all fail to start, which is
-    // what every tab does when the pane socket is unreachable. The window then
-    // sat there, empty and authoritative, and the next switch deleted a
-    // workspace with ten live tabs in it.
-    //
-    // Emptiness that came from a failure has to stay indistinguishable from not
-    // knowing, because that is what it is.
-    let rebuilt = crate::ui::windows::WindowRegistry::app_for(cx, client_ws)
-        .and_then(|app| app.upgrade())
-        .is_some_and(|app| !app.read(cx).tabs.is_empty());
+/// What a rebuild leaves the window entitled to say, from how many tabs the
+/// tree asked it to put up (`wanted`), which ids those were (`wanted_ids`),
+/// and the tabs it is showing now (`showing`).
+///
+/// Informed *after* the rebuild, and only if the rebuild produced something.
+///
+/// The licence means "this window knows what belongs in this workspace", and
+/// `switch_workspace` / `detach_workspace` read it as permission to delete a
+/// workspace that has no tabs — from the machine tree and from the store
+/// both. Granting it before the rebuild handed that permission to a window
+/// whose rebuild had not happened yet, and a rebuild can produce nothing:
+/// `tabs_from_session` drops any tab whose panes all fail to start, which is
+/// what every tab does when the pane socket is unreachable. The window then
+/// sat there, empty and authoritative, and the next switch deleted a
+/// workspace with ten live tabs in it.
+///
+/// Emptiness that came from a failure has to stay indistinguishable from not
+/// knowing, because that is what it is.
+///
+/// A rebuild that produced *some* of its tabs is the same failure, one tab at
+/// a time, and the licence it does earn — it put a layout up, and closes and
+/// splits in it must reach the machine — cannot be allowed to speak for the
+/// tabs it did not: at `SyncScope::Full` every mirror tab missing from the
+/// window is a `TabClose`, and the tabs missing were exactly the ones that
+/// failed to rebuild, so the sync deleted them off the machine, panes and all
+/// (#672). They are held instead (`not_rebuilt`), out of the diff's reach until
+/// a later rebuild puts them up or the machine lets them go.
+///
+/// Holding has a cost the caller should know: `diff` stops before its
+/// reorder pass and the active-tab op whenever anything is held, so while
+/// this set stands the window's tab order and active tab do not reach the
+/// machine — a restart restores the order and focus from before the drag.
+/// And nothing retries a held tab: the set is rewritten only by the next
+/// `settle_rebuild`, which runs only from a hydration that rebuilds, and a
+/// re-prime or an `Adopt::IfEmpty` hydrate on a populated window never gets
+/// there. A tab that fails to rebuild stays held, and holds the ordering
+/// with it, until the next restart. That state was already reachable — a
+/// pane whose remote spawn failed stays connecting for the same span, held
+/// the same way — so this widens a standing hole rather than opening one; a
+/// retry, or a way to close a held tab from the window, is separate work.
+///
+/// The none-rebuilt guard reads the *count* asked for, not the ids found:
+/// `tree_id` is not serialized, so a session that reached here from disk
+/// would name no ids at all, and "no ids" must not read as "no tabs wanted"
+/// — that would grant the licence to a window that rebuilt nothing, which is
+/// #672 again.
+fn settle_rebuild(
+    cx: &mut App,
+    client_ws: WorkspaceId,
+    wanted: usize,
+    wanted_ids: &[TabId],
+    showing: &[TabId],
+) {
+    let not_rebuilt: Vec<TabId> = wanted_ids
+        .iter()
+        .copied()
+        .filter(|id| !showing.contains(id))
+        .collect();
+    if !not_rebuilt.is_empty() && !showing.is_empty() {
+        log::warn!(
+            "workspace {client_ws}: {} of its {wanted} tab(s) could not be rebuilt; they stay on \
+             the machine, held out of this window's sync (tab order and active tab are not \
+             synced while a tab is held)",
+            not_rebuilt.len()
+        );
+    }
+    let rebuilt = !showing.is_empty();
+    cx.default_global::<TreeSync>()
+        .windows
+        .entry(client_ws)
+        .or_default()
+        .not_rebuilt = not_rebuilt;
     if rebuilt || wanted == 0 {
         mark_window_informed(cx, client_ws);
     } else {
@@ -2105,7 +2195,6 @@ fn settle_hydration(
              window uninformed so the layout is not mistaken for an empty workspace"
         );
     }
-    true
 }
 
 /// Someone else removed this workspace from its machine — `tty7 ws rm`, or
@@ -3525,6 +3614,153 @@ mod tests {
                 .informed = true;
             hydrate_window_from_tree(cx, ws);
             assert!(cx.default_global::<TreeSync>().windows[&ws].informed);
+        });
+    }
+
+    /// #672's residual: a rebuild that put up some of the tabs the tree asked
+    /// for and dropped the rest (`tabs_from_session` drops a tab none of whose
+    /// panes would start). It earns the licence — it did put a layout up — and
+    /// the tabs it dropped are not tabs the user closed, so they must be held
+    /// out of the diff rather than the licence withheld from the whole window.
+    #[gpui::test]
+    fn a_partial_rebuild_holds_the_tabs_it_could_not_put_up(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            let (put_up, failed) = (TabId::new(), TabId::new());
+            let settled = |cx: &mut App| {
+                let state = &cx.default_global::<TreeSync>().windows[&ws];
+                (state.informed, state.not_rebuilt.clone())
+            };
+
+            settle_rebuild(cx, ws, 2, &[put_up, failed], &[put_up]);
+            assert_eq!(
+                settled(cx),
+                (true, vec![failed]),
+                "the window speaks for the tab it put up, and holds the one it could not"
+            );
+
+            settle_rebuild(cx, ws, 2, &[put_up, failed], &[put_up, failed]);
+            assert_eq!(
+                settled(cx),
+                (true, vec![]),
+                "a later rebuild that puts them all up holds nothing back"
+            );
+
+            cx.default_global::<TreeSync>()
+                .windows
+                .get_mut(&ws)
+                .unwrap()
+                .informed = false;
+            settle_rebuild(cx, ws, 2, &[put_up, failed], &[]);
+            assert_eq!(
+                settled(cx),
+                (false, vec![put_up, failed]),
+                "a rebuild that produced nothing still does not get to speak for the workspace"
+            );
+
+            settle_rebuild(cx, ws, 0, &[], &[]);
+            assert_eq!(
+                settled(cx),
+                (true, vec![]),
+                "an empty tree rebuilt into an empty window is the one case that is genuinely empty"
+            );
+
+            // A session with tabs but no ids — what a disk-loaded session
+            // looks like, since `tree_id` is not serialized — that rebuilt
+            // nothing. "No ids" must not read as "no tabs wanted".
+            cx.default_global::<TreeSync>()
+                .windows
+                .get_mut(&ws)
+                .unwrap()
+                .informed = false;
+            settle_rebuild(cx, ws, 2, &[], &[]);
+            assert_eq!(
+                settled(cx),
+                (false, vec![]),
+                "the guard counts the tabs asked for, not the ids found"
+            );
+        });
+    }
+
+    /// The consequence, on the sync that follows: the mirror holds both tabs,
+    /// the window shows one, and the one it could not put up must not come out
+    /// of a `Full` diff as `TabClose` — that op deleted from the machine exactly
+    /// the tabs a restart had failed to bring back, panes and all (#672).
+    #[cfg(unix)]
+    #[gpui::test]
+    fn the_next_sync_leaves_a_tab_the_rebuild_could_not_put_up_on_the_machine(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, mut vcx, _pane_stream) = crate::ui::app::test_window::harness_with_pane(cx);
+        let (put_up, failed) = (TabId::new(), TabId::new());
+        app.update_in(&mut vcx, |app, _, cx| {
+            let view = crate::core::session::WindowView::default();
+            let ws = view.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![view],
+                    active: Some(ws),
+                },
+            );
+            app.workspace = ws;
+            app.tabs[0].tree_id.set(put_up);
+            {
+                let state = cx
+                    .default_global::<TreeSync>()
+                    .windows
+                    .entry(ws)
+                    .or_default();
+                state.sync = SyncPhase::Primed(WsMirror {
+                    tabs: vec![
+                        TreeTab {
+                            id: put_up,
+                            name: None,
+                            sidebar_group: None,
+                            root: PaneNode::Leaf { pane: 1 },
+                        },
+                        TreeTab {
+                            id: failed,
+                            name: None,
+                            sidebar_group: None,
+                            root: PaneNode::Leaf { pane: 2 },
+                        },
+                    ],
+                    active: Some(put_up),
+                });
+                // Keeps whatever the sync queues where the test can read it:
+                // with no link, `pump` would otherwise clear the queue and drop
+                // the mirror on its way to a re-pull.
+                state.inflight = true;
+            }
+            settle_rebuild(cx, ws, 2, &[put_up, failed], &[put_up]);
+            assert!(
+                cx.default_global::<TreeSync>().windows[&ws].informed,
+                "the shape the damage needs: a window licensed to prune, over a mirror \
+                 holding a tab it is not showing"
+            );
+
+            sync_window(app, cx);
+
+            let state = &cx.default_global::<TreeSync>().windows[&ws];
+            assert!(
+                !state
+                    .queue
+                    .iter()
+                    .any(|op| matches!(op, ControlRequest::TabClose { .. })),
+                "the tab that failed to come back is not one the user closed: {:?}",
+                state.queue
+            );
+            match &state.sync {
+                SyncPhase::Primed(mirror) => assert_eq!(
+                    mirror.tabs.iter().map(|t| t.id).collect::<Vec<_>>(),
+                    vec![put_up, failed],
+                    "and it stays on the machine for the next rebuild to put up"
+                ),
+                SyncPhase::Unprimed { .. } => {
+                    panic!("the sync must not have thrown the mirror away")
+                }
+            }
         });
     }
 

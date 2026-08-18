@@ -1008,6 +1008,13 @@ impl TerminalView {
         let attached = match restore_pane {
             Some(id) => match RemoteTerminal::attach_on(&route, TermSize::new(80, 24), 8, 17, id) {
                 Ok(terminal) => Some((terminal, id, None)),
+                Err(e) if crate::terminal::attach_unanswered(&e) => {
+                    // Not "gone": nobody answered, which a daemon still coming
+                    // up also does. Whoever finds an orphaned shell later
+                    // reads this line.
+                    log::warn!("attach to pane {id} went unanswered ({e:#}); spawning fresh");
+                    None
+                }
                 Err(e) => {
                     log::info!("pane {id} is gone on its machine ({e:#}); spawning fresh");
                     None
