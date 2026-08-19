@@ -4691,12 +4691,14 @@ impl Tty7App {
         cx.notify();
     }
 
-    fn palette_commands(&self, window: &Window, cx: &App) -> Vec<Command> {
+    pub(crate) fn palette_commands(&self, window: &Window, cx: &App) -> Vec<Command> {
         let mut commands = Command::base_commands(
             cx,
             ChromeState {
                 rail_collapsed: self.sidebar_collapsed,
                 right_panel_visible: self.right_panel_visible,
+                document_filled: self.document_layout(cx)
+                    == crate::core::config::DocumentLayout::Fill,
             },
         );
 

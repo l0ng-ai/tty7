@@ -23,7 +23,9 @@ use gpui_component::{ActiveTheme as _, InteractiveElementExt as _, v_flex};
 use std::cell::Cell as StdCell;
 use std::rc::Rc;
 
-use crate::core::config::{Config, DOCUMENT_RATIO_STOPS, DocumentLayout};
+use crate::core::config::{
+    Config, DOCUMENT_RATIO_MAX, DOCUMENT_RATIO_MIN, DOCUMENT_RATIO_STOPS, DocumentLayout,
+};
 use crate::ui::app::{DOCUMENT_MIN_W, OverlayTop, TERMINAL_MIN_W, Tty7App, document_column_px};
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::right_panel::RESIZE_HANDLE_WIDTH;
@@ -334,9 +336,7 @@ impl Tty7App {
                             };
                             let right = b.origin.x + b.size.width;
                             let raw = (right - ev.position.x).as_f32();
-                            let w = raw
-                                .clamp(DOCUMENT_MIN_W, (body - TERMINAL_MIN_W).max(DOCUMENT_MIN_W));
-                            ratio_cell.set(w / body);
+                            ratio_cell.set(dragged_ratio(body, raw));
                             window.refresh();
                         }
                     });
@@ -405,6 +405,20 @@ impl Tty7App {
     }
 }
 
+/// The ratio a divider dropped `raw` points from the right edge of a `body`
+/// wide area settles on.
+///
+/// Two clamps, and both are load-bearing. The pixel one keeps the terminal and
+/// the document each above their floor, and is what binds on a narrow window.
+/// The ratio one is the band the *file* keeps — `Config::sanitize` holds
+/// `document_ratio` to it, so a drag that wrote outside it would be moved on
+/// the next launch, and a column dropped against the edge of a wide window
+/// would reopen hundreds of points from where it was left.
+pub(crate) fn dragged_ratio(body: f32, raw: f32) -> f32 {
+    let w = raw.clamp(DOCUMENT_MIN_W, (body - TERMINAL_MIN_W).max(DOCUMENT_MIN_W));
+    (w / body).clamp(DOCUMENT_RATIO_MIN, DOCUMENT_RATIO_MAX)
+}
+
 /// The width the divider's double-click moves to from `current`: the one after
 /// whichever named stop `current` is nearest, wrapping round.
 pub(crate) fn next_ratio_stop(current: f32) -> f32 {
@@ -419,11 +433,36 @@ pub(crate) fn next_ratio_stop(current: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::next_ratio_stop;
+    use super::{dragged_ratio, next_ratio_stop};
     use crate::core::config::{
-        DOCUMENT_RATIO_HALF, DOCUMENT_RATIO_THIRD, DOCUMENT_RATIO_TWO_THIRDS,
+        DOCUMENT_RATIO_HALF, DOCUMENT_RATIO_MAX, DOCUMENT_RATIO_MIN, DOCUMENT_RATIO_THIRD,
+        DOCUMENT_RATIO_TWO_THIRDS,
     };
     use crate::ui::app::{DOCUMENT_MIN_W, TERMINAL_MIN_W, document_column_px};
+
+    /// Nothing the divider can write is something the next launch moves.
+    /// `Config::sanitize` clamps `document_ratio` into a band, so a drag that
+    /// left the band was saved and then quietly relocated: on a 2560-point body
+    /// the narrowest the divider went was a ratio of 0.11, which came back as
+    /// 0.2 — a 232-point jump the user never asked for. The drag clamps to the
+    /// file's band as well as to the two floors now, and this is what says so.
+    #[test]
+    fn a_dragged_width_is_one_the_config_can_keep() {
+        for body in [640., 900., 1440., 2560., 5120.] {
+            for raw in [-500., 0., 1., DOCUMENT_MIN_W, body / 2., body, body + 900.] {
+                let r = dragged_ratio(body, raw);
+                assert!(
+                    (DOCUMENT_RATIO_MIN..=DOCUMENT_RATIO_MAX).contains(&r),
+                    "body {body} dropped at {raw} wrote {r}, which the file would not keep"
+                );
+                // And the width that ratio draws still holds the invariant the
+                // whole budget exists for.
+                let drawn = document_column_px(body, r).expect("a body that seats both");
+                assert!(body - drawn >= TERMINAL_MIN_W - f32::EPSILON);
+                assert!(drawn >= DOCUMENT_MIN_W - f32::EPSILON);
+            }
+        }
+    }
 
     /// Third, half, two thirds, round again — and a dragged width joins at
     /// whichever stop it looks nearest to rather than always restarting.
@@ -625,6 +664,103 @@ mod gpui_tests {
         );
     }
 
+    /// A docked column takes width off the tab strip too, and the strip has to
+    /// be told. Where the header is hoisted — Windows, Linux — it is drawn over
+    /// the trailing end of the spanning title bar with no fill of its own, so a
+    /// chip left under it shows through the file name and stays clickable
+    /// through it. On macOS the strip sits inside the terminal column, and
+    /// sizing it to the window rather than to that column is what pushed the
+    /// New Tab button off the end before the detail panel got the same
+    /// reservation.
+    #[gpui::test]
+    fn the_tab_chips_stop_where_the_document_column_starts(cx: &mut TestAppContext) {
+        let (app, mut vcx) = window_with(cx, 1200., 10);
+        // Chips only exist with the bar along the top; with the rail up the
+        // strip is the sidebar's and has nothing in this row to collide with.
+        vcx.update(|_, cx| {
+            cx.global_mut::<Config>().tab_bar_position = crate::core::config::TabBarPosition::Top;
+        });
+        app.update_in(&mut vcx, |app, window, cx| {
+            for (i, tab) in app.tabs.iter_mut().enumerate() {
+                tab.name = Some(format!("a tab with a long enough name {i}"));
+            }
+            app.active = 0;
+            app.toggle_code_panel(window, cx);
+        });
+        vcx.run_until_parked();
+
+        let (viewport, panel, docked) = app.update_in(&mut vcx, |app, window, cx| {
+            (
+                window.viewport_size().width.as_f32(),
+                if app.right_panel_open(cx) {
+                    app.right_panel_px(window, cx)
+                } else {
+                    0.
+                },
+                app.document_dock_px(window, cx)
+                    .expect("a 1200 window seats both"),
+            )
+        });
+        let column_left = viewport - panel - docked;
+        let chips = app.update_in(&mut vcx, |app, _, _| app.strip_slots.borrow().clone());
+        let far = chips
+            .iter()
+            .map(|b| (b.origin.x + b.size.width).as_f32())
+            .fold(0., f32::max);
+        assert!(far > 0., "the strip has to have drawn chips to measure");
+        assert!(
+            far <= column_left + 0.5,
+            "a chip reached {far}, past the column's left edge at {column_left}"
+        );
+    }
+
+    /// The palette row has to name what running it will do. Fill is per tab, so
+    /// a tab told to fill must be offered "Dock" — even though the config, which
+    /// every tab that was never told is still reading, still says dock. Reading
+    /// the config here offered "Fill" to a tab that was already filling.
+    #[gpui::test]
+    fn the_palette_offers_the_active_tabs_layout_not_the_configs(cx: &mut TestAppContext) {
+        use crate::ui::i18n::L10nKey;
+        use crate::ui::palette::CommandKind;
+
+        let (app, mut vcx) = window_with(cx, 1440., 2);
+        crate::ui::i18n::set_locale("en");
+        let row = |app: &Entity<Tty7App>, vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |app, window, cx| {
+                app.palette_commands(window, cx)
+                    .into_iter()
+                    .find(|c| c.kind == CommandKind::ToggleDocumentFill)
+                    .expect("the palette offers the fill toggle")
+                    .title
+            })
+        };
+        assert_eq!(row(&app, &mut vcx), t(L10nKey::CmdDocumentFill).to_string());
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.active = 1;
+            app.toggle_document_fill(cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            row(&app, &mut vcx),
+            t(L10nKey::CmdDocumentDock).to_string(),
+            "a tab that is filling is offered the way back"
+        );
+        assert_eq!(
+            layout(&mut vcx),
+            DocumentLayout::Dock,
+            "and the config it did not write still reads dock"
+        );
+
+        app.update_in(&mut vcx, |app, _, _| app.active = 0);
+        vcx.run_until_parked();
+        assert_eq!(
+            row(&app, &mut vcx),
+            t(L10nKey::CmdDocumentFill).to_string(),
+            "the other tab is untouched, and is still offered fill"
+        );
+    }
+
     /// The complaint in #625: opening a file must leave the terminal on screen.
     /// The column is half of what the terminal and the document share, and the
     /// terminal's own laid-out area gives up exactly that width — which is what
@@ -646,7 +782,7 @@ mod gpui_tests {
         );
 
         // The terminal is laid out at what is left, not at the full width with
-        // a card over half of it.  is the rectangle the grid sizes
+        // a card over half of it. `pane_area` is the rectangle the grid sizes
         // itself from, so this is the assertion the PTY reflow rests on.
         let pane = app
             .update_in(&mut vcx, |app, _, _| app.pane_area.get())

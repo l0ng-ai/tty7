@@ -1538,8 +1538,18 @@ impl Tty7App {
             true => self.right_panel_px(window, cx),
             false => 0.,
         };
+        // A docked document column has the same claim on this strip the detail
+        // panel does, and it is answered in the same two ways. On macOS the
+        // strip lives *inside* the terminal column, so the column's width comes
+        // off `strip_w` the way the panel's does — sizing the strip to more
+        // than it gets is what pushed the New Tab button out before.
+        // Everywhere else the strip spans the workspace and the column's header
+        // is drawn over its trailing end, so the width is reserved as a corner
+        // instead: that header carries no fill of its own, and a chip left
+        // under it showed through the file name while staying clickable.
+        let document_w = self.document_dock_px(window, cx).unwrap_or(0.);
         let strip_w = if cfg!(target_os = "macos") {
-            (window.viewport_size().width - px(80. + panel_w)).max(px(160.))
+            (window.viewport_size().width - px(80. + panel_w + document_w)).max(px(160.))
         } else {
             (window.viewport_size().width - px(114.)).max(px(140.))
         };
@@ -1554,6 +1564,12 @@ impl Tty7App {
             0.
         } else {
             chrome_band_w.unwrap_or_else(trailing_chrome_tiles_w)
+        } + if cfg!(target_os = "macos") {
+            // Already taken out of `strip_w` above; charging it here too would
+            // narrow the chips by a column's width twice over.
+            0.
+        } else {
+            document_w
         };
         let fixed_w = 3. * CHIP_GAP + crate::ui::app::TILE_SIZE + corner_w;
         let chips_avail = (strip_w - px(fixed_w + GRAB_HANDLE_W)).max(px(80.));

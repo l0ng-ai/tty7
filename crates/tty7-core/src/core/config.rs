@@ -183,17 +183,18 @@ pub struct Config {
     /// `diffEditor.renderSideBySide` makes.
     #[serde(default, deserialize_with = "de_lenient")]
     pub diff_view: DiffViewMode,
-    /// How the code / diff surface shares the window with the terminal. Global
-    /// for the same reason `diff_view` is: someone who wants documents beside
-    /// the terminal wants that in every workspace, not once per tab.
+    /// How the code / diff surface shares the window with the terminal — for a
+    /// tab that has not been told otherwise. The choice itself is per tab, made
+    /// on the document header's context menu; this is the value a fresh tab
+    /// starts from, and therefore the one every untold tab is still reading,
+    /// which is why the menu never writes it.
     #[serde(default, deserialize_with = "de_lenient")]
     pub document_layout: DocumentLayout,
     /// The share of the terminal column — the flex area between the sidebar and
     /// the right panel — the document column takes when docked. The named
     /// widths land on a third, a half and two thirds; a drag leaves whatever it
-    /// leaves. Live layout narrows this further when the terminal's floor needs
-    /// the width, so the bounds here only have to keep a hand-written config
-    /// from hiding one side or the other outright.
+    /// leaves, held to [`DOCUMENT_RATIO_MIN`]..=[`DOCUMENT_RATIO_MAX`]. Live
+    /// layout narrows it further when the terminal's floor needs the width.
     #[serde(default = "default_document_ratio")]
     pub document_ratio: f32,
     /// The source control panel's history section starts collapsed: a graph
@@ -777,7 +778,9 @@ impl Config {
         if !self.document_ratio.is_finite() || self.document_ratio <= 0.0 {
             self.document_ratio = default_document_ratio();
         }
-        self.document_ratio = self.document_ratio.clamp(0.2, 0.8);
+        self.document_ratio = self
+            .document_ratio
+            .clamp(DOCUMENT_RATIO_MIN, DOCUMENT_RATIO_MAX);
         if let Some(command) = &self.link_file_command
             && command.trim().is_empty()
         {
@@ -1110,6 +1113,18 @@ pub enum DocumentLayout {
 fn default_document_ratio() -> f32 {
     0.5
 }
+
+/// The band `document_ratio` is held to — in the file *and* at the divider.
+///
+/// One shared pair rather than two, for the reason `FONT_SIZE_MIN` and its
+/// stepper are one pair (#550): a GUI that clamps somewhere the file does not
+/// writes a value `sanitize` then moves, and the user finds the thing they
+/// dropped somewhere else on the next launch. The divider clamps in *pixels*
+/// against the terminal's floor as well, which is the tighter limit on a narrow
+/// window; on a wide one this band is, and both ends of it have to be reachable
+/// and keepable.
+pub const DOCUMENT_RATIO_MIN: f32 = 0.2;
+pub const DOCUMENT_RATIO_MAX: f32 = 0.8;
 
 /// The named shares of the terminal column a document column can be snapped to,
 /// in the order the segmented control and the divider's double-click cycle use.
@@ -1611,6 +1626,37 @@ mod tests {
         assert_eq!(clamp(-3.0), 1.0);
         assert_eq!(clamp(100.0), 10.0);
         assert_eq!(clamp(0.01), 0.1);
+    }
+
+    /// A width the user dropped the divider at has to come back where they left
+    /// it. `sanitize` holds `document_ratio` to a band; the divider clamps to
+    /// the same one, through these constants, so nothing it can write is
+    /// something the next launch moves. The regression this pins: the drag used
+    /// to clamp in pixels alone, so a column pushed against either edge of a
+    /// wide window was saved outside the band and reopened hundreds of points
+    /// from where it was dropped.
+    #[test]
+    fn sanitize_holds_document_ratio_to_the_band_the_divider_clamps_to() {
+        let clamp = |r: f32| {
+            let mut cfg = Config {
+                document_ratio: r,
+                ..Config::default()
+            };
+            cfg.sanitize();
+            cfg.document_ratio
+        };
+        // Both edges are legal, so a divider dropped on one has somewhere to
+        // stop rather than a value that keeps being rewritten.
+        assert_eq!(clamp(DOCUMENT_RATIO_MIN), DOCUMENT_RATIO_MIN);
+        assert_eq!(clamp(DOCUMENT_RATIO_MAX), DOCUMENT_RATIO_MAX);
+        for stop in DOCUMENT_RATIO_STOPS {
+            assert_eq!(clamp(stop), stop, "a named width must survive the file");
+        }
+        assert_eq!(clamp(0.05), DOCUMENT_RATIO_MIN);
+        assert_eq!(clamp(0.95), DOCUMENT_RATIO_MAX);
+        assert_eq!(clamp(0.0), default_document_ratio());
+        assert_eq!(clamp(-1.0), default_document_ratio());
+        assert_eq!(clamp(f32::NAN), default_document_ratio());
     }
 
     #[test]
