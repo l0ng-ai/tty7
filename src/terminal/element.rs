@@ -639,11 +639,20 @@ enum RowSeg {
     Solo {
         col: usize,
     },
+    /// Cells that have to reach the font together, because what they draw is
+    /// decided by the sequence and not by any one of them: a base and its
+    /// combining marks, and a flag's two Regional Indicators.
     Cluster {
         col: usize,
         cells: usize,
         text: String,
-        wide_base: bool,
+        /// Whether the shaped glyph fills both columns or sits in the first
+        /// with the second reserved. A wide base spans both; a narrow base
+        /// carrying a mark does not — the mark draws over the base and the
+        /// second column is the grid's, not the glyph's. A flag spans both
+        /// without a wide base anywhere in it, which is why this asks about
+        /// the glyph rather than about the base.
+        glyph_spans_both: bool,
     },
 }
 
@@ -654,6 +663,31 @@ fn push_cell(text: &mut String, cell: &RenderCell) {
 
 fn is_sara_am(c: char) -> bool {
     matches!(c, '\u{0E33}' | '\u{0EB3}')
+}
+
+fn is_regional_indicator(c: char) -> bool {
+    matches!(c, '\u{1F1E6}'..='\u{1F1FF}')
+}
+
+/// The Regional Indicator that pairs with the one at `col` to make a flag, if
+/// the cell after it is one.
+///
+/// Each indicator is one column wide, so a flag is two ordinary cells with no
+/// spacer between them — which is why nothing else in this function catches
+/// them. They have to be shaped together: a font decides on a flag by looking
+/// at the pair, and asked about either half alone it can only answer with the
+/// letter tile that half is (#686).
+///
+/// Pairing left to right is the rule Unicode gives (UTS #51): indicators are
+/// taken two at a time from the start of the run, so an odd one out is the
+/// letter it is, and a row that ends mid-flag leaves its first half alone
+/// rather than reaching past the end.
+fn regional_indicator_pair_at(row: &[RenderCell], col: usize) -> Option<&RenderCell> {
+    if !is_regional_indicator(row[col].c) {
+        return None;
+    }
+    row.get(col + 1)
+        .filter(|next| !next.spacer && is_regional_indicator(next.c))
 }
 
 fn sara_am_at(row: &[RenderCell], col: usize) -> Option<&RenderCell> {
@@ -694,11 +728,11 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
             continue;
         }
         if let Some(marks) = &cell.marks {
-            let wide_base = col + 1 < row.len() && row[col + 1].spacer;
-            let mut cells = if wide_base { 2 } else { 1 };
+            let glyph_spans_both = col + 1 < row.len() && row[col + 1].spacer;
+            let mut cells = if glyph_spans_both { 2 } else { 1 };
             let mut text = String::with_capacity(1 + marks.len());
             push_cell(&mut text, cell);
-            if !wide_base
+            if !glyph_spans_both
                 && !is_sara_am(cell.c)
                 && let Some(am) = sara_am_at(row, col + 1)
             {
@@ -709,7 +743,7 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
                 col,
                 cells,
                 text,
-                wide_base,
+                glyph_spans_both,
             });
             col += cells;
             continue;
@@ -722,6 +756,17 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
                     text: char_string(cell.c),
                 });
                 col += 2;
+            } else if let Some(partner) = regional_indicator_pair_at(row, col) {
+                let mut text = String::with_capacity(2);
+                push_cell(&mut text, cell);
+                push_cell(&mut text, partner);
+                segs.push(RowSeg::Cluster {
+                    col,
+                    cells: 2,
+                    text,
+                    glyph_spans_both: true,
+                });
+                col += 2;
             } else if !is_sara_am(cell.c)
                 && let Some(am) = sara_am_at(row, col + 1)
             {
@@ -732,7 +777,7 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
                     col,
                     cells: 2,
                     text,
-                    wide_base: false,
+                    glyph_spans_both: false,
                 });
                 col += 2;
             } else {
@@ -934,6 +979,22 @@ fn native_cell_residue(style: &GlyphStyle) -> Option<char> {
         .then_some(' ')
 }
 
+/// The width a [`RowSeg::Cluster`]'s shaped run is forced to, or `None` to
+/// let it take its natural width.
+///
+/// Only a two-cell cluster is forced at all, and what it is forced to is the
+/// question `glyph_spans_both` answers: a flag has to fill both of its
+/// columns, while a narrow base carrying a combining mark has to stay inside
+/// the first — forcing that one to two cells would stretch the base across a
+/// column the grid has already promised to the mark.
+///
+/// Split out because it is the half of #686 that no `segment_row` test can
+/// see: a flag that reached the font as a pair but was then squeezed into one
+/// column would draw correctly and land wrong.
+fn cluster_force_width(cells: usize, glyph_spans_both: bool, cell_width: Pixels) -> Option<Pixels> {
+    (cells == 2).then(|| cell_width * if glyph_spans_both { 2. } else { 1. })
+}
+
 fn seg_clip_width(solo: bool, cells: usize, cell_width: Pixels) -> Pixels {
     if solo {
         cell_width * 2.
@@ -1033,12 +1094,12 @@ fn paint_glyphs(
                     col,
                     cells,
                     text,
-                    wide_base,
+                    glyph_spans_both,
                 } => (
                     col,
                     cells,
                     SharedString::from(text),
-                    (cells == 2).then(|| geom.cell_width * if wide_base { 2. } else { 1. }),
+                    cluster_force_width(cells, glyph_spans_both, geom.cell_width),
                     cells == 1,
                 ),
             };
@@ -2253,6 +2314,88 @@ mod tests {
         row
     }
 
+    fn flag_cluster(col: usize, text: &str) -> RowSeg {
+        RowSeg::Cluster {
+            col,
+            cells: 2,
+            text: text.to_string(),
+            glyph_spans_both: true,
+        }
+    }
+
+    /// #686: a flag is two Regional Indicators, one per column, and the font
+    /// can only make a flag out of them if it is handed both at once.
+    ///
+    /// The grid is right — the probe shows `🇨🇳x` as U+1F1E8, U+1F1F3, `x` in
+    /// columns 0, 1, 2, with no spacer and no combining marks, so the two
+    /// columns the flag owns are the two it should own. What was wrong is the
+    /// shaping: neither indicator is ASCII, neither is followed by a spacer,
+    /// so both fell through to `Solo` and `paint_glyphs` called `shape_line`
+    /// on each one alone. A font never saw the pair, so it drew two letter
+    /// tiles instead of a flag — with the fallback chain and Noto Color Emoji
+    /// both already correct.
+    #[test]
+    fn segment_row_shapes_a_flag_as_one_cluster() {
+        let row = vec![cell('\u{1F1E8}'), cell('\u{1F1F3}'), cell('x')];
+        assert_eq!(
+            segment_row(&row),
+            [flag_cluster(0, "\u{1F1E8}\u{1F1F3}"), run(2, 1, "x")]
+        );
+    }
+
+    /// Pairing is left to right and never greedy across a flag boundary: six
+    /// indicators are three flags, not one run of letters.
+    #[test]
+    fn segment_row_pairs_consecutive_flags_two_by_two() {
+        let row: Vec<_> = "\u{1F1E8}\u{1F1F3}\u{1F1FA}\u{1F1F8}\u{1F1EF}\u{1F1F5}"
+            .chars()
+            .map(cell)
+            .collect();
+        assert_eq!(
+            segment_row(&row),
+            [
+                flag_cluster(0, "\u{1F1E8}\u{1F1F3}"),
+                flag_cluster(2, "\u{1F1FA}\u{1F1F8}"),
+                flag_cluster(4, "\u{1F1EF}\u{1F1F5}"),
+            ]
+        );
+    }
+
+    /// `前🇨🇳后`: the flag keeps its two columns between two wide glyphs, and
+    /// neither neighbour is drawn into.
+    #[test]
+    fn segment_row_keeps_a_flag_between_wide_neighbours() {
+        let mut row = wide_cells("前");
+        row.extend([cell('\u{1F1E8}'), cell('\u{1F1F3}')]);
+        row.extend(wide_cells("后"));
+        assert_eq!(
+            segment_row(&row),
+            [
+                wide(0, 2, "前"),
+                flag_cluster(2, "\u{1F1E8}\u{1F1F3}"),
+                wide(4, 2, "后"),
+            ]
+        );
+    }
+
+    /// An indicator with no partner is not half a flag — it is the letter it
+    /// is, and it keeps the single column it was given. This is the row that
+    /// ends mid-flag, and the odd one out of an odd-length run.
+    #[test]
+    fn segment_row_leaves_a_lone_regional_indicator_alone() {
+        let row = vec![cell('x'), cell('\u{1F1E8}')];
+        assert_eq!(segment_row(&row), [run(0, 1, "x"), RowSeg::Solo { col: 1 }]);
+
+        let row: Vec<_> = "\u{1F1E8}\u{1F1F3}\u{1F1FA}".chars().map(cell).collect();
+        assert_eq!(
+            segment_row(&row),
+            [
+                flag_cluster(0, "\u{1F1E8}\u{1F1F3}"),
+                RowSeg::Solo { col: 2 }
+            ]
+        );
+    }
+
     #[test]
     fn segment_row_batches_uniform_ascii() {
         let row: Vec<_> = "hello".chars().map(cell).collect();
@@ -2516,6 +2659,26 @@ mod tests {
         assert_eq!(seg_clip_width(true, 1, cell), px(20.));
     }
 
+    /// The other half of #686. A flag reaches the font as a pair now, but it
+    /// still has to be given the two columns it owns: forced to one, the flag
+    /// the font just drew would be squeezed into half its space.
+    #[test]
+    fn cluster_force_width_gives_a_flag_both_of_its_columns() {
+        let cell = px(10.);
+        assert_eq!(cluster_force_width(2, true, cell), Some(px(20.)));
+        assert_eq!(
+            cluster_force_width(2, false, cell),
+            Some(px(10.)),
+            "a narrow base under a combining mark stays in its own column — the second \
+             belongs to the mark"
+        );
+        assert_eq!(
+            cluster_force_width(1, false, cell),
+            None,
+            "a one-cell cluster takes its natural width"
+        );
+    }
+
     #[test]
     fn build_font_disables_ligatures_unless_features_are_configured() {
         let font = build_font(&gpui::font("Test"), false, false);
@@ -2638,7 +2801,7 @@ mod tests {
             col,
             cells,
             text: text.to_string(),
-            wide_base: false,
+            glyph_spans_both: false,
         }
     }
 
@@ -2647,7 +2810,7 @@ mod tests {
             col,
             cells,
             text: text.to_string(),
-            wide_base: true,
+            glyph_spans_both: true,
         }
     }
 

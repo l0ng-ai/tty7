@@ -2819,6 +2819,64 @@ mod tests {
         );
     }
 
+    /// The grid shape #686's fix rests on: a flag is two ordinary cells, one
+    /// per Regional Indicator, with no spacer and nothing hung off either as a
+    /// zero-width mark.
+    ///
+    /// `segment_row` pairs indicators on exactly that layout, and its own
+    /// tests build the row by hand — so if a future `alacritty_terminal` gave
+    /// an indicator two columns, or attached the second to the first the way
+    /// it attaches combining marks, those tests would keep passing while the
+    /// real path stopped matching. This is the one that would fail.
+    #[test]
+    fn a_flag_is_two_single_column_cells() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        DaemonMsg::Output("\u{1F1E8}\u{1F1F3}x".as_bytes().to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+
+        let mut cells = Vec::new();
+        for _ in 0..200 {
+            {
+                let t = term.term.lock();
+                let grid = t.grid();
+                cells = (0..3usize)
+                    .map(|col| {
+                        let cell = &grid[alacritty_terminal::index::Line(0)]
+                            [alacritty_terminal::index::Column(col)];
+                        (
+                            cell.c,
+                            cell.flags
+                                .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR),
+                            cell.flags
+                                .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER),
+                            cell.zerowidth().map(<[char]>::to_vec),
+                        )
+                    })
+                    .collect();
+            }
+            if cells.iter().any(|(c, ..)| *c == 'x') {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(
+            cells,
+            vec![
+                ('\u{1F1E8}', false, false, None),
+                ('\u{1F1F3}', false, false, None),
+                ('x', false, false, None),
+            ],
+            "each indicator holds one column on its own, and the text after the flag starts \
+             in the third — the columns were never the bug, the shaping was"
+        );
+    }
+
     #[test]
     fn emoji_presentation_sequences_reserve_two_columns() {
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
