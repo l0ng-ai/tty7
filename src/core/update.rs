@@ -1997,6 +1997,71 @@ impl PackageOffer {
     }
 }
 
+/// The architecture this binary was built for, as `target_arch` spells it.
+/// Named so the macOS policy below can be handed an architecture rather than
+/// read one, which is what makes it testable on either kind of Mac.
+#[cfg(target_os = "macos")]
+const BUILD_ARCH: &str = std::env::consts::ARCH;
+
+/// Whether this process is an x86_64 binary Rosetta is translating on Apple
+/// Silicon.
+///
+/// `sysctl.proc_translated` answers 1 exactly then and 0 for a native
+/// process. On an Intel Mac the key does not exist at all, which is the same
+/// answer for our purposes: nothing to migrate to.
+#[cfg(target_os = "macos")]
+fn running_translated() -> bool {
+    proc_translated() == Some(1)
+}
+
+/// The raw `sysctl.proc_translated` reading: `None` when the key does not
+/// exist, which is an Intel Mac.
+///
+/// Split from [`running_translated`] so a test can tell "the kernel says no"
+/// from "we asked the wrong question" — every way of getting `sysctlbyname`
+/// wrong returns non-zero and would otherwise read as an ordinary no.
+#[cfg(target_os = "macos")]
+fn proc_translated() -> Option<i32> {
+    let mut translated: i32 = 0;
+    let mut len = std::mem::size_of::<i32>();
+    // SAFETY: the name is a NUL-terminated literal, and the out pointer and
+    // its length describe the same `i32` on the stack.
+    let queried = unsafe {
+        libc::sysctlbyname(
+            c"sysctl.proc_translated".as_ptr(),
+            (&raw mut translated).cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (queried == 0).then_some(translated)
+}
+
+/// The macOS package a build should replace itself with, split from the
+/// probing so the policy is testable without a Rosetta process — the same
+/// split [`linux_package_for`] makes for the AppImage answer.
+#[cfg(target_os = "macos")]
+fn macos_package_arch(build_arch: &str, translated: bool) -> Option<&'static str> {
+    match (build_arch, translated) {
+        // Rosetta only ever translates x86_64, and only on Apple Silicon, so
+        // this is the one build that is running somewhere other than where it
+        // was compiled for. Offering it the native package is what carries an
+        // install across (#687); offering it its own architecture is what kept
+        // it Intel through every update it ever took.
+        //
+        // Safe to do unasked: the swap is the same unzip-and-rename it already
+        // performs, the updater doing it is a separate process that only moves
+        // files, and both packages ship in every release — a release missing
+        // the arm64 zip fails loudly in `select_release_asset_for` rather than
+        // falling back to the wrong one.
+        ("x86_64", true) => Some("arm64"),
+        ("aarch64", _) => Some("arm64"),
+        ("x86_64", false) => Some("x86_64"),
+        _ => None,
+    }
+}
+
 /// The release package this installation can replace itself with, or the
 /// reason it cannot.
 fn package_for_current_install(version: &str) -> Result<PackageOffer, UpdateInstallHint> {
@@ -2008,11 +2073,7 @@ fn package_for_current_install(version: &str) -> Result<PackageOffer, UpdateInst
         if !is_macos_update_writable(&app) || bundled_updater().is_none() {
             return Err(UpdateInstallHint::UnsupportedMacos);
         }
-        let arch = if cfg!(target_arch = "aarch64") {
-            "arm64"
-        } else if cfg!(target_arch = "x86_64") {
-            "x86_64"
-        } else {
+        let Some(arch) = macos_package_arch(BUILD_ARCH, running_translated()) else {
             return Err(UpdateInstallHint::UnsupportedMacos);
         };
         return Ok(PackageOffer::plain(format!(
@@ -2947,6 +3008,80 @@ mod tests {
                 "tty7-27.1.0-macos-arm64.zip".to_string()
             ))
         );
+    }
+
+    /// #687: an Intel build on Apple Silicon has to be offered the *native*
+    /// package, not another copy of itself.
+    ///
+    /// The architecture was read from `cfg!(target_arch)`, which an x86_64
+    /// binary answers `x86_64` whether it is running on an Intel Mac or under
+    /// Rosetta. So an install that arrived as Intel — a mis-picked download, a
+    /// migration off an Intel Mac — asked for the Intel package on every
+    /// update and stayed Intel forever, silently, until macOS started warning
+    /// that the app "includes a component that will not work with a future
+    /// release of macOS". The updater is the only thing that could have moved
+    /// them across, and it was the thing keeping them.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_translated_install_is_offered_the_native_package() {
+        assert_eq!(
+            macos_package_arch("x86_64", true),
+            Some("arm64"),
+            "an x86_64 build under Rosetta is on Apple Silicon, and updating is the one \
+             moment it can become native"
+        );
+        assert_eq!(
+            macos_package_arch("x86_64", false),
+            Some("x86_64"),
+            "an untranslated x86_64 build is a real Intel Mac, which arm64 would not run"
+        );
+        assert_eq!(
+            macos_package_arch("aarch64", false),
+            Some("arm64"),
+            "a native build keeps the answer it always had"
+        );
+        assert_eq!(
+            macos_package_arch("powerpc", false),
+            None,
+            "an architecture the release does not publish has no filename worth naming"
+        );
+    }
+
+    /// The probe the policy above is fed, checked against the system's own
+    /// answer.
+    ///
+    /// Both halves are needed. Every way of getting `sysctlbyname` wrong — a
+    /// misspelled key, the wrong out-size — returns non-zero, which reads as
+    /// an ordinary "not translated"; on the untranslated machines this test
+    /// mostly runs on, that is also the right answer, so comparing only the
+    /// `bool` would pass a probe that never worked and leave #687 unfixed with
+    /// every policy test above still green. Asserting the key *resolves* on
+    /// Apple Silicon is what actually pins the call.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_translation_probe_agrees_with_the_system() {
+        let sysctl = std::process::Command::new("/usr/sbin/sysctl")
+            .args(["-n", "sysctl.proc_translated"])
+            .output()
+            .expect("sysctl is part of the base system");
+        let reading = sysctl
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&sysctl.stdout).trim().to_string());
+
+        assert_eq!(
+            proc_translated().map(|t| t.to_string()),
+            reading,
+            "the probe has to read what the kernel reads, including whether the key is there"
+        );
+        if cfg!(target_arch = "aarch64") {
+            assert!(
+                proc_translated().is_some(),
+                "every Apple Silicon kernel carries sysctl.proc_translated; `None` here means \
+                 the name or the out-size is wrong, not that nothing is being translated"
+            );
+        }
+        assert_eq!(running_translated(), reading.as_deref() == Some("1"));
     }
 
     /// The one Linux shape that installs itself: an AppImage whose directory
