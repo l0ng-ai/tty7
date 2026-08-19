@@ -661,6 +661,15 @@ fn sara_am_at(row: &[RenderCell], col: usize) -> Option<&RenderCell> {
         .filter(|cell| !cell.spacer && is_sara_am(cell.c))
 }
 
+fn is_regional_indicator(c: char) -> bool {
+    matches!(c, '\u{1F1E6}'..='\u{1F1FF}')
+}
+
+fn regional_indicator_at(row: &[RenderCell], col: usize) -> Option<&RenderCell> {
+    row.get(col)
+        .filter(|cell| !cell.spacer && is_regional_indicator(cell.c))
+}
+
 fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
     let mut segs = Vec::new();
     let mut col = 0;
@@ -691,6 +700,23 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
                 cells: col - start,
                 text,
             });
+            continue;
+        }
+        // Ahead of the marks branch: a stray mark on either half must not
+        // split the pair, or the other half paints as a lettered box.
+        if is_regional_indicator(cell.c)
+            && let Some(next) = regional_indicator_at(row, col + 1)
+        {
+            let mut text = String::with_capacity(8);
+            push_cell(&mut text, cell);
+            push_cell(&mut text, next);
+            segs.push(RowSeg::Cluster {
+                col,
+                cells: 2,
+                text,
+                wide_base: false,
+            });
+            col += 2;
             continue;
         }
         if let Some(marks) = &cell.marks {
@@ -2704,6 +2730,100 @@ mod tests {
         assert_eq!(
             segment_row(&row),
             [RowSeg::Solo { col: 0 }, RowSeg::Solo { col: 1 }]
+        );
+    }
+
+    #[test]
+    fn segment_row_joins_a_regional_indicator_pair() {
+        let row = vec![cell('\u{1F1E8}'), cell('\u{1F1F3}')];
+        assert_eq!(segment_row(&row), [cluster(0, 2, "\u{1F1E8}\u{1F1F3}")]);
+
+        let row = vec![cell('a'), cell('\u{1F1E8}'), cell('\u{1F1F3}'), cell('b')];
+        assert_eq!(
+            segment_row(&row),
+            [
+                run(0, 1, "a"),
+                cluster(1, 2, "\u{1F1E8}\u{1F1F3}"),
+                run(3, 1, "b"),
+            ]
+        );
+
+        let row = vec![
+            cell('\u{1F1E8}'),
+            cell('\u{1F1F3}'),
+            cell('\u{1F1FA}'),
+            cell('\u{1F1F8}'),
+        ];
+        assert_eq!(
+            segment_row(&row),
+            [
+                cluster(0, 2, "\u{1F1E8}\u{1F1F3}"),
+                cluster(2, 2, "\u{1F1FA}\u{1F1F8}"),
+            ]
+        );
+
+        let mut row = vec![cell('\u{1F1E8}'), cell('\u{1F1F3}')];
+        row[1].fg = gpui::red();
+        assert_eq!(segment_row(&row), [cluster(0, 2, "\u{1F1E8}\u{1F1F3}")]);
+
+        let mut row = vec![cell('\u{1F1E8}'), cell('\u{1F1F3}')];
+        row[0].marks = Some(Box::from(['\u{FE0F}']));
+        assert_eq!(
+            segment_row(&row),
+            [cluster(0, 2, "\u{1F1E8}\u{FE0F}\u{1F1F3}")]
+        );
+
+        let mut row = vec![cell('\u{1F1E8}'), cell('\u{1F1F3}')];
+        row[1].marks = Some(Box::from(['\u{FE0F}']));
+        assert_eq!(
+            segment_row(&row),
+            [cluster(0, 2, "\u{1F1E8}\u{1F1F3}\u{FE0F}")]
+        );
+    }
+
+    #[test]
+    fn segment_row_leaves_an_unpaired_regional_indicator_alone() {
+        let row = vec![cell('\u{1F1E8}')];
+        assert_eq!(segment_row(&row), [RowSeg::Solo { col: 0 }]);
+
+        let row = vec![cell('\u{1F1E8}'), cell('\u{1F1F3}'), cell('\u{1F1FA}')];
+        assert_eq!(
+            segment_row(&row),
+            [cluster(0, 2, "\u{1F1E8}\u{1F1F3}"), RowSeg::Solo { col: 2 }]
+        );
+
+        let row = vec![cell('\u{1F1E8}'), cell('a')];
+        assert_eq!(segment_row(&row), [RowSeg::Solo { col: 0 }, run(1, 1, "a")]);
+
+        let row = vec![cell('\u{1F1E8}'), cell(' '), cell('\u{1F1F3}')];
+        assert_eq!(
+            segment_row(&row),
+            [RowSeg::Solo { col: 0 }, RowSeg::Solo { col: 2 }]
+        );
+    }
+
+    #[test]
+    fn a_regional_indicator_pair_reaches_segment_row_as_two_plain_columns() {
+        let mut term = alacritty_terminal::Term::new(
+            alacritty_terminal::term::Config::default(),
+            &crate::terminal::size::TermSize::new(80, 24),
+            alacritty_terminal::event::VoidListener,
+        );
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        parser.advance(&mut term, "\u{1F1E8}\u{1F1F3}x".as_bytes());
+
+        let palette = [Rgb { r: 0, g: 0, b: 0 }; 256];
+        let colors = test_colors();
+        let row: Vec<_> = (0..4)
+            .map(|col| {
+                let point = AlacPoint::new(AlacLine(0), AlacColumn(col));
+                snapshot_cell(&term.grid()[point], point, &palette, &colors, None)
+            })
+            .collect();
+        assert_eq!(
+            segment_row(&row),
+            [cluster(0, 2, "\u{1F1E8}\u{1F1F3}"), run(2, 1, "x")]
         );
     }
 
