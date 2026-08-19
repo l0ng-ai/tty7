@@ -643,7 +643,7 @@ enum RowSeg {
         col: usize,
         cells: usize,
         text: String,
-        wide_base: bool,
+        double_width: bool,
     },
 }
 
@@ -654,6 +654,23 @@ fn push_cell(text: &mut String, cell: &RenderCell) {
 
 fn is_sara_am(c: char) -> bool {
     matches!(c, '\u{0E33}' | '\u{0EB3}')
+}
+
+fn is_regional_indicator(c: char) -> bool {
+    ('\u{1F1E6}'..='\u{1F1FF}').contains(&c)
+}
+
+fn regional_indicator_pair_at(row: &[RenderCell], col: usize) -> Option<&RenderCell> {
+    let first = row.get(col)?;
+    let second = row.get(col + 1)?;
+    (!first.spacer
+        && first.marks.is_none()
+        && is_regional_indicator(first.c)
+        && !second.spacer
+        && second.marks.is_none()
+        && is_regional_indicator(second.c)
+        && GlyphStyle::of(first) == GlyphStyle::of(second))
+    .then_some(second)
 }
 
 fn sara_am_at(row: &[RenderCell], col: usize) -> Option<&RenderCell> {
@@ -709,13 +726,24 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
                 col,
                 cells,
                 text,
-                wide_base,
+                double_width: wide_base,
             });
             col += cells;
             continue;
         }
         if !cell.c.is_ascii_graphic() {
-            if col + 1 < row.len() && row[col + 1].spacer {
+            if let Some(second) = regional_indicator_pair_at(row, col) {
+                let mut text = String::with_capacity(2);
+                text.push(cell.c);
+                text.push(second.c);
+                segs.push(RowSeg::Cluster {
+                    col,
+                    cells: 2,
+                    text,
+                    double_width: true,
+                });
+                col += 2;
+            } else if col + 1 < row.len() && row[col + 1].spacer {
                 segs.push(RowSeg::Wide {
                     start: col,
                     cells: 2,
@@ -732,7 +760,7 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
                     col,
                     cells: 2,
                     text,
-                    wide_base: false,
+                    double_width: false,
                 });
                 col += 2;
             } else {
@@ -1033,12 +1061,12 @@ fn paint_glyphs(
                     col,
                     cells,
                     text,
-                    wide_base,
+                    double_width,
                 } => (
                     col,
                     cells,
                     SharedString::from(text),
-                    (cells == 2).then(|| geom.cell_width * if wide_base { 2. } else { 1. }),
+                    (cells == 2).then(|| geom.cell_width * if double_width { 2. } else { 1. }),
                     cells == 1,
                 ),
             };
@@ -2638,7 +2666,7 @@ mod tests {
             col,
             cells,
             text: text.to_string(),
-            wide_base: false,
+            double_width: false,
         }
     }
 
@@ -2647,7 +2675,7 @@ mod tests {
             col,
             cells,
             text: text.to_string(),
-            wide_base: true,
+            double_width: true,
         }
     }
 
@@ -2669,6 +2697,46 @@ mod tests {
         assert_eq!(
             segment_row(&row),
             [cluster(0, 1, "\u{0E17}\u{0E35}\u{0E48}"), run(1, 1, "a")]
+        );
+    }
+
+    #[test]
+    fn segment_row_shapes_regional_indicator_pairs_as_two_column_flags() {
+        let row: Vec<_> = "🇨🇳x".chars().map(cell).collect();
+        assert_eq!(
+            segment_row(&row),
+            [wide_cluster(0, 2, "🇨🇳"), run(2, 1, "x")]
+        );
+
+        let mut row = wide_cells("前");
+        row.extend("🇨🇳".chars().map(cell));
+        row.extend(wide_cells("后"));
+        assert_eq!(
+            segment_row(&row),
+            [wide(0, 2, "前"), wide_cluster(2, 2, "🇨🇳"), wide(4, 2, "后"),]
+        );
+
+        let row: Vec<_> = "🇨🇳🇺🇸🇯🇵".chars().map(cell).collect();
+        assert_eq!(
+            segment_row(&row),
+            [
+                wide_cluster(0, 2, "🇨🇳"),
+                wide_cluster(2, 2, "🇺🇸"),
+                wide_cluster(4, 2, "🇯🇵"),
+            ]
+        );
+    }
+
+    #[test]
+    fn segment_row_leaves_unpaired_or_differently_styled_indicators_solo() {
+        let row = vec![cell('🇨'), cell('x')];
+        assert_eq!(segment_row(&row), [RowSeg::Solo { col: 0 }, run(1, 1, "x")]);
+
+        let mut row = vec![cell('🇨'), cell('🇳')];
+        row[1].fg = gpui::red();
+        assert_eq!(
+            segment_row(&row),
+            [RowSeg::Solo { col: 0 }, RowSeg::Solo { col: 1 }]
         );
     }
 
