@@ -223,10 +223,11 @@ pub enum HookAgent {
     Droid,
     Qwen,
     Goose,
+    Kimi,
 }
 
 impl HookAgent {
-    pub const ALL: [HookAgent; 11] = [
+    pub const ALL: [HookAgent; 12] = [
         HookAgent::Claude,
         HookAgent::Codex,
         HookAgent::Copilot,
@@ -238,6 +239,7 @@ impl HookAgent {
         HookAgent::Droid,
         HookAgent::Qwen,
         HookAgent::Goose,
+        HookAgent::Kimi,
     ];
 
     /// The hooks behind a detected agent process, if it has any.
@@ -258,6 +260,7 @@ impl HookAgent {
             CLIAgent::Droid => Some(HookAgent::Droid),
             CLIAgent::Qwen => Some(HookAgent::Qwen),
             CLIAgent::Goose => Some(HookAgent::Goose),
+            CLIAgent::Kimi => Some(HookAgent::Kimi),
             CLIAgent::Aider
             | CLIAgent::Amp
             | CLIAgent::Cursor
@@ -283,7 +286,18 @@ impl HookAgent {
             | HookAgent::Pi
             | HookAgent::Grok
             | HookAgent::OhMyPi
-            | HookAgent::Goose => None,
+            | HookAgent::Goose
+            | HookAgent::Kimi => None,
+        }
+    }
+
+    /// The events this agent's hooks merge into a shared TOML config, if that
+    /// is how it takes them — the third strategy, for the agents whose hooks
+    /// live as `[[hooks]]` entries in a config file the user also hand-edits.
+    fn toml_hook_events(self) -> Option<&'static [(&'static str, &'static str)]> {
+        match self {
+            HookAgent::Kimi => Some(KIMI_HOOK_EVENTS),
+            _ => None,
         }
     }
 
@@ -300,6 +314,7 @@ impl HookAgent {
             HookAgent::Droid => "droid",
             HookAgent::Qwen => "qwen",
             HookAgent::Goose => "goose",
+            HookAgent::Kimi => "kimi",
         }
     }
 
@@ -316,6 +331,7 @@ impl HookAgent {
             HookAgent::Droid => "Droid",
             HookAgent::Qwen => "Qwen Code",
             HookAgent::Goose => "Goose",
+            HookAgent::Kimi => "Kimi Code",
         }
     }
 
@@ -346,6 +362,7 @@ impl HookAgent {
             HookAgent::Goose => {
                 target.under_home(&[".agents", "plugins", "tty7", "hooks", "hooks.json"])
             }
+            HookAgent::Kimi => target.kimi_config_path(),
         }
     }
 
@@ -429,6 +446,15 @@ impl<'a> HookTarget<'a> {
         self.under_home(&[".config"])
     }
 
+    fn kimi_config_path(&self) -> PathBuf {
+        if self.is_local()
+            && let Some(dir) = std::env::var_os("KIMI_CODE_HOME").filter(|d| !d.is_empty())
+        {
+            return PathBuf::from(dir).join("config.toml");
+        }
+        self.under_home(&[".kimi-code", "config.toml"])
+    }
+
     fn hook_command(&self, agent: HookAgent, event: &str) -> String {
         if let Some(exe) = self.hook_command_exe() {
             return format!("{exe} agent-hook {} {event}", agent.slug());
@@ -498,6 +524,9 @@ pub enum HooksState {
 
 pub fn hooks_state(target: &HookTarget, agent: HookAgent) -> HooksState {
     let path = agent.target_path(target);
+    if let Some(events) = agent.toml_hook_events() {
+        return toml_hooks_state(target, &path, agent, events);
+    }
     if let Some(events) = agent.hook_map_events() {
         return hook_map_state(target, &path, agent, events);
     }
@@ -531,6 +560,10 @@ pub enum HookOutcome {
 
 pub fn install_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<HookOutcome> {
     let path = agent.target_path(target);
+    if let Some(events) = agent.toml_hook_events() {
+        toml_hooks_install(target, &path, agent, events)?;
+        return Ok(HookOutcome::Installed);
+    }
     if let Some(events) = agent.hook_map_events() {
         hook_map_install(target, &path, agent, events)?;
         if agent != HookAgent::Codex {
@@ -552,6 +585,9 @@ pub fn install_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<Ho
 
 pub fn uninstall_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<HookOutcome> {
     let path = agent.target_path(target);
+    if agent.toml_hook_events().is_some() {
+        return toml_hooks_uninstall(target, &path, agent);
+    }
     match agent.hook_map_events() {
         Some(_) => hook_map_uninstall(target, &path, agent),
         None => owned_file_uninstall(target, &path, &agent.marker()),
@@ -655,6 +691,20 @@ const DROID_HOOK_EVENTS: &[(&str, &str)] = &[
 /// `Notification` hook at all, which would only muddy a status the dedicated
 /// event already reports precisely.
 const QWEN_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt-submit"),
+    ("PermissionRequest", "permission-request"),
+    ("PostToolUse", "tool-complete"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session-end"),
+];
+
+/// Kimi Code's hooks live as `[[hooks]]` entries in its main `config.toml` —
+/// the same file that holds the user's providers and models — so they go
+/// through the TOML merge strategy rather than a JSON map or an owned file.
+/// Like Qwen it has a first-class permission event, so it needs no
+/// `Notification` hook and none of the sniffing in [`effective_event`].
+const KIMI_HOOK_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "prompt-submit"),
     ("PermissionRequest", "permission-request"),
@@ -816,6 +866,133 @@ fn marker_command<'a>(matcher: &'a serde_json::Value, marker: &str) -> Option<&'
         })
 }
 
+fn toml_hooks_state(
+    target: &HookTarget,
+    path: &Path,
+    agent: HookAgent,
+    events: &[(&str, &str)],
+) -> HooksState {
+    let Ok(text) = target.read(path) else {
+        return HooksState::NotInstalled;
+    };
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return HooksState::NotInstalled;
+    };
+    let marker = agent.marker();
+    let ours: Vec<(&str, &str)> = doc
+        .get("hooks")
+        .and_then(|h| h.as_array_of_tables())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let command = entry
+                .get("command")
+                .and_then(|c| c.as_str())
+                .filter(|c| c.contains(&marker))?;
+            let event = entry.get("event").and_then(|e| e.as_str())?;
+            Some((event, command))
+        })
+        .collect();
+    if ours.is_empty() {
+        return HooksState::NotInstalled;
+    }
+    let complete = ours.len() == events.len()
+        && events.iter().all(|(hook_event, tty7_event)| {
+            let command = target.hook_command(agent, tty7_event);
+            ours.iter().any(|(e, c)| e == hook_event && *c == command)
+        });
+    if complete {
+        HooksState::Installed
+    } else {
+        HooksState::Outdated
+    }
+}
+
+fn toml_hooks_install(
+    target: &HookTarget,
+    path: &Path,
+    agent: HookAgent,
+    events: &[(&str, &str)],
+) -> anyhow::Result<()> {
+    let mut doc: toml_edit::DocumentMut = match target.read(path) {
+        Ok(text) => text.parse().map_err(|e| {
+            anyhow::anyhow!(
+                "{} is not valid TOML ({e}); not touching it",
+                path.display()
+            )
+        })?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => toml_edit::DocumentMut::new(),
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", path.display())),
+    };
+
+    let hooks = doc.entry("hooks").or_insert(toml_edit::Item::ArrayOfTables(
+        toml_edit::ArrayOfTables::new(),
+    ));
+    let Some(list) = hooks.as_array_of_tables_mut() else {
+        return Err(anyhow::anyhow!(
+            "\"hooks\" in {} is not an array of tables; not touching it",
+            path.display()
+        ));
+    };
+
+    let marker = agent.marker();
+    list.retain(|entry| !toml_command_is_marked(entry, &marker));
+    for (hook_event, tty7_event) in events {
+        let mut entry = toml_edit::Table::new();
+        entry["event"] = toml_edit::value(*hook_event);
+        entry["command"] = toml_edit::value(target.hook_command(agent, tty7_event));
+        list.push(entry);
+    }
+
+    target.write(path, doc.to_string().as_bytes())
+}
+
+fn toml_hooks_uninstall(
+    target: &HookTarget,
+    path: &Path,
+    agent: HookAgent,
+) -> anyhow::Result<HookOutcome> {
+    let text = match target.read(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(HookOutcome::NothingInstalled);
+        }
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", path.display())),
+    };
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "{} is not valid TOML ({e}); not touching it",
+            path.display()
+        )
+    })?;
+
+    let marker = agent.marker();
+    let mut removed = 0;
+    if let Some(list) = doc
+        .get_mut("hooks")
+        .and_then(|h| h.as_array_of_tables_mut())
+    {
+        let before = list.len();
+        list.retain(|entry| !toml_command_is_marked(entry, &marker));
+        removed = before - list.len();
+        if list.is_empty() {
+            doc.remove("hooks");
+        }
+    }
+    if removed == 0 {
+        return Ok(HookOutcome::NoTty7Hooks);
+    }
+    target.write(path, doc.to_string().as_bytes())?;
+    Ok(HookOutcome::Removed)
+}
+
+fn toml_command_is_marked(entry: &toml_edit::Table, marker: &str) -> bool {
+    entry
+        .get("command")
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| c.contains(marker))
+}
+
 /// Returns the bare file name of `exe` when resolving that name from PATH
 /// yields the same binary. Returns `None` when the name does not resolve, or
 /// when an earlier PATH entry contains a different file with the same name
@@ -877,7 +1054,8 @@ fn owned_file_content(target: &HookTarget, agent: HookAgent) -> Option<String> {
         | HookAgent::Codex
         | HookAgent::Gemini
         | HookAgent::Droid
-        | HookAgent::Qwen => None,
+        | HookAgent::Qwen
+        | HookAgent::Kimi => None,
     }
 }
 
@@ -1236,6 +1414,7 @@ mod tests {
             .chain(DROID_HOOK_EVENTS)
             .chain(QWEN_HOOK_EVENTS)
             .chain(GOOSE_HOOK_EVENTS)
+            .chain(KIMI_HOOK_EVENTS)
             .map(|(_, e)| *e)
             .chain(GROK_HOOK_EVENTS.iter().map(|(_, e, _)| *e))
             .collect();
@@ -1268,6 +1447,7 @@ mod tests {
                 HookAgent::Goose,
                 "/home/me/.agents/plugins/tty7/hooks/hooks.json",
             ),
+            (HookAgent::Kimi, "/home/me/.kimi-code/config.toml"),
         ] {
             assert_eq!(
                 agent.target_path(&t),
@@ -1287,6 +1467,7 @@ mod tests {
             HookAgent::Droid,
             HookAgent::Qwen,
             HookAgent::Goose,
+            HookAgent::Kimi,
         ] {
             assert_eq!(hooks_state(&real, agent), HooksState::NotInstalled);
             install_hooks(&real, agent).unwrap_or_else(|e| panic!("{}: {e}", agent.slug()));
@@ -1564,6 +1745,7 @@ mod tests {
                 HookAgent::OhMyPi,
                 "/home/me/.omp/agent/extensions/tty7/index.ts",
             ),
+            (HookAgent::Kimi, "/home/me/.kimi-code/config.toml"),
         ] {
             assert_eq!(
                 agent.target_path(&target),
@@ -1876,6 +2058,90 @@ mod tests {
         uninstall_hooks(&t, HookAgent::Claude).expect("uninstall is idempotent");
 
         unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Kimi's hooks share `config.toml` with the user's providers and models,
+    /// so the merge must leave everything that is not ours — including
+    /// comments and formatting — byte-for-byte alone.
+    #[test]
+    fn kimi_install_preserves_the_user_s_config_toml() {
+        let dir = std::env::temp_dir().join(format!("tty7-kimi-hooks-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.toml");
+        let user_half = concat!(
+            "# my providers\n",
+            "default_model = \"kimi-k2\"\n",
+            "\n",
+            "[[hooks]]\n",
+            "event = \"Stop\"\n",
+            "command = \"afplay ding.aiff\"\n",
+        );
+        std::fs::write(&config, user_half).unwrap();
+        unsafe { std::env::set_var("KIMI_CODE_HOME", &dir) };
+
+        let host = local_host();
+        let t = HookTarget::local(&*host).expect("home resolves in tests");
+        assert_eq!(HookAgent::Kimi.target_path(&t), config);
+
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::NotInstalled);
+        install_hooks(&t, HookAgent::Kimi).expect("install succeeds");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Installed);
+        install_hooks(&t, HookAgent::Kimi).expect("re-install succeeds");
+
+        let written = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            written.starts_with(user_half),
+            "the user's half of config.toml — comment included — survives untouched"
+        );
+        let doc: toml_edit::DocumentMut = written.parse().expect("still valid TOML");
+        let hooks = doc["hooks"].as_array_of_tables().unwrap();
+        assert_eq!(
+            hooks
+                .iter()
+                .filter(|e| toml_command_is_marked(e, "agent-hook kimi"))
+                .count(),
+            KIMI_HOOK_EVENTS.len(),
+            "exactly one tty7 entry per event after two installs"
+        );
+        for (event, _) in KIMI_HOOK_EVENTS {
+            assert!(
+                hooks.iter().any(|e| {
+                    toml_command_is_marked(e, "agent-hook kimi")
+                        && e.get("event").and_then(|v| v.as_str()) == Some(*event)
+                }),
+                "{event} carries the tty7 hook"
+            );
+        }
+
+        let healthy = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(
+            &config,
+            healthy.replace("agent-hook kimi stop", "agent-hook kimi stop --stale"),
+        )
+        .unwrap();
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Outdated);
+        install_hooks(&t, HookAgent::Kimi).expect("reinstall over an outdated entry succeeds");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Installed);
+
+        uninstall_hooks(&t, HookAgent::Kimi).expect("uninstall succeeds");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::NotInstalled);
+        let after = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            after.contains("afplay ding.aiff"),
+            "the user's own Stop hook survives uninstall"
+        );
+        assert!(!after.contains("agent-hook kimi"));
+        uninstall_hooks(&t, HookAgent::Kimi).expect("uninstall is idempotent");
+
+        std::fs::write(&config, "not = valid = toml").unwrap();
+        assert!(
+            install_hooks(&t, HookAgent::Kimi).is_err(),
+            "a config.toml that does not parse is left alone"
+        );
+
+        unsafe { std::env::remove_var("KIMI_CODE_HOME") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

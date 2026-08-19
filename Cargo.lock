@@ -9250,6 +9250,7 @@ dependencies = [
  "indexmap",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 
@@ -9852,6 +9853,7 @@ dependencies = [
  "system-configuration-sys",
  "tempfile",
  "tokio",
+ "toml_edit 0.25.13+spec-1.1.0",
  "ureq",
  "uuid",
  "windows-sys 0.59.0",

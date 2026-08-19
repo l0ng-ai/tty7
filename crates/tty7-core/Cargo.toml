@@ -48,6 +48,14 @@ sha2 = "0.11"
 # implementation.
 ignore = "0.4"
 
+# Format-preserving TOML editing for `core::agent_hooks`: Kimi Code takes its
+# hooks as `[[hooks]]` entries in the same `config.toml` that holds the user's
+# providers, models and comments, so installing must edit that file in place
+# without reformatting it — which rules out the plain `toml` crate's
+# parse-and-reserialize round trip. Already in the tree transitively, so this
+# pins no new code.
+toml_edit = "0.25"
+
 # Lane assignment for the commit graph (`core::git::log`) keeps a couple of
 # parents and a handful of edges per row; a SmallVec keeps those off the heap
 # for the shapes that make up almost all of a real history. Already in the tree

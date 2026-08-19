@@ -22,10 +22,11 @@ pub enum CLIAgent {
     Grok,
     Qwen,
     OhMyPi,
+    Kimi,
 }
 
 impl CLIAgent {
-    pub const ALL: [CLIAgent; 18] = [
+    pub const ALL: [CLIAgent; 19] = [
         CLIAgent::Claude,
         CLIAgent::Codex,
         CLIAgent::Gemini,
@@ -44,6 +45,7 @@ impl CLIAgent {
         CLIAgent::Grok,
         CLIAgent::Qwen,
         CLIAgent::OhMyPi,
+        CLIAgent::Kimi,
     ];
 
     fn aliases(self) -> &'static [&'static str] {
@@ -72,6 +74,10 @@ impl CLIAgent {
             // Oh My Pi is a fork of Pi, but it ships one binary of its own and
             // never installs a `pi`, so the two names stay disjoint.
             CLIAgent::OhMyPi => &["omp"],
+            // Both the standalone Kimi Code CLI and the legacy open-source
+            // kimi-cli install a `kimi` — same vendor, same brand, so one
+            // detection covers them. Only the standalone one has hooks.
+            CLIAgent::Kimi => &["kimi", "kimi-code"],
         }
     }
 
@@ -95,6 +101,7 @@ impl CLIAgent {
             CLIAgent::Grok => "grok",
             CLIAgent::Qwen => "qwen",
             CLIAgent::OhMyPi => "omp",
+            CLIAgent::Kimi => "kimi",
         }
     }
 
@@ -123,6 +130,7 @@ impl CLIAgent {
             CLIAgent::Grok => "Grok",
             CLIAgent::Qwen => "Qwen Code",
             CLIAgent::OhMyPi => "Oh My Pi",
+            CLIAgent::Kimi => "Kimi Code",
         }
     }
 
@@ -155,6 +163,7 @@ impl CLIAgent {
             CLIAgent::Grok => Some(format!("grok{flags} --resume {session_id}")),
             CLIAgent::Pi => Some(format!("pi{flags} --session {session_id}")),
             CLIAgent::OhMyPi => Some(format!("omp{flags} --resume {session_id}")),
+            CLIAgent::Kimi => Some(format!("kimi{flags} --session {session_id}")),
             _ => None,
         }
     }
@@ -342,6 +351,8 @@ impl CLIAgent {
             // `--resume`, `-r` and `--session` are three spellings of one flag
             // in Oh My Pi; `--session-dir` is a different one and survives.
             CLIAgent::OhMyPi => &["--resume", "-r", "--session", "--fork", "--continue", "-c"],
+            // `--resume`/`-r` is Kimi's hidden alias for `--session`/`-S`.
+            CLIAgent::Kimi => &["--session", "-S", "--resume", "-r", "--continue", "-c"],
             CLIAgent::Grok => &[
                 "--resume",
                 "-r",
@@ -414,6 +425,9 @@ impl CLIAgent {
             CLIAgent::Grok => 0x000000,
             CLIAgent::Qwen => 0x6D44E8,
             CLIAgent::OhMyPi => 0xF97316,
+            // The blue of the flame in Kimi's brand mark; the glyph itself is
+            // black, which Codex and Grok already have covered.
+            CLIAgent::Kimi => 0x027AFF,
         }
     }
 
@@ -432,6 +446,7 @@ impl CLIAgent {
             CLIAgent::Pi => "icons/agents/pi.svg",
             CLIAgent::OhMyPi => "icons/agents/omp.svg",
             CLIAgent::Qwen => "icons/agents/qwen.svg",
+            CLIAgent::Kimi => "icons/agents/kimi.svg",
             CLIAgent::Aider
             | CLIAgent::Auggie
             | CLIAgent::Hermes
@@ -865,6 +880,8 @@ mod tests {
             ("hermes", CLIAgent::Hermes),
             ("omp", CLIAgent::OhMyPi),
             ("/opt/homebrew/bin/omp", CLIAgent::OhMyPi),
+            ("kimi", CLIAgent::Kimi),
+            ("/usr/local/bin/kimi", CLIAgent::Kimi),
         ] {
             assert_eq!(CLIAgent::detect_from_argv(&argv(&[cmd])), Some(agent));
         }
@@ -1155,6 +1172,10 @@ mod tests {
                 .as_deref(),
             Some("pi --session 0199c3f2-1b0e-7c3a-9f21-6d4b8e2a5c17")
         );
+        assert_eq!(
+            CLIAgent::Kimi.resume_command("abc-123", None).as_deref(),
+            Some("kimi --session abc-123")
+        );
         assert_eq!(CLIAgent::Aider.resume_command("abc", None), None);
         assert_eq!(CLIAgent::Claude.resume_command("abc; rm -rf /", None), None);
         assert_eq!(CLIAgent::Claude.resume_command("$(boom)", None), None);
@@ -1179,6 +1200,16 @@ mod tests {
                 .resume_command("abc", Some(&argv(&["claude", "--model", "opus"])))
                 .as_deref(),
             Some("claude --model opus --resume abc")
+        );
+        assert_eq!(
+            CLIAgent::Kimi
+                .resume_command(
+                    "abc-123",
+                    Some(&argv(&["kimi", "--session", "old", "--yolo"]))
+                )
+                .as_deref(),
+            Some("kimi --yolo --session abc-123"),
+            "a stale --session flag comes off before the new one goes on"
         );
         assert_eq!(
             CLIAgent::Claude

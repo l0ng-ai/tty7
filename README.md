@@ -50,7 +50,7 @@ Native builds for macOS, Windows, and Linux on [**Releases**](https://github.com
 |---|---|
 | **Editor-grade input** | ghost suggestions from history · explained tab completion · syntax highlighting · multi-line editing · click places the caret · <kbd>⌃ R</kbd> fuzzy history |
 | **Window** | tabs & splits · <kbd>⌘ P</kbd> palette · <kbd>⌘ F</kbd> scrollback search · nine themes · IME |
-| **Agent-aware** | per-pane detection (18 CLIs): status dot · notifications · branch + diff · resume after reboot · tray icon when input is needed |
+| **Agent-aware** | per-pane detection (19 CLIs): status dot · notifications · branch + diff · resume after reboot · tray icon when input is needed |
 | **Remote workspaces** | remote files, repos, changes, diffs, worktrees, tabs, and panes · reconnect from any client and continue where you left off |
 | **CLI + Skills** | bundled `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · pane/workspace control · real PTY commands · output, process, port, and agent status |
 | **SSH** | native russh stack: profiles with keychain secrets · SFTP panel · port forwarding · jump hosts · one-time, unprivileged `tty7-server` install |

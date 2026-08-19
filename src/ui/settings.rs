@@ -629,6 +629,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchGooseKeywords,
         },
         SearchEntry {
+            section: Agents,
+            title: SettingsAgentKimiCode,
+            keywords: SettingsSearchKimiCodeKeywords,
+        },
+        SearchEntry {
             section: WindowTabs,
             title: SettingsStartupWindow,
             keywords: SettingsSearchStartupWindowKeywords,

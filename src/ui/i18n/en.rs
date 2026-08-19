@@ -718,6 +718,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAgentDroid => "Droid",
         L10nKey::SettingsAgentQwenCode => "Qwen Code",
         L10nKey::SettingsAgentGoose => "Goose",
+        L10nKey::SettingsAgentKimiCode => "Kimi Code",
         L10nKey::SettingsSearchAboutKeywords => "version license credits build update check github",
         L10nKey::SettingsSearchAppHttpProxyKeywords => {
             "proxy http https socks socks5 clash v2ray network download update"
@@ -804,6 +805,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "agent integration hooks install qwen code qwen-code"
         }
         L10nKey::SettingsSearchGooseKeywords => "agent integration hooks plugin install goose",
+        L10nKey::SettingsSearchKimiCodeKeywords => {
+            "agent integration hooks install kimi code kimi-code moonshot"
+        }
         L10nKey::SettingsSearchPiKeywords => "agent integration extension install pi",
         L10nKey::SettingsSearchPortForwardingKeywords => {
             "ssh tunnel local remote dynamic socks forward rule"
