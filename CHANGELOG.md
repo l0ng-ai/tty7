@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Documents dock beside the terminal** (#625). Opening a file, toggling the
+  code panel or opening a diff no longer covers the workspace: the document
+  takes a column to the right of the terminal — half the space between the
+  sidebar and the right panel by default — and the pane you were reading stays
+  visible and typeable underneath none of it. Reviewing a file while an agent
+  talks stopped being a toggle loop. Drag the divider for any width, double-click
+  it to cycle a third, a half and two thirds, or use **Document: Third / Half /
+  Two-Thirds Width** in the palette. Right-click the document's header for
+  **Fill window** — the old overlay, unchanged, and per tab, so a file read
+  over the whole window in one tab leaves the agent beside its own in the next.
+  The terminal keeps its floor through all of it, and a window too narrow to
+  seat both fills for that file only, without changing what any tab chose. New
+  in `config.json`: `document_ratio`, and `document_layout` for what a fresh
+  tab starts as.
+
 - **A tab can be dropped into another tab, as a pane of it** (#621). Drag a tab
   by its chip or by its sidebar row, out over the panes, and it lands where the
   highlight says — the same reading as dragging a pane, minus the middle, which

@@ -75,6 +75,10 @@ pub enum CommandKind {
     ToggleSftp,
     ShowSshForwards,
     ToggleCodePanel,
+    ToggleDocumentFill,
+    DocumentWidthThird,
+    DocumentWidthHalf,
+    DocumentWidthTwoThirds,
     RestartSshSession,
     ScmCommit,
     ScmStageAll,
@@ -182,6 +186,10 @@ impl CommandKind {
             ToggleSftp => "ssh-remote-files",
             ShowSshForwards => "ssh-port-forwarding",
             ToggleCodePanel => "code-panel",
+            ToggleDocumentFill => "document-fill",
+            DocumentWidthThird => "document-width-third",
+            DocumentWidthHalf => "document-width-half",
+            DocumentWidthTwoThirds => "document-width-two-thirds",
             RestartSshSession => "ssh-reconnect",
             ScmCommit => "git-commit",
             ScmStageAll => "git-stage-all",
@@ -281,6 +289,10 @@ impl CommandKind {
             ToggleSftp => "ToggleSftp",
             ShowSshForwards => "ShowSshForwards",
             ToggleCodePanel => "ToggleCodePanel",
+            ToggleDocumentFill => "ToggleDocumentFill",
+            DocumentWidthThird => "DocumentWidthThird",
+            DocumentWidthHalf => "DocumentWidthHalf",
+            DocumentWidthTwoThirds => "DocumentWidthTwoThirds",
             RestartSshSession => "RestartSshSession",
             OpenSshProfiles => "OpenSshProfiles",
             ScmCommit => "ScmCommit",
@@ -410,6 +422,7 @@ impl Command {
         let tab_bar_left = cfg.tab_bar_position == TabBarPosition::Left;
         let sidebar_hidden = chrome.rail_collapsed || !tab_bar_left;
         let right_panel_open = chrome.right_panel_visible;
+        let document_filled = cfg.document_layout == crate::core::config::DocumentLayout::Fill;
 
         let tabs = [
             Command::localized(L10nKey::CmdNewTab, NewTab),
@@ -473,6 +486,17 @@ impl Command {
                 ToggleRightPanel,
             ),
             Command::localized(L10nKey::CmdShowCodePanel, ToggleCodePanel),
+            Command::localized(
+                if document_filled {
+                    L10nKey::CmdDocumentDock
+                } else {
+                    L10nKey::CmdDocumentFill
+                },
+                ToggleDocumentFill,
+            ),
+            Command::localized(L10nKey::CmdDocumentWidthThird, DocumentWidthThird),
+            Command::localized(L10nKey::CmdDocumentWidthHalf, DocumentWidthHalf),
+            Command::localized(L10nKey::CmdDocumentWidthTwoThirds, DocumentWidthTwoThirds),
             Command::localized(
                 if tab_bar_left {
                     L10nKey::CmdTabBarMoveToTop

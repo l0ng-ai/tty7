@@ -383,6 +383,13 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         ("ToggleSftp", ""),
         ("ShowSshForwards", ""),
         ("ToggleCodePanel", "secondary-shift-e"),
+        // Deliberately unbound. Docking is the default and Esc already gets the
+        // terminal back, so a default chord here would only be one more thing
+        // competing for a two-key combination nobody asked for.
+        ("ToggleDocumentFill", ""),
+        ("DocumentWidthThird", ""),
+        ("DocumentWidthHalf", ""),
+        ("DocumentWidthTwoThirds", ""),
         // Implemented, dispatchable, and until now unbindable: `set_binding`
         // only fills slots that exist here, so `"ShowRightPanelInfo": "ctrl-1"`
         // in config.json was dropped without a word, and the Keybindings page —
@@ -568,6 +575,22 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             t(L10nKey::AppMenuRightPanel).to_string(),
         ),
         "ToggleCodePanel" => (CommandGroup::View, t(L10nKey::AppMenuCodePanel).to_string()),
+        "ToggleDocumentFill" => (
+            CommandGroup::View,
+            t(L10nKey::CmdToggleDocumentFill).to_string(),
+        ),
+        "DocumentWidthThird" => (
+            CommandGroup::View,
+            t(L10nKey::CmdDocumentWidthThird).to_string(),
+        ),
+        "DocumentWidthHalf" => (
+            CommandGroup::View,
+            t(L10nKey::CmdDocumentWidthHalf).to_string(),
+        ),
+        "DocumentWidthTwoThirds" => (
+            CommandGroup::View,
+            t(L10nKey::CmdDocumentWidthTwoThirds).to_string(),
+        ),
         "ShowRightPanelInfo" => (
             CommandGroup::View,
             t(L10nKey::CmdRightPanelInfo).to_string(),
@@ -1030,6 +1053,10 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ToggleSftp" => KeyBinding::new(keystroke, ToggleSftp, None),
         "ShowSshForwards" => KeyBinding::new(keystroke, ShowSshForwards, None),
         "ToggleCodePanel" => KeyBinding::new(keystroke, ToggleCodePanel, None),
+        "ToggleDocumentFill" => KeyBinding::new(keystroke, ToggleDocumentFill, None),
+        "DocumentWidthThird" => KeyBinding::new(keystroke, DocumentWidthThird, None),
+        "DocumentWidthHalf" => KeyBinding::new(keystroke, DocumentWidthHalf, None),
+        "DocumentWidthTwoThirds" => KeyBinding::new(keystroke, DocumentWidthTwoThirds, None),
         "EditorSave" => KeyBinding::new(keystroke, EditorSave, None),
         "OpenSshProfiles" => KeyBinding::new(keystroke, OpenSshProfiles, None),
         "RestartSshSession" => KeyBinding::new(keystroke, RestartSshSession, None),

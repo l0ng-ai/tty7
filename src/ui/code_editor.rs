@@ -9,11 +9,13 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, Position, TabSize};
+use gpui_component::menu::ContextMenuExt as _;
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 
 use crate::ui::app::Tty7App;
+use crate::ui::document_column::DocumentChrome;
 use crate::ui::host_ops::{HostId, HostOps, MTime, SharedHost, WatchSub};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
@@ -1081,6 +1083,7 @@ impl Tty7App {
 impl Tty7App {
     pub(crate) fn render_code_overlay(
         &mut self,
+        chrome: DocumentChrome,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -1132,17 +1135,25 @@ impl Tty7App {
             .filter(|f| f.conflict)
             .map(|_| self.render_editor_conflict_banner(cx));
 
+        let header = chrome
+            .renders_own_header()
+            .then(|| self.render_editor_header(chrome, window, cx));
         let editor_col = v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(self.render_editor_header(window, cx))
+            .children(header)
             .when_some(conflict_banner, |this, b| this.child(b))
             .child(div().flex_1().min_h_0().child(body));
 
-        Some(
-            v_flex()
-                .id("code-panel")
+        // The panel's own paint is the same either way; only the box is not.
+        // Filling the workspace means stopping the window's translucency and
+        // repainting the theme image the root's copy now sits under; docking
+        // means sitting in the same plane as the right panel, which the column
+        // wrapper has already painted.
+        let shell = v_flex().id("code-panel");
+        let shell = match chrome {
+            DocumentChrome::Fill => shell
                 .absolute()
                 .inset_0()
                 .occlude()
@@ -1154,33 +1165,58 @@ impl Tty7App {
                 // theme background image is repainted on top of it, since the
                 // root's copy now sits below this fill.
                 .bg(crate::ui::theme::overlay_background(cx))
+                .children(crate::ui::app::overlay_surface_layers(cx)),
+            DocumentChrome::Dock | DocumentChrome::DockHoisted => shell.size_full().min_w_0(),
+        };
+        Some(
+            shell
                 .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                     if ev.keystroke.key == "escape" {
                         this.toggle_code_panel(window, cx);
                     }
                 }))
-                .children(crate::ui::app::overlay_surface_layers(cx))
                 .child(h_flex().flex_1().min_h_0().w_full().child(editor_col))
                 .child(self.render_code_status_bar(window, cx))
                 .into_any_element(),
         )
     }
 
-    fn render_editor_header(
+    /// The editor header alone, for the strip above a docked column.
+    pub(crate) fn render_editor_header_only(
         &self,
+        chrome: DocumentChrome,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    ) -> gpui::AnyElement {
+        self.render_editor_header(chrome, window, cx)
+            .into_any_element()
+    }
+
+    fn render_editor_header(
+        &self,
+        chrome: DocumentChrome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let active = self.tab_code().and_then(|c| c.active_file());
         let name = active.map(|f| f.label());
         let dirty = active.is_some_and(|f| f.dirty);
-        let lead = if self.left_panel_open(cx) {
+        // `TITLE_BAR_LEAD` is the room macOS's traffic lights need. Only a
+        // header that starts at the left edge of the window has them to clear,
+        // and a docked column never does.
+        let lead = if self.left_panel_open(cx) || chrome.is_dock() {
             crate::ui::app::CONTENT_INSET
         } else {
             crate::ui::app::TITLE_BAR_LEAD
         };
-        crate::ui::app::title_bar_drag(h_flex().id("editor-header"), "editor-header", window, cx)
-            .flex_none()
+        let row = h_flex().id("editor-header");
+        let row = if chrome.header_is_title_strip() {
+            crate::ui::app::title_bar_drag(row, "editor-header", window, cx)
+        } else {
+            row
+        };
+        let menu_app = cx.entity().downgrade();
+        row.flex_none()
             .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
             .items_center()
             .gap_1p5()
@@ -1226,6 +1262,9 @@ impl Tty7App {
                     })),
                 ),
             )
+            .context_menu(move |menu, _window, cx| {
+                Tty7App::document_header_menu(menu, &menu_app, cx)
+            })
     }
 
     fn render_code_status_bar(&self, _window: &Window, cx: &mut Context<Self>) -> gpui::Div {

@@ -563,6 +563,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
             "行の +N −N をクリックすると、オーバーレイでワーキングツリーの Diff を開きます。オフならカウントは表示されたまま、クリックだけできません"
         }
+        L10nKey::DocumentDock => "ターミナルの隣にドック",
+        L10nKey::DocumentFill => "ウィンドウ全体",
         L10nKey::SettingsNotifications => "通知",
         L10nKey::SettingsNotifyOnCommandFinish => "コマンド終了時に通知",
         L10nKey::SettingsNotifyOnCommandFinishDesc => {
@@ -1469,6 +1471,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdResetFontSize => "フォントサイズをリセット",
         L10nKey::CmdEnterFullScreen => "全画面表示",
         L10nKey::CmdToggleDiffViewMode => "統合 / 左右分割の差分表示を切り替え",
+        L10nKey::CmdDocumentDock => "ドキュメント: ターミナルの隣にドック",
+        L10nKey::CmdDocumentFill => "ドキュメント: ウィンドウ全体",
+        L10nKey::CmdToggleDocumentFill => "ドキュメントのフィル / ドックを切り替え",
+        L10nKey::CmdDocumentWidthThird => "ドキュメント: 幅3分の1",
+        L10nKey::CmdDocumentWidthHalf => "ドキュメント: 幅半分",
+        L10nKey::CmdDocumentWidthTwoThirds => "ドキュメント: 幅3分の2",
         L10nKey::CmdGitCommit => "Git: コミット",
         L10nKey::CmdGitStageAll => "Git: すべての変更をステージ",
         L10nKey::CmdGitUnstageAll => "Git: すべてのステージを取り消す",

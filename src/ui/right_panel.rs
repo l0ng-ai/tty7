@@ -306,7 +306,7 @@ impl Tty7App {
         crate::ui::app::side_panel_max(
             window.viewport_size().width.as_f32(),
             MIN_WIDTH,
-            self.sidebar_floor(cx),
+            self.sidebar_floor(cx) + self.document_floor(cx),
         )
     }
 
@@ -406,7 +406,7 @@ impl Tty7App {
         // below only ever sees a `Window`, and the cap it clamps against has to
         // be the same one the layout applies or the panel springs back from
         // wherever it was dropped.
-        let sidebar_floor = self.sidebar_floor(cx);
+        let others_floor = self.sidebar_floor(cx) + self.document_floor(cx);
         let backing = canvas(
             {
                 let container = container.clone();
@@ -433,7 +433,7 @@ impl Tty7App {
                             let max = crate::ui::app::side_panel_max(
                                 window.viewport_size().width.as_f32(),
                                 MIN_WIDTH,
-                                sidebar_floor,
+                                others_floor,
                             );
                             width_cell.set(raw.clamp(MIN_WIDTH, max));
                             window.refresh();

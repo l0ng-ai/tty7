@@ -117,8 +117,18 @@ impl Tty7App {
         crate::ui::app::side_panel_max(
             window.viewport_size().width.as_f32(),
             MIN_SIDEBAR_WIDTH,
-            self.right_panel_floor(cx),
+            self.right_panel_floor(cx) + self.document_floor(cx),
         )
+    }
+
+    /// How wide the sidebar is drawn, given the live cell and the cap the rest
+    /// of the window leaves it. Read here rather than clamped at each caller so
+    /// the document column's budget and the sidebar itself can never disagree
+    /// about how much width is already spoken for.
+    pub(crate) fn sidebar_px(&self, window: &Window, cx: &gpui::App) -> f32 {
+        self.sidebar_width
+            .get()
+            .clamp(MIN_SIDEBAR_WIDTH, self.sidebar_max_px(window, cx))
     }
 
     pub(crate) fn tab_sidebar(
@@ -129,8 +139,7 @@ impl Tty7App {
         let active = self.active;
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let show_badges = self.mod_hint_badges;
-        let max_width = self.sidebar_max_px(window, cx);
-        let width = self.sidebar_width.get().clamp(MIN_SIDEBAR_WIDTH, max_width);
+        let width = self.sidebar_px(window, cx);
         let query = self.sidebar_search.read(cx).value().trim().to_lowercase();
         // Blanked here, written again from paint: a row filtered out by the
         // search — or hidden with its collapsed group — must leave no rectangle
@@ -1040,7 +1049,7 @@ impl Tty7App {
         // below only ever sees a `Window`, and the cap it clamps against has to
         // be the same one the layout applies or the sidebar springs back from
         // wherever it was dropped.
-        let panel_floor = self.right_panel_floor(cx);
+        let others_floor = self.right_panel_floor(cx) + self.document_floor(cx);
         let backing = canvas(
             {
                 let container = container.clone();
@@ -1066,7 +1075,7 @@ impl Tty7App {
                             let max = crate::ui::app::side_panel_max(
                                 window.viewport_size().width.as_f32(),
                                 MIN_SIDEBAR_WIDTH,
-                                panel_floor,
+                                others_floor,
                             );
                             width_cell.set(raw.clamp(MIN_SIDEBAR_WIDTH, max));
                             window.refresh();

@@ -488,6 +488,27 @@ pub(crate) fn chrome_tile(button: Button, selected: bool, cx: &gpui::App) -> But
     chrome_tile_sized(button, TILE_SIZE, TILE_GLYPH, selected, cx)
 }
 
+/// How wide the two chrome tiles at the trailing end of the title bar are, with
+/// the padding around them.
+pub(crate) fn trailing_chrome_tiles_w() -> f32 {
+    let trailing_pad = if cfg!(target_os = "macos") {
+        tile_trailing_inset()
+    } else {
+        4.
+    };
+    trailing_pad + crate::ui::app::TILE_SIZE + 2. + crate::ui::app::TILE_SIZE
+}
+
+/// The whole trailing cluster: those tiles and the OS window buttons beyond
+/// them.
+///
+/// Anything else drawn into that end of the title bar has to stop short of it —
+/// which for the hoisted document header means the case where the detail panel
+/// is closed and the document column runs to the window's right edge.
+pub(crate) fn trailing_chrome_w() -> f32 {
+    trailing_chrome_tiles_w() + crate::ui::app::WINDOW_CONTROLS_W
+}
+
 pub(crate) fn chrome_tile_sized(
     button: Button,
     tile: f32,
@@ -1532,14 +1553,7 @@ impl Tty7App {
         let corner_w = if panel_w > 0. {
             0.
         } else {
-            chrome_band_w.unwrap_or_else(|| {
-                let trailing_pad = if cfg!(target_os = "macos") {
-                    tile_trailing_inset()
-                } else {
-                    4.
-                };
-                trailing_pad + crate::ui::app::TILE_SIZE + 2. + crate::ui::app::TILE_SIZE
-            })
+            chrome_band_w.unwrap_or_else(trailing_chrome_tiles_w)
         };
         let fixed_w = 3. * CHIP_GAP + crate::ui::app::TILE_SIZE + corner_w;
         let chips_avail = (strip_w - px(fixed_w + GRAB_HANDLE_W)).max(px(80.));

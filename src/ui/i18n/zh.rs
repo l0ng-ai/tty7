@@ -488,6 +488,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
             "点击行上的 +N −N 在浮层中打开 worktree diff。关闭后计数仍显示，只是不可点击。"
         }
+        L10nKey::DocumentDock => "停靠在终端旁",
+        L10nKey::DocumentFill => "铺满窗口",
         L10nKey::SettingsNotifications => "通知",
         L10nKey::SettingsNotifyOnCommandFinish => "命令完成时通知",
         L10nKey::SettingsNotifyOnCommandFinishDesc => "较长的前台命令完成后发出桌面提醒。",
@@ -1333,6 +1335,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdEnterFullScreen => "进入全屏",
         L10nKey::CmdClearScrollback => "清除回滚内容",
         L10nKey::CmdToggleDiffViewMode => "切换统一 / 并排差异视图",
+        L10nKey::CmdDocumentDock => "文档：停靠在终端旁",
+        L10nKey::CmdDocumentFill => "文档：铺满窗口",
+        L10nKey::CmdToggleDocumentFill => "切换文档铺满 / 停靠",
+        L10nKey::CmdDocumentWidthThird => "文档：三分之一宽",
+        L10nKey::CmdDocumentWidthHalf => "文档：一半宽",
+        L10nKey::CmdDocumentWidthTwoThirds => "文档：三分之二宽",
         L10nKey::CmdGitCommit => "Git：提交",
         L10nKey::CmdGitStageAll => "Git：暂存全部更改",
         L10nKey::CmdGitUnstageAll => "Git：取消暂存全部更改",

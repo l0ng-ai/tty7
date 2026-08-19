@@ -183,6 +183,19 @@ pub struct Config {
     /// `diffEditor.renderSideBySide` makes.
     #[serde(default, deserialize_with = "de_lenient")]
     pub diff_view: DiffViewMode,
+    /// How the code / diff surface shares the window with the terminal. Global
+    /// for the same reason `diff_view` is: someone who wants documents beside
+    /// the terminal wants that in every workspace, not once per tab.
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub document_layout: DocumentLayout,
+    /// The share of the terminal column — the flex area between the sidebar and
+    /// the right panel — the document column takes when docked. The named
+    /// widths land on a third, a half and two thirds; a drag leaves whatever it
+    /// leaves. Live layout narrows this further when the terminal's floor needs
+    /// the width, so the bounds here only have to keep a hand-written config
+    /// from hiding one side or the other outright.
+    #[serde(default = "default_document_ratio")]
+    pub document_ratio: f32,
     /// The source control panel's history section starts collapsed: a graph
     /// unfurling the first time someone opens the panel is a worse first
     /// impression than one they asked for.
@@ -586,6 +599,8 @@ impl Default for Config {
             right_panel_width: default_right_panel_width(),
             right_panel_tab: RightPanelTab::Info,
             diff_view: DiffViewMode::Split,
+            document_layout: DocumentLayout::default(),
+            document_ratio: default_document_ratio(),
             scm_graph_expanded: false,
             sidebar_grouping: SidebarGrouping::Repo,
             sidebar_diff_preview: true,
@@ -759,6 +774,10 @@ impl Config {
             self.right_panel_width = default_right_panel_width();
         }
         self.right_panel_width = self.right_panel_width.clamp(100.0, 2000.0);
+        if !self.document_ratio.is_finite() || self.document_ratio <= 0.0 {
+            self.document_ratio = default_document_ratio();
+        }
+        self.document_ratio = self.document_ratio.clamp(0.2, 0.8);
         if let Some(command) = &self.link_file_command
             && command.trim().is_empty()
         {
@@ -1072,6 +1091,36 @@ pub enum DiffViewMode {
 fn default_right_panel_width() -> f32 {
     260.
 }
+
+/// Where the code / diff surface is drawn.
+///
+/// It used to be one thing — a full-workspace overlay — so there was nothing to
+/// name. Docking it beside the terminal is the default now: opening a file to
+/// read it while an agent talks underneath was the reason the built-in editor
+/// exists, and an overlay covers the agent. `Fill` is that overlay, kept for
+/// anyone who wants the whole window for the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentLayout {
+    #[default]
+    Dock,
+    Fill,
+}
+
+fn default_document_ratio() -> f32 {
+    0.5
+}
+
+/// The named shares of the terminal column a document column can be snapped to,
+/// in the order the segmented control and the divider's double-click cycle use.
+pub const DOCUMENT_RATIO_THIRD: f32 = 1. / 3.;
+pub const DOCUMENT_RATIO_HALF: f32 = 0.5;
+pub const DOCUMENT_RATIO_TWO_THIRDS: f32 = 2. / 3.;
+pub const DOCUMENT_RATIO_STOPS: [f32; 3] = [
+    DOCUMENT_RATIO_THIRD,
+    DOCUMENT_RATIO_HALF,
+    DOCUMENT_RATIO_TWO_THIRDS,
+];
 
 /// The rem the chrome has always been laid out against — gpui's own default,
 /// which is what `text_sm()` and `text_xs()` resolve 14px and 12px from. Left

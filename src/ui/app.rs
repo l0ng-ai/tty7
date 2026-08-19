@@ -175,16 +175,47 @@ pub(crate) const HOME_CURSOR_BLINK_MS: u64 = 600;
 /// dropping it would have let a panel grow past where it could before under
 /// cover of a change that is only meant to take width away from panels.
 ///
-/// `other_floor` is zero when the other panel is closed, which is why this
-/// takes floors rather than reading them: only the caller knows what is up.
-pub(crate) fn side_panel_max(viewport: f32, own_floor: f32, other_floor: f32) -> f32 {
-    (viewport - TERMINAL_MIN_W - other_floor)
+/// `others_floor` is the sum of the floors under every *other* column that is
+/// open — the panel opposite, and the document column when a file or a diff is
+/// docked. It is zero for each of them that is closed, which is why this takes
+/// floors rather than reading them: only the caller knows what is up.
+pub(crate) fn side_panel_max(viewport: f32, own_floor: f32, others_floor: f32) -> f32 {
+    (viewport - TERMINAL_MIN_W - others_floor)
         .min(viewport * SIDE_PANEL_MAX_RATIO)
         .max(own_floor)
 }
 
 /// The half of the window neither panel may grow past on its own.
 const SIDE_PANEL_MAX_RATIO: f32 = 0.5;
+
+/// The narrowest a docked document column may be squeezed to: the header, a
+/// readable run of about thirty columns, and the status bar under them. Below
+/// this a file is a ribbon of hyphenated fragments and the column is worth
+/// less than the terminal width it costs.
+pub(crate) const DOCUMENT_MIN_W: f32 = 280.;
+
+/// How wide the docked document column is, given the width the terminal and the
+/// document share — the window less the sidebar and the right panel — and the
+/// share of it the user asked for.
+///
+/// `None` is the narrow-window answer: there is no way to give both the
+/// terminal and a document a width worth reading, so the caller falls back to
+/// filling the workspace for this frame. That fallback is *derived*, never
+/// stored — widening the window docks again on the next frame, and the user's
+/// saved `document_layout` is untouched throughout.
+///
+/// The named two-thirds deliberately runs past the half-window cap the side
+/// panels obey. That cap is there so neither *panel* can dominate a wide
+/// display; the document is the thing the user is reading, and an increment
+/// that silently became a half on every window wider than about 720 points of
+/// body would be a lie. The terminal's floor still binds.
+pub(crate) fn document_column_px(body: f32, ratio: f32) -> Option<f32> {
+    if !body.is_finite() || body < TERMINAL_MIN_W + DOCUMENT_MIN_W {
+        return None;
+    }
+    let ratio = if ratio.is_finite() { ratio } else { 0.5 };
+    Some((body * ratio).clamp(DOCUMENT_MIN_W, body - TERMINAL_MIN_W))
+}
 
 pub(crate) const TITLE_BAR_HEIGHT: f32 = 40.;
 
@@ -353,6 +384,16 @@ pub struct Tab {
     pub(crate) code: Option<Box<crate::ui::code_editor::TabCode>>,
     pub(crate) sidebar_group: std::cell::RefCell<Option<std::path::PathBuf>>,
     pub(crate) overlay_top: OverlayTop,
+    /// Whether this tab's document fills the workspace or docks beside the
+    /// terminal, once the tab has been told. `None` follows `document_layout`
+    /// in the config, which is the default a fresh tab starts from and the
+    /// last explicit choice anyone made.
+    ///
+    /// Per tab rather than per window because what you are doing differs per
+    /// tab: reading a long file in one while an agent works in another wants
+    /// the whole window here and half of it there, and a global switch made
+    /// each of those flip the other.
+    pub(crate) document_layout: Option<crate::core::config::DocumentLayout>,
     pub(crate) tree_id: std::cell::Cell<tty7_core::core::machine::TabId>,
     /// Monotonic stamp of when this tab was last activated, used to order the
     /// switcher's tab column most-recently-used first. Zero means never.
@@ -367,7 +408,7 @@ pub(crate) enum OverlayTop {
 }
 
 impl Tab {
-    fn new(pane: Pane) -> Self {
+    pub(crate) fn new(pane: Pane) -> Self {
         Self {
             pane,
             name: None,
@@ -376,6 +417,7 @@ impl Tab {
             diff_overlay: None,
             code: None,
             overlay_top: OverlayTop::default(),
+            document_layout: None,
             sidebar_group: std::cell::RefCell::new(None),
             tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
             last_used: std::cell::Cell::new(0),
@@ -391,6 +433,7 @@ impl Tab {
             diff_overlay: None,
             code: None,
             overlay_top: OverlayTop::default(),
+            document_layout: None,
             sidebar_group: std::cell::RefCell::new(
                 tree.sidebar_group.clone().map(std::path::PathBuf::from),
             ),
@@ -636,6 +679,12 @@ pub struct Tty7App {
     pub(crate) settings_hit_anchored: Cell<bool>,
     pub(crate) right_panel_width: Rc<Cell<f32>>,
     pub(crate) right_panel_dragging: Rc<Cell<bool>>,
+    /// The docked document column's share of the terminal column, live. Held
+    /// beside the config value rather than in it for the same reason the two
+    /// panel widths are: a drag writes this cell on every mouse move and the
+    /// config once, on mouse up.
+    pub(crate) document_ratio: Rc<Cell<f32>>,
+    pub(crate) document_dragging: Rc<Cell<bool>>,
     pub(crate) right_panel_visible: bool,
     pub(crate) right_panel_tab: RightPanelTab,
     pub(crate) sidebar_collapsed: bool,
@@ -1057,6 +1106,7 @@ impl Tty7App {
         });
         let sidebar_width = cx.global::<Config>().sidebar_width;
         let right_panel_width = cx.global::<Config>().right_panel_width;
+        let document_ratio = cx.global::<Config>().document_ratio;
         let right_panel_visible = cx.global::<Config>().right_panel_visible;
         let right_panel_tab = cx.global::<Config>().right_panel_tab;
         let scm_graph_expanded = cx.global::<Config>().scm_graph_expanded;
@@ -1227,6 +1277,8 @@ impl Tty7App {
             settings_hit_anchored: Cell::new(false),
             right_panel_width: Rc::new(Cell::new(right_panel_width)),
             right_panel_dragging: Rc::new(Cell::new(false)),
+            document_ratio: Rc::new(Cell::new(document_ratio)),
+            document_dragging: Rc::new(Cell::new(false)),
             right_panel_visible,
             right_panel_tab,
             sidebar_collapsed,
@@ -1550,6 +1602,7 @@ impl Tty7App {
                 diff_overlay: None,
                 code: None,
                 overlay_top: OverlayTop::default(),
+                document_layout: None,
                 sidebar_group: std::cell::RefCell::new(st.sidebar_group),
                 tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
                 last_used: std::cell::Cell::new(0),
@@ -4878,6 +4931,16 @@ impl Tty7App {
             ToggleSftp => self.toggle_sftp(window, cx),
             ShowSshForwards => self.show_ssh_forwards(window, cx),
             ToggleCodePanel => self.toggle_code_panel(window, cx),
+            ToggleDocumentFill => self.toggle_document_fill(cx),
+            DocumentWidthThird => {
+                self.set_document_ratio(crate::core::config::DOCUMENT_RATIO_THIRD, cx)
+            }
+            DocumentWidthHalf => {
+                self.set_document_ratio(crate::core::config::DOCUMENT_RATIO_HALF, cx)
+            }
+            DocumentWidthTwoThirds => {
+                self.set_document_ratio(crate::core::config::DOCUMENT_RATIO_TWO_THIRDS, cx)
+            }
             RestartSshSession => self.restart_ssh_session(window, cx),
             SetTheme(i) => {
                 if let Some(id) = crate::ui::presets::all(cx).get(i).map(|t| t.id.clone()) {
@@ -5735,6 +5798,8 @@ impl Tty7App {
         self.sidebar_width.set(cx.global::<Config>().sidebar_width);
         self.right_panel_width
             .set(cx.global::<Config>().right_panel_width);
+        self.document_ratio
+            .set(cx.global::<Config>().document_ratio);
         if font_size != self.font_size {
             self.font_size = font_size;
             let px_size = px(font_size);
@@ -6972,27 +7037,72 @@ impl Render for Tty7App {
                 this.child(el)
             });
 
-        let diff_overlay = self.render_diff_overlay(window, cx);
-
-        let code_overlay = self.render_code_overlay(window, cx);
-
-        let overlays: Vec<gpui::AnyElement> = {
-            let mut pair = vec![
-                (OverlayTop::Diff, diff_overlay),
-                (OverlayTop::Code, code_overlay),
-            ];
-            if self
-                .tabs
-                .get(self.active)
-                .is_some_and(|t| t.overlay_top == OverlayTop::Diff)
-            {
-                pair.reverse();
-            }
-            pair.into_iter().filter_map(|(_, el)| el).collect()
+        // One decision for the whole document surface. Docked, exactly one of
+        // the two surfaces is drawn — a column has one child, and two `flex_1`
+        // siblings would split it and fight — so `overlay_top` stops ordering a
+        // pair and starts choosing between them. Filling, nothing changes: both
+        // are rendered, ordered by `overlay_top`, and the front one wins on
+        // paint order as it always has.
+        let document_dock_px = self.document_dock_px(window, cx);
+        // Where the docked header sits. Everywhere but macOS the title bar
+        // spans the workspace and leaves the strip above the column empty, so
+        // the header goes up into it; on macOS the column already reaches the
+        // top of the window and its own first row lands there.
+        let document_chrome = if cfg!(target_os = "macos") {
+            crate::ui::document_column::DocumentChrome::Dock
+        } else {
+            crate::ui::document_column::DocumentChrome::DockHoisted
         };
+        let document_header = document_dock_px
+            .is_some()
+            .then(|| self.render_document_header(document_chrome, window, cx))
+            .flatten();
+        let (overlays, document_column) = match document_dock_px {
+            Some(w) => (
+                Vec::new(),
+                self.render_document_column(w, document_chrome, window, cx),
+            ),
+            None => {
+                let diff_overlay = self.render_diff_overlay(
+                    crate::ui::document_column::DocumentChrome::Fill,
+                    window,
+                    cx,
+                );
+                let code_overlay = self.render_code_overlay(
+                    crate::ui::document_column::DocumentChrome::Fill,
+                    window,
+                    cx,
+                );
+                let mut pair = vec![
+                    (OverlayTop::Diff, diff_overlay),
+                    (OverlayTop::Code, code_overlay),
+                ];
+                if self
+                    .tabs
+                    .get(self.active)
+                    .is_some_and(|t| t.overlay_top == OverlayTop::Diff)
+                {
+                    pair.reverse();
+                }
+                (
+                    pair.into_iter()
+                        .filter_map(|(_, el)| el)
+                        .collect::<Vec<gpui::AnyElement>>(),
+                    None,
+                )
+            }
+        };
+        let document_px = document_column
+            .as_ref()
+            .map_or(0., |_| document_dock_px.unwrap_or_default());
 
         let right_panel = self.render_right_panel(window, cx);
-        let panel_below_title_bar = right_panel.is_some() && !cfg!(target_os = "macos");
+        // A docked document takes the same fork the right panel does: on
+        // Windows and Linux the window controls live at the right end of the
+        // title bar, so the bar has to span the workspace rather than sit
+        // inside the terminal column with a column drawn to the right of it.
+        let panel_below_title_bar =
+            (right_panel.is_some() || document_column.is_some()) && !cfg!(target_os = "macos");
         let (column_title_bar, spanning_title_bar) = if panel_below_title_bar {
             (None, Some(title_bar))
         } else {
@@ -7003,7 +7113,11 @@ impl Render for Tty7App {
         } else {
             (overlays, Vec::new())
         };
-        let panel_px = self.right_panel_px(window, cx);
+        let panel_px = if right_panel.is_some() {
+            self.right_panel_px(window, cx)
+        } else {
+            0.
+        };
         let terminal_column = div()
             .flex_1()
             .min_w_0()
@@ -7020,6 +7134,7 @@ impl Render for Tty7App {
             .flex()
             .flex_row()
             .child(terminal_column)
+            .when_some(document_column, |this, column| this.child(column))
             .when_some(right_panel, |this, panel| this.child(panel));
         let main_layout = div()
             .flex_1()
@@ -7039,18 +7154,59 @@ impl Render for Tty7App {
                         div()
                             .relative()
                             .flex_none()
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .bottom_0()
-                                    .right_0()
-                                    .w(px(self.right_panel_px(window, cx)))
-                                    .bg(crate::ui::theme::workspace_surface_color(cx))
-                                    .border_l_1()
-                                    .border_color(cx.theme().sidebar_border),
-                            )
-                            .child(bar),
+                            // One patch per column below, rather than one for
+                            // both: each carries the left border its own column
+                            // carries, so the rule between the document and the
+                            // detail panel runs the full height of the window
+                            // instead of stopping at the title bar.
+                            .when(panel_px > 0., |this| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .bottom_0()
+                                        .right_0()
+                                        .w(px(panel_px))
+                                        .bg(crate::ui::theme::workspace_surface_color(cx))
+                                        .border_l_1()
+                                        .border_color(cx.theme().sidebar_border),
+                                )
+                            })
+                            .when(document_px > 0., |this| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .bottom_0()
+                                        .right(px(panel_px))
+                                        .w(px(document_px))
+                                        .bg(crate::ui::theme::workspace_surface_color(cx))
+                                        .border_l_1()
+                                        .border_color(cx.theme().sidebar_border),
+                                )
+                            })
+                            .child(bar)
+                            // The document's header, in the strip the spanning
+                            // title bar leaves empty above its column. Drawn
+                            // after the bar so it sits over the tab strip's
+                            // slack — and stopping short of the trailing
+                            // chrome, which is only in the way when the detail
+                            // panel is closed and this column is the one at the
+                            // window's right edge.
+                            .when_some(document_header, |this, header| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .h(px(TITLE_BAR_HEIGHT))
+                                        .right(px(panel_px))
+                                        .w(px(document_px))
+                                        .when(panel_px <= 0., |d| {
+                                            d.pr(px(crate::ui::tab_strip::trailing_chrome_w()))
+                                        })
+                                        .child(header),
+                                )
+                            }),
                     )
                     .child(panel_row)
                     .children(hoisted_overlays.into_iter().map(|overlay| {
@@ -7266,6 +7422,20 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &ToggleDiffViewMode, _window, cx| {
                     this.toggle_diff_view_mode(cx)
                 }))
+                .on_action(cx.listener(|this, _: &ToggleDocumentFill, _window, cx| {
+                    this.toggle_document_fill(cx)
+                }))
+                .on_action(cx.listener(|this, _: &DocumentWidthThird, _window, cx| {
+                    this.set_document_ratio(crate::core::config::DOCUMENT_RATIO_THIRD, cx)
+                }))
+                .on_action(cx.listener(|this, _: &DocumentWidthHalf, _window, cx| {
+                    this.set_document_ratio(crate::core::config::DOCUMENT_RATIO_HALF, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &DocumentWidthTwoThirds, _window, cx| {
+                        this.set_document_ratio(crate::core::config::DOCUMENT_RATIO_TWO_THIRDS, cx)
+                    }),
+                )
                 .on_action(cx.listener(|this, _: &ScmCommit, window, cx| {
                     this.run_scm_action(ScmIntent::Commit, window, cx)
                 }))
@@ -7642,6 +7812,7 @@ fn tabs_from_session(
             diff_overlay: None,
             code: None,
             overlay_top: OverlayTop::default(),
+            document_layout: None,
             sidebar_group: std::cell::RefCell::new(st.sidebar_group.clone()),
             tree_id: std::cell::Cell::new(
                 st.tree_id
@@ -8439,10 +8610,10 @@ mod window_drag_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseReason, TERMINAL_MIN_W, TabAgentSession, clear_window_override_values, close_prompt,
-        join_shell_args, leaf_shares_the_window_daemon, mru_order, pane_free_for,
-        parse_ssh_connect_input, parse_ssh_option_words, side_panel_max, split_shell_args,
-        wd_path_saveable,
+        CloseReason, DOCUMENT_MIN_W, TERMINAL_MIN_W, TabAgentSession, clear_window_override_values,
+        close_prompt, document_column_px, join_shell_args, leaf_shares_the_window_daemon,
+        mru_order, pane_free_for, parse_ssh_connect_input, parse_ssh_option_words, side_panel_max,
+        split_shell_args, wd_path_saveable,
     };
 
     const SIDEBAR_MIN: f32 = crate::ui::tab_sidebar::MIN_SIDEBAR_WIDTH;
@@ -8466,6 +8637,47 @@ mod tests {
         // terminal the other half, so the older cap is the one that binds and
         // a lone panel behaves exactly as it always did.
         assert_eq!(side_panel_max(mid, SIDEBAR_MIN, 0.), mid / 2.);
+    }
+
+    /// A docked document is a third column in the same budget, so it has to be
+    /// reserved by the two panels the way they already reserve each other —
+    /// otherwise a panel dragged to its old limit takes the width out of the
+    /// document, which then has nowhere to take it from but the terminal.
+    #[test]
+    fn a_docked_document_is_reserved_by_the_panels_too() {
+        let wide = 1440.;
+        let max = side_panel_max(wide, PANEL_MIN, SIDEBAR_MIN + DOCUMENT_MIN_W);
+        assert_eq!(
+            wide - SIDEBAR_MIN - DOCUMENT_MIN_W - max,
+            TERMINAL_MIN_W,
+            "a panel at its cap, with both other columns at their floors,              leaves the terminal exactly its floor"
+        );
+        assert!(
+            max < side_panel_max(wide, PANEL_MIN, SIDEBAR_MIN),
+            "the reservation only ever takes width away"
+        );
+    }
+
+    /// The floors are not what the panels are actually drawn at. Both are
+    /// draggable and both persist, so the budget has to be fed the live widths
+    /// or a widened sidebar is width the terminal silently loses.
+    #[test]
+    fn widened_panels_still_leave_the_terminal_its_floor() {
+        let viewport = 1440.;
+        // Both dragged well past their floors, and the document asked for the
+        // widest named share there is.
+        let body = viewport - 400. - 320.;
+        let document = document_column_px(body, 2. / 3.).expect("720 points seats both");
+        assert!(
+            body - document >= TERMINAL_MIN_W,
+            "terminal got {}",
+            body - document
+        );
+
+        // Squeezed further, the document is the one that gives up first — and
+        // then stops existing rather than dropping under its own floor.
+        let squeezed = viewport - 600. - 400.;
+        assert_eq!(document_column_px(squeezed, 0.5), None);
     }
 
     /// The reservation must only ever take width away from a panel. On a wide

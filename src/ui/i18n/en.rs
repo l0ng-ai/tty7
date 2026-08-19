@@ -554,6 +554,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
             "Click a row's +N −N to open the working-tree diff in an overlay. Off leaves the counts visible, just not clickable."
         }
+        L10nKey::DocumentDock => "Dock beside terminal",
+        L10nKey::DocumentFill => "Fill window",
         L10nKey::SettingsNotifications => "Notifications",
         L10nKey::SettingsNotifyOnCommandFinish => "Notify on command finish",
         L10nKey::SettingsNotifyOnCommandFinishDesc => {
@@ -1412,6 +1414,12 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdResetFontSize => "Reset Font Size",
         L10nKey::CmdEnterFullScreen => "Enter Full Screen",
         L10nKey::CmdToggleDiffViewMode => "Toggle Unified / Side-by-Side Diff",
+        L10nKey::CmdDocumentDock => "Document: Dock Beside Terminal",
+        L10nKey::CmdDocumentFill => "Document: Fill Window",
+        L10nKey::CmdToggleDocumentFill => "Toggle Document Fill / Dock",
+        L10nKey::CmdDocumentWidthThird => "Document: Third Width",
+        L10nKey::CmdDocumentWidthHalf => "Document: Half Width",
+        L10nKey::CmdDocumentWidthTwoThirds => "Document: Two-Thirds Width",
         L10nKey::CmdGitCommit => "Git: Commit",
         L10nKey::CmdGitStageAll => "Git: Stage All Changes",
         L10nKey::CmdGitUnstageAll => "Git: Unstage All Changes",
