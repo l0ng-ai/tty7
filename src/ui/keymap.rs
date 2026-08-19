@@ -212,10 +212,16 @@ fn action_bindings(effective: &[(String, String)]) -> Vec<KeyBinding> {
 /// Whether a chord is one the terminal owes the PTY as a control code.
 ///
 /// Ctrl and nothing else, over the keys that carry a C0 byte: the alphabet,
-/// `[ \ ] ^ _ / ?`, the digits 2..8 and Space. A binding sitting on one of
+/// `@ [ \ ] ^ _ / ?`, the digits 2..8 and Space — `ctrl_c0` in
+/// `terminal::input` is the table this mirrors. A binding sitting on one of
 /// these does not merely shadow the shell, it deletes a byte the program on
 /// the far end is waiting for — Ctrl+D is EOF, Ctrl+W deletes a word, Ctrl+^
 /// is vim's alternate file.
+///
+/// The backtick is in the set without being in that table — it is held over
+/// from when this rule lived inside the defaults test. It errs the safe way:
+/// a chord that encodes nothing gets a warning it did not strictly earn,
+/// which is cheaper than a default quietly eating one that does.
 fn steals_a_control_code(chord: &str) -> bool {
     let Ok(ks) = Keystroke::parse(chord) else {
         return false;
@@ -1419,18 +1425,24 @@ mod tests {
             "Ctrl+Shift+V is the paste that works on every screen"
         );
         // The two ways out, both of which the control-code validator has to
-        // let through: retire the chord, or hand it the whole screen.
-        let retired = vec![("AlternatePaste".to_string(), String::new())];
+        // let through: retire the chord, or hand it the whole screen. Both are
+        // one line in a `config.json`, so both are asserted against the whole
+        // default table with that line applied — a bare one-entry table would
+        // pass either assertion without the escape hatch working at all.
+        let mut retired = effective.clone();
+        set_binding(&mut retired, "AlternatePaste", String::new());
         assert!(
             dispatched(&retired, "ctrl-v", "Terminal").is_empty(),
             "an emptied AlternatePaste gives Ctrl+V back to the shell"
         );
-        let everywhere = vec![("PasteText".to_string(), "ctrl-v".to_string())];
-        assert!(
-            dispatched(&everywhere, "ctrl-v", "Terminal alt_screen")
-                .contains(&PasteText::name_for_type()),
-            "a user may put Paste itself on Ctrl+V and have it everywhere"
-        );
+        let mut everywhere = effective.clone();
+        set_binding(&mut everywhere, "PasteText", "ctrl-v".to_string());
+        for context in ["Terminal", "Terminal alt_screen"] {
+            assert!(
+                dispatched(&everywhere, "ctrl-v", context).contains(&PasteText::name_for_type()),
+                "a user may put Paste itself on Ctrl+V and have it on every screen"
+            );
+        }
         let rebound = vec![("PasteText".to_string(), "ctrl-alt-v".to_string())];
         assert!(
             !extra_keystrokes(&rebound)

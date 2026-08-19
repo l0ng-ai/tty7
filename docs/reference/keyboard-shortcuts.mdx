@@ -73,10 +73,13 @@ the way Windows Terminal does out of the box:
 { "keybindings": { "PasteText": "ctrl-v" } }
 ```
 
-Every other <kbd>Ctrl</kbd> chord reaches the program you are running, control
-codes included: <kbd>Ctrl 6</kbd> and <kbd>Ctrl ⇧ 6</kbd> are `^^` (vim's
+Every <kbd>Ctrl</kbd> chord that stands for a control code reaches the program
+you are running: <kbd>Ctrl 6</kbd> and <kbd>Ctrl ⇧ 6</kbd> are `^^` (vim's
 alternate file), <kbd>Ctrl /</kbd> and <kbd>Ctrl ⇧ −</kbd> are `^_` (readline's
-undo), <kbd>Ctrl 3</kbd> is Escape.
+undo), <kbd>Ctrl 3</kbd> is Escape. The plain <kbd>Ctrl</kbd> chords tty7 keeps
+are the ones that stand for nothing: <kbd>Ctrl ⇥</kbd> for the next tab, and on
+Windows and Linux <kbd>Ctrl +</kbd> · <kbd>Ctrl −</kbd> · <kbd>Ctrl 0</kbd> for
+the font size.
 
 ## Git and SSH
 

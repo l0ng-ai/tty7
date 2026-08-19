@@ -2471,6 +2471,26 @@ impl TerminalView {
         context
     }
 
+    /// `AlternatePaste`, with the grid asked again before it pastes.
+    ///
+    /// The `!alt_screen` half of the binding's context comes from the frame
+    /// that was last *painted*, and gpui matches keystrokes against that frame
+    /// — so a program that took the alternate screen after the last paint is
+    /// still "at a prompt" as far as the keymap is concerned. One frame is
+    /// enough: the keystroke that launches a full-screen program and the
+    /// Ctrl+V after it can land either side of a paint. Pasting there is not a
+    /// mistake the user can take back — vim in normal mode runs the clipboard
+    /// as commands — so the last word belongs to the terminal mode, not to the
+    /// frame. Propagating hands the chord on to `on_key_down`, which encodes it
+    /// as the SYN the program is waiting for.
+    fn alternate_paste(&mut self, cx: &mut Context<Self>) {
+        if self.on_alt_screen() {
+            cx.propagate();
+            return;
+        }
+        self.paste_from_clipboard(cx);
+    }
+
     pub(super) fn key_flags(&self) -> super::input::KeyFlags {
         super::input::KeyFlags::from_mode(self.terminal.term.lock().mode())
     }
@@ -6106,9 +6126,7 @@ impl Render for TerminalView {
                 this.cut_contextual(cx);
             }))
             .on_action(cx.listener(|this, _: &PasteText, _w, cx| this.paste_from_clipboard(cx)))
-            .on_action(
-                cx.listener(|this, _: &AlternatePaste, _w, cx| this.paste_from_clipboard(cx)),
-            )
+            .on_action(cx.listener(|this, _: &AlternatePaste, _w, cx| this.alternate_paste(cx)))
             .on_action(cx.listener(|this, _: &SelectAll, _w, cx| this.select_all_contextual(cx)))
             .on_action(cx.listener(|this, _: &UndoEdit, _w, cx| this.undo_edit(false, cx)))
             .on_action(cx.listener(|this, _: &RedoEdit, _w, cx| this.undo_edit(true, cx)))
@@ -12201,6 +12219,37 @@ mod gpui_tests {
         vcx.simulate_keystrokes("ctrl-v");
 
         assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x16]));
+    }
+
+    /// The other half of that rule, which the binding's context cannot state.
+    ///
+    /// gpui matches a keystroke against the frame it last *painted*, so
+    /// `!alt_screen` outlives the switch by a frame: launch a full-screen
+    /// program and hit Ctrl+V before the next paint and the keymap still
+    /// believes the pane is at a prompt. The action asks the grid itself, so
+    /// the clipboard never lands in a program that would run it as commands.
+    #[gpui::test]
+    fn alternate_paste_asks_the_grid_and_not_the_last_frame(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("echo hi".into())));
+
+        window
+            .update(cx, |view, _window, cx| {
+                assert!(!view.on_alt_screen());
+                view.alternate_paste(cx);
+            })
+            .unwrap();
+        assert_eq!(next_input(&mut daemon), b"echo hi".to_vec());
+
+        alt_screen_ready(&window, cx, &mut daemon);
+        window
+            .update(cx, |view, _window, cx| view.alternate_paste(cx))
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "the paste is withheld even when the frame that matched said otherwise"
+        );
     }
 
     /// `Ctrl-^`, which used to die in a hardcoded block that swallowed every
