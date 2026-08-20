@@ -2658,7 +2658,13 @@ mod tests {
     fn shell_quote_leaves_safe_paths_and_quotes_the_rest() {
         assert_eq!(shell_quote_for(Path::new("/a/b.txt"), None), "/a/b.txt");
         assert_eq!(shell_quote_for(Path::new("/a dir/f"), None), "'/a dir/f'");
-        assert_eq!(shell_quote_for(Path::new("/a'b"), None), r"'/a'\''b'");
+        // An apostrophe is the one character the dialects disagree about, so
+        // the shell has to be named — with none given the answer is the
+        // platform's, and this assertion is about the POSIX rule.
+        assert_eq!(
+            shell_quote_for(Path::new("/a'b"), Some("zsh")),
+            r"'/a'\''b'"
+        );
     }
 
     #[test]
