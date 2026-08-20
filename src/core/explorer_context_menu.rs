@@ -42,8 +42,8 @@ impl Location {
     /// written here is what a user sees until something writes it again — an
     /// install-time snapshot of the locale. Two things keep that snapshot
     /// honest: `register` sets the locale from the config before building the
-    /// entries, and [`refresh_labels`] restates them when the language changes
-    /// in Settings.
+    /// entries, and [`refresh_labels`] restates them whenever the language
+    /// changes — from the picker in Settings or from a hand-edited config.
     fn label(self) -> &'static str {
         t(match self {
             Self::Directory => L10nKey::ExplorerMenuOpenIn,
