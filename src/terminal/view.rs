@@ -9498,7 +9498,7 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn accepting_a_candidate_escapes_it_for_the_shell(cx: &mut TestAppContext) {
+    fn accepting_a_candidate_quotes_it_for_the_shell(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
         let (window, _daemon) = harness(cx);
         window
@@ -9507,13 +9507,17 @@ mod gpui_tests {
                 view.completion_insert(&dir_candidate("My Documents", 3, 5), 3);
                 assert_eq!(
                     view.cmd.text(),
-                    "cd My\\ Documents/",
-                    "an unescaped candidate resplits into two arguments and the command breaks"
+                    "cd 'My Documents'/",
+                    "an unquoted candidate resplits into two arguments and the command breaks"
                 );
 
                 view.cmd.set("cd ~/My");
                 view.completion_insert(&dir_candidate("~/My Documents", 3, 6), 3);
-                assert_eq!(view.cmd.text(), "cd ~/My\\ Documents/");
+                assert_eq!(
+                    view.cmd.text(),
+                    "cd ~/'My Documents'/",
+                    "the ~ stays outside the quotes so the shell still expands it"
+                );
 
                 view.cmd.set("git commit --mess");
                 view.completion_insert(

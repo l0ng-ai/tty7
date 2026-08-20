@@ -80,40 +80,37 @@ pub fn quote_for_shell(path: &str, shell_program: Option<&str>) -> String {
 /// pane's shell. On a POSIX shell it is, and a user who typed `My\ Docs` by
 /// hand expects it honoured; on Windows it is a path separator and must
 /// survive untouched.
+///
+/// Inside single quotes it is neither, on any shell: a POSIX single-quoted
+/// string is literal from end to end. Unescaping there would take the
+/// separators out of `'C:\Users\me'` — exactly the form [`quote_for_shell`]
+/// produces for that path.
+///
+/// The scan tracks quoting across the whole word rather than looking at the
+/// first character, because a quote can open partway in: `~/'My Documents'` has
+/// to keep its `~/` outside so the shell expands it, and the `'\''` seam that
+/// carries a quote through a single-quoted string is three state changes in a
+/// row rather than a special case.
 pub fn unquote_word(word: &str, posix_escapes: bool) -> String {
-    let inner = match word.as_bytes().first() {
-        Some(b'\'') => strip_single_quoted(&word[1..]),
-        Some(b'"') => word[1..]
-            .strip_suffix('"')
-            .unwrap_or(&word[1..])
-            .to_string(),
-        _ => word.to_string(),
-    };
-    if !posix_escapes || !inner.contains('\\') {
-        return inner;
-    }
-    let mut out = String::with_capacity(inner.len());
-    let mut escaped = false;
-    for ch in inner.chars() {
-        if escaped {
-            out.push(ch);
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else {
-            out.push(ch);
+    let mut out = String::with_capacity(word.len());
+    let mut quote: Option<char> = None;
+    let mut chars = word.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            // A backslash escapes inside double quotes and outside quotes, but
+            // never inside single ones. A trailing one has nothing to escape
+            // and stands for itself.
+            (Some('"') | None, '\\') if posix_escapes => match chars.next() {
+                Some(next) => out.push(next),
+                None => out.push('\\'),
+            },
+            (Some(_), _) => out.push(c),
+            (None, '\'' | '"') => quote = Some(c),
+            (None, _) => out.push(c),
         }
     }
-    if escaped {
-        out.push('\\');
-    }
     out
-}
-
-/// Undo the `'\''` seam a POSIX single-quoted string uses to carry a quote.
-fn strip_single_quoted(rest: &str) -> String {
-    let body = rest.strip_suffix('\'').unwrap_or(rest);
-    body.replace(r"'\''", "'")
 }
 
 /// Whether the pane's shell treats a backslash as an escape character.
