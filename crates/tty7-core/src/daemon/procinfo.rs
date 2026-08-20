@@ -173,8 +173,21 @@ fn process_table() -> HashMap<u32, Row> {
     HashMap::new()
 }
 
+/// The executable name behind a pid.
+///
+/// One copy, shared with `pane.rs`. There used to be two, and each carried a
+/// guard the other lacked — this one had no `pid <= 0` check, and its Linux
+/// arm had no `/proc/<pid>/comm` fallback — so the two disagreed about the
+/// name of the same process whenever the executable link was unreadable.
+///
+/// Callers may still layer their own fallback on top: `process_table` reaches
+/// for the kernel's short name when this returns `None`, which is what covers
+/// a process whose path this cannot read at all.
 #[cfg(target_os = "macos")]
-fn proc_name(pid: i32) -> Option<String> {
+pub(super) fn proc_name(pid: i32) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
     let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let ret =
         unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
@@ -185,12 +198,27 @@ fn proc_name(pid: i32) -> Option<String> {
     Some(path.rsplit('/').next().unwrap_or(path).to_string())
 }
 
+/// See the macOS arm above.
+///
+/// `/proc/<pid>/exe` is a link the kernel refuses to resolve for a process
+/// owned by someone else, so the `comm` fallback is what keeps a differently
+/// owned process from coming back nameless.
 #[cfg(target_os = "linux")]
-fn proc_name(pid: i32) -> Option<String> {
-    let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    let name = path.file_name()?.to_str()?;
-    let name = name.strip_suffix(" (deleted)").unwrap_or(name);
-    (!name.is_empty()).then(|| name.to_string())
+pub(super) fn proc_name(pid: i32) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    if let Ok(path) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            let name = name.strip_suffix(" (deleted)").unwrap_or(name);
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let comm = comm.trim();
+    (!comm.is_empty()).then(|| comm.to_string())
 }
 
 #[cfg(unix)]

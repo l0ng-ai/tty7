@@ -709,32 +709,12 @@ fn rollback_write(
     children.remove(host, &dir.to_path_buf());
 }
 
-/// Quote a path for the shell the pane is actually running. cmd.exe only
-/// treats double quotes as quoting — a single quote is an ordinary character
-/// there, so the POSIX form would split the path at its first space
-/// (#593). PowerShell and every POSIX shell take the single-quoted form, so
-/// an unknown shell keeps it too.
+/// Quote a path for the shell the pane is actually running.
+///
+/// The rules live in [`crate::core::shell_quote`], shared with the terminal's
+/// own path insertion so the two cannot drift apart again (#593).
 pub(crate) fn shell_quote_for(path: &Path, shell_program: Option<&str>) -> String {
-    let s = path.to_string_lossy();
-    if !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_alphanumeric() || "/.-_~+".contains(c))
-    {
-        return s.into_owned();
-    }
-    let is_cmd = shell_program
-        .map(|p| {
-            let base = p.rsplit(['\\', '/']).next().unwrap_or(p);
-            base.eq_ignore_ascii_case("cmd") || base.eq_ignore_ascii_case("cmd.exe")
-        })
-        .unwrap_or(false);
-    if is_cmd {
-        // Windows paths cannot contain a double quote, so there is nothing
-        // to escape inside the quotes.
-        format!("\"{s}\"")
-    } else {
-        format!("'{}'", s.replace('\'', r"'\''"))
-    }
+    crate::core::shell_quote::quote_for_shell(&path.to_string_lossy(), shell_program)
 }
 
 impl Tty7App {

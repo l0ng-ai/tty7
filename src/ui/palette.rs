@@ -90,11 +90,6 @@ pub enum CommandKind {
     ScmSync,
     ScmCreateBranch,
     OpenBranchPicker,
-    /// One branch, filled in by the picker. Dynamic like `OpenSshConnect`, so
-    /// it gets no stable id and no key spec. Nothing emits it until the picker
-    /// can list refs.
-    #[allow(dead_code)]
-    CheckoutBranch(String),
     ToggleDiffViewMode,
     SendSelectionToAgent,
     SendGitDiffToAgent,
@@ -209,7 +204,6 @@ impl CommandKind {
             OpenSshProfiles => "ssh-manage-profiles",
             SaveSshSessionAsHost => "ssh-save-connection",
             OpenSshConnect(_)
-            | CheckoutBranch(_)
             | SetTheme(_)
             | ActivateTab(_)
             | ConnectSavedProfile(_)
@@ -316,7 +310,6 @@ impl CommandKind {
             | OpenThemePicker
             | OpenSshConnectInput
             | OpenSshConnect(_)
-            | CheckoutBranch(_)
             | SetTheme(_)
             | ActivateTab(_)
             | ConnectSavedProfile(_)

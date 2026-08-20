@@ -5023,9 +5023,6 @@ impl Tty7App {
             ScmSync => self.run_scm_action(ScmIntent::Sync, window, cx),
             ScmCreateBranch => self.run_scm_action(ScmIntent::CreateBranch, window, cx),
             OpenBranchPicker => self.run_scm_action(ScmIntent::CheckoutBranch, window, cx),
-            // The branch picker fills this in once it can list refs; until
-            // then the palette never emits it.
-            CheckoutBranch(_) => {}
             ToggleDiffViewMode => self.toggle_diff_view_mode(cx),
             OpenThemePicker | OpenSshConnectInput => {}
             ActivateTab(i) => self.activate(i, window, cx),

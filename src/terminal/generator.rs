@@ -3,15 +3,16 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 #[cfg(unix)]
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
-
+use std::time::Duration;
 #[cfg(unix)]
+use std::time::Instant;
+
 const TIMEOUT: Duration = Duration::from_millis(800);
 
-#[cfg(unix)]
 const MAX_STDOUT: usize = 256 * 1024;
 
 const CACHE_TTL: Duration = Duration::from_secs(5);
@@ -49,9 +50,69 @@ impl Drop for Reaped {
     }
 }
 
+/// The POSIX shell that runs generator scripts on Windows, if there is one.
+///
+/// Generators are POSIX shell one-liners lifted from the Fig specs, so running
+/// one takes a POSIX shell. Windows ships none; Git for Windows puts `bash.exe`
+/// on PATH and covers most developers who would have a spec installed at all.
+///
+/// Finding nothing has always meant no candidates, but it used to mean that in
+/// silence — and a completion menu whose generator produced nothing looks
+/// exactly like one that never ran. This says which it was, once per process.
 #[cfg(not(unix))]
-fn run_uncached(_script: &str, _cwd: &Path) -> Vec<Parsed> {
-    Vec::new()
+fn posix_shell() -> Option<&'static Path> {
+    static SHELL: OnceLock<Option<PathBuf>> = OnceLock::new();
+    SHELL
+        .get_or_init(|| {
+            let found = std::env::var_os("PATH")
+                .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|dir| dir.join("bash.exe"))
+                .find(|p| p.is_file());
+            match &found {
+                Some(p) => {
+                    log::debug!("completion generators will run under {}", p.display())
+                }
+                None => log::info!(
+                    "no bash.exe on PATH: completion generators are off, so any spec that \
+                     fills its candidates from one will offer nothing"
+                ),
+            }
+            found
+        })
+        .as_deref()
+}
+
+#[cfg(not(unix))]
+fn run_uncached(script: &str, cwd: &Path) -> Vec<Parsed> {
+    let Some(shell) = posix_shell() else {
+        return Vec::new();
+    };
+    let mut cmd = Command::new(shell);
+    cmd.arg("-c").arg(script).current_dir(cwd);
+    // `output_within` kills the child at the deadline the way the unix path's
+    // `killpg` does, minus the process group — Windows has no equivalent, so a
+    // generator that forks leaves its children to the OS.
+    let out = tty7_core::core::proc::output_within(
+        tty7_core::core::proc::hide_console(&mut cmd),
+        TIMEOUT,
+    );
+    match out {
+        Ok(out) if out.status.success() => {
+            let mut bytes = out.stdout;
+            bytes.truncate(MAX_STDOUT);
+            parse(script, &String::from_utf8_lossy(&bytes))
+        }
+        Ok(out) => {
+            log::debug!("generator {script:?} exited {}", out.status);
+            Vec::new()
+        }
+        Err(e) => {
+            log::debug!("generator {script:?} failed: {e}");
+            Vec::new()
+        }
+    }
 }
 
 #[cfg(unix)]

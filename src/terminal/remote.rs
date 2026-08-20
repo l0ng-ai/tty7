@@ -362,7 +362,7 @@ impl RemoteTerminal {
             restore,
         }
         .encode(&mut stream)?;
-        let pane_id = match DaemonMsg::read(&mut stream)? {
+        let pane_id = match spawn_reply(&mut stream, attach_reply_wait(route), "Spawn")? {
             DaemonMsg::Spawned { pane_id } => pane_id,
             // Passed through, not wrapped: the caller already logs which
             // spawn this was, and the window shows only this text.
@@ -1413,7 +1413,13 @@ impl RemoteTerminal {
             spec,
         }
         .encode(&mut stream)?;
-        let pane_id = match DaemonMsg::read(&mut stream)? {
+        // Native SSH is always dialled through the local daemon, whatever the
+        // far end turns out to be, so this waits on the local budget.
+        let pane_id = match spawn_reply(
+            &mut stream,
+            attach_reply_wait(&PaneRoute::Local),
+            "SpawnNativeSsh",
+        )? {
             DaemonMsg::Spawned { pane_id } => pane_id,
             DaemonMsg::Error(msg) => {
                 return Err(anyhow::anyhow!("daemon refused SpawnNativeSsh: {msg}"));
@@ -1731,6 +1737,36 @@ fn attach_reply_wait(route: &PaneRoute) -> std::time::Duration {
     match route.is_local() {
         true => std::time::Duration::from_secs(2),
         false => std::time::Duration::from_secs(15),
+    }
+}
+
+/// Read the daemon's answer to a spawn request, under the deadline `Attach`
+/// uses for the same route.
+///
+/// A daemon caught mid-restart accepts the connection and then never serves
+/// it. `Attach` has been guarded against that silence since #673, and core's
+/// `PaneSession::spawn_over` bounds the identical exchange, but this path read
+/// with no deadline at all — and the local route spawns synchronously on the
+/// UI thread (`ui::app`'s `PaneRoute::Local` branch), so a daemon that went
+/// quiet froze the whole window on "new tab".
+///
+/// The timeout is reported as a plain message with no `io::Error` in its
+/// chain, which is what keeps `daemon_disconnected_before_spawn_reply` from
+/// claiming it: silence is not a hangup, and retrying it would only wait
+/// again. `what` names the request, since the window shows only this text.
+fn spawn_reply(
+    stream: &mut Stream,
+    wait: std::time::Duration,
+    what: &str,
+) -> anyhow::Result<DaemonMsg> {
+    let _ = stream.set_read_timeout(Some(wait));
+    let reply = DaemonMsg::read(stream);
+    let _ = stream.set_read_timeout(None);
+    match reply {
+        Ok(msg) => Ok(msg),
+        Err(e) if would_block(&e) => Err(anyhow::anyhow!("no answer to {what} within {wait:?}")),
+        Err(e) => Err(anyhow::Error::new(e)
+            .context(format!("reading the daemon's answer to {what}"))),
     }
 }
 

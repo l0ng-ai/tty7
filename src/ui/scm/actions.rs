@@ -185,9 +185,7 @@ impl Tty7App {
                 cx,
             ),
             ScmIntent::CreateBranch => self.scm_begin_create_branch(window, cx),
-            // Checking out is a pick, not a verb: the switcher hangs off the
-            // branch name, which is where the list of branches already is.
-            ScmIntent::CheckoutBranch => {}
+            ScmIntent::CheckoutBranch => self.scm_begin_checkout_branch(window, cx),
         }
     }
 

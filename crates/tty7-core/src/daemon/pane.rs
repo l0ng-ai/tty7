@@ -2182,7 +2182,7 @@ impl DaemonPane {
             .lock()
             .ok()
             .and_then(|m| m.as_ref().and_then(|m| m.process_group_leader()))
-            .and_then(proc_name)
+            .and_then(super::procinfo::proc_name)
             .unwrap_or_default()
     }
 
@@ -3013,39 +3013,6 @@ fn hex_val(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
-}
-
-#[cfg(target_os = "macos")]
-fn proc_name(pid: i32) -> Option<String> {
-    if pid <= 0 {
-        return None;
-    }
-    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-    let ret =
-        unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
-    if ret <= 0 {
-        return None;
-    }
-    let path = std::str::from_utf8(&buf[..ret as usize]).ok()?;
-    Some(path.rsplit('/').next().unwrap_or(path).to_string())
-}
-
-#[cfg(target_os = "linux")]
-fn proc_name(pid: i32) -> Option<String> {
-    if pid <= 0 {
-        return None;
-    }
-    if let Ok(path) = std::fs::read_link(format!("/proc/{pid}/exe")) {
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            let name = name.strip_suffix(" (deleted)").unwrap_or(name);
-            if !name.is_empty() {
-                return Some(name.to_string());
-            }
-        }
-    }
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-    let comm = comm.trim();
-    (!comm.is_empty()).then(|| comm.to_string())
 }
 
 #[cfg(test)]

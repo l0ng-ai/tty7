@@ -417,7 +417,20 @@ fn new_session_token() -> String {
 fn client_hostname() -> String {
     static NAME: OnceLock<String> = OnceLock::new();
     NAME.get_or_init(|| {
-        std::process::Command::new("hostname")
+        // Windows publishes the name in the environment, so the usual case
+        // spawns nothing at all. That matters here: a console program started
+        // from a GUI process flashes a console window on screen even when its
+        // output is piped, and this runs while the user is looking at the
+        // connect dialog.
+        #[cfg(windows)]
+        if let Some(name) = std::env::var_os("COMPUTERNAME") {
+            let name = name.to_string_lossy().trim().to_string();
+            if !name.is_empty() {
+                return name;
+            }
+        }
+        let mut cmd = std::process::Command::new("hostname");
+        tty7_core::core::proc::hide_console(&mut cmd)
             .output()
             .ok()
             .filter(|o| o.status.success())

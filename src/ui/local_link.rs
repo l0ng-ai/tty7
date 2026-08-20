@@ -175,11 +175,18 @@ fn connect_blocking() -> std::io::Result<Arc<ControlClient>> {
     let hello = ControlHello::gui(uuid::Uuid::new_v4().to_string(), "this computer");
     let sink: tty7_core::daemon::control::EventSink = Box::new(local_event_sink);
     #[cfg(unix)]
-    let client = ControlClient::over_unix(
-        std::os::unix::net::UnixStream::connect(tty7_core::host::server::control_socket_path()?)?,
-        &hello,
-        sink,
-    )?;
+    let client = {
+        let stream = std::os::unix::net::UnixStream::connect(
+            tty7_core::host::server::control_socket_path()?,
+        )?;
+        // Every other client socket goes through `tune` on its way up — 256 KiB
+        // buffers on Unix, nodelay on Windows — because it is `connect_endpoint`
+        // that calls it, and this is the one connect that does not go through
+        // there. It is also the busiest: the control link carries every event
+        // the window redraws from.
+        tty7_core::daemon::transport::tune(&stream);
+        ControlClient::over_unix(stream, &hello, sink)?
+    };
     #[cfg(windows)]
     let client =
         ControlClient::over_tcp(tty7_core::host::server::connect_control()?, &hello, sink)?;

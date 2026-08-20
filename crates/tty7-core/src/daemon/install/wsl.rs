@@ -86,30 +86,6 @@ pub fn host_label(distro: &str) -> String {
     format!("wsl:{distro}")
 }
 
-pub fn list_distros() -> Vec<String> {
-    let mut cmd = std::process::Command::new(WSL_EXE);
-    cmd.args(["-l", "-q"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let Ok(out) = crate::core::proc::hide_console(&mut cmd).output() else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    parse_distro_list(&out.stdout)
-}
-
-pub fn parse_distro_list(bytes: &[u8]) -> Vec<String> {
-    decode_wsl_text(bytes)
-        .lines()
-        .map(|line| line.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}' || c == '\0'))
-        .filter(|line| !line.is_empty() && !line.starts_with("docker-desktop"))
-        .map(str::to_string)
-        .collect()
-}
-
 pub fn decode_wsl_text(bytes: &[u8]) -> String {
     if !bytes.contains(&0) {
         return strip_bom(&String::from_utf8_lossy(bytes));
@@ -1164,18 +1140,6 @@ mod tests {
         let (out, ok) = real_sh(&format!("HOME=/no/such/place\n{CD_HOME}pwd\n"));
         assert!(ok, "{out}");
         assert_eq!(out.trim(), "/", "the fallback must be `/`, not a failure");
-    }
-
-    #[test]
-    fn the_distro_list_is_decoded_and_filtered() {
-        let raw = utf16le(
-            "Ubuntu-22.04\r\ndocker-desktop\r\ndocker-desktop-data\r\nArch\r\n\r\n",
-            true,
-        );
-        assert_eq!(parse_distro_list(&raw), vec!["Ubuntu-22.04", "Arch"]);
-        assert!(parse_distro_list(&[]).is_empty());
-        let padded = utf16le("Ubuntu\0\r\n", true);
-        assert_eq!(parse_distro_list(&padded), vec!["Ubuntu"]);
     }
 
     #[test]

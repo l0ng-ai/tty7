@@ -70,6 +70,10 @@ pub(crate) struct ScmPanelState {
     pub(crate) branches_loading: HashSet<RepoKey>,
     /// The inline "name your branch" input, present only while it is open.
     pub(crate) new_branch: Option<Entity<InputState>>,
+    /// The inline "switch to which branch" input, present only while it is
+    /// open. Never open at the same time as `new_branch` — opening either one
+    /// closes the other, since the panel has room for one input row.
+    pub(crate) checkout_branch: Option<Entity<InputState>>,
     /// Unsent commit messages, one per working tree.
     pub(crate) drafts: HashMap<RepoKey, String>,
     /// The commit box. `None` until the panel has been rendered once: an
