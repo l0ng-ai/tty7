@@ -4,13 +4,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Deserialize;
 
+// Keys the specs carry but this completer never reads are simply not declared:
+// serde ignores unknown fields by default, so a spec parses the same either
+// way. Declaring them anyway cost seven `#[allow(dead_code)]` attributes
+// propping up fields nothing asked for. Add one back when something reads it.
+
 #[derive(Debug, Deserialize)]
 pub struct Signature {
-    #[allow(dead_code)]
-    pub name: String,
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub description: Option<String>,
     #[serde(default)]
     pub options: Vec<Opt>,
     #[serde(default)]
@@ -45,12 +45,6 @@ pub struct Opt {
     pub description: Option<String>,
     #[serde(default)]
     pub args: Vec<Arg>,
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub required: bool,
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub repeatable: bool,
     #[serde(default)]
     pub hidden: bool,
     #[serde(default)]
@@ -65,15 +59,6 @@ impl Opt {
 
 #[derive(Debug, Deserialize)]
 pub struct Arg {
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub name: Option<String>,
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub optional: bool,
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub variadic: bool,
     #[serde(default)]
     pub template: Vec<String>,
     #[serde(default)]
