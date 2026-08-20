@@ -256,3 +256,32 @@ Two things that do *not* answer this question: `tty7 procs`, which reports
 nothing running for a pane with a live agent in it, and an empty
 `capture --plain` — a worker mistakenly launched with `-p` paints nothing all
 turn while the event stream underneath is busy.
+
+### A stuck `working` can be an aborted turn
+
+Hooks report turn boundaries, so a turn that dies without one — an API error,
+a dropped connection — leaves the status standing at `working` forever, and
+your `wait` sleeps through it. The screen is where the truth is: capture the
+tail and look for an error line (`API Error: Connection closed mid-response`
+and its relatives) sitting above the input box.
+
+The recovery is the reason workers run in interactive mode: the session is
+still alive at its prompt, with all its context and any half-made edits
+intact. Tell it to pick the work back up —
+
+```bash
+tty7 send "$PANE" 'Your last turn was cut off by an API error. Continue and finish the task as instructed.' --enter
+```
+
+— and go back to waiting.
+
+### Tail enough lines to see the spinner
+
+A TUI keeps its input box at the **bottom** of the screen, so a short tail —
+`tail -5` — shows an empty prompt box whether the worker is idle or three
+files deep in an edit: the line that distinguishes them is the spinner/elapsed
+line a dozen rows up, and a short tail cuts it off. `tail -15` or more
+whenever the question is "is it doing anything", and read for the spinner, not
+the prompt. "The bottom looks like a prompt" is evidence about a *shell* pane
+(step 3's launch check); on a TUI pane it is what the screen always looks
+like.
