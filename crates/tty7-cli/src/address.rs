@@ -60,19 +60,28 @@ pub fn parse_pane(s: &str) -> Result<u64> {
 }
 
 pub fn parse_tab(s: &str) -> Result<TabAddress> {
-    let body = s
-        .strip_prefix('@')
-        .ok_or_else(|| anyhow!("'{s}' is not a tab address — tabs look like @7"))?;
+    // The `@` is optional, for the reason it is optional on a pane (#538): every
+    // `--json` payload spells tabs bare, so the id `tty7 tab new --json` just
+    // handed back has to address the tab it created. Demanding the sigil made
+    // the one id you are certain of the one shape the CLI refused.
+    let body = s.strip_prefix('@').unwrap_or(s);
+    let not_an_address =
+        || anyhow!("'{s}' is not a tab address — @7 as numbered by `tty7 ls`, or a full tab id");
     if body.is_empty() {
-        bail!("'{s}' is not a tab address — tabs look like @7");
+        return Err(not_an_address());
     }
-    if let Ok(n) = body.parse::<u64>() {
-        return Ok(TabAddress::Ordinal(n));
+    // Digits and nothing else. `u64::from_str` also takes a leading `+`, and
+    // with the `@` gone that would read `+5` as tab 5 rather than as a typo.
+    if body.bytes().all(|b| b.is_ascii_digit()) {
+        return body
+            .parse()
+            .map(TabAddress::Ordinal)
+            .map_err(|_| not_an_address());
     }
     if looks_like_uuid(body) {
         return Ok(TabAddress::Id(body.to_string()));
     }
-    bail!("'{s}' is not a tab address — @7 as numbered by `tty7 ls`, or @<full tab id>");
+    Err(not_an_address())
 }
 
 fn looks_like_uuid(s: &str) -> bool {
@@ -161,6 +170,34 @@ mod tests {
         // people into "%${TTY7_PANE#%}" contortions (#538).
         assert_eq!(parse_pane("42").unwrap(), 42);
         assert_eq!(parse_pane("%42").unwrap(), 42);
+    }
+
+    #[test]
+    fn a_bare_tab_id_addresses_the_same_tab_as_the_marked_one() {
+        // Every `--json` payload spells tabs bare, and the id `tty7 tab new`
+        // hands back is the one tab you are certain of — refusing it there made
+        // naming a tab you just created impossible without counting `@N` again.
+        let id = "0d4e1a54-0000-4000-8000-000000000003";
+        assert_eq!(parse_tab(id).unwrap(), TabAddress::Id(id.into()));
+        assert_eq!(
+            parse_tab(&format!("@{id}")).unwrap(),
+            TabAddress::Id(id.into())
+        );
+        assert_eq!(parse_tab("7").unwrap(), TabAddress::Ordinal(7));
+        assert_eq!(parse_tab("@7").unwrap(), TabAddress::Ordinal(7));
+    }
+
+    #[test]
+    fn a_tab_ordinal_is_digits_and_nothing_else() {
+        // Same guard as the pane one, and it matters for the same reason now
+        // that the sigil is optional on both.
+        for not_a_tab in ["+5", "@+5", "-5", " 5", "5 ", "", "@", "5.0", "build"] {
+            assert!(
+                parse_tab(not_a_tab).is_err(),
+                "'{not_a_tab}' must not read as a tab address"
+            );
+        }
+        assert!(parse_tab("99999999999999999999999").is_err());
     }
 
     #[test]
