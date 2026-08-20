@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -278,34 +278,68 @@ pub fn logs() -> Result<Outcome> {
 }
 
 fn server_exe() -> Result<PathBuf> {
-    if let Some(explicit) = std::env::var_os(SERVER_EXE_ENV).filter(|v| !v.is_empty()) {
-        return Ok(PathBuf::from(explicit));
-    }
-    let name = if cfg!(windows) {
+    let name = server_exe_name();
+    let own_dir = std::env::current_exe()
+        .ok()
+        .and_then(|own| own.parent().map(Path::to_path_buf));
+    let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    resolve_server_exe(
+        std::env::var_os(SERVER_EXE_ENV).filter(|v| !v.is_empty()).as_deref(),
+        own_dir.as_deref(),
+        &path_dirs,
+        name,
+        |p| p.is_file(),
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not find {name} next to this binary or on PATH — install it, or point \
+             {SERVER_EXE_ENV} at it"
+        )
+    })
+}
+
+fn server_exe_name() -> &'static str {
+    if cfg!(windows) {
         "tty7-server.exe"
     } else {
         "tty7-server"
-    };
-    if let Ok(own) = std::env::current_exe() {
-        if let Some(dir) = own.parent() {
-            let sibling = dir.join(name);
-            if sibling.exists() {
-                return Ok(sibling);
-            }
+    }
+}
+
+/// Where the server binary is, in the order the three sources are trusted.
+///
+/// An explicit override wins outright and is not checked for existence: the
+/// caller asked for that path, and a "not found" from the spawn names it, where
+/// silently falling through to a *different* binary would not.
+///
+/// A sibling of this binary comes next — that is the shipped layout — and PATH
+/// last. Both are held to the same test: the sibling used to be accepted on
+/// `exists()`, so a directory named `tty7-server` shadowed the real one on PATH
+/// and turned a working install into a spawn failure.
+///
+/// `is_exe` is passed in so a test can answer without touching the filesystem.
+fn resolve_server_exe(
+    explicit: Option<&std::ffi::OsStr>,
+    own_dir: Option<&Path>,
+    path_dirs: &[PathBuf],
+    name: &str,
+    is_exe: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if let Some(explicit) = explicit {
+        return Some(PathBuf::from(explicit));
+    }
+    if let Some(dir) = own_dir {
+        let sibling = dir.join(name);
+        if is_exe(&sibling) {
+            return Some(sibling);
         }
     }
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
-    bail!(
-        "could not find {name} next to this binary or on PATH — install it, or point \
-         {SERVER_EXE_ENV} at it"
-    )
+    path_dirs
+        .iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_exe(candidate))
 }
 
 #[cfg(unix)]
@@ -335,3 +369,112 @@ fn detach(cmd: &mut Command) {
 
 #[cfg(not(any(unix, windows)))]
 fn detach(_cmd: &mut Command) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    const NAME: &str = "tty7-server";
+
+    fn dirs(paths: &[&str]) -> Vec<PathBuf> {
+        paths.iter().map(PathBuf::from).collect()
+    }
+
+    /// Stands in for the filesystem: only the listed paths are runnable files.
+    fn only(files: &'static [&'static str]) -> impl Fn(&Path) -> bool {
+        move |p: &Path| files.iter().any(|f| Path::new(f) == p)
+    }
+
+    #[test]
+    fn the_override_wins_and_is_taken_at_its_word() {
+        let got = resolve_server_exe(
+            Some(OsStr::new("/opt/custom/tty7-server")),
+            Some(Path::new("/usr/local/bin")),
+            &dirs(&["/usr/bin"]),
+            NAME,
+            only(&["/usr/local/bin/tty7-server", "/usr/bin/tty7-server"]),
+        );
+        assert_eq!(got, Some(PathBuf::from("/opt/custom/tty7-server")));
+    }
+
+    /// Not existence-checked on purpose: a bad override should fail loudly by
+    /// that name, not quietly run a different binary.
+    #[test]
+    fn a_nonexistent_override_is_still_returned() {
+        let got = resolve_server_exe(
+            Some(OsStr::new("/nope/tty7-server")),
+            Some(Path::new("/usr/local/bin")),
+            &dirs(&["/usr/bin"]),
+            NAME,
+            only(&["/usr/bin/tty7-server"]),
+        );
+        assert_eq!(got, Some(PathBuf::from("/nope/tty7-server")));
+    }
+
+    #[test]
+    fn a_sibling_beats_path() {
+        let got = resolve_server_exe(
+            None,
+            Some(Path::new("/opt/tty7")),
+            &dirs(&["/usr/bin"]),
+            NAME,
+            only(&["/opt/tty7/tty7-server", "/usr/bin/tty7-server"]),
+        );
+        assert_eq!(got, Some(PathBuf::from("/opt/tty7/tty7-server")));
+    }
+
+    #[test]
+    fn path_is_searched_in_order_when_there_is_no_sibling() {
+        let got = resolve_server_exe(
+            None,
+            Some(Path::new("/opt/tty7")),
+            &dirs(&["/a", "/b", "/c"]),
+            NAME,
+            only(&["/b/tty7-server", "/c/tty7-server"]),
+        );
+        assert_eq!(got, Some(PathBuf::from("/b/tty7-server")));
+    }
+
+    /// The bug behind holding both candidates to `is_file`: a *directory*
+    /// named `tty7-server` beside this binary used to satisfy `exists()`, so it
+    /// shadowed the real one on PATH and the spawn failed on a working install.
+    #[test]
+    fn a_directory_by_that_name_does_not_shadow_the_real_binary() {
+        let got = resolve_server_exe(
+            None,
+            Some(Path::new("/opt/tty7")),
+            &dirs(&["/usr/bin"]),
+            NAME,
+            // /opt/tty7/tty7-server exists but is not a file, so it is absent here.
+            only(&["/usr/bin/tty7-server"]),
+        );
+        assert_eq!(got, Some(PathBuf::from("/usr/bin/tty7-server")));
+    }
+
+    #[test]
+    fn nothing_anywhere_is_a_miss_rather_than_a_guess() {
+        assert_eq!(
+            resolve_server_exe(
+                None,
+                Some(Path::new("/opt/tty7")),
+                &dirs(&["/usr/bin"]),
+                NAME,
+                only(&[]),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn no_own_directory_falls_through_to_path() {
+        let got = resolve_server_exe(
+            None,
+            None,
+            &dirs(&["/usr/bin"]),
+            NAME,
+            only(&["/usr/bin/tty7-server"]),
+        );
+        assert_eq!(got, Some(PathBuf::from("/usr/bin/tty7-server")));
+    }
+}

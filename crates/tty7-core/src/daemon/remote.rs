@@ -257,3 +257,80 @@ mod tests {
         assert!(parse_ssh_invocation(&argv(&["scp", "dev:/x", "."])).is_none());
     }
 }
+
+#[cfg(target_os = "macos")]
+#[cfg(test)]
+mod procargs_tests {
+    use super::*;
+
+    /// Build a KERN_PROCARGS2 buffer: argc, the exec path, then argc
+    /// NUL-terminated arguments, with the alignment padding the kernel leaves
+    /// between the path and the first argument.
+    fn procargs(argc: i32, exec_path: &str, args: &[&str], pad: usize) -> Vec<u8> {
+        let mut buf = argc.to_ne_bytes().to_vec();
+        buf.extend_from_slice(exec_path.as_bytes());
+        buf.push(0);
+        buf.extend(std::iter::repeat_n(0u8, pad));
+        for a in args {
+            buf.extend_from_slice(a.as_bytes());
+            buf.push(0);
+        }
+        buf
+    }
+
+    #[test]
+    fn the_exec_path_is_skipped_and_argv_comes_back_in_order() {
+        let buf = procargs(3, "/usr/bin/ssh", &["ssh", "-p", "2222"], 0);
+        assert_eq!(
+            parse_macos_procargs(&buf),
+            Some(vec!["ssh".into(), "-p".into(), "2222".into()])
+        );
+    }
+
+    /// The kernel pads between the exec path and argv, and the amount varies.
+    /// Miscounting it would return the tail of the path as argv[0].
+    #[test]
+    fn alignment_padding_after_the_exec_path_is_skipped_however_long() {
+        for pad in 0..8 {
+            let buf = procargs(1, "/usr/bin/ssh", &["ssh"], pad);
+            assert_eq!(
+                parse_macos_procargs(&buf),
+                Some(vec!["ssh".to_string()]),
+                "{pad} bytes of padding"
+            );
+        }
+    }
+
+    /// argc counts what to read, so anything after it — the environment —
+    /// stays out of argv.
+    #[test]
+    fn the_environment_after_argv_is_not_read() {
+        let buf = procargs(2, "/usr/bin/ssh", &["ssh", "host", "PATH=/bin", "HOME=/me"], 0);
+        assert_eq!(
+            parse_macos_procargs(&buf),
+            Some(vec!["ssh".into(), "host".into()])
+        );
+    }
+
+    /// A buffer that ends mid-argv stops there rather than running off the end.
+    #[test]
+    fn a_truncated_buffer_returns_what_it_had() {
+        let full = procargs(4, "/usr/bin/ssh", &["ssh", "-p", "2222", "host"], 0);
+        let cut = &full[..full.len() - 6];
+        let got = parse_macos_procargs(cut).expect("what survived is still argv");
+        assert!(got.len() < 4, "{got:?}");
+        assert_eq!(got[0], "ssh");
+    }
+
+    #[test]
+    fn a_buffer_too_short_to_hold_argc_is_rejected() {
+        assert_eq!(parse_macos_procargs(&[]), None);
+        assert_eq!(parse_macos_procargs(&[0, 0, 0]), None);
+    }
+
+    #[test]
+    fn a_process_with_no_arguments_at_all_is_none_rather_than_empty() {
+        let buf = procargs(0, "/usr/bin/ssh", &[], 0);
+        assert_eq!(parse_macos_procargs(&buf), None);
+    }
+}
