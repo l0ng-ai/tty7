@@ -147,7 +147,6 @@ impl ConflictKind {
             _ => return None,
         })
     }
-
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

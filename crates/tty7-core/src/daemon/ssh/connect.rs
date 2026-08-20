@@ -359,11 +359,7 @@ async fn http_connect(
 }
 
 /// See [`socks5_handshake`] — same split, same reason.
-async fn http_connect_handshake<S>(
-    s: &mut S,
-    target: &str,
-    target_port: u16,
-) -> anyhow::Result<()>
+async fn http_connect_handshake<S>(s: &mut S, target: &str, target_port: u16) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -651,7 +647,11 @@ mod proxy_handshake_tests {
         .concat();
         let (out, sent) = run_socks5(&script, "example.com", 22).await;
         assert!(out.is_ok(), "{:?}", out.err());
-        assert_eq!(&sent[..3], &[0x05, 0x01, 0x00], "greeting is SOCKS5 no-auth");
+        assert_eq!(
+            &sent[..3],
+            &[0x05, 0x01, 0x00],
+            "greeting is SOCKS5 no-auth"
+        );
         let req = &sent[3..];
         assert_eq!(
             &req[..5],
@@ -677,7 +677,9 @@ mod proxy_handshake_tests {
     #[tokio::test]
     async fn socks5_refuses_a_proxy_that_wants_authentication() {
         let (out, _) = run_socks5(&[0x05, 0x02], "example.com", 22).await;
-        let msg = out.expect_err("a proxy demanding auth must fail").to_string();
+        let msg = out
+            .expect_err("a proxy demanding auth must fail")
+            .to_string();
         assert!(msg.contains("no-auth"), "{msg}");
     }
 
@@ -692,7 +694,9 @@ mod proxy_handshake_tests {
     async fn socks5_rejects_a_host_too_long_for_its_length_byte() {
         let long = "a".repeat(256);
         let (out, _) = run_socks5(&[0x05, 0x00], &long, 22).await;
-        let msg = out.expect_err("256 bytes will not fit in one byte").to_string();
+        let msg = out
+            .expect_err("256 bytes will not fit in one byte")
+            .to_string();
         assert!(msg.contains("too long"), "{msg}");
     }
 
@@ -750,7 +754,12 @@ mod proxy_handshake_tests {
 
     #[tokio::test]
     async fn http_connect_reports_the_status_line_on_refusal() {
-        let (out, _) = run_http("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n", "h", 22).await;
+        let (out, _) = run_http(
+            "HTTP/1.1 407 Proxy Authentication Required\r\n\r\n",
+            "h",
+            22,
+        )
+        .await;
         let msg = out.expect_err("407 is a refusal").to_string();
         assert!(msg.contains("407"), "{msg}");
     }
@@ -759,7 +768,12 @@ mod proxy_handshake_tests {
     /// code or a 200 appearing in a header must not be mistaken for success.
     #[tokio::test]
     async fn http_connect_does_not_take_a_header_mentioning_200_for_success() {
-        let (out, _) = run_http("HTTP/1.1 502 Bad Gateway\r\nX-Upstream: 200\r\n\r\n", "h", 22).await;
+        let (out, _) = run_http(
+            "HTTP/1.1 502 Bad Gateway\r\nX-Upstream: 200\r\n\r\n",
+            "h",
+            22,
+        )
+        .await;
         assert!(out.is_err(), "only the status line decides");
     }
 }

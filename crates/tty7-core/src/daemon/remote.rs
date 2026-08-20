@@ -305,7 +305,12 @@ mod procargs_tests {
     /// stays out of argv.
     #[test]
     fn the_environment_after_argv_is_not_read() {
-        let buf = procargs(2, "/usr/bin/ssh", &["ssh", "host", "PATH=/bin", "HOME=/me"], 0);
+        let buf = procargs(
+            2,
+            "/usr/bin/ssh",
+            &["ssh", "host", "PATH=/bin", "HOME=/me"],
+            0,
+        );
         assert_eq!(
             parse_macos_procargs(&buf),
             Some(vec!["ssh".into(), "host".into()])

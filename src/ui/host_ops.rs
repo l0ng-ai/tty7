@@ -35,9 +35,23 @@ mod blocking {
     }
 
     impl State {
+        /// Whether a submission should start a thread rather than lean on the
+        /// idle ones. Strictly greater: `jobs == idle` is already covered.
         fn wants_another_thread(&self) -> bool {
             self.jobs.len() > self.idle && self.threads < MAX_THREADS
         }
+    }
+
+    /// Whether a worker whose wait timed out should retire.
+    ///
+    /// Not on the timer alone. A job can be pushed between the timeout firing
+    /// and this thread reacquiring the lock, and `submit` decides whether to
+    /// spawn by counting idle threads — so it saw this one as available and
+    /// did not spawn. Retiring on `timed_out` by itself would carry that job's
+    /// only worker away with it, and the job would sit in the queue until some
+    /// unrelated submission happened to start a thread.
+    fn should_retire(timed_out: bool, pending_jobs: usize) -> bool {
+        timed_out && pending_jobs == 0
     }
 
     fn pool() -> &'static Arc<Inner> {
@@ -98,13 +112,74 @@ mod blocking {
                         .unwrap_or_else(|e| e.into_inner());
                     st = guard;
                     st.idle -= 1;
-                    if timeout.timed_out() && st.jobs.is_empty() {
+                    if should_retire(timeout.timed_out(), st.jobs.len()) {
                         st.threads -= 1;
                         return;
                     }
                 }
             };
             job();
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn state(jobs: usize, threads: usize, idle: usize) -> State {
+            let mut q: VecDeque<Job> = VecDeque::new();
+            for _ in 0..jobs {
+                q.push_back(Box::new(|| {}));
+            }
+            State {
+                jobs: q,
+                threads,
+                idle,
+            }
+        }
+
+        #[test]
+        fn an_idle_thread_is_preferred_over_a_new_one() {
+            assert!(
+                !state(1, 1, 1).wants_another_thread(),
+                "one job and one idle thread needs nobody new"
+            );
+            assert!(
+                !state(2, 2, 2).wants_another_thread(),
+                "jobs == idle is already covered"
+            );
+            assert!(
+                state(3, 2, 2).wants_another_thread(),
+                "one job more than there are idle threads"
+            );
+        }
+
+        #[test]
+        fn the_first_job_starts_the_first_thread() {
+            assert!(state(1, 0, 0).wants_another_thread());
+        }
+
+        #[test]
+        fn the_pool_stops_growing_at_its_ceiling() {
+            assert!(state(1000, MAX_THREADS - 1, 0).wants_another_thread());
+            assert!(
+                !state(1000, MAX_THREADS, 0).wants_another_thread(),
+                "a backlog does not buy more than MAX_THREADS"
+            );
+        }
+
+        #[test]
+        fn a_worker_retires_only_on_a_timeout_with_nothing_queued() {
+            assert!(should_retire(true, 0));
+            assert!(!should_retire(false, 0), "a wake-up is not a timeout");
+        }
+
+        /// The whole reason the queue is consulted: `submit` counted this
+        /// thread as idle and therefore did not spawn one, so retiring here
+        /// would leave the job it just pushed with no worker.
+        #[test]
+        fn a_job_that_landed_during_the_timeout_keeps_the_worker_alive() {
+            assert!(!should_retire(true, 1));
         }
     }
 }

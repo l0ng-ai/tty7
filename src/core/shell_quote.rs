@@ -83,7 +83,10 @@ pub fn quote_for_shell(path: &str, shell_program: Option<&str>) -> String {
 pub fn unquote_word(word: &str, posix_escapes: bool) -> String {
     let inner = match word.as_bytes().first() {
         Some(b'\'') => strip_single_quoted(&word[1..]),
-        Some(b'"') => word[1..].strip_suffix('"').unwrap_or(&word[1..]).to_string(),
+        Some(b'"') => word[1..]
+            .strip_suffix('"')
+            .unwrap_or(&word[1..])
+            .to_string(),
         _ => word.to_string(),
     };
     if !posix_escapes || !inner.contains('\\') {
@@ -140,7 +143,10 @@ mod tests {
 
     #[test]
     fn a_plain_path_is_left_alone() {
-        assert_eq!(quote_for_shell("/Users/me/notes.txt", None), "/Users/me/notes.txt");
+        assert_eq!(
+            quote_for_shell("/Users/me/notes.txt", None),
+            "/Users/me/notes.txt"
+        );
         assert_eq!(quote_for_shell("notes.txt", None), "notes.txt");
         assert_eq!(quote_for_shell("--message", None), "--message");
     }
@@ -151,7 +157,10 @@ mod tests {
             quote_for_shell("/Users/me/My File (1).txt", Some("zsh")),
             "'/Users/me/My File (1).txt'"
         );
-        assert_eq!(quote_for_shell("/a/$HOME & more", None), "'/a/$HOME & more'");
+        assert_eq!(
+            quote_for_shell("/a/$HOME & more", None),
+            "'/a/$HOME & more'"
+        );
         assert_eq!(quote_for_shell("it's here", None), r"'it'\''s here'");
         assert_eq!(quote_for_shell("", None), "''");
     }

@@ -496,7 +496,12 @@ fn complete_signature(
         push_arg_suggestions(&mut out, arg, word);
         if let Some(cwd) = cwd {
             if arg.wants_paths() {
-                out.extend(complete_path(word, cwd, arg.wants_dirs_only(), posix_escapes));
+                out.extend(complete_path(
+                    word,
+                    cwd,
+                    arg.wants_dirs_only(),
+                    posix_escapes,
+                ));
             }
         }
         let pending = match cwd {
@@ -534,7 +539,12 @@ fn complete_signature(
         push_arg_suggestions(&mut out, arg, word);
         if let Some(cwd) = cwd {
             if arg.wants_paths() {
-                out.extend(complete_path(word, cwd, arg.wants_dirs_only(), posix_escapes));
+                out.extend(complete_path(
+                    word,
+                    cwd,
+                    arg.wants_dirs_only(),
+                    posix_escapes,
+                ));
             }
         }
         if cwd.is_some() {
@@ -791,9 +801,14 @@ mod tests {
     }
 
     fn texts(line: &str) -> Vec<String> {
-        complete(line, line.chars().count(), Some(Path::new("/")), Some("zsh"))
-            .map(|c| c.candidates.into_iter().map(|c| c.text).collect())
-            .unwrap_or_default()
+        complete(
+            line,
+            line.chars().count(),
+            Some(Path::new("/")),
+            Some("zsh"),
+        )
+        .map(|c| c.candidates.into_iter().map(|c| c.text).collect())
+        .unwrap_or_default()
     }
 
     #[test]
@@ -1175,7 +1190,8 @@ mod tests {
     fn a_remote_pane_completes_commands_but_never_local_paths() {
         let dir = temp_tree("remote", &[("only-here.txt", false), ("subdir", true)]);
 
-        let c = complete("cat only", 8, Some(dir.as_path()), Some("zsh")).expect("local pane completes paths");
+        let c = complete("cat only", 8, Some(dir.as_path()), Some("zsh"))
+            .expect("local pane completes paths");
         assert!(c.candidates.iter().any(|c| c.text.starts_with("only-here")));
 
         assert!(complete("cat only", 8, None, Some("zsh")).is_none());

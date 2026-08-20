@@ -693,7 +693,11 @@ impl Tty7App {
     /// palette entry and its key binding, which have no button to hang a menu
     /// off. It used to be wired to nothing at all — the action was registered,
     /// listed and bindable, and invoking it silently did nothing.
-    pub(crate) fn scm_begin_checkout_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn scm_begin_checkout_branch(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let input =
             cx.new(|cx| InputState::new(window, cx).placeholder(t(L10nKey::ScmCheckoutBranch)));
         let handle = input.read(cx).focus_handle(cx);

@@ -286,7 +286,9 @@ fn server_exe() -> Result<PathBuf> {
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
     resolve_server_exe(
-        std::env::var_os(SERVER_EXE_ENV).filter(|v| !v.is_empty()).as_deref(),
+        std::env::var_os(SERVER_EXE_ENV)
+            .filter(|v| !v.is_empty())
+            .as_deref(),
         own_dir.as_deref(),
         &path_dirs,
         name,

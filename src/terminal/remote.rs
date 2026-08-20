@@ -21,9 +21,9 @@ use crate::core::config::CursorStyle as ConfigCursorStyle;
 use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
     AuthPromptKind, AuthResponse, ClientMsg, DaemonMsg, KnownHostEntry, KnownHostId,
-    LoopbackForward, LoopbackForwardRequest, ManagedForward, NativeSshSpec, PaneProcs, RemoteContext, RestoreFrom, SftpEntry,
-    SftpJobProgress, SftpOp, SftpOpResult, SftpTransferSpec, ShellSpec, SshForwardRule, SshPhase,
-    SshTestReport, WinSize, WorkspaceOp, WorkspaceRequest,
+    LoopbackForward, LoopbackForwardRequest, ManagedForward, NativeSshSpec, PaneProcs,
+    RemoteContext, RestoreFrom, SftpEntry, SftpJobProgress, SftpOp, SftpOpResult, SftpTransferSpec,
+    ShellSpec, SshForwardRule, SshPhase, SshTestReport, WinSize, WorkspaceOp, WorkspaceRequest,
 };
 use crate::daemon::transport::{self, Stream};
 use gpui::EntityId;
@@ -1746,8 +1746,9 @@ fn spawn_reply(
     match reply {
         Ok(msg) => Ok(msg),
         Err(e) if would_block(&e) => Err(anyhow::anyhow!("no answer to {what} within {wait:?}")),
-        Err(e) => Err(anyhow::Error::new(e)
-            .context(format!("reading the daemon's answer to {what}"))),
+        Err(e) => {
+            Err(anyhow::Error::new(e).context(format!("reading the daemon's answer to {what}")))
+        }
     }
 }
 

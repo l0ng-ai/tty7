@@ -6882,11 +6882,11 @@ mod tests {
         staging_cache, staging_dir_is_safe, wsl_path, wsl_share_distro, wsl_share_path,
     };
     use super::{
-        description_budget, drag_scroll_step, elide, encode_mouse,
-        expand_file_command_template, fallback_chain, fig_icon_emoji, fig_icon_glyph,
-        focus_report_bytes, highlight_runs, input_overflow_shift, input_overlay_rows, menu_layout,
-        paste_bytes, select_end_copy, should_show_context_menu,
-        smooth_scroll_step, submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
+        description_budget, drag_scroll_step, elide, encode_mouse, expand_file_command_template,
+        fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes, highlight_runs,
+        input_overflow_shift, input_overlay_rows, menu_layout, paste_bytes, select_end_copy,
+        should_show_context_menu, smooth_scroll_step, submit_bytes, trim_trailing_spaces,
+        wheel_route, wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
