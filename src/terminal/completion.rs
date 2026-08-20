@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use crate::core::shell_quote::{Quoting, unquote_word};
+
 use super::signature::{self, Arg, CmdNode, Signature};
 
 struct WordCand {
@@ -117,10 +119,10 @@ fn current_command(chars: &[char], word_start: usize) -> Option<String> {
     (!base.is_empty()).then(|| base.to_string())
 }
 
-/// `shell` is the pane's shell binary, which decides whether a backslash in
-/// the word under the cursor is an escape character or a path separator. Get
-/// it wrong on Windows and every native path loses its separators before the
-/// lookup, so no directory ever resolves.
+/// `shell` is the pane's shell binary, which decides how the word under the
+/// cursor is quoted — above all whether a backslash in it is an escape
+/// character or a path separator. Get it wrong on Windows and every native
+/// path loses its separators before the lookup, so no directory ever resolves.
 pub fn complete(
     line: &str,
     cursor: usize,
@@ -132,7 +134,7 @@ pub fn complete(
         cursor,
         cwd,
         cwd.is_some(),
-        crate::core::shell_quote::posix_escapes_for(shell),
+        crate::core::shell_quote::quoting_for(shell),
     )
 }
 
@@ -146,7 +148,7 @@ pub fn complete(
 pub fn complete_foreign(line: &str, cursor: usize, cwd: &Path) -> Option<Completion> {
     // A WSL pane runs a Linux shell over Linux paths, so a backslash is an
     // escape there whatever this machine happens to be.
-    complete_inner(line, cursor, Some(cwd), false, true)
+    complete_inner(line, cursor, Some(cwd), false, Quoting::Posix)
 }
 
 fn complete_inner(
@@ -154,7 +156,7 @@ fn complete_inner(
     cursor: usize,
     cwd: Option<&Path>,
     this_machine: bool,
-    posix_escapes: bool,
+    quoting: Quoting,
 ) -> Option<Completion> {
     let chars: Vec<char> = line.chars().collect();
     let cursor = cursor.min(chars.len());
@@ -165,7 +167,7 @@ fn complete_inner(
     let (word_cands, pending) = if is_command && !word.contains('/') {
         (complete_command(&word, this_machine), Vec::new())
     } else {
-        match complete_signature(&chars, word_start, &word, cwd, posix_escapes) {
+        match complete_signature(&chars, word_start, &word, cwd, quoting) {
             Some(sig) => (
                 sig.cands,
                 if this_machine {
@@ -183,10 +185,7 @@ fn complete_inner(
                 Some(cwd) => {
                     let dirs_only = current_command(&chars, word_start)
                         .is_some_and(|c| DIR_ONLY_COMMANDS.contains(&c.as_str()));
-                    (
-                        complete_path(&word, cwd, dirs_only, posix_escapes),
-                        Vec::new(),
-                    )
+                    (complete_path(&word, cwd, dirs_only, quoting), Vec::new())
                 }
             },
         }
@@ -338,7 +337,7 @@ pub fn remote_path_request(
 
     // The far end of a remote pane is always POSIX — a backslash there is an
     // escape, never a separator.
-    let word = crate::core::shell_quote::unquote_word(&word, true);
+    let word = unquote_word(&word, Quoting::Posix);
     let (dir_part, prefix) = match word.rfind('/') {
         Some(i) => (&word[..=i], &word[i + 1..]),
         None => ("", word.as_str()),
@@ -398,11 +397,11 @@ pub fn remote_path_candidates(req: &RemotePathRequest, entries: &[RemoteEntry]) 
     out
 }
 
-fn complete_path(word: &str, cwd: &Path, dirs_only: bool, posix_escapes: bool) -> Vec<WordCand> {
+fn complete_path(word: &str, cwd: &Path, dirs_only: bool, quoting: Quoting) -> Vec<WordCand> {
     // Candidates are emitted unquoted and quoted at insertion time. Undo the
     // corresponding quoting for lookup, so a second Tab after inserting
     // `'My Documents'/` still enters the real directory.
-    let word = crate::core::shell_quote::unquote_word(word, posix_escapes);
+    let word = unquote_word(word, quoting);
     let (dir_part, prefix) = match word.rfind(std::path::is_separator) {
         Some(i) => (&word[..=i], &word[i + 1..]),
         None => ("", word.as_str()),
@@ -457,7 +456,7 @@ fn complete_signature(
     word_start: usize,
     word: &str,
     cwd: Option<&Path>,
-    posix_escapes: bool,
+    quoting: Quoting,
 ) -> Option<SigResult> {
     let prefix: String = chars[..word_start].iter().collect();
     let tokens: Vec<&str> = prefix[segment_start(&prefix)..]
@@ -496,12 +495,7 @@ fn complete_signature(
         push_arg_suggestions(&mut out, arg, word);
         if let Some(cwd) = cwd {
             if arg.wants_paths() {
-                out.extend(complete_path(
-                    word,
-                    cwd,
-                    arg.wants_dirs_only(),
-                    posix_escapes,
-                ));
+                out.extend(complete_path(word, cwd, arg.wants_dirs_only(), quoting));
             }
         }
         let pending = match cwd {
@@ -539,12 +533,7 @@ fn complete_signature(
         push_arg_suggestions(&mut out, arg, word);
         if let Some(cwd) = cwd {
             if arg.wants_paths() {
-                out.extend(complete_path(
-                    word,
-                    cwd,
-                    arg.wants_dirs_only(),
-                    posix_escapes,
-                ));
+                out.extend(complete_path(word, cwd, arg.wants_dirs_only(), quoting));
             }
         }
         if cwd.is_some() {

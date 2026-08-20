@@ -7,9 +7,7 @@ use std::process::Command;
 #[cfg(unix)]
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
-#[cfg(unix)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_millis(800);
 

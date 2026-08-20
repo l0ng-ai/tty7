@@ -1617,9 +1617,10 @@ impl TerminalView {
 
     /// The shell binary this pane is running, for the path-quoting rules.
     ///
-    /// `None` before the pane has resolved one, which
-    /// [`quote_for_shell`] reads as "assume something POSIX-ish" — the right
-    /// guess everywhere but a cmd.exe pane that has not reported in yet.
+    /// `None` before the pane has resolved one, which [`quote_for_shell`]
+    /// answers from the platform — PowerShell on Windows, POSIX elsewhere.
+    /// The one pane that guess is wrong for is a cmd.exe pane that has not
+    /// reported in yet.
     fn shell_program(&self) -> Option<String> {
         self.shell_spec.as_ref().map(|s| s.program.clone())
     }
