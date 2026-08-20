@@ -24,8 +24,8 @@ use std::time::Duration;
 use russh::{ChannelMsg, Pty};
 
 use crate::daemon::protocol::{
-    AuthPromptKind, AuthResponse, LoopbackForward, LoopbackForwardId, LoopbackForwardInfo,
-    ManagedForward, NativeSshSpec, SshForwardRule, SshPhase, SshTestNeed, SshTestReport, WinSize,
+    AuthPromptKind, AuthResponse, LoopbackForward, ManagedForward, NativeSshSpec, SshForwardRule,
+    SshPhase, SshTestNeed, SshTestReport, WinSize,
 };
 use crate::daemon::remote_link::{self, RemoteEntry, RemoteLink};
 use crate::daemon::router::{RouteChannel, RouteSetup};
@@ -136,14 +136,6 @@ impl SshManager {
             remote_host,
             remote_port,
         ))
-    }
-
-    pub fn list_loopback_forwards(&self) -> Vec<LoopbackForwardInfo> {
-        Vec::new()
-    }
-
-    pub fn close_loopback_forward(&self, _id: &LoopbackForwardId) -> bool {
-        false
     }
 
     pub fn spawn_native_session(

@@ -21,8 +21,7 @@ use crate::core::config::CursorStyle as ConfigCursorStyle;
 use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
     AuthPromptKind, AuthResponse, ClientMsg, DaemonMsg, KnownHostEntry, KnownHostId,
-    LoopbackForward, LoopbackForwardId, LoopbackForwardInfo, LoopbackForwardRequest,
-    ManagedForward, NativeSshSpec, PaneProcs, RemoteContext, RestoreFrom, SftpEntry,
+    LoopbackForward, LoopbackForwardRequest, ManagedForward, NativeSshSpec, PaneProcs, RemoteContext, RestoreFrom, SftpEntry,
     SftpJobProgress, SftpOp, SftpOpResult, SftpTransferSpec, ShellSpec, SshForwardRule, SshPhase,
     SshTestReport, WinSize, WorkspaceOp, WorkspaceRequest,
 };
@@ -1342,34 +1341,6 @@ impl RemoteTerminal {
         }
     }
 
-    pub fn list_loopback_forwards() -> Vec<LoopbackForwardInfo> {
-        fn query() -> anyhow::Result<Vec<LoopbackForwardInfo>> {
-            let mut stream = connect()?;
-            ClientMsg::ListLoopbackForwards.encode(&mut stream)?;
-            match DaemonMsg::read(&mut stream)? {
-                DaemonMsg::LoopbackForwardList(list) => Ok(list),
-                other => Err(anyhow::anyhow!(
-                    "unexpected reply to ListLoopbackForwards: {other:?}"
-                )),
-            }
-        }
-        query().unwrap_or_default()
-    }
-
-    pub fn close_loopback_forward(id: LoopbackForwardId) -> Vec<LoopbackForwardInfo> {
-        fn query(id: LoopbackForwardId) -> anyhow::Result<Vec<LoopbackForwardInfo>> {
-            let mut stream = connect()?;
-            ClientMsg::CloseLoopbackForward(id).encode(&mut stream)?;
-            match DaemonMsg::read(&mut stream)? {
-                DaemonMsg::LoopbackForwardList(list) => Ok(list),
-                other => Err(anyhow::anyhow!(
-                    "unexpected reply to CloseLoopbackForward: {other:?}"
-                )),
-            }
-        }
-        query(id).unwrap_or_default()
-    }
-
     pub fn spawn_native_ssh(
         size: TermSize,
         cell_w: u16,
@@ -1488,6 +1459,14 @@ impl RemoteTerminal {
         }
     }
 
+    /// The client half of known-hosts management.
+    ///
+    /// Nothing calls this yet: there is no known-hosts surface in the window or
+    /// the CLI. What sits behind it is not a stub, though — `ssh::known_hosts`
+    /// parses the real file, fingerprints each key, and rewrites through a
+    /// 0600 temp file — so this is an interface waiting for a screen, not
+    /// scaffolding around nothing. Deleting it would throw away the finished
+    /// half of the feature.
     pub fn list_known_hosts() -> Vec<KnownHostEntry> {
         fn query() -> anyhow::Result<Vec<KnownHostEntry>> {
             let mut stream = connect()?;
@@ -1519,6 +1498,8 @@ impl RemoteTerminal {
         })
     }
 
+    /// See [`Self::list_known_hosts`] — same story, and it returns the list
+    /// after the removal so a caller can redraw from one round trip.
     pub fn delete_known_host(id: KnownHostId) -> Vec<KnownHostEntry> {
         fn query(id: KnownHostId) -> anyhow::Result<Vec<KnownHostEntry>> {
             let mut stream = connect()?;

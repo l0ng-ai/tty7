@@ -190,22 +190,6 @@ pub struct LoopbackForward {
     pub local_port: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct LoopbackForwardId {
-    pub pane_id: u64,
-    pub target: String,
-    pub remote_host: String,
-    pub remote_port: u16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoopbackForwardInfo {
-    pub id: LoopbackForwardId,
-    pub local_port: u16,
-    pub age_secs: u64,
-    pub idle_secs: u64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum SshAuthMode {
@@ -778,8 +762,6 @@ pub enum ClientMsg {
         exe: PathBuf,
     },
     EnsureLoopbackForward(LoopbackForwardRequest),
-    ListLoopbackForwards,
-    CloseLoopbackForward(LoopbackForwardId),
     SpawnNativeSsh {
         cwd: Option<PathBuf>,
         size: WinSize,
@@ -866,7 +848,6 @@ pub enum DaemonMsg {
     Agent(Option<crate::core::cli_agent::CLIAgent>),
     AgentStatus(Option<crate::core::cli_agent::AgentSessionState>),
     LoopbackForward(LoopbackForward),
-    LoopbackForwardList(Vec<LoopbackForwardInfo>),
     AuthPrompt {
         request_id: u64,
         prompt: AuthPromptKind,
@@ -899,8 +880,6 @@ mod kind {
     pub const SHUTDOWN: u8 = 8;
     pub const SPAWN_SHELL: u8 = 9;
     pub const ENSURE_LOOPBACK_FORWARD: u8 = 10;
-    pub const LIST_LOOPBACK_FORWARDS: u8 = 11;
-    pub const CLOSE_LOOPBACK_FORWARD: u8 = 12;
     pub const SPAWN_NATIVE_SSH: u8 = 14;
     pub const AUTH_RESPONSE: u8 = 15;
     pub const LIST_KNOWN_HOSTS: u8 = 16;
@@ -933,7 +912,6 @@ mod kind {
     pub const SIZE: u8 = 9;
     pub const REMOTE_CONTEXT: u8 = 10;
     pub const LOOPBACK_FORWARD: u8 = 11;
-    pub const LOOPBACK_FORWARD_LIST: u8 = 12;
     pub const AUTH_PROMPT: u8 = 13;
     pub const SSH_STATUS: u8 = 14;
     pub const KNOWN_HOSTS_LIST: u8 = 15;
@@ -1118,10 +1096,6 @@ impl ClientMsg {
             ClientMsg::EnsureLoopbackForward(req) => {
                 write_frame(w, kind::ENSURE_LOOPBACK_FORWARD, &to_json(req)?)
             }
-            ClientMsg::ListLoopbackForwards => write_frame(w, kind::LIST_LOOPBACK_FORWARDS, &[]),
-            ClientMsg::CloseLoopbackForward(id) => {
-                write_frame(w, kind::CLOSE_LOOPBACK_FORWARD, &to_json(id)?)
-            }
             ClientMsg::SpawnNativeSsh { cwd, size, spec } => {
                 write_frame(w, kind::SPAWN_NATIVE_SSH, &to_json(&(cwd, size, spec))?)
             }
@@ -1233,8 +1207,6 @@ impl ClientMsg {
                 exe: from_json(&payload)?,
             },
             kind::ENSURE_LOOPBACK_FORWARD => ClientMsg::EnsureLoopbackForward(from_json(&payload)?),
-            kind::LIST_LOOPBACK_FORWARDS => ClientMsg::ListLoopbackForwards,
-            kind::CLOSE_LOOPBACK_FORWARD => ClientMsg::CloseLoopbackForward(from_json(&payload)?),
             kind::SPAWN_NATIVE_SSH => {
                 let (cwd, size, spec) = from_json(&payload)?;
                 ClientMsg::SpawnNativeSsh { cwd, size, spec }
@@ -1326,9 +1298,6 @@ impl DaemonMsg {
             DaemonMsg::LoopbackForward(forward) => {
                 write_frame(w, kind::LOOPBACK_FORWARD, &to_json(forward)?)
             }
-            DaemonMsg::LoopbackForwardList(forwards) => {
-                write_frame(w, kind::LOOPBACK_FORWARD_LIST, &to_json(forwards)?)
-            }
             DaemonMsg::AuthPrompt { request_id, prompt } => {
                 write_frame(w, kind::AUTH_PROMPT, &to_json(&(request_id, prompt))?)
             }
@@ -1388,7 +1357,6 @@ impl DaemonMsg {
             kind::AGENT => DaemonMsg::Agent(from_json(&payload)?),
             kind::AGENT_STATUS => DaemonMsg::AgentStatus(from_json(&payload)?),
             kind::LOOPBACK_FORWARD => DaemonMsg::LoopbackForward(from_json(&payload)?),
-            kind::LOOPBACK_FORWARD_LIST => DaemonMsg::LoopbackForwardList(from_json(&payload)?),
             kind::AUTH_PROMPT => {
                 let (request_id, prompt) = from_json(&payload)?;
                 DaemonMsg::AuthPrompt { request_id, prompt }
@@ -1570,13 +1538,6 @@ mod tests {
                 remote_host: "127.0.0.1".into(),
                 remote_port: 3000,
             }),
-            ClientMsg::ListLoopbackForwards,
-            ClientMsg::CloseLoopbackForward(LoopbackForwardId {
-                pane_id: 7,
-                target: "dev".into(),
-                remote_host: "127.0.0.1".into(),
-                remote_port: 3000,
-            }),
             ClientMsg::ListKnownHosts,
             ClientMsg::DeleteKnownHost(KnownHostId {
                 host: "example.com".into(),
@@ -1741,17 +1702,6 @@ mod tests {
             })),
             DaemonMsg::AgentStatus(None),
             DaemonMsg::LoopbackForward(LoopbackForward { local_port: 49152 }),
-            DaemonMsg::LoopbackForwardList(vec![LoopbackForwardInfo {
-                id: LoopbackForwardId {
-                    pane_id: 7,
-                    target: "dev".into(),
-                    remote_host: "127.0.0.1".into(),
-                    remote_port: 3000,
-                },
-                local_port: 49152,
-                age_secs: 12,
-                idle_secs: 3,
-            }]),
             DaemonMsg::KnownHostsList(vec![KnownHostEntry {
                 host: "example.com".into(),
                 marker: Some("@revoked".into()),

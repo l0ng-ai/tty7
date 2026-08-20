@@ -36,9 +36,7 @@ use crate::ui::palette::{
 use crate::ui::pane::{CloseOutcome, Dir, Pane, PaneSlot};
 use crate::ui::presets::Fill;
 use crate::ui::scm::ScmIntent;
-use crate::ui::settings::{
-    Recording, SettingsSection, SettingsState, ThemeEditor, humanize_action,
-};
+use crate::ui::settings::{Recording, SettingsSection, SettingsState, ThemeEditor};
 use crate::ui::theme::{apply_theme, set_menus};
 
 /// What to start in a pane that is about to be opened.

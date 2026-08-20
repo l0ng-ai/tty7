@@ -880,21 +880,6 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             Ok(())
         }
 
-        ClientMsg::ListLoopbackForwards => {
-            let mut w = write_stream;
-            let list = crate::daemon::ssh::SshManager::global().list_loopback_forwards();
-            DaemonMsg::LoopbackForwardList(list).encode(&mut w)?;
-            Ok(())
-        }
-
-        ClientMsg::CloseLoopbackForward(id) => {
-            let mut w = write_stream;
-            crate::daemon::ssh::SshManager::global().close_loopback_forward(&id);
-            let list = crate::daemon::ssh::SshManager::global().list_loopback_forwards();
-            DaemonMsg::LoopbackForwardList(list).encode(&mut w)?;
-            Ok(())
-        }
-
         ClientMsg::ListKnownHosts => {
             let mut w = write_stream;
             let list = crate::daemon::ssh::known_hosts::list();

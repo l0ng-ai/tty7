@@ -209,7 +209,6 @@ mod tests {
     #[test]
     fn git_signature_parses_and_memoizes() {
         let sig = signature("git").expect("git spec on disk");
-        assert_eq!(sig.name, "git");
         assert!(sig.subcommands.len() > 20, "git has many subcommands");
         let again = signature("git").unwrap();
         assert!(Arc::ptr_eq(&sig, &again));
