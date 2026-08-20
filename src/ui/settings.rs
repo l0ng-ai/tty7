@@ -2523,9 +2523,10 @@ impl Tty7App {
                     .into_any_element();
             self.settings_row(
                 t(L10nKey::SettingsBlur),
-                // Not `SettingsBlurDesc` — that one says "(macOS)", which is
-                // exactly wrong here. This row explains the flag's one
-                // remaining job on Windows: feeding the `Auto` material.
+                // Not `SettingsBlurDesc` — that one describes the switch's
+                // usual job, blurring whatever sits behind the window. This
+                // row explains its one remaining job on Windows: feeding the
+                // `Auto` material.
                 t(L10nKey::SettingsBlurAutoDesc),
                 control,
                 cx,
