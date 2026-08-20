@@ -1,6 +1,6 @@
 use gpui::{
-    App, Axis, Bounds, Context, Entity, Focusable, Pixels, PromptLevel, Subscription, Window, div,
-    img, point, prelude::*, px, size,
+    App, Axis, Bounds, Context, Edges, Entity, Focusable, Pixels, PromptLevel, Size, Subscription,
+    Window, div, img, point, prelude::*, px, size,
 };
 use gpui_component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{InputEvent, InputState};
@@ -295,22 +295,45 @@ pub(crate) fn title_bar_hug_offset() -> f32 {
 
 /// The bounds to remember for reopening this window at the same place.
 ///
-/// The value goes back in through `WindowOptions::window_bounds`, which every
-/// backend reads as the *outer* rectangle, so outer is what to save — except
-/// on Wayland under client-side decorations, where the outer rectangle is the
-/// surface, shadow included, and the compositor's first sized configure adds
-/// the inset back onto whatever was asked for (`compute_outer_size`). Saving
-/// outer there grows the window by twice the shadow on every launch (the bug
-/// Zed fixed in ca9cee85e1); saving inner pre-deflates by exactly what the
-/// configure re-inflates, and the geometry holds still. X11 never re-inflates:
-/// it creates the window at the requested rectangle verbatim and its
-/// `inner_window_bounds` also shifts the origin by the inset, so saving inner
-/// there would shrink the window and walk it down-right by the shadow on
-/// every launch. macOS and Windows report no inset, so the two are the same.
-fn window_bounds_to_remember(window: &Window, cx: &App) -> Bounds<Pixels> {
-    match cx.compositor_name() {
-        "Wayland" => window.inner_window_bounds().get_bounds(),
-        _ => window.window_bounds().get_bounds(),
+/// Under client-side decorations the window's *outer* rectangle is the whole
+/// surface, shadow included, and both Linux backends put the shadow back on
+/// their own once the window is up: Wayland's first sized configure adds the
+/// inset to whatever geometry was asked for (`compute_outer_size`), and on X11
+/// the inset travels as `_GTK_FRAME_EXTENTS`, which a window manager only
+/// advertises — and gpui only turns CSD on for — when it honours those extents
+/// by keeping the *visible* frame put. Save the outer rectangle either way and
+/// it comes back twice the shadow larger every launch; that is the bug Zed
+/// fixed in ca9cee85e1 ("linux: Fix non-maximized Zed windows growing larger
+/// across sessions", #22301), whose own measurements were taken on X11.
+///
+/// So save the inner rectangle, exactly as Zed does, on every platform. It is
+/// the visible frame, which is what the backends re-inflate back to, and it
+/// costs nothing elsewhere: `inner_window_bounds` defaults to `window_bounds`
+/// on the `PlatformWindow` trait, and neither the macOS nor the Windows backend
+/// nor gpui's `TestWindow` overrides it. On X11 without a compositor the same
+/// holds for a different reason — `window_decorations()` answers `Server`, the
+/// window border never calls `set_client_inset`, and the insets stay zero.
+fn window_bounds_to_remember(window: &Window) -> Bounds<Pixels> {
+    window.inner_window_bounds().get_bounds()
+}
+
+/// The band the tab strip claims for a drop, in the window's outer coordinates.
+///
+/// The strip is the top of the *content*, and under client-side decorations the
+/// content sits inside the frame padding while `viewport` still measures the
+/// whole surface, shadow included — so the band starts at the padding and stops
+/// at the far edge of the frame, one padding in from each side. Anything else
+/// leaves the outermost chips outside the zone that is supposed to contain
+/// them. `window_paddings` answers `Edges::all(0)` under server-side
+/// decorations, which is every platform but Linux CSD, so off Linux this stays
+/// the full-width rectangle from the window's corner it has always been.
+fn strip_band(viewport: Size<Pixels>, pad: Edges<Pixels>) -> Bounds<Pixels> {
+    Bounds {
+        origin: point(pad.left, pad.top),
+        size: size(
+            (viewport.width - pad.left - pad.right).max(px(0.)),
+            px(TITLE_BAR_HEIGHT),
+        ),
     }
 }
 
@@ -1319,7 +1342,7 @@ impl Tty7App {
             settings: None,
             ssh_prompt: crate::ui::ssh_prompt::SshPromptState::new(cx),
             close_prompt_open: false,
-            window_bounds: window_bounds_to_remember(window, cx),
+            window_bounds: window_bounds_to_remember(window),
             workspace,
             workspace_rename: None,
             window_title: std::cell::RefCell::new(String::new()),
@@ -1343,8 +1366,8 @@ impl Tty7App {
         })
         .detach();
 
-        cx.observe_window_bounds(window, |this, window, cx| {
-            this.window_bounds = window_bounds_to_remember(window, cx);
+        cx.observe_window_bounds(window, |this, window, _cx| {
+            this.window_bounds = window_bounds_to_remember(window);
         })
         .detach();
 
@@ -3827,6 +3850,8 @@ impl Tty7App {
     /// Which gap between tabs the pointer is in, as the tab a newcomer would
     /// be inserted before and the caret marking it — on the strip, or on the
     /// sidebar, whichever the pointer is over.
+    ///
+    /// `viewport` and the pointer are both in the window's outer coordinates.
     fn detach_slot(&self, window: &Window, cx: &App) -> Option<(usize, Bounds<Pixels>)> {
         /// How far above its first row the sidebar's band starts, so the gap
         /// over that row is inside it.
@@ -3838,10 +3863,6 @@ impl Tty7App {
         let vertical = matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
             && !self.tabs.is_empty();
         let viewport = window.viewport_size();
-        // The pointer and the viewport are in the window's outer coordinates;
-        // under client-side decorations the content — title bar included —
-        // sits inside the frame padding, so the strip's band starts there and
-        // not at the window's corner. Zero padding everywhere else.
         let pad = gpui_component::window_paddings(window);
         // The band each surface claims, read off the tabs it drew rather than
         // measured as an element of its own: the chips and the rows are the
@@ -3858,10 +3879,7 @@ impl Tty7App {
                 .map(|(_, b)| b.origin.x + b.size.width)
                 .reduce(Pixels::max)?;
             Some(match axis {
-                Axis::Horizontal => Bounds {
-                    origin: point(pad.left, pad.top),
-                    size: size(viewport.width - pad.left - pad.right, px(TITLE_BAR_HEIGHT)),
-                },
+                Axis::Horizontal => strip_band(viewport, pad),
                 Axis::Vertical => Bounds {
                     origin: point(left, top - px(BAND_REACH)),
                     size: size(
@@ -8645,14 +8663,54 @@ mod window_drag_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseReason, DOCUMENT_MIN_W, TERMINAL_MIN_W, TabAgentSession, clear_window_override_values,
-        close_prompt, document_column_px, join_shell_args, leaf_shares_the_window_daemon,
-        mru_order, pane_free_for, parse_ssh_connect_input, parse_ssh_option_words, side_panel_max,
-        split_shell_args, wd_path_saveable,
+        CloseReason, DOCUMENT_MIN_W, TERMINAL_MIN_W, TITLE_BAR_HEIGHT, TabAgentSession,
+        clear_window_override_values, close_prompt, document_column_px, join_shell_args,
+        leaf_shares_the_window_daemon, mru_order, pane_free_for, parse_ssh_connect_input,
+        parse_ssh_option_words, side_panel_max, split_shell_args, strip_band, wd_path_saveable,
     };
+    use gpui::{Edges, point, px, size};
 
     const SIDEBAR_MIN: f32 = crate::ui::tab_sidebar::MIN_SIDEBAR_WIDTH;
     const PANEL_MIN: f32 = crate::ui::right_panel::MIN_WIDTH;
+
+    /// #679: the band now starts at the frame padding rather than at the
+    /// window's corner, and off Linux CSD there is no padding to start at —
+    /// `window_paddings` answers `Edges::all(0)` under server-side decorations,
+    /// which is what macOS, Windows and a bare X session all report.
+    #[test]
+    fn an_undecorated_frame_leaves_the_strips_drop_band_where_it_was() {
+        let band = strip_band(size(px(1200.), px(800.)), Edges::all(px(0.)));
+        assert_eq!(band.origin, point(px(0.), px(0.)));
+        assert_eq!(band.size, size(px(1200.), px(TITLE_BAR_HEIGHT)));
+    }
+
+    /// The viewport measures the whole surface, shadow included, so the band
+    /// has to lose one padding at each end — not one twice over, and not none.
+    /// Getting it wrong puts the outermost chips outside the band drawn to hold
+    /// them, and a drop on them reads as a drop on nothing.
+    #[test]
+    fn a_client_side_frame_pulls_the_drop_band_in_by_the_shadow_on_both_sides() {
+        let viewport = size(px(1200.), px(800.));
+        let pad = Edges::all(px(12.));
+        let band = strip_band(viewport, pad);
+
+        assert_eq!(band.origin, point(pad.left, pad.top));
+        assert_eq!(
+            band.origin.x + band.size.width,
+            viewport.width - pad.right,
+            "the band must reach the far edge of the frame, not of the surface"
+        );
+        assert_eq!(band.size.height, px(TITLE_BAR_HEIGHT));
+    }
+
+    /// A surface narrower than its own shadow is only reachable mid-resize, but
+    /// a negative width would make `Bounds::contains` answer for a rectangle
+    /// that is inside out.
+    #[test]
+    fn a_drop_band_narrower_than_its_frame_collapses_instead_of_inverting() {
+        let band = strip_band(size(px(10.), px(800.)), Edges::all(px(12.)));
+        assert_eq!(band.size.width, px(0.));
+    }
 
     /// Two panels that each cap themselves at half the window leave the
     /// terminal nothing when both are open, so the cap is what is left after
