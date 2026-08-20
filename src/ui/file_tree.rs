@@ -2050,13 +2050,18 @@ impl Tty7App {
 
         menu = menu.separator().item(
             PopupMenuItem::new(t(L10nKey::FileTreeContextCopyPath)).on_click({
-                let p = p.clone();
+                // Only a path on this machine gets re-spelled: a remote
+                // host's paths are already native over there, and giving
+                // them this OS's separators would copy something that names
+                // nothing on either machine.
+                let text = match paths_are_local {
+                    true => crate::ui::path_display::native_separators(&p)
+                        .display()
+                        .to_string(),
+                    false => p.display().to_string(),
+                };
                 move |_, _window, cx| {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                        crate::ui::path_display::native_separators(&p)
-                            .display()
-                            .to_string(),
-                    ));
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
                 }
             }),
         );

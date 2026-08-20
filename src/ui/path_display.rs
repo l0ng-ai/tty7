@@ -69,21 +69,55 @@ fn normalized(s: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Normalizes a path's separators to what the local OS expects. On Windows the
-/// shell's `IShellFolder::ParseDisplayName` bails out with `E_INVALIDARG` on a
-/// mixed-separator path — a forward-slash prefix joined with backslash
-/// entries. The forward slashes get in from two routes: the shell's PWD
-/// (OSC 7 from Git Bash / MSYS bash reports `/`, and that string survives
-/// `Path::ancestors()` when the file tree walks up to find `.git`), and
-/// `git rev-parse --show-toplevel` from Git for Windows (MSYS2), which always
-/// prints `/` regardless of the calling shell. `reveal_path` swallows that
-/// failure (it only logs), so handing it native separators is what makes
+/// Re-spells a path on **this** machine with the separators this OS expects.
+///
+/// On Windows the shell's `IShellFolder::ParseDisplayName` bails out with
+/// `E_INVALIDARG` on a mixed-separator path — a forward-slash prefix joined
+/// with backslash entries. The forward slashes get in from two routes: the
+/// shell's PWD (OSC 7 from Git Bash / MSYS bash reports `/`, and that string
+/// survives `Path::ancestors()` when the file tree walks up to find `.git`),
+/// and `git rev-parse --show-toplevel` from Git for Windows (MSYS2), which
+/// always prints `/` regardless of the calling shell. `reveal_path` swallows
+/// that failure (it only logs), so handing it native separators is what makes
 /// "open folder" actually open.
+///
+/// **Only for paths on the machine this window runs on.** A remote host's
+/// `/home/u/src` is already native over there; re-spelling it would put a
+/// path on the clipboard that names nothing on either machine. Every caller
+/// sits behind a locality check for that reason.
+///
+/// The rewrite runs on the path's own UTF-16 code units, not on a
+/// `to_string_lossy` copy of them. A Windows filename may hold unpaired
+/// surrogates, which `to_string_lossy` turns into `U+FFFD` — the returned
+/// path would then silently name a *different* file, and reveal would open
+/// nothing without reporting why. `/` and `\` are ASCII, so a code unit
+/// equal to one of them is that character and never half of a surrogate
+/// pair, which is what makes the swap safe to do one unit at a time.
+#[cfg(windows)]
 pub(crate) fn native_separators(path: &Path) -> Cow<'_, Path> {
-    #[cfg(windows)]
-    if path.as_os_str().to_string_lossy().contains('/') {
-        return Cow::Owned(path.as_os_str().to_string_lossy().replace('/', "\\").into());
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    const SLASH: u16 = b'/' as u16;
+    const BACKSLASH: u16 = b'\\' as u16;
+
+    let os = path.as_os_str();
+    // Nothing to fix — including every UNC (`\\wsl$\…`, `\\?\…`) and
+    // already-native path — hands the caller's own path straight back.
+    if !os.encode_wide().any(|unit| unit == SLASH) {
+        return Cow::Borrowed(path);
     }
+    let wide: Vec<u16> = os
+        .encode_wide()
+        .map(|unit| if unit == SLASH { BACKSLASH } else { unit })
+        .collect();
+    Cow::Owned(PathBuf::from(OsString::from_wide(&wide)))
+}
+
+/// Off Windows the OS separator is already `/`, and a backslash in a path is
+/// an ordinary filename character — there is nothing to re-spell.
+#[cfg(not(windows))]
+pub(crate) fn native_separators(path: &Path) -> Cow<'_, Path> {
     Cow::Borrowed(path)
 }
 
@@ -232,14 +266,49 @@ mod tests {
         // A UNC path (`\\wsl$\…`, `\\?\…`) or an already-native path has no
         // `/`, so it passes through borrowed — the replace is a no-op and
         // must not allocate, nor touch the leading `\\`.
-        for p in ["\\\\wsl$\\Ubuntu\\home", "\\\\?\\C:\\code", "C:\\code\\tty7"] {
+        for p in [
+            "\\\\wsl$\\Ubuntu\\home",
+            "\\\\?\\C:\\code",
+            "C:\\code\\tty7",
+        ] {
             let got = native_separators(Path::new(p));
             assert_eq!(got.as_ref(), Path::new(p), "{p:?}");
-            assert!(
-                matches!(got, Cow::Borrowed(_)),
-                "{p:?} should not allocate"
-            );
+            assert!(matches!(got, Cow::Borrowed(_)), "{p:?} should not allocate");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_separators_keeps_a_name_a_string_cannot_hold() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+        // `0xD800` is a lone high surrogate — legal in an NTFS name, and not
+        // representable in a Rust `str`. Rewriting through
+        // `to_string_lossy` would swap it for `U+FFFD` and hand back a path
+        // naming a *different* file; because `reveal_path` only logs its
+        // failures, that reads to the user as the same silent no-op this fix
+        // is here to remove. Working on the UTF-16 units keeps the name.
+        let raw: Vec<u16> = "C:/a"
+            .encode_utf16()
+            .chain([0xD800])
+            .chain("/b".encode_utf16())
+            .collect();
+        let path = PathBuf::from(OsString::from_wide(&raw));
+        let want: Vec<u16> = "C:\\a"
+            .encode_utf16()
+            .chain([0xD800])
+            .chain("\\b".encode_utf16())
+            .collect();
+        assert_eq!(
+            native_separators(&path)
+                .as_os_str()
+                .encode_wide()
+                .collect::<Vec<_>>(),
+            want
+        );
+        // The round-trip this replaced really did destroy it.
+        assert!(path.to_string_lossy().contains('\u{FFFD}'));
     }
 
     #[cfg(not(windows))]

@@ -4241,22 +4241,29 @@ impl Tty7App {
         cx.notify();
     }
 
-    pub(crate) fn tab_cwd(
-        &self,
-        index: usize,
-        window: &Window,
-        cx: &App,
-    ) -> Option<std::path::PathBuf> {
-        self.tabs
-            .get(index)?
-            .pane
-            .focused_or_first(window, cx)
-            .and_then(|leaf| leaf.read(cx).cwd())
+    /// A tab's working directory, spelled for the clipboard.
+    ///
+    /// A cwd on this machine is re-spelled with this OS's separators, because
+    /// what goes on the clipboard is meant to be pasted into a shell and a
+    /// mixed-separator path is not one Windows will take. A remote pane's cwd
+    /// keeps the spelling its own machine uses — it is already native over
+    /// there. Both "Copy working directory" entry points (the app-menu action
+    /// and the tab context menu) come through here so the two cannot drift.
+    pub(crate) fn tab_cwd_text(&self, index: usize, window: &Window, cx: &App) -> Option<String> {
+        let leaf = self.tabs.get(index)?.pane.focused_or_first(window, cx)?;
+        let view = leaf.read(cx);
+        let cwd = view.cwd()?;
+        Some(match view.local_cwd().is_some() {
+            true => crate::ui::path_display::native_separators(&cwd)
+                .display()
+                .to_string(),
+            false => cwd.display().to_string(),
+        })
     }
 
     pub(crate) fn copy_active_cwd(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if let Some(cwd) = self.tab_cwd(self.active, window, cx) {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(cwd.display().to_string()));
+        if let Some(text) = self.tab_cwd_text(self.active, window, cx) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         }
     }
 

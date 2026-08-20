@@ -681,19 +681,24 @@ impl Tty7App {
                 );
                 if let Some(cwd) = view.effective_cwd() {
                     let home = view.display_home(cx);
+                    // Whether this pane's paths are this machine's decides
+                    // both tiles: reveal only means anything on the machine
+                    // the file manager can see, and only a local path may be
+                    // re-spelled with this OS's separators — a remote one is
+                    // already native where it lives.
+                    let local = view.local_cwd().is_some();
                     rows.push(InfoRow {
                         label: t(L10nKey::PanelCwd),
                         value: InfoValue::Path(compact_path(&cwd, home.as_deref())),
                         // The compacted `~/…` spelling is for reading; what
                         // goes on the clipboard is the path a shell can use.
-                        copy: Some(
-                            crate::ui::path_display::native_separators(&cwd)
+                        copy: Some(match local {
+                            true => crate::ui::path_display::native_separators(&cwd)
                                 .display()
                                 .to_string(),
-                        ),
-                        // Reveal only means anything when the path is on the
-                        // machine the file manager can see.
-                        reveal: view.local_cwd().is_some().then(|| cwd.clone()),
+                            false => cwd.display().to_string(),
+                        }),
+                        reveal: local.then(|| cwd.clone()),
                     });
                 }
                 let shell = match view.shell_spec().map(|s| s.program.clone()) {

@@ -1665,13 +1665,17 @@ impl Tty7App {
             .separator()
             .item(
                 PopupMenuItem::new(t(L10nKey::FileTreeContextCopyPath)).on_click({
-                    let absolute = absolute.clone();
+                    // Same locality rule as Reveal below: a remote
+                    // repository's paths belong to its own filesystem and
+                    // are left spelled the way that machine spells them.
+                    let text = match repo.host == HostId::LOCAL {
+                        true => crate::ui::path_display::native_separators(&absolute)
+                            .display()
+                            .to_string(),
+                        false => absolute.display().to_string(),
+                    };
                     move |_, _window, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                            crate::ui::path_display::native_separators(&absolute)
-                                .display()
-                                .to_string(),
-                        ));
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
                     }
                 }),
             );
