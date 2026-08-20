@@ -1502,6 +1502,50 @@ impl TerminalView {
         self.terminal.agent_session()
     }
 
+    /// One entry per turn of the agent's conversation, oldest first — see
+    /// [`crate::terminal::agent_marks`].
+    pub fn agent_turns(&self) -> Vec<crate::terminal::agent_marks::AgentTurn> {
+        self.terminal.agent_turns().list()
+    }
+
+    /// Scroll back to where a turn began, putting that row at the top of the
+    /// viewport so the answer to it reads downwards from there.
+    ///
+    /// The stored anchor only says roughly where the agent was drawing when the
+    /// turn started, so the prompt's own text gets the final say; the row it is
+    /// found on is written back, and a second click on the same turn lands in
+    /// the same place without searching again.
+    pub fn scroll_to_agent_turn(
+        &mut self,
+        turn: &crate::terminal::agent_marks::AgentTurn,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(anchor) = turn.row else {
+            return false;
+        };
+        // Nothing behind the alt screen to scroll to, and `scroll_display` is a
+        // no-op there anyway — say so rather than pretending the click worked.
+        if self.on_alt_screen() {
+            return false;
+        }
+        self.cancel_scroll_anim();
+        let row = {
+            let mut term = self.terminal.term.lock();
+            use alacritty_terminal::grid::Dimensions as _;
+            let history = term.grid().history_size() as i64;
+            let row = crate::terminal::agent_marks::locate(&term, anchor, &turn.text);
+            let target = (history - row).clamp(0, history);
+            let delta = (target - term.grid().display_offset() as i64)
+                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+            term.scroll_display(Scroll::Delta(delta));
+            row
+        };
+        self.terminal.agent_turns().recenter(turn.id, row);
+        self.scroll_frac = 0.;
+        cx.notify();
+        true
+    }
+
     /// What this pane is in the middle of, when it can say so. `None` means
     /// either nothing is running or the shell never told us — and a terminal
     /// that guessed would raise this question on every single close.
@@ -3035,6 +3079,9 @@ impl TerminalView {
         // not replay out-of-band image frames, so a browser redraws on its next
         // transmit (same reasoning as the reattach path in `adopt_relink`).
         self.terminal.images().clear();
+        // Agent turn anchors are rows in the same discarded history, and unlike
+        // images they cannot be redrawn back into place.
+        self.terminal.agent_turns().clear();
         self.scroll_frac = 0.;
         self.terminal.write(vec![0x0c_u8]);
         cx.notify();
@@ -5520,9 +5567,14 @@ impl TerminalView {
                 }
             }
         };
-        let cell = |color: gpui::Hsla, ch: char, selected: bool, caret: bool, underline: bool| {
+        let cell = |color: gpui::Hsla,
+                    text: String,
+                    width: usize,
+                    selected: bool,
+                    caret: bool,
+                    underline: bool| {
             let inverted = caret && block_cursor;
-            let w = cell_w * (display_width(ch) as f32);
+            let w = cell_w * (width as f32);
             let mut d = div()
                 .relative()
                 .flex_none()
@@ -5539,7 +5591,7 @@ impl TerminalView {
             if underline {
                 d = d.border_b_1().border_color(fg);
             }
-            d = d.child(ch.to_string());
+            d = d.child(text);
             if caret && !inverted {
                 d = d.child(caret_bar());
             }
@@ -5553,15 +5605,24 @@ impl TerminalView {
 
         let is_multiline = chars.contains(&'\n');
 
-        for i in 0..len {
-            if i == cursor && has_marked {
-                for mc in marked.chars() {
-                    lines
-                        .last_mut()
-                        .unwrap()
-                        .push(cell(fg, mc, false, false, true));
+        let marked_cells = input_cells(&marked.chars().collect::<Vec<char>>());
+        for c in input_cells(&chars) {
+            // The caret sits on the base of a cell, so an IME's in-flight text
+            // opens wherever the caret is drawn — anywhere inside the cell, not
+            // only on its first character.
+            if has_marked && (c.start..c.end).contains(&cursor) {
+                for mc in &marked_cells {
+                    lines.last_mut().unwrap().push(cell(
+                        fg,
+                        mc.text.clone(),
+                        mc.width,
+                        false,
+                        false,
+                        true,
+                    ));
                 }
             }
+            let i = c.start;
             if chars[i] == '\n' {
                 if selection.is_none() && !has_marked && cursor_on && cursor == i {
                     lines.last_mut().unwrap().push(
@@ -5579,12 +5640,18 @@ impl TerminalView {
                 lines.push(Vec::new());
                 continue;
             }
-            let selected = selection.is_some_and(|(s, e)| i >= s && i < e);
-            let caret = selection.is_none() && !has_marked && cursor_on && cursor == i;
+            // A cell is one glyph, so it tints as a unit: a selection that
+            // covers any character in it — the base or a mark riding on it —
+            // covers the whole thing.
+            let selected = selection.is_some_and(|(s, e)| s < c.end && c.start < e);
+            let caret = selection.is_none()
+                && !has_marked
+                && cursor_on
+                && (c.start..c.end).contains(&cursor);
             lines
                 .last_mut()
                 .unwrap()
-                .push(cell(colors[i], chars[i], selected, caret, false));
+                .push(cell(colors[i], c.text, c.width, selected, caret, false));
         }
 
         let ghost: Option<String> = if selection.is_none() && !has_marked && !is_multiline {
@@ -5598,8 +5665,8 @@ impl TerminalView {
         if cursor == len {
             let last = lines.last_mut().unwrap();
             if has_marked {
-                for mc in marked.chars() {
-                    last.push(cell(fg, mc, false, false, true));
+                for mc in &marked_cells {
+                    last.push(cell(fg, mc.text.clone(), mc.width, false, false, true));
                 }
             } else if ghost.is_none() {
                 let mut tail = blank(cell_w).relative();
@@ -5612,9 +5679,10 @@ impl TerminalView {
 
         if let Some(rem) = ghost {
             let last = lines.last_mut().unwrap();
-            for (gi, gc) in rem.chars().map(one_line_char).enumerate() {
+            let flat: Vec<char> = rem.chars().map(one_line_char).collect();
+            for (gi, gc) in input_cells(&flat).into_iter().enumerate() {
                 let caret = gi == 0 && cursor == len && cursor_on;
-                last.push(cell(muted, gc, false, caret, false));
+                last.push(cell(muted, gc.text, gc.width, false, caret, false));
             }
         }
 
@@ -6307,24 +6375,88 @@ fn highlight_runs(line: &str, positions: &[usize]) -> Vec<(String, bool)> {
     runs
 }
 
+/// Columns this character occupies in the input bar.
+///
+/// The bar lays out text the terminal is about to receive, so it has to agree
+/// with the grid on where every character lands. The grid gets its widths from
+/// `unicode-width` by way of `alacritty_terminal`, so the bar reads the same
+/// table: a hand-written range list drifts from it the moment Unicode assigns
+/// another block, and it silently counted `🀄`, `⌚` and every combining mark
+/// as one plain column (#701).
+///
+/// Control characters have no width of their own. The bar still gives them a
+/// column — one was typed, and a cell that occupies nothing is a cell nobody
+/// can put the caret on.
 fn display_width(c: char) -> usize {
-    let u = c as u32;
-    let wide = matches!(u,
-        0x1100..=0x115F
-        | 0x2329 | 0x232A
-        | 0x2E80..=0x303E
-        | 0x3041..=0x33FF
-        | 0x3400..=0x4DBF
-        | 0x4E00..=0x9FFF
-        | 0xA000..=0xA4CF
-        | 0xAC00..=0xD7A3
-        | 0xF900..=0xFAFF
-        | 0xFE10..=0xFE19 | 0xFE30..=0xFE6F
-        | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6
-        | 0x1F300..=0x1FAFF
-        | 0x20000..=0x3FFFD
-    );
-    if wide { 2 } else { 1 }
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
+}
+
+/// One drawn cell of the input bar.
+#[derive(Debug, PartialEq)]
+struct InputCell {
+    /// Character indices the cell covers, as `start..end`.
+    start: usize,
+    end: usize,
+    /// What to draw in it — a base character and whatever rides along with it.
+    text: String,
+    /// Columns it occupies. Zero for a newline, which ends the row rather than
+    /// taking space on it.
+    width: usize,
+}
+
+/// Splits input-bar text into the cells it draws.
+///
+/// Combining marks, variation selectors and the joiner inside an emoji
+/// sequence take no column of their own, and the shaper has to see them in the
+/// same run as their base to compose a single glyph — so they ride in the cell
+/// of the character in front of them instead of each getting a box. Handing
+/// them their own cell is what left `e` and its accent side by side, and every
+/// mark shifted the rest of the row a column left (#701).
+///
+/// A mark with no base ahead of it — text pasted mid-sequence, an IME's
+/// in-flight buffer — keeps a cell and a column, so it stays visible and the
+/// caret has somewhere to sit.
+fn input_cells(chars: &[char]) -> Vec<InputCell> {
+    let mut cells: Vec<InputCell> = Vec::with_capacity(chars.len());
+    for (i, &ch) in chars.iter().enumerate() {
+        if ch == '\n' {
+            cells.push(InputCell {
+                start: i,
+                end: i + 1,
+                text: String::new(),
+                width: 0,
+            });
+            continue;
+        }
+        let w = display_width(ch);
+        match cells.last_mut() {
+            // `width > 0` keeps a mark off a newline's cell, which ends a row
+            // and draws nothing.
+            Some(last) if w == 0 && last.width > 0 => {
+                last.text.push(ch);
+                last.end = i + 1;
+                // U+FE0F asks for the emoji glyph, and an emoji presentation
+                // sequence is two columns wide even where its base is one — a
+                // rule that only exists at string level (UTS #51), which is why
+                // scoring character by character misses it. The grid re-scores
+                // the sequence the same way (our `alacritty_terminal` fork,
+                // #203), so the bar has to as well or `❤️` sits a column
+                // narrower here than where it lands. Never narrower than the
+                // base: giving a column back would mean pulling the row left.
+                if ch == '\u{FE0F}' {
+                    let scored = unicode_width::UnicodeWidthStr::width(last.text.as_str());
+                    last.width = scored.max(last.width);
+                }
+            }
+            _ => cells.push(InputCell {
+                start: i,
+                end: i + 1,
+                text: ch.to_string(),
+                width: w.max(1),
+            }),
+        }
+    }
+    cells
 }
 
 #[derive(Debug, PartialEq)]
@@ -6660,6 +6792,17 @@ fn menu_layout(
     (place_above, visible, first)
 }
 
+/// Where each character of the input bar lands: `(row, column, width)`, one
+/// entry per character, plus the row and column the text ends on.
+///
+/// Walks the same cells the bar draws rather than re-deriving widths per
+/// character — an emoji presentation sequence is two columns and a stranded
+/// combining mark is one, and a second width table would put clicks, wrapping
+/// and the caret a column away from the glyph on screen.
+///
+/// Only the base of a cell carries the width, so a click can never land on a
+/// character riding along with it. Those riders are parked at the column the
+/// caret takes after the cell, which is where a caret sitting on one belongs.
 fn input_char_positions(
     chars: &[char],
     scol: usize,
@@ -6668,20 +6811,22 @@ fn input_char_positions(
     let mut positions: Vec<(usize, usize, usize)> = Vec::with_capacity(chars.len());
     let mut r = 0usize;
     let mut c = scol;
-    for &ch in chars {
-        if ch == '\n' {
+    for cell in input_cells(chars) {
+        if chars[cell.start] == '\n' {
             positions.push((r, c, 0));
             r += 1;
             c = 0;
             continue;
         }
-        let w = display_width(ch).max(1);
-        if c + w > cols {
+        if c + cell.width > cols {
             r += 1;
             c = 0;
         }
-        positions.push((r, c, w));
-        c += w;
+        positions.push((r, c, cell.width));
+        c += cell.width;
+        for _ in cell.start + 1..cell.end {
+            positions.push((r, c, 0));
+        }
     }
     (positions, r, c)
 }
@@ -6885,9 +7030,9 @@ mod tests {
     use super::{
         description_budget, drag_scroll_step, elide, encode_mouse, expand_file_command_template,
         fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes, highlight_runs,
-        input_overflow_shift, input_overlay_rows, menu_layout, paste_bytes, select_end_copy,
-        should_show_context_menu, smooth_scroll_step, submit_bytes, trim_trailing_spaces,
-        wheel_route, wrapped_click_index,
+        input_cells, input_char_positions, input_overflow_shift, input_overlay_rows, menu_layout,
+        paste_bytes, select_end_copy, should_show_context_menu, smooth_scroll_step, submit_bytes,
+        trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
@@ -7990,6 +8135,184 @@ mod tests {
         assert_eq!(display_width('é'), 1);
         assert_eq!(display_width('©'), 1);
         assert_eq!(display_width('±'), 1);
+    }
+
+    /// Wide characters the grid reserves two columns for, scattered outside the
+    /// ranges anyone would think to hand-write: mahjong and playing cards below
+    /// the Miscellaneous Symbols and Pictographs block, and the handful of Wide
+    /// code points stranded in Misc Technical and Dingbats.
+    #[test]
+    fn display_width_covers_wide_chars_outside_the_main_emoji_blocks() {
+        assert_eq!(display_width('🀄'), 2);
+        assert_eq!(display_width('🃏'), 2);
+        assert_eq!(display_width('⌚'), 2);
+        assert_eq!(display_width('⏰'), 2);
+        assert_eq!(display_width('✅'), 2);
+        assert_eq!(display_width('❌'), 2);
+    }
+
+    /// Combining marks ride on the cell of the character they decorate. Giving
+    /// one a column of its own shifts the rest of the line and hands the mark
+    /// to the shaper alone, with no base to attach to.
+    #[test]
+    fn display_width_combining_marks_take_no_column() {
+        // COMBINING ACUTE ACCENT — the second half of a decomposed `é`.
+        assert_eq!(display_width('\u{0301}'), 0);
+        // VARIATION SELECTOR-16, which asks for the emoji glyph.
+        assert_eq!(display_width('\u{FE0F}'), 0);
+        // ZERO WIDTH JOINER, the glue inside 👩‍💻.
+        assert_eq!(display_width('\u{200D}'), 0);
+    }
+
+    /// The width table feeds the bar's own line breaking, so a character
+    /// counted short pulls everything after it one column left.
+    #[test]
+    fn input_char_positions_reserve_two_columns_for_wide_chars() {
+        let chars: Vec<char> = "a🀄b".chars().collect();
+        let (positions, _, _) = input_char_positions(&chars, 0, 80);
+        assert_eq!(positions, vec![(0, 0, 1), (0, 1, 2), (0, 3, 1)]);
+    }
+
+    /// Geometry and drawing read the same cells, so a sequence the bar draws
+    /// two columns wide is two columns wide to wrapping and clicks as well. Two
+    /// width tables would put `X` under the right half of the heart.
+    #[test]
+    fn input_char_positions_agree_with_the_cells_the_bar_draws() {
+        for text in [
+            "a🀄b",
+            "e\u{0301}X",
+            "\u{2764}\u{FE0F}X",
+            "\u{0301}ab",
+            "a\nb",
+        ] {
+            let chars: Vec<char> = text.chars().collect();
+            let (positions, _, _) = input_char_positions(&chars, 0, 80);
+            assert_eq!(positions.len(), chars.len(), "{text:?}");
+            for cell in input_cells(&chars) {
+                let drawn = if chars[cell.start] == '\n' {
+                    0
+                } else {
+                    cell.width
+                };
+                assert_eq!(positions[cell.start].2, drawn, "{text:?} at {}", cell.start);
+                for i in cell.start + 1..cell.end {
+                    assert_eq!(positions[i].2, 0, "{text:?} at {i}");
+                }
+            }
+        }
+    }
+
+    /// `❤️` is two columns in the bar, so the character after it starts at
+    /// column 2 — and a click on either half of it lands on the heart.
+    #[test]
+    fn input_char_positions_reserve_two_columns_for_an_emoji_presentation_sequence() {
+        let chars: Vec<char> = "\u{2764}\u{FE0F}X".chars().collect();
+        let (positions, _, _) = input_char_positions(&chars, 0, 80);
+        assert_eq!(positions, vec![(0, 0, 2), (0, 2, 0), (0, 2, 1)]);
+        assert_eq!(click("\u{2764}\u{FE0F}X", 0, 80, 0, 0), Some(0));
+        assert_eq!(click("\u{2764}\u{FE0F}X", 0, 80, 1, 0), Some(0));
+        assert_eq!(click("\u{2764}\u{FE0F}X", 0, 80, 2, 0), Some(2));
+    }
+
+    /// A mark with no base gets a cell of its own on screen, so it has to get a
+    /// column here too — otherwise everything after it clicks one column off.
+    #[test]
+    fn input_char_positions_give_a_stranded_combining_mark_a_column() {
+        let chars: Vec<char> = "\u{0301}ab".chars().collect();
+        let (positions, _, _) = input_char_positions(&chars, 0, 80);
+        assert_eq!(positions, vec![(0, 0, 1), (0, 1, 1), (0, 2, 1)]);
+    }
+
+    /// A cell wraps whole. Splitting `❤️` across rows would draw its two
+    /// columns on one row and count them on two.
+    #[test]
+    fn input_char_positions_wrap_a_cell_without_splitting_it() {
+        let chars: Vec<char> = "abc\u{2764}\u{FE0F}".chars().collect();
+        let (positions, r, c) = input_char_positions(&chars, 0, 4);
+        assert_eq!(positions[3], (1, 0, 2));
+        assert_eq!((r, c), (1, 2));
+    }
+
+    /// Clicking the right half of a wide character lands on that character, not
+    /// on the one after it.
+    #[test]
+    fn wrapped_click_index_hits_both_halves_of_a_wide_char() {
+        assert_eq!(click("a🀄b", 0, 80, 1, 0), Some(1));
+        assert_eq!(click("a🀄b", 0, 80, 2, 0), Some(1));
+        assert_eq!(click("a🀄b", 0, 80, 3, 0), Some(2));
+    }
+
+    /// A combining mark shares its base's column, so a click there hits the
+    /// base — there is nowhere on screen that is the mark and not the base.
+    #[test]
+    fn wrapped_click_index_lands_on_the_base_not_its_combining_mark() {
+        // e + COMBINING ACUTE ACCENT + X.
+        assert_eq!(click("e\u{0301}X", 0, 80, 0, 0), Some(0));
+        assert_eq!(click("e\u{0301}X", 0, 80, 1, 0), Some(2));
+    }
+
+    fn cells(text: &str) -> Vec<(usize, usize, String, usize)> {
+        let chars: Vec<char> = text.chars().collect();
+        input_cells(&chars)
+            .into_iter()
+            .map(|c| (c.start, c.end, c.text, c.width))
+            .collect()
+    }
+
+    #[test]
+    fn input_cells_keep_a_combining_mark_with_its_base() {
+        assert_eq!(
+            cells("e\u{0301}X"),
+            vec![
+                (0, 2, "e\u{0301}".to_string(), 1),
+                (2, 3, "X".to_string(), 1),
+            ]
+        );
+    }
+
+    /// An emoji presentation sequence is two columns wide even though its base
+    /// is one on its own — the same re-scoring the terminal grid does.
+    #[test]
+    fn input_cells_widen_an_emoji_presentation_sequence() {
+        assert_eq!(
+            cells("\u{2764}\u{FE0F}X"),
+            vec![
+                (0, 2, "\u{2764}\u{FE0F}".to_string(), 2),
+                (2, 3, "X".to_string(), 1),
+            ]
+        );
+        // U+FE0E asks for the text glyph, and stays one column.
+        assert_eq!(
+            cells("\u{2764}\u{FE0E}"),
+            vec![(0, 2, "\u{2764}\u{FE0E}".to_string(), 1)]
+        );
+    }
+
+    /// A ZWJ sequence stays two cells, because that is what the grid does with
+    /// it: the joiner rides on the first emoji and the second one still claims
+    /// its own two columns. Composing the pair into one glyph is a separate
+    /// problem (#209) and fixing it here would put the bar a column off from
+    /// the row the text lands on.
+    #[test]
+    fn input_cells_split_a_zwj_sequence_the_way_the_grid_does() {
+        assert_eq!(
+            cells("\u{1F469}\u{200D}\u{1F4BB}"),
+            vec![
+                (0, 2, "\u{1F469}\u{200D}".to_string(), 2),
+                (2, 3, "\u{1F4BB}".to_string(), 2),
+            ]
+        );
+    }
+
+    /// A mark with no base ahead of it still needs a column, or it is invisible
+    /// and the caret has nowhere to sit. A newline is not a base to hang one on.
+    #[test]
+    fn input_cells_give_a_stranded_combining_mark_a_column() {
+        assert_eq!(cells("\u{0301}"), vec![(0, 1, "\u{0301}".to_string(), 1)]);
+        assert_eq!(
+            cells("\n\u{0301}"),
+            vec![(0, 1, String::new(), 0), (1, 2, "\u{0301}".to_string(), 1),]
+        );
     }
 
     fn click(text: &str, scol: usize, cols: usize, col: usize, row: usize) -> Option<usize> {
@@ -10723,6 +11046,94 @@ mod gpui_tests {
                 view.on_scroll(&ev, w, cx);
                 assert!(view.scroll_anim.is_none(), "half a line was animated");
                 assert!(view.scroll_frac > 0., "and it did not move either");
+            })
+            .unwrap();
+    }
+
+    /// The agent's prompt drawn on row 20, with enough output after it that the
+    /// row can actually be scrolled to the top of the viewport.
+    const CONVERSATION_ROW: i64 = 20;
+
+    fn painted_conversation(view: &TerminalView) {
+        let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+        let mut term = view.terminal.term.lock();
+        for i in 0..300 {
+            let line = match i {
+                20 => "> restore the outline\r\n".to_string(),
+                _ => format!("line {i}\r\n"),
+            };
+            parser.advance(&mut *term, line.as_bytes());
+        }
+    }
+
+    fn viewport_top(view: &TerminalView) -> String {
+        use alacritty_terminal::index::{Column, Line};
+        let term = view.terminal.term.lock();
+        let grid = term.grid();
+        let line = -(grid.display_offset() as i32);
+        (0..grid.columns())
+            .map(|c| grid[Line(line)][Column(c)].c)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[gpui::test]
+    fn jumping_to_a_turn_puts_the_prompt_at_the_top_of_the_viewport(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _w, cx| {
+                painted_conversation(view);
+                // Off by three, the way a hook firing into a live repaint is.
+                let turn = crate::terminal::agent_marks::AgentTurn {
+                    row: Some(CONVERSATION_ROW + 3),
+                    text: "restore the outline".into(),
+                    done: true,
+                    id: 1,
+                };
+                assert!(view.scroll_to_agent_turn(&turn, cx));
+                assert_eq!(
+                    viewport_top(view),
+                    "> restore the outline",
+                    "the text corrected the anchor's three-row error"
+                );
+                let history = {
+                    use alacritty_terminal::grid::Dimensions as _;
+                    view.terminal.term.lock().grid().history_size() as i64
+                };
+                assert_eq!(
+                    display_offset(view) as i64,
+                    history - CONVERSATION_ROW,
+                    "the turn's row is the first one shown, not merely on screen"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_turn_with_nowhere_to_go_reports_that_it_did_not_move(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _w, cx| {
+                painted_conversation(view);
+                let mut turn = crate::terminal::agent_marks::AgentTurn {
+                    row: None,
+                    text: "restore the outline".into(),
+                    done: true,
+                    id: 1,
+                };
+                assert!(
+                    !view.scroll_to_agent_turn(&turn, cx),
+                    "a turn that began on the alt screen has no row"
+                );
+
+                turn.row = Some(CONVERSATION_ROW);
+                let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+                parser.advance(&mut *view.terminal.term.lock(), b"\x1b[?1049h");
+                assert!(
+                    !view.scroll_to_agent_turn(&turn, cx),
+                    "and a pane sitting on the alt screen has no scrollback to show"
+                );
             })
             .unwrap();
     }

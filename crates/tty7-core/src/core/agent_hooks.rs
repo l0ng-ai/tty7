@@ -78,7 +78,39 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
             body[key] = serde_json::Value::String(v.to_string());
         }
     }
+    if let Some(prompt) = ["prompt", "userPrompt", "user_prompt"]
+        .iter()
+        .find_map(|k| payload.get(*k))
+        .and_then(|v| v.as_str())
+        .and_then(prompt_label)
+    {
+        body["prompt"] = serde_json::Value::String(prompt);
+    }
     format!("\x1b]777;notify;{AGENT_EVENT_SENTINEL};{body}\x07").into_bytes()
+}
+
+/// How much of a prompt rides back to the terminal.
+///
+/// Two reasons it is short. The payload goes out as an OSC, and the tokenizer
+/// reading it *abandons* anything past 8 KiB rather than truncating — a pasted
+/// file would silently cost the whole event, not just its tail. And what the
+/// client does with this is label one row of a list and look for that text in
+/// the scrollback, neither of which can use more than a line.
+const PROMPT_LABEL_MAX: usize = 200;
+
+/// The first line of what the user typed, which is both the label an outline
+/// row shows and the needle that finds the turn again in the scrollback.
+///
+/// A line rather than the whole prompt because the terminal wrapped it across
+/// rows: a needle spanning a line break matches no single row, so the later
+/// lines would only make the search fail.
+fn prompt_label(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let end = line
+        .char_indices()
+        .nth(PROMPT_LABEL_MAX)
+        .map_or(line.len(), |(i, _)| i);
+    Some(line[..end].to_string())
 }
 
 #[cfg(unix)]
@@ -1415,6 +1447,80 @@ mod tests {
         assert_eq!(ev.agent, Some(CLIAgent::Grok));
         assert_eq!(ev.session_id.as_deref(), Some("g-42"));
         assert_eq!(ev.cwd.as_deref(), Some(std::path::Path::new("/w")));
+    }
+
+    /// Parses a built sequence back the way the terminal's scanner does.
+    fn round_trip(
+        agent: &str,
+        event: &str,
+        stdin_json: &str,
+    ) -> crate::core::cli_agent::AgentEvent {
+        let seq = build_hook_sequence(agent, event, stdin_json);
+        crate::core::cli_agent::parse_agent_event(&seq[2..seq.len() - 1]).expect("parses")
+    }
+
+    #[test]
+    fn a_submitted_prompt_rides_back_as_the_turns_label() {
+        let ev = round_trip(
+            "claude",
+            "prompt-submit",
+            r#"{"prompt":"restore the outline","session_id":"s-1"}"#,
+        );
+        assert_eq!(ev.prompt.as_deref(), Some("restore the outline"));
+        assert_eq!(
+            ev.message, None,
+            "a prompt is not a message; the turn starts with nothing said back"
+        );
+    }
+
+    #[test]
+    fn a_prompt_is_cut_to_its_first_line() {
+        let ev = round_trip(
+            "claude",
+            "prompt-submit",
+            r#"{"prompt":"\n\n  what did we decide  \nand then some more\nand more"}"#,
+        );
+        assert_eq!(
+            ev.prompt.as_deref(),
+            Some("what did we decide"),
+            "later lines wrapped when they were drawn and would only fail the search"
+        );
+    }
+
+    #[test]
+    fn a_pasted_file_cannot_cost_the_whole_event() {
+        let prompt = "x".repeat(64 * 1024);
+        let ev = round_trip(
+            "claude",
+            "prompt-submit",
+            &serde_json::json!({ "prompt": prompt }).to_string(),
+        );
+        assert_eq!(
+            ev.prompt.map(|p| p.chars().count()),
+            Some(PROMPT_LABEL_MAX),
+            "the tokenizer abandons an oversized payload rather than truncating it"
+        );
+    }
+
+    #[test]
+    fn a_prompt_of_wide_characters_is_cut_on_a_character_boundary() {
+        let prompt = "把大纲恢复一下".repeat(100);
+        let ev = round_trip(
+            "claude",
+            "prompt-submit",
+            &serde_json::json!({ "prompt": prompt }).to_string(),
+        );
+        assert_eq!(ev.prompt.map(|p| p.chars().count()), Some(PROMPT_LABEL_MAX));
+    }
+
+    #[test]
+    fn an_agent_that_reports_no_prompt_carries_none() {
+        assert_eq!(round_trip("codex", "stop", "{}").prompt, None);
+        assert_eq!(
+            round_trip("claude", "prompt-submit", r#"{"prompt":"   "}"#).prompt,
+            None,
+            "whitespace is not a label"
+        );
     }
 
     #[test]
