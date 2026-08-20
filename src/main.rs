@@ -466,6 +466,11 @@ fn main() {
     // the log is the only place the reason can survive.
     if let Some(register) = explorer_menu_action_from(&args) {
         let result = if register {
+            // The verb labels are localized, and this process stops at the
+            // `return` below — it never reaches the `set_locale` on the GUI
+            // path. Without this read every install would write English
+            // entries, whatever language the user runs tty7 in.
+            crate::ui::i18n::set_locale(&Config::load().gui_language);
             crate::core::explorer_context_menu::register()
         } else {
             crate::core::explorer_context_menu::unregister()

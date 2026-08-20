@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 
+use crate::ui::i18n::{L10nKey, t};
+
 const DIRECTORY_KEY: &str = r"Software\Classes\Directory\shell\tty7";
 const BACKGROUND_KEY: &str = r"Software\Classes\Directory\Background\shell\tty7";
 
@@ -34,11 +36,19 @@ impl Location {
         }
     }
 
+    /// The wording Explorer shows, in the language the app is set to.
+    ///
+    /// Explorer reads this string from the registry, not from tty7, so what is
+    /// written here is what a user sees until something writes it again — an
+    /// install-time snapshot of the locale. Two things keep that snapshot
+    /// honest: `register` sets the locale from the config before building the
+    /// entries, and [`refresh_labels`] restates them when the language changes
+    /// in Settings.
     fn label(self) -> &'static str {
-        match self {
-            Self::Directory => "Open in tty7",
-            Self::Background => "Open tty7 here",
-        }
+        t(match self {
+            Self::Directory => L10nKey::ExplorerMenuOpenIn,
+            Self::Background => L10nKey::ExplorerMenuOpenHere,
+        })
     }
 
     fn placeholder(self) -> &'static str {
@@ -88,6 +98,25 @@ pub fn register() -> Result<()> {
 /// Remove only the two Explorer verb trees owned by tty7.
 pub fn unregister() -> Result<()> {
     platform_unregister()
+}
+
+/// Restate the verb labels in the language the UI now runs in.
+///
+/// The registry holds whatever wording was current when the installer ran, so
+/// without this a user who switches tty7 to Chinese keeps English entries in
+/// Explorer for the life of the install — the one place in the product where
+/// the language setting would not reach.
+///
+/// Only keys that already exist are rewritten. Offering the menu is the
+/// installer's checkbox and declining it is the user's decision; changing a
+/// language must never be what puts the verbs back.
+///
+/// Best-effort by design: a failure here costs a log line, never a language
+/// change the user asked for.
+pub fn refresh_labels() {
+    if let Err(error) = platform_refresh_labels() {
+        log::warn!("could not restate the Explorer context-menu labels: {error}");
+    }
 }
 
 /// Build a command line without converting the executable path through UTF-8.
@@ -251,6 +280,48 @@ mod windows {
         notify_explorer();
         Ok(())
     }
+
+    /// The verb key, or `None` when tty7's menu is not installed.
+    ///
+    /// Deliberately open rather than create: this is the call that makes
+    /// [`refresh_labels`] unable to resurrect a menu the user removed.
+    fn open_existing(path: &str) -> Result<Option<RegistryKey>> {
+        let path = wide(OsStr::new(path));
+        let mut key: HKEY = std::ptr::null_mut();
+        // SAFETY: `path` is a live, NUL-terminated UTF-16 string and `key` is a
+        // live local the API fills in only on success.
+        let code = unsafe {
+            RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                KEY_READ | KEY_WRITE,
+                &mut key,
+            )
+        };
+        match code {
+            ERROR_SUCCESS => Ok(Some(RegistryKey(key))),
+            ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => Ok(None),
+            other => Err(io_error("opening the tty7 Explorer registry key", other)),
+        }
+    }
+
+    pub(super) fn refresh_labels() -> Result<()> {
+        let mut restated = false;
+        for location in [Location::Directory, Location::Background] {
+            let Some(key) = open_existing(location.key())? else {
+                continue;
+            };
+            set_string(&key, None, OsStr::new(location.label()))?;
+            restated = true;
+        }
+        // Only worth waking the shell when something actually moved; a user who
+        // never installed the menu changes languages for free.
+        if restated {
+            notify_explorer();
+        }
+        Ok(())
+    }
 }
 
 #[cfg(windows)]
@@ -263,6 +334,11 @@ fn platform_unregister() -> Result<()> {
     windows::unregister()
 }
 
+#[cfg(windows)]
+fn platform_refresh_labels() -> Result<()> {
+    windows::refresh_labels()
+}
+
 #[cfg(not(windows))]
 fn platform_register() -> Result<()> {
     anyhow::bail!("Windows Explorer integration is only available on Windows")
@@ -273,12 +349,23 @@ fn platform_unregister() -> Result<()> {
     anyhow::bail!("Windows Explorer integration is only available on Windows")
 }
 
+/// Nothing to restate: the verbs exist only on Windows.
+///
+/// Silent rather than an error like the two above, because this one is called
+/// on every language change on every platform. Refusing here would put a
+/// warning in the log of every macOS and Linux user who picks a language.
+#[cfg(not(windows))]
+fn platform_refresh_labels() -> Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn registration_targets_both_directory_surfaces() {
+        crate::ui::i18n::set_locale("en");
         let app = Path::new(r"C:\Program Files\tty7\tty7-app.exe");
         let [directory, background] = registrations(app);
 
@@ -297,6 +384,25 @@ mod tests {
             background.command,
             r#""C:\Program Files\tty7\tty7-app.exe" --open-path "%V""#
         );
+    }
+
+    /// The entries Explorer shows were English whatever language tty7 ran in,
+    /// because the labels were string literals. They are the only wording in
+    /// the product that outlives the process that wrote it, so the guard is on
+    /// the label rather than on the registry write it feeds.
+    #[test]
+    fn the_verb_labels_follow_the_ui_language() {
+        crate::ui::i18n::set_locale("zh-CN");
+        assert_eq!(Location::Directory.label(), "在 tty7 中打开");
+        assert_eq!(Location::Background.label(), "在此处打开 tty7");
+
+        crate::ui::i18n::set_locale("ja-JP");
+        assert_eq!(Location::Directory.label(), "tty7 で開く");
+        assert_eq!(Location::Background.label(), "ここで tty7 を開く");
+
+        crate::ui::i18n::set_locale("en");
+        assert_eq!(Location::Directory.label(), "Open in tty7");
+        assert_eq!(Location::Background.label(), "Open tty7 here");
     }
 
     #[test]

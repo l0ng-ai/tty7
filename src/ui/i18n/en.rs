@@ -128,7 +128,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "How opaque the window background is, for every theme. Below 100% the desktop shows through."
         }
         L10nKey::SettingsBlur => "Blur",
-        L10nKey::SettingsBlurDesc => "Blur whatever is behind a translucent window (macOS).",
+        L10nKey::SettingsBlurDesc => {
+            if cfg!(target_os = "macos") {
+                "Blur whatever is behind a translucent window."
+            } else {
+                "Blur whatever is behind a translucent window. Needs a compositor that offers it — KDE Plasma does; GNOME and plain X11 leave the window merely transparent."
+            }
+        }
         L10nKey::SettingsBlurAutoDesc => {
             "Blur whatever is behind a translucent window. Only applies while Background material is Auto."
         }
@@ -172,6 +178,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ThemeDuplicateFailed => "Could not duplicate the theme",
         L10nKey::ThemeSaveFailed => "Could not save the theme",
         L10nKey::OpenInFileManagerFailed => "Could not open {path}",
+        L10nKey::ExplorerMenuOpenIn => "Open in tty7",
+        L10nKey::ExplorerMenuOpenHere => "Open tty7 here",
         L10nKey::SettingsCustomThemesIntro => {
             "Duplicate a theme to edit its colors, or drop a tty7 YAML theme or iTerm2 .itermcolors file in the themes folder."
         }
@@ -344,7 +352,15 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsConnectTimeout => "Connect timeout (s)",
         L10nKey::SettingsConnectTimeoutDesc => "Blank = library default.",
         L10nKey::SettingsX11Forwarding => "X11 forwarding",
-        L10nKey::SettingsX11ForwardingDesc => "Request X11 forwarding (needs XQuartz on macOS).",
+        L10nKey::SettingsX11ForwardingDesc => {
+            if cfg!(target_os = "macos") {
+                "Request X11 forwarding (needs XQuartz)."
+            } else if cfg!(target_os = "windows") {
+                "Request X11 forwarding (needs an X server running, such as VcXsrv or X410)."
+            } else {
+                "Request X11 forwarding."
+            }
+        }
         L10nKey::SettingsShellIntegration => "Shell integration",
         L10nKey::SettingsShellIntegrationDesc => {
             "Let the remote shell report prompts, exit codes, and the working directory."
@@ -477,7 +493,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsCopyOnSelect => "Copy on select",
         L10nKey::SettingsCopyOnSelectDesc => {
-            "Selecting text with the mouse copies it to the clipboard right away, no ⌘C needed."
+            if cfg!(target_os = "macos") {
+                "Selecting text with the mouse copies it to the clipboard right away, no ⌘C needed."
+            } else {
+                "Selecting text with the mouse copies it to the clipboard right away, no Ctrl+Shift+C needed."
+            }
         }
         L10nKey::SettingsTrimTrailingSpaces => "Trim trailing spaces on copy",
         L10nKey::SettingsTrimTrailingSpacesDesc => {

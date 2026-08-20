@@ -117,7 +117,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "窗口背景的不透明度，适用于所有主题。低于 100% 时可以看到桌面。"
         }
         L10nKey::SettingsBlur => "模糊",
-        L10nKey::SettingsBlurDesc => "模糊半透明窗口背后的内容（macOS）。",
+        L10nKey::SettingsBlurDesc => {
+            if cfg!(target_os = "macos") {
+                "模糊半透明窗口背后的内容。"
+            } else {
+                "模糊半透明窗口背后的内容。需要合成器支持——KDE Plasma 可以；GNOME 和裸 X11 下窗口只会变透明。"
+            }
+        }
         L10nKey::SettingsBlurAutoDesc => {
             "模糊半透明窗口背后的内容。仅在「背景材质」为「自动」时生效。"
         }
@@ -155,6 +161,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ThemeDuplicateFailed => "无法复制主题",
         L10nKey::ThemeSaveFailed => "无法保存主题",
         L10nKey::OpenInFileManagerFailed => "无法打开 {path}",
+        L10nKey::ExplorerMenuOpenIn => "在 tty7 中打开",
+        L10nKey::ExplorerMenuOpenHere => "在此处打开 tty7",
         L10nKey::SettingsCustomThemesIntro => {
             "复制一个主题即可在此编辑颜色，或把 tty7 YAML 主题、iTerm2 .itermcolors 文件放进主题文件夹。"
         }
@@ -307,7 +315,15 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsConnectTimeout => "连接超时（秒）",
         L10nKey::SettingsConnectTimeoutDesc => "留空 = 库默认值。",
         L10nKey::SettingsX11Forwarding => "X11 转发",
-        L10nKey::SettingsX11ForwardingDesc => "请求 X11 转发（macOS 上需要 XQuartz）。",
+        L10nKey::SettingsX11ForwardingDesc => {
+            if cfg!(target_os = "macos") {
+                "请求 X11 转发（需要 XQuartz）。"
+            } else if cfg!(target_os = "windows") {
+                "请求 X11 转发（需要运行 X 服务端，如 VcXsrv 或 X410）。"
+            } else {
+                "请求 X11 转发。"
+            }
+        }
         L10nKey::SettingsShellIntegration => "Shell 集成",
         L10nKey::SettingsShellIntegrationDesc => "让远程 shell 报告提示符、退出码和工作目录。",
         L10nKey::SettingsLoginScripts => "登录脚本",
@@ -420,7 +436,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "双击选择光标下的完整 URL、文件路径、邮箱或成对的括号。"
         }
         L10nKey::SettingsCopyOnSelect => "选中即复制",
-        L10nKey::SettingsCopyOnSelectDesc => "用鼠标选中文本时立即复制到剪贴板，无需按 ⌘C。",
+        L10nKey::SettingsCopyOnSelectDesc => {
+            if cfg!(target_os = "macos") {
+                "用鼠标选中文本时立即复制到剪贴板，无需按 ⌘C。"
+            } else {
+                "用鼠标选中文本时立即复制到剪贴板，无需按 Ctrl+Shift+C。"
+            }
+        }
         L10nKey::SettingsTrimTrailingSpaces => "复制时去除末尾空格",
         L10nKey::SettingsTrimTrailingSpacesDesc => "去除每行复制文本末尾的空白。",
         L10nKey::SettingsKeyboard => "键盘",

@@ -5434,6 +5434,10 @@ impl Tty7App {
         set_locale(code);
         cx.global::<Config>().save();
         set_menus(cx);
+        // Explorer reads its menu wording from the registry, so it is the one
+        // surface a language change does not reach on its own. No-op unless
+        // the user installed the context menu, and off Windows entirely.
+        crate::core::explorer_context_menu::refresh_labels();
         self.refresh_locale_state(window, cx);
         crate::ui::windows::WindowRegistry::refresh_locale(cx, Some(self.workspace));
     }
