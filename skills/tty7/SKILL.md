@@ -62,10 +62,17 @@ Reach for tty7 when one of these is true:
 |---|---|---|
 | `%42` | a pane | yes — a pane keeps its id for its whole life |
 | `@7` | a tab, numbered across the **whole machine** in tree order | **no** — it shifts whenever a workspace or tab appears or disappears |
+| `@<full tab UUID>` | that same tab, by id | yes |
 | `api` / `76698a44` / a full UUID | a workspace, by name, by unique id prefix, or by id | yes |
 
 Re-resolve `@N` right before you use it; never cache one across a step that
-creates or removes a tab. Pane ids and workspace ids are safe to remember.
+creates or removes a tab. Pane ids, tab ids and workspace ids are safe to
+remember — so when you create a tab and mean to address it again later, keep the
+id `tty7 tab new --json` hands back rather than counting `@N` a second time.
+
+The sigils are optional wherever an address is expected: `%42` and `42` are the
+same pane, `@7` and `7` the same tab. Ids copied out of `--json` paste straight
+back in.
 
 Omitting the address inside a tty7 shell means "this pane" / "this workspace".
 An explicit address always wins over the environment.
@@ -126,6 +133,22 @@ waiting is `tty7 wait`.
 For keystrokes rather than characters — Ctrl-C, Escape, the arrow keys — use
 `--key` (see [Answering a prompt](#answering-a-prompt)). Typing `^C` as text
 does nothing; it arrives as two characters.
+
+**A brand-new pane can swallow the Enter.** A shell still working through its
+startup files — a prompt framework, `fastfetch`, anything that paints on login —
+takes the text you send but loses the carriage return that follows it, and the
+command just sits on the prompt line unexecuted. Nothing reports this: the
+`send` succeeded, and the pane looks like a worker that has not got going yet.
+So after sending the first command into a pane you just created, read the screen
+back and check it actually left the prompt:
+
+```bash
+tty7 capture "$PANE" --plain | tail -3   # command still sitting on the prompt?
+tty7 send "$PANE" --enter                # then give it the Enter it lost
+```
+
+Cheaper than diagnosing it later, and only the first `send` into a fresh pane
+needs the check.
 
 ## Reading a pane
 
@@ -197,6 +220,11 @@ If you want the process tree itself — "what is running in there", "which port 
 this pane serving" — that is `tty7 procs %83`: indented by depth, `*` on the
 foreground process, then the ports those processes are listening on.
 
+It is not the way to check on a coding agent, though. `procs` reports
+`nothing running in this pane` for a pane with a busy agent in it, so reading it
+as "the worker died" is wrong. Ask `tty7 agents` about those, or see
+[When a worker never moves](#when-a-worker-never-moves).
+
 ## Handing work to another agent
 
 Everything above also works when the thing in the pane is a coding agent, and
@@ -206,7 +234,7 @@ process tree:
 
 ```bash
 PANE=$(tty7 split --v)
-tty7 send "$PANE" 'claude -p "add tests for the parser"' --enter
+tty7 send "$PANE" 'claude --dangerously-skip-permissions "add tests for the parser"' --enter
 tty7 wait "$PANE" --until waiting,done --changed --timeout 900
 tty7 capture "$PANE" --plain | tail -40
 tty7 pane close "$PANE"
@@ -215,6 +243,27 @@ tty7 pane close "$PANE"
 Five steps: give it a pane, hand it the task, sleep until it needs you or
 finishes, read what happened, clean up. The third is the one worth
 understanding.
+
+### Give the worker its interactive mode
+
+Hand the task as an argument, **not** with `-p`. Both run one turn and stop, so
+the difference is not what the worker does — it is what anybody can see while it
+does it.
+
+Interactive is the mode that draws a TUI, so the pane fills with the worker's
+reasoning and tool calls as they happen. That is visible to the user in their
+tty7 window, and it is what `capture --plain` reads back. `-p` is the piped
+mode: it draws nothing, streams its answer to stdout when the turn ends, and
+until then the pane's screen stays **empty** — `capture --plain` on it returns
+nothing at all, which reads exactly like a worker that hung. Putting a `-p`
+worker in a pane throws away the only reason it is in a pane.
+
+Interactive also leaves the session alive at the prompt, so you can `send` a
+follow-up into the same context. A `-p` worker is gone after its one turn.
+
+Reach for `-p` only when you want the answer as a string and nobody needs to
+watch — and then prefer `tty7 run` or the Bash tool, which is what that shape
+is for.
 
 ### What the states mean
 
@@ -292,6 +341,20 @@ worker is fine, it just has no way to say so. `tty7 agents` names the agent when
 it can see the gap, and `tty7 doctor` reports where every agent's hooks stand.
 Hooks are installed from the GUI's **Settings → Agents**; tell the user rather
 than trying to install them yourself.
+
+Before concluding anything, check whether it is moving. Those same hooks emit an
+OSC 777 line on every tool call, and `capture` **without** `--plain` shows them —
+one of the few times the raw bytes beat the rendered screen:
+
+```bash
+tty7 capture "$PANE" | grep -c 'tool-complete'   # rising = alive and working
+```
+
+That is also the answer when a worker's screen looks empty: a `-p` worker paints
+nothing until its turn ends, so `capture --plain` is blank the whole way through
+while the event stream underneath is busy. Two things that do *not* answer this
+question: `tty7 procs`, which reports nothing running for a pane with a live
+agent in it, and the absence of output on a `--plain` capture.
 
 ## Looking around
 
