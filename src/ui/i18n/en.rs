@@ -1040,8 +1040,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelSsh => "ssh",
         L10nKey::PanelBranch => "branch",
         L10nKey::PanelChangesRow => "changes",
-        L10nKey::PanelAgent => "agent",
-        L10nKey::PanelAgentIdle => "idle",
         L10nKey::PanelAgentWorking => "working",
         L10nKey::PanelAgentWaiting => "waiting",
         L10nKey::PanelAgentDone => "done",

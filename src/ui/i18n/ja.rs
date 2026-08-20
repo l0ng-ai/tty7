@@ -1104,8 +1104,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelSsh => "ssh",
         L10nKey::PanelBranch => "ブランチ",
         L10nKey::PanelChangesRow => "変更",
-        L10nKey::PanelAgent => "エージェント",
-        L10nKey::PanelAgentIdle => "アイドル",
         L10nKey::PanelAgentWorking => "作業中",
         L10nKey::PanelAgentWaiting => "待機中",
         L10nKey::PanelAgentDone => "完了",

@@ -185,14 +185,6 @@ enum InfoValue {
         removed: u32,
         open: Option<(crate::ui::host_ops::HostId, PathBuf)>,
     },
-    /// An agent and what it is doing, behind the status dot the sidebar draws
-    /// on the tab — `hollow` for Waiting, which is a different *shape* rather
-    /// than one more hue, for the same reason the tab's dot is.
-    Agent {
-        text: String,
-        dot: Option<u32>,
-        hollow: bool,
-    },
 }
 
 /// One label/value line of the Session section.
@@ -663,11 +655,6 @@ impl Tty7App {
         // off in both places rather than in one of them.
         let mut diff_target: Option<(crate::ui::host_ops::HostId, PathBuf)> = None;
         let mut git: Option<crate::terminal::git_status::GitStatus> = None;
-        // The agent row's name and status, read off one leaf (see below).
-        let mut agent_row: Option<(
-            crate::core::cli_agent::CLIAgent,
-            crate::core::cli_agent::AgentStatus,
-        )> = None;
         // The leaf the CONVERSATION section reads its turns off — the same one
         // every row above describes.
         let mut detail_pane = None;
@@ -723,26 +710,6 @@ impl Tty7App {
                     forwards_pane = Some(view.pane_id);
                 }
                 git = view.git_status(cx);
-                // Name and status come from the *same* leaf: the detail pane's
-                // own agent when it has one, and otherwise the tab's most
-                // urgent agent leaf — which still holds the row while focus
-                // sits on a plain shell, and still colours its dot the way the
-                // tab strip's badge does, but names the pane it took the
-                // status from. Pairing `tab.agent` with `tab.agent_status`
-                // would splice one pane's name onto another pane's status — a
-                // row no leaf ever had — because the two resolve
-                // independently (#543). Read here, where `view` is in scope;
-                // pushed beside the other rows below.
-                agent_row = match view.agent() {
-                    Some(agent) => {
-                        let status = view
-                            .agent_session()
-                            .map(|s| s.status)
-                            .unwrap_or(crate::core::cli_agent::AgentStatus::Idle);
-                        Some((agent, status))
-                    }
-                    None => tab.agent_row(cx),
-                };
                 detail_pane = Some(leaf);
             }
             // Read off the same pane the rows above describe, rather than off
@@ -763,20 +730,6 @@ impl Tty7App {
                         open: (git.added > 0 || git.removed > 0)
                             .then_some(diff_target.clone())
                             .flatten(),
-                    },
-                    copy: None,
-                    reveal: None,
-                });
-            }
-            // Name and status were read off one leaf above; push the row.
-            if let Some((agent, status)) = agent_row {
-                let name = agent.display_name();
-                rows.push(InfoRow {
-                    label: t(L10nKey::PanelAgent),
-                    value: InfoValue::Agent {
-                        text: format!("{name} · {}", agent_status_label(status)),
-                        dot: status.dot_rgb(),
-                        hollow: status == crate::core::cli_agent::AgentStatus::Waiting,
                     },
                     copy: None,
                     reveal: None,
@@ -930,31 +883,6 @@ impl Tty7App {
                     None => counts.into_any_element(),
                 }
             }
-            // The dot hangs out of the flow rather than sitting in it. A
-            // childless box has no baseline of its own, so as a flex item it
-            // offers up its bottom edge instead — and the row, which aligns
-            // its label and its value on their shared baseline, then hoisted
-            // the whole value six pixels and left "agent" sitting under its
-            // own value. Out of flow it cannot be mistaken for the thing that
-            // sets the line.
-            InfoValue::Agent { text, dot, hollow } => div()
-                .flex_1()
-                .min_w_0()
-                .relative()
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .when(dot.is_some(), |d| d.pl(rems(PIP_SIZE + PIP_GAP)))
-                        .text_size(rems(TEXT_MONO))
-                        .font_family(mono.clone())
-                        .text_color(cx.theme().foreground)
-                        .child(text),
-                )
-                .children(dot.map(|rgb| {
-                    status_pip(rgb, hollow, crate::ui::theme::workspace_surface_color(cx))
-                }))
-                .into_any_element(),
         };
 
         // The strip is opaque and pinned to the row's right edge, so whatever
@@ -1501,50 +1429,6 @@ pub(crate) fn git_badge(letter: &str, color: gpui::Hsla, mono: &gpui::SharedStri
         .into_any_element()
 }
 
-/// Diameter of the agent dot in the Info panel, and the gap between it and the
-/// word it qualifies.
-///
-/// Seven sixteenths of a rem — seven pixels at the default interface size,
-/// because a dot on a line of text has to survive being read at a glance
-/// without becoming a bullet, and a rem rather than a pixel because the line it
-/// sits in is sized in rems: pinned in pixels it slid towards the cap height of
-/// its own row the moment the interface font scale moved off 100%.
-const PIP_SIZE: f32 = 7. * STEP;
-const PIP_GAP: f32 = 7. * STEP;
-
-/// How far down the value box the dot starts, again as a fraction of the text
-/// it is centred in rather than a pixel count.
-const PIP_TOP: f32 = 6. * STEP;
-
-/// The dot a tab wears for its agent's state, at the size a line of panel text
-/// can carry it.
-///
-/// Same colours and the same hollow-for-Waiting rule as the sidebar's, because
-/// it is the same fact: a reader who has learned that amber-with-a-hole means
-/// "it wants you" on a tab must not have to learn it a second time here. Same
-/// *shape*, too — [`Tty7App::status_dot`] punches a small hole out of a filled
-/// dot, so drawing this one as a thin ring would have been a second dialect of
-/// the one rule the doc above promises is shared. `hole` is the colour behind
-/// the dot, which is what a hole in it has to be painted in; the agent row is
-/// never interactive, so that colour is the panel's own and does not move
-/// under the pointer.
-fn status_pip(rgb: u32, hollow: bool, hole: gpui::Hsla) -> AnyElement {
-    div()
-        .absolute()
-        .left_0()
-        .top(rems(PIP_TOP))
-        .size(rems(PIP_SIZE))
-        .rounded_full()
-        .bg(gpui::rgb(rgb))
-        .when(hollow, |dot| {
-            dot.flex()
-                .items_center()
-                .justify_center()
-                .child(div().size(rems(PIP_SIZE * 0.36)).rounded_full().bg(hole))
-        })
-        .into_any_element()
-}
-
 /// A small filled pill around a mono token — a pid, a port number.
 ///
 /// The padding and the radius are derived from the text size: at
@@ -1577,16 +1461,6 @@ pub fn reveal_label() -> &'static str {
         t(L10nKey::PanelRevealInFinder)
     } else {
         t(L10nKey::PanelOpenFolder)
-    }
-}
-
-fn agent_status_label(status: crate::core::cli_agent::AgentStatus) -> &'static str {
-    use crate::core::cli_agent::AgentStatus::*;
-    match status {
-        Idle => t(L10nKey::PanelAgentIdle),
-        Working => t(L10nKey::PanelAgentWorking),
-        Waiting => t(L10nKey::PanelAgentWaiting),
-        Done => t(L10nKey::PanelAgentDone),
     }
 }
 

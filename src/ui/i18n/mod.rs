@@ -775,8 +775,6 @@ l10n_keys! {
     PanelSsh,
     PanelBranch,
     PanelChangesRow,
-    PanelAgent,
-    PanelAgentIdle,
     PanelAgentWorking,
     PanelAgentWaiting,
     PanelAgentDone,
@@ -1542,10 +1540,9 @@ mod tests {
             L10nKey::SettingsLanguageEnglish,
             L10nKey::SettingsLanguageChinese,
             L10nKey::SettingsLanguageJapanese,
-            // The pane-type labels are one set — shell / agent / ssh — and
-            // translating only the middle one would break the set.
+            // The pane-type labels: one names a program, the other a protocol,
+            // and no locale renames either.
             L10nKey::PanelShell,
-            L10nKey::PanelAgent,
             L10nKey::PanelSsh,
             // The zh copy calls the background process "server" throughout —
             // this heading is that word on its own.

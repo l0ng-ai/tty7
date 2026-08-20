@@ -997,8 +997,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelSsh => "ssh",
         L10nKey::PanelBranch => "分支",
         L10nKey::PanelChangesRow => "变更",
-        L10nKey::PanelAgent => "agent",
-        L10nKey::PanelAgentIdle => "空闲",
         L10nKey::PanelAgentWorking => "进行中",
         L10nKey::PanelAgentWaiting => "等待中",
         L10nKey::PanelAgentDone => "已完成",

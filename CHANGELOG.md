@@ -94,6 +94,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Info panel's `agent` row is gone.** It said `Claude Code · working`
+  beside a status dot — the same name and the same dot the tab and its sidebar
+  row were already wearing, two panels away from neither of them. The
+  CONVERSATION section below now says what that agent is doing in a form the
+  row never could, and the dot stays where it was learned.
 - **A zsh or fish you gave your own arguments to is no longer injected into.**
   Custom arguments have always been the line where tty7 backs off — the bash,
   PowerShell and WSL setups checked for them — but the zsh and fish setups did
