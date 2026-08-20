@@ -5620,7 +5620,10 @@ impl TerminalView {
                 lines.push(Vec::new());
                 continue;
             }
-            let selected = selection.is_some_and(|(s, e)| i >= s && i < e);
+            // A cell is one glyph, so it tints as a unit: a selection that
+            // covers any character in it — the base or a mark riding on it —
+            // covers the whole thing.
+            let selected = selection.is_some_and(|(s, e)| s < c.end && c.start < e);
             let caret = selection.is_none()
                 && !has_marked
                 && cursor_on
@@ -6769,6 +6772,17 @@ fn menu_layout(
     (place_above, visible, first)
 }
 
+/// Where each character of the input bar lands: `(row, column, width)`, one
+/// entry per character, plus the row and column the text ends on.
+///
+/// Walks the same cells the bar draws rather than re-deriving widths per
+/// character — an emoji presentation sequence is two columns and a stranded
+/// combining mark is one, and a second width table would put clicks, wrapping
+/// and the caret a column away from the glyph on screen.
+///
+/// Only the base of a cell carries the width, so a click can never land on a
+/// character riding along with it. Those riders are parked at the column the
+/// caret takes after the cell, which is where a caret sitting on one belongs.
 fn input_char_positions(
     chars: &[char],
     scol: usize,
@@ -6777,23 +6791,22 @@ fn input_char_positions(
     let mut positions: Vec<(usize, usize, usize)> = Vec::with_capacity(chars.len());
     let mut r = 0usize;
     let mut c = scol;
-    for &ch in chars {
-        if ch == '\n' {
+    for cell in input_cells(chars) {
+        if chars[cell.start] == '\n' {
             positions.push((r, c, 0));
             r += 1;
             c = 0;
             continue;
         }
-        // A combining mark shares the column of the character it follows, so it
-        // gets that character's position and no width of its own — which also
-        // keeps a click from ever landing on the mark instead of its base.
-        let w = display_width(ch);
-        if w > 0 && c + w > cols {
+        if c + cell.width > cols {
             r += 1;
             c = 0;
         }
-        positions.push((r, c, w));
-        c += w;
+        positions.push((r, c, cell.width));
+        c += cell.width;
+        for _ in cell.start + 1..cell.end {
+            positions.push((r, c, 0));
+        }
     }
     (positions, r, c)
 }
@@ -8172,6 +8185,66 @@ mod tests {
         let chars: Vec<char> = "a🀄b".chars().collect();
         let (positions, _, _) = input_char_positions(&chars, 0, 80);
         assert_eq!(positions, vec![(0, 0, 1), (0, 1, 2), (0, 3, 1)]);
+    }
+
+    /// Geometry and drawing read the same cells, so a sequence the bar draws
+    /// two columns wide is two columns wide to wrapping and clicks as well. Two
+    /// width tables would put `X` under the right half of the heart.
+    #[test]
+    fn input_char_positions_agree_with_the_cells_the_bar_draws() {
+        for text in [
+            "a🀄b",
+            "e\u{0301}X",
+            "\u{2764}\u{FE0F}X",
+            "\u{0301}ab",
+            "a\nb",
+        ] {
+            let chars: Vec<char> = text.chars().collect();
+            let (positions, _, _) = input_char_positions(&chars, 0, 80);
+            assert_eq!(positions.len(), chars.len(), "{text:?}");
+            for cell in input_cells(&chars) {
+                let drawn = if chars[cell.start] == '\n' {
+                    0
+                } else {
+                    cell.width
+                };
+                assert_eq!(positions[cell.start].2, drawn, "{text:?} at {}", cell.start);
+                for i in cell.start + 1..cell.end {
+                    assert_eq!(positions[i].2, 0, "{text:?} at {i}");
+                }
+            }
+        }
+    }
+
+    /// `❤️` is two columns in the bar, so the character after it starts at
+    /// column 2 — and a click on either half of it lands on the heart.
+    #[test]
+    fn input_char_positions_reserve_two_columns_for_an_emoji_presentation_sequence() {
+        let chars: Vec<char> = "\u{2764}\u{FE0F}X".chars().collect();
+        let (positions, _, _) = input_char_positions(&chars, 0, 80);
+        assert_eq!(positions, vec![(0, 0, 2), (0, 2, 0), (0, 2, 1)]);
+        assert_eq!(click("\u{2764}\u{FE0F}X", 0, 80, 0, 0), Some(0));
+        assert_eq!(click("\u{2764}\u{FE0F}X", 0, 80, 1, 0), Some(0));
+        assert_eq!(click("\u{2764}\u{FE0F}X", 0, 80, 2, 0), Some(2));
+    }
+
+    /// A mark with no base gets a cell of its own on screen, so it has to get a
+    /// column here too — otherwise everything after it clicks one column off.
+    #[test]
+    fn input_char_positions_give_a_stranded_combining_mark_a_column() {
+        let chars: Vec<char> = "\u{0301}ab".chars().collect();
+        let (positions, _, _) = input_char_positions(&chars, 0, 80);
+        assert_eq!(positions, vec![(0, 0, 1), (0, 1, 1), (0, 2, 1)]);
+    }
+
+    /// A cell wraps whole. Splitting `❤️` across rows would draw its two
+    /// columns on one row and count them on two.
+    #[test]
+    fn input_char_positions_wrap_a_cell_without_splitting_it() {
+        let chars: Vec<char> = "abc\u{2764}\u{FE0F}".chars().collect();
+        let (positions, r, c) = input_char_positions(&chars, 0, 4);
+        assert_eq!(positions[3], (1, 0, 2));
+        assert_eq!((r, c), (1, 2));
     }
 
     /// Clicking the right half of a wide character lands on that character, not
