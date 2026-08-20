@@ -704,12 +704,22 @@ const QWEN_HOOK_EVENTS: &[(&str, &str)] = &[
 /// through the TOML merge strategy rather than a JSON map or an owned file.
 /// Like Qwen it has a first-class permission event, so it needs no
 /// `Notification` hook and none of the sniffing in [`effective_event`].
+///
+/// `Stop` alone does not cover every way a turn ends here: Kimi's own event
+/// reference says `Stop` "does not fire on interrupts, so this event fires
+/// instead" of `Interrupt`, and a turn that dies on an error reports
+/// `StopFailure`. Without those two an <kbd>Esc</kbd> or a failed turn would
+/// leave the pane on "working" forever and `tty7 wait` would only ever time
+/// out, so both report the same end-of-turn as `Stop` does. All three are
+/// observation-only events, and a doubled `stop` is idempotent.
 const KIMI_HOOK_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "prompt-submit"),
     ("PermissionRequest", "permission-request"),
     ("PostToolUse", "tool-complete"),
     ("Stop", "stop"),
+    ("Interrupt", "stop"),
+    ("StopFailure", "stop"),
     ("SessionEnd", "session-end"),
 ];
 
@@ -879,27 +889,27 @@ fn toml_hooks_state(
         return HooksState::NotInstalled;
     };
     let marker = agent.marker();
-    let ours: Vec<(&str, &str)> = doc
+    let marked: Vec<&toml_edit::Table> = doc
         .get("hooks")
         .and_then(|h| h.as_array_of_tables())
         .into_iter()
         .flatten()
-        .filter_map(|entry| {
-            let command = entry
-                .get("command")
-                .and_then(|c| c.as_str())
-                .filter(|c| c.contains(&marker))?;
-            let event = entry.get("event").and_then(|e| e.as_str())?;
-            Some((event, command))
-        })
+        .filter(|entry| toml_command_is_marked(entry, &marker))
         .collect();
-    if ours.is_empty() {
+    if marked.is_empty() {
         return HooksState::NotInstalled;
     }
-    let complete = ours.len() == events.len()
+    // Every marked entry counts towards the total, `event` or no `event`: a
+    // hand-edit that drops the key leaves an entry that is ours and is broken,
+    // which is exactly what Outdated means. Reporting NotInstalled instead
+    // would hide it from `refresh_hooks`, which only ever revisits Outdated.
+    let complete = marked.len() == events.len()
         && events.iter().all(|(hook_event, tty7_event)| {
             let command = target.hook_command(agent, tty7_event);
-            ours.iter().any(|(e, c)| e == hook_event && *c == command)
+            marked.iter().any(|entry| {
+                entry.get("event").and_then(|e| e.as_str()) == Some(*hook_event)
+                    && entry.get("command").and_then(|c| c.as_str()) == Some(command.as_str())
+            })
         });
     if complete {
         HooksState::Installed
@@ -924,6 +934,18 @@ fn toml_hooks_install(
         Err(e) if e.kind() == io::ErrorKind::NotFound => toml_edit::DocumentMut::new(),
         Err(e) => return Err(anyhow::anyhow!("read {}: {e}", path.display())),
     };
+
+    // `hooks = []` and no `hooks` key at all say the same thing, but toml_edit
+    // keeps an empty inline array and an array of tables apart. Promote the
+    // one to the other rather than refusing over a difference that carries no
+    // configuration and that the user cannot see.
+    if doc
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .is_some_and(|a| a.is_empty())
+    {
+        doc.remove("hooks");
+    }
 
     let hooks = doc.entry("hooks").or_insert(toml_edit::Item::ArrayOfTables(
         toml_edit::ArrayOfTables::new(),
@@ -2140,8 +2162,216 @@ mod tests {
             install_hooks(&t, HookAgent::Kimi).is_err(),
             "a config.toml that does not parse is left alone"
         );
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "not = valid = toml",
+            "and is not rewritten on the way out"
+        );
+        assert!(
+            uninstall_hooks(&t, HookAgent::Kimi).is_err(),
+            "uninstall refuses the same file"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "not = valid = toml"
+        );
 
         unsafe { std::env::remove_var("KIMI_CODE_HOME") };
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `config.toml` that parses but spells `hooks` as something other than
+    /// an array of tables is a file we do not understand. Every one of these
+    /// must come back as a refusal with the file untouched — the one thing
+    /// that must never happen to the file holding the user's API keys is a
+    /// silent rewrite.
+    #[test]
+    fn kimi_refuses_a_hooks_key_of_the_wrong_toml_type() {
+        let host = FakeRemote::shared();
+        let base = std::env::temp_dir().join(format!("tty7-kimi-shapes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        for (name, text) in [
+            ("a_string", "hooks = \"nope\"\n"),
+            ("a_table", "[hooks]\nfoo = 1\n"),
+            (
+                "an_inline_array",
+                "hooks = [{ event = \"Stop\", command = \"afplay a.aiff\" }]\n",
+            ),
+        ] {
+            let home = base.join(name);
+            let t = HookTarget::remote(&*host, home.clone());
+            let config = HookAgent::Kimi.target_path(&t);
+            std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+            std::fs::write(&config, text).unwrap();
+
+            assert_eq!(
+                hooks_state(&t, HookAgent::Kimi),
+                HooksState::NotInstalled,
+                "{name}: nothing of ours is in there"
+            );
+            assert!(
+                install_hooks(&t, HookAgent::Kimi).is_err(),
+                "{name}: install refuses"
+            );
+            assert_eq!(
+                uninstall_hooks(&t, HookAgent::Kimi).unwrap(),
+                HookOutcome::NoTty7Hooks,
+                "{name}: uninstall finds nothing of ours"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&config).unwrap(),
+                text,
+                "{name}: the file is byte-for-byte what it was"
+            );
+        }
+
+        // `hooks = []` is the one shape that carries no configuration at all,
+        // so it is promoted instead of refused.
+        let home = base.join("an_empty_array");
+        let t = HookTarget::remote(&*host, home.clone());
+        let config = HookAgent::Kimi.target_path(&t);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "model = \"k2\"\nhooks = []\n").unwrap();
+        install_hooks(&t, HookAgent::Kimi).expect("an empty inline array is promoted, not refused");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Installed);
+        let written = std::fs::read_to_string(&config).unwrap();
+        assert!(written.starts_with("model = \"k2\"\n"), "{written}");
+        assert!(!written.contains("hooks = []"), "{written}");
+        assert_eq!(
+            uninstall_hooks(&t, HookAgent::Kimi).unwrap(),
+            HookOutcome::Removed
+        );
+        assert!(
+            !std::fs::read_to_string(&config).unwrap().contains("hooks"),
+            "the key goes when the last entry in it does"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The rest of the TOML merge contract: a file that does not exist yet, a
+    /// second install that changes nothing, entries a hand-edit has mangled,
+    /// and an uninstall that has to thread its removals between the user's own
+    /// entries and the tables that follow them.
+    #[test]
+    fn kimi_toml_merge_holds_up_across_the_awkward_shapes() {
+        let host = FakeRemote::shared();
+        let base = std::env::temp_dir().join(format!("tty7-kimi-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let marker = "agent-hook kimi";
+
+        // Nothing there at all: install creates the directory and the file.
+        let t = HookTarget::remote(&*host, base.join("fresh"));
+        let config = HookAgent::Kimi.target_path(&t);
+        assert!(!config.exists());
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::NotInstalled);
+        assert_eq!(
+            uninstall_hooks(&t, HookAgent::Kimi).unwrap(),
+            HookOutcome::NothingInstalled,
+            "there is no file to take anything out of"
+        );
+        install_hooks(&t, HookAgent::Kimi).expect("install writes a fresh config.toml");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Installed);
+        let once = std::fs::read_to_string(&config).unwrap();
+        install_hooks(&t, HookAgent::Kimi).expect("re-install succeeds");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            once,
+            "a second install is byte-for-byte the first — no churn, no growth"
+        );
+
+        // A hand-edit that drops `event` leaves an entry that is ours and is
+        // broken. That is Outdated, not NotInstalled: `refresh_hooks` only
+        // ever revisits Outdated, so anything else hides the damage.
+        let mangled = once.replacen("event = \"SessionStart\"\n", "", 1);
+        assert_ne!(mangled, once);
+        std::fs::write(&config, &mangled).unwrap();
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Outdated);
+        install_hooks(&t, HookAgent::Kimi).expect("install repairs it");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Installed);
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), once);
+
+        // One marked entry too many is Outdated too, and install prunes it.
+        // This one has no `event` at all, so counting only the entries that
+        // still name one would find the full roster and call it Installed
+        // while a broken ninth entry sat there.
+        let mut extra = std::fs::read_to_string(&config).unwrap();
+        extra.push_str("\n[[hooks]]\ncommand = \"tty7 agent-hook kimi stop\"\n");
+        std::fs::write(&config, &extra).unwrap();
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Outdated);
+        install_hooks(&t, HookAgent::Kimi).expect("install prunes the stray");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Installed);
+        let doc: toml_edit::DocumentMut =
+            std::fs::read_to_string(&config).unwrap().parse().unwrap();
+        assert_eq!(
+            doc["hooks"]
+                .as_array_of_tables()
+                .unwrap()
+                .iter()
+                .filter(|e| toml_command_is_marked(e, marker))
+                .count(),
+            KIMI_HOOK_EVENTS.len()
+        );
+
+        // The user's own entry comes first and another table follows ours:
+        // uninstall has to take out the middle and leave both ends alone.
+        let t = HookTarget::remote(&*host, base.join("sandwich"));
+        let config = HookAgent::Kimi.target_path(&t);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let user_half = concat!(
+            "# mine\n",
+            "[[hooks]]\n",
+            "event = \"Stop\"\n",
+            "command = \"afplay a.aiff\"  # ding\n",
+            "\n",
+            "[providers.moonshot]\n",
+            "api_key = \"secret\"\n",
+        );
+        std::fs::write(&config, user_half).unwrap();
+        install_hooks(&t, HookAgent::Kimi).expect("install");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Installed);
+        let merged = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            merged.starts_with(
+                "# mine\n[[hooks]]\nevent = \"Stop\"\ncommand = \"afplay a.aiff\"  # ding\n"
+            ),
+            "the user's entry and its trailing comment come through verbatim:\n{merged}"
+        );
+        assert!(merged.contains("[providers.moonshot]\napi_key = \"secret\"\n"));
+        assert_eq!(
+            uninstall_hooks(&t, HookAgent::Kimi).unwrap(),
+            HookOutcome::Removed
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            user_half,
+            "uninstall puts the file back exactly as the user left it"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Kimi's `Stop` does not fire when the user interrupts a turn or when one
+    /// dies on an error, so the pane would sit on "working" forever without
+    /// the two events that do.
+    #[test]
+    fn kimi_reports_every_way_a_turn_ends() {
+        for event in ["Stop", "Interrupt", "StopFailure"] {
+            assert_eq!(
+                KIMI_HOOK_EVENTS
+                    .iter()
+                    .find(|(hook_event, _)| *hook_event == event)
+                    .map(|(_, tty7_event)| *tty7_event),
+                Some("stop"),
+                "{event} has to end the turn like Stop does"
+            );
+        }
+        assert!(
+            !KIMI_HOOK_EVENTS
+                .iter()
+                .any(|(hook_event, _)| *hook_event == "Notification"),
+            "Notification fires for background-task chatter and would strand the pane on waiting"
+        );
     }
 }

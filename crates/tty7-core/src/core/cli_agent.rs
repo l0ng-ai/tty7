@@ -352,7 +352,20 @@ impl CLIAgent {
             // in Oh My Pi; `--session-dir` is a different one and survives.
             CLIAgent::OhMyPi => &["--resume", "-r", "--session", "--fork", "--continue", "-c"],
             // `--resume`/`-r` is Kimi's hidden alias for `--session`/`-S`.
-            CLIAgent::Kimi => &["--session", "-S", "--resume", "-r", "--continue", "-c"],
+            // `--agent`/`--agent-file` bind the main agent at session creation
+            // and Kimi rejects either next to `--session` outright; resuming
+            // restores the bound agent by itself, so replaying them would only
+            // turn a working resume into a startup error.
+            CLIAgent::Kimi => &[
+                "--session",
+                "-S",
+                "--resume",
+                "-r",
+                "--continue",
+                "-c",
+                "--agent",
+                "--agent-file",
+            ],
             CLIAgent::Grok => &[
                 "--resume",
                 "-r",
@@ -1210,6 +1223,43 @@ mod tests {
                 .as_deref(),
             Some("kimi --yolo --session abc-123"),
             "a stale --session flag comes off before the new one goes on"
+        );
+        assert_eq!(
+            CLIAgent::Kimi
+                .resume_command("abc-123", Some(&argv(&["kimi", "--session=old", "--yolo"])))
+                .as_deref(),
+            Some("kimi --yolo --session abc-123"),
+            "and so does the one-token spelling of it"
+        );
+        assert_eq!(
+            CLIAgent::Kimi
+                .resume_command(
+                    "abc-123",
+                    Some(&argv(&["kimi", "--resume", "--model", "kimi-k2"]))
+                )
+                .as_deref(),
+            Some("kimi --model kimi-k2 --session abc-123"),
+            "`--session` takes an optional id, so a bare one must not eat the flag after it"
+        );
+        assert_eq!(
+            CLIAgent::Kimi
+                .resume_command(
+                    "abc-123",
+                    Some(&argv(&["kimi", "--continue", "--model", "kimi-k2"]))
+                )
+                .as_deref(),
+            Some("kimi --model kimi-k2 --session abc-123"),
+            "`--continue` is mutually exclusive with `--session` and takes no value"
+        );
+        assert_eq!(
+            CLIAgent::Kimi
+                .resume_command(
+                    "abc-123",
+                    Some(&argv(&["kimi", "--agent", "reviewer", "--yolo"]))
+                )
+                .as_deref(),
+            Some("kimi --yolo --session abc-123"),
+            "Kimi rejects `--agent` next to `--session`, and resume rebinds the agent itself"
         );
         assert_eq!(
             CLIAgent::Claude
