@@ -9805,6 +9805,7 @@ dependencies = [
  "tray-icon",
  "tty7-core",
  "unicode-segmentation",
+ "unicode-width",
  "uuid",
  "windows 0.58.0",
  "windows-sys 0.61.2",
