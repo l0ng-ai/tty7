@@ -162,9 +162,10 @@ tty7 capture %83 --plain
 `capture` hands back what the daemon stored — the pane's bytes, escapes and
 all — and `--plain` replays them through a terminal grid and prints the
 resulting text instead. Not a stripper: colour and cursor escapes are gone, but
-also a line the shell wrapped at column 249 comes back as one line, a progress
-bar that rewrote itself with `\r` reads as its final value, and a TUI's screen
-lands where it was drawn. Use it whenever a human would want to read the output.
+also a line the shell wrapped at the pane's width comes back as one line, a
+progress bar that rewrote itself with `\r` reads as its final value, and a
+TUI's screen lands where it was drawn. Use it whenever a human would want to
+read the output.
 
 Two details about what you get back either way: capture returns a *snapshot*,
 not a stream — call it again for a newer one. And by default it prints the

@@ -111,14 +111,16 @@ the way to ask "is the command finished"; that is `free`. Mixing agent states
 with `free` is safe: `free` is only consulted when no named agent state
 matched first.
 
-### `--changed` is not optional in a loop
+### `--changed` on every wait that follows a send
 
 The status is a **level, not an event**: `done` stands until the next turn
 begins. A `wait` issued right after a `send` will happily answer with *last*
 turn's `done` before the worker has even read the input, and you will read a
 stale screen and think it failed. `--changed` refuses the state the pane was
-already in. Every round after the first needs it; the JSON's `stale` flag
-tells you when it mattered.
+already in. Every wait that follows input into the pane needs it; the JSON's
+`stale` flag tells you when it mattered. A wait that follows *nothing* — the
+harvest round in [fan-out](#running-several-workers) — is the case that must
+not use it.
 
 ### The babysit loop
 
@@ -198,10 +200,13 @@ cp /tmp/agent-workers /tmp/agent-pending
 while [ -s /tmp/agent-pending ]; do
   : > /tmp/agent-still
   while read -r task PANE WT WS; do
-    if tty7 wait "$PANE" --until waiting,done --changed --timeout 120; then
+    tty7 wait "$PANE" --until waiting,done --timeout 120; rc=$?
+    if [ $rc -eq 0 ]; then
       : # done → collect (step 5); waiting → babysit (step 4), then requeue
+    elif [ $rc -eq 124 ]; then
+      echo "$task $PANE $WT $WS" >> /tmp/agent-still   # not yet — come back
     else
-      echo "$task $PANE $WT $WS" >> /tmp/agent-still   # 124: not yet — come back
+      echo "$task: pane $PANE is gone" >&2             # 1: died; nothing to requeue
     fi
   done < /tmp/agent-pending
   mv /tmp/agent-still /tmp/agent-pending
@@ -213,6 +218,15 @@ sequence, the first stuck worker blinds you to every worker behind it. Round
 trips of 120 seconds keep you circulating — collecting the finished, answering
 the stuck, and telling the user about the one that has moved nothing for three
 rounds.
+
+No `--changed` here, unlike step 4, and that is deliberate: a worker that
+reached `done` while you were waiting on a *different* one is already standing
+in that state when its own `wait` finally starts, and `--changed` would refuse
+it — every round, forever. Each pane runs one turn, so a standing `done` is
+this turn's. What that costs you is on the other side: after answering a
+`waiting` worker, give it a `tty7 wait "$PANE" --until working --changed
+--timeout 30` before you requeue it, or the next round hands you the same
+prompt again.
 
 What not to build: workers do not talk to each other, and their branches never
 merge into each other. Keep the topology a star — you hand out tasks that do
