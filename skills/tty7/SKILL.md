@@ -1,7 +1,7 @@
 ---
 name: tty7
 description: >-
-  Drive the tty7 terminal workbench from the shell with the `tty7` binary — list workspaces/tabs/panes, split a pane, send text or keystrokes into one, capture what is on a pane's screen, run a command in a real PTY and pass its exit code through, block until a pane finishes or needs input, see which coding agents are running and which ports a pane is listening on. Use this whenever tty7, panes, workspaces, or `%42`/`@7`/"the other pane"/"the other agent" come up; whenever you want to hand work to another agent and collect the result ("get Claude/Codex to do X", "派个活", "let another agent handle this", running several agents in parallel); whenever you need to start something long-running or interactive (dev server, REPL, ssh session, `tail -f`, a TUI) that should not sit blocking your Bash tool; whenever a program needs a real terminal to behave the way the user sees it; and whenever you need to look at or report on what is running in some *other* terminal on this machine. Cheap to check: if `$TTY7_PANE` is set you are already inside tty7 and every command here works with no setup.
+  Drive the tty7 terminal workbench from the shell with the `tty7` binary — list workspaces/tabs/panes, split a pane, send text or keystrokes into one, capture what is on a pane's screen, run a command in a real PTY and pass its exit code through, block until a pane finishes or needs input, see which coding agents are running and which ports a pane is listening on. Use this whenever tty7, panes, workspaces, or `%42`/`@7`/"the other pane"/"the other agent" come up; whenever you want to hand work to another agent and collect the result ("get Claude/Codex to do X", "派个活", "let another agent handle this", running several agents in parallel and merging what they produce); whenever you need to start something long-running or interactive (dev server, REPL, ssh session, `tail -f`, a TUI) that should not sit blocking your Bash tool; whenever a program needs a real terminal to behave the way the user sees it; and whenever you need to look at or report on what is running in some *other* terminal on this machine. Cheap to check: if `$TTY7_PANE` is set you are already inside tty7 and every command here works with no setup.
 ---
 
 # Driving tty7 from the command line
@@ -34,27 +34,25 @@ If `tty7 doctor` says the server is unreachable, stop and tell the user — do
 not run `tty7 server start` on your own initiative. Starting a server they
 didn't ask for changes what their GUI attaches to.
 
-## When to use this instead of the Bash tool
+## What are you here to do?
 
-The Bash tool is right for anything that starts, does its job, and exits.
-Reach for tty7 when one of these is true:
+Four jobs, four shapes:
 
-- **It shouldn't block you.** A dev server, a watcher, `tail -f`, a long test
-  run you want to check on later. Put it in a pane, come back and read it.
-- **It's interactive or stateful.** A REPL, `ssh`, a database shell, anything
-  where you send one thing, read the answer, then send the next. A pane keeps
-  the session alive between your turns; a Bash call cannot.
-- **It needs a real TTY.** Programs that detect a pipe and change behaviour —
-  colour, progress bars, TUIs, `top`, anything using raw mode. `tty7 run`
-  gives a genuine PTY at 120×30.
-- **The user should be able to watch it.** Anything in a pane shows up in their
-  tty7 window, live. That is often the whole point.
-- **You're being asked about something you didn't start.** "What's running in
-  that pane?", "why is port 3000 taken?", "what are my agents doing?" — you can
-  answer those from here without touching anything.
-- **Someone else should do the work.** Another coding agent can run in a pane,
-  and you can wait on it and read its answer. See [Handing work to another
-  agent](#handing-work-to-another-agent).
+1. **Run something that shouldn't block you or needs a real TTY** — a dev
+   server, a long test run, a TUI. [Running a command](#running-a-command-two-shapes).
+2. **Talk to something stateful over time** — a REPL, `ssh`, a debugger.
+   Same primitives: [send](#non-blocking-a-pane-you-talk-to-over-time),
+   [read](#reading-a-pane), repeat.
+3. **Look at what this machine is doing** — other panes, other agents, ports.
+   [Looking around](#looking-around), strictly read-only.
+4. **Hand work to another coding agent** — one worker or a fan-out of several.
+   Read `references/delegation.md` first; the short version is
+   [below](#handing-work-to-another-agent).
+
+The Bash tool remains right for anything that starts, does its job, and exits
+without needing a terminal or an audience. A pane earns its keep when the
+process outlives your turn, needs a real PTY, or should be visible to the user
+in their tty7 window — that last one is often the whole point.
 
 ## Addresses
 
@@ -131,8 +129,11 @@ wait and it does not tell you what happened — reading is a separate step, and
 waiting is `tty7 wait`.
 
 For keystrokes rather than characters — Ctrl-C, Escape, the arrow keys — use
-`--key` (see [Answering a prompt](#answering-a-prompt)). Typing `^C` as text
-does nothing; it arrives as two characters.
+`--key`: it takes `enter escape tab backtab space backspace delete up down
+right left home end pageup pagedown`, plus `C-<char>` for Ctrl and `M-<char>`
+for Alt. Repeat it for a sequence; text and keys compose, text first. Typing
+`^C` as text does nothing — it arrives as two characters; `--key C-c` is the
+real interrupt.
 
 **A brand-new pane can swallow the Enter.** A shell still working through its
 startup files — a prompt framework, `fastfetch`, anything that paints on login —
@@ -218,143 +219,35 @@ For something that quick, `--interval 100`, or drop `--changed` and read the
 
 If you want the process tree itself — "what is running in there", "which port is
 this pane serving" — that is `tty7 procs %83`: indented by depth, `*` on the
-foreground process, then the ports those processes are listening on.
-
-It is not the way to check on a coding agent, though. `procs` reports
-`nothing running in this pane` for a pane with a busy agent in it, so reading it
-as "the worker died" is wrong. Ask `tty7 agents` about those, or see
-[When a worker never moves](#when-a-worker-never-moves).
+foreground process, then the ports those processes are listening on. It is not
+the way to check on a coding agent, though: `procs` reports `nothing running in
+this pane` for a pane with a busy agent in it, so reading it as "the worker
+died" is wrong. Ask `tty7 agents` about those.
 
 ## Handing work to another agent
 
-Everything above also works when the thing in the pane is a coding agent, and
-that is where this stops being a terminal wrapper and starts being useful. An
-agent reports its own status, so you can wait on *it* rather than on its
-process tree:
+A pane can hold another coding agent, and every primitive above works on it —
+plus one that only agents have: status hooks report `working` / `waiting` /
+`done`, so `tty7 wait` can block on the *agent* rather than its process tree.
 
-```bash
-PANE=$(tty7 split --v)
-tty7 send "$PANE" 'claude --dangerously-skip-permissions "add tests for the parser"' --enter
-tty7 wait "$PANE" --until waiting,done --changed --timeout 900
-tty7 capture "$PANE" --plain | tail -40
-tty7 pane close "$PANE"
-```
+**Delegation has a playbook — `references/delegation.md`. Read it before you
+spawn a worker.** It covers the whole arc: giving the worker its own git
+worktree and workspace, handing the task over with the delivery contract in the
+prompt, proving the command actually started, babysitting the states, collecting
+the result out of git, fanning out several workers, and cleaning up.
 
-Five steps: give it a pane, hand it the task, sleep until it needs you or
-finishes, read what happened, clean up. The third is the one worth
-understanding.
+Four rules from it survive even if you read nothing else:
 
-### Give the worker its interactive mode
-
-Hand the task as an argument, **not** with `-p`. Both run one turn and stop, so
-the difference is not what the worker does — it is what anybody can see while it
-does it.
-
-Interactive is the mode that draws a TUI, so the pane fills with the worker's
-reasoning and tool calls as they happen. That is visible to the user in their
-tty7 window, and it is what `capture --plain` reads back. `-p` is the piped
-mode: it draws nothing, streams its answer to stdout when the turn ends, and
-until then the pane's screen stays **empty** — `capture --plain` on it returns
-nothing at all, which reads exactly like a worker that hung. Putting a `-p`
-worker in a pane throws away the only reason it is in a pane.
-
-Interactive also leaves the session alive at the prompt, so you can `send` a
-follow-up into the same context. A `-p` worker is gone after its one turn.
-
-Reach for `-p` only when you want the answer as a string and nobody needs to
-watch — and then prefer `tty7 run` or the Bash tool, which is what that shape
-is for.
-
-### What the states mean
-
-| State | The pane is |
-|---|---|
-| `working` | mid-turn |
-| `waiting` | **stopped, needing you** — a permission prompt, a question |
-| `done` | finished its turn |
-| `idle` | an agent that has not started a turn |
-| `free` | no agent: the foreground command exited (see above) |
-| `no-agent` | nothing reports status here — a plain shell, or hooks not installed |
-| `exit` | the pane is gone; ends every wait whether you asked for it or not |
-
-`--until waiting,done,exit` is the default because those are the three that mean
-"your turn again". Note that `idle` is something an agent says about *itself* —
-a pane running a build is `no-agent`, never `idle`, so `--until idle` is never
-the way to ask "is the command finished". That is `free`.
-
-Mixing the two is safe: `--until waiting,done,free` covers a pane whose kind you
-don't know, because `free` is only consulted when none of the agent states you
-named matched first.
-
-### `--changed` is not optional in a loop
-
-The status is a **level, not an event**: `done` stands until the next turn
-begins. So a `wait` issued right after a `send` will happily answer with *last*
-turn's `done` before the worker has even read the input, and you will read a
-stale screen and think it failed. `--changed` refuses the state the pane was
-already in. Every round after the first needs it; the JSON's `stale` flag tells
-you when it mattered.
-
-### Answering a prompt
-
-A worker that stops at `waiting` is usually showing something that text cannot
-answer — a permission prompt driven by arrow keys, a menu, a TUI. Look first,
-then press keys:
-
-```bash
-tty7 capture "$PANE" --plain | tail -20   # what is it asking?
-tty7 send "$PANE" --key down --key enter  # answer it
-tty7 send "$PANE" --key C-c               # or stop it
-```
-
-`--key` takes `enter escape tab backtab space backspace delete up down right
-left home end pageup pagedown`, plus `C-<char>` for Ctrl and `M-<char>` for
-Alt. Repeat it for a sequence; text and keys compose, text first. This is also
-how you interrupt a runaway command in a pane you own — `--key C-c` — which
-plain `send` cannot express.
-
-### Running several at once
-
-Panes are independent, so fan out and then collect:
-
-```bash
-for task in parser lexer codegen; do
-  P=$(tty7 split --v)
-  tty7 send "$P" "claude -p 'add tests for the $task'" --enter
-  echo "$P" >> /tmp/workers
-done
-while read -r P; do
-  tty7 wait "$P" --until done,exit --changed --timeout 1800 || echo "$P did not finish"
-  tty7 capture "$P" --plain | tail -40
-  tty7 pane close "$P"
-done < /tmp/workers
-```
-
-Splitting repeatedly makes the user's window very busy; `tty7 new` gives each
-worker its own workspace instead if you would rather not.
-
-### When a worker never moves
-
-A `wait` that times out while `tty7 agents` shows a status that never changes
-almost always means the agent's status hooks are missing or out of date — the
-worker is fine, it just has no way to say so. `tty7 agents` names the agent when
-it can see the gap, and `tty7 doctor` reports where every agent's hooks stand.
-Hooks are installed from the GUI's **Settings → Agents**; tell the user rather
-than trying to install them yourself.
-
-Before concluding anything, check whether it is moving. Those same hooks emit an
-OSC 777 line on every tool call, and `capture` **without** `--plain` shows them —
-one of the few times the raw bytes beat the rendered screen:
-
-```bash
-tty7 capture "$PANE" | grep -c 'tool-complete'   # rising = alive and working
-```
-
-That is also the answer when a worker's screen looks empty: a `-p` worker paints
-nothing until its turn ends, so `capture --plain` is blank the whole way through
-while the event stream underneath is busy. Two things that do *not* answer this
-question: `tty7 procs`, which reports nothing running for a pane with a live
-agent in it, and the absence of output on a `--plain` capture.
+- **Interactive mode, never `-p`.** `claude -p` draws no TUI: the pane stays
+  blank, `capture --plain` returns nothing, the user watches an empty
+  rectangle, and the session dies after one turn so you cannot follow up. Hand
+  the task as an argument to the interactive command instead.
+- **A worker that writes files gets its own git worktree.** Two agents in one
+  checkout trample each other and the user's working tree.
+- **Collect results from git, not from the screen.** Tell the worker to commit;
+  read the diff. A screen is a rectangle and the top of it is gone.
+- **After the first send into a new pane, confirm the command left the
+  prompt** — the swallowed-Enter check above.
 
 ## Looking around
 
@@ -420,8 +313,12 @@ from the GUI.
 `ws stop`, `machine connect` and `machine disconnect` exit with a message saying
 they're not implemented. Don't build a plan around them.
 
-## Full command reference
+## References
 
-`references/commands.md` has every verb, subcommand and flag in one table, plus
-the JSON shape each one emits. Read it when you need a verb that isn't above,
-or when you're about to parse `--json` output and want to know the field names.
+- `references/delegation.md` — the delegation playbook: worktrees, handover,
+  babysitting, collection, fan-out, cleanup. Read it whenever another agent is
+  about to do the work.
+- `references/commands.md` — every verb, subcommand and flag in one table, plus
+  the JSON shape each one emits. Read it when you need a verb that isn't above,
+  or when you're about to parse `--json` output and want to know the field
+  names.

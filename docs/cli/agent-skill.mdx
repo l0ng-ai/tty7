@@ -15,7 +15,8 @@ npx skills add l0ng-ai/tty7
 
 The source lives at
 [`skills/tty7/`](https://github.com/l0ng-ai/tty7/tree/main/skills/tty7) in the
-repository: a `SKILL.md` and a full command reference.
+repository: a `SKILL.md` and two references — the full command table, and a
+delegation playbook the agent reads before handing work to another agent.
 
 <Note>
   This is the only skill tty7 has — nothing in **Settings → Agents** installs
@@ -88,6 +89,15 @@ tty7 send "$PANE" 'cargo test > /tmp/t.log 2>&1; echo $? > /tmp/t.rc' --enter
 # wake up exactly when the other agent needs something
 tty7 wait %3 --until waiting,done --changed --timeout 600
 ```
+
+### How to delegate
+
+`references/delegation.md` is the part the agent reads before spawning a
+worker: give the worker its own git worktree and workspace, hand the task over
+in interactive mode with the delivery contract in the prompt, prove the
+command actually started, babysit with `tty7 wait`, collect the result out of
+git rather than the screen, clean up — and, for a fan-out, harvest with short
+per-worker timeouts so one stuck worker cannot stall the round.
 
 ## For humans writing their own tooling
 
