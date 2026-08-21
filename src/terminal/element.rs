@@ -810,6 +810,10 @@ thread_local! {
                             static CHAR_STRINGS: RefCell<HashMap<char, SharedString>> = RefCell::new(HashMap::new());
 
                         static GRID_BUF: RefCell<Vec<RenderCell>> = const { RefCell::new(Vec::new()) };
+
+                        /// Measured ink extents and the font size they were measured at.
+                        static INK_EXTENTS: RefCell<(Pixels, HashMap<(gpui::FontId, char), Option<Pixels>>)> =
+                            RefCell::new((px(0.), HashMap::new()));
 }
 
 fn char_string(c: char) -> SharedString {
@@ -960,11 +964,84 @@ fn native_cell_residue(style: &GlyphStyle) -> Option<char> {
         .then_some(' ')
 }
 
-fn seg_clip_width(solo: bool, cells: usize, cell_width: Pixels) -> Pixels {
+/// How much room a segment's glyph gets before it is made to shrink.
+///
+/// No monospace face is wide enough for an emoji at the sizes people read at.
+/// Apple Color Emoji is a bitmap face whose strikes are quantised, so its ink
+/// is widest relative to the em exactly where it hurts: 1.25em from 12 to 16px,
+/// tapering to 1.0em by 24px. Two cells only cover 1.25em from 0.63em advance
+/// up, and the common faces sit at 0.60em (Menlo, SF Mono) or 0.50em (Ubuntu
+/// Mono). Every terminal therefore has to choose between shrinking the glyph
+/// and letting it spill. This follows WezTerm, whose answer shows the glyph
+/// whole most often: a quarter cell of slack always, and a whole extra cell
+/// when the neighbouring cell is blank and has nothing to lose.
+fn seg_budget(solo: bool, cells: usize, room: bool, cell_width: Pixels) -> Pixels {
     if solo {
+        // Single-cell glyphs have always been allowed to lean into the next
+        // cell. Narrowing that here would shrink a pile of symbols that look
+        // fine today, so it stays a separate decision.
         cell_width * 2.
+    } else if room {
+        cell_width * (cells as f32 + 1.)
     } else {
-        cell_width * cells as f32
+        cell_width * (cells as f32 + 0.25)
+    }
+}
+
+/// How much to shrink a segment so its glyph stops inside its budget.
+fn fit_scale(ink: Pixels, budget: Pixels) -> f32 {
+    if ink <= budget || ink <= px(0.) {
+        1.
+    } else {
+        budget.as_f32() / ink.as_f32()
+    }
+}
+
+/// Where a segment's ink ends, measured from the left edge of its first cell.
+///
+/// Advance is the wrong yardstick: Apple Color Emoji advances 1.31em but only
+/// inks 1.25em, so going by advance shrinks glyphs that would have fit. Ask
+/// for the glyph's own bounds instead, cached per (face, char) because the
+/// lookup is a font query a screenful of CJK would otherwise repeat on every
+/// cell of every frame.
+fn ink_extent(
+    cx: &App,
+    shaped: &gpui::ShapedLine,
+    text: &str,
+    font_size: Pixels,
+) -> Option<Pixels> {
+    let font_id = shaped.runs.first()?.font_id;
+    let c = text.chars().next()?;
+    INK_EXTENTS.with(|cache| {
+        let hit = {
+            let mut cache = cache.borrow_mut();
+            if cache.0 != font_size {
+                cache.0 = font_size;
+                cache.1.clear();
+            }
+            if cache.1.len() > 32_768 {
+                cache.1.clear();
+            }
+            cache.1.get(&(font_id, c)).copied()
+        };
+        if let Some(extent) = hit {
+            return extent;
+        }
+        let extent = cx
+            .text_system()
+            .typographic_bounds(font_id, font_size, c)
+            .ok()
+            .map(|bounds| bounds.origin.x + bounds.size.width);
+        cache.borrow_mut().1.insert((font_id, c), extent);
+        extent
+    })
+}
+
+/// Whether the cell after a segment is free for its glyph to lean into.
+fn has_room_after(row: &[RenderCell], start: usize, cells: usize) -> bool {
+    match row.get(start + cells) {
+        None => true,
+        Some(next) => is_blank(next) && !next.draw_bg && !next.selected,
     }
 }
 
@@ -984,7 +1061,6 @@ fn paint_glyphs(
         build_font(italic_font.unwrap_or(base_font), false, true),
         build_font(bold_font.unwrap_or(base_font), true, true),
     ];
-    let face = |bold: bool, italic: bool| &faces[(bold as usize) | ((italic as usize) << 1)];
 
     let run_buf = &mut [TextRun {
         len: 0,
@@ -999,7 +1075,13 @@ fn paint_glyphs(
         let row_base = row * geom.cols;
         let y = geom.origin.y + geom.line_height * (row as f32);
 
-        for seg in segment_row(&buf[row_base..row_base + geom.cols]) {
+        let row_cells = &buf[row_base..row_base + geom.cols];
+
+        for seg in segment_row(row_cells) {
+            // A `Run` is one glyph per cell in the main font, which by
+            // definition already fits; the rest can carry a glyph from a
+            // fallback face that is wider than the cells it was handed.
+            let fit = !matches!(seg, RowSeg::Run { .. });
             let (start, cells, text, force_width, solo) = match seg {
                 RowSeg::Run { start, cells, text } => (
                     start,
@@ -1070,22 +1152,45 @@ fn paint_glyphs(
             };
 
             let style = GlyphStyle::of(&buf[row_base + start]);
+            let face_ix = (style.bold as usize) | ((style.italic as usize) << 1);
             run_buf[0] = TextRun {
                 len: text.len(),
-                font: face(style.bold, style.italic).clone(),
+                font: faces[face_ix].clone(),
                 color: style.fg,
                 background_color: None,
                 underline: style.underline_style(),
                 strikethrough: style.strikethrough_style(),
             };
 
-            let shaped = window
-                .text_system()
-                .shape_line(text, font_size, run_buf, force_width);
-
             let x = geom.origin.x + geom.cell_width * (start as f32);
-            let clip_width = seg_clip_width(solo, cells, geom.cell_width);
-            let clip = Bounds::new(point(x, y), size(clip_width, geom.line_height));
+            let budget = if fit {
+                seg_budget(
+                    solo,
+                    cells,
+                    has_room_after(row_cells, start, cells),
+                    geom.cell_width,
+                )
+            } else {
+                geom.cell_width * cells as f32
+            };
+
+            let mut shaped =
+                window
+                    .text_system()
+                    .shape_line(text.clone(), font_size, run_buf, force_width);
+            if fit && let Some(ink) = ink_extent(cx, &shaped, &text, font_size) {
+                let scale = fit_scale(ink, budget);
+                if scale < 1. {
+                    shaped = window.text_system().shape_line(
+                        text.clone(),
+                        font_size * scale,
+                        run_buf,
+                        force_width,
+                    );
+                }
+            }
+
+            let clip = Bounds::new(point(x, y), size(budget, geom.line_height));
             window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
                 _ = shaped.paint(
                     point(x, y),
@@ -2227,6 +2332,50 @@ mod tests {
     }
 
     #[test]
+    fn fit_scale_only_shrinks_glyphs_that_overflow_their_budget() {
+        let budget = px(15.);
+        assert_eq!(fit_scale(px(19.2), budget), 15. / 19.2);
+        // Whatever already fits keeps its own size, including a glyph that
+        // lands exactly on the edge and a run that measured as empty.
+        assert_eq!(fit_scale(px(15.), budget), 1.);
+        assert_eq!(fit_scale(px(12.), budget), 1.);
+        assert_eq!(fit_scale(px(0.), budget), 1.);
+    }
+
+    #[test]
+    fn an_emoji_only_shrinks_where_the_face_is_narrow_and_the_next_cell_is_taken() {
+        // Apple Color Emoji inks 1.25em, which is 18.75px at a 15px font size.
+        let ink = px(18.75);
+        let scale = |advance_em: f32, room: bool| {
+            let cell = px(15. * advance_em);
+            fit_scale(ink, seg_budget(false, 2, room, cell))
+        };
+
+        // Menlo and friends: a quarter cell of slack is enough on its own.
+        assert_eq!(scale(0.6, false), 1.);
+        // Ubuntu Mono is narrow enough that a crowded neighbour forces a
+        // shrink, but a blank one lends a whole cell and the emoji stays whole.
+        assert!(scale(0.5, false) < 1.);
+        assert_eq!(scale(0.5, true), 1.);
+    }
+
+    #[test]
+    fn only_a_plain_blank_cell_counts_as_room() {
+        let mut row: Vec<_> = "ab".chars().map(cell).collect();
+        row.push(cell(' '));
+        assert!(!has_room_after(&row, 0, 1), "a letter is not room");
+        assert!(has_room_after(&row, 1, 1), "a blank is");
+        assert!(has_room_after(&row, 2, 1), "so is the end of the row");
+
+        // A blank that paints something of its own is not free real estate.
+        row[2].draw_bg = true;
+        assert!(!has_room_after(&row, 1, 1));
+        row[2].draw_bg = false;
+        row[2].selected = true;
+        assert!(!has_room_after(&row, 1, 1));
+    }
+
+    #[test]
     fn terminal_cursor_shape_maps_to_painted_cursor_style() {
         use crate::core::config::CursorStyle;
 
@@ -2534,12 +2683,16 @@ mod tests {
     }
 
     #[test]
-    fn seg_clip_width_frees_solo_symbols_but_pins_batched_runs() {
+    fn seg_budget_frees_solo_symbols_and_lends_a_cell_only_when_one_is_free() {
         let cell = px(10.);
-        assert_eq!(seg_clip_width(false, 1, cell), px(10.));
-        assert_eq!(seg_clip_width(false, 5, cell), px(50.));
-        assert_eq!(seg_clip_width(false, 2, cell), px(20.));
-        assert_eq!(seg_clip_width(true, 1, cell), px(20.));
+        assert_eq!(seg_budget(true, 1, false, cell), px(20.), "solo keeps two");
+        assert_eq!(
+            seg_budget(false, 2, false, cell),
+            px(22.5),
+            "a quarter cell"
+        );
+        assert_eq!(seg_budget(false, 2, true, cell), px(30.), "a whole cell");
+        assert_eq!(seg_budget(false, 1, false, cell), px(12.5));
     }
 
     #[test]
