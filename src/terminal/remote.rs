@@ -198,10 +198,15 @@ const MAX_BACKLOG: usize = 4 << 20;
 const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// What the sender thread needs to report a link that stopped taking input.
-/// The same signals `note_input_lost` reads off `RemoteTerminal`, cloned out so
-/// the failure can be raised from the thread that actually meets it.
+/// The signals the pane holds, cloned out so the failure can be raised from the
+/// thread that actually meets it.
 #[derive(Clone)]
 struct InputLoss {
+    /// Set by the first frame *this* link refused, so the loss is said once
+    /// rather than once per keystroke. One per link rather than one per pane: a
+    /// relink hands the retired sender's last, doomed write and the new
+    /// sender's first real one two different flags, so the dying link cannot
+    /// spend the new link's one chance to speak.
     said: Arc<AtomicBool>,
     reader_quit: Arc<AtomicBool>,
     exited: Arc<AtomicBool>,
@@ -209,6 +214,15 @@ struct InputLoss {
 }
 
 impl InputLoss {
+    fn new(reader_quit: Arc<AtomicBool>, exited: Arc<AtomicBool>, proxy: EventProxy) -> InputLoss {
+        InputLoss {
+            said: Arc::new(AtomicBool::new(false)),
+            reader_quit,
+            exited,
+            proxy,
+        }
+    }
+
     /// The link refused a frame. Every keystroke after the first would say the
     /// same thing, so this side says it once; and unless the reader has been
     /// retired for a relink or a release, the pane is marked exited the way the
@@ -217,6 +231,12 @@ impl InputLoss {
     /// input into it that nothing will ever read. The reader still raises its
     /// own `Exit` when it finds the same socket closed; the handler is
     /// idempotent, so a link that is genuinely gone may be reported twice.
+    ///
+    /// This is hardening for a *closed* link, not the cure for #673: a socket
+    /// some process holds open and never reads accepts writes into its send
+    /// buffer, so they succeed and vanish until the buffer fills, and nothing
+    /// here fires until the backlog bound does. What stops that pane existing
+    /// at all is `attach_on` refusing to call a silent `Attach` attached.
     fn note(&self, err: &std::io::Error) {
         if self.said.swap(true, Ordering::SeqCst) {
             return;
@@ -239,7 +259,14 @@ struct SendQueue {
     /// batch is exactly what a stalled link parks in, so leaving it out would
     /// mean the backlog bound could never be reached.
     bytes: usize,
-    /// Set by teardown: the sender writes what is left and then retires.
+    /// How much of `bytes` belongs to frames that were over the whole bound on
+    /// their own, and so were let through on their own terms. The bound is
+    /// raised by exactly this while they are outstanding, and put back the
+    /// moment the queue empties — otherwise one big paste would leave every
+    /// keystroke behind it looking like a dead link.
+    oversize: usize,
+    /// Set by teardown, or by a sender that has given up: either way the queue
+    /// takes nothing more. Teardown's sender writes what is left first.
     closing: bool,
     /// Set by the sender once there is nothing left to write. Teardown waits
     /// on this for `DRAIN_GRACE`, no longer.
@@ -300,7 +327,16 @@ impl LinkWriter {
         if q.closing {
             return;
         }
-        if q.bytes + frame.len() > MAX_BACKLOG {
+        // A frame over the bound all by itself is not a backlog — a paste is
+        // whatever the clipboard holds, and refusing a big one would kill a
+        // perfectly healthy pane. Onto an empty queue it goes through anyway,
+        // and lifts the bound by its own size for as long as it is outstanding,
+        // so what piles up behind it is still held to the same four megabytes.
+        // Onto a queue that already has something on it, the ordinary bound
+        // applies: one such frame is a paste, a second one arriving before the
+        // first has moved is a link that is not moving.
+        let oversize = frame.len() > MAX_BACKLOG && q.bytes == 0;
+        if !oversize && q.bytes + frame.len() > MAX_BACKLOG + q.oversize {
             // Dropped rather than queued: a backlog this deep is a link nothing
             // is reading, and growing it only trades a frozen window for an
             // exhausted heap. Reported in the same words, and once, as a write
@@ -311,6 +347,9 @@ impl LinkWriter {
                 format!("nothing has drained this pane's link for {MAX_BACKLOG} bytes of input"),
             ));
             return;
+        }
+        if oversize {
+            q.oversize = frame.len();
         }
         q.bytes += frame.len();
         q.frames.push_back(frame);
@@ -323,7 +362,15 @@ impl LinkWriter {
     /// to go out — see the constant — and then shuts the socket down whether it
     /// went or not. Never joins: a sender parked on a dead link would take the
     /// UI thread down with it, the same trap `stop_reader` documents.
+    ///
+    /// Called twice on the way out — `stop_reader` closes the link, then the
+    /// field drop closes it again — so the second call has to be free rather
+    /// than another `DRAIN_GRACE` spent waiting for a sender that is already
+    /// gone. A retired handle is one whose thread has been let go.
     fn close(&mut self) {
+        if self.thread.is_none() {
+            return;
+        }
         let (lock, wake) = &*self.queue;
         if let Ok(mut q) = lock.lock() {
             q.closing = true;
@@ -354,11 +401,15 @@ fn send_loop(
     // Abandons whatever is still queued and reports the link settled. Wakes a
     // teardown that is inside `DRAIN_GRACE` waiting to hear it: what is left
     // here is never going out, and there is nothing to be gained by making the
-    // window sit out the rest of the grace period to find that out.
+    // window sit out the rest of the grace period to find that out. Closes the
+    // queue on the way, too — with no thread left to drain it, anything queued
+    // after this is just a keystroke held onto until the pane drops.
     let give_up = || {
         if let Ok(mut q) = lock.lock() {
             q.frames.clear();
             q.bytes = 0;
+            q.oversize = 0;
+            q.closing = true;
             q.drained = true;
             wake.notify_all();
         }
@@ -407,6 +458,9 @@ fn send_loop(
         }
         if let Ok(mut q) = lock.lock() {
             q.bytes = q.bytes.saturating_sub(taken);
+            if q.bytes == 0 {
+                q.oversize = 0;
+            }
         }
     }
 }
@@ -466,11 +520,6 @@ pub struct RemoteTerminal {
     /// flag under the term lock before every grid mutation, so once it is set
     /// the abandoned thread can only exit, never write.
     reader_quit: Arc<AtomicBool>,
-    /// Set by the first frame the link refused, so the loss is said once
-    /// rather than once per keystroke. Cleared when a relink installs a link
-    /// that has not refused anything yet. Shared with the sender thread, which
-    /// is where the refusal is now met.
-    input_lost: Arc<AtomicBool>,
 }
 
 /// The workspace id a spawn carries, so the pane's shell gets `$TTY7_WS` and a
@@ -763,7 +812,6 @@ impl RemoteTerminal {
         );
         self.reader_thread = Some(reader);
         self.reader_quit = quit;
-        self.input_lost.store(false, Ordering::SeqCst);
         // Installed after `reader_quit`, so the sender reports a refusal
         // against the reader this link actually has. Assigning retires the old
         // `LinkWriter` through its `Drop`, which is what closes the old socket.
@@ -838,15 +886,9 @@ impl RemoteTerminal {
             },
         );
 
-        let input_lost = Arc::new(AtomicBool::new(false));
         let link = LinkWriter::new(
             write_half,
-            InputLoss {
-                said: input_lost.clone(),
-                reader_quit: reader_quit.clone(),
-                exited: exited_flag.clone(),
-                proxy: proxy.clone(),
-            },
+            InputLoss::new(reader_quit.clone(), exited_flag.clone(), proxy.clone()),
         )?;
 
         Ok(Self {
@@ -879,19 +921,18 @@ impl RemoteTerminal {
             proxy,
             reader_thread: Some(reader_thread),
             reader_quit,
-            input_lost,
         })
     }
 
     /// The signals the sender thread raises a refused frame through, bundled
-    /// for whichever `LinkWriter` is current.
+    /// for the `LinkWriter` about to be installed. Read after `reader_quit` has
+    /// been swapped, so a relink's new sender answers to the new reader.
     fn input_loss(&self) -> InputLoss {
-        InputLoss {
-            said: self.input_lost.clone(),
-            reader_quit: self.reader_quit.clone(),
-            exited: self.exited_flag.clone(),
-            proxy: self.proxy.clone(),
-        }
+        InputLoss::new(
+            self.reader_quit.clone(),
+            self.exited_flag.clone(),
+            self.proxy.clone(),
+        )
     }
 
     pub fn detach_link(&mut self) {
@@ -3696,8 +3737,15 @@ mod tests {
 
         // 8K a shot rather than a byte, so this is a few hundred frames and not
         // a few million: the bound is on bytes queued, not on frames.
+        //
+        // Twice the bound rather than a frame or two past it. The sender does
+        // get some of this onto the wire before it parks — as much as the send
+        // buffer holds, which is 8K on macOS but a couple hundred K on Linux —
+        // and that much is discounted from the backlog. A margin narrower than
+        // the widest of those buffers is a test that passes on one platform and
+        // not the other.
         let chunk = vec![b'x'; 8 << 10];
-        for _ in 0..(MAX_BACKLOG / chunk.len()) + 2 {
+        for _ in 0..2 * MAX_BACKLOG / chunk.len() {
             term.write(chunk.clone());
         }
 
@@ -3711,6 +3759,34 @@ mod tests {
         }
         assert_eq!(exits, 1, "said once, not once per keystroke");
         drop(daemon_side);
+    }
+
+    /// One frame can be larger than the whole backlog bound: a paste is
+    /// whatever the clipboard holds. That is not a link nothing is draining,
+    /// and a pane must not die of being pasted into — nor may the keystrokes
+    /// that follow read as a backlog merely because the paste is still going.
+    #[test]
+    fn a_paste_larger_than_the_backlog_bound_is_not_a_dead_link() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        // A peer that keeps reading: the link is healthy, just carrying a lot.
+        let draining = std::thread::spawn(move || {
+            let _ = std::io::copy(&mut daemon_side, &mut std::io::sink());
+        });
+
+        term.write(vec![b'x'; MAX_BACKLOG + (1 << 20)]);
+        for _ in 0..1024 {
+            term.write(vec![b'y']);
+        }
+
+        assert!(
+            !term.exited_flag.load(Ordering::SeqCst),
+            "a five megabyte paste is a paste, not a link that has stopped taking input"
+        );
+        drop(term);
+        draining.join().unwrap();
     }
 
     /// Input the link refuses used to vanish: `write` threw the error away, so a
@@ -3759,9 +3835,11 @@ mod tests {
         assert_eq!(exits, 1, "said once, not once per keystroke");
     }
 
-    /// A link retired for a relink refuses writes too — `stop_reader` shuts it
-    /// down — and that must not read as the pane dying under the swap, for the
-    /// same reason the retired reader exits silently.
+    /// A link retired for a relink takes no more input — `stop_reader` closes
+    /// the queue and shuts the socket down — and that must not read as the pane
+    /// dying under the swap, for the same reason the retired reader exits
+    /// silently. The frame is now turned away at the queue rather than by the
+    /// socket, but the pane has to stay alive either way.
     #[test]
     fn a_write_on_a_retired_link_does_not_mark_the_pane_gone() {
         crate::core::config::pin_test_config_dir();
