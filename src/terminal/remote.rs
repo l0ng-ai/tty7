@@ -181,6 +181,236 @@ impl PaneRoute {
     }
 }
 
+/// How much unsent input a pane holds before it calls the link lost. A link
+/// that is draining never gets near this: the sender thread is parked waiting
+/// for work, so the queue holds at most the frames of one burst. Reaching it
+/// means nothing on the far side has taken a byte for as long as it takes to
+/// type — or paste — four megabytes, which is a dead link, not a slow one.
+const MAX_BACKLOG: usize = 4 << 20;
+
+/// How long a teardown lets the sender finish what is already queued before it
+/// cuts the socket out from under it. `Detach` is the last frame a pane sends
+/// and it is worth a moment: on a draining link the sender is idle, so it goes
+/// out in microseconds and this returns at once. On a link that has stopped
+/// draining it will never go out at all, and closing the pane must not wait
+/// around to discover that — the daemon reads the closed socket as a detach
+/// anyway.
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// What the sender thread needs to report a link that stopped taking input.
+/// The same signals `note_input_lost` reads off `RemoteTerminal`, cloned out so
+/// the failure can be raised from the thread that actually meets it.
+#[derive(Clone)]
+struct InputLoss {
+    said: Arc<AtomicBool>,
+    reader_quit: Arc<AtomicBool>,
+    exited: Arc<AtomicBool>,
+    proxy: EventProxy,
+}
+
+impl InputLoss {
+    /// The link refused a frame. Every keystroke after the first would say the
+    /// same thing, so this side says it once; and unless the reader has been
+    /// retired for a relink or a release, the pane is marked exited the way the
+    /// reader marks it on EOF — it is the same socket, noticed from the writing
+    /// side first — so the window shows the pane as gone instead of taking
+    /// input into it that nothing will ever read. The reader still raises its
+    /// own `Exit` when it finds the same socket closed; the handler is
+    /// idempotent, so a link that is genuinely gone may be reported twice.
+    fn note(&self, err: &std::io::Error) {
+        if self.said.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        log::warn!("the daemon link stopped taking this pane's input: {err}");
+        if self.reader_quit.load(Ordering::SeqCst) {
+            return;
+        }
+        self.exited.store(true, Ordering::SeqCst);
+        self.proxy.send_event(AlacEvent::Wakeup);
+        self.proxy.send_event(AlacEvent::Exit);
+    }
+}
+
+#[derive(Default)]
+struct SendQueue {
+    frames: VecDeque<Vec<u8>>,
+    /// Bytes queued but not yet on the wire — including the batch the sender
+    /// currently holds, which is why this is not just `frames`' total. That
+    /// batch is exactly what a stalled link parks in, so leaving it out would
+    /// mean the backlog bound could never be reached.
+    bytes: usize,
+    /// Set by teardown: the sender writes what is left and then retires.
+    closing: bool,
+    /// Set by the sender once there is nothing left to write. Teardown waits
+    /// on this for `DRAIN_GRACE`, no longer.
+    drained: bool,
+}
+
+/// A pane's writing half, moved onto a thread of its own.
+///
+/// The socket underneath is blocking and has no write timeout, so a peer that
+/// stops reading parks `write(2)` in the kernel until it starts again. Every
+/// caller of `RemoteTerminal::write` is a gpui event handler — a keystroke, a
+/// paste, a mouse report, a focus change — and one UI thread draws every
+/// window, so a park there is every window frozen. On macOS a unix stream gives
+/// up after 8K of send buffer, which is about 1400 keystrokes: a single paste.
+///
+/// So nothing on the UI thread touches the socket. Frames are encoded, queued,
+/// and handed to a sender thread that is welcome to park for as long as the far
+/// end makes it.
+struct LinkWriter {
+    /// A second handle on the same socket, kept for `shutdown` alone.
+    /// `shutdown(2)` returns at once even while another thread is parked in
+    /// `write(2)` on that socket — which is exactly the state teardown has to
+    /// be able to break, and exactly what a handle behind the sender's own lock
+    /// could not do.
+    closer: Stream,
+    queue: Arc<(Mutex<SendQueue>, std::sync::Condvar)>,
+    loss: InputLoss,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl LinkWriter {
+    fn new(stream: Stream, loss: InputLoss) -> std::io::Result<LinkWriter> {
+        let closer = stream.try_clone()?;
+        let queue = Arc::new((Mutex::new(SendQueue::default()), std::sync::Condvar::new()));
+        let sending = Arc::clone(&queue);
+        let sender_loss = loss.clone();
+        let thread = std::thread::Builder::new()
+            .name("tty7-pane-writer".into())
+            .spawn(move || send_loop(stream, sending, sender_loss))?;
+        Ok(LinkWriter {
+            closer,
+            queue,
+            loss,
+            thread: Some(thread),
+        })
+    }
+
+    /// Queues a frame. Never blocks: the socket belongs to the sender thread,
+    /// and the only thing that happens here is a push onto a `VecDeque`.
+    fn send(&self, msg: ClientMsg) {
+        let mut frame = Vec::new();
+        if let Err(e) = msg.encode(&mut frame) {
+            log::warn!("could not encode a frame for this pane's link: {e}");
+            return;
+        }
+        let (lock, wake) = &*self.queue;
+        let Ok(mut q) = lock.lock() else { return };
+        if q.closing {
+            return;
+        }
+        if q.bytes + frame.len() > MAX_BACKLOG {
+            // Dropped rather than queued: a backlog this deep is a link nothing
+            // is reading, and growing it only trades a frozen window for an
+            // exhausted heap. Reported in the same words, and once, as a write
+            // the link refuses outright — the pane is gone either way.
+            drop(q);
+            self.loss.note(&std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!("nothing has drained this pane's link for {MAX_BACKLOG} bytes of input"),
+            ));
+            return;
+        }
+        q.bytes += frame.len();
+        q.frames.push_back(frame);
+        q.drained = false;
+        drop(q);
+        wake.notify_one();
+    }
+
+    /// Retires the sender and cuts the link. Gives what is queued `DRAIN_GRACE`
+    /// to go out — see the constant — and then shuts the socket down whether it
+    /// went or not. Never joins: a sender parked on a dead link would take the
+    /// UI thread down with it, the same trap `stop_reader` documents.
+    fn close(&mut self) {
+        let (lock, wake) = &*self.queue;
+        if let Ok(mut q) = lock.lock() {
+            q.closing = true;
+            wake.notify_one();
+            if let Ok((waited, _)) = wake.wait_timeout_while(q, DRAIN_GRACE, |q| !q.drained) {
+                drop(waited);
+            }
+        }
+        let _ = self.closer.shutdown(std::net::Shutdown::Both);
+        drop(self.thread.take());
+    }
+}
+
+impl Drop for LinkWriter {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+fn send_loop(
+    mut stream: Stream,
+    queue: Arc<(Mutex<SendQueue>, std::sync::Condvar)>,
+    loss: InputLoss,
+) {
+    use std::io::Write as _;
+    let (lock, wake) = &*queue;
+
+    // Abandons whatever is still queued and reports the link settled. Wakes a
+    // teardown that is inside `DRAIN_GRACE` waiting to hear it: what is left
+    // here is never going out, and there is nothing to be gained by making the
+    // window sit out the rest of the grace period to find that out.
+    let give_up = || {
+        if let Ok(mut q) = lock.lock() {
+            q.frames.clear();
+            q.bytes = 0;
+            q.drained = true;
+            wake.notify_all();
+        }
+    };
+
+    loop {
+        let batch = {
+            let Ok(mut q) = lock.lock() else { return };
+            loop {
+                if !q.frames.is_empty() {
+                    break;
+                }
+                // Nothing left to write, so the link is as flushed as this
+                // thread can make it. Said before the `closing` check, so a
+                // teardown racing a sender that has already finished hears it
+                // rather than waiting out `DRAIN_GRACE` for nothing.
+                q.drained = true;
+                wake.notify_all();
+                if q.closing {
+                    return;
+                }
+                let Ok(next) = wake.wait(q) else { return };
+                q = next;
+            }
+            std::mem::take(&mut q.frames)
+        };
+        // Counted against the backlog until it is actually out. Discounting it
+        // at the moment it left the `VecDeque` would let a sender parked on the
+        // first frame of a huge batch hold the whole thing off the books, and
+        // the bound the batch is meant to enforce would never be reached.
+        let taken: usize = batch.iter().map(Vec::len).sum();
+        // Written with the lock released: parking here is the whole point, and
+        // a sender holding the queue lock while it parked would put every
+        // `send` — every keystroke — behind the same wait it exists to absorb.
+        for frame in batch {
+            if let Err(e) = stream.write_all(&frame) {
+                loss.note(&e);
+                give_up();
+                return;
+            }
+        }
+        if let Err(e) = stream.flush() {
+            loss.note(&e);
+            give_up();
+            return;
+        }
+        if let Ok(mut q) = lock.lock() {
+            q.bytes = q.bytes.saturating_sub(taken);
+        }
+    }
+}
+
 pub struct RemoteTerminal {
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     pub events: smol::channel::Receiver<AlacEvent>,
@@ -192,7 +422,7 @@ pub struct RemoteTerminal {
     /// alongside `size` so a display-scale change still reaches the child even
     /// when the grid dimensions are unchanged.
     synced_cell: (u16, u16),
-    writer: Mutex<Stream>,
+    link: LinkWriter,
     cwd: Arc<Mutex<Option<PathBuf>>>,
     shell_state: Arc<Mutex<ShellState>>,
     remote_context: Arc<Mutex<Option<RemoteContext>>>,
@@ -236,10 +466,11 @@ pub struct RemoteTerminal {
     /// flag under the term lock before every grid mutation, so once it is set
     /// the abandoned thread can only exit, never write.
     reader_quit: Arc<AtomicBool>,
-    /// Set by the first `Input` the link refused, so the loss is said once
+    /// Set by the first frame the link refused, so the loss is said once
     /// rather than once per keystroke. Cleared when a relink installs a link
-    /// that has not refused anything yet.
-    input_lost: AtomicBool,
+    /// that has not refused anything yet. Shared with the sender thread, which
+    /// is where the refusal is now met.
+    input_lost: Arc<AtomicBool>,
 }
 
 /// The workspace id a spawn carries, so the pane's shell gets `$TTY7_WS` and a
@@ -530,12 +761,13 @@ impl RemoteTerminal {
                 turns: self.turns.clone(),
             },
         );
-        if let Ok(mut writer) = self.writer.lock() {
-            *writer = stream;
-        }
         self.reader_thread = Some(reader);
         self.reader_quit = quit;
         self.input_lost.store(false, Ordering::SeqCst);
+        // Installed after `reader_quit`, so the sender reports a refusal
+        // against the reader this link actually has. Assigning retires the old
+        // `LinkWriter` through its `Drop`, which is what closes the old socket.
+        self.link = LinkWriter::new(stream, self.input_loss())?;
         self.route = route.clone();
         self.synced_size = false;
         self.resize(size, cell_w, cell_h);
@@ -606,6 +838,17 @@ impl RemoteTerminal {
             },
         );
 
+        let input_lost = Arc::new(AtomicBool::new(false));
+        let link = LinkWriter::new(
+            write_half,
+            InputLoss {
+                said: input_lost.clone(),
+                reader_quit: reader_quit.clone(),
+                exited: exited_flag.clone(),
+                proxy: proxy.clone(),
+            },
+        )?;
+
         Ok(Self {
             term,
             events: rx,
@@ -614,7 +857,7 @@ impl RemoteTerminal {
             size,
             synced_size: false,
             synced_cell: (0, 0),
-            writer: Mutex::new(write_half),
+            link,
             cwd,
             shell_state,
             remote_context,
@@ -636,14 +879,23 @@ impl RemoteTerminal {
             proxy,
             reader_thread: Some(reader_thread),
             reader_quit,
-            input_lost: AtomicBool::new(false),
+            input_lost,
         })
     }
 
-    pub fn detach_link(&mut self) {
-        if let Ok(mut writer) = self.writer.lock() {
-            let _ = ClientMsg::Detach.encode(&mut *writer);
+    /// The signals the sender thread raises a refused frame through, bundled
+    /// for whichever `LinkWriter` is current.
+    fn input_loss(&self) -> InputLoss {
+        InputLoss {
+            said: self.input_lost.clone(),
+            reader_quit: self.reader_quit.clone(),
+            exited: self.exited_flag.clone(),
+            proxy: self.proxy.clone(),
         }
+    }
+
+    pub fn detach_link(&mut self) {
+        self.link.send(ClientMsg::Detach);
         self.stop_reader();
         self.poll_exited();
     }
@@ -658,9 +910,10 @@ impl RemoteTerminal {
     /// touching the grid again.
     fn stop_reader(&mut self) {
         self.reader_quit.store(true, Ordering::SeqCst);
-        if let Ok(writer) = self.writer.lock() {
-            let _ = writer.shutdown(std::net::Shutdown::Both);
-        }
+        // The sender owns the socket now, and closing it is its job: `close`
+        // gives whatever is queued a brief moment to go out and then shuts the
+        // socket down regardless, which is also what wakes the reader.
+        self.link.close();
         drop(self.reader_thread.take());
     }
 
@@ -1179,45 +1432,17 @@ impl RemoteTerminal {
         self.child_exited.load(Ordering::SeqCst)
     }
 
+    /// Queues a keystroke — or a paste, or a mouse report — for the link.
+    ///
+    /// Callers are gpui event handlers on the UI thread, so this returns
+    /// without touching the socket. A link that has stopped draining is a
+    /// problem for the sender thread, not for the window.
     pub fn write<B: Into<Cow<'static, [u8]>>>(&self, bytes: B) {
         let bytes = bytes.into();
         if bytes.is_empty() {
             return;
         }
-        let Ok(mut writer) = self.writer.lock() else {
-            return;
-        };
-        if let Err(e) = ClientMsg::Input(bytes.into_owned()).encode(&mut *writer) {
-            drop(writer);
-            self.note_input_lost(&e);
-        }
-    }
-
-    /// The link refused an `Input`. Every keystroke after the first would say
-    /// the same thing, so this side says it once; and unless the reader has
-    /// been retired for a relink or a release, the pane is marked exited the
-    /// way the reader marks it on EOF — it is the same socket, noticed from the
-    /// writing side first — so the window shows the pane as gone instead of
-    /// taking input into it that nothing will ever read. The reader still
-    /// raises its own `Exit` when it finds the same socket closed; the handler
-    /// is idempotent, so a link that is genuinely gone may be reported twice.
-    ///
-    /// This is hardening for a *closed* link, not the cure for #673: a socket
-    /// some process holds open and never reads accepts writes into its send
-    /// buffer, so they succeed and vanish until the buffer fills, and nothing
-    /// here fires. What stops that pane existing at all is `attach_on`
-    /// refusing to call a silent `Attach` attached.
-    fn note_input_lost(&self, err: &std::io::Error) {
-        if self.input_lost.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        log::warn!("the daemon link stopped taking this pane's input: {err}");
-        if self.reader_quit.load(Ordering::SeqCst) {
-            return;
-        }
-        self.exited_flag.store(true, Ordering::SeqCst);
-        self.proxy.send_event(AlacEvent::Wakeup);
-        self.proxy.send_event(AlacEvent::Exit);
+        self.link.send(ClientMsg::Input(bytes.into_owned()));
     }
 
     /// Whether the daemon behind this pane echoes a `DaemonMsg::Size` into the
@@ -1273,9 +1498,7 @@ impl RemoteTerminal {
         }
 
         let win = win_size(size, cell_w, cell_h);
-        if let Ok(mut writer) = self.writer.lock() {
-            let _ = ClientMsg::Resize(win).encode(&mut *writer);
-        }
+        self.link.send(ClientMsg::Resize(win));
     }
 
     pub fn foreground_cwd(&self) -> Option<PathBuf> {
@@ -1512,13 +1735,10 @@ impl RemoteTerminal {
     }
 
     pub fn respond_auth(&self, request_id: u64, response: AuthResponse) {
-        if let Ok(mut writer) = self.writer.lock() {
-            let _ = ClientMsg::AuthResponse {
-                request_id,
-                response,
-            }
-            .encode(&mut *writer);
-        }
+        self.link.send(ClientMsg::AuthResponse {
+            request_id,
+            response,
+        });
     }
 
     /// The client half of known-hosts management.
@@ -1947,9 +2167,7 @@ fn daemon_disconnected_before_spawn_reply(err: &anyhow::Error) -> bool {
 
 impl Drop for RemoteTerminal {
     fn drop(&mut self) {
-        if let Ok(mut writer) = self.writer.lock() {
-            let _ = ClientMsg::Detach.encode(&mut *writer);
-        }
+        self.link.send(ClientMsg::Detach);
         self.stop_reader();
     }
 }
@@ -3436,6 +3654,65 @@ mod tests {
         }
     }
 
+    /// A peer that holds the link open and stops reading is what the router
+    /// looks like from here when the far end is congested: `copy_bidirectional`
+    /// stops draining our half and the send buffer fills. The socket is
+    /// blocking and has no write timeout, so `write(2)` parks — and it used to
+    /// park on the UI thread, which draws every window. macOS gives a unix
+    /// stream 8K, so it took about 1400 keystrokes, or one paste.
+    ///
+    /// Typing into such a pane must now cost the window nothing at all.
+    #[test]
+    fn a_link_that_stopped_reading_does_not_park_the_writing_thread() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        // Far past the 8K that used to be fatal, one keystroke at a time, on
+        // this very thread: a park anywhere in here is a frozen window.
+        let started = std::time::Instant::now();
+        for _ in 0..64 * 1024 {
+            term.write(vec![b'x']);
+        }
+        let spent = started.elapsed();
+
+        drop(daemon_side);
+        assert!(
+            spent < std::time::Duration::from_secs(1),
+            "64K keystrokes into a link nobody is draining took {spent:?} — \
+             the caller is a gpui event handler, so this is the UI thread"
+        );
+    }
+
+    /// The backlog is bounded, and reaching the bound is not a slow link but a
+    /// dead one: nothing has taken a byte for four megabytes of typing. Saying
+    /// so is what stops the pane quietly swallowing input forever, and it is
+    /// said in the same words — and once — as an outright refused write.
+    #[test]
+    fn a_backlog_nothing_drains_is_reported_as_a_lost_link() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        // 8K a shot rather than a byte, so this is a few hundred frames and not
+        // a few million: the bound is on bytes queued, not on frames.
+        let chunk = vec![b'x'; 8 << 10];
+        for _ in 0..(MAX_BACKLOG / chunk.len()) + 2 {
+            term.write(chunk.clone());
+        }
+
+        assert!(
+            term.exited_flag.load(Ordering::SeqCst),
+            "a link that has taken nothing for {MAX_BACKLOG} bytes is gone, and the pane must say so"
+        );
+        let mut exits = 0;
+        while let Ok(ev) = term.events.try_recv() {
+            exits += usize::from(matches!(ev, AlacEvent::Exit));
+        }
+        assert_eq!(exits, 1, "said once, not once per keystroke");
+        drop(daemon_side);
+    }
+
     /// Input the link refuses used to vanish: `write` threw the error away, so a
     /// pane whose daemon had stopped reading kept taking keystrokes into
     /// nothing. The refusal now marks the pane exited by the reader's own signal
@@ -3443,18 +3720,25 @@ mod tests {
     /// an open receiving half and the writing side is the one that finds out.
     /// (Shutting the peer's receiving half instead is not portable: Linux
     /// answers the next write with EPIPE, macOS buffers it.)
+    ///
+    /// The refusal is met on the sender thread now, so the pane learns of it a
+    /// moment after the keystroke rather than during it. That is the trade the
+    /// queue buys: the window never waits on the socket to find out.
     #[test]
     fn a_write_the_link_refuses_marks_the_pane_gone_once() {
         crate::core::config::pin_test_config_dir();
         let (client_side, _daemon_side) = UnixStream::pair().unwrap();
         let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
-        term.writer
-            .lock()
-            .unwrap()
+        term.link
+            .closer
             .shutdown(std::net::Shutdown::Write)
             .unwrap();
 
         term.write(b"echo hi\r".to_vec());
+        let noticed = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !term.exited_flag.load(Ordering::SeqCst) && std::time::Instant::now() < noticed {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert!(
             term.exited_flag.load(Ordering::SeqCst),
             "a refused Input is the link gone, and the pane has to say so"
