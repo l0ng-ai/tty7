@@ -233,6 +233,36 @@ pub(crate) fn orphan_panes_of(
         .collect()
 }
 
+/// What to print where an orphan names its owner. The owner it carries is a
+/// `WorkspaceId` — 36 characters of UUID that say nothing on screen and, left
+/// whole, push the row's Close button clean out of the card. So: name the
+/// workspace when this machine still has one, and otherwise keep the first 8
+/// characters, which is what `tty7 pane ls --all` prints and enough to line
+/// the two listings up. An owner that is no workspace id at all is an older
+/// client's own label (`tty7-cli`) and already reads fine.
+/// The name this machine shows for the workspace an orphan still claims —
+/// `None` once that workspace is gone, which is the ordinary case for a pane
+/// nobody holds.
+fn workspace_name_of(owner: &str, cx: &App) -> Option<String> {
+    let id = owner.parse::<WorkspaceId>().ok()?;
+    let machine = crate::ui::machine_mirror::MachineMirrors::machine(
+        cx,
+        crate::core::session::HostId::LOCAL,
+    )?;
+    let ws = machine.workspaces.iter().find(|ws| ws.id == id)?;
+    Some(crate::ui::machine_mirror::display_name_of(
+        ws,
+        &machine.panes,
+    ))
+}
+
+fn owner_label(owner: &str, workspace_name: Option<String>) -> String {
+    workspace_name.unwrap_or_else(|| match owner.parse::<WorkspaceId>() {
+        Ok(_) => owner.chars().take(8).collect(),
+        Err(_) => owner.to_string(),
+    })
+}
+
 /// Which face the card is showing: the workspace list, or the create form.
 pub(crate) enum Page {
     List,
@@ -2010,41 +2040,59 @@ impl Tty7App {
         let Some(switcher) = self.switcher.as_ref() else {
             return v_flex();
         };
+        // Resolved up front, while `cx` can still be borrowed as an `App`: the
+        // render loop below needs it mutably for the Close listener.
+        let lines: Vec<(u64, String)> = switcher
+            .orphans
+            .iter()
+            .map(|orphan| {
+                let mut bits = vec![format!("%{}", orphan.pane_id)];
+                if let Some(owner) = &orphan.owner {
+                    bits.push(owner_label(owner, workspace_name_of(owner, cx)));
+                }
+                if let Some(cwd) = &orphan.cwd {
+                    bits.push(cwd.clone());
+                } else if !orphan.title.is_empty() {
+                    bits.push(orphan.title.clone());
+                }
+                (orphan.pane_id, bits.join(" · "))
+            })
+            .collect();
         let mut list = v_flex().gap(px(2.));
-        for orphan in &switcher.orphans {
-            let mut bits = vec![format!("%{}", orphan.pane_id)];
-            if let Some(owner) = &orphan.owner {
-                bits.push(owner.clone());
-            }
-            if let Some(cwd) = &orphan.cwd {
-                bits.push(cwd.clone());
-            } else if !orphan.title.is_empty() {
-                bits.push(orphan.title.clone());
-            }
-            let pane_id = orphan.pane_id;
+        for (pane_id, line) in lines {
             list = list.child(
                 h_flex()
                     .items_center()
                     .justify_between()
                     .gap(px(6.))
+                    // The text takes the slack and gives it back: without
+                    // `min_w_0` a flex child refuses to shrink below its
+                    // content, and one long cwd pushed the Close button past
+                    // the edge of the card — the row named a pane the user
+                    // then had no way to stop.
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
                             .text_xs()
                             .text_color(theme.foreground)
-                            .child(bits.join(" · ")),
+                            .child(line),
                     )
                     .child(
-                        Button::new(gpui::SharedString::from(format!(
-                            "switcher-close-orphan:{pane_id}"
-                        )))
-                        .label(t(L10nKey::Close))
-                        .ghost()
-                        .xsmall()
-                        .on_click(cx.listener(
-                            move |this, _, _window, cx| {
-                                this.close_orphan_pane(pane_id, cx);
-                            },
-                        )),
+                        div().flex_shrink_0().child(
+                            Button::new(gpui::SharedString::from(format!(
+                                "switcher-close-orphan:{pane_id}"
+                            )))
+                            .label(t(L10nKey::Close))
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(
+                                move |this, _, _window, cx| {
+                                    this.close_orphan_pane(pane_id, cx);
+                                },
+                            )),
+                        ),
                     ),
             );
         }
@@ -3420,6 +3468,27 @@ mod tests {
                 owner: Some("tty7-cli".to_string()),
             }],
             "%2 is held by a workspace and %3 is dead — neither is a leak to reap (#596)"
+        );
+    }
+
+    #[test]
+    fn an_orphans_owner_reads_as_a_workspace_never_as_a_whole_uuid() {
+        let uuid = "e0d7bebd-2e46-4a8e-abbb-f2f109a9b61d";
+        assert_eq!(
+            owner_label(uuid, Some("seeg".to_string())),
+            "seeg",
+            "the workspace is still here, so say which one it is"
+        );
+        assert_eq!(
+            owner_label(uuid, None),
+            "e0d7bebd",
+            "no workspace left to name: the short id `pane ls` prints, not all 36 \
+             characters — the full one shoved the Close button off the card"
+        );
+        assert_eq!(
+            owner_label("tty7-cli", None),
+            "tty7-cli",
+            "an older client's own label is not an id and reads fine whole"
         );
     }
 
