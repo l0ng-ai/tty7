@@ -212,8 +212,22 @@ fn notify_config_load_failed(
     let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, workspace) else {
         return;
     };
+    // The sentence says what happened; serde says what to fix. It already
+    // names the field, the type it wanted, and the line and column, and until
+    // now it went only to `log::warn!` — which is to say nowhere, since there
+    // is no log unless `TTY7_LOG` is set. "Fix it and tty7 reloads" is not
+    // much help to somebody who cannot see which line is wrong.
+    //
+    // Appended rather than folded into the translated string: it is serde's
+    // English and it is not ours to translate, and a placeholder would put a
+    // raw parser message in the middle of a localized sentence. On its own
+    // line after it, it reads as what it is — the parser's own words.
+    let body = match crate::core::config::parse_fault() {
+        Some(fault) => format!("{}\n\n{}", crate::ui::i18n::t(key), fault.detail),
+        None => crate::ui::i18n::t(key).to_string(),
+    };
     let _ = handle.update(cx, |_, window, cx| {
-        window.push_notification(crate::ui::i18n::t(key), cx);
+        window.push_notification(body, cx);
     });
 }
 

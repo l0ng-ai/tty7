@@ -917,7 +917,7 @@ impl Config {
         }
     }
 
-    fn path() -> Option<PathBuf> {
+    pub(crate) fn path() -> Option<PathBuf> {
         config_path("config.json")
     }
 }
@@ -968,6 +968,47 @@ pub fn default_config_dir() -> Option<PathBuf> {
 
 pub fn config_path(file: &str) -> Option<PathBuf> {
     Some(config_dir()?.join(file))
+}
+
+/// Why the config file did not parse, in serde's own words.
+///
+/// [`LoadOutcome::Quarantined`] says only *that* it failed, and that is all
+/// most callers need. `doctor` needs the rest, because the reader is standing
+/// in front of a file they have to fix and the answer is already known: serde
+/// names the field, the type it wanted, and the line and column.
+///
+/// Until now that went to `log::warn!` and nowhere else — and there is no log
+/// unless `TTY7_LOG` is set, so in practice it went nowhere.
+///
+/// Read again rather than carried on the outcome: the outcome is `Copy` and
+/// crosses several call sites that only want the verdict, and this is asked
+/// once, by a diagnostic command, about a file that is already on disk.
+pub fn parse_fault() -> Option<ParseFault> {
+    let path = Config::path()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let error = serde_json::from_str::<Config>(strip_bom(&text)).err()?;
+    Some(ParseFault {
+        malformed: matches!(
+            error.classify(),
+            serde_json::error::Category::Syntax | serde_json::error::Category::Eof
+        ),
+        detail: error.to_string(),
+    })
+}
+
+/// What [`parse_fault`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseFault {
+    /// True when the bytes are not JSON at all — a missing comma, an unclosed
+    /// brace. False when they *are* JSON and simply do not fit the shape:
+    /// `"font_size": "big"`, or a string where an object goes. Those are
+    /// different mistakes and they send the reader to different places, so
+    /// calling both "not valid JSON" sends half of them hunting for a comma
+    /// that is not missing.
+    pub malformed: bool,
+    /// serde's message, which already carries the field, the expected type,
+    /// and `at line N column M`.
+    pub detail: String,
 }
 
 pub fn strip_bom(text: &str) -> &str {
@@ -2506,6 +2547,52 @@ mod tests {
         assert_eq!(cfg.font_family, "Hack");
         assert_eq!(cfg.theme_preset, "light");
         assert!(cfg.keybindings.is_empty());
+    }
+
+    /// A config that will not load says what is wrong with it and where.
+    ///
+    /// Two mistakes, and they send the reader to different places. A missing
+    /// comma is not JSON. `"font_size": "big"`, or a string where an object
+    /// goes, *is* JSON — it simply does not fit — and telling that reader
+    /// their file is "not valid JSON" sends them hunting for punctuation that
+    /// is not wrong. `doctor` said exactly that for both, and serde's answer,
+    /// which names the field, the type it wanted and the line and column, went
+    /// to a `log::warn!` nobody has switched on.
+    #[test]
+    fn a_config_that_will_not_load_says_what_and_where() {
+        let _guard = lock_config_file();
+        pin_config_dir();
+        let path = Config::path().expect("a pinned config dir");
+
+        std::fs::write(&path, br#"{ "font_size": 12,, }"#).unwrap();
+        let fault = parse_fault().expect("a file that does not parse has a fault");
+        assert!(fault.malformed, "a stray comma is not JSON: {fault:?}");
+        assert!(
+            fault.detail.contains("line 1 column"),
+            "the reader needs the place: {fault:?}"
+        );
+
+        std::fs::write(&path, br#"{ "font_size": "big" }"#).unwrap();
+        let fault = parse_fault().expect("a shape mismatch is a fault too");
+        assert!(
+            !fault.malformed,
+            "this is valid JSON that does not fit, not broken JSON: {fault:?}"
+        );
+        assert!(
+            fault.detail.contains("f32") && fault.detail.contains("line 1 column"),
+            "the reader needs the type and the place: {fault:?}"
+        );
+
+        std::fs::write(&path, br#"{ "font_size": 12"#).unwrap();
+        assert!(
+            parse_fault().is_some_and(|f| f.malformed),
+            "a truncated file is not JSON either"
+        );
+
+        std::fs::write(&path, br#"{ "font_size": 12 }"#).unwrap();
+        assert_eq!(parse_fault(), None, "a file that loads has no fault");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     fn pin_config_dir() {

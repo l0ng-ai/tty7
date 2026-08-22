@@ -153,6 +153,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A config file that will not load now says what is wrong and where.**
+  `doctor` reported "NOT VALID JSON" for three different mistakes, and two of
+  them were valid JSON: `"font_size": "big"`, or a string where an object goes,
+  is well-formed JSON that does not fit the shape — a reader told their file
+  is not valid JSON goes hunting for a missing comma that is not missing.
+  serde already answers this, naming the field, the type it wanted and the line
+  and column, and that answer went only to a `log::warn!` — which is nowhere,
+  since there is no log unless `TTY7_LOG` is set. The two are now told apart,
+  and both carry the detail: `DOES NOT FIT — invalid type: string "big",
+  expected f32 at line 1 column 20`. The window's notice appends it too, on its
+  own line after the translated sentence.
+
 - **A workspace or tab name is stored as one line.** `tty7 tab rename @1
   $'one\ntwo'` kept the newline verbatim, and a name is only ever drawn as a
   label — the layout breaks a label on a newline whatever its wrapping says,

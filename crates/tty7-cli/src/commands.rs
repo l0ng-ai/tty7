@@ -1776,11 +1776,27 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     let (config_state, config_ok) = match loaded.1 {
         tty7_core::core::config::LoadOutcome::Parsed => ("ok".to_string(), true),
         tty7_core::core::config::LoadOutcome::Absent => ("none yet — the defaults are the config".to_string(), true),
-        tty7_core::core::config::LoadOutcome::Quarantined => (
-            "NOT VALID JSON — kept aside as config.json.corrupt; running on defaults and not saving"
-                .to_string(),
-            false,
-        ),
+        tty7_core::core::config::LoadOutcome::Quarantined => {
+            // What failed and where, not just that something did. serde
+            // already names the field, the type it wanted and the line and
+            // column; that went to a log nobody has switched on. And a file
+            // that is valid JSON in the wrong shape — `"font_size": "big"`, a
+            // string where an object goes — is a different mistake from a
+            // missing comma, so calling both "not valid JSON" sent half the
+            // readers hunting for punctuation that was not wrong.
+            let fault = tty7_core::core::config::parse_fault();
+            let what = match &fault {
+                Some(f) if f.malformed => format!("NOT VALID JSON — {}", f.detail),
+                Some(f) => format!("DOES NOT FIT — {}", f.detail),
+                None => "NOT USABLE".to_string(),
+            };
+            (
+                format!(
+                    "{what}; kept aside as config.json.corrupt, running on defaults and not saving"
+                ),
+                false,
+            )
+        }
         tty7_core::core::config::LoadOutcome::Unreadable => (
             "UNREADABLE — running on defaults and not saving"
                 .to_string(),
