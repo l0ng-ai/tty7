@@ -21,7 +21,36 @@ const SESSION_SIZE: WinSize = WinSize {
     cell_h: 16,
 };
 
+/// How long to wait for the daemon to start replaying at all.
+///
+/// Generous because it covers a cold link: the first byte may be behind a
+/// remote server waking up. Nothing is paid here in the normal case — the
+/// first `Size` arrives in a millisecond or two and the wait is replaced.
 const REPLAY_FIRST_WAIT: Duration = Duration::from_secs(10);
+
+/// How long silence has to last before the replay counts as finished.
+///
+/// Worth knowing before touching it: **this is paid on every capture**, and it
+/// dominates the cost of the verb. Measured against a local daemon, `tty7
+/// capture` takes ~323ms whatever it is capturing — a pane that has printed
+/// nothing costs the same as one holding 22,000 lines, and `--plain` costs the
+/// same as raw, because the grid replay is ~20ms and the rest is this timer
+/// running out. For comparison `tty7 pane ls` over the same socket is ~5ms.
+///
+/// It is paid because the replay has no end. The daemon sends `Size` then
+/// `Snapshot` per ring segment and simply stops; the only way to know it has
+/// stopped is to wait and see. Live `Output` ends it early, so a busy pane
+/// returns at once — but the orchestration idiom the docs recommend is
+/// `tty7 wait … && tty7 capture …`, and `wait` returns exactly when the pane
+/// has gone quiet, so that path always pays in full.
+///
+/// Two things not to do about it. Lowering it trades a bounded delay for
+/// silently truncated output on a slow link or a loaded machine, which is the
+/// worse failure by a wide margin. Adding an end-of-replay message is the real
+/// fix, and it is not additive: `DaemonMsg::read` rejects an unknown kind
+/// outright, so a daemon sending one to an older client breaks the client. That
+/// needs a `PROTOCOL_VERSION` bump and the daemon gating it on what the peer
+/// announced — see the rules on that constant.
 const REPLAY_SETTLE: Duration = Duration::from_millis(300);
 
 const NOT_RUNNING: &str =
