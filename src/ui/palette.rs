@@ -279,7 +279,6 @@ impl CommandKind {
             OpenDiscord => "OpenDiscord",
             ReportIssue => "ReportIssue",
             Quit => "Quit",
-            RestartDaemon => "RestartDaemon",
             ToggleSftp => "ToggleSftp",
             ShowSshForwards => "ShowSshForwards",
             ToggleCodePanel => "ToggleCodePanel",
@@ -300,6 +299,13 @@ impl CommandKind {
             ScmCreateBranch => "ScmCreateBranch",
             OpenBranchPicker => "ScmCheckoutBranch",
             ToggleDiffViewMode => "ToggleDiffViewMode",
+            // No keymap action of their own, so there is no shortcut to show.
+            // `RestartDaemon` is here rather than above because it named
+            // `"RestartDaemon"`, which the keymap has never bound: the lookup
+            // could only ever come back empty, and naming an action that does
+            // not exist reads like one that does. Restarting the server is
+            // palette-only for now; giving it a bindable action means a gpui
+            // action and a handler, which is a feature rather than a fix.
             CopyText
             | CutText
             | PasteText
@@ -310,6 +316,7 @@ impl CommandKind {
             | OpenThemePicker
             | OpenSshConnectInput
             | OpenSshConnect(_)
+            | RestartDaemon
             | SetTheme(_)
             | ActivateTab(_)
             | ConnectSavedProfile(_)
@@ -1556,6 +1563,62 @@ mod tests {
 mod gpui_tests {
     use super::*;
     use gpui::TestAppContext;
+
+    /// Every keymap action `key_spec` names is one the keymap actually binds.
+    ///
+    /// `effective_key` answers an action it does not know with `None`, exactly
+    /// as it answers one that is deliberately unbound — so a misspelled or
+    /// renamed action does not fail, it just quietly stops showing the shortcut
+    /// it was written to show. `RestartDaemon` named an action the keymap has
+    /// never had, and nothing said so.
+    ///
+    /// The names are read out of `key_spec`'s own source: the match is the
+    /// list, and a second copy of it here would drift the way the first one did.
+    #[test]
+    fn key_spec_only_names_actions_the_keymap_binds() {
+        const SOURCE: &str = include_str!("palette.rs");
+
+        let body = {
+            let start = SOURCE
+                .find("fn key_spec(&self, cx: &App) -> Option<String> {")
+                .expect("key_spec is still spelled this way");
+            let rest = &SOURCE[start..];
+            let end = rest.find("\n    }\n").expect("key_spec has a body");
+            &rest[..end]
+        };
+
+        let named: Vec<&str> = body
+            .match_indices("=> \"")
+            .map(|(at, _)| {
+                let from = &body[at + 4..];
+                &from[..from.find('"').expect("a closing quote")]
+            })
+            // The inline `secondary-*` specs are keystrokes, not action names.
+            .filter(|s| !s.contains('-'))
+            .collect();
+        assert!(
+            named.len() > 50,
+            "the source scan found only {} actions, so it has stopped matching \
+             how `key_spec` is written",
+            named.len()
+        );
+
+        let bound: std::collections::HashSet<&str> = crate::ui::keymap::default_bindings()
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect();
+
+        let mut phantom: Vec<&str> = named.into_iter().filter(|a| !bound.contains(a)).collect();
+        phantom.sort();
+        phantom.dedup();
+
+        assert!(
+            phantom.is_empty(),
+            "`key_spec` names these actions, but the keymap binds none of them, \
+             so the palette shows no shortcut for them however they are bound: \
+             {phantom:?}"
+        );
+    }
 
     #[gpui::test]
     fn every_palette_command_has_a_stable_id(cx: &mut TestAppContext) {
