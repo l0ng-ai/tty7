@@ -1768,6 +1768,109 @@ mod tests {
         assert!(marker_command(&serde_json::json!({}), "agent-hook claude").is_none());
     }
 
+    /// Every event name the installed hooks can send is one the daemon reads.
+    ///
+    /// The two halves are far apart and neither would say a word if they
+    /// disagreed. An agent's hooks are a config file this module renders, and
+    /// what reaches the daemon is `"event": "<whatever the file said>"` --
+    /// `run_agent_hook` does not check the name, and `parse_agent_event` drops
+    /// an event whose name is not an `AgentEventKind`. So a typo in a hook
+    /// template, or a rename of one variant, turns that agent's status
+    /// reporting off: the dot never lights, `tty7 wait` never wakes, and
+    /// nothing anywhere is logged.
+    ///
+    /// Rendered rather than declared: this installs each agent for real and
+    /// reads the files back, so it covers whatever route the name took to get
+    /// there instead of trusting a table that the renderer might not use.
+    #[test]
+    fn every_event_the_hooks_send_is_one_the_daemon_understands() {
+        use crate::core::cli_agent::AgentEventKind;
+
+        let host = local_host();
+        let dir = std::env::temp_dir().join(format!("tty7-hook-events-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = HookTarget::remote(&*host, dir.clone());
+        for agent in HookAgent::ALL {
+            install_hooks(&target, agent).expect("hooks install into a scratch home");
+        }
+
+        fn walk(d: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(d) else { return };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() { walk(&p, out) } else { out.push(p) }
+            }
+        }
+        let mut files = Vec::new();
+        walk(&dir, &mut files);
+        assert!(
+            files.len() >= HookAgent::ALL.len(),
+            "every agent should have written something: {files:?}"
+        );
+
+        let mut seen: std::collections::BTreeSet<(String, String)> = Default::default();
+        let tidy = |w: &str| {
+            w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                .to_string()
+        };
+        for file in &files {
+            let Ok(text) = std::fs::read_to_string(file) else { continue };
+            let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            for line in text.lines() {
+                // Every bridge explains itself in comments that spell the
+                // command out; that is prose, not a command line.
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('#')
+                {
+                    continue;
+                }
+                // A config file names the event on the command line.
+                let mut rest = line;
+                while let Some(at) = rest.find("agent-hook ") {
+                    rest = &rest[at + "agent-hook ".len()..];
+                    let mut words = rest.split_whitespace();
+                    if let (Some(slug), Some(event)) = (words.next(), words.next()) {
+                        let event = tidy(event);
+                        // A bridge ends the string here and appends the event
+                        // at run time; those are caught by `emit(` below.
+                        if !event.is_empty() {
+                            seen.insert((tidy(slug), event));
+                        }
+                    }
+                }
+                // A plugin bridge names it in an `emit("…")` call instead.
+                let mut rest = line;
+                while let Some(at) = rest.find("emit(\"") {
+                    rest = &rest[at + "emit(\"".len()..];
+                    if let Some(end) = rest.find('"') {
+                        seen.insert((name.clone(), tidy(&rest[..end])));
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            seen.len() > 30,
+            "expected the installed hooks to name plenty of events; found {seen:?}"
+        );
+        let unknown: Vec<String> = seen
+            .iter()
+            .filter(|(_, event)| {
+                serde_json::from_value::<AgentEventKind>(serde_json::Value::String(event.clone()))
+                    .is_err()
+            })
+            .map(|(slug, event)| format!("{slug} sends {event:?}"))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "these hook events would be dropped by `parse_agent_event`, silently \
+             turning off that agent's status: {}",
+            unknown.join(", ")
+        );
+    }
+
     fn local_host() -> crate::host::SharedHost {
         crate::host::local::LocalHost::new()
     }
@@ -2481,3 +2584,5 @@ mod tests {
         );
     }
 }
+
+
