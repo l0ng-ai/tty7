@@ -153,6 +153,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`kill -9` on the server no longer leaves it unable to start again.** A
+  Unix endpoint is a socket *file*; killed uncleanly, the daemon leaves it on
+  disk and `bind` on a path that already exists fails rather than replacing
+  it. Starting again reported only that the server "did not open its endpoints
+  within 10s", with the real reason — `Address already in use` — visible only
+  by running it by hand, and the way out was deleting a file from a temp
+  directory nothing named. The startup path already knew how to probe a stale
+  endpoint and unlink it; it skipped that whenever the recorded daemon was
+  gone, which is exactly the case a SIGKILL, an OOM kill or a lost machine
+  leaves behind.
+
+- **SIGTERM no longer costs every pane up to 30 seconds of screen.** The
+  daemon blocks SIGTERM and waits for it on a dedicated thread so it can write
+  every pane's scrollback one last time on the way out. It armed that too
+  late: `pthread_sigmask` blocks a signal on the *calling* thread only, and by
+  then other threads were already serving with SIGTERM unblocked, so the
+  kernel could deliver it to one of them and end the process on the spot —
+  no final write, nothing logged. A machine shutting down, a logout, a
+  supervisor stopping the daemon or a plain `kill` all took that path.
+
+- **A finished SFTP download no longer replaces a file it did not pick.** The
+  panel chooses a free name, downloads to a sibling temp file, then renames
+  onto it — and `rename` replaces whatever it lands on silently. The gap
+  between choosing the name and arriving at it is the whole transfer, and
+  `~/Downloads` is a directory browsers and other tools write to as well. The
+  rename is now refused if anything is sitting there, which costs a retry and
+  numbers the copy the way a second download already does. It asks
+  `symlink_metadata` rather than `metadata`, so a dangling symlink does not
+  read as a free name and get destroyed.
+
+- **A failed update no longer takes the backup with it.** Replacing the app
+  moves the current bundle into the staging directory and renames the
+  replacement into its place; between those two lines there is no app at all
+  and the copy in the stage is the only one. If the second rename failed the
+  restore was attempted with its result discarded and the stage deleted
+  regardless — so a restore that also failed left nothing at the install path,
+  no backup, and an error naming only the swap. That is a reinstall. The
+  launch-failure path ten lines below already handled this correctly; both
+  arms now agree.
+
+- **`--cwd` naming a directory that does not exist no longer runs the command
+  somewhere else.** `tty7 run --cwd /nonexistent -- pwd` exited 0 from
+  wherever the CLI happened to be started, so `--cwd ~/porj -- make` built the
+  wrong tree and reported success — and the caller most likely to mistype a
+  path is a script, which has nothing to notice by. Falling back to a
+  directory that resolves is right for a cwd inherited from a shell's OSC 7
+  and wrong for one typed as an instruction. `tty7 new <path>` did the same,
+  rooting the workspace in the CLI's directory and handing back an id as if it
+  had not. Both now refuse before anything is spawned or created, and tell
+  "no such directory" apart from "not a directory".
+
+- **A slow moment on the first connection no longer disables shell
+  integration for a whole host.** The probe that asks a remote which shell it
+  runs answers "don't know" both for a shell there is no bootstrap for and for
+  a probe that never got asked — the channel would not open, the exec failed,
+  or the five-second read ran out. Either answer was cached process-wide with
+  no expiry and nothing to evict it, so one busy moment on the first pane to a
+  host meant no prompt marks, no directory tracking and no command status for
+  that host for the rest of the daemon's life, with no error and no way to
+  clear it short of restarting — reconnecting did not, because the entry
+  outlives the connection.
+
+- **A command killed by a signal is no longer reported as having chosen to
+  exit 1.** The pty layer builds a signalled child's status as code 1 and
+  keeps the signal itself in a private field, so a `SIGKILL` and an honest
+  `exit 1` were indistinguishable. That reached the CLI as
+  `"exit_code_known": true` — the field the reference describes as how you
+  tell a real 1 from a stand-in — so an agent was told the opposite of the
+  truth.
+
+- **A refused split no longer leaves a shell running that nothing holds.**
+  `tty7 split` spawned the shell and only then asked the tree to hold it, so
+  any refusal in between left a pane that `pane ls --all` could see and the
+  tree could not, removable only with `pane close --orphans`. `--ratio nan`
+  was the way in: it cannot be serialised onto the control connection at all,
+  so the link dropped mid-request and the daemon's own "a split ratio must be
+  a finite number" never came back — the caller saw "control connection lost"
+  instead, and the pane was already running.
+
+- **Reshaping a window no longer leaves its old shells running.** Dropping a
+  pane's view is also what detaching does, so every layout rewrite — a delta
+  for a tab the window had built differently, a rebuild from the machine tree
+  — left shells nobody could reach again. A 150-operation fuzz against an open
+  window showed 31 such rewrites to 2 rebuilds. Panes put down this way are
+  now parked rather than ended, and judged once the mirrors agree.
+
+- **Three more secret-carrying types are redacted in log output.** The
+  codebase had already decided a secret must not reach a formatter, and three
+  types still derived `Debug`: the keychain writes holding the password or
+  passphrase just typed — returned *beside* an `AuthResponse` built from the
+  same string, so the identical secret was redacted in one and printable in
+  the other — and the attachment token whose own documentation says it goes
+  over no wire and onto no disk. The log file is disk too.
+
 - **A bad tab address now points at the command that lists them.** Handed
   something like `@deadbeef`, the CLI said "@7 as numbered by `tty7 ls`" —
   but `tty7 ls` prints workspaces with a tab *count* and no `@` numbers at
