@@ -1786,12 +1786,45 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
             false,
         ),
     };
+    // The same argument as the config row, for the file where it matters more.
+    // A machine tree that does not parse is copied aside and the machine comes
+    // up with *no workspaces at all* — every tab and pane layout on it. The
+    // only notice is a `log::warn!`, and there is no log unless `TTY7_LOG` is
+    // set, so the copy that makes this recoverable is invisible: the reader
+    // sees "no workspaces" and no reason to look in the config directory.
+    //
+    // Only when a copy is really there. A row that says "no tree was set
+    // aside" on every healthy machine is noise, and this one has to read as
+    // news.
+    let quarantined_tree = tty7_core::core::config::config_dir_path()
+        .map(|dir| dir.join(tty7_core::core::machine::MACHINE_FILE))
+        .map(|path| tty7_core::core::config::quarantined_copies(&path))
+        .filter(|kept| !kept.is_empty());
     let mut rows = vec![
         vec![address::ENV_CONFIG_DIR.to_string(), mark(&ctx.config_dir)],
         vec![address::ENV_WS.to_string(), mark(&ctx.ws)],
         vec![address::ENV_PANE.to_string(), mark(&ctx.pane)],
         vec!["config".to_string(), config_state.clone()],
     ];
+    if let Some(kept) = &quarantined_tree {
+        let newest = kept
+            .last()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        rows.push(vec![
+            "workspace tree".to_string(),
+            match kept.len() {
+                1 => format!(
+                    "a tree that did not parse was kept at {newest} — if workspaces are \
+                     missing, that copy is them"
+                ),
+                n => format!(
+                    "{n} trees that did not parse were kept beside it, most recently \
+                     {newest} — if workspaces are missing, those copies are them"
+                ),
+            },
+        ]);
+    }
     let mut server = json!({ "reachable": false });
     // `None` until the server answers: with no tree to check against, "not
     // gone" would be a claim rather than an answer, so the two fields are

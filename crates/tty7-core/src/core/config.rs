@@ -1002,6 +1002,23 @@ pub(crate) fn quarantine(path: &std::path::Path) -> bool {
     true
 }
 
+/// Every quarantined copy of `path` that is actually on disk, oldest name
+/// first.
+///
+/// Quarantining announces itself with a `log::warn!` and nothing else, and
+/// there is no log at all unless `TTY7_LOG` is set — so a state file that
+/// failed to parse is set aside in complete silence. For `config.json` the
+/// silence is survivable, because `LoadOutcome` reaches `doctor` and the
+/// settings are still on screen. For the machine tree it is not: the whole
+/// of it — every workspace, every tab, every pane layout — comes back empty,
+/// and `MachineStore::open` calls that "recoverable by hand" while nothing
+/// tells the hand where to look. This is how a caller asks.
+pub fn quarantined_copies(path: &std::path::Path) -> Vec<PathBuf> {
+    quarantine_candidates(path)
+        .filter(|kept| kept.exists())
+        .collect()
+}
+
 /// Whether an earlier quarantine of `path` already holds exactly `bytes`.
 fn already_kept(path: &std::path::Path, bytes: &[u8]) -> bool {
     quarantine_candidates(path).any(|kept| std::fs::read(&kept).is_ok_and(|held| held == bytes))
@@ -1416,6 +1433,54 @@ mod tests {
 
     /// What a ninth corruption does to the eight kept copies.
     ///
+    /// What `doctor` can find out about a tree that was set aside.
+    ///
+    /// Quarantining a machine tree costs the user every workspace on the
+    /// machine, and says so only through a `log::warn!` — into a log that is
+    /// not written at all unless `TTY7_LOG` is set. So the copy that makes it
+    /// recoverable had no reader: `tty7 ws ls` says "no workspaces" and
+    /// nothing suggests looking in the config directory. This is the question
+    /// `doctor` asks instead.
+    ///
+    /// Empty on a healthy machine matters as much as non-empty on a broken
+    /// one: the row is only worth printing as news, and one that appeared
+    /// beside every intact tree would be noise on every install.
+    #[test]
+    fn a_quarantined_tree_can_be_found_by_something_that_wants_to_report_it() {
+        let dir = std::env::temp_dir().join(format!("tty7-quar-find-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("machine.json");
+
+        assert!(
+            quarantined_copies(&path).is_empty(),
+            "nothing was ever set aside here"
+        );
+
+        std::fs::write(&path, b"{ not json").expect("write the file");
+        quarantine(&path);
+        let kept = quarantined_copies(&path);
+        assert_eq!(kept.len(), 1, "one corruption, one copy");
+        assert_eq!(
+            kept[0].file_name().and_then(|n| n.to_str()),
+            Some("machine.json.corrupt")
+        );
+
+        // A second, *different* corruption earns its own copy; the same bytes
+        // again would not, which is what `already_kept` is for.
+        std::fs::write(&path, b"{ still not json").expect("rewrite the file");
+        quarantine(&path);
+        let kept = quarantined_copies(&path);
+        assert_eq!(kept.len(), 2, "a distinct corruption is kept beside it");
+        assert_eq!(
+            kept[1].file_name().and_then(|n| n.to_str()),
+            Some("machine.json.corrupt.1"),
+            "oldest name first, so the last is the most recent"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `quarantine_path` ends in `unwrap_or(base)`, which reads like a
     /// defensive branch and is the wrap: the cap is on how much history a
     /// config directory may accumulate, and the oldest copy is what gives way.
