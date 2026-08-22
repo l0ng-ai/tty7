@@ -4631,6 +4631,63 @@ mod tests {
         assert!(out.contains("set (/cfg/tty7)"), "{out}");
     }
 
+    /// `doctor --json` carries the sections the reference says it does.
+    ///
+    /// This is one of the three verbs whose JSON is printed even when it
+    /// fails, so something is always parsing it — `tty7 doctor || alert` needs
+    /// the rows as well as the code. A section added here and not written down
+    /// is a shape change under a documented contract, and that is how the
+    /// `config` section arrived: added to answer for a config the file parsed
+    /// but tty7 does not read, and the page went on describing three sections.
+    ///
+    /// Top level only. The fields inside vary with what a server could be
+    /// asked — `context` gains `workspace_gone` and `pane_gone` only when one
+    /// answered — and the page explains that in prose it would be wrong to
+    /// pin to a fixed list.
+    #[test]
+    fn the_doctor_json_sections_are_the_ones_the_reference_names() {
+        const DOC: &str = include_str!("../../../docs/cli/reference.mdx");
+
+        let lead = "JSON: `{\"context\":";
+        let at = DOC.find(lead).expect("the reference documents doctor's JSON");
+        let line = &DOC[at..at + DOC[at..].find('\n').expect("the line ends")];
+        let documented: Vec<&str> = line
+            .split('"')
+            .filter(|t| t.chars().all(|c| c.is_ascii_lowercase() || c == '_') && !t.is_empty())
+            .collect();
+
+        let out = run_cli(
+            &["tty7", "doctor", "--json"],
+            &Context::default(),
+            &mut doctor_backend(),
+        );
+        let j = json_of(out);
+        let sections: Vec<String> = j
+            .as_object()
+            .expect("doctor answers an object")
+            .keys()
+            .cloned()
+            .collect();
+        assert!(
+            sections.len() >= 3,
+            "doctor answered almost nothing: {sections:?}"
+        );
+        for section in &sections {
+            assert!(
+                documented.contains(&section.as_str()),
+                "`doctor --json` emits a `{section}` section that \
+                 docs/cli/reference.mdx never names"
+            );
+        }
+        for want in ["context", "server", "hooks", "config"] {
+            assert!(
+                sections.iter().any(|s| s == want),
+                "the reference promises a `{want}` section and doctor did not \
+                 emit one: {sections:?}"
+            );
+        }
+    }
+
     #[test]
     fn doctor_says_when_the_inherited_context_names_nothing_here() {
         // A shell outlives the workspace it was opened in, and one opened
