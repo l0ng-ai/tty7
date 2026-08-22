@@ -220,6 +220,27 @@ fn sweep_in(dir: &Path, keep: &HashSet<u64>) {
 
 #[cfg(test)]
 mod tests {
+    /// Where a pane's history goes is named on the privacy page.
+    ///
+    /// With per-pane history on, a pane's `HISTFILE` is redirected into
+    /// `<config>/history/`, and what lands there is the command lines someone
+    /// typed — the most sensitive thing tty7 causes to be written anywhere. The
+    /// page enumerates `<config>/scrollback/*.bin` down to its mode and
+    /// retention; this directory belongs there on the same footing, and said
+    /// only "your shell's own file, exactly as before".
+    ///
+    /// The path, not prose, because the path is the part a reader needs in
+    /// order to go and look.
+    #[test]
+    fn the_per_pane_history_location_is_on_the_privacy_page() {
+        const PRIVACY: &str = include_str!("../../../../docs/reference/privacy.mdx");
+        assert!(
+            PRIVACY.contains("<config>/history/"),
+            "per-pane history redirects HISTFILE into <config>/history/, and the \
+             privacy page never names it"
+        );
+    }
+
     use super::*;
 
     /// The shared temp directory the rest of the suite pins, by the same name:
