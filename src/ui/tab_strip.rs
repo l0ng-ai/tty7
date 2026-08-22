@@ -120,8 +120,22 @@ pub(crate) fn short_title(raw: &str, home: Option<&std::path::Path>) -> String {
     }
 
     let sep = path_separator(path);
-    let depth = segments.len() + usize::from(matches!(kind, Kind::Home));
-    let mut label = if depth > KEEP_SEGMENTS {
+    // Segments only. `~` used to count as one, which cut a home path a
+    // segment early and bought nothing: `~/repo/025/tty7` came back as
+    // `…/repo/025/tty7` — the same width to the character, with the home
+    // marker traded for an ellipsis that stood for nothing omitted. An
+    // ellipsis is a claim that something was dropped, and the reader cannot
+    // tell that label from a genuinely deep path whose ancestors are hidden.
+    //
+    // `elide_path_middle` reads the marker the same way this writes it: a
+    // leading `…` means "already elided once", so it replaces the marker
+    // rather than keeping it. The false one therefore cost the `~` for good —
+    // narrowing such a tab further gave `…/025/tty7` where it could have
+    // given `~/…/025/tty7`.
+    //
+    // The absolute case never had this: `/usr/local/bin` keeps its root at
+    // the same segment count, and now the home case matches it.
+    let mut label = if segments.len() > KEEP_SEGMENTS {
         let tail = &segments[segments.len() - KEEP_SEGMENTS..];
         format!("…{sep}{}", join_segments(tail, sep))
     } else {
@@ -2076,9 +2090,37 @@ mod tests {
 
     #[test]
     fn short_title_truncates_deep_paths_to_trailing_segments() {
-        assert_eq!(short_title("user@host:~/repo/025/tty7"), "…/repo/025/tty7");
+        assert_eq!(
+            short_title("user@host:~/w/repo/025/tty7"),
+            "…/repo/025/tty7"
+        );
         assert_eq!(short_title("/usr/local/share/man"), "…/local/share/man");
         assert_eq!(short_title("a/b/c/d"), "…/b/c/d");
+    }
+
+    /// The ellipsis is a claim that something was dropped, and at exactly
+    /// three segments nothing is.
+    ///
+    /// `~` used to count toward the depth, so a home path was cut one segment
+    /// earlier than an absolute one — and the cut bought nothing: `~` and `…`
+    /// are one grapheme each, so `…/repo/025/tty7` is the same width as
+    /// `~/repo/025/tty7` and says less. Worse, it says something untrue: the
+    /// reader cannot tell it from a deep path whose ancestors really are
+    /// hidden, and `elide_path_middle` reads a leading `…` as "already elided"
+    /// and drops it, so narrowing the tab lost the home marker for good.
+    #[test]
+    fn a_home_path_is_only_elided_when_something_is_actually_dropped() {
+        // Three segments: the same shape as `/usr/local/bin`, which keeps its
+        // root, so this keeps its own.
+        assert_eq!(short_title("user@host:~/repo/025/tty7"), "~/repo/025/tty7");
+        assert_eq!(short_title("/usr/local/bin"), "/usr/local/bin");
+
+        // Four is where a home path really does lose one, and the marker
+        // stands for the segment it lost.
+        assert_eq!(short_title("~/w/repo/025/tty7"), "…/repo/025/tty7");
+
+        // Fewer than three was never in question, and stays put.
+        assert_eq!(short_title("~/repo/tty7"), "~/repo/tty7");
     }
 
     #[test]
