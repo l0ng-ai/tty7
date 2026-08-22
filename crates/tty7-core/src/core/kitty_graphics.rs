@@ -1819,6 +1819,45 @@ mod tests {
             victim.exists(),
             "a path outside the temp dir must survive a t=t handoff"
         );
+
+        // `/etc/hosts` alone cannot tell "the check refused" from "the OS
+        // refused": the suite does not run as root, so `remove_file` on it
+        // fails either way and `let _ =` swallows that. Dropping the temp-dir
+        // check entirely left this test green, which is not what it is for.
+        //
+        // So: a victim this user demonstrably *can* delete, outside every temp
+        // directory. The proof of deletability is a probe file removed right
+        // beside it — without that, a survivor still says nothing.
+        let outside = [std::path::Path::new(env!("CARGO_MANIFEST_DIR"))]
+            .into_iter()
+            .find(|dir| !path_is_in_temp_dir(dir));
+        let Some(outside) = outside else {
+            // A checkout under /tmp. The half above still holds; this half
+            // would be asserting the opposite of what it means to.
+            return;
+        };
+        let dir = outside.join(format!("target/tty7-kitty-victim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            !path_is_in_temp_dir(&dir),
+            "the victim directory has to be somewhere the check would refuse"
+        );
+
+        let probe = dir.join("probe");
+        std::fs::write(&probe, b"x").unwrap();
+        std::fs::remove_file(&probe).expect("the victim directory must be one we can delete from");
+
+        let precious = dir.join("id_ed25519");
+        std::fs::write(&precious, [0u8, 1, 2, 3, 4, 5, 6, 7]).unwrap();
+        let img = temp_file_transfer(&precious).resolve().expect("still reads");
+        assert_eq!(img.data.len(), 8);
+        assert!(
+            precious.exists(),
+            "a `t=t` transfer naming a deletable file outside the temp dir \
+             unlinked it — the whole point of the temp-dir check"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
