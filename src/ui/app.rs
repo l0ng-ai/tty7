@@ -1960,7 +1960,7 @@ impl Tty7App {
         // exec — a daemon that never started listening again is gone, and the
         // client we still hold points at its socket, which `is_connected` keeps
         // calling good until its reader sees the EOF.
-        let _ = cx.update(crate::ui::tree_sync::resync_after_local_daemon_change);
+        cx.update(crate::ui::tree_sync::resync_after_local_daemon_change);
 
         let _ = this.update_in(cx, |this, window, cx| {
             this.focus_active(window, cx);
@@ -9763,7 +9763,6 @@ mod restart_server_gpui_tests {
                 root.view()
                     .clone()
                     .downcast::<Tty7App>()
-                    .ok()
                     .expect("window root wraps a Tty7App")
             })
             .unwrap();

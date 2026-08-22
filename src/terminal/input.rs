@@ -277,13 +277,14 @@ fn legacy_keystroke_to_bytes(ks: &gpui::Keystroke, flags: KeyFlags) -> Option<Ve
     let m = &ks.modifiers;
     let key = ks.key.as_str();
 
-    if m.control && !m.platform {
-        if let Some(b) = ctrl_c0(key) {
-            if m.alt {
-                return Some(vec![0x1b, b]);
-            }
-            return Some(vec![b]);
+    if m.control
+        && !m.platform
+        && let Some(b) = ctrl_c0(key)
+    {
+        if m.alt {
+            return Some(vec![0x1b, b]);
         }
+        return Some(vec![b]);
     }
 
     if let Some(seq) = functional_key(key, xterm_mods(m), flags.app_cursor()) {

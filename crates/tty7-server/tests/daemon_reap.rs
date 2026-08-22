@@ -219,7 +219,7 @@ fn a_holder_that_answers_the_handshake_is_left_alone() {
         "a healthy daemon must survive reap_stranded untouched"
     );
     assert!(
-        PaneClient::at(&dir.join("daemon.sock")).version().is_ok(),
+        PaneClient::at(dir.join("daemon.sock")).version().is_ok(),
         "and still be serving on its endpoint"
     );
 

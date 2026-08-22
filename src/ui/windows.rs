@@ -826,9 +826,10 @@ mod tests {
         // gpui's default asks Wayland for a server-side frame on top of it.
         cx.update(|cx| {
             WindowRegistry::init(cx);
-            let mut config = Config::default();
-            config.remember_window_size = false;
-            cx.set_global(config);
+            cx.set_global(Config(crate::core::config::CoreConfig {
+                remember_window_size: false,
+                ..Default::default()
+            }));
 
             let options = window_options(cx, None);
             assert_eq!(options.window_decorations, Some(WindowDecorations::Client));

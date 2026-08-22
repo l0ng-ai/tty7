@@ -508,10 +508,10 @@ fn complete_signature(
     if let Some(arg) = pending_value {
         let mut out = Vec::new();
         push_arg_suggestions(&mut out, arg, word);
-        if let Some(cwd) = cwd {
-            if arg.wants_paths() {
-                out.extend(complete_path(word, cwd, arg.wants_dirs_only(), quoting));
-            }
+        if let Some(cwd) = cwd
+            && arg.wants_paths()
+        {
+            out.extend(complete_path(word, cwd, arg.wants_dirs_only(), quoting));
         }
         let pending = match cwd {
             Some(_) => collect_generators(arg),
@@ -546,10 +546,10 @@ fn complete_signature(
     let mut claims_slot = false;
     if let Some(arg) = node.args().first() {
         push_arg_suggestions(&mut out, arg, word);
-        if let Some(cwd) = cwd {
-            if arg.wants_paths() {
-                out.extend(complete_path(word, cwd, arg.wants_dirs_only(), quoting));
-            }
+        if let Some(cwd) = cwd
+            && arg.wants_paths()
+        {
+            out.extend(complete_path(word, cwd, arg.wants_dirs_only(), quoting));
         }
         if cwd.is_some() {
             pending = collect_generators(arg);

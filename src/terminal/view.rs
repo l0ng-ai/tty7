@@ -8340,8 +8340,13 @@ mod tests {
                     cell.width
                 };
                 assert_eq!(positions[cell.start].2, drawn, "{text:?} at {}", cell.start);
-                for i in cell.start + 1..cell.end {
-                    assert_eq!(positions[i].2, 0, "{text:?} at {i}");
+                for (i, pos) in positions
+                    .iter()
+                    .enumerate()
+                    .take(cell.end)
+                    .skip(cell.start + 1)
+                {
+                    assert_eq!(pos.2, 0, "{text:?} at {i}");
                 }
             }
         }
@@ -12791,7 +12796,7 @@ mod gpui_tests {
     fn ctrl_6_reaches_the_pty_as_rs(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
         let (window, mut daemon) = harness(cx);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         window
             .update(cx, |view, window, cx| {
                 window.activate_window();

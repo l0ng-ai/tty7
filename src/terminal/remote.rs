@@ -1764,6 +1764,11 @@ impl RemoteTerminal {
     /// 0600 temp file — so this is an interface waiting for a screen, not
     /// scaffolding around nothing. Deleting it would throw away the finished
     /// half of the feature.
+    ///
+    /// The `allow` is the same statement made to the compiler: without it this
+    /// pair is the one warning every build prints, and a build that always
+    /// warns is a build nobody reads the warnings of.
+    #[allow(dead_code)]
     pub fn list_known_hosts() -> Vec<KnownHostEntry> {
         fn query() -> anyhow::Result<Vec<KnownHostEntry>> {
             let mut stream = connect()?;
@@ -1797,6 +1802,7 @@ impl RemoteTerminal {
 
     /// See [`Self::list_known_hosts`] — same story, and it returns the list
     /// after the removal so a caller can redraw from one round trip.
+    #[allow(dead_code)]
     pub fn delete_known_host(id: KnownHostId) -> Vec<KnownHostEntry> {
         fn query(id: KnownHostId) -> anyhow::Result<Vec<KnownHostEntry>> {
             let mut stream = connect()?;
