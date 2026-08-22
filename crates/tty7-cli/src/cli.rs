@@ -688,29 +688,85 @@ mod tests {
         // Global flags have their own table, and `--help` is clap's.
         const EVERYWHERE: [&str; 4] = ["json", "quiet", "machine", "help"];
 
+        // Recursive, because most of the flags are a level down: `ws rename`,
+        // `pane split`, `tab close`, `machine ls`, `server restart`. Walking
+        // only the top level pinned `run` and `wait` and left the rest of the
+        // surface free to drift — and the reference is what an agent reads
+        // before it ever runs `--help`.
+        fn walk(
+            cmd: &clap::Command,
+            path: &str,
+            doc: &str,
+            everywhere: &[&str],
+            missing: &mut Vec<String>,
+            checked: &mut Vec<String>,
+        ) {
+            for arg in cmd.get_arguments() {
+                let Some(long) = arg.get_long() else { continue };
+                if everywhere.contains(&long) {
+                    continue;
+                }
+                checked.push(format!("{path} --{long}"));
+                // The flag anywhere on the page, not only at the start of a
+                // code span. The page writes some of them inside a whole
+                // command — ``| `server restart --hard` | …`` — and requiring
+                // a backtick immediately before the dashes called that one
+                // undocumented when it has its own table row.
+                if !doc.contains(&format!("--{long}")) {
+                    missing.push(format!("{path} --{long}"));
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                if sub.get_name() == "help" {
+                    continue;
+                }
+                walk(
+                    sub,
+                    &format!("{path} {}", sub.get_name()),
+                    doc,
+                    everywhere,
+                    missing,
+                    checked,
+                );
+            }
+        }
+
         let cli = Cli::command();
         let mut missing: Vec<String> = Vec::new();
-        let (mut covered, mut checked) = (0usize, 0usize);
+        let mut covered = 0usize;
+        let mut checked: Vec<String> = Vec::new();
         for verb in cli.get_subcommands() {
             let name = verb.get_name();
-            if !DOC.contains(&format!("`tty7 {name}")) {
+            // Two heading shapes, because the page uses both: a leaf verb gets
+            // ``### `tty7 capture …` `` and a group gets ``## `pane` — panes``.
+            // Matching only the first skipped `ws`, `tab`, `pane`, `machine`
+            // and `server` — every group, and with them every nested verb.
+            let documented =
+                DOC.contains(&format!("`tty7 {name}")) || DOC.contains(&format!("\n## `{name}`"));
+            if !documented {
                 continue;
             }
             covered += 1;
-            for arg in verb.get_arguments() {
-                let Some(long) = arg.get_long() else { continue };
-                if EVERYWHERE.contains(&long) {
-                    continue;
-                }
-                checked += 1;
-                if !DOC.contains(&format!("`--{long}")) {
-                    missing.push(format!("{name} --{long}"));
-                }
-            }
+            walk(verb, name, DOC, &EVERYWHERE, &mut missing, &mut checked);
         }
         // Or the loop could pass by matching nothing at all.
         assert!(covered >= 10, "only {covered} documented verbs were found");
-        assert!(checked >= 5, "only {checked} verb flags were checked");
+        // Named rather than counted: a count drifts with the surface, and what
+        // has to hold is that the walk went a level *down*. These five live
+        // under `tab`, `pane` and `server`, and a one-level walk reaches none
+        // of them — which is exactly the state this test was in.
+        for nested in [
+            "tab new --cwd",
+            "pane ls --all",
+            "pane split --ratio",
+            "pane close --orphans",
+            "server restart --hard",
+        ] {
+            assert!(
+                checked.iter().any(|c| c == nested),
+                "`{nested}` was never reached, so the walk is not descending: {checked:?}"
+            );
+        }
         assert!(
             missing.is_empty(),
             "the command reference does not mention these flags: {missing:?}"
