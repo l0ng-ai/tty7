@@ -1697,6 +1697,102 @@ fn unix_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// Every layout delta an agent can meet is named in the CLI reference.
+    ///
+    /// `docs/cli/reference.mdx` says of `tty7 events` that "the kinds and
+    /// payloads are stable; the prose is not" — which is a promise to the
+    /// people writing loops against that stream. A variant added here is a
+    /// kind that turns up on the wire with nothing describing it, and the
+    /// stream is externally tagged, so a reader matching on known kinds meets
+    /// an object it cannot place.
+    ///
+    /// Both directions: a kind documented and then removed is the same
+    /// promise broken from the other side.
+    ///
+    /// The names come from the source rather than a list kept here, so this
+    /// cannot quietly agree with itself.
+    #[test]
+    fn every_layout_delta_is_named_in_the_cli_reference() {
+        const SRC: &str = include_str!("machine.rs");
+        const DOC: &str = include_str!("../../../../docs/cli/reference.mdx");
+
+        let head = "pub enum LayoutDelta {";
+        let body = &SRC[SRC.find(head).expect("the enum is here") + head.len()..];
+        let mut depth = 0usize;
+        let mut variants: Vec<String> = Vec::new();
+        for line in body.lines() {
+            let line = line.trim();
+            if depth == 0
+                && line.starts_with(|c: char| c.is_ascii_uppercase())
+                && let name = line
+                    .chars()
+                    .take_while(char::is_ascii_alphanumeric)
+                    .collect::<String>()
+                && !name.is_empty()
+            {
+                // `#[serde(rename_all = "snake_case")]` sits on this enum.
+                let mut snake = String::new();
+                for (i, c) in name.chars().enumerate() {
+                    if c.is_ascii_uppercase() && i > 0 {
+                        snake.push('_');
+                    }
+                    snake.push(c.to_ascii_lowercase());
+                }
+                variants.push(snake);
+            }
+            let mut done = false;
+            for c in line.chars() {
+                match c {
+                    '{' | '(' => depth += 1,
+                    '}' | ')' => {
+                        if depth == 0 {
+                            done = true;
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    _ => {}
+                }
+            }
+            if done {
+                break;
+            }
+        }
+        assert!(
+            variants.len() > 10,
+            "the scan stopped matching how this file is written, so the check \
+             below would pass for the wrong reason: {variants:?}"
+        );
+
+        // The sentence that enumerates them, so a name merely appearing
+        // somewhere else in the page does not count.
+        let lead = "`delta` is externally tagged the same way. The kinds are";
+        // From *after* the lead, so the sentence's own `delta` is not read as
+        // one of the kinds it introduces.
+        let at = DOC.find(lead).expect("the reference still enumerates the kinds") + lead.len();
+        let listed = &DOC[at..at + DOC[at..].find(".\n\n").expect("the sentence ends")];
+        let named: Vec<&str> = listed
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|t| t.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+            .collect();
+
+        let missing: Vec<&String> = variants.iter().filter(|v| !named.contains(&v.as_str())).collect();
+        assert!(
+            missing.is_empty(),
+            "these layout deltas reach `tty7 events` with nothing in \
+             docs/cli/reference.mdx naming them: {missing:?}"
+        );
+        let stale: Vec<&&str> = named
+            .iter()
+            .filter(|n| !variants.iter().any(|v| v == *n))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "the reference names layout deltas that no longer exist: {stale:?}"
+        );
+    }
     use super::*;
 
     fn store() -> (Arc<MachineStore>, tempfile::TempDir) {
