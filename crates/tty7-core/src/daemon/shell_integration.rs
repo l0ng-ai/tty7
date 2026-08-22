@@ -2831,6 +2831,49 @@ mod tests {
         assert!(!inj.replaces_argv);
     }
 
+    /// Every shipped integration reports the same facts about a command.
+    ///
+    /// The four OSC 133 marks are what everything above them is built on: `A`
+    /// and `B` bracket the prompt, `C` says a command started, `D;<code>` says
+    /// it finished and how. `tty7 wait --until free`, the exit code in the tab
+    /// strip, the "still running" dot, and every orchestration that reads them
+    /// go quiet for a shell that skips one -- and quiet is the whole problem,
+    /// because nothing reports a mark that was never sent. `7;file://` is the
+    /// same story for the working directory the tree and new tabs follow.
+    ///
+    /// `D` is checked with its separator: a bare `133;D` means "finished,
+    /// code unknown", which is a different and much less useful answer than
+    /// the one every one of these scripts actually gives.
+    ///
+    /// Per-shell tests below go further on the shells that need it; this is
+    /// the floor none of them may drop through. Not asserted here: an OSC 0/2
+    /// title, which only bash and PowerShell send -- on the others the user's
+    /// own prompt owns the title and tty7 does not take it from them.
+    #[test]
+    fn every_integration_reports_the_prompt_the_command_and_its_exit_code() {
+        for (shell, body) in [
+            ("zsh", ZSH_INTEGRATION),
+            ("bash", BASH_INTEGRATION),
+            ("fish", FISH_INTEGRATION),
+            ("nushell", NUSHELL_INTEGRATION),
+            ("PowerShell", POWERSHELL_INTEGRATION),
+        ] {
+            for (mark, what) in [
+                ("133;A", "the prompt starting"),
+                ("133;B", "the prompt ending"),
+                ("133;C", "a command starting"),
+                ("133;D;", "a command finishing, with its exit code"),
+                ("7;file://", "the working directory"),
+            ] {
+                assert!(
+                    body.contains(mark),
+                    "{shell}'s integration never sends `{mark}`, so {what} is \
+                     invisible in a {shell} pane and nothing says so"
+                );
+            }
+        }
+    }
+
     #[test]
     fn powershell_integration_emits_every_osc_133_mark_and_cwd() {
         let s = POWERSHELL_INTEGRATION;
@@ -3401,3 +3444,4 @@ mod tests {
         );
     }
 }
+
