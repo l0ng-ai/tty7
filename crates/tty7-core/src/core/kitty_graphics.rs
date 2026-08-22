@@ -1644,10 +1644,43 @@ mod tests {
     fn shared_transmission_dropped_on_remote() {
         // A non-local parser must never surface a file/shm transfer even if a
         // misbehaving sender ignored the refusal and sent one anyway.
-        let b64 = BASE64.encode(b"/px-abc123");
-        let cmd = format!("Ga=T,f=32,t=s,s=64,v=1,i=7;{b64}");
-        let mut p = GraphicsParser::new();
-        assert_eq!(p.feed(cmd.as_bytes()), None);
+        //
+        // Every indirect medium, not only shm — the same point the query-side
+        // test makes, and it matters more here. `query_reply` is the polite
+        // half: it tells a well-behaved sender not to bother. This is the half
+        // that holds when the sender does it anyway, and the sender on a remote
+        // pane is the far end of an ssh link naming a path on *this* machine.
+        // Covering only `t=s` left a gate that could be narrowed to shm with
+        // the whole suite still green, and `t=f`/`t=t` would then read whatever
+        // the far side asked for.
+        for (id, medium, payload) in [
+            (7u32, "s", &b"/px-abc123"[..]),
+            (8, "f", &b"/etc/passwd"[..]),
+            (9, "t", &b"/tmp/handoff.rgba"[..]),
+        ] {
+            let b64 = BASE64.encode(payload);
+            let cmd = format!("Ga=T,f=32,t={medium},s=64,v=1,i={id};{b64}");
+            let mut p = GraphicsParser::new();
+            assert_eq!(
+                p.feed(cmd.as_bytes()),
+                None,
+                "a remote pane must not surface a `t={medium}` transfer naming \
+                 {} on this host",
+                String::from_utf8_lossy(payload)
+            );
+        }
+
+        // And the local counterpart still does surface all three, so the guard
+        // above is refusing on locality rather than on the medium.
+        for (id, medium) in [(17u32, "s"), (18, "f"), (19, "t")] {
+            let b64 = BASE64.encode(b"/px-abc123");
+            let cmd = format!("Ga=T,f=32,t={medium},s=64,v=1,i={id};{b64}");
+            let mut p = GraphicsParser::new_local(true);
+            assert!(
+                matches!(p.feed(cmd.as_bytes()), Some(Event::ImageFromMedium(_))),
+                "a local pane should still accept `t={medium}`"
+            );
+        }
     }
 
     #[test]
