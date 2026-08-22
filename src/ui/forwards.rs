@@ -52,12 +52,9 @@ impl ForwardFields {
             }
             (host.to_string(), port)
         };
-        let bind_host = match self.bind_host.trim() {
-            // The panel's own default, and the one the strip's tooltip
-            // promises: an empty bind host is loopback, not every interface.
-            "" => "127.0.0.1".to_string(),
-            host => host.to_string(),
-        };
+        // The panel's own default, and the one the strip's tooltip promises:
+        // an empty bind host is loopback, not every interface.
+        let bind_host = crate::core::ssh_profile::bind_host_or_loopback(&self.bind_host);
         let description = self.description.trim();
         Some(SshForwardRule {
             kind: self.kind,

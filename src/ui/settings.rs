@@ -28,7 +28,8 @@ use crate::core::config::{
 };
 use crate::core::keychain::CredentialRef;
 use crate::core::ssh_profile::{
-    Algorithms, AuthMode, ForwardKind, ForwardRule, HostPort, SshProfile, to_connect_string,
+    Algorithms, AuthMode, ForwardKind, ForwardRule, HostPort, SshProfile, bind_host_or_loopback,
+    to_connect_string,
 };
 use crate::daemon::protocol::{SshTestNeed, SshTestReport};
 use crate::ui::app::{
@@ -1070,7 +1071,10 @@ impl ForwardRuleForm {
     fn collect(&self, cx: &App) -> Option<ForwardRule> {
         let val = |e: &Entity<InputState>| e.read(cx).value().trim().to_string();
         let bind_port: u16 = val(&self.bind_port).parse().ok().filter(|p| *p > 0)?;
-        let bind = HostPort::new(val(&self.bind_host), bind_port);
+        // Blank means loopback, the same as it does in the side panel's form
+        // and in a `LocalForward` line with no bind address. Left as typed,
+        // the address became whatever the platform's resolver made of `""`.
+        let bind = HostPort::new(bind_host_or_loopback(&val(&self.bind_host)), bind_port);
         let target = if self.kind == ForwardKind::Dynamic {
             HostPort::default()
         } else {
@@ -8447,5 +8451,59 @@ mod search_index_tests {
                 "{key} is exempt from the search index but no longer names a row"
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod forward_bind_gpui_tests {
+    use super::*;
+    use crate::ui::app::test_window::harness;
+    use gpui::TestAppContext;
+
+    /// The settings sheet and the side panel are two forms for the same rule,
+    /// and a blank bind address has to mean the same thing in both.
+    ///
+    /// It did not. `ForwardFields::collect` in the side panel normalized a
+    /// blank to loopback — and said in its own doc that it applies "the same
+    /// conditions the settings sheet's `ForwardRuleForm::collect` applies" —
+    /// while the sheet passed the empty string straight through to the bind.
+    /// `LocalForward` lines out of `~/.ssh/config` normalized too, so the
+    /// sheet was the one path of three that left the address to whatever the
+    /// platform's resolver makes of `""`.
+    #[gpui::test]
+    fn a_blank_bind_address_in_the_settings_sheet_is_loopback(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+
+        let rule = app.update_in(&mut vcx, |_app, window, cx| {
+            let row = seed_forward_row(window, cx, &ForwardRule::default());
+            row.bind_port
+                .update(cx, |s, cx| s.set_value("8080", window, cx));
+            row.target_host
+                .update(cx, |s, cx| s.set_value("10.0.0.9", window, cx));
+            row.target_port
+                .update(cx, |s, cx| s.set_value("80", window, cx));
+            // bind_host left as the placeholder shows it: empty.
+            row.collect(cx)
+        });
+
+        let rule = rule.expect("a rule with a port and a target is complete");
+        assert_eq!(
+            rule.bind.host, "127.0.0.1",
+            "a blank bind address is loopback, not whatever `\"\"` resolves to"
+        );
+
+        // And the side panel, on the same blank, agrees.
+        let panel = crate::ui::forwards::ForwardFields {
+            kind: crate::daemon::protocol::SshForwardKind::Local,
+            bind_host: String::new(),
+            bind_port: "8080".into(),
+            target_host: "10.0.0.9".into(),
+            target_port: "80".into(),
+            description: String::new(),
+        }
+        .collect()
+        .expect("the same rule, typed in the other form");
+        assert_eq!(panel.bind_host, rule.bind.host, "the two forms agree");
     }
 }

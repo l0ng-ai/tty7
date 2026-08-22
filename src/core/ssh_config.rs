@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::core::ssh_profile::{ForwardKind, ForwardRule, HostPort, SshProfile as ManagedProfile};
+use crate::core::ssh_profile::{
+    ForwardKind, ForwardRule, HostPort, SshProfile as ManagedProfile, bind_host_or_loopback,
+};
 
 const MAX_INCLUDE_DEPTH: usize = 8;
 const MAX_CONFIG_FILES: usize = 256;
@@ -902,7 +904,7 @@ fn parse_algorithm_list(value: &str) -> Option<Vec<String>> {
 fn parse_forward_rule(kind: ForwardKind, value: &str) -> Option<ForwardRule> {
     let words = split_words(value);
     let (bind_host, bind_port) = parse_forward_endpoint(words.first()?)?;
-    let bind = HostPort::new(forward_bind_host(bind_host), bind_port);
+    let bind = HostPort::new(bind_host_or_loopback(&bind_host), bind_port);
     let target = match kind {
         ForwardKind::Dynamic => HostPort::default(),
         ForwardKind::Local | ForwardKind::Remote => {
@@ -935,14 +937,6 @@ fn parse_forward_endpoint(token: &str) -> Option<(String, u16)> {
             Some((host, port))
         }
         None => Some((String::new(), token.parse::<u16>().ok()?)),
-    }
-}
-
-fn forward_bind_host(host: String) -> String {
-    if host.is_empty() {
-        "127.0.0.1".to_string()
-    } else {
-        host
     }
 }
 

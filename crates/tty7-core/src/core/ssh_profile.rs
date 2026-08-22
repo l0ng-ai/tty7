@@ -112,6 +112,27 @@ impl HostPort {
     }
 }
 
+/// The address a forward binds when the user did not name one.
+///
+/// Loopback, always. Left empty, the address is whatever the platform's
+/// resolver makes of `""` — loopback on macOS and glibc today, but that is
+/// getaddrinfo's choice and not ours, and the same string under `AI_PASSIVE`
+/// semantics means every interface. An SSH tunnel is exactly the thing that
+/// must not be opened to the network by a default nobody chose.
+///
+/// One function because there are three forms that build a forward — the
+/// settings sheet, the side panel, and `LocalForward` lines read out of
+/// `~/.ssh/config` — and a rule typed in one has to mean what it means in the
+/// others. Two of them already normalized, with the same literal written
+/// twice; the settings sheet did not, so a blank there was the only one that
+/// left the decision to the resolver.
+pub fn bind_host_or_loopback(host: &str) -> String {
+    match host.trim() {
+        "" => "127.0.0.1".to_string(),
+        named => named.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AuthMode {
@@ -537,6 +558,30 @@ mod tests {
                 format!("{home}/.ssh/id_ed25519")
             ]
         );
+    }
+
+    /// A forward with no bind address binds loopback, never the world.
+    ///
+    /// Left to the platform, `""` is whatever getaddrinfo decides — loopback
+    /// on macOS and glibc, every interface under `AI_PASSIVE` semantics. An
+    /// SSH tunnel reachable from the network is not a thing to arrive at by
+    /// way of an unset default, so the answer is given here instead of asked
+    /// for.
+    #[test]
+    fn a_forward_with_no_bind_address_binds_loopback() {
+        assert_eq!(bind_host_or_loopback(""), "127.0.0.1");
+        assert_eq!(
+            bind_host_or_loopback("   "),
+            "127.0.0.1",
+            "and blank is empty"
+        );
+        assert_eq!(bind_host_or_loopback("\t"), "127.0.0.1");
+
+        // A named address is the user saying it out loud, including the one
+        // that does mean every interface.
+        assert_eq!(bind_host_or_loopback("0.0.0.0"), "0.0.0.0");
+        assert_eq!(bind_host_or_loopback("localhost"), "localhost");
+        assert_eq!(bind_host_or_loopback(" ::1 "), "::1", "and it is trimmed");
     }
 
     #[test]
