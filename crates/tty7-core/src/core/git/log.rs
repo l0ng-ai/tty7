@@ -1195,6 +1195,84 @@ mod tests {
     /// "Visible" carries the one nuance: an `Out` may land on a lane a `Pass`
     /// already crosses — a join, see [`bottom`] — and that pair is one line.
     /// Two `Pass`es or two `Out`s on one lane are still bugs.
+    struct Lcg(u64);
+    impl Lcg {
+        fn n(&mut self, m: usize) -> usize {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.0 >> 33) as usize) % m.max(1)
+        }
+    }
+
+    /// A topo-ordered DAG, newest first: commit i may only name parents j > i,
+    /// which is exactly the guarantee `--topo-order` gives `push`.
+    fn dag(seed: u64, n: usize, max_parents: usize) -> Vec<(Oid, SmallVec<[Oid; 2]>)> {
+        let mut r = Lcg(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
+        let mut page = Vec::with_capacity(n);
+        for i in 0..n {
+            let remaining = n - i - 1;
+            let want = if remaining == 0 { 0 } else { 1 + r.n(max_parents) };
+            let mut ps: SmallVec<[Oid; 2]> = SmallVec::new();
+            for _ in 0..want.min(remaining) {
+                let p = i + 1 + r.n(remaining);
+                let id = format!("c{p}");
+                if !ps.contains(&id) {
+                    ps.push(id);
+                }
+            }
+            // Some commits are genuine roots even mid-page.
+            if r.n(12) == 0 {
+                ps.clear();
+            }
+            page.push((format!("c{i}"), ps));
+        }
+        page
+    }
+
+    #[test]
+    fn random_dags_lay_out_consistently() {
+        for seed in 0..4000u64 {
+            let n = 2 + (seed as usize % 40);
+            let maxp = 1 + (seed as usize % 4); // up to octopus merges
+            let page = dag(seed, n, maxp);
+            let rows = lay_out(&page);
+            assert_eq!(rows.len(), page.len(), "seed {seed}: one row per commit");
+            for (i, (row, (_, parents))) in rows.iter().zip(page.iter()).enumerate() {
+                assert_eq!(
+                    row.parents as usize,
+                    parents.len().min(u8::MAX as usize),
+                    "seed {seed} row {i}: parent count"
+                );
+                let outs = row.edges.iter().filter(|e| matches!(e, Edge::Out { .. })).count();
+                if parents.is_empty() {
+                    assert_eq!(outs, 0, "seed {seed} row {i}: a root must not send an Out");
+                }
+                assert!(
+                    !row.edges.iter().any(|e| matches!(*e, Edge::Pass { lane, .. } if lane == row.node)),
+                    "seed {seed} row {i}: a Pass crosses the row's own node lane: {row:?}"
+                );
+            }
+            assert_lanes_line_up(&rows);
+        }
+    }
+
+    /// The same, but split across page boundaries: the allocator has to hand
+    /// its state from one page to the next without a seam.
+    #[test]
+    fn a_dag_split_into_pages_lays_out_the_same_as_one_page() {
+        for seed in 0..1500u64 {
+            let n = 6 + (seed as usize % 30);
+            let page = dag(seed, n, 1 + (seed as usize % 3));
+            let whole = lay_out(&page);
+            let cut = 1 + (seed as usize % (n - 1));
+            let mut split = Vec::new();
+            let mut alloc = LaneAlloc::new();
+            alloc.push(&page[..cut], &mut split);
+            alloc.push(&page[cut..], &mut split);
+            assert_eq!(whole, split, "seed {seed}: page boundary at {cut} changed the layout");
+            assert_lanes_line_up(&split);
+        }
+    }
+
     fn assert_lanes_line_up(rows: &[GraphRow]) {
         for (i, row) in rows.iter().enumerate() {
             let once = |mut lanes: Vec<Lane>| {
@@ -2087,3 +2165,4 @@ mod tests {
         assert!(!page.complete, "five of the seven is not the whole history");
     }
 }
+
