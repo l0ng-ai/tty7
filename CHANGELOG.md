@@ -153,6 +153,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A clamped setting now says so.** A hand-edited `config.json` asking for
+  `ui_font_size: 8`, `font_size: 999` or `scrollback_limit: 5` runs at 12, 256
+  and 100 — clamping beats refusing the whole file over one silly number, and
+  the file is deliberately left alone. What was missing is that nothing said
+  so: the file went on claiming 8 while the app ran at 12, and the two never
+  met. Each correction now names the field, what was asked for, and what is
+  actually in use.
+
+- **`tty7 procs` on a pane that does not exist is an error.** The daemon
+  answers a pane it is not running exactly as it answers an idle one, so
+  `tty7 procs %999` printed "nothing running in this pane" and exited 0 for a
+  pane that never existed. Every other verb taking a `%PANE` says when the
+  pane is not there, and an agent reading the machine-readable half could not
+  tell the two apart.
+
+- **A title carrying a newline no longer paints over the tab strip.**
+  Whatever runs in a pane sets the title, and an OSC ends only on BEL or ESC —
+  every other byte is payload, newlines included. That title is drawn as a tab
+  label and written into the machine file, and a label with a newline paints
+  its tail over whatever sits below it.
+
+- **The refusal to write the machine file now names the file.** On a config
+  directory it cannot write, `tty7 new` answered `Permission denied (os error
+  13)` and nothing else — the right refusal and the right exit code, but
+  naming neither what tty7 was doing nor which file it could not write, on a
+  machine where that directory is exactly what the reader has to go and fix.
+
+- **The clipboard-read policy is tty7's own, not an upstream default.** tty7
+  has a handler that would read the system clipboard and write it back down
+  the pty. It never runs, because the VT crate refuses a paste request before
+  it becomes an event — but that was a decision taken by a field tty7 never
+  set, so a release that moved the default would have handed any program able
+  to write to a pane whatever is on the clipboard, over any SSH connection it
+  is on. The policy is now stated here and pinned.
+
 - **`kill` and `timeout` work inside a pane again.** The daemon blocks SIGTERM
   on its main thread before any other starts, so that one waiter can run the
   shutdown save — deliberate, and it also reached where it was never meant to:
