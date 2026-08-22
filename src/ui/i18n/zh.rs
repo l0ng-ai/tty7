@@ -678,7 +678,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "代理 proxy http https socks socks5 clash v2ray 网络 下载 更新"
         }
         L10nKey::SettingsSearchAnsiColorsKeywords => {
-            "ANSI颜色 调色板 终端颜色 主题 ansi colors palette terminal theme"
+            "ANSI颜色 调色板 终端颜色 16色 主题 ansi colors palette terminal theme"
         }
         L10nKey::SettingsSearchBackgroundImageKeywords => {
             "背景图片 背景图 壁纸 图片 照片 主题 background image wallpaper picture theme"

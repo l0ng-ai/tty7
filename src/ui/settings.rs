@@ -8507,3 +8507,69 @@ mod forward_bind_gpui_tests {
         assert_eq!(panel.bind_host, rule.bind.host, "the two forms agree");
     }
 }
+
+#[cfg(test)]
+mod search_keyword_tests {
+    use super::*;
+
+    /// A number in a search keyword list must survive translation.
+    ///
+    /// Keywords are match data, not prose: they exist so someone typing what
+    /// they would call the thing lands on its row. A digit is the part of that
+    /// which does not translate — "16" is "16" in every language — so a
+    /// translation that drops one silently narrows what its speakers can find.
+    ///
+    /// `SettingsSearchAnsiColorsKeywords` was the case. English and Japanese
+    /// both carried "16"; Chinese did not, so searching `16` under `zh-CN`
+    /// matched nothing at all while the other two found ANSI colours.
+    ///
+    /// Only the keyword strings. Digits in ordinary copy are phrasing — the
+    /// Japanese for "one per line" contains a 1 the English has no reason to —
+    /// and holding those to the English would be nonsense.
+    #[test]
+    fn a_number_in_a_keyword_list_survives_translation() {
+        use crate::ui::i18n::{SUPPORTED_LANGUAGES, translate_for_test};
+
+        fn digits(text: &str) -> std::collections::BTreeSet<String> {
+            let mut out = std::collections::BTreeSet::new();
+            let mut cur = String::new();
+            for c in text.chars() {
+                if c.is_ascii_digit() {
+                    cur.push(c);
+                } else if !cur.is_empty() {
+                    out.insert(std::mem::take(&mut cur));
+                }
+            }
+            if !cur.is_empty() {
+                out.insert(cur);
+            }
+            out
+        }
+
+        let mut checked = 0usize;
+        for entry in settings_search_entries() {
+            let want = digits(translate_for_test(0, entry.keywords));
+            if want.is_empty() {
+                continue;
+            }
+            checked += 1;
+            for (idx, lang) in SUPPORTED_LANGUAGES.iter().enumerate().skip(1) {
+                let got = digits(translate_for_test(idx, entry.keywords));
+                let dropped: Vec<&String> = want.difference(&got).collect();
+                // A translation may add numbers of its own; it may not lose one.
+                assert!(
+                    dropped.is_empty(),
+                    "{:?}: the {} keywords drop {:?}, which English carries, so a search \
+                     for it finds nothing in that language",
+                    entry.title,
+                    lang.code,
+                    dropped
+                );
+            }
+        }
+        assert!(
+            checked > 0,
+            "no keyword list carries a number, so this guard is checking nothing"
+        );
+    }
+}

@@ -1471,6 +1471,13 @@ fn current_locale_index() -> usize {
     CURRENT.load(Ordering::Relaxed) as usize
 }
 
+/// [`translate`] for one named locale, so a test can compare the languages
+/// against each other without steering the process-wide one.
+#[cfg(test)]
+pub(crate) fn translate_for_test(locale_idx: usize, key: L10nKey) -> &'static str {
+    translate(locale_idx, key)
+}
+
 fn translate(locale_idx: usize, key: L10nKey) -> &'static str {
     if let Some(lang) = SUPPORTED_LANGUAGES.get(locale_idx)
         && let Some(text) = (lang.translate_fn)(key)
