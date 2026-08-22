@@ -1,3 +1,4 @@
+use crate::terminal::view::one_line;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -640,7 +641,10 @@ impl Tty7App {
                         .min_w_0()
                         .truncate()
                         .text_sm()
-                        .child(SharedString::from(label.subject.clone())),
+                        // One row, `.truncate()` and all: a commit subject and
+                        // an author name are both strings the repository chose,
+                        // and git keeps a `\r` or a `\t` in either verbatim.
+                        .child(SharedString::from(one_line(&label.subject))),
                 )
                 .child(
                     div()
@@ -1481,9 +1485,16 @@ fn source_subject(source: &DiffSource, branch: String) -> SourceSubject {
 /// One string rather than two elements: the separator has to disappear along
 /// with whichever half is missing, and a `when_some` chain around a middle dot
 /// says less than this does.
+///
+/// The author is folded to one line. git will not take a control character in
+/// a *branch* name and will take one in an author name without comment —
+/// `git -c user.name=$'Bad\rName' commit` is enough, and `%an` hands it back
+/// the same way — so this is a string the repository chose, drawn in a bar
+/// that is one row tall.
 fn label_byline(label: &CommitLabel, now: i64) -> String {
+    let author = one_line(label.author.trim());
     let when = (label.at > 0).then(|| relative_time(now, label.at));
-    match (label.author.trim(), when) {
+    match (author.as_str(), when) {
         ("", Some(when)) => when,
         (author, Some(when)) => format!("{author} · {when}"),
         (author, None) => author.to_string(),
@@ -1814,6 +1825,42 @@ mod tests {
             "main".into(),
         );
         assert!(empty.label.is_none());
+    }
+
+    /// An author name from the repository draws on one row.
+    ///
+    /// git refuses a control character in a *branch* name and accepts one in
+    /// an author name without a word — `git -c user.name=$'Bad\rName' commit`
+    /// succeeds and `git log --format=%an` hands it straight back. The byline
+    /// sits in a bar one row tall, beside a subject that is truncated to fit,
+    /// so a mandatory break inside it grows the bar past its own height.
+    #[test]
+    fn an_author_name_carrying_control_characters_stays_on_the_byline() {
+        let now = 1_786_255_391 + 7200;
+        assert_eq!(
+            label_byline(
+                &CommitLabel {
+                    subject: "s".into(),
+                    author: "Bad\rName".into(),
+                    at: 1_786_255_391,
+                },
+                now
+            ),
+            "Bad Name · 2h"
+        );
+        assert_eq!(
+            label_byline(
+                &CommitLabel {
+                    subject: "s".into(),
+                    author: "\r\n\t".into(),
+                    at: 1_786_255_391,
+                },
+                now
+            ),
+            "2h",
+            "an author that is only control characters is no author, and the \
+             separator goes with it"
+        );
     }
 
     #[test]

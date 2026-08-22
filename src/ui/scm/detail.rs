@@ -823,9 +823,16 @@ pub(crate) fn diff_totals(files: &[CommitFile]) -> Option<(u32, u32)> {
 
 /// `Ada Lovelace · 2h`. Author, not committer: a rebase rewrites the second
 /// one, and "who wrote this" is the question a reader is asking.
+/// `Ada · 2h`, the byline the detail panel draws.
+///
+/// The name is folded to one line. git refuses a control character in a
+/// *branch* name and takes one in an author name without comment —
+/// `git -c user.name=$'Bad\rName' commit` succeeds and `%an` hands it back
+/// unchanged — so this is a string the repository chose, drawn on one row.
 pub(crate) fn byline(commit: &Commit, now: i64) -> String {
+    let name = crate::terminal::view::one_line(commit.author.name.trim());
     let when = (commit.author.at.unix > 0).then(|| relative_time(now, commit.author.at.unix));
-    match (commit.author.name.trim(), when) {
+    match (name.as_str(), when) {
         ("", Some(when)) => when,
         (name, Some(when)) => format!("{name} · {when}"),
         (name, None) => name.to_string(),
@@ -873,6 +880,21 @@ mod tests {
             body: String::new(),
             refs: Vec::new(),
         }
+    }
+
+    /// The same for the detail panel's byline, which is its own function.
+    #[test]
+    fn an_author_name_carrying_control_characters_stays_on_one_row() {
+        let now = 1_786_255_391 + 7200;
+        assert_eq!(
+            byline(&commit("Bad\rName", 1_786_255_391), now),
+            "Bad Name · 2h"
+        );
+        assert_eq!(
+            byline(&commit("\r\n\t", 1_786_255_391), now),
+            "2h",
+            "an author that is only control characters is no author"
+        );
     }
 
     #[test]

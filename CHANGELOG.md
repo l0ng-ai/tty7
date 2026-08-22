@@ -188,6 +188,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expected f32 at line 1 column 20`. The window's notice appends it too, on its
   own line after the translated sentence.
 
+- **A commit author's name draws on one row.** git refuses a control
+  character in a *branch* name and accepts one in an author name without
+  comment — `git -c user.name=$'Bad\rName' commit` succeeds and
+  `git log --format=%an` hands it straight back — so a cloned repository can
+  carry one into the byline under a commit subject, which sits in a bar one row
+  tall. Both bylines fold it now: the diff overlay's and the commit detail's,
+  which are separate functions.
+
 - **A changed file's name draws on one row of the source-control panel.**
   tty7 asks git for `--porcelain=v2 -z` precisely so paths arrive raw rather
   than C-quoted, which is right for opening a file and wrong for drawing one:
