@@ -1244,6 +1244,76 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
 mod tests {
     use super::*;
     use gpui::Action as _;
+    /// Every action with no default chord is named on the shortcuts page.
+    ///
+    /// The page has two halves: a table of default chords, and a list of the
+    /// rest — "more actions you can bind". An action with no chord of its own
+    /// appears only in that second list, so leaving it out makes the action
+    /// unfindable: it has no key to be discovered by and no row to be read on.
+    /// That is how the four `Document` actions arrived — the dock shipped with
+    /// them bindable and the page never learned they existed.
+    ///
+    /// The neighbouring test guards the other direction, that the page names
+    /// no action which has been renamed away. This one asks whether the page
+    /// is *complete*, which is the half a rename cannot break but a new
+    /// feature can.
+    ///
+    /// Compound spellings count, on the same convention that test already
+    /// keeps: the page writes `ResizePaneLeft/Right/Up/Down` and
+    /// `SelectWorkspace1`…`SelectWorkspace9` rather than one row each, so an
+    /// action is named when its stem is — a trailing direction or digit is
+    /// part of the family, not a separate entry.
+    #[test]
+    fn every_action_without_a_default_chord_is_on_the_shortcuts_page() {
+        const PAGE: &str = include_str!("../../docs/reference/keyboard-shortcuts.mdx");
+
+        let unbound: Vec<&str> = default_bindings()
+            .into_iter()
+            .filter(|(_, key)| key.is_empty())
+            .map(|(action, _)| action)
+            .collect();
+        assert!(
+            unbound.len() > 20,
+            "only {} chordless actions were found, so the scan has stopped \
+             matching how the table is written",
+            unbound.len()
+        );
+
+        let named = |action: &str| {
+            if PAGE.contains(action) {
+                return true;
+            }
+            // The page names a thing one of two ways: by action identifier in
+            // the rebinding lists, or by label in the chord table. `CopyText`
+            // is the second — `per_platform("", "ctrl-shift-c")` leaves it
+            // chordless on macOS while it is Ctrl+Shift+C elsewhere, so it
+            // earns a row in the table and is written "Copy" there.
+            let (_, label) = action_entry(action);
+            let label = label.trim_end_matches('…');
+            if !label.is_empty() && PAGE.contains(label) {
+                return true;
+            }
+            // `ResizePaneUp` under `ResizePaneLeft/Right/Up/Down`,
+            // `SelectWorkspace7` under `SelectWorkspace1`…`SelectWorkspace9`.
+            for suffix in ["Right", "Left", "Up", "Down"] {
+                if let Some(stem) = action.strip_suffix(suffix)
+                    && PAGE.contains(stem)
+                {
+                    return true;
+                }
+            }
+            let stem = action.trim_end_matches(|c: char| c.is_ascii_digit());
+            stem != action && PAGE.contains(stem)
+        };
+
+        let missing: Vec<&str> = unbound.into_iter().filter(|a| !named(a)).collect();
+        assert!(
+            missing.is_empty(),
+            "these actions can be bound but the shortcuts page never names them, \
+             so nothing on screen says they exist: {missing:?}"
+        );
+    }
+
     /// Every action the shortcuts page names still exists.
     ///
     /// The page is written by hand and lists most bindings by label and chord,
