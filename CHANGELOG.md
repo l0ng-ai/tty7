@@ -153,6 +153,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **In-app updates work again on macOS** (#708). Every "Update and Relaunch"
+  failed with `codesign did not report a designated requirement`, on every
+  build and both channels, with nothing a user could do but download the app by
+  hand. The updater compares the signing requirement of the staged app against
+  the installed one, and read `codesign -d -r-`'s answer off stderr — where
+  codesign puts only the `Executable=` header. The requirement is on stdout, so
+  the check could never match. Both streams are read now, and the parse is
+  split from the process call so a test can hold it against codesign itself
+  rather than against our belief about it.
+
 - **A tree pull that has to be retried no longer ends with the window deleting
   the tabs it was pulling.** A window told to rebuild itself from the machine —
   a daemon back as a new process, a restart handoff that was refused, a remote

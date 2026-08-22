@@ -278,6 +278,27 @@ mod macos {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// The designated requirement out of what `codesign -d -r-` printed.
+    ///
+    /// Split from the call below so the parse can be exercised without a
+    /// bundle to point at — which is why nothing caught it reading the wrong
+    /// stream. `codesign` writes the requirement to **stdout** and puts only
+    /// the `-d` display header (`Executable=…`) on stderr, so a parse that
+    /// read stderr could never match: every in-app update on macOS failed
+    /// with "codesign did not report a designated requirement", on every
+    /// build and every release, with nothing a user could do about it (#708).
+    ///
+    /// Both streams are read, stdout first. Which stream carries which half is
+    /// codesign's own business and has moved before; a requirement found
+    /// anywhere in the output is the requirement, and the updater has no
+    /// reason to be the stricter party about where it was printed.
+    fn designated_requirement(stdout: &str, stderr: &str) -> Option<String> {
+        [stdout, stderr]
+            .into_iter()
+            .flat_map(str::lines)
+            .find_map(|line| line.strip_prefix("designated => ").map(str::to_string))
+    }
+
     fn signing_requirement(app: &Path) -> Result<String, String> {
         let output = Command::new("/usr/bin/codesign")
             .args(["-d", "-r-"])
@@ -296,10 +317,11 @@ mod macos {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        String::from_utf8_lossy(&output.stderr)
-            .lines()
-            .find_map(|line| line.strip_prefix("designated => ").map(str::to_string))
-            .ok_or_else(|| "codesign did not report a designated requirement".to_string())
+        designated_requirement(
+            &String::from_utf8_lossy(&output.stdout),
+            &String::from_utf8_lossy(&output.stderr),
+        )
+        .ok_or_else(|| "codesign did not report a designated requirement".to_string())
     }
 
     fn replace_and_relaunch(
@@ -456,6 +478,58 @@ mod macos {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// The stream split, held against `codesign` itself rather than
+        /// against what the updater believes about it.
+        ///
+        /// This is the test #708 was missing. The parse read stderr, where
+        /// `codesign` puts only the display header, so every in-app update on
+        /// macOS failed — and no unit test could see it, because the parse was
+        /// fused to the process call and the process needs a signed bundle.
+        ///
+        /// `/bin/ls` is that bundle: Apple-signed, present on every macOS, and
+        /// it answers `-d -r-` with a designated requirement of its own. If
+        /// this ever fails because the requirement moved streams again, the
+        /// function under test already reads both — so it failing means
+        /// `codesign` stopped printing one at all, which the updater must not
+        /// discover from a user's failed update.
+        #[test]
+        fn the_designated_requirement_is_read_off_the_stream_codesign_uses() {
+            let out = Command::new("/usr/bin/codesign")
+                .args(["-d", "-r-", "/bin/ls"])
+                .output()
+                .expect("codesign is part of macOS");
+            assert!(out.status.success(), "codesign refused /bin/ls");
+
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let requirement = designated_requirement(&stdout, &stderr)
+                .expect("codesign reports a designated requirement for /bin/ls");
+            assert!(
+                requirement.contains("identifier"),
+                "a designated requirement names an identifier: {requirement:?}"
+            );
+
+            // Named rather than merely relied on: the updater used to read
+            // only the stream that carries none of it.
+            assert!(
+                stdout.contains("designated => "),
+                "the requirement is on stdout; if this moved, so must the doc above"
+            );
+        }
+
+        /// Reading both streams is what keeps the choice above from being a
+        /// guess about a future macOS.
+        #[test]
+        fn a_requirement_on_either_stream_is_found_and_neither_is_an_error() {
+            let line = "designated => identifier \"com.example.app\" and anchor apple";
+            let want = Some("identifier \"com.example.app\" and anchor apple".to_string());
+
+            assert_eq!(designated_requirement(line, "Executable=/x"), want);
+            assert_eq!(designated_requirement("Executable=/x", line), want);
+            assert_eq!(designated_requirement("Executable=/x", ""), None);
+            assert_eq!(designated_requirement("", ""), None);
+        }
 
         fn bundle(path: &Path, marker: &str) {
             fs::create_dir_all(path.join("Contents/MacOS")).unwrap();
