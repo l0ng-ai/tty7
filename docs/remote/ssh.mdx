@@ -116,6 +116,11 @@ the current pane. Useful after a laptop sleeps or a network changes.
 
 - No fallback to the system `ssh` binary
 - No `Match` or `canonicalize*` directives from `~/.ssh/config`
+- No Unix-socket or service-name forwards from `~/.ssh/config`. A forward rule
+  holds a host and a numeric port, so OpenSSH spellings like
+  `LocalForward /run/docker.sock ...` or `LocalForward 8080 localhost:http` have
+  nowhere to go. They are listed in the import report rather than dropped
+  quietly
 - No GSSAPI *directives* from `~/.ssh/config`. Kerberos `gssapi-with-mic` itself
   is supported — pick **GSSAPI** in a profile's Auth field — it is just not
   something the config-file resolution path reads

@@ -708,7 +708,7 @@ fn ignored_options(blocks: &[HostBlock]) -> Vec<IgnoredOption> {
         hosts.sort();
         hosts.dedup();
         for opt in &block.options {
-            if option_is_supported(&opt.key) {
+            if option_is_carried(&opt.key, &opt.value) {
                 continue;
             }
             // Keyed on the lowercased form so `IdentityAgent` under one host
@@ -741,7 +741,22 @@ fn ignored_options(blocks: &[HostBlock]) -> Vec<IgnoredOption> {
 /// same question and a hand-copied pair of lists is a thing that drifts.
 /// `every_supported_keyword_is_kept` sets all twenty of these in one config and
 /// fails if any of them comes back in the report as dropped.
-fn option_is_supported(key: &str) -> bool {
+///
+/// The value matters for the three forwarding keywords, because knowing the
+/// keyword is not the same as being able to carry what it says. OpenSSH accepts
+/// a Unix socket on either end of a forward and a service name where a port
+/// goes -- `LocalForward /run/docker.sock ...`, `LocalForward 8080
+/// localhost:http` -- and a `ForwardRule` holds a host and a `u16`, so neither
+/// survives `parse_forward_rule`. Answering by keyword alone reported those as
+/// kept while `resolve_alias` dropped them, which is the worst of the three
+/// possible answers: the tunnel is not there and the report says it is.
+fn option_is_carried(key: &str, value: &str) -> bool {
+    match key {
+        "localforward" => return parse_forward_rule(ForwardKind::Local, value).is_some(),
+        "remoteforward" => return parse_forward_rule(ForwardKind::Remote, value).is_some(),
+        "dynamicforward" => return parse_forward_rule(ForwardKind::Dynamic, value).is_some(),
+        _ => {}
+    }
     matches!(
         key,
         "hostname"
@@ -1030,6 +1045,75 @@ mod tests {
     /// own directory agrees for `~/.ssh/config` and diverges one level down,
     /// where `Include extra.conf` inside `~/.ssh/conf.d/x.conf` would reach
     /// `~/.ssh/conf.d/extra.conf` instead of the file ssh reads.
+    /// A forward tty7 cannot hold is reported, not dropped in silence.
+    ///
+    /// OpenSSH accepts a Unix socket on either end of a forward and a service
+    /// name wherever a port goes -- `ssh -G` on this very config answers
+    /// `localforward /tmp/my.sock [localhost]:80` and turns `localhost:http`
+    /// into port 80. A `ForwardRule` holds a host and a `u16`, so
+    /// `parse_forward_rule` returns `None` for all of them and the rule never
+    /// reaches the profile.
+    ///
+    /// That much is a limitation. What made it a bug is that the report
+    /// answered by keyword: `LocalForward` was on the supported list, so the
+    /// import said it had kept a forward it had thrown away, and someone whose
+    /// tunnel never came up had nothing to read. `docs/remote/ssh.mdx` now
+    /// lists this beside the other omissions, and the report names it.
+    ///
+    /// The forwards that do fit still have to come through untouched, or the
+    /// value-aware check would have bought honesty by reporting everything.
+    #[test]
+    fn a_forward_that_cannot_be_held_is_reported_rather_than_dropped() {
+        const SSH_DOC: &str = include_str!("../../docs/remote/ssh.mdx");
+        assert!(
+            SSH_DOC.contains("Unix-socket or service-name forwards"),
+            "the page has to say which forwards do not come across"
+        );
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = dir.path().join("config");
+        std::fs::write(
+            &cfg,
+            "Host fwd\n\
+             \x20 HostName fwd.example.com\n\
+             \x20 LocalForward /tmp/my.sock localhost:80\n\
+             \x20 LocalForward 8080 /tmp/remote.sock\n\
+             \x20 LocalForward 8081 localhost:http\n\
+             \x20 RemoteForward /tmp/r.sock localhost:80\n\
+             \x20 LocalForward 9000 localhost:90\n\
+             \x20 DynamicForward 1080\n",
+        )
+        .unwrap();
+
+        let report = import_report_from(cfg.clone(), dir.path());
+        let profile = &report.profiles.first().expect("one host").profile;
+        let kept: Vec<(u16, String, u16)> = profile
+            .forwards
+            .iter()
+            .map(|f| (f.bind.port, f.target.host.clone(), f.target.port))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![(9000, "localhost".to_string(), 90), (1080, String::new(), 0)],
+            "the forwards that fit a host and a port still come across whole"
+        );
+
+        let named: Vec<&str> = report
+            .ignored
+            .iter()
+            .map(|i| i.option.as_str())
+            .collect();
+        assert!(
+            named.contains(&"LocalForward") && named.contains(&"RemoteForward"),
+            "the four that were dropped have to appear in the report, spelled as \
+             the file spells them -- got {named:?}"
+        );
+        assert!(
+            !named.contains(&"DynamicForward"),
+            "a forward that came across whole is not an omission -- got {named:?}"
+        );
+    }
+
     /// A `Match` block's settings do not reach an imported profile.
     ///
     /// `docs/remote/ssh.mdx` lists "No `Match` or `canonicalize*` directives"
@@ -1623,3 +1707,4 @@ mod tests {
         crate::testutil::temp_root(&format!("ssh-config-test-{name}"))
     }
 }
+

@@ -153,6 +153,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An `ssh_config` forward tty7 cannot hold is now named in the import
+  report instead of vanishing.** OpenSSH accepts a Unix socket on either end
+  of a forward and a service name wherever a port goes —
+  `LocalForward /run/docker.sock ...`, `LocalForward 8080 localhost:http`. A
+  tty7 forward rule holds a host and a numeric port, so none of those parse,
+  and the rule never reached the profile. The report answered by keyword, so
+  it said `LocalForward` had been kept: the tunnel was not there and nothing
+  said why. The check now looks at the value, and `docs/remote/ssh.mdx` lists
+  the limitation beside the others.
+
 - **The file tree now ignores the same files git does when a `.gitignore`
   pattern and the name on disk differ in case.** `git init` turns on
   `core.ignorecase` after probing the filesystem, so it is on for essentially
