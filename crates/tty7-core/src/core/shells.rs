@@ -61,6 +61,37 @@ pub fn inventory() -> ShellInventory {
     inventory
 }
 
+/// Why `program` could not be launched, if there is a reason to be had.
+///
+/// "Program", not "shell": the same check stands in front of the configured
+/// shell and of a command handed to `tty7 run`, and calling the latter a shell
+/// tells someone who typed `tty7 run -- ./build.sh` that tty7 misunderstood
+/// what they asked for. The caller supplies the context — the CLI prefixes
+/// "spawning `…`" — so the sentence only has to carry the fact.
+///
+/// Only a program given as a path can be checked here; a bare name is resolved
+/// through PATH by the OS, and guessing at that would be worse than silence.
+pub fn program_problem(program: &str) -> Option<String> {
+    let path = std::path::Path::new(program);
+    if path.components().count() < 2 {
+        return None;
+    }
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Some(format!("no such program on this machine: {program}"));
+    };
+    if meta.is_dir() {
+        return Some(format!("that program is a directory: {program}"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return Some(format!("that program is not executable: {program}"));
+        }
+    }
+    None
+}
+
 /// Adds the user's own menu entries after everything that was detected.
 ///
 /// After, not among: the detected list is ordered so the shell a new tab

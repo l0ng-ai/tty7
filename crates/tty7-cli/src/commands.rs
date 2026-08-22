@@ -1882,6 +1882,32 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
             ),
         ]);
     }
+    // The configured shell is what every new tab and every `tty7 new` launches,
+    // so a `shell` naming something that is not there breaks all of them — and
+    // the config row above says `ok`, because the file parses perfectly well.
+    // `custom_shells` was already checked here and only costs a menu row; this
+    // one costs the whole app, and was the one nobody asked about.
+    //
+    // Local only, like the hooks row: under `-m` the shell is resolved on the
+    // far machine and a path checked here would answer about the wrong disk.
+    let shell_problem = config_ok
+        .then(|| {
+            backend.is_this_machine().then(|| {
+                loaded
+                    .0
+                    .shell
+                    .as_ref()
+                    .and_then(|s| tty7_core::core::shells::program_problem(&s.program))
+            })
+        })
+        .flatten()
+        .flatten();
+    if let Some(problem) = &shell_problem {
+        rows.push(vec![
+            "shell".to_string(),
+            format!("{problem} — every new tab and `tty7 new` fails until this is fixed"),
+        ]);
+    }
     if !config_dir_writable {
         rows.push(vec![
             "config dir".to_string(),
@@ -2004,6 +2030,7 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
                 "ok": config_ok,
                 "state": config_state,
                 "dir_writable": config_dir_writable,
+                "shell_problem": shell_problem,
             },
             "hooks": hooks_json(&hooks),
         }),
@@ -2018,6 +2045,9 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     if !config_dir_writable {
         eprintln!("tty7: doctor: the config directory cannot be written to");
     }
+    if shell_problem.is_some() {
+        eprintln!("tty7: doctor: the configured shell cannot be launched");
+    }
     if report.json["server"]["reachable"] == false {
         // doctor is the verb people run when something is not working, so an
         // unreachable server is *the* finding — not a row to exit 0 over:
@@ -2026,7 +2056,7 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
         eprintln!("tty7: doctor: the server is unreachable");
         return Ok(Outcome::Exit(1, report));
     }
-    if !config_ok || !config_dir_writable {
+    if !config_ok || !config_dir_writable || shell_problem.is_some() {
         return Ok(Outcome::Exit(1, report));
     }
     Ok(Outcome::Report(report))

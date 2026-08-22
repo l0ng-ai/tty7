@@ -153,6 +153,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`doctor` now checks the configured shell.** A `shell` naming something
+  that is not there — missing, a directory, not executable — makes every new
+  tab and every `tty7 new` fail, while `doctor` reported `config ok`, because
+  the file parses perfectly well. It already checked `custom_shells`, which
+  only costs a menu row; the setting that costs the whole app was the one
+  nobody asked about. The check is the daemon's own, moved somewhere both can
+  reach rather than written twice, so the row says exactly what the refusal
+  will say. A shell given as a bare name is still left to `PATH`, and under
+  `-m` the row is skipped, because the shell resolves on the far machine.
+
 - **A config file that will not load now says what is wrong and where.**
   `doctor` reported "NOT VALID JSON" for three different mistakes, and two of
   them were valid JSON: `"font_size": "big"`, or a string where an object goes,

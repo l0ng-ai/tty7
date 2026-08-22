@@ -11,6 +11,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::core::kitty_graphics::{GraphicsSniffer, Segment, Sniffed};
 use crate::core::osc::OscTokenizer;
+use crate::core::shells::program_problem as shell_program_problem;
 use crate::daemon::protocol::{
     AuthResponse, DaemonMsg, MAX_FRAME, NativeSshSpec, PaneInfo, RemoteContext, RemoteKind,
     ShellSpec, WinSize,
@@ -127,35 +128,6 @@ struct SpawnConfig {
 /// "daemon refused Spawn: spawn failed: Unable to spawn … (ENOENT: No such
 /// file or directory)" — and the one fact that matters is buried in it.
 ///
-/// "Program", not "shell": the same check stands in front of the configured
-/// shell and of a command handed to `tty7 run`, and calling the latter a shell
-/// tells someone who typed `tty7 run -- ./build.sh` that tty7 misunderstood
-/// what they asked for. The caller supplies the context — the CLI prefixes
-/// "spawning `…`" — so the sentence only has to carry the fact.
-///
-/// Only a program given as a path can be checked here; a bare name is resolved
-/// through PATH by the OS, and guessing at that would be worse than silence.
-fn shell_program_problem(program: &str) -> Option<String> {
-    let path = std::path::Path::new(program);
-    if path.components().count() < 2 {
-        return None;
-    }
-    let Ok(meta) = std::fs::metadata(path) else {
-        return Some(format!("no such program on this machine: {program}"));
-    };
-    if meta.is_dir() {
-        return Some(format!("that program is a directory: {program}"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if meta.permissions().mode() & 0o111 == 0 {
-            return Some(format!("that program is not executable: {program}"));
-        }
-    }
-    None
-}
-
 fn build_spawn_config(
     pane: u64,
     cwd: Option<PathBuf>,
