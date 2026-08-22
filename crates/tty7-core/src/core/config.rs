@@ -1495,8 +1495,6 @@ mod tests {
         );
     }
 
-    /// What a ninth corruption does to the eight kept copies.
-    ///
     /// What `doctor` can find out about a tree that was set aside.
     ///
     /// Quarantining a machine tree costs the user every workspace on the
@@ -1545,6 +1543,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// What a ninth corruption does to the eight kept copies.
+    ///
     /// `quarantine_path` ends in `unwrap_or(base)`, which reads like a
     /// defensive branch and is the wrap: the cap is on how much history a
     /// config directory may accumulate, and the oldest copy is what gives way.
