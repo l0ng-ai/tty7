@@ -217,6 +217,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is the wrong conclusion to reach while reading a log to work out when
   something happened.
 
+- **A keybinding you set for `⌘+` is no longer silently overridden.** gpui
+  resolves a keystroke by context depth and then by registration order, later
+  winning, and tty7's fixed bindings were registered after the config — so the
+  one *global* entry among them, the font-size step on `⌘+`, beat anything a
+  config asked for on that chord, with no error and nothing in the keybindings
+  UI to explain it. The fixed bindings are registered first now. The others are
+  unaffected: they are scoped to Terminal, Switcher and Palette, which are
+  deeper contexts than a config binding can name, and depth is compared before
+  order. What "fixed" was for is that they exist at all — they are not in the
+  config table, so a rebuild replaying only the config would drop them — not
+  that they outrank what somebody typed.
+
 - **A commit author's name draws on one row.** git refuses a control
   character in a *branch* name and accepts one in an author name without
   comment — `git -c user.name=$'Bad\rName' commit` succeeds and

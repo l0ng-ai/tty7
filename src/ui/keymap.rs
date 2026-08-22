@@ -80,8 +80,21 @@ fn rebuild_keymap(cx: &mut App) {
         .try_global::<BaseBindings>()
         .map(|base| base.0.clone())
         .unwrap_or_default();
-    bindings.extend(action_bindings(&effective));
+    // Fixed first, the config after it. gpui sorts a keystroke's matches by
+    // context depth and then by *index*, later winning — so adding these last
+    // let the one global entry among them, `secondary-+`, beat a config that
+    // asked for that chord. The user got `IncreaseFontSize` and no word about
+    // why, which is the same silence this tree already went to some trouble to
+    // remove from an unparseable chord and a clamped setting.
+    //
+    // The other fixed bindings are unaffected: `Terminal`, `Switcher` and
+    // `Palette` are deeper contexts than a config binding's, and depth is
+    // compared before index. What "fixed" was ever meant to buy them is that
+    // they *exist* — they are not in `effective_bindings`, so a rebuild that
+    // replayed only the config would drop them — not that they outrank what
+    // somebody typed.
     bindings.extend(fixed_bindings());
+    bindings.extend(action_bindings(&effective));
     cx.clear_key_bindings();
     cx.bind_keys(bindings);
 }
@@ -1511,6 +1524,42 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     const CTRL: &str = "Ctrl";
 
+    /// A fixed binding does not outrank the config.
+    ///
+    /// gpui resolves a keystroke by context depth first and then by index,
+    /// with the later-added binding winning. `fixed_bindings` were added after
+    /// the config, so the one *global* entry among them — `secondary-+` for
+    /// the font step — could not be rebound: a config asking for that chord
+    /// got `IncreaseFontSize` instead, silently. This tree has already gone to
+    /// some trouble to stop a keybinding being ignored without a word.
+    ///
+    /// The context-scoped ones are unaffected by the order, because depth is
+    /// compared first, and they need to win: a `tab` bound in `Terminal` or
+    /// `Switcher` is deeper than anything the config can express.
+    ///
+    /// Read from the source, because the property is the order of two lines
+    /// and exercising it would mean standing up a gpui `App` to press a key
+    /// into.
+    #[test]
+    fn the_fixed_bindings_are_registered_before_the_config_not_after() {
+        const SRC: &str = include_str!("keymap.rs");
+        let start = SRC
+            .find("fn rebuild_keymap(")
+            .expect("the keymap is rebuilt here");
+        let body = &SRC[start..];
+        let body = &body[..body.find("\n}\n").expect("the function ends")];
+
+        let fixed = body.find("bindings.extend(fixed_bindings())").expect("fixed");
+        let config = body
+            .find("bindings.extend(action_bindings(")
+            .expect("the config's own bindings");
+        assert!(
+            fixed < config,
+            "the fixed bindings are added after the config, so the global one \
+             among them shadows a chord the user asked for"
+        );
+    }
+
     #[test]
     fn key_tokens_maps_modifiers_to_glyphs() {
         assert_eq!(key_tokens("secondary-t"), vec![SECONDARY, "T"]);
@@ -2206,3 +2255,4 @@ mod gpui_tests {
         });
     }
 }
+
