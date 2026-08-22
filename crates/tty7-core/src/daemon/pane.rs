@@ -2802,11 +2802,24 @@ fn apply_agent(
         stamp_launch_argv(st, argv);
         return;
     }
-    if agent.is_none() && st.agent_session.is_some() {
+    // One agent giving way to another, with no gap the probe could see.
+    // `claude; codex` is that: the probe runs twice a second, and the shell
+    // starts the second one microseconds after the first exits, so the pane
+    // goes straight from one to the other and never reads as agent-less. The
+    // session belongs to the agent that opened it -- its id, its last message,
+    // its status, the argv it was launched with -- and carrying that across
+    // makes the new pane claim a turn it never took and offers to resume a
+    // conversation the new agent has never heard of.
+    //
+    // Not on `None` -> `Some`: an agent's own hooks reach the pane before the
+    // process probe does, and that session is this agent's. The probe catching
+    // up is not a change of hands.
+    let handed_over = matches!((st.agent, agent), (Some(was), Some(now)) if was != now);
+    if (agent.is_none() || handed_over) && st.agent_session.is_some() {
         st.agent_session = None;
         notify(st, DaemonMsg::AgentStatus(None));
     }
-    if agent.is_none() {
+    if agent.is_none() || handed_over {
         st.agent_argv = None;
     }
     notify(st, DaemonMsg::Agent(agent));
@@ -4632,6 +4645,71 @@ mod tests {
         assert!(st.agent_session.is_none());
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::AgentStatus(None))));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Agent(None))));
+    }
+
+    /// A second agent in the same pane does not inherit the first one's turn.
+    ///
+    /// The probe reads the foreground process twice a second, and `claude;
+    /// codex` starts the second one microseconds after the first exits -- so
+    /// the pane goes straight from `Some(Claude)` to `Some(Codex)` and is
+    /// never seen agent-less. Clearing only on the way to `None` meant Codex
+    /// arrived already Done, wearing Claude's last message, holding Claude's
+    /// session id and the argv Claude was launched with. Resume would have
+    /// offered `codex --resume <a uuid Codex has never issued>`, and the tab
+    /// showed a finished turn Codex had not taken.
+    ///
+    /// The other direction must not clear: an agent's own hooks reach the pane
+    /// before the process probe does, so `None` -> `Some` is the probe catching
+    /// up with a session that already belongs to the agent arriving.
+    #[test]
+    fn a_pane_changing_agents_does_not_hand_over_the_session() {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
+
+        let claude_session = || AgentSessionState {
+            status: AgentStatus::Done,
+            message: Some("all set".into()),
+            session_id: Some("claude-uuid".into()),
+            launch_argv: Some(vec!["claude".into()]),
+            rich: true,
+            ..Default::default()
+        };
+
+        let mut st = test_state(true);
+        st.agent = Some(CLIAgent::Claude);
+        st.agent_argv = Some(vec!["claude".into()]);
+        st.agent_session = Some(claude_session());
+
+        apply_agent(&mut st, Some((CLIAgent::Codex, vec!["codex".into()])));
+        assert_eq!(st.agent, Some(CLIAgent::Codex));
+        assert!(
+            st.agent_session.is_none(),
+            "Codex must not start out holding Claude's session: {:?}",
+            st.agent_session
+        );
+
+        // Same agent seen again is not a hand-over.
+        let mut st = test_state(true);
+        st.agent = Some(CLIAgent::Claude);
+        st.agent_session = Some(claude_session());
+        apply_agent(&mut st, Some((CLIAgent::Claude, vec!["claude".into()])));
+        assert_eq!(
+            st.agent_session.as_ref().and_then(|s| s.session_id.clone()),
+            Some("claude-uuid".to_string()),
+            "the same agent keeps its own turn"
+        );
+
+        // Hooks first, probe second: the session is already the arriving
+        // agent's, and the probe catching up must leave it alone.
+        let mut st = test_state(true);
+        st.agent = None;
+        st.agent_session = Some(claude_session());
+        apply_agent(&mut st, Some((CLIAgent::Claude, vec!["claude".into()])));
+        assert_eq!(
+            st.agent_session.as_ref().and_then(|s| s.session_id.clone()),
+            Some("claude-uuid".to_string()),
+            "the probe catching up with a session that is already this agent's \
+             must not throw it away"
+        );
     }
 
     #[test]

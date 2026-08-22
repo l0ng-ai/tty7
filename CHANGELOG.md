@@ -153,6 +153,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A second agent in the same pane no longer inherits the first one's
+  turn.** The foreground process is read twice a second, and a chained
+  `claude; codex` starts the second agent microseconds after the first exits
+  — so the pane goes straight from one to the other and is never seen
+  agent-less. Only the way to *no* agent cleared the session, so Codex
+  arrived already showing Done, wearing Claude's last message, holding
+  Claude's session id and the argv Claude was launched with. Resume offered
+  `codex --resume` on a uuid Codex had never issued. A change of agent now
+  clears the session; an agent's own hooks arriving before the process probe
+  still do not.
+
 - **An `ssh_config` forward tty7 cannot hold is now named in the import
   report instead of vanishing.** OpenSSH accepts a Unix socket on either end
   of a forward and a service name wherever a port goes —
