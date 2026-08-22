@@ -110,6 +110,47 @@ impl Tty7App {
         self.toggle_diff_overlay_at(host, cwd, None, window, cx)
     }
 
+    /// The sidebar's `+N −M`, which names a row that may not be the tab in
+    /// front.
+    ///
+    /// The overlay is stored per tab and `open_diff_overlay` writes to the
+    /// *active* one, so the row's tab has to come forward before it opens.
+    /// Without that, clicking another row's counts read that row's repository
+    /// and opened it as an overlay on the tab already in front: the front tab
+    /// kept focus and showed a diff belonging to a different repository, and
+    /// the overlay stayed filed under the front tab afterwards (#706).
+    ///
+    /// Arriving from another tab opens rather than toggles. The click asked to
+    /// see this diff, and a target that already had it open and in front would
+    /// answer a request to show it by closing it.
+    pub(crate) fn show_tab_diff_overlay(
+        &mut self,
+        index: usize,
+        host: crate::ui::host_ops::HostId,
+        cwd: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // `activate` no-ops on an index it does not have, which would leave the
+        // open below writing to whichever tab happens to be in front — the bug
+        // itself. A row can outlive its tab between render and click.
+        if index >= self.tabs.len() {
+            return;
+        }
+        let switching = self.active != index;
+        self.activate(index, window, cx);
+        self.open_diff_overlay_inner(
+            host,
+            cwd,
+            DiffSource::Head,
+            None,
+            // Only a click on the tab already in front is a toggle.
+            !switching,
+            window,
+            cx,
+        );
+    }
+
     pub(crate) fn toggle_diff_overlay_at(
         &mut self,
         host: crate::ui::host_ops::HostId,
@@ -132,6 +173,27 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_diff_overlay_inner(host, cwd, source, focus, true, window, cx)
+    }
+
+    /// `may_close` is what separates a toggle from a request to see something.
+    ///
+    /// Every caller that clicks the same control twice wants the second click
+    /// to put the overlay away, so they pass `true`. A click that *arrives from
+    /// another tab* has not asked for that: it named a diff it cannot currently
+    /// see, and answering by closing the one already open there would leave the
+    /// screen showing nothing it asked for.
+    #[allow(clippy::too_many_arguments)]
+    fn open_diff_overlay_inner(
+        &mut self,
+        host: crate::ui::host_ops::HostId,
+        cwd: PathBuf,
+        source: DiffSource,
+        focus: Option<String>,
+        may_close: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let active = self.active;
         let was_front = self.tabs.get(active).is_some_and(|t| {
             t.overlay_top == crate::ui::app::OverlayTop::Diff || !self.code_panel_visible()
@@ -148,7 +210,7 @@ impl Tty7App {
             .and_then(|t| t.diff_overlay.as_mut())
             .filter(|o| o.cwd == cwd && o.host_id == host && o.source == source)
         {
-            Some(o) if o.focus == focus && was_front => {
+            Some(o) if o.focus == focus && was_front && may_close => {
                 self.close_diff_overlay(window, cx);
                 return;
             }
@@ -2577,5 +2639,103 @@ mod render_idle_gpui_tests {
             "a settled overlay must stop re-reading its own diff"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tab_target_gpui_tests {
+    use std::path::PathBuf;
+
+    use gpui::TestAppContext;
+
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::host_ops::HostId;
+
+    /// #706: the sidebar's `+N −M` belongs to the row it is drawn on, not to
+    /// the tab in front.
+    ///
+    /// The counts used to call `toggle_diff_overlay`, which writes to the
+    /// active tab. Clicking tab B's counts from tab A therefore opened B's
+    /// repository as an overlay *on A*: A kept focus, showed a diff from a
+    /// directory it has nothing to do with, and kept that overlay filed under
+    /// its own name afterwards.
+    #[gpui::test]
+    fn another_rows_counts_open_that_rows_tab(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        let cwd = PathBuf::from("/w/repo-b");
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(app.active, 0, "the harness starts on the first tab");
+            app.show_tab_diff_overlay(1, HostId::LOCAL, cwd.clone(), window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            assert_eq!(app.active, 1, "the row's own tab comes forward");
+            assert!(
+                app.tabs[0].diff_overlay.is_none(),
+                "the tab that was in front keeps no overlay it never asked for"
+            );
+            let overlay = app.tabs[1]
+                .diff_overlay
+                .as_ref()
+                .expect("the overlay is filed under the tab whose counts were clicked");
+            assert_eq!(overlay.cwd, cwd, "and it opens on that row's repository");
+        });
+    }
+
+    /// Arriving from another tab opens; a second click, now that the tab is
+    /// already in front, toggles it away. Without the first half a target that
+    /// already had the overlay open would answer "show me this" by closing it.
+    #[gpui::test]
+    fn a_click_from_elsewhere_opens_and_the_next_one_closes(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        let cwd = PathBuf::from("/w/repo-b");
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.show_tab_diff_overlay(1, HostId::LOCAL, cwd.clone(), window, cx);
+        });
+        // Reached from tab 0 again: still an open, not a close.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.activate(0, window, cx);
+            app.show_tab_diff_overlay(1, HostId::LOCAL, cwd.clone(), window, cx);
+        });
+        app.update(cx, |app, _| {
+            assert!(
+                app.tabs[1].diff_overlay.is_some(),
+                "a click that switches tabs asks to see the diff, not to hide it"
+            );
+        });
+
+        // Already in front, so this one is the toggle.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.show_tab_diff_overlay(1, HostId::LOCAL, cwd.clone(), window, cx);
+        });
+        app.update(cx, |app, _| {
+            assert!(
+                app.tabs[1].diff_overlay.is_none(),
+                "clicking the counts of the tab already in front closes it again"
+            );
+        });
+    }
+
+    /// A row can outlive the tab it was drawn for. `activate` no-ops on an
+    /// index it does not have, so without the bounds check the open would fall
+    /// through to whichever tab happened to be in front — #706 again, by
+    /// another route.
+    #[gpui::test]
+    fn a_row_index_that_no_longer_exists_opens_nothing(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.show_tab_diff_overlay(7, HostId::LOCAL, PathBuf::from("/w/gone"), window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            assert_eq!(app.active, 0, "nothing came forward");
+            assert!(
+                app.tabs.iter().all(|t| t.diff_overlay.is_none()),
+                "and no tab picked up the missing row's overlay"
+            );
+        });
     }
 }

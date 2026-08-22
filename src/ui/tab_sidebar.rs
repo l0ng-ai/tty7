@@ -437,7 +437,15 @@ impl Tty7App {
                                         MouseButton::Left,
                                         cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                                             cx.stop_propagation();
-                                            this.toggle_diff_overlay(host, cwd.clone(), window, cx);
+                                            // `i`, not the active tab: these
+                                            // counts belong to this row (#706).
+                                            this.show_tab_diff_overlay(
+                                                i,
+                                                host,
+                                                cwd.clone(),
+                                                window,
+                                                cx,
+                                            );
                                         }),
                                     )
                             });
