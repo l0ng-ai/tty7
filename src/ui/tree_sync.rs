@@ -1375,13 +1375,24 @@ pub(crate) fn fresh_workspace_name(cx: &App, host: HostId) -> String {
 ///
 /// `answered` is the machine's answer. A chosen name it read back was spent by
 /// the create that carried it, and there is nothing left to do. One it did not
-/// means the create never ran — the workspace was already there, or the other
-/// create won the race with a stale idea of the name — so it goes out as the
-/// rename it has become. Either way the name is owed only once.
+/// means the create never ran, and there are two ways that happens: the other
+/// create of this window's own pair won the race with a stale idea of the
+/// name, or the workspace was simply already there. Either way the name is
+/// owed only once — `take` runs whatever is decided below.
+///
+/// `holds_tabs` is what separates those two. A workspace this window's sibling
+/// create just made is empty, so renaming it is finishing this window's own
+/// job. A workspace that already holds tabs was made by somebody else and is
+/// somebody else's: a client opening a populated workspace on another machine
+/// used to rename it to the codename *its* side had rolled, so a workspace
+/// full of another user's running panes took the connecting client's name
+/// (#716). Adopting a workspace is not creating one, and only the create was
+/// ever owed a name.
 fn settle_chosen_name(
     cx: &mut App,
     client_ws: WorkspaceId,
     answered: Option<String>,
+    holds_tabs: bool,
 ) -> Option<String> {
     let chosen = cx
         .default_global::<TreeSync>()
@@ -1390,6 +1401,8 @@ fn settle_chosen_name(
         .and_then(|state| state.chosen_name.take());
     match chosen {
         Some(chosen) if answered.as_deref() == Some(chosen.as_str()) => answered,
+        // Adopted, not created. The machine's name stands.
+        Some(_) if holds_tabs => answered,
         Some(chosen) => {
             rename_workspace(cx, client_ws, Some(chosen.clone()));
             Some(chosen)
@@ -1478,12 +1491,13 @@ fn finish_prime(
     };
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
+    let holds_tabs = !landed.0.is_empty();
     crate::ui::machine_mirror::MachineMirrors::note_synced_workspace(
         cx, host, machine_ws, landed.0, landed.1,
     );
     // The pull above is the only place this window will hear the workspace's
     // name — it is left out of the deltas its own create raises (#604).
-    let name = settle_chosen_name(cx, client_ws, landed.2);
+    let name = settle_chosen_name(cx, client_ws, landed.2, holds_tabs);
     crate::ui::machine_mirror::MachineMirrors::note_workspace_name(cx, host, machine_ws, name);
     if !was_dirty {
         return;
@@ -2352,7 +2366,7 @@ fn settle_hydration(
         .find(|w| w.id == machine_ws)
         .and_then(|w| w.name.clone());
     crate::ui::machine_mirror::MachineMirrors::install(cx, host, machine);
-    let name = settle_chosen_name(cx, client_ws, answered);
+    let name = settle_chosen_name(cx, client_ws, answered, !mirror.tabs.is_empty());
     crate::ui::machine_mirror::MachineMirrors::note_workspace_name(cx, host, machine_ws, name);
     let machine_was_empty = mirror.tabs.is_empty();
     let was_dirty = {
@@ -3246,6 +3260,54 @@ mod tests {
                     .chosen_name
                     .is_none(),
                 "and it is owed only once"
+            );
+        });
+    }
+
+    /// #716: opening a workspace that another client already filled must not
+    /// rename it.
+    ///
+    /// The typed-name arbitration above exists for a create that never ran
+    /// because this window's *own* sibling create won the race. A workspace
+    /// that already holds tabs did not come from either of them — it belongs
+    /// to whoever built it — and the report is what that looked like from the
+    /// other end: a machine's workspace of nineteen live panes came back named
+    /// after the connecting client's local user, because the connecting side
+    /// spent a codename it had rolled for a workspace it thought it was
+    /// making.
+    ///
+    /// The name is still consumed. It was owed once, and adopting a workspace
+    /// is how it stops being owed — leaving it parked would only fire the
+    /// rename at the next pull instead.
+    #[gpui::test]
+    fn a_populated_workspace_keeps_the_name_its_own_machine_gave_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let (ws, view) = primed_window(cx, Some("sher1"));
+            let epoch = cx.default_global::<TreeSync>().windows[&ws].epoch;
+
+            finish_prime(
+                cx,
+                ws,
+                epoch,
+                Ok((
+                    WsMirror {
+                        tabs: vec![TreeTab::leaf(7), TreeTab::leaf(11)],
+                        active: None,
+                    },
+                    Some("alisher-work".into()),
+                )),
+            );
+
+            assert_eq!(
+                crate::ui::machine_mirror::display_name(cx, &view).as_deref(),
+                Some("alisher-work"),
+                "a workspace with tabs in it was not created here, so it keeps its own name"
+            );
+            assert!(
+                cx.default_global::<TreeSync>().windows[&ws]
+                    .chosen_name
+                    .is_none(),
+                "and the name stops being owed either way, so no later pull fires the rename"
             );
         });
     }
