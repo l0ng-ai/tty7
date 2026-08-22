@@ -5709,11 +5709,16 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> Entity<SliderState> {
         let scroll_mult = cx.global::<Config>().mouse_scroll_multiplier;
+        // Ends read from the clamp, not written again here: the slider used to
+        // span 0.5..=5.0 against a clamp of 0.1..=10, so the documented ends
+        // were unreachable from the window and a hand-set 8x sat under a thumb
+        // pinned at 5. The step is what the wider span costs — a tenth, so 1.00
+        // is still a position rather than something to be landed on between two.
         let scroll_slider = cx.new(|_| {
             SliderState::new()
-                .min(0.5)
-                .max(5.0)
-                .step(0.25)
+                .min(crate::core::config::MOUSE_SCROLL_MULTIPLIER_MIN)
+                .max(crate::core::config::MOUSE_SCROLL_MULTIPLIER_MAX)
+                .step(0.1)
                 .default_value(scroll_mult)
         });
         subs.push(cx.subscribe_in(

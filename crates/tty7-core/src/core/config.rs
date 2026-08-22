@@ -838,7 +838,9 @@ impl Config {
         if !self.mouse_scroll_multiplier.is_finite() || self.mouse_scroll_multiplier <= 0.0 {
             self.mouse_scroll_multiplier = Config::default().mouse_scroll_multiplier;
         }
-        self.mouse_scroll_multiplier = self.mouse_scroll_multiplier.clamp(0.1, 10.0);
+        self.mouse_scroll_multiplier = self
+            .mouse_scroll_multiplier
+            .clamp(MOUSE_SCROLL_MULTIPLIER_MIN, MOUSE_SCROLL_MULTIPLIER_MAX);
         self.notify_threshold_secs = self.notify_threshold_secs.clamp(1, 3600);
         self.window_opacity = self
             .window_opacity
@@ -1314,6 +1316,19 @@ pub const FONT_SIZE_MIN: f32 = 4.0;
 pub const FONT_SIZE_MAX: f32 = 256.0;
 pub const LINE_HEIGHT_MIN: f32 = 0.5;
 pub const LINE_HEIGHT_MAX: f32 = 4.0;
+
+/// How far a wheel notch is multiplied before it scrolls, on the same #550
+/// footing as the pairs above — with one difference worth naming: the UI is
+/// the half that was wrong here, not the file.
+///
+/// The settings slider spanned 0.5..=5.0 while this clamp and
+/// `docs/reference/configuration.mdx` both said 0.1..=10, so a documented,
+/// storable value could not be set from the window at all, and a hand-set 8×
+/// sat under a thumb pinned at the slider's own maximum. Its two sibling
+/// sliders (window opacity, background-image opacity) each span exactly their
+/// clamp; this one now reads its ends from here, so the two cannot part again.
+pub const MOUSE_SCROLL_MULTIPLIER_MIN: f32 = 0.1;
+pub const MOUSE_SCROLL_MULTIPLIER_MAX: f32 = 10.0;
 
 /// The side panels' width bounds, on the same #550 footing as the font pair.
 ///
@@ -2038,6 +2053,53 @@ mod tests {
         assert_eq!(clamp(0.0), default_document_ratio());
         assert_eq!(clamp(-1.0), default_document_ratio());
         assert_eq!(clamp(f32::NAN), default_document_ratio());
+    }
+
+    /// Both ends of the scroll multiplier survive a sanitize, and the reference
+    /// page still names the same pair.
+    ///
+    /// The slider reads its ends from these constants, so what this holds is
+    /// that the ends it offers are ends the file will actually keep — the half
+    /// that was broken when the slider spanned 0.5..=5.0 against this clamp.
+    /// The page is checked here rather than trusted because it is the third
+    /// copy of the range, and the one a reader meets first.
+    #[test]
+    fn the_scroll_multiplier_range_is_the_one_the_ui_and_the_page_offer() {
+        let sanitized = |m: f32| {
+            let mut cfg = Config {
+                mouse_scroll_multiplier: m,
+                ..Config::default()
+            };
+            cfg.sanitize();
+            cfg.mouse_scroll_multiplier
+        };
+        assert_eq!(
+            sanitized(MOUSE_SCROLL_MULTIPLIER_MIN),
+            MOUSE_SCROLL_MULTIPLIER_MIN
+        );
+        assert_eq!(
+            sanitized(MOUSE_SCROLL_MULTIPLIER_MAX),
+            MOUSE_SCROLL_MULTIPLIER_MAX
+        );
+        assert_eq!(
+            sanitized(MOUSE_SCROLL_MULTIPLIER_MAX * 2.0),
+            MOUSE_SCROLL_MULTIPLIER_MAX
+        );
+        assert_eq!(sanitized(-1.0), Config::default().mouse_scroll_multiplier);
+
+        const PAGE: &str = include_str!("../../../../docs/reference/configuration.mdx");
+        let row = PAGE
+            .lines()
+            .find(|l| l.contains("`mouse_scroll_multiplier`"))
+            .expect("the reference page lists mouse_scroll_multiplier");
+        let range = format!(
+            "{}\u{2013}{}",
+            MOUSE_SCROLL_MULTIPLIER_MIN, MOUSE_SCROLL_MULTIPLIER_MAX
+        );
+        assert!(
+            row.contains(&range),
+            "the reference page should say the range is {range}, but its row reads: {row}"
+        );
     }
 
     #[test]
