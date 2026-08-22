@@ -82,14 +82,49 @@ pub fn render(segments: &[CaptureSegment]) -> String {
     out
 }
 
+/// How many scrollback lines a segment of `bytes` can possibly need.
+///
+/// The grid's scrollback is what holds output this segment pushed off its own
+/// screen, and a segment can be far longer than one screenful — so too small a
+/// scrollback answers a different question than the raw form does, silently.
+///
+/// It used to be `Config::default()`'s 10k lines, on the reasoning that this
+/// was "the daemon ring's order of magnitude". Measured, it is not: the ring is
+/// capped in *bytes* (8 MiB), which at ordinary line lengths is nearer 100k
+/// lines. A pane that had printed 120k lines came back from raw `capture` at
+/// line 30,764 and from `capture --plain` at line 109,973 — nine tenths of the
+/// ring missing from the plain form, with nothing said and `--scrollback`
+/// unable to bring it back.
+///
+/// So the bound comes from the work. A row is started by a newline or by
+/// running out of columns, so counting both is an upper bound on the rows the
+/// segment can fill: one per newline, plus one per screenful of columns for
+/// whatever wraps.
+///
+/// `bytes / cols` alone is not enough, and the difference is the whole bug in
+/// miniature — a line shorter than the pane is wide still costs a full row, so
+/// dividing by the width under-counts exactly when lines are short, which is
+/// most output. Measured against a 120k-line pane it recovered sixty thousand
+/// of the missing lines and still stopped twenty thousand short of raw.
+///
+/// Over-estimating costs nothing: alacritty grows its history as lines arrive
+/// rather than allocating the maximum up front. And the whole thing is bounded
+/// on the other side by the daemon's ring, which cannot hand over more than it
+/// keeps.
+fn scrollback_for(bytes: &[u8], cols: usize) -> usize {
+    const FLOOR: usize = 10_000;
+    let newlines = bytes.iter().filter(|&&b| b == b'\n').count();
+    let wrapped = bytes.len().div_ceil(cols.max(1));
+    newlines.saturating_add(wrapped).max(FLOOR)
+}
+
 fn render_segment(size: WinSize, bytes: &[u8]) -> String {
     let size = GridSize::of(size);
-    // The scrollback the grid keeps is for output this segment pushed off its
-    // own screen: a segment can be far longer than one screenful, and dropping
-    // what scrolled away would answer a different question than the raw form
-    // does. `Config::default()` allows 10k lines, which is the daemon ring's
-    // order of magnitude.
-    let mut term = Term::new(Config::default(), &size, VoidListener);
+    let config = Config {
+        scrolling_history: scrollback_for(bytes, size.cols),
+        ..Config::default()
+    };
+    let mut term = Term::new(config, &size, VoidListener);
     // Spelled out because `Processor` is generic over its sync-timeout policy
     // and nothing here pins it; the default is the one the GUI parses with.
     let mut parser: Processor = Processor::new();
@@ -134,6 +169,63 @@ mod tests {
             cell_w: 8,
             cell_h: 16,
         }
+    }
+
+    /// A segment longer than the old fixed 10k scrollback keeps its head.
+    ///
+    /// `--plain` used to build every grid with `Config::default()`, whose 10k
+    /// lines were justified as "the daemon ring's order of magnitude". The ring
+    /// is capped in bytes (8 MiB), which at ordinary line lengths is nearer
+    /// 100k lines — so the plain form quietly answered with a fraction of what
+    /// the raw form did, and `--scrollback` could not bring the rest back. On a
+    /// pane that had printed 120,000 lines, raw began at line 30,764 and plain
+    /// at line 109,973.
+    ///
+    /// Short lines are the case that breaks a `bytes / cols` estimate, so they
+    /// are the case tested: 20,000 of them, each far narrower than the grid.
+    #[test]
+    fn a_segment_past_the_old_scrollback_is_not_silently_cut() {
+        let mut input = String::new();
+        for i in 1..=20_000 {
+            input.push_str(&format!("L{i}\r\n"));
+        }
+        let text = plain(200, 24, &input);
+        assert!(
+            text.contains("\nL1\n") || text.starts_with("L1\n"),
+            "the first line scrolled out of a grid too small to hold it"
+        );
+        assert!(text.contains("L20000"), "and the last line is still there");
+    }
+
+    /// The bound is rows, not bytes-per-column.
+    ///
+    /// A line shorter than the pane is wide still costs a whole row, so
+    /// dividing the byte count by the width under-counts exactly when lines are
+    /// short — which is most output. Counting newlines is what fixes that;
+    /// the wrap term covers the opposite case, one long line with no newline
+    /// in it at all.
+    #[test]
+    fn the_scrollback_bound_counts_rows_a_segment_can_reach() {
+        // 1,000 two-byte lines in a 200-column grid: 4,000 bytes, so a
+        // bytes/cols estimate says 20 rows for something that needs 1,000.
+        let short = b"a\n".repeat(1_000);
+        assert!(
+            scrollback_for(&short, 200) >= 1_000,
+            "one row per newline at minimum"
+        );
+
+        // One long line and no newline: the wrap term is what carries it.
+        let wide = vec![b'x'; 100_000];
+        assert!(
+            scrollback_for(&wide, 100) >= 1_000,
+            "100k bytes at 100 cols"
+        );
+
+        // Never below the old default, so nothing that used to fit stops
+        // fitting.
+        assert_eq!(scrollback_for(b"", 80), 10_000);
+        // A zero width is clamped rather than dividing by it.
+        assert!(scrollback_for(b"abc", 0) >= 10_000);
     }
 
     fn plain(cols: u16, rows: u16, bytes: &str) -> String {

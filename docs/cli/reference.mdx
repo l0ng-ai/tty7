@@ -177,6 +177,12 @@ the new prompt alone — everything above the banner needs `--scrollback`.
 decoded as UTF-8 (invalid bytes become U+FFFD). With `--plain`, those bytes
 replayed through a terminal grid and printed as the text they produced.
 
+Both forms cover the same span: the grid `--plain` replays through is sized to
+hold whatever the segment can fill, so it never answers with less of the pane
+than the raw form does. Rendering a full ring costs proportionate memory for
+the moment it takes — a few hundred MB for the 8 MiB maximum, and nothing worth
+measuring for an ordinary capture.
+
 Either way it is a snapshot, not a stream: it collects the replay, settles for
 ~300 ms, and returns. Call it again for a newer one.
 JSON: `{"pane","text"}`.
