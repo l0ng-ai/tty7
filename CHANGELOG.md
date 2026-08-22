@@ -188,6 +188,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expected f32 at line 1 column 20`. The window's notice appends it too, on its
   own line after the translated sentence.
 
+- **A workspace labelled by its directory draws on one row.** A workspace with
+  no name of its own is labelled by the directory its first pane sits in, and a
+  directory is bytes to the kernel — `mkdir $'proj\nname'` is a switcher label
+  with a newline in it, which grows the row and paints over what sits below.
+  Folding names as they are stored does not reach this one, because nobody
+  named it. The same fold now also covers a name that arrives already stored:
+  from an older build, or from a remote machine's tree, which is only as folded
+  as the server that wrote it — and the dialect version does not tell those
+  apart, because the wire shape never changed.
+
 - **A workspace or tab name is stored as one line.** `tty7 tab rename @1
   $'one\ntwo'` kept the newline verbatim, and a name is only ever drawn as a
   label — the layout breaks a label on a newline whatever its wrapping says,

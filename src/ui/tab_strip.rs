@@ -1270,10 +1270,14 @@ impl Tty7App {
         window: Option<&Window>,
         cx: &App,
     ) -> String {
+        // Folded here as well as in `normalize_name`, which only covers names
+        // this build stored: a tab named by an older build, or one arriving in
+        // a *remote* machine's tree, is only as folded as whatever wrote it.
+        // A label with a newline in it grows the row and paints over the strip.
         if let Some(name) = tab.name.as_ref() {
             let trimmed = name.trim();
             if !trimmed.is_empty() {
-                return trimmed.to_string();
+                return crate::terminal::view::one_line(trimmed);
             }
         }
         let (raw, home) = tab.leaf_title_and_home(window, cx);

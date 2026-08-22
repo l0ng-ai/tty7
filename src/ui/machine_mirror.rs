@@ -359,15 +359,30 @@ pub fn display_name(cx: &App, entry: &crate::core::session::WindowView) -> Optio
     }
 }
 
+/// The label for a workspace, folded to one line.
+///
+/// Both halves need the fold, for different reasons. The directory half is a
+/// name nobody composed: a directory is bytes to the kernel, so
+/// `mkdir $'proj\nname'` is a workspace label with a newline in it, and gpui
+/// breaks a label on one whatever its wrapping says — the switcher row grows
+/// and paints over what sits below.
+///
+/// The stored half is folded by `normalize_name` on the way in, so a name set
+/// through this build is already one line. This is for the ones that were not:
+/// a workspace named by an older build, and a *remote* machine's tree, which
+/// arrives already stored and is only as folded as the server that wrote it.
+/// The dialect version does not separate those — the wire shape did not
+/// change — so a peer mid-rollout is the ordinary case, not a contrived one.
 pub fn display_name_of(ws: &Workspace, panes: &[PaneRecord]) -> String {
+    use crate::terminal::view::one_line;
     if let Some(name) = ws.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-        return name.to_string();
+        return one_line(name);
     }
     subject_path_of(ws, panes)
         .and_then(|path| {
             std::path::Path::new(&path)
                 .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
+                .map(|n| one_line(&n.to_string_lossy()))
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| t(L10nKey::WindowUntitled).to_string())
@@ -496,6 +511,54 @@ pub fn pane_count(cx: &App, entry: &crate::core::session::WindowView) -> Option<
 
 #[cfg(test)]
 mod tests {
+    /// A workspace label draws on one row, whoever composed the name.
+    ///
+    /// Two ways in, and `normalize_name` covers neither. A workspace with no
+    /// name of its own is labelled by its directory, and a directory is bytes
+    /// to the kernel — `mkdir $'proj\nname'` is a label with a newline in it,
+    /// and the pane's own cwd confirms it arrives that way. A workspace that
+    /// *has* a name got it folded on the way in only if this build stored it;
+    /// an older build, or a remote machine's tree, is only as folded as
+    /// whatever wrote it, and the dialect version does not tell those apart
+    /// because the wire shape never changed.
+    #[test]
+    fn a_workspace_label_is_one_line_however_it_was_named() {
+        use tty7_core::core::machine::{PaneRecord, Workspace};
+
+        let named = Workspace {
+            name: Some("alpha\nbeta".to_string()),
+            ..Workspace::default()
+        };
+        assert_eq!(
+            display_name_of(&named, &[]),
+            "alpha↵beta",
+            "a stored name from an older build or a remote tree still folds"
+        );
+
+        // The directory label is read off the first pane the workspace's tabs
+        // actually hold, so the workspace has to hold one.
+        let ws = Workspace {
+            name: None,
+            tabs: vec![tty7_core::core::machine::Tab::leaf(1)],
+            ..Workspace::default()
+        };
+        let mut pane = PaneRecord::new(1);
+        pane.cwd = Some("/tmp/holder/proj\nname".to_string());
+        assert_eq!(
+            display_name_of(&ws, std::slice::from_ref(&pane)),
+            "proj↵name",
+            "and a directory nobody named folds too"
+        );
+
+        pane.cwd = Some("/tmp/holder/ordinary".to_string());
+        assert_eq!(
+            display_name_of(&ws, std::slice::from_ref(&pane)),
+            "ordinary",
+            "nothing else is touched"
+        );
+    }
+
+
     use tty7_core::core::machine::{Axis, PaneNode, PaneSeed, Tab, TabId};
 
     use super::*;
