@@ -188,6 +188,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expected f32 at line 1 column 20`. The window's notice appends it too, on its
   own line after the translated sentence.
 
+- **`doctor` says when a workspace tree was set aside.** A `machine.json` that
+  does not parse is copied to `machine.json.corrupt` and the machine comes up
+  with *no workspaces at all* — every tab and pane layout on it. That is
+  recoverable by hand, but only by a hand that knows where to look, and the
+  only notice was a log line that a default install never writes. What the
+  user saw was `tty7 ws ls` reporting no workspaces and nothing to suggest the
+  copy exists.
+
+- **A panic in the updater is now recorded.** The GUI and the server both
+  install the crash hook; the updater did not, and of the three it needs it
+  most — it runs detached, after the app it is replacing has exited, so its
+  stderr is attached to nothing, and it is doing the one job in this product
+  that can leave an install broken. A panic mid-swap was silence: the app does
+  not come back, the update log stops mid-sentence, and nothing anywhere says
+  why.
+
+- **The side panels accept the widths the reference publishes.** The
+  documented range for `sidebar_width` and the right panel's width was
+  100–2000, and the widgets floored themselves at 180 and 216 — so a
+  documented `sidebar_width: 120` was accepted, kept in the file, and silently
+  drawn wider. One range now, defined where the value is validated, which is
+  the rule the rest of the settings already follow.
+
+- **Log timestamps say they are UTC.** A line read `23:00:24.563` on a machine
+  whose clock said `07:00:24` — the stamp was always UTC and nothing marked
+  it, so the line looked eight hours stale rather than eight hours offset,
+  which is the wrong conclusion to reach while reading a log to work out when
+  something happened.
+
 - **A commit author's name draws on one row.** git refuses a control
   character in a *branch* name and accepts one in an author name without
   comment — `git -c user.name=$'Bad\rName' commit` succeeds and
