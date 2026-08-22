@@ -188,6 +188,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expected f32 at line 1 column 20`. The window's notice appends it too, on its
   own line after the translated sentence.
 
+- **A commit subject draws on one row of the graph.** git keeps a `\r`, `\t`
+  or `\v` in a subject verbatim and `git log --format=%s` returns it that way,
+  so any repository you clone can carry one — and the graph row is a fixed
+  height, which a mandatory break inside it grows past, over the row below.
+  `\r` is worth naming twice: it is a carriage return, so
+  `fix: something\rHIDDEN` is a subject whose visible half need not be the
+  stored one. Folded, both halves are on the row. The detail panel is
+  deliberately unchanged — it shows the whole subject across several clamped
+  lines, so a break there costs a line it already budgeted for.
+
 - **A workspace labelled by its directory draws on one row.** A workspace with
   no name of its own is labelled by the directory its first pane sits in, and a
   directory is bytes to the kernel — `mkdir $'proj\nname'` is a switcher label

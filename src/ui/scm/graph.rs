@@ -219,6 +219,29 @@ fn gutter_width(max_lanes: usize) -> f32 {
 /// Strict on purpose. Only a lowercase ASCII type, an optional parenthesised
 /// scope, an optional `!`, then `": "`. `Note: see below` and `TODO: fix` are
 /// not conventional commits and keep their whole line.
+/// The subject as a graph row draws it: one line.
+///
+/// A commit subject is a name nobody here composed. git keeps a `\r`, a `\t`
+/// or a `\v` in one verbatim and `git log --format=%s` hands it back the same
+/// way — checked, not assumed — so any repository somebody clones can carry
+/// one. The row is a fixed `GRAPH_ROW_H` and a mandatory break inside it grows
+/// the row past its own height and paints over the one below.
+///
+/// `\r` deserves its own mention: in a terminal it would return to the start
+/// of the line, so `fix: something\rHIDDEN` is a subject whose visible half
+/// need not be the stored one. Folded, both halves are there and neither is
+/// pretending.
+///
+/// Folded before the split rather than after, because the split borrows from
+/// what it is given.
+///
+/// The detail panel deliberately does not do this: it shows the whole subject
+/// across several lines under a `line_clamp`, so a break there costs a line it
+/// already budgeted for.
+fn row_subject(summary: &str) -> String {
+    crate::terminal::view::one_line(summary)
+}
+
 fn split_conventional(subject: &str) -> (Option<(&str, bool)>, &str) {
     let bytes = subject.as_bytes();
     let type_len = bytes.iter().take_while(|b| b.is_ascii_lowercase()).count();
@@ -872,7 +895,8 @@ impl Tty7App {
         // The sidebar's surface, because that is the fill this row sits on.
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let selected = self.scm.graph.selected.as_deref() == Some(commit.oid.as_str());
-        let (prefix, subject) = split_conventional(&commit.summary);
+        let summary = row_subject(&commit.summary);
+        let (prefix, subject) = split_conventional(&summary);
         let deco = commit.refs.first();
         let extra = commit.refs.len().saturating_sub(1);
         let oid = commit.oid.clone();
@@ -1646,6 +1670,37 @@ impl Tty7App {
 
 #[cfg(test)]
 mod tests {
+    /// A commit subject draws on one row, whatever the repository put in it.
+    ///
+    /// git keeps a `\r`, `\t`, `\v` or `\f` in a subject verbatim and
+    /// `git log --format=%s` returns it that way — verified against a real
+    /// repository, not assumed — so a clone can carry one and the graph draws
+    /// whatever the clone has. The row is a fixed height; a mandatory break
+    /// inside it grows past that height and over the row below.
+    ///
+    /// `\r` is the one worth naming twice: it is a carriage return, so
+    /// `fix: something\rHIDDEN` is a subject whose visible half need not be
+    /// the stored one. After folding, both halves are on the row.
+    #[test]
+    fn a_commit_subject_carrying_control_characters_draws_on_one_row() {
+        assert_eq!(row_subject("fix: something\rHIDDEN"), "fix: something HIDDEN");
+        assert_eq!(row_subject("feat:\tindented"), "feat: indented");
+        assert_eq!(row_subject("chore: a\u{b}b\u{c}c"), "chore: a b c");
+        assert_eq!(
+            row_subject("docs: 项目 · ordinary"),
+            "docs: 项目 · ordinary",
+            "nothing else is touched"
+        );
+
+        // And the split still finds the prefix afterwards, which is the whole
+        // reason the fold happens before it rather than after.
+        let folded = row_subject("fix: something\rHIDDEN");
+        let (prefix, subject) = split_conventional(&folded);
+        assert_eq!(prefix.map(|(p, breaking)| (p.to_string(), breaking)), Some(("fix".to_string(), false)));
+        assert_eq!(subject, "something HIDDEN");
+    }
+
+
     use super::*;
     use crate::ui::app::test_window::harness;
     use crate::ui::host_ops::HostId;
