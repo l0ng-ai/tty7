@@ -450,7 +450,8 @@ list a retry needs.
 | `server logs` | Tail the server log; prints the path, and says so when logging was never enabled (`TTY7_LOG=info` before the server starts) |
 | `server start` | Bring up a server on this machine |
 | `server stop` | Stop it — **every pane on the machine dies** |
-| `server restart` | Stop, then start — same consequence |
+| `server restart` | Hand the panes to a new server of this build; **sessions keep running** — the shells, and what they are running, carry across. A pane using tty7's own SSH client is the exception: that connection drops and has to be reopened |
+| `server restart --hard` | Stop, then start — **every pane on the machine dies**, exactly as `stop` |
 
 <Warning>
   Do not run `start`, `stop`, or `restart` on someone else's behalf. They change

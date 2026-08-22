@@ -1072,6 +1072,57 @@ mod tests {
     ///
     /// Every flag carried help and every positional did not — 22 of them, the
     /// main argument of each verb, printed as a bare `[WORKSPACE]` with an
+    /// Every flag this CLI accepts is named on the page that documents it.
+    ///
+    /// A flag nobody wrote down is a feature only its author knows about, and
+    /// the failure is worse when the flag is the destructive one:
+    /// `server restart --hard` shipped undocumented while the reference page
+    /// still described plain `restart` as "Stop, then start — same
+    /// consequence", which had been true before the flag split the two apart.
+    /// So the page told a reader that restarting kills every pane (it does
+    /// not), and said nothing at all about the option that does.
+    ///
+    /// Names only. Whether the prose around a flag is *right* is not
+    /// something a test can hold — but a flag missing from the page entirely
+    /// is, and that is the state this catches.
+    ///
+    /// The global flags are exempt: they repeat on all forty-odd verbs, and
+    /// the page documents them once in its own table rather than per verb.
+    #[test]
+    fn every_flag_is_named_on_the_reference_page() {
+        use clap::CommandFactory as _;
+
+        const PAGE: &str = include_str!("../../../docs/cli/reference.mdx");
+        const GLOBAL: &[&str] = &["json", "quiet", "help", "version", "machine", "config-dir"];
+
+        fn walk(cmd: &clap::Command, page: &str, missing: &mut Vec<String>, seen: &mut usize) {
+            for a in cmd.get_arguments() {
+                let Some(long) = a.get_long() else { continue };
+                if GLOBAL.contains(&long) {
+                    continue;
+                }
+                *seen += 1;
+                if !page.contains(&format!("--{long}")) {
+                    missing.push(format!("{}: --{long}", cmd.get_name()));
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                walk(sub, page, missing, seen);
+            }
+        }
+
+        let (mut missing, mut seen) = (Vec::new(), 0usize);
+        walk(&Cli::command(), PAGE, &mut missing, &mut seen);
+        assert!(
+            seen > 15,
+            "only {seen} flags were inspected, so the walk has stopped finding them"
+        );
+        assert!(
+            missing.is_empty(),
+            "these flags exist but the reference page never names them: {missing:?}"
+        );
+    }
+
     /// empty column beside it. The gap was invisible to anyone reading the
     /// source, where a `value_name` looks like documentation.
     #[test]
