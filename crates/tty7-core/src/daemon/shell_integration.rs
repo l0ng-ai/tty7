@@ -2554,6 +2554,45 @@ mod tests {
         }
     }
 
+    /// Every shell tty7 injects into is named on both front pages.
+    ///
+    /// A shipped integration nobody knows about is a feature that may as well
+    /// not exist: someone choosing a terminal reads the README, not
+    /// `shell_integration.rs`. nushell was the case — implemented, tested, and
+    /// written up on the shell-integration page, while both READMEs listed
+    /// "zsh, bash, fish, PowerShell" and stopped.
+    ///
+    /// Both languages, because the Chinese README is a translation of the same
+    /// table and drifts the same way.
+    #[test]
+    fn every_shipped_integration_is_named_in_both_readmes() {
+        const EN: &str = include_str!("../../../../README.md");
+        const ZH: &str = include_str!("../../../../README.zh-CN.md");
+
+        // The name a reader would look for, per script this file ships.
+        let shells = [
+            ("zsh", ZSH_INTEGRATION),
+            ("bash", BASH_INTEGRATION),
+            ("fish", FISH_INTEGRATION),
+            ("nushell", NUSHELL_INTEGRATION),
+            ("PowerShell", POWERSHELL_INTEGRATION),
+        ];
+        for (name, body) in shells {
+            assert!(
+                !body.is_empty(),
+                "{name}'s integration script is empty, so this list has gone stale"
+            );
+            assert!(
+                EN.contains(name),
+                "{name} has an integration script but README.md never names it"
+            );
+            assert!(
+                ZH.contains(name),
+                "{name} has an integration script but README.zh-CN.md never names it"
+            );
+        }
+    }
+
     #[test]
     fn every_integration_guards_install_on_empty_sentinel() {
         for (shell, body) in [
