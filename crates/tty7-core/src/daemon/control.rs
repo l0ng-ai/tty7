@@ -1430,6 +1430,111 @@ fn read_until_closed<R: Read>(inner: &Arc<ClientInner>, mut r: R, events: EventS
 
 #[cfg(test)]
 mod tests {
+    /// The dialect and the number that names it move together.
+    ///
+    /// The comment on `CONTROL_VERSION` records what happens when they do not:
+    /// between v5 and v6 the machine tree replaced four verbs, `GitStream`
+    /// arrived, and two replies went away, "all of it against a number that
+    /// never moved, so every one of those servers still answers the hello and
+    /// then drops the link on the first call." Nothing stopped that, and
+    /// nothing stopped it happening again.
+    ///
+    /// So the shape of every message this file puts on the wire is fingerprinted
+    /// and pinned. Change one and this fails, which is the moment to decide
+    /// whether the change needs a new `CONTROL_VERSION` -- and it usually does,
+    /// because a peer built before it will not understand the new spelling and
+    /// the only way it can say so is at the hello.
+    ///
+    /// Comments and formatting are stripped, so wording and rustfmt do not
+    /// trip it; `#[serde(...)]` lines are kept, because renaming a field or
+    /// giving it a default *is* a change of dialect. `ControlClient` is left
+    /// out: it holds the connection, not a message.
+    ///
+    /// What this does not cover: a type declared elsewhere that a message
+    /// carries by reference. Those are versioned by their own crate's rules;
+    /// this pins the file that defines the dialect.
+    #[test]
+    fn the_wire_shape_is_pinned_to_the_control_version() {
+        /// Bump alongside `CONTROL_VERSION` when the shapes above change. The
+        /// failure prints the value to paste here.
+        const SHAPE: u64 = 0x11f7e87081fa8be9;
+        const AT_VERSION: u32 = 7;
+
+        const SRC: &str = include_str!("control.rs");
+        let mut shape = String::new();
+        let mut names: Vec<String> = Vec::new();
+        let mut rest = SRC;
+        loop {
+            let e = rest.find("\npub enum ");
+            let t = rest.find("\npub struct ");
+            let Some(at) = [e, t].into_iter().flatten().min() else { break };
+            rest = &rest[at + 1..];
+            let Some(open) = rest.find('{') else { break };
+            let name: String = rest[..open]
+                .split_whitespace()
+                .nth(2)
+                .unwrap_or_default()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            let mut depth = 0usize;
+            let mut end = open;
+            for (i, c) in rest[open..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = open + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let block = &rest[..end];
+            rest = &rest[end..];
+            // The client owns the connection; its fields are not a message.
+            if name == "ControlClient" {
+                continue;
+            }
+            names.push(name);
+            for line in block.lines() {
+                let line = line.trim();
+                if line.starts_with("//") {
+                    continue;
+                }
+                shape.extend(line.chars().filter(|c| !c.is_whitespace()));
+            }
+        }
+
+        assert!(
+            names.len() >= 10 && names.contains(&"ControlRequest".to_string()),
+            "the scan above stopped matching how this file is written, so the \
+             fingerprint below would be pinning nothing: found {names:?}"
+        );
+
+        let mut fingerprint: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in shape.bytes() {
+            fingerprint ^= u64::from(byte);
+            fingerprint = fingerprint.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+
+        assert_eq!(
+            AT_VERSION, CONTROL_VERSION,
+            "CONTROL_VERSION moved to {CONTROL_VERSION} without this guard \
+             being updated; set AT_VERSION to match and re-pin SHAPE"
+        );
+        assert_eq!(
+            fingerprint, SHAPE,
+            "the control dialect changed while CONTROL_VERSION stayed at \
+             {CONTROL_VERSION}. If a peer built against v{CONTROL_VERSION} can \
+             still read every message here, re-pin SHAPE to 0x{fingerprint:016x}. \
+             If it cannot -- a verb added, removed or renamed, a field renamed \
+             or given a serde default -- bump CONTROL_VERSION as well, or those \
+             peers will answer the hello and drop the link on the first call."
+        );
+    }
     use super::*;
     use crate::daemon::protocol::MAX_FRAME;
     use std::io::Cursor;
@@ -3041,3 +3146,5 @@ mod tests {
         assert!(!client.is_connected());
     }
 }
+
+
