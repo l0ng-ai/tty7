@@ -153,6 +153,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A newline in a name no longer breaks the row drawing it.** A filename is
+  bytes to the kernel, so `touch $'a\nb'` makes a file the tree has to draw,
+  and the layout breaks text on a newline whatever the row asks for: the row
+  grows to two lines and every row below it slides down. The same held for a
+  remote name in the SFTP panel and for completion descriptions — 122 of the
+  shipped completion specs carry a newline, ten of them early enough that the
+  second line painted over whatever the menu was floating above. All three now
+  fold the break where the text is drawn, and only there, so the real name is
+  still what gets renamed or removed.
+
+- **A tab whose path starts at `~` no longer claims to have omitted
+  something.** `~/repo/025/tty7` was drawn as `…/repo/025/tty7` while
+  `/usr/local/bin` of the same shape kept its root, because `~` was counted
+  toward the path's depth. The cut bought nothing — `~` and `…` are one
+  character each — and an ellipsis is a claim that something was left out.
+
+- **An internationalised domain is no longer offered as a broken link.**
+  `https://例え.jp` in a pane came back as the link `https://`, which opens
+  nowhere. The scan is ASCII-only on purpose, so that a URL followed by CJK
+  text does not swallow the rest of the sentence; what it must not do is hand
+  back the bare scheme it was left with.
+
+- **The PNG decode ceiling is tty7's own number.** A kitty graphics escape is
+  untrusted — any program in a pane can print one — and every other bound on
+  that path is deliberate. The PNG branch left its limit to the image
+  library's default of 512 MiB, eight times tty7's own ceiling and somebody
+  else's number to change; this runs in the GUI process.
+
 - **Searching for `Error` finds `error` again.** With case sensitivity off —
   the default — typing a capital found nothing on a screen full of matches.
   The regex engine applies smart case of its own, turning matching insensitive
