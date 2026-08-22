@@ -153,6 +153,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Turning on per-pane history no longer turns off history search.** The
+  window keeps the input bar's own command store in the file
+  `<config>/history`, and the daemon put each pane's `HISTFILE` in a
+  *directory* of that same name. A path can only be one of the two, and the
+  daemon created its directory the moment the setting was switched on — so from
+  then on the window's append opened a directory, got an error, and dropped the
+  line without a word. Up and Ctrl-R kept showing whatever had been recorded
+  before the setting was turned on, and never grew again. The panes' files now
+  live in `<config>/pane-history/`, and an install that already has the old
+  directory is moved across on the next start, keeping its history.
+
 - **A tree pull that has to be retried no longer ends with the window deleting
   the tabs it was pulling.** A window told to rebuild itself from the machine —
   a daemon back as a new process, a restart handoff that was refused, a remote

@@ -70,7 +70,9 @@ impl Daemon {
         std::fs::read_to_string(
             self.dir
                 .path()
-                .join("history")
+                // Not `history`: that name is the window's own command store,
+                // a file. See `daemon::history::dir`.
+                .join("pane-history")
                 .join(format!("pane-{pane_id}")),
         )
         .ok()

@@ -53,8 +53,39 @@ pub fn enabled() -> bool {
     crate::core::config::Config::load().per_pane_history
 }
 
+/// Where a pane's own `HISTFILE` lives.
+///
+/// `pane-history`, not `history`: the window keeps its input bar's own command
+/// store in the *file* `<config>/history` (`terminal::history`), and this used
+/// to be that same path as a *directory*. Both cannot exist. Whichever came
+/// first won, and since the daemon creates its directory the moment
+/// `per_pane_history` is switched on, that was this one — after which the
+/// window's `append` opened a directory, failed, and dropped every command on
+/// the floor without a word. Turning on per-pane history quietly turned off
+/// history search.
+///
+/// An install that already tripped over it is carried across: the directory is
+/// exactly what belongs at the new name, and moving it frees the old one for
+/// the file that should have been there all along.
 fn dir() -> Option<PathBuf> {
-    crate::core::config::config_path("history")
+    let dir = crate::core::config::config_path("pane-history")?;
+    let displaced = crate::core::config::config_path("history")?;
+    adopt_a_displaced_directory(&displaced, &dir);
+    Some(dir)
+}
+
+/// Move an install that predates the rename onto the new name.
+///
+/// Only when the old path is a *directory*: a plain `history` file there is the
+/// window's own store, and moving that would take the very thing this repairs.
+/// Only when the new path is absent, so a second call cannot bury a directory
+/// that is already in use. A failed rename is not worth reporting — the caller
+/// goes on to create the new directory, and the worst case is per-pane history
+/// starting empty, which is where it starts for everyone else.
+fn adopt_a_displaced_directory(displaced: &Path, dir: &Path) {
+    if !dir.exists() && displaced.is_dir() {
+        let _ = std::fs::rename(displaced, dir);
+    }
 }
 
 pub(crate) fn path_for(pane: u64) -> Option<PathBuf> {
@@ -223,7 +254,7 @@ mod tests {
     /// Where a pane's history goes is named on the privacy page.
     ///
     /// With per-pane history on, a pane's `HISTFILE` is redirected into
-    /// `<config>/history/`, and what lands there is the command lines someone
+    /// `<config>/pane-history/`, and what lands there is the command lines someone
     /// typed — the most sensitive thing tty7 causes to be written anywhere. The
     /// page enumerates `<config>/scrollback/*.bin` down to its mode and
     /// retention; this directory belongs there on the same footing, and said
@@ -235,13 +266,109 @@ mod tests {
     fn the_per_pane_history_location_is_on_the_privacy_page() {
         const PRIVACY: &str = include_str!("../../../../docs/reference/privacy.mdx");
         assert!(
-            PRIVACY.contains("<config>/history/"),
-            "per-pane history redirects HISTFILE into <config>/history/, and the \
+            PRIVACY.contains("<config>/pane-history/"),
+            "per-pane history redirects HISTFILE into <config>/pane-history/, and the \
              privacy page never names it"
         );
     }
 
     use super::*;
+
+    /// A pane's history does not land on top of the window's.
+    ///
+    /// The window keeps the input bar's command store in the *file*
+    /// `<config>/history`, and this module used to put its per-pane files in a
+    /// *directory* of that same name. A path is one or the other. The daemon
+    /// created its directory the moment `per_pane_history` was switched on, so
+    /// the daemon won; from then on the window's `append` opened a directory,
+    /// got an error, and — the call site being `if let Ok(mut f) = open(..)` —
+    /// dropped the line without a word. Switching on per-pane history switched
+    /// off history search, and nothing said so.
+    ///
+    /// Read from the window's source rather than restating the name here, so
+    /// that moving *either* side onto the other's path fails this.
+    #[test]
+    fn a_panes_history_does_not_land_on_the_windows_own() {
+        const WINDOW: &str = include_str!("../../../../src/terminal/history.rs");
+        let names: Vec<&str> = WINDOW
+            .match_indices("config_path(\"")
+            .filter_map(|(i, m)| {
+                let rest = &WINDOW[i + m.len()..];
+                rest.find('"').map(|end| &rest[..end])
+            })
+            .collect();
+        assert!(
+            names.contains(&"history"),
+            "expected the window to still keep a store called `history`; if it \
+             was renamed, this guard needs to learn the new name — found {names:?}"
+        );
+        let ours = dir_name();
+        assert!(
+            !names.contains(&ours),
+            "the daemon puts per-pane history at <config>/{ours}/ and the window \
+             uses <config>/{ours} too ({names:?}); one is a directory and one is \
+             a file, so whichever is created first makes the other fail silently"
+        );
+    }
+
+    /// The name only, so the guard above can compare without a config dir.
+    fn dir_name() -> &'static str {
+        "pane-history"
+    }
+
+    /// An install that already tripped over the collision is carried across,
+    /// and one that did not is left alone.
+    ///
+    /// Three cases, because each is a different way to lose data: a directory
+    /// at the old name is what belongs at the new one and moves; a *file* there
+    /// is the window's store and must not be dragged along; and a new name that
+    /// already exists is in use, so the old one stays put rather than being
+    /// buried on top of it.
+    #[test]
+    fn the_old_location_moves_only_when_it_is_the_daemons_to_move() {
+        let root = std::env::temp_dir().join(format!("tty7-hist-move-{}", std::process::id()));
+        let case = |name: &str| {
+            let d = root.join(name);
+            std::fs::remove_dir_all(&d).ok();
+            std::fs::create_dir_all(&d).unwrap();
+            (d.join("history"), d.join("pane-history"))
+        };
+
+        let (displaced, dir) = case("a-directory");
+        std::fs::create_dir_all(&displaced).unwrap();
+        std::fs::write(displaced.join("pane-7"), "ls\n").unwrap();
+        adopt_a_displaced_directory(&displaced, &dir);
+        assert!(!displaced.exists(), "the old directory should have moved");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("pane-7")).unwrap(),
+            "ls\n",
+            "the panes' files should have come with it"
+        );
+
+        let (displaced, dir) = case("a-file");
+        std::fs::write(&displaced, "cd /\n").unwrap();
+        adopt_a_displaced_directory(&displaced, &dir);
+        assert_eq!(
+            std::fs::read_to_string(&displaced).unwrap(),
+            "cd /\n",
+            "the window's own history file is not the daemon's to move"
+        );
+        assert!(!dir.exists(), "and nothing should have appeared at the new name");
+
+        let (displaced, dir) = case("both");
+        std::fs::create_dir_all(&displaced).unwrap();
+        std::fs::write(displaced.join("pane-7"), "old\n").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pane-7"), "in use\n").unwrap();
+        adopt_a_displaced_directory(&displaced, &dir);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("pane-7")).unwrap(),
+            "in use\n",
+            "a new location already in use must not be overwritten"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     /// The shared temp directory the rest of the suite pins, by the same name:
     /// the override is a process-wide `OnceLock`, so agreeing on the path is
