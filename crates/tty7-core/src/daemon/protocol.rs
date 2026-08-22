@@ -5,6 +5,26 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 
+/// The pane dialect GUI↔daemon and GUI↔remote `tty7-server` speak.
+///
+/// When to move it, because the answer is not "whenever a message changes"
+/// and the two worked examples are buried far below:
+///
+/// Adding a field with `#[serde(default)]` does **not** move it. serde ignores
+/// fields it does not know and fills in the ones it is not sent, so a peer on
+/// either side of the change reads the message fine — and this number gates the
+/// remote handshake, so bumping would turn away every older `tty7-server` over
+/// a field it could safely ignore. `AuthPromptKind::KeyPassphrase::rejected`
+/// is that case, with a test pinning both directions.
+///
+/// Removing a field, renaming one, changing its type, retagging an enum, or
+/// changing what a message *means* does move it. Those a peer cannot read
+/// past, and the handshake is the only place it can say so — better a refusal
+/// naming the version than a link that connects and then misbehaves.
+///
+/// A new message variant sits between the two: an old peer will not send it
+/// and will fail to decode it, so whether it needs a bump depends on whether
+/// the sender knows the peer is new. If it cannot know, bump.
 pub const PROTOCOL_VERSION: u32 = 5;
 
 pub const FEATURE_PANE_OWNER: &str = "pane-owner";
