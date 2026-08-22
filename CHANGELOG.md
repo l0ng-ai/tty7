@@ -153,6 +153,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`kill` and `timeout` work inside a pane again.** The daemon blocks SIGTERM
+  on its main thread before any other starts, so that one waiter can run the
+  shutdown save — deliberate, and it also reached where it was never meant to:
+  `fork` copies the calling thread's signal mask into the child and `execve`
+  keeps it, so every pane ran with SIGTERM blocked. `kill`, `pkill`,
+  `timeout`, a supervisor, a CI cancellation — none of them could stop
+  anything running in a pane, and only `kill -9` would.
+
+- **Panes the window puts down while squaring its layout are hung up.** The
+  daemon cannot tell a pane ending from a pane moving to another tab — the
+  removal is identical — so whoever sent the operation has to say. `tty7 pane
+  close` always did; the window did it only where a person closed something,
+  and never for the identical operations its own reconciliation raises,
+  because that path dropped the reply on the floor.
+
+- **A killed server no longer leaves its throwaway shell directories behind.**
+  Every zsh pane gets a scratch `ZDOTDIR` under the temp directory that the
+  pane's own teardown removes, so a clean stop leaves none. A server that is
+  killed never runs that teardown and nothing went back to look: this machine
+  had 3,850 of them, from months of crashes and `kill -9`. A later startup
+  sweeps them, beside the stale-socket cleanup.
+
+- **Three verbs say the server is down instead of "No such file or
+  directory".** Most verbs go to the control socket and answer "could not
+  reach the tty7 server on this machine — `tty7 server start` brings one up".
+  `send`, `capture` and `procs` go to a pane instead, and reported the raw
+  `os error 2` from the missing socket file, which names nothing a reader can
+  act on.
+
 - **A newline in a name no longer breaks the row drawing it.** A filename is
   bytes to the kernel, so `touch $'a\nb'` makes a file the tree has to draw,
   and the layout breaks text on a newline whatever the row asks for: the row
