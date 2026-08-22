@@ -1024,6 +1024,42 @@ mod tests {
         assert!(safe_local_name(".hidden"));
     }
 
+    /// A drive-relative name is refused on Windows, where it escapes.
+    ///
+    /// The name comes off a *remote* directory listing, so a hostile or
+    /// compromised server picks it, and it is joined to the local download
+    /// directory. `Path::join` with a path carrying a drive prefix does not
+    /// append — it replaces: on Windows `…\Downloads`.join(`C:evil.txt`) is
+    /// `C:evil.txt`, resolved against the process's current directory on that
+    /// drive, and the download has left the folder it was told to write into.
+    ///
+    /// `..`, `.` and anything with a separator are caught twice over — by the
+    /// literal comparisons and again by the components walk — so removing
+    /// either check left every case above still passing. This is the one only
+    /// the components walk catches, and nothing was asserting it.
+    ///
+    /// Split by platform because the answer genuinely differs: on Unix
+    /// `C:evil.txt` is an ordinary filename with a colon in it and refusing it
+    /// would be wrong. `Path::components` is what knows the difference, which
+    /// is the reason to route the decision through it rather than a list of
+    /// forbidden characters.
+    #[test]
+    #[cfg(windows)]
+    fn a_drive_relative_remote_name_is_refused() {
+        assert!(!safe_local_name("C:"));
+        assert!(!safe_local_name("C:evil.txt"));
+        assert!(!safe_local_name("C:/evil.txt"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_colon_is_an_ordinary_character_in_a_name_here() {
+        // The counterpart of the Windows case above: nothing about a colon is
+        // unsafe on this platform, and the components walk says so.
+        assert!(safe_local_name("C:evil.txt"));
+        assert!(safe_local_name("a:b"));
+    }
+
     #[test]
     fn an_occupied_destination_is_seen_even_when_it_leads_nowhere() {
         // The download refuses to rename onto an occupied name, and asks
