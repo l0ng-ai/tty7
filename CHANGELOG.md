@@ -153,6 +153,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The daemon raises its own open-file limit, and says so when it still runs
+  out.** A pane costs about three descriptors, and the daemon inherited its
+  soft limit from whatever launched it — with the historic macOS default of
+  256 that is a ceiling of roughly eighty panes, against a documented maximum
+  of 16,384. The eighty-first failed with `dup of fd 93 failed`, which names
+  neither the limit nor the way past it. The soft limit is now raised to the
+  hard one at startup, which needs no privilege and leaves an administrator
+  who lowered the hard limit in charge; measured under an inherited soft limit
+  of 96, the ceiling went from 26 extra tabs to more than 45. When the hard
+  limit really is the ceiling, the refusal now says "out of file descriptors —
+  this account's open-file limit is the ceiling on how many panes can run at
+  once; raise it (`ulimit -n`, …)", keeping the original error in parentheses.
+
 - **`doctor` now checks the configured shell.** A `shell` naming something
   that is not there — missing, a directory, not executable — makes every new
   tab and every `tty7 new` fail, while `doctor` reported `config ok`, because

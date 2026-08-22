@@ -128,6 +128,28 @@ struct SpawnConfig {
 /// "daemon refused Spawn: spawn failed: Unable to spawn … (ENOENT: No such
 /// file or directory)" — and the one fact that matters is buried in it.
 ///
+/// Re-word a spawn failure that is really the open-file limit.
+///
+/// The text is matched rather than an errno read, because portable-pty hands
+/// back an `anyhow::Error` built from a message — the code is not on it to
+/// consult. Both spellings are covered: the libc phrase, and the one
+/// portable-pty writes itself when the `dup` behind the pty fails.
+///
+/// A miss costs nothing: the original error is used unchanged.
+pub(crate) fn out_of_descriptors(error: &anyhow::Error) -> Option<anyhow::Error> {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    let looks_like = text.contains("too many open files")
+        || text.contains("emfile")
+        || text.contains("dup of fd");
+    looks_like.then(|| {
+        anyhow::anyhow!(
+            "out of file descriptors — this account's open-file limit is the ceiling \
+             on how many panes can run at once; raise it (`ulimit -n`, or the \
+             launchd/systemd limit for the session) and start the server again ({error:#})"
+        )
+    })
+}
+
 fn build_spawn_config(
     pane: u64,
     cwd: Option<PathBuf>,
@@ -4617,6 +4639,50 @@ mod tests {
         assert!(st.agent_session.is_none());
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::AgentStatus(None))));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Agent(None))));
+    }
+
+    /// Running out of descriptors says so, in words that name the way out.
+    ///
+    /// This is the ceiling on how many panes can run at once, and neither of
+    /// the two sentences it arrives as says that. libc gives "Too many open
+    /// files (os error 24)"; portable-pty, when the `dup` behind a pty is what
+    /// failed, gives "dup of fd 93 failed" — which does not even contain the
+    /// word "file". A reader meeting either one has no reason to think about
+    /// `ulimit`.
+    ///
+    /// Matched on the text rather than an errno, because portable-pty hands
+    /// back an `anyhow::Error` built from a message and the code is not on it
+    /// to consult. Anything else passes through untouched: a wrong guess here
+    /// would replace a true sentence with a false one.
+    #[test]
+    fn descriptor_exhaustion_is_re_worded_and_nothing_else_is() {
+        for text in [
+            "Too many open files (os error 24)",
+            "dup of fd 93 failed",
+            "EMFILE: too many open files",
+        ] {
+            let re = out_of_descriptors(&anyhow::anyhow!("{text}"))
+                .unwrap_or_else(|| panic!("{text:?} is descriptor exhaustion and was not named"));
+            let said = format!("{re:#}");
+            assert!(
+                said.contains("out of file descriptors") && said.contains("ulimit"),
+                "the re-wording has to name the limit and the way past it: {said}"
+            );
+            assert!(
+                said.contains(text),
+                "and keep the original, for whoever needs it: {said}"
+            );
+        }
+        for text in [
+            "no such program on this machine: /nope",
+            "Permission denied (os error 13)",
+            "spawn failed: ENOENT",
+        ] {
+            assert!(
+                out_of_descriptors(&anyhow::anyhow!("{text}")).is_none(),
+                "{text:?} is not descriptor exhaustion and must be left alone"
+            );
+        }
     }
 
     /// A second agent in the same pane does not inherit the first one's turn.

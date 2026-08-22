@@ -365,6 +365,8 @@ pub fn run_daemon() -> anyhow::Result<()> {
     // first that does. Keep it that way, or move this up again.
     #[cfg(unix)]
     serve_sigterm(registry.clone());
+    #[cfg(unix)]
+    raise_open_file_limit();
 
     #[cfg(any(unix, windows))]
     {
@@ -654,6 +656,53 @@ fn run_with(registry: Arc<Registry>) -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
+/// Take the open-file limit up to whatever this user is allowed.
+///
+/// A pane costs about three descriptors — the pty master, and the pipes behind
+/// it — and the daemon inherits its soft limit from whatever started it. With
+/// the historic macOS default of 256 that is a ceiling of roughly eighty
+/// panes, against a `MAX_PANES` of 16,384, and the eighty-first fails with
+/// `dup of fd 93 failed`: a sentence that names neither the limit nor the way
+/// past it.
+///
+/// Raising the *soft* limit to the *hard* one needs no privilege — it is the
+/// ordinary thing a long-lived server does at startup, and it leaves an
+/// administrator who lowered the hard limit in charge, since that is the one
+/// this cannot touch.
+///
+/// Capped at `OPEN_MAX` because macOS refuses `RLIM_INFINITY` here outright:
+/// asking for it fails and leaves the low limit in place, which is the one
+/// outcome worth avoiding.
+///
+/// Best effort throughout. A daemon that could not raise its limit still runs;
+/// it simply runs into the ceiling sooner, and `spawn` now says so when it
+/// does.
+#[cfg(unix)]
+fn raise_open_file_limit() {
+    const OPEN_MAX: libc::rlim_t = 10_240;
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return;
+    }
+    let want = limit.rlim_max.min(OPEN_MAX);
+    if want <= limit.rlim_cur {
+        return;
+    }
+    let raised = libc::rlimit {
+        rlim_cur: want,
+        rlim_max: limit.rlim_max,
+    };
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
+        log::debug!(
+            "open-file limit raised from {} to {want}",
+            limit.rlim_cur
+        );
+    }
+}
+
 fn serve_sigterm(registry: Arc<Registry>) {
     let set = unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
@@ -762,6 +811,13 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                 match DaemonPane::spawn(id, cwd, size, shell, owner, workspace, restore, on_dead) {
                     Ok(p) => p,
                     Err(e) => {
+                        // Descriptor exhaustion is the one failure along this
+                        // path whose own words say nothing useful — portable-pty
+                        // reports `dup of fd 93 failed`, and libc reports `Too
+                        // many open files`, neither of which names the limit or
+                        // the way past it. Several calls in `spawn` can hit it,
+                        // so it is re-worded here, where all of them arrive.
+                        let e = crate::daemon::pane::out_of_descriptors(&e).unwrap_or(e);
                         let mut w = write_stream;
                         // The daemon's own error is already a sentence; a second
                         // "spawn failed:" in front of it only pads the one the
