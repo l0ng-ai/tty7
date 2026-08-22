@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn the_files_this_crate_leaves_behind_are_on_the_privacy_page() {
         const PRIVACY: &str = include_str!("../../../../docs/reference/privacy.mdx");
-        for file in ["crash.log", "tty7.log"] {
+        for file in ["crash.log", "tty7.log", "update.log"] {
             assert!(
                 PRIVACY.contains(file),
                 "{file} is written to the config directory but not on the privacy page"

@@ -4167,7 +4167,7 @@ mod windows {
 /// This binary runs *detached*, after the GUI it is replacing has exited, so
 /// its stderr is attached to nothing a user will ever read — and it is doing
 /// the one job in the product that can leave an install broken. Without this a
-/// panic mid-swap is simply silence: the app does not come back, `tty7-updater.log`
+/// panic mid-swap is simply silence: the app does not come back, `update.log`
 /// stops mid-sentence, and there is nothing to say why.
 ///
 /// `crash.log` is the same file the app and the server write to, in the config
