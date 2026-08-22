@@ -1772,7 +1772,8 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     // exactly the state someone runs `doctor` in. Every setting is ignored, a
     // copy has been kept aside and saving is suppressed, and none of that is
     // visible from the rows around it.
-    let (config_state, config_ok) = match tty7_core::core::config::Config::load_with_outcome().1 {
+    let loaded = tty7_core::core::config::Config::load_with_outcome();
+    let (config_state, config_ok) = match loaded.1 {
         tty7_core::core::config::LoadOutcome::Parsed => ("ok".to_string(), true),
         tty7_core::core::config::LoadOutcome::Absent => ("none yet — the defaults are the config".to_string(), true),
         tty7_core::core::config::LoadOutcome::Quarantined => (
@@ -1825,6 +1826,28 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
                 "not settings tty7 reads, so they do nothing: {} — check the spelling against \
                  the reference page",
                 keys.join(", ")
+            ),
+        ]);
+    }
+    // A `custom_shells` entry with nothing to launch never becomes a menu row,
+    // and the way one ends up empty is why this is worth a row of its own: the
+    // struct is `#[serde(default)]`, so a misspelled key *inside* an entry is
+    // not an error but an entry with nothing in it. `custom_shells` is itself a
+    // real setting, so the unknown-key check above cannot see it.
+    let dead_shells = config_ok
+        .then(|| tty7_core::core::shells::unusable_custom_shells(&loaded.0.custom_shells))
+        .filter(|dead| !dead.is_empty());
+    if let Some(dead) = &dead_shells {
+        rows.push(vec![
+            "custom shells".to_string(),
+            format!(
+                "{} of them name no program, so their menu rows never appear: entry {} — a \
+                 misspelled key inside an entry reads as an empty one",
+                dead.len(),
+                dead.iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         ]);
     }

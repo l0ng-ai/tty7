@@ -68,6 +68,27 @@ pub fn inventory() -> ShellInventory {
 /// to "what do I get if I just click". A user-authored entry is an extra, not a
 /// candidate for that position — so this runs once the default has already been
 /// settled and cannot move it.
+/// The `custom_shells` entries that can never become a menu row, by position.
+///
+/// [`append_custom`] already drops these and says so with `log::warn!`, and
+/// per `docs/reference/privacy.mdx` there is no log unless `TTY7_LOG` is set.
+/// The way an entry ends up empty is the reason this is worth reporting: the
+/// struct is `#[serde(default)]`, so a misspelled key inside one — `programm`
+/// for `program` — is not an error but an entry with nothing in it. The file
+/// parses, the top-level key `custom_shells` is a real setting so the
+/// unknown-key check cannot see it either, and the row simply never appears.
+///
+/// Positions rather than labels, because an entry this broken usually has no
+/// label to name it by — that is the same misspelling, one field over.
+pub fn unusable_custom_shells(custom: &[crate::core::config::CustomShell]) -> Vec<usize> {
+    custom
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.program.trim().is_empty())
+        .map(|(index, _)| index)
+        .collect()
+}
+
 fn append_custom(inventory: &mut ShellInventory, custom: &[crate::core::config::CustomShell]) {
     for (index, entry) in custom.iter().enumerate() {
         let program = entry.program.trim();
@@ -920,6 +941,46 @@ fn parse_wsl_list(bytes: &[u8]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::config::CustomShell;
+
+    /// Which `custom_shells` entries can never become a menu row.
+    ///
+    /// `append_custom` has always dropped these, saying so with `log::warn!`
+    /// into a log that is not written unless `TTY7_LOG` is set. The way one
+    /// ends up empty is what makes it worth reporting: `CustomShell` is
+    /// `#[serde(default)]`, so a misspelled key *inside* an entry is not a
+    /// parse error but an entry with nothing in it — and `custom_shells` is
+    /// itself a real setting, so the unknown-key check cannot see it either.
+    /// The file parses, `doctor` says `ok`, and the row never appears.
+    #[test]
+    fn an_entry_that_names_no_program_is_reported_by_position() {
+        let shell = |label: &str, program: &str| CustomShell {
+            label: label.into(),
+            program: program.into(),
+            args: Vec::new(),
+        };
+
+        assert!(
+            unusable_custom_shells(&[]).is_empty(),
+            "nothing is not a fault"
+        );
+        assert!(
+            unusable_custom_shells(&[shell("Bash", "/bin/bash")]).is_empty(),
+            "a usable entry is not a fault"
+        );
+
+        // What a misspelled key deserializes to: every field defaulted.
+        let typo: CustomShell = serde_json::from_str(r#"{"labl":"X","programm":"/bin/bash"}"#)
+            .expect("an unknown key is not an error here — that is the whole problem");
+        assert_eq!(typo, CustomShell::default(), "it lands as an empty entry");
+
+        assert_eq!(
+            unusable_custom_shells(&[shell("Good", "/bin/sh"), typo, shell("", "   ")]),
+            vec![1, 2],
+            "positions, because an entry this broken has no label to name it by"
+        );
+    }
+
     use super::*;
 
     #[test]
