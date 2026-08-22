@@ -85,6 +85,9 @@ pub enum CommandKind {
     ScmUnstageAll,
     ScmDiscardAll,
     ScmPush,
+    ScmCommitAmend,
+    ScmRefresh,
+    ScmToggleGraph,
     ScmPull,
     ScmFetch,
     ScmSync,
@@ -191,6 +194,9 @@ impl CommandKind {
             ScmUnstageAll => "git-unstage-all",
             ScmDiscardAll => "git-discard-all",
             ScmPush => "git-push",
+            ScmCommitAmend => "git-amend",
+            ScmRefresh => "git-refresh",
+            ScmToggleGraph => "git-toggle-graph",
             ScmPull => "git-pull",
             ScmFetch => "git-fetch",
             ScmSync => "git-sync",
@@ -293,6 +299,9 @@ impl CommandKind {
             ScmUnstageAll => "ScmUnstageAll",
             ScmDiscardAll => "ScmDiscardAll",
             ScmPush => "ScmPush",
+            ScmCommitAmend => "ScmCommitAmend",
+            ScmRefresh => "ScmRefresh",
+            ScmToggleGraph => "ScmToggleGraph",
             ScmPull => "ScmPull",
             ScmFetch => "ScmFetch",
             ScmSync => "ScmSync",
@@ -541,6 +550,9 @@ impl Command {
             Command::localized(L10nKey::CmdGitSync, ScmSync)
                 .with_subtitle(t(L10nKey::CmdGitSyncSubtitle)),
             Command::localized(L10nKey::CmdGitPush, ScmPush),
+            Command::localized(L10nKey::ScmAmendLastCommit, ScmCommitAmend),
+            Command::localized(L10nKey::ScmRefresh, ScmRefresh),
+            Command::localized(L10nKey::CmdGitToggleGraph, ScmToggleGraph),
             Command::localized(L10nKey::CmdGitPull, ScmPull),
             Command::localized(L10nKey::CmdGitFetch, ScmFetch),
         ];
@@ -1620,6 +1632,58 @@ mod gpui_tests {
         );
     }
 
+    /// Every Git action you can bind is also a palette command.
+    ///
+    /// The palette page's claim is that every action is reachable there
+    /// "whether or not it has a keybinding", and for the Git group that was
+    /// nearly true: commit, stage, unstage, discard, sync, push, pull, fetch
+    /// and the branch verbs were all present, while `ScmCommitAmend`,
+    /// `ScmRefresh` and `ScmToggleGraph` were bindable and unreachable. A
+    /// group that is nine tenths complete is worse than one that is obviously
+    /// partial — the three missing looked like features that did not exist.
+    ///
+    /// Scoped to Git on purpose. Plenty of actions belong nowhere near a
+    /// palette — `HideApp`, `InsertNewline`, the numbered tab and workspace
+    /// families — so the whole-app version of this claim is prose, not a
+    /// contract. One coherent group either is complete or is not.
+    #[test]
+    fn every_bindable_git_action_is_a_palette_command() {
+        const SOURCE: &str = include_str!("palette.rs");
+
+        let git: Vec<&str> = crate::ui::keymap::default_bindings()
+            .into_iter()
+            .map(|(action, _)| action)
+            .filter(|a| a.starts_with("Scm"))
+            .collect();
+        assert!(
+            git.len() > 8,
+            "only {} Git actions were found, so the scan has stopped matching \
+             how the table is written",
+            git.len()
+        );
+
+        // `key_spec` is the mapping that survives a rename: it is what names
+        // the keymap action a command stands for, so a command whose variant
+        // is spelled differently — `OpenBranchPicker` for `ScmCheckoutBranch`
+        // — is still found here.
+        let spec = {
+            let start = SOURCE
+                .find("fn key_spec(&self, cx: &App) -> Option<String> {")
+                .expect("key_spec is still spelled this way");
+            let rest = &SOURCE[start..];
+            &rest[..rest.find("\n    }\n").expect("key_spec has a body")]
+        };
+
+        let missing: Vec<&str> = git
+            .into_iter()
+            .filter(|a| !spec.contains(&format!("\"{a}\"")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these Git actions can be bound but the palette cannot run them: {missing:?}"
+        );
+    }
+
     #[gpui::test]
     fn every_palette_command_has_a_stable_id(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
@@ -1658,7 +1722,12 @@ mod gpui_tests {
             };
             let cmds = Command::base_commands(cx, chrome);
             let git = cmds.iter().filter(|c| c.group == CommandGroup::Git).count();
-            assert_eq!(git, 10, "the git section should hold ten verbs");
+            // The number is a forcing function rather than a fact worth
+            // knowing: adding a Git verb should be a deliberate act that
+            // lands it in this group, and bumping this is how that is
+            // confirmed. Went from ten to thirteen when `ScmCommitAmend`,
+            // `ScmRefresh` and `ScmToggleGraph` stopped being bindable-only.
+            assert_eq!(git, 13, "every Git verb belongs to the Git section");
             // View stays a list of things to show and hide.
             assert!(
                 !cmds.iter().any(|c| c.group == CommandGroup::View
