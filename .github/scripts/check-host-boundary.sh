@@ -36,7 +36,16 @@ cd "$(dirname "$0")/../.."
 ROOTS=(src/ui src/terminal)
 
 # The forbidden constructs, as extended-regex alternatives.
-PATTERN='std::fs::|Command::new\("git"\)|\.canonicalize\(\)|\.is_absolute\(\)'
+#
+# `.exists()` is here for the same reason `.canonicalize()` is: it asks *this*
+# machine whether a path is there, and a workspace path may name a file on the
+# far side. `search::local_probe` is the shape the answer should take — a local
+# prober and a remote one behind one `Probe`, rather than a bare `.exists()`
+# that silently answers for the client. `.is_file()` and `.is_dir()` are the
+# same hazard and are deliberately *not* here yet: between them they occur
+# eleven more times on paths that are local by construction, and eleven more
+# allowlist lines would cost more than the net gains.
+PATTERN='std::fs::|Command::new\("git"\)|\.canonicalize\(\)|\.is_absolute\(\)|\.exists\(\)'
 
 # Allowlist entries are `<path>|<literal pattern>`, one per line. `<path>|*`
 # exempts a file wholesale (used only for the boundary module itself). The
@@ -46,10 +55,17 @@ ALLOW=$(
 # The host boundary itself: every routed filesystem call lands here by design.
 src/ui/host_ops.rs|*
 
+# A destination the user picked in this app's own save/copy flow, or a name it
+# is choosing for a download — both on this machine by construction. The remote
+# half of a transfer goes over SFTP, never through these.
+src/ui/file_copy.rs|.exists()
+src/ui/sftp.rs|.exists()
+
 # Themes and presets are app-owned files under the local config dir
 # (`themes_dir()`), never a workspace path — a remote workspace does not carry
 # the user's color schemes with it.
 src/ui/presets.rs|std::fs::
+src/ui/presets.rs|.exists()
 src/ui/presets.rs|.is_absolute()
 src/ui/app.rs|std::fs::create_dir_all
 
