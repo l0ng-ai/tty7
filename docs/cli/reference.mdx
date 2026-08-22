@@ -235,6 +235,17 @@ want directly after a `send`; a command quick enough to finish inside one
 The reply carries the agent's message and native session id. The JSON's `stale`
 flag says whether the answer might belong to the previous turn.
 
+`wait` is the one address-taking verb that does **not** refuse a pane the
+server has no record of — it answers `exit`, `matched: true`, `stale: true` and
+exits `0`, where `capture` and `send` would exit `1`. It cannot do otherwise:
+the server forgets a pane once it is reaped, so a pane that finished and was
+cleaned up and a pane id that never existed are the same question to it, and
+refusing would break the first — which is the ordinary end of an
+orchestration. `stale: false` is the only thing that says a pane moved into its
+state while you were watching; a stale `exit` means it was already gone,
+whatever the reason. Check the id itself with `pane ls --all` if you need to
+tell a typo from a finished worker.
+
 JSON: `{"pane","status","matched","stale","activity","message","session_id"}`.
 A timeout exits `124` with the same object plus `"timed_out": true` —
 `matched` is `false` there, and `stale` still says whether the pane moved

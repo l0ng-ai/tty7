@@ -3778,6 +3778,44 @@ mod tests {
         assert_eq!(backend.control_calls, vec![ControlRequest::AgentStates]);
     }
 
+    /// A pane the server has no record of answers `exit`, and that is the
+    /// decision rather than an oversight.
+    ///
+    /// `wait` is the one address-taking verb that does not refuse an unknown
+    /// pane — `capture`, `procs`, `send` and `pane close` all exit 1 on the
+    /// same address. It cannot join them: the server keeps no record of a pane
+    /// once it is reaped, so "finished and was cleaned up" and "never existed"
+    /// are the same question to it, and refusing would break the first. That
+    /// one is the ordinary end of an orchestration — you wait on work that may
+    /// already be over.
+    ///
+    /// `stale` is what a caller reads to tell the two apart from a *watched*
+    /// finish: false only when the pane moved into the state while the wait
+    /// was running. An `exit` that comes back stale means the pane was gone
+    /// before anyone looked, whatever the reason.
+    #[test]
+    fn wait_on_a_pane_the_server_never_had_reports_it_gone() {
+        let mut backend = mock();
+        backend.replies.push_back(ReplyOk::AgentStates(Vec::new()));
+        let out = run_cli(
+            &["tty7", "wait", "%9999", "--until", "exit"],
+            &Context::default(),
+            &mut backend,
+        );
+        let json = json_of(out);
+        assert_eq!(json["pane"], 9999);
+        assert_eq!(json["status"], "exit", "gone is gone, known or not");
+        assert_eq!(
+            json["matched"], true,
+            "and it ends the wait rather than spinning on a ghost"
+        );
+        assert_eq!(
+            json["stale"], true,
+            "nobody watched this happen — the only signal separating a pane \
+             that finished under the wait from one that was already absent"
+        );
+    }
+
     /// `--changed` is the fix for a level-triggered status: right after a
     /// `send`, the agent still reports last turn's state. The flag refuses the
     /// position the wait arrived at and wakes only once the pane moves.

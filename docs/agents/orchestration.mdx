@@ -66,6 +66,14 @@ about the pane, because not everything worth waiting on is an agent:
 | `free` | The foreground command has exited; the pane is back to its bare shell |
 | `exit` | The pane is gone. Ends every wait, whether you asked for it or not |
 
+`exit` also answers for a pane id the server has never held. Once a pane is
+reaped the server keeps no record of it, so "your worker finished and was
+cleaned up" and "that id is wrong" arrive identically — `exit` with
+`stale: true`, and exit status `0`. Unlike `capture` or `send`, a mistyped
+address will not fail here. If a worker's result matters, read it back
+(`tty7 capture`) rather than treating a bare `wait` as proof the work
+happened.
+
 ### Waiting on a command instead of an agent
 
 An agent says when it is done. A `cargo test` does not — so for a plain pane the
