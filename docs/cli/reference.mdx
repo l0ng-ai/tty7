@@ -320,14 +320,18 @@ nothing, so `tty7 agents` shows it standing still and `tty7 wait` sits there
 until it times out. Outdated hooks fail the same quiet way. Hooks are a local
 install, so under `-m` the row reads `unknown`.
 
-JSON: `{"context":{"config_dir","workspace","pane"},"server":{"reachable","dialect_ok","build","status","routes"},"config":{"ok","state"},"hooks":{"installed","outdated","not_installed"}}`
+JSON: `{"context":{"config_dir","workspace","pane"},"server":{"reachable","dialect_ok","build","status","routes"},"config":{"ok","state","dir_writable"},"hooks":{"installed","outdated","not_installed"}}`
 — the context fields are booleans, not values, and each `hooks` field is a list
 of agent slugs. `context` also carries `workspace_gone` and `pane_gone` when a
 server answered and could be asked; both are absent when none did, so that "it
 names nothing here" stays distinct from "nobody could check". `config.ok` is
 false only when the file failed to parse and tty7 is running on defaults;
-`config.state` is the same sentence the table prints. The extra rows the table
-can show — unread keys, unusable `custom_shells` — are prose, not JSON fields.
+`config.state` is the same sentence the table prints. `config.dir_writable` is
+probed by writing, not read off the mode bits, because a read-only mount or an
+ACL leaves a `0700` directory that refuses every write — false means settings
+cannot be saved and `tty7 new` cannot file a workspace. Either of those false
+exits `1`, so `tty7 doctor || alert` fires. The extra rows the table can show —
+unread keys, unusable `custom_shells` — are prose, not JSON fields.
 
 ## `ws` — workspaces
 

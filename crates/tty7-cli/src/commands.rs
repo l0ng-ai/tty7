@@ -1797,6 +1797,21 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     // Only when a copy is really there. A row that says "no tree was set
     // aside" on every healthy machine is noise, and this one has to read as
     // news.
+    // Whether the config directory can actually be written to, probed rather
+    // than inferred from its mode: a read-only mount, an ACL, or a directory
+    // owned by somebody else all read as writable by permission bits alone,
+    // and what matters is whether the write would succeed.
+    //
+    // This is the check `doctor` was missing. With the directory unwritable
+    // every `tty7 new` and every `tab new` fails with "could not write the
+    // machine tree — Permission denied", settings cannot be saved, and doctor
+    // reported the install healthy and exited 0: the config row says "none yet
+    // — the defaults are the config", which is true of reading and says
+    // nothing about writing. `tty7 doctor || alert` is the thing that is
+    // supposed to fire here.
+    let config_dir_writable = tty7_core::core::config::config_dir_path()
+        .map(|dir| dir_is_writable(&dir))
+        .unwrap_or(true);
     let quarantined_tree = tty7_core::core::config::config_dir_path()
         .map(|dir| dir.join(tty7_core::core::machine::MACHINE_FILE))
         .map(|path| tty7_core::core::config::quarantined_copies(&path))
@@ -1848,6 +1863,18 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
                     .map(|i| i.to_string())
                     .collect::<Vec<_>>()
                     .join(", ")
+            ),
+        ]);
+    }
+    if !config_dir_writable {
+        rows.push(vec![
+            "config dir".to_string(),
+            format!(
+                "not writable{} — settings cannot be saved and new workspaces \
+                 cannot be filed; fix the permissions on that directory",
+                tty7_core::core::config::config_dir_path()
+                    .map(|d| format!(" ({})", d.display()))
+                    .unwrap_or_default()
             ),
         ]);
     }
@@ -1957,7 +1984,11 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
         json: json!({
             "context": context_json(ctx, dangling),
             "server": server,
-            "config": { "ok": config_ok, "state": config_state },
+            "config": {
+                "ok": config_ok,
+                "state": config_state,
+                "dir_writable": config_dir_writable,
+            },
             "hooks": hooks_json(&hooks),
         }),
     };
@@ -1968,6 +1999,9 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     if !config_ok {
         eprintln!("tty7: doctor: the config file is not being used");
     }
+    if !config_dir_writable {
+        eprintln!("tty7: doctor: the config directory cannot be written to");
+    }
     if report.json["server"]["reachable"] == false {
         // doctor is the verb people run when something is not working, so an
         // unreachable server is *the* finding — not a row to exit 0 over:
@@ -1976,10 +2010,26 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
         eprintln!("tty7: doctor: the server is unreachable");
         return Ok(Outcome::Exit(1, report));
     }
-    if !config_ok {
+    if !config_ok || !config_dir_writable {
         return Ok(Outcome::Exit(1, report));
     }
     Ok(Outcome::Report(report))
+}
+
+/// Whether a directory can be written to, by writing to it.
+///
+/// The mode bits are not the question. A read-only mount, an ACL, an immutable
+/// flag or a directory owned by somebody else can all leave `0700` on a
+/// directory that refuses every write, and the thing being diagnosed is
+/// whether the write succeeds.
+///
+/// The probe is removed either way, and a directory that cannot be read at all
+/// counts as unwritable — an install nobody can reach is not a healthy one.
+fn dir_is_writable(dir: &std::path::Path) -> bool {
+    let probe = dir.join(format!(".tty7-doctor-{}", std::process::id()));
+    let ok = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
 }
 
 /// Where every installable status hook stands on this machine.
@@ -4629,6 +4679,53 @@ mod tests {
         };
         let out = human(run_cli(&["tty7", "doctor"], &ctx, &mut doctor_backend()));
         assert!(out.contains("set (/cfg/tty7)"), "{out}");
+    }
+
+    /// The config directory is checked by writing to it, not by its mode.
+    ///
+    /// `doctor` reported a healthy install and exited 0 on a directory it
+    /// could not write to — while every `tty7 new` failed with "could not
+    /// write the machine tree — Permission denied" and settings could not be
+    /// saved. The config row says "none yet — the defaults are the config",
+    /// which is true of *reading* and says nothing about writing, so the one
+    /// verb whose job is to catch a broken install missed this one.
+    ///
+    /// The probe writes because the mode bits are not the question: a
+    /// read-only mount, an ACL, an immutable flag or another user's directory
+    /// all leave `0700` on something that refuses every write.
+    ///
+    /// The wiring — the row, the stderr headline, the exit 1 — is checked
+    /// against a live daemon rather than here, because it turns on the
+    /// process-wide config directory and this suite runs many threads in one
+    /// process.
+    #[test]
+    fn the_config_dir_check_asks_by_writing() {
+        let dir = std::env::temp_dir().join(format!("tty7-doctor-rw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(dir_is_writable(&dir), "a fresh directory is writable");
+        assert!(
+            std::fs::read_dir(&dir).unwrap().next().is_none(),
+            "the probe has to clean up after itself"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+            assert!(
+                !dir_is_writable(&dir),
+                "a directory that refuses a write is not writable"
+            );
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(dir_is_writable(&dir), "and it recovers when it is fixed");
+        }
+
+        assert!(
+            !dir_is_writable(&dir.join("does-not-exist")),
+            "a directory nobody can reach is not a healthy install either"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `doctor --json` carries the sections the reference says it does.

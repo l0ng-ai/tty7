@@ -153,6 +153,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`doctor` now notices a config directory it cannot write to.** With the
+  directory unwritable, every `tty7 new` and `tab new` failed with "could not
+  write the machine tree — Permission denied" and settings could not be saved,
+  while `tty7 doctor` printed a clean table and exited 0. Its config row says
+  "none yet — the defaults are the config", which is true of reading and says
+  nothing about writing, so the one verb whose job is catching a broken
+  install missed this one and `tty7 doctor || alert` never fired. There is now
+  a row, a line on stderr, `config.dir_writable` in the JSON, and exit 1 — and
+  the check writes a probe file rather than reading the mode bits, because a
+  read-only mount or an ACL leaves `0700` on a directory that refuses
+  everything.
+
 - **A clamped setting now says so.** A hand-edited `config.json` asking for
   `ui_font_size: 8`, `font_size: 999` or `scrollback_limit: 5` runs at 12, 256
   and 100 — clamping beats refusing the whole file over one silly number, and
