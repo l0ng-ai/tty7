@@ -188,6 +188,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expected f32 at line 1 column 20`. The window's notice appends it too, on its
   own line after the translated sentence.
 
+- **A changed file's name draws on one row of the source-control panel.**
+  tty7 asks git for `--porcelain=v2 -z` precisely so paths arrive raw rather
+  than C-quoted, which is right for opening a file and wrong for drawing one:
+  a filename is bytes to the kernel, `touch $'a\nb'` makes one, and the row it
+  lands in has a fixed height. The file tree already folded its own names; the
+  source-control panel and the commit detail read theirs from a different place
+  and reached the shared label helper unfolded. Both halves fold now — a
+  directory can carry one just as easily.
+
 - **A commit subject draws on one row of the graph.** git keeps a `\r`, `\t`
   or `\v` in a subject verbatim and `git log --format=%s` returns it that way,
   so any repository you clone can carry one — and the graph row is a fixed

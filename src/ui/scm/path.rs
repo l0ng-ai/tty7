@@ -2,6 +2,7 @@
 //! 260px column. All pure, all cheap, all unit-tested — the panel calls these
 //! once per visible row per frame.
 
+use crate::terminal::view::one_line;
 use std::borrow::Cow;
 use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -14,14 +15,25 @@ const ELLIPSIS: char = '…';
 /// The panel renders these as two runs with different sizes and colours, so
 /// they have to come back as separate slices rather than one pre-joined
 /// string. A path with no directory gets an empty second half.
-pub(crate) fn split_display_path(rel: &str) -> (&str, &str) {
+pub(crate) fn split_display_path(rel: &str) -> (String, String) {
     // A trailing slash means the caller handed us a directory; the last
     // component is still the name, so drop the slash before splitting.
     let trimmed = rel.strip_suffix('/').unwrap_or(rel);
-    match trimmed.rsplit_once('/') {
-        Some((dir, name)) => (name, dir),
-        None => (trimmed, ""),
-    }
+    let (dir, name) = match trimmed.rsplit_once('/') {
+        Some((dir, name)) => (dir, name),
+        None => ("", trimmed),
+    };
+    // Folded, and that is why this hands back owned strings rather than
+    // borrows. A path here comes out of `git status --porcelain=v2 -z`, which
+    // this tree asks for precisely so paths arrive *raw* — the `-z` comment in
+    // `git::status` says as much: without it "any path with a space, a quote or
+    // a newline comes back C-quoted". Raw is right for opening the file and
+    // wrong for drawing it: a filename is bytes to the kernel, `touch $'a\nb'`
+    // makes one, and a row that breaks grows past its height and paints over
+    // the row below.
+    //
+    // Both halves, because a *directory* can carry one just as easily.
+    (one_line(name), one_line(dir))
 }
 
 /// Keep the head and the tail, drop the middle. Paths and branch names both
@@ -97,21 +109,56 @@ pub(crate) fn relative_time(now_unix: i64, then_unix: i64) -> String {
 mod tests {
     use super::*;
 
+    /// A path from git status draws on one row, both halves of it.
+    ///
+    /// This tree asks git for `--porcelain=v2 -z` precisely so paths arrive
+    /// *raw* — the comment on that flag says without it "any path with a
+    /// space, a quote or a newline comes back C-quoted". Raw is right for
+    /// opening the file and wrong for drawing it: a filename is bytes to the
+    /// kernel, `touch $'a\nb'` makes one, and the row it lands in has a fixed
+    /// height that a mandatory break grows past.
+    ///
+    /// The file tree already folds its own names for exactly this reason; the
+    /// source-control panel and the commit detail read their paths from a
+    /// different place and reached this helper unfolded.
+    #[test]
+    fn a_status_path_with_control_characters_folds_on_both_halves() {
+        assert_eq!(
+            split_display_path("src/weird\nname.txt"),
+            ("weird↵name.txt".to_string(), "src".to_string())
+        );
+        assert_eq!(
+            split_display_path("odd\ndir/plain.txt"),
+            ("plain.txt".to_string(), "odd↵dir".to_string()),
+            "a directory can carry one just as easily"
+        );
+        assert_eq!(
+            split_display_path("a\tb/c\rd"),
+            ("c d".to_string(), "a b".to_string()),
+            "every control character, not only the newline"
+        );
+        assert_eq!(
+            split_display_path("src/ui/项目.rs"),
+            ("项目.rs".to_string(), "src/ui".to_string()),
+            "nothing else is touched"
+        );
+    }
+
     #[test]
     fn split_display_path_separates_the_name_from_its_directory() {
-        assert_eq!(split_display_path("src/ui/app.rs"), ("app.rs", "src/ui"));
-        assert_eq!(split_display_path("README.md"), ("README.md", ""));
-        assert_eq!(split_display_path("a/b"), ("b", "a"));
-        assert_eq!(split_display_path(""), ("", ""));
+        assert_eq!(split_display_path("src/ui/app.rs"), ("app.rs".to_string(), "src/ui".to_string()));
+        assert_eq!(split_display_path("README.md"), ("README.md".to_string(), "".to_string()));
+        assert_eq!(split_display_path("a/b"), ("b".to_string(), "a".to_string()));
+        assert_eq!(split_display_path(""), ("".to_string(), "".to_string()));
     }
 
     #[test]
     fn split_display_path_ignores_a_trailing_slash() {
-        assert_eq!(split_display_path("src/ui/"), ("ui", "src"));
-        assert_eq!(split_display_path("src/"), ("src", ""));
+        assert_eq!(split_display_path("src/ui/"), ("ui".to_string(), "src".to_string()));
+        assert_eq!(split_display_path("src/"), ("src".to_string(), "".to_string()));
         // A leading slash leaves an empty directory half rather than dropping
         // the root — the caller decides how to render that.
-        assert_eq!(split_display_path("/etc"), ("etc", ""));
+        assert_eq!(split_display_path("/etc"), ("etc".to_string(), "".to_string()));
     }
 
     #[test]
