@@ -1675,6 +1675,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabUnnamedShell => "终端 {n}",
         L10nKey::ShellDefault => "默认",
         L10nKey::SidebarScratchGroup => "草稿",
+        L10nKey::SidebarRenameGroup => "重命名分组",
         L10nKey::TabContextCloseTab => "关闭标签页",
         L10nKey::TabContextCloseTabsBelow => "关闭下方标签页",
         L10nKey::AppAgentHooksOpFailed => "失败：{error}",

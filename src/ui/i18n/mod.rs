@@ -997,6 +997,7 @@ l10n_keys! {
     TabUnnamedShell,
     ShellDefault,
     SidebarScratchGroup,
+    SidebarRenameGroup,
     TabContextCloseTab,
     TabContextCloseTabsBelow,
     TabContextMarkUnread,

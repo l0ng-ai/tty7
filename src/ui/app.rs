@@ -630,6 +630,15 @@ pub(crate) struct WorkspaceRename {
     _subs: Vec<Subscription>,
 }
 
+pub(crate) struct GroupRename {
+    /// The sidebar group being renamed, by its section key rather than an
+    /// index: `None` is the Scratch group, and a group's index shifts the
+    /// moment a repo probe lands and regroups a tab mid-rename.
+    pub(crate) key: Option<std::path::PathBuf>,
+    pub(crate) input: Entity<InputState>,
+    _subs: Vec<Subscription>,
+}
+
 pub(crate) struct LoopbackForwardPanelState {
     pub(crate) form_pane_id: Option<u64>,
     pub(crate) managed: Vec<crate::daemon::protocol::ManagedForward>,
@@ -776,6 +785,7 @@ pub struct Tty7App {
     window_bounds: Bounds<Pixels>,
     pub(crate) workspace: WorkspaceId,
     pub(crate) workspace_rename: Option<WorkspaceRename>,
+    pub(crate) group_rename: Option<GroupRename>,
     window_title: std::cell::RefCell<String>,
     pub(crate) connect: Option<crate::ui::remote_workspace::ConnectFlow>,
     pub(crate) switcher: Option<crate::ui::switcher::Switcher>,
@@ -1343,6 +1353,7 @@ impl Tty7App {
             window_bounds: window_bounds_to_remember(window),
             workspace,
             workspace_rename: None,
+            group_rename: None,
             window_title: std::cell::RefCell::new(String::new()),
             connect: None,
             switcher: None,
@@ -4728,6 +4739,48 @@ impl Tty7App {
         self.sync_window_title(window, cx);
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    pub(crate) fn start_group_rename(
+        &mut self,
+        key: Option<std::path::PathBuf>,
+        current: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = Self::rename_box(current, window, cx);
+        let subs = vec![cx.subscribe_in(
+            &input,
+            window,
+            |this, _input, ev: &InputEvent, window, cx| match ev {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    this.commit_group_rename(window, cx)
+                }
+                _ => {}
+            },
+        )];
+        self.group_rename = Some(GroupRename {
+            key,
+            input,
+            _subs: subs,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn commit_group_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rename) = self.group_rename.take() else {
+            return;
+        };
+        let value = rename.input.read(cx).value().trim().to_string();
+        let key = crate::ui::tab_sidebar::group_name_key(&rename.key);
+        self.update_config(cx, |cfg| {
+            if value.is_empty() {
+                cfg.sidebar_group_names.remove(&key);
+            } else {
+                cfg.sidebar_group_names.insert(key, value);
+            }
+        });
+        self.focus_active(window, cx);
     }
 
     fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -9781,6 +9834,57 @@ mod shell_menu_gpui_tests {
                 app.shells.shells.is_empty(),
                 "a remote window must not offer this computer's shells: {:?}",
                 app.shells.shells
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+mod group_rename_gpui_tests {
+    use gpui::TestAppContext;
+
+    use crate::ui::app::test_window::harness;
+
+    #[gpui::test]
+    fn a_group_rename_lands_in_the_config_and_an_empty_one_reverts(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        let key = Some(std::path::PathBuf::from("/w/repo"));
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.start_group_rename(key.clone(), "repo".into(), window, cx);
+            let input = app
+                .group_rename
+                .as_ref()
+                .expect("the box is up")
+                .input
+                .clone();
+            input.update(cx, |s, cx| s.set_value("mine", window, cx));
+            app.commit_group_rename(window, cx);
+        });
+        app.update(&mut vcx, |_app, cx| {
+            let cfg = cx.global::<crate::core::config::Config>();
+            assert_eq!(
+                cfg.sidebar_group_names.get("/w/repo").map(String::as_str),
+                Some("mine")
+            );
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.start_group_rename(key.clone(), "mine".into(), window, cx);
+            let input = app
+                .group_rename
+                .as_ref()
+                .expect("the box is up")
+                .input
+                .clone();
+            input.update(cx, |s, cx| s.set_value("  ", window, cx));
+            app.commit_group_rename(window, cx);
+        });
+        app.update(&mut vcx, |_app, cx| {
+            let cfg = cx.global::<crate::core::config::Config>();
+            assert!(
+                cfg.sidebar_group_names.get("/w/repo").is_none(),
+                "an empty rename removes the entry so the derived name returns"
             );
         });
     }

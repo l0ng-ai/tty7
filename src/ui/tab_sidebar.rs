@@ -5,7 +5,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
-use gpui_component::menu::{ContextMenu, ContextMenuExt as _};
+use gpui_component::menu::{ContextMenu, ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -853,8 +853,13 @@ impl Tty7App {
                 })
                 .collect();
             let header = section.name.clone().map(|name| {
-                let label: SharedString = name.to_uppercase().into();
-                h_flex()
+                let shown = effective_group_name(cx.global::<Config>(), &section.key, name);
+                let rename_input = self
+                    .group_rename
+                    .as_ref()
+                    .filter(|r| r.key == section.key)
+                    .map(|r| r.input.clone());
+                let base = h_flex()
                     .id(("sidebar-group", group_ix))
                     .w_full()
                     .items_center()
@@ -882,21 +887,61 @@ impl Tty7App {
                                 cx.new(|_| DragGroup)
                             }
                         })
-                    })
-                    .child(
-                        div()
-                            .flex_shrink(1.)
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(label),
+                    });
+                if let Some(input) = rename_input {
+                    return base
+                        .child(
+                            div()
+                                .id(("sidebar-group-rename", group_ix))
+                                .flex_1()
+                                .min_w_0()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                // Same guard as the tab rows' rename box: a
+                                // click landing in the field must not reach
+                                // the drag handler behind it and take the
+                                // focus with it.
+                                .on_click(|_, _, cx| cx.stop_propagation())
+                                .child(Input::new(&input).appearance(false)),
+                        )
+                        .into_any_element();
+                }
+                let label: SharedString = shown.to_uppercase().into();
+                let menu_app = cx.entity().downgrade();
+                let key = section.key.clone();
+                base.child(
+                    div()
+                        .flex_shrink(1.)
+                        .min_w_0()
+                        .truncate()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(cx.theme().muted_foreground.opacity(0.7))
+                        .child(row_count.to_string()),
+                )
+                .context_menu(move |menu, _window, _cx| {
+                    let app = menu_app.clone();
+                    let key = key.clone();
+                    let current = shown.clone();
+                    menu.min_w(px(160.)).item(
+                        PopupMenuItem::new(t(L10nKey::SidebarRenameGroup)).on_click(
+                            move |_, window, cx| {
+                                let _ = app.update(cx, |this, cx| {
+                                    this.start_group_rename(
+                                        key.clone(),
+                                        current.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                });
+                            },
+                        ),
                     )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_color(cx.theme().muted_foreground.opacity(0.7))
-                            .child(row_count.to_string()),
-                    )
+                })
+                .into_any_element()
             });
 
             let block = v_flex()
@@ -1360,6 +1405,24 @@ fn sidebar_sections(keys: &[Option<PathBuf>]) -> Vec<Section> {
     sections
 }
 
+/// The key a group's custom title is stored under in
+/// [`Config::sidebar_group_names`]: the group's root path, with `""` standing
+/// for the Scratch group.
+pub(crate) fn group_name_key(key: &Option<PathBuf>) -> String {
+    key.as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// What a group header shows: the user's custom title when one is stored,
+/// otherwise the name derived from the group's path.
+fn effective_group_name(cfg: &Config, key: &Option<PathBuf>, derived: String) -> String {
+    cfg.sidebar_group_names
+        .get(&group_name_key(key))
+        .cloned()
+        .unwrap_or(derived)
+}
+
 fn reordered_rows(
     keys: &[Option<PathBuf>],
     group: &Option<PathBuf>,
@@ -1468,6 +1531,33 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    #[test]
+    fn custom_group_titles_override_derived_names_by_key() {
+        let mut cfg = Config::default();
+        let repo = Some(p("/w/tty7"));
+        assert_eq!(
+            effective_group_name(&cfg, &repo, "tty7".into()),
+            "tty7",
+            "no entry: the derived name stands"
+        );
+
+        cfg.sidebar_group_names
+            .insert(group_name_key(&repo), "mine".into());
+        cfg.sidebar_group_names
+            .insert(group_name_key(&None), "inbox".into());
+        assert_eq!(effective_group_name(&cfg, &repo, "tty7".into()), "mine");
+        assert_eq!(
+            effective_group_name(&cfg, &None, "Scratch".into()),
+            "inbox",
+            "the scratch group renames through the \"\" key"
+        );
+        assert_eq!(
+            effective_group_name(&cfg, &Some(p("/w/other")), "other".into()),
+            "other",
+            "an entry only covers its own group"
+        );
     }
 
     #[test]

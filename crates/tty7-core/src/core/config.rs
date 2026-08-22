@@ -206,6 +206,12 @@ pub struct Config {
     pub sidebar_grouping: SidebarGrouping,
     #[serde(default = "default_true")]
     pub sidebar_diff_preview: bool,
+    /// Custom sidebar group titles, keyed by the group's root path — `""`
+    /// stands for the Scratch group. A group without an entry keeps the name
+    /// derived from its path, and an entry is removed (not blanked) when the
+    /// user commits an empty rename, so the derived name comes back.
+    #[serde(default)]
+    pub sidebar_group_names: HashMap<String, String>,
     #[serde(default, deserialize_with = "de_lenient")]
     pub notify_on_command_finish: NotifyMode,
     pub check_for_updates: bool,
@@ -605,6 +611,7 @@ impl Default for Config {
             scm_graph_expanded: false,
             sidebar_grouping: SidebarGrouping::Repo,
             sidebar_diff_preview: true,
+            sidebar_group_names: HashMap::new(),
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,
             update_channel: UpdateChannel::default(),
@@ -1294,6 +1301,39 @@ mod tests {
         assert!(json.contains("\"sidebar_diff_preview\":false"), "persisted");
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.sidebar_diff_preview);
+    }
+
+    #[test]
+    fn sidebar_group_names_round_trip_and_default_empty() {
+        let mut cfg = Config::default();
+        assert!(cfg.sidebar_group_names.is_empty());
+
+        // A Windows group key is the shape this actually stores on the
+        // platform the sidebar groups are keyed by path on, and its
+        // backslashes are the one part of the key that JSON has to escape.
+        let win = r"D:\gh-prj\tty7";
+        cfg.sidebar_group_names.insert(win.into(), "mine".into());
+        cfg.sidebar_group_names
+            .insert(String::new(), "inbox".into());
+        let text = serde_json::to_string(&cfg).unwrap();
+        assert!(
+            text.contains(r#""D:\\gh-prj\\tty7":"mine""#),
+            "the backslashes are escaped, not dropped: {text}"
+        );
+        let back: Config = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            back.sidebar_group_names.get(win).map(String::as_str),
+            Some("mine")
+        );
+        assert_eq!(
+            back.sidebar_group_names.get("").map(String::as_str),
+            Some("inbox"),
+            "the scratch group's custom title persists under the \"\" key"
+        );
+
+        // A config predating the key parses to the default empty map.
+        let old: Config = serde_json::from_str("{}").unwrap();
+        assert!(old.sidebar_group_names.is_empty());
     }
 
     #[test]

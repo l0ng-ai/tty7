@@ -1761,6 +1761,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TabUnnamedShell => "Shell {n}",
         L10nKey::ShellDefault => "default",
         L10nKey::SidebarScratchGroup => "Scratch",
+        L10nKey::SidebarRenameGroup => "Rename Group",
         L10nKey::TabContextCloseTab => "Close Tab",
         L10nKey::TabContextCloseTabsBelow => "Close Tabs Below",
         L10nKey::AppAgentHooksOpFailed => "Failed: {error}",
