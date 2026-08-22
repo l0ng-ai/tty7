@@ -105,6 +105,18 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsLanguageEnglish => "English",
         L10nKey::SettingsLanguageChinese => "简体中文",
         L10nKey::SettingsLanguageJapanese => "日本語",
+        L10nKey::SettingsSearchAgentForwardingKeywords => {
+            "SSH agent 转发 密钥转发 代理转发 ssh agent forwarding key forward"
+        }
+        L10nKey::SettingsSearchCustomShellPathKeywords => {
+            "自定义 shell 路径 可执行文件 登录程序 shell binary path executable custom"
+        }
+        L10nKey::SettingsSearchImportAliasesKeywords => {
+            "导入别名 SSH 配置 主机别名 ssh config alias host import openssh"
+        }
+        L10nKey::SettingsSearchJumpHostKeywords => {
+            "跳板机 堡垒机 中转 ssh bastion proxyjump jump host gateway"
+        }
         L10nKey::SettingsSearchLanguageKeywords => {
             "语言 区域设置 英文 中文 language locale english chinese"
         }
@@ -744,6 +756,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchLineHeightKeywords => {
             "行高 行间距 行距 typography line height spacing leading"
         }
+        L10nKey::SettingsSearchMouseZoomKeywords => {
+            "滚轮缩放 鼠标缩放 字号 修饰键 wheel scroll zoom mouse font size modifier"
+        }
         L10nKey::SettingsSearchNewTabPositionKeywords => {
             "新标签页位置 标签页 顺序 末尾 当前之后 new tab position tabs order end after current"
         }
@@ -755,6 +770,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchOpacityKeywords => {
             "不透明度 透明度 窗口 半透明 alpha opacity transparency translucent window"
+        }
+        L10nKey::SettingsSearchOpenFilesCommandKeywords => {
+            "打开文件 命令 编辑器 外部程序 链接 open file command editor external link"
         }
         L10nKey::SettingsSearchOpenFilesWithKeywords => {
             "打开文件 链接 编辑器 命令 外部应用 路径 行号 列号 open files editor command path line column"
@@ -773,6 +791,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchDroidKeywords => {
             "Droid agent 集成 钩子 安装 droid factory agent integration hooks install"
+        }
+        L10nKey::SettingsSearchPerPaneHistoryKeywords => {
+            "每个窗格独立历史 命令历史 上方向键 bash zsh shell history per pane"
         }
         L10nKey::SettingsSearchQwenCodeKeywords => {
             "Qwen Code 通义千问 agent 集成 钩子 安装 qwen code agent integration hooks install"
@@ -804,8 +825,17 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchScrollSpeedKeywords => {
             "滚动速度 鼠标滚轮 滚动倍率 scroll speed mouse wheel multiplier scrolling"
         }
+        L10nKey::SettingsSearchShellIntegrationKeywords => {
+            "Shell 集成 远程 rc 文件 bashrc zshrc 提示符标记 shell integration remote"
+        }
+        L10nKey::SettingsSearchSkipBannerKeywords => {
+            "跳过登录横幅 motd 登录消息 静默 ssh login banner suppress quiet"
+        }
         L10nKey::SettingsSearchSmoothScrollKeywords => {
             "平滑滚动 动画 缓动 滚轮 触控板 smooth animation ease wheel trackpad scrolling"
+        }
+        L10nKey::SettingsSearchUiFontSizeKeywords => {
+            "界面字号 界面文字大小 侧边栏 标签页 缩放 interface ui font size text bigger smaller zoom"
         }
         L10nKey::SettingsSearchUpdateChannelKeywords => {
             "更新通道 稳定版 每夜构建 预发布 版本 update channel stable nightly release"
@@ -863,6 +893,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchStartupWindowKeywords => {
             "启动窗口 启动 最大化 全屏 普通 startup window launch maximized fullscreen normal"
+        }
+        L10nKey::SettingsSearchX11ForwardingKeywords => {
+            "X11 转发 图形转发 显示 ssh x11 forwarding display gui xquartz"
         }
         L10nKey::SwitcherNoMatch => "没有匹配的工作区或机器。",
         L10nKey::AddSshHost => "添加 SSH 主机…",

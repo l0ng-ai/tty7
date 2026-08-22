@@ -123,6 +123,18 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsLanguageEnglish => "English",
         L10nKey::SettingsLanguageChinese => "简体中文",
         L10nKey::SettingsLanguageJapanese => "日本語",
+        L10nKey::SettingsSearchAgentForwardingKeywords => {
+            "SSH エージェント転送 鍵転送 ssh agent forwarding key forward"
+        }
+        L10nKey::SettingsSearchCustomShellPathKeywords => {
+            "シェル パス 実行ファイル ログインシェル shell binary path executable custom"
+        }
+        L10nKey::SettingsSearchImportAliasesKeywords => {
+            "エイリアス取り込み SSH 設定 ホスト ssh config alias host import openssh"
+        }
+        L10nKey::SettingsSearchJumpHostKeywords => {
+            "踏み台 ジャンプホスト 中継 ssh bastion proxyjump jump host gateway"
+        }
         L10nKey::SettingsSearchLanguageKeywords => {
             "言語 ロケール 英語 中国語 language locale english chinese"
         }
@@ -837,6 +849,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchLineHeightKeywords => {
             "タイポグラフィ リーディング 行間 line height typography leading spacing"
         }
+        L10nKey::SettingsSearchMouseZoomKeywords => {
+            "ホイール ズーム 拡大 縮小 修飾キー wheel scroll zoom mouse font size modifier"
+        }
         L10nKey::SettingsSearchNewTabPositionKeywords => {
             "タブ 順序 末尾 現在のタブの隣 new tab position tabs order end after current"
         }
@@ -848,6 +863,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchOpacityKeywords => {
             "透明度 半透明 透ける ウィンドウ alpha opacity transparency translucent window"
+        }
+        L10nKey::SettingsSearchOpenFilesCommandKeywords => {
+            "ファイルを開く コマンド エディタ 外部アプリ リンク open file command editor external link"
         }
         L10nKey::SettingsSearchOpenFilesWithKeywords => {
             "リンク ファイル エディタ コマンド 外部アプリ パス 行 列 open files with editor external app path line column"
@@ -866,6 +884,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchDroidKeywords => {
             "エージェント 統合 フック インストール droid factory agent integration hooks install"
+        }
+        L10nKey::SettingsSearchPerPaneHistoryKeywords => {
+            "ペインごとの履歴 コマンド履歴 上矢印 bash zsh shell history per pane"
         }
         L10nKey::SettingsSearchQwenCodeKeywords => {
             "エージェント 統合 フック インストール qwen code agent integration hooks install"
@@ -897,8 +918,17 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchScrollSpeedKeywords => {
             "マウス ホイール 倍率 スクロール scroll speed mouse wheel multiplier scrolling"
         }
+        L10nKey::SettingsSearchShellIntegrationKeywords => {
+            "シェル統合 リモート rc bashrc zshrc プロンプト shell integration remote"
+        }
+        L10nKey::SettingsSearchSkipBannerKeywords => {
+            "バナー抑制 motd ログインメッセージ ssh login banner suppress quiet"
+        }
         L10nKey::SettingsSearchSmoothScrollKeywords => {
             "スムーズ スクロール アニメーション ホイール トラックパッド smooth animation ease wheel trackpad"
+        }
+        L10nKey::SettingsSearchUiFontSizeKeywords => {
+            "UI フォントサイズ インターフェイス 文字サイズ サイドバー タブ 拡大 縮小 interface ui font size text zoom"
         }
         L10nKey::SettingsSearchUpdateChannelKeywords => {
             "更新 チャンネル 安定版 ナイトリー リリース update channel stable nightly release"
@@ -956,6 +986,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchStartupWindowKeywords => {
             "起動 開く 最大化 全画面 通常 startup window launch maximized fullscreen normal"
+        }
+        L10nKey::SettingsSearchX11ForwardingKeywords => {
+            "X11 転送 GUI 転送 ディスプレイ ssh x11 forwarding display gui xquartz"
         }
         L10nKey::SwitcherNoMatch => "一致するワークスペースまたはマシンがありません",
         L10nKey::AddSshHost => "SSH ホストを追加…",

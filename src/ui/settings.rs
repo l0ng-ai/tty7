@@ -718,6 +718,61 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             title: SettingsInstallCliOnPath,
             keywords: SettingsSearchCommandLineToolKeywords,
         },
+        SearchEntry {
+            section: Appearance,
+            title: SettingsUiFontSize,
+            keywords: SettingsSearchUiFontSizeKeywords,
+        },
+        SearchEntry {
+            section: Terminal,
+            title: SettingsCustomPath,
+            keywords: SettingsSearchCustomShellPathKeywords,
+        },
+        SearchEntry {
+            section: Terminal,
+            title: SettingsMouseZoom,
+            keywords: SettingsSearchMouseZoomKeywords,
+        },
+        SearchEntry {
+            section: Terminal,
+            title: SettingsOpenFilesCommand,
+            keywords: SettingsSearchOpenFilesCommandKeywords,
+        },
+        SearchEntry {
+            section: Input,
+            title: SettingsPerPaneHistory,
+            keywords: SettingsSearchPerPaneHistoryKeywords,
+        },
+        SearchEntry {
+            section: Ssh,
+            title: SettingsImportAliases,
+            keywords: SettingsSearchImportAliasesKeywords,
+        },
+        SearchEntry {
+            section: Ssh,
+            title: SettingsJumpHost,
+            keywords: SettingsSearchJumpHostKeywords,
+        },
+        SearchEntry {
+            section: Ssh,
+            title: SettingsAgentForwarding,
+            keywords: SettingsSearchAgentForwardingKeywords,
+        },
+        SearchEntry {
+            section: Ssh,
+            title: SettingsX11Forwarding,
+            keywords: SettingsSearchX11ForwardingKeywords,
+        },
+        SearchEntry {
+            section: Ssh,
+            title: SettingsShellIntegration,
+            keywords: SettingsSearchShellIntegrationKeywords,
+        },
+        SearchEntry {
+            section: Ssh,
+            title: SettingsSkipBanner,
+            keywords: SettingsSearchSkipBannerKeywords,
+        },
     ]
 }
 
@@ -8245,5 +8300,152 @@ mod gpui_tests {
         });
         assert!(prompt_editor);
         assert!(tab_completion, "the completion menu comes back with it");
+    }
+}
+
+#[cfg(test)]
+mod search_index_tests {
+    use super::*;
+
+    /// The label key of every row `settings.rs` can render, read out of its own
+    /// source.
+    ///
+    /// Reading the source rather than keeping a list by hand is the point: a
+    /// list would need exactly the discipline the search index needs, and would
+    /// fall out of date the same way, so it could not catch the index doing it.
+    /// The label keys of every row `settings.rs` can render, read out of its
+    /// own source — one entry per row, holding every key that row's label can
+    /// resolve to.
+    ///
+    /// Reading the source rather than keeping a list by hand is the point: a
+    /// list would need exactly the discipline the search index needs, and would
+    /// fall out of date the same way, so it could not catch the index doing it.
+    ///
+    /// A label can name more than one key, because a few are chosen by
+    /// `cfg!(target_os = ...)` — the blur row is "Background material" on
+    /// Windows and "Blur" everywhere else. The index is gated the same way, so
+    /// the caller asks whether *any* of a row's keys is indexed rather than
+    /// picking the branch this build happens to be on.
+    fn rendered_row_label_keys() -> Vec<Vec<String>> {
+        const SOURCE: &str = include_str!("settings.rs");
+
+        fn keys_in(text: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            let mut rest = text;
+            while let Some(at) = rest.find("L10nKey::") {
+                rest = &rest[at + "L10nKey::".len()..];
+                let end = rest
+                    .find(|c: char| !c.is_alphanumeric() && c != '_')
+                    .unwrap_or(rest.len());
+                out.push(rest[..end].to_string());
+                rest = &rest[end..];
+            }
+            out
+        }
+
+        let mut rows = Vec::new();
+        for call in ["self.settings_row(", "self.settings_row_gated_when("] {
+            let mut from = 0;
+            while let Some(at) = SOURCE[from..].find(call) {
+                let start = from + at + call.len();
+                from = start;
+                // The label is the first argument. Stop at the comma that ends
+                // it so the description's key cannot be read as the label's.
+                let arg = &SOURCE[start..SOURCE.len().min(start + 400)];
+                let arg = match arg.find(',') {
+                    Some(end) => &arg[..end],
+                    None => arg,
+                };
+                let keys = keys_in(arg);
+                if keys.is_empty() {
+                    // A row labelled by a runtime string (an agent's display
+                    // name, a caller's `label`). Nothing static to index.
+                    continue;
+                }
+                rows.push(keys);
+            }
+        }
+        assert!(
+            rows.len() > 50,
+            "the source scan found only {} rows, so it has stopped matching how \
+             a row is written",
+            rows.len()
+        );
+        rows
+    }
+
+    /// Every settings row is reachable from the search box.
+    ///
+    /// The two halves of search do not agree on their own: [`row_matches_query`]
+    /// accepts a bare label match, while [`section_match_count`] — which drives
+    /// the nav badges, [`best_matching_section`] and the "nothing matches" note
+    /// — counts only the index. A row missing from the index is therefore not
+    /// merely unhighlighted: typing its own title into the box makes the page
+    /// answer that nothing matches, while the row sits there on screen. Seven
+    /// rows did, including "Zoom with the wheel" and "Skip banner".
+    ///
+    /// The fix is the index, not the count: a row's label is written for a
+    /// reader, and the keywords are what carry the words they would actually
+    /// reach for.
+    #[test]
+    fn every_rendered_settings_row_is_findable_by_its_own_label() {
+        // Bare field labels inside the SSH profile form — "Name", "Host",
+        // "User", "Auth". They are indexed nowhere on purpose: each is one
+        // common word, and a one-word entry puts a match on the SSH badge for
+        // half the queries anyone types. The distinctive rows of that same form
+        // (jump host, agent forwarding, X11, shell integration, skip banner)
+        // *are* indexed, so the form is reachable by the things it is actually
+        // searched for.
+        const BARE_FIELD_LABELS: &[&str] = &[
+            "SettingsName",
+            "SettingsHost",
+            "SettingsUser",
+            "SettingsAuth",
+        ];
+
+        // `L10nKey` is not `Hash`, and its `Debug` name is what the source scan
+        // yields, so the index is compared as those names.
+        let indexed: std::collections::HashSet<String> = settings_search_entries()
+            .iter()
+            .map(|e| format!("{:?}", e.title))
+            .collect();
+
+        let mut missing: Vec<String> = rendered_row_label_keys()
+            .into_iter()
+            .filter(|keys| {
+                !keys
+                    .iter()
+                    .any(|k| BARE_FIELD_LABELS.contains(&k.as_str()) || indexed.contains(k))
+            })
+            .map(|keys| keys.join(" or "))
+            .collect();
+        missing.sort();
+        missing.dedup();
+
+        assert!(
+            missing.is_empty(),
+            "these settings rows are rendered but not in the search index, so \
+             searching for one by name answers that nothing matches: {missing:?}"
+        );
+    }
+
+    /// The exemptions above name rows that exist.
+    ///
+    /// Without this, renaming one of those keys would silently widen the
+    /// exemption to nothing and take a row out of the guard with it.
+    #[test]
+    fn the_search_index_exemptions_still_name_rendered_rows() {
+        let rendered = rendered_row_label_keys();
+        for key in [
+            "SettingsName",
+            "SettingsHost",
+            "SettingsUser",
+            "SettingsAuth",
+        ] {
+            assert!(
+                rendered.iter().any(|keys| keys.iter().any(|k| k == key)),
+                "{key} is exempt from the search index but no longer names a row"
+            );
+        }
     }
 }

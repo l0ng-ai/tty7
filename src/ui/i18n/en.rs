@@ -118,6 +118,18 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsLanguageEnglish => "English",
         L10nKey::SettingsLanguageChinese => "简体中文",
         L10nKey::SettingsLanguageJapanese => "日本語",
+        L10nKey::SettingsSearchAgentForwardingKeywords => {
+            "ssh agent forwarding key auth forward ForwardAgent"
+        }
+        L10nKey::SettingsSearchCustomShellPathKeywords => {
+            "shell binary path executable custom login program"
+        }
+        L10nKey::SettingsSearchImportAliasesKeywords => {
+            "ssh config alias host import openssh known hosts"
+        }
+        L10nKey::SettingsSearchJumpHostKeywords => {
+            "ssh bastion proxyjump jump host tunnel gateway hop"
+        }
         L10nKey::SettingsSearchLanguageKeywords => "language, locale, english, chinese",
         L10nKey::SettingsTransparency => "Transparency",
         L10nKey::SettingsOpacity => "Opacity",
@@ -798,6 +810,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchKeybindingsTitle => "Keybindings",
         L10nKey::SettingsSearchLineHeightKeywords => "typography leading spacing",
+        L10nKey::SettingsSearchMouseZoomKeywords => {
+            "wheel scroll zoom font size ctrl cmd modifier mouse"
+        }
         L10nKey::SettingsSearchNewTabPositionKeywords => "tabs order end after current",
         L10nKey::SettingsSearchNotifyOnCommandFinishKeywords => {
             "notification alert done osc desktop banner long command"
@@ -807,6 +822,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchOpacityKeywords => {
             "transparency translucent see through window alpha"
+        }
+        L10nKey::SettingsSearchOpenFilesCommandKeywords => {
+            "link file open editor command external application click"
         }
         L10nKey::SettingsSearchOpenFilesWithKeywords => {
             "links file editor command external app path line column"
@@ -818,6 +836,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchOhMyPiKeywords => "agent integration extension install omp oh my pi",
         L10nKey::SettingsSearchGeminiKeywords => "agent integration hooks install gemini google",
         L10nKey::SettingsSearchDroidKeywords => "agent integration hooks install droid factory",
+        L10nKey::SettingsSearchPerPaneHistoryKeywords => {
+            "shell history per pane separate up arrow recall bash zsh"
+        }
         L10nKey::SettingsSearchQwenCodeKeywords => {
             "agent integration hooks install qwen code qwen-code"
         }
@@ -842,8 +863,17 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "restore session previous tabs splits reopen launch startup layout"
         }
         L10nKey::SettingsSearchScrollSpeedKeywords => "mouse wheel multiplier scrolling",
+        L10nKey::SettingsSearchShellIntegrationKeywords => {
+            "ssh remote shell integration rc bashrc zshrc prompt marks"
+        }
+        L10nKey::SettingsSearchSkipBannerKeywords => {
+            "ssh login banner motd suppress quiet message of the day"
+        }
         L10nKey::SettingsSearchSmoothScrollKeywords => {
             "smooth animation ease wheel notch trackpad scrolling"
+        }
+        L10nKey::SettingsSearchUiFontSizeKeywords => {
+            "interface ui chrome sidebar tab settings text bigger smaller zoom scale"
         }
         L10nKey::SettingsSearchUpdateChannelKeywords => {
             "update channel stable nightly release prerelease build"
@@ -896,6 +926,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "ssh confirm close tab pane live session security"
         }
         L10nKey::SettingsSearchStartupWindowKeywords => "launch open maximized fullscreen normal",
+        L10nKey::SettingsSearchX11ForwardingKeywords => {
+            "ssh x11 forwarding display gui xquartz ForwardX11"
+        }
         L10nKey::SwitcherNoMatch => "No workspace or machine matches.",
         L10nKey::AddSshHost => "Add SSH Host…",
         L10nKey::ClickForNewWindow => "click for a new window",
