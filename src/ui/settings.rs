@@ -327,6 +327,27 @@ impl SettingsSection {
         SettingsSection::About,
     ];
 
+    /// The name this section is shown under, in the nav and on the docs page.
+    ///
+    /// A method rather than eight labels spelled into the nav builder, because
+    /// the match is exhaustive: a section added to `ALL` has to be given a
+    /// name here before this compiles. The docs guard reads the same answer,
+    /// so `docs/customization/settings.mdx` cannot go on calling a section by
+    /// a name the window stopped using — it checked only that the *count* of
+    /// cards matched, which a rename leaves untouched.
+    pub(crate) fn nav_label(self) -> L10nKey {
+        match self {
+            SettingsSection::Appearance => L10nKey::SettingsNavAppearance,
+            SettingsSection::Terminal => L10nKey::SettingsNavTerminal,
+            SettingsSection::Input => L10nKey::SettingsNavInput,
+            SettingsSection::Ssh => L10nKey::SettingsNavSsh,
+            SettingsSection::Agents => L10nKey::SettingsNavAgents,
+            SettingsSection::WindowTabs => L10nKey::SettingsNavWindowTabs,
+            SettingsSection::Keybindings => L10nKey::SettingsNavKeybindings,
+            SettingsSection::About => L10nKey::SettingsNavAbout,
+        }
+    }
+
     fn profile_label(self) -> &'static str {
         match self {
             SettingsSection::Appearance => "settings:appearance",
@@ -1648,42 +1669,42 @@ impl Tty7App {
 
         let nav_body = SidebarMenu::new()
             .child(nav_item(
-                t(L10nKey::SettingsNavAppearance),
+                t(SettingsSection::Appearance.nav_label()),
                 SettingsSection::Appearance,
                 Icon::new(IconName::Palette),
             ))
             .child(nav_item(
-                t(L10nKey::SettingsNavTerminal),
+                t(SettingsSection::Terminal.nav_label()),
                 SettingsSection::Terminal,
                 Icon::new(IconName::SquareTerminal),
             ))
             .child(nav_item(
-                t(L10nKey::SettingsNavInput),
+                t(SettingsSection::Input.nav_label()),
                 SettingsSection::Input,
                 Icon::new(IconName::Settings2),
             ))
             .child(nav_item(
-                t(L10nKey::SettingsNavSsh),
+                t(SettingsSection::Ssh.nav_label()),
                 SettingsSection::Ssh,
                 Icon::new(IconName::Globe),
             ))
             .child(nav_item(
-                t(L10nKey::SettingsNavAgents),
+                t(SettingsSection::Agents.nav_label()),
                 SettingsSection::Agents,
                 Icon::new(IconName::Bot),
             ))
             .child(nav_item(
-                t(L10nKey::SettingsNavWindowTabs),
+                t(SettingsSection::WindowTabs.nav_label()),
                 SettingsSection::WindowTabs,
                 Icon::new(IconName::WindowRestore),
             ))
             .child(nav_item(
-                t(L10nKey::SettingsNavKeybindings),
+                t(SettingsSection::Keybindings.nav_label()),
                 SettingsSection::Keybindings,
                 Icon::new(IconName::CaseSensitive),
             ))
             .child(nav_item(
-                t(L10nKey::SettingsNavAbout),
+                t(SettingsSection::About.nav_label()),
                 SettingsSection::About,
                 Icon::empty().path("icons/circle-info.svg"),
             ));
@@ -7326,6 +7347,22 @@ mod tests {
         assert_eq!(
             cards, n,
             "the page shows {cards} section cards for {n} sections"
+        );
+
+        // And each card is the section it claims to be. Counting alone let a
+        // rename through untouched — eight sections and eight cards is just as
+        // true when one of them has been called something else for a release.
+        crate::ui::i18n::set_locale("en");
+        let missing: Vec<&str> = SettingsSection::ALL
+            .into_iter()
+            .map(|section| crate::ui::i18n::t(section.nav_label()))
+            .filter(|label| !DOC.contains(&format!("<Card title=\"{label}\"")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the page has a card for every section but not by these names: \
+             {missing:?} — a section was renamed and the page still calls it \
+             what it used to be"
         );
     }
 
