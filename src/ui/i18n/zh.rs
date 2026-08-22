@@ -49,6 +49,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::Abort => "中止",
         L10nKey::HostKeyOverrideMessage => "输入 yes 覆盖并信任新密钥，或按 Esc 中止。",
         L10nKey::Override => "覆盖",
+        L10nKey::KeybindingsIgnored => {
+            "config.json 中有 {count} 项快捷键无效，已跳过：{names}。设置 → 快捷键 中列出了所有可用的动作名和按键写法。"
+        }
         L10nKey::RememberKeychain => "记住（钥匙串）",
         L10nKey::Cancel => "取消",
         L10nKey::Close => "关闭",

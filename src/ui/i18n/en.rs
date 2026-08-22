@@ -53,6 +53,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "Type \"yes\" to override and trust the new key, or Esc to abort."
         }
         L10nKey::Override => "Override",
+        L10nKey::KeybindingsIgnored => {
+            "{count} of the keybindings in config.json did nothing and were skipped: {names}. Settings → Keybindings lists every action name and the chords they take."
+        }
         L10nKey::RememberKeychain => "Remember (keychain)",
         L10nKey::Cancel => "Cancel",
         L10nKey::Close => "Close",

@@ -127,6 +127,7 @@ l10n_keys! {
     Abort,
     HostKeyOverrideMessage,
     Override,
+    KeybindingsIgnored,
     RememberKeychain,
     Cancel,
     Close,

@@ -217,6 +217,44 @@ fn notify_config_load_failed(
     });
 }
 
+/// Says out loud that some of the `keybindings` in config.json did nothing.
+///
+/// The two places that drop one already say so with `log::warn!`, and there is
+/// no log unless `TTY7_LOG` is set — so on a default install a typo'd action
+/// name or an unparseable chord costs the user their shortcut in silence.
+/// `config.json` still parses, so `tty7 doctor` reports it `ok`, and the only
+/// evidence is a key that does nothing.
+///
+/// Same shape as the config notice above, for the same reason: the symptom on
+/// its own reads as "tty7 ignored my settings", and nothing points at the line
+/// that needs fixing.
+fn notify_ignored_keybindings(cx: &mut App) {
+    use gpui_component::WindowExt as _;
+
+    let faults = crate::ui::keymap::ignored_keybindings(cx);
+    if faults.is_empty() {
+        return;
+    }
+    let names = faults
+        .iter()
+        .map(|(action, _)| action.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let text = crate::ui::i18n::t_fmt(
+        crate::ui::i18n::L10nKey::KeybindingsIgnored,
+        &[("count", &faults.len().to_string()), ("names", &names)],
+    );
+    let Some(workspace) = crate::ui::windows::WindowRegistry::most_recent(cx) else {
+        return;
+    };
+    let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, workspace) else {
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        window.push_notification(text, cx);
+    });
+}
+
 fn strip_os_arg_prefix(arg: &std::ffi::OsStr, prefix: &str) -> Option<std::ffi::OsString> {
     let suffix = arg.as_encoded_bytes().strip_prefix(prefix.as_bytes())?;
     // SAFETY: `prefix` is ASCII and is removed only from the beginning of an
@@ -623,6 +661,12 @@ fn main() {
             crate::ui::windows::announce_detached_at_launch(cx, reopen);
             if config_outcome.failed() {
                 notify_config_load_failed(cx, config_outcome, true);
+            }
+            // Only when the file itself loaded: a quarantined config is running
+            // on defaults, so its `keybindings` were never read and complaining
+            // about them would name a map nothing consulted.
+            else {
+                notify_ignored_keybindings(cx);
             }
         });
 }

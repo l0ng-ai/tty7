@@ -822,6 +822,47 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
     })
 }
 
+/// Why an entry in `config.json`'s `keybindings` did nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum KeybindingFault {
+    /// No action goes by that name — a typo, or a name from another app.
+    UnknownAction,
+    /// The chord does not parse, so nothing could ever press it.
+    InvalidKeystroke,
+}
+
+/// The entries in `config.json`'s `keybindings` map that were thrown away.
+///
+/// Both halves already say so — `set_binding` for a name no action answers to,
+/// `action_bindings` for a chord that does not parse — and both say it with
+/// `log::warn!`, into a log that per `docs/reference/privacy.mdx` is not
+/// written at all unless `TTY7_LOG` is set. So on a default install a
+/// hand-edited typo costs the user their binding in silence: `config.json`
+/// parses, `tty7 doctor` reports the config as `ok`, and the shortcut simply
+/// never fires.
+///
+/// It is answered here rather than in `doctor` because `doctor` cannot ask.
+/// The action table and the keystroke parser both live in the window; the CLI
+/// shares only the crate underneath, and moving either down there to answer
+/// one diagnostic would be the tail wagging the dog.
+///
+/// An empty chord is not a fault: that is how a binding is *unbound*, and
+/// `action_bindings` skips it deliberately.
+pub(crate) fn ignored_keybindings(cx: &App) -> Vec<(String, KeybindingFault)> {
+    let cfg = cx.global::<Config>();
+    let known: Vec<&str> = default_bindings().into_iter().map(|(a, _)| a).collect();
+    let mut out = Vec::new();
+    for (action, key) in &cfg.keybindings {
+        if !known.contains(&action.as_str()) {
+            out.push((action.clone(), KeybindingFault::UnknownAction));
+        } else if !key.is_empty() && !keystroke_is_valid(key) {
+            out.push((action.clone(), KeybindingFault::InvalidKeystroke));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 pub(crate) fn effective_bindings(cx: &App) -> Vec<(String, String)> {
     let cfg = cx.global::<Config>();
     let mut effective: Vec<(String, String)> = default_bindings()
@@ -1895,6 +1936,64 @@ mod gpui_tests {
     use super::*;
     use crate::core::config::Config;
     use gpui::TestAppContext;
+
+    /// What a hand-edited `keybindings` map loses, and why anyone is told.
+    ///
+    /// `set_binding` drops a name no action answers to and `action_bindings`
+    /// drops a chord that will not parse — both with `log::warn!`, into a log
+    /// that is not written unless `TTY7_LOG` is set. `config.json` still
+    /// parses either way, so `tty7 doctor` calls it `ok` and the only evidence
+    /// left is a shortcut that never fires.
+    ///
+    /// An empty chord is not a fault: that is how a binding is unbound, and
+    /// `action_bindings` skips it on purpose.
+    #[gpui::test]
+    fn a_keybinding_that_does_nothing_is_collected_for_the_notice(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            init(cx);
+            {
+                let cfg = cx.global_mut::<Config>();
+                // A real action with a real chord: nothing to report.
+                cfg.keybindings
+                    .insert("SplitRight".into(), "secondary-shift-9".into());
+                // A name no action answers to — the ordinary typo.
+                cfg.keybindings
+                    .insert("NewTabb".into(), "secondary-t".into());
+                // A real action whose chord cannot be pressed.
+                cfg.keybindings
+                    .insert("NewWorkspace".into(), "not-a-chord".into());
+                // Unbinding, which is a choice rather than a mistake.
+                cfg.keybindings.insert("RenameTab".into(), String::new());
+            }
+
+            let faults = ignored_keybindings(cx);
+            assert_eq!(
+                faults,
+                vec![
+                    ("NewTabb".to_string(), KeybindingFault::UnknownAction),
+                    (
+                        "NewWorkspace".to_string(),
+                        KeybindingFault::InvalidKeystroke
+                    ),
+                ],
+                "the working binding and the deliberate unbind are not faults"
+            );
+        });
+    }
+
+    /// A config nobody edited reports nothing, so the notice cannot cry wolf
+    /// on every launch.
+    #[gpui::test]
+    fn a_default_config_has_no_ignored_keybindings(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            init(cx);
+            assert!(ignored_keybindings(cx).is_empty());
+        });
+    }
 
     #[gpui::test]
     fn init_then_rebind_installs_the_merged_table(cx: &mut TestAppContext) {

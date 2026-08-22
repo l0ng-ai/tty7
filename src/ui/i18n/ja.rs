@@ -55,6 +55,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "「yes」を入力すると新しいキーを上書きして信頼します。中止するには Esc を押してください"
         }
         L10nKey::Override => "上書き",
+        L10nKey::KeybindingsIgnored => {
+            "config.json のキーバインド {count} 件が無効のためスキップされました: {names}。設定 → キーバインド にすべてのアクション名とキーの書き方があります。"
+        }
         L10nKey::RememberKeychain => "キーチェーンに保存",
         L10nKey::Cancel => "キャンセル",
         L10nKey::Close => "閉じる",
