@@ -1768,6 +1768,59 @@ mod tests {
         assert!(marker_command(&serde_json::json!({}), "agent-hook claude").is_none());
     }
 
+    /// The hook says nothing at all outside tty7, and decides that first.
+    ///
+    /// These hooks live in the user's own Claude/Codex/Gemini config, so they
+    /// run on *every* invocation of those agents — including the ones in
+    /// iTerm, Terminal, VS Code, or a plain ssh session. What they emit is
+    /// `OSC 777;notify`, which is urxvt's desktop-notification convention and
+    /// is honoured as such by more than one terminal. Without the marker check
+    /// those terminals would get a notification, or a mouthful of escape
+    /// bytes, on every turn of an agent that has nothing to do with tty7. The
+    /// three plugin bridges carry their own `process.env["TTY7"]` gate and are
+    /// tested for it; the nine config-driven agents have only this one.
+    ///
+    /// Order matters as much as presence. The check sits ahead of the stdin
+    /// read because stdin here is a pipe the caller may never write to, and a
+    /// hook that blocks is a hook that hangs the agent.
+    ///
+    /// Read from the source rather than exercised, because exercising it means
+    /// varying an environment variable and this suite runs in one process on
+    /// many threads — `set_var` is unsound there, and a gate this cheap is not
+    /// worth making the whole file unsafe to test. Removing the check outright
+    /// left every test in the repo green, which is the gap this closes.
+    #[test]
+    fn the_hook_checks_it_is_inside_tty7_before_it_reads_or_writes_anything() {
+        const SRC: &str = include_str!("agent_hooks.rs");
+        let start = SRC
+            .find("pub fn run_agent_hook(")
+            .expect("the entry point is declared here");
+        let body = &SRC[start..];
+        let end = body.find("\n}\n").expect("the entry point ends");
+        let body = &body[..end];
+
+        let gate = body
+            .find("TTY7_ENV_MARKER")
+            .unwrap_or_else(|| panic!("`run_agent_hook` no longer checks {TTY7_ENV_MARKER}: {body}"));
+        assert!(
+            body[gate..].contains("return"),
+            "the marker is named but nothing returns on it: {body}"
+        );
+        for (what, needle) in [
+            ("reads stdin", "stdin()"),
+            ("writes to the terminal", "write_to_controlling_tty"),
+        ] {
+            let at = body
+                .find(needle)
+                .unwrap_or_else(|| panic!("`run_agent_hook` no longer {what}: {body}"));
+            assert!(
+                gate < at,
+                "`run_agent_hook` {what} before checking {TTY7_ENV_MARKER}, so it \
+                 does that outside tty7 too"
+            );
+        }
+    }
+
     /// Every event name the installed hooks can send is one the daemon reads.
     ///
     /// The two halves are far apart and neither would say a word if they
