@@ -1474,6 +1474,99 @@ mod tests {
         assert_eq!(got_from_daemon, daemon_msgs, "client decoded daemon stream");
     }
 
+    /// Every message on the wire is in one of the round-trip lists.
+    ///
+    /// `client_roundtrip` and `daemon_roundtrip` are hand-written lists, so a
+    /// variant added later is not tested unless somebody remembers to add it —
+    /// and nothing says otherwise. Five had gone that way: `Handoff`,
+    /// `QueryProcs`, `Image`, `DeleteImage`, `Procs`. They all encode and
+    /// decode correctly, but nothing had ever checked, and `Image` is the one
+    /// carrying arbitrary binary through a length-prefixed frame.
+    ///
+    /// Read from this file's own text rather than kept as a second list, for
+    /// the usual reason: two lists drift and one cannot.
+    #[test]
+    fn every_wire_message_is_in_a_round_trip_list() {
+        const SRC: &str = include_str!("protocol.rs");
+
+        /// The variant names declared by `pub enum <name>`, which rustfmt puts
+        /// one per line at a single level of indentation.
+        fn variants(enum_name: &str) -> Vec<String> {
+            let head = format!("pub enum {enum_name} {{");
+            let start = SRC.find(&head).expect("the enum is declared here");
+            let body = &SRC[start + head.len()..];
+            let mut depth = 0usize;
+            let mut out = Vec::new();
+            for line in body.lines() {
+                let trimmed = line.trim();
+                if depth == 0
+                    && let Some(first) = trimmed.chars().next()
+                    && first.is_ascii_uppercase()
+                {
+                    let name: String = trimmed
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric())
+                        .collect();
+                    if !name.is_empty() {
+                        out.push(name);
+                    }
+                }
+                for c in trimmed.chars() {
+                    match c {
+                        '{' | '(' => depth += 1,
+                        '}' | ')' => {
+                            if depth == 0 {
+                                return out;
+                            }
+                            depth -= 1;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            out
+        }
+
+        /// The variants a test names, from its body.
+        fn named_in(test: &str, enum_name: &str) -> Vec<String> {
+            let start = SRC.find(&format!("fn {test}()")).expect("the test exists");
+            let body = &SRC[start..];
+            let end = body.find("\n    }\n").unwrap_or(body.len());
+            let needle = format!("{enum_name}::");
+            let mut out = Vec::new();
+            let mut rest = &body[..end];
+            while let Some(at) = rest.find(&needle) {
+                rest = &rest[at + needle.len()..];
+                let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                if !name.is_empty() {
+                    out.push(name);
+                }
+            }
+            out
+        }
+
+        for (enum_name, test) in [
+            ("ClientMsg", "client_roundtrip"),
+            ("DaemonMsg", "daemon_roundtrip"),
+        ] {
+            let declared = variants(enum_name);
+            assert!(
+                declared.len() > 20,
+                "{enum_name}: only found {} variants, so the parse above has \
+                 stopped matching how this file is written and the check below \
+                 would pass for the wrong reason: {declared:?}",
+                declared.len()
+            );
+            let covered = named_in(test, enum_name);
+            let missing: Vec<&String> = declared.iter().filter(|v| !covered.contains(v)).collect();
+            assert!(
+                missing.is_empty(),
+                "{enum_name} variants never encoded and decoded by `{test}`: \
+                 {missing:?} — add one of each to its list"
+            );
+        }
+    }
+
     #[test]
     fn client_roundtrip() {
         let msgs = vec![
@@ -1638,6 +1731,39 @@ mod tests {
                 forward_id: 3,
             },
             ClientMsg::ListForwards { pane_id: 7 },
+            ClientMsg::Handoff {
+                exe: PathBuf::from("/opt/tty7/bin/tty7-server"),
+            },
+            ClientMsg::QueryProcs { pane_id: 11 },
+            ClientMsg::SpawnNativeSsh {
+                cwd: Some(PathBuf::from("/srv")),
+                size: SIZE,
+                spec: Box::new(sample_native_spec()),
+            },
+            ClientMsg::TestSsh {
+                spec: Box::new(sample_native_spec()),
+            },
+            ClientMsg::AuthResponse {
+                request_id: 9,
+                response: AuthResponse::Secret("hunter2".into()),
+            },
+            ClientMsg::AuthResponse {
+                request_id: 10,
+                response: AuthResponse::HostKeyDecision {
+                    accept: true,
+                    remember: false,
+                },
+            },
+            ClientMsg::AuthResponse {
+                request_id: 11,
+                response: AuthResponse::Cancelled,
+            },
+            ClientMsg::OnWorkspace(Box::new(WorkspaceRequest {
+                workspace: crate::core::session::WorkspaceId::new(),
+                spec: Box::new(sample_native_spec()),
+                view_pane: 5,
+                op: WorkspaceOp::ListForwards,
+            })),
             ClientMsg::Version,
         ];
         let mut buf = Vec::new();
@@ -1820,6 +1946,60 @@ mod tests {
                 features: Vec::new(),
                 instance: String::new(),
             }),
+            // Binary payloads, including a byte the frame header could be
+            // confused for and one long enough to cross a chunk boundary.
+            DaemonMsg::Image((0u8..=255).cycle().take(70_000).collect()),
+            DaemonMsg::Image(Vec::new()),
+            DaemonMsg::DeleteImage(vec![0x1b, b'_', b'G', b'a', b'=', b'd', 0x1b, b'\\']),
+            DaemonMsg::Procs(PaneProcs {
+                procs: vec![
+                    ProcEntry {
+                        pid: 4242,
+                        name: "cargo".into(),
+                        depth: 0,
+                        foreground: true,
+                    },
+                    ProcEntry {
+                        pid: 4243,
+                        name: "rustc".into(),
+                        depth: 2,
+                        foreground: false,
+                    },
+                ],
+                ports: vec![
+                    PortEntry {
+                        port: 3000,
+                        pid: 4242,
+                        name: "node".into(),
+                        addr: "*".into(),
+                    },
+                    PortEntry {
+                        port: 8080,
+                        pid: 4244,
+                        name: "python3".into(),
+                        addr: "[::1]".into(),
+                    },
+                ],
+            }),
+            DaemonMsg::Procs(PaneProcs {
+                procs: Vec::new(),
+                ports: Vec::new(),
+            }),
+            DaemonMsg::AuthPrompt {
+                request_id: 9,
+                prompt: AuthPromptKind::Password {
+                    user: "u".into(),
+                    host: "h".into(),
+                },
+            },
+            DaemonMsg::SshStatus {
+                phase: SshPhase::Connecting,
+            },
+            DaemonMsg::SshStatus {
+                phase: SshPhase::Failed {
+                    reason: "no route to host".into(),
+                },
+            },
             DaemonMsg::Error("nope".into()),
         ];
         let mut buf = Vec::new();
