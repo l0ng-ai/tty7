@@ -514,9 +514,32 @@ fn not_found(msg: impl Into<String>) -> io::Error {
 /// without being unnamed, so it sorts, compares and resolves as a name nobody
 /// can see or retype. One rule at the store settles it for both front doors
 /// and for anything added beside them later.
+/// The one funnel a workspace or tab name passes through: `workspace_create`,
+/// `workspace_rename` and `tab_rename` all use it.
+///
+/// A control character becomes a space, on the same reasoning
+/// `parse_osc_title` gives for a title: a name is only ever drawn as a label,
+/// gpui breaks a label on `\n` whatever its wrapping says, and the tail then
+/// paints over whatever sits below it. `tty7 tab rename @1 $'one\ntwo'` is all
+/// it takes, and the CLI's own table folds on the way out — so the daemon was
+/// handing every *other* reader something the table had already decided was
+/// not drawable.
+///
+/// Folded here rather than at each place that draws one, so the tab strip, the
+/// sidebar, the switcher and a remote client cannot disagree, and so a name
+/// that reaches the machine file is one that can be read back off it. That is
+/// the opposite of the choice made for a *filename*, which is folded only
+/// where it is drawn because it is also handed to `join` and `rename` — a name
+/// has no such second life.
+///
+/// Trimmed afterwards, because folding can leave the edges blank.
 fn normalize_name(name: Option<String>) -> Option<String> {
     let name = name?;
-    let trimmed = name.trim();
+    let folded: String = name
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let trimmed = folded.trim();
     match trimmed.is_empty() {
         true => None,
         false => Some(trimmed.to_string()),
@@ -1697,6 +1720,46 @@ fn unix_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// A name reaches the tree as one line, whatever was typed.
+    ///
+    /// `tty7 tab rename @1 $'one\ntwo'` used to store the newline verbatim,
+    /// and a name is only ever drawn as a label: gpui breaks a label on `\n`
+    /// whatever its wrapping says, so the tab strip, the sidebar and the
+    /// switcher would each have grown a row and painted over what sits below.
+    /// The CLI's own table already folded on the way out, so the daemon was
+    /// handing every other reader something one of its readers had already
+    /// decided was not drawable.
+    ///
+    /// All three name-setting paths share this funnel, so the check covers
+    /// creating a workspace, renaming one, and renaming a tab together.
+    #[test]
+    fn a_name_carrying_control_characters_is_folded_to_one_line() {
+        assert_eq!(
+            normalize_name(Some("one\ntwo".into())),
+            Some("one two".to_string())
+        );
+        assert_eq!(
+            normalize_name(Some("a\r\nb\tc".into())),
+            Some("a  b c".to_string()),
+            "every control character folds, not just the newline"
+        );
+        assert_eq!(
+            normalize_name(Some("\n  spaced  \n".into())),
+            Some("spaced".to_string()),
+            "folding can leave the edges blank, so the trim comes after it"
+        );
+        assert_eq!(
+            normalize_name(Some("\n\t \r".into())),
+            None,
+            "a name that is only control characters is no name"
+        );
+        assert_eq!(
+            normalize_name(Some("项目 · main".into())),
+            Some("项目 · main".to_string()),
+            "nothing else is touched"
+        );
+    }
+
     /// Every layout delta an agent can meet is named in the CLI reference.
     ///
     /// `docs/cli/reference.mdx` says of `tty7 events` that "the kinds and

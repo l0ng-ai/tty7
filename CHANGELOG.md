@@ -153,6 +153,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A workspace or tab name is stored as one line.** `tty7 tab rename @1
+  $'one\ntwo'` kept the newline verbatim, and a name is only ever drawn as a
+  label — the layout breaks a label on a newline whatever its wrapping says,
+  so the tab strip, the sidebar and the switcher would each have grown a row
+  and painted over what sits below. The CLI's own table already folded on the
+  way out, so the daemon was handing every other reader something one of its
+  readers had already decided was undrawable. Control characters now become
+  spaces at the single point all three naming paths pass through.
+
 - **`doctor` now notices a config directory it cannot write to.** With the
   directory unwritable, every `tty7 new` and `tab new` failed with "could not
   write the machine tree — Permission denied" and settings could not be saved,
