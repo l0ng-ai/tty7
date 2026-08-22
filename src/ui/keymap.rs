@@ -465,6 +465,11 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         // Deliberately unbound. Docking is the default and Esc already gets the
         // terminal back, so a default chord here would only be one more thing
         // competing for a two-key combination nobody asked for.
+        // Bindable with no default chord, like the rest of this run. It is
+        // reachable from the app menu and the palette; leaving it out of
+        // this table was the one thing that made it the only menu item of
+        // forty-five a user could not put a key on.
+        ("RestartDaemon", ""),
         ("ToggleDocumentFill", ""),
         ("DocumentWidthThird", ""),
         ("DocumentWidthHalf", ""),
@@ -654,6 +659,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             t(L10nKey::AppMenuRightPanel).to_string(),
         ),
         "ToggleCodePanel" => (CommandGroup::View, t(L10nKey::AppMenuCodePanel).to_string()),
+        "RestartDaemon" => (
+            CommandGroup::Application,
+            t(L10nKey::CmdRestartServer).to_string(),
+        ),
         "ToggleDocumentFill" => (
             CommandGroup::View,
             t(L10nKey::CmdToggleDocumentFill).to_string(),
@@ -1228,6 +1237,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ToggleSftp" => KeyBinding::new(keystroke, ToggleSftp, None),
         "ShowSshForwards" => KeyBinding::new(keystroke, ShowSshForwards, None),
         "ToggleCodePanel" => KeyBinding::new(keystroke, ToggleCodePanel, None),
+        "RestartDaemon" => KeyBinding::new(keystroke, RestartDaemon, None),
         "ToggleDocumentFill" => KeyBinding::new(keystroke, ToggleDocumentFill, None),
         "DocumentWidthThird" => KeyBinding::new(keystroke, DocumentWidthThird, None),
         "DocumentWidthHalf" => KeyBinding::new(keystroke, DocumentWidthHalf, None),

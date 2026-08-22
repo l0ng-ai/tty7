@@ -302,6 +302,7 @@ impl CommandKind {
             ScmCommitAmend => "ScmCommitAmend",
             ScmRefresh => "ScmRefresh",
             ScmToggleGraph => "ScmToggleGraph",
+            RestartDaemon => "RestartDaemon",
             ScmPull => "ScmPull",
             ScmFetch => "ScmFetch",
             ScmSync => "ScmSync",
@@ -309,12 +310,6 @@ impl CommandKind {
             OpenBranchPicker => "ScmCheckoutBranch",
             ToggleDiffViewMode => "ToggleDiffViewMode",
             // No keymap action of their own, so there is no shortcut to show.
-            // `RestartDaemon` is here rather than above because it named
-            // `"RestartDaemon"`, which the keymap has never bound: the lookup
-            // could only ever come back empty, and naming an action that does
-            // not exist reads like one that does. Restarting the server is
-            // palette-only for now; giving it a bindable action means a gpui
-            // action and a handler, which is a feature rather than a fix.
             CopyText
             | CutText
             | PasteText
@@ -325,7 +320,6 @@ impl CommandKind {
             | OpenThemePicker
             | OpenSshConnectInput
             | OpenSshConnect(_)
-            | RestartDaemon
             | SetTheme(_)
             | ActivateTab(_)
             | ConnectSavedProfile(_)
