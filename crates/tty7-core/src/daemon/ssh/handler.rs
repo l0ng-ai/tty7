@@ -105,23 +105,13 @@ impl ClientHandler {
         if !accept {
             return false;
         }
-        if remember {
-            // The superseded line has to go before the new one lands.
-            // `known_hosts::check` answers `Known` on any same-algorithm match,
-            // so an override that only appended left the key the user had just
-            // rejected trusted for good. If it cannot be dropped, do not append
-            // either: being asked again next time is the better half of that
-            // trade.
-            match known_hosts::forget_superseded(&self.host, self.port, key) {
-                Ok(()) => {
-                    if let Err(e) = known_hosts::append_trusted(&self.host, self.port, key) {
-                        log::warn!("failed to record host key in known_hosts: {e}");
-                    }
-                }
-                Err(e) => log::warn!(
-                    "not recording host key: the superseded known_hosts line could not be removed: {e}"
-                ),
-            }
+        // `record_trusted` drops the line this key supersedes before adding it,
+        // and adds nothing if that drop fails — see its comment for why the
+        // order is not optional.
+        if remember
+            && let Err(e) = known_hosts::record_trusted(&self.host, self.port, key)
+        {
+            log::warn!("not recording host key in known_hosts: {e}");
         }
         true
     }
@@ -259,6 +249,54 @@ mod tests {
             assert!(
                 matches!(action(status.clone(), false), HostKeyAction::Accept),
                 "{status:?} should be accepted outright with verification off"
+            );
+        }
+    }
+
+    /// Saying no to a host-key prompt refuses the connection.
+    ///
+    /// The most direct failure this code could have: a person is shown a
+    /// changed host key, declines, and connects anyway. `accepted_and_remembered`
+    /// is tested on its own, but nothing checked that `apply_decision` acts on
+    /// what it answers — deleting the `if !accept` guard left the whole suite
+    /// green.
+    ///
+    /// No filesystem is touched: every response here answers `remember: false`
+    /// once refused, so the recording branch is not reached. `remember: true`
+    /// alongside `accept: false` is the dialog's checkbox state, not consent,
+    /// and is here for exactly that reason.
+    #[test]
+    fn a_refused_host_key_prompt_refuses_the_connection() {
+        let handler = ClientHandler {
+            host: "example.com".into(),
+            port: 2222,
+            verify_host_keys: true,
+            skip_banner: false,
+            broker: crate::daemon::ssh::broker::PromptBroker::new(Box::new(|_| true)),
+            remote_forwards: crate::daemon::ssh::forward::RemoteForwardTable::default(),
+        };
+        let key = russh::keys::PublicKey::from_openssh(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPXO/kBX63iuiTczoR6uNdl3wAFK7tGWz70jCKkKlw5r",
+        )
+        .expect("a key to offer");
+
+        for resp in [
+            AuthResponse::HostKeyDecision {
+                accept: false,
+                remember: false,
+            },
+            // The checkbox left ticked while answering no.
+            AuthResponse::HostKeyDecision {
+                accept: false,
+                remember: true,
+            },
+            AuthResponse::Cancelled,
+            // A response of the wrong shape is not consent either.
+            AuthResponse::Secret("yes".into()),
+        ] {
+            assert!(
+                !handler.apply_decision(resp.clone(), &key),
+                "{resp:?} must not accept the key"
             );
         }
     }

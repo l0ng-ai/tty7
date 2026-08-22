@@ -177,11 +177,36 @@ pub(crate) fn known_algorithms_in_str(contents: &str, host: &str, port: u16) -> 
     out
 }
 
-pub(crate) fn append_trusted(host: &str, port: u16, key: &PublicKey) -> std::io::Result<()> {
+/// Trust `key` for `host:port`, dropping the line it supersedes first.
+///
+/// One function rather than two calls at the call site, because the order is
+/// the whole point and a call site can get it wrong silently. `check` answers
+/// `Known` on any same-algorithm match, so appending without dropping leaves
+/// the key this one replaces trusted for good — which is how a host that
+/// rotated away from a compromised key would go on accepting the old one.
+///
+/// And if the drop fails, nothing is appended: being asked again next time is
+/// the better half of that trade.
+pub(crate) fn record_trusted(host: &str, port: u16, key: &PublicKey) -> std::io::Result<()> {
     let path = default_path().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "no home dir for known_hosts")
     })?;
-    append_trusted_to(&path, host, port, key)
+    record_trusted_in_file(&path, host, port, key)
+}
+
+pub(crate) fn record_trusted_in_file(
+    path: &Path,
+    host: &str,
+    port: u16,
+    key: &PublicKey,
+) -> std::io::Result<()> {
+    forget_superseded_in_file(path, host, port, key).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("the superseded known_hosts line could not be removed: {e}"),
+        )
+    })?;
+    append_trusted_to(path, host, port, key)
 }
 
 pub(crate) fn append_trusted_to(
@@ -331,13 +356,6 @@ pub(crate) fn delete_in_str(contents: &str, id: &KnownHostId) -> (String, bool) 
 ///
 /// A no-op for a host that was merely unknown, which by definition has no
 /// same-algorithm line to drop.
-pub(crate) fn forget_superseded(host: &str, port: u16, key: &PublicKey) -> std::io::Result<()> {
-    match default_path() {
-        Some(path) => forget_superseded_in_file(&path, host, port, key),
-        None => Ok(()),
-    }
-}
-
 pub(crate) fn forget_superseded_in_file(
     path: &Path,
     host: &str,
@@ -1032,9 +1050,12 @@ mod tests {
         let path = dir.join("known_hosts");
         std::fs::write(&path, format!("example.com {KEY_A}\n")).unwrap();
 
+        // Through `record_trusted_in_file`, which is what `apply_decision`
+        // calls: the two halves in the wrong order, or one of them missing, is
+        // the bug this test is named after, and calling them separately here
+        // would let the call site drop one without anything noticing.
         let kb = key(KEY_B);
-        forget_superseded_in_file(&path, "example.com", 22, &kb).unwrap();
-        append_trusted_to(&path, "example.com", 22, &kb).unwrap();
+        record_trusted_in_file(&path, "example.com", 22, &kb).unwrap();
 
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(
