@@ -153,6 +153,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **In-app updates work again on macOS.** `codesign -d -r-` writes the
+  designated requirement to *stdout* and puts only its display header on
+  stderr; the updater read stderr, so the prefix it was looking for could
+  never match and every update ended at "codesign did not report a designated
+  requirement". Every build, every channel, with nothing for a user to do but
+  download the app again by hand.
+
+- **Closing a tab no longer throws away unsaved editor edits.** The code panel
+  hangs off the tab, so closing the tab dropped every buffer in it. Only the
+  editor itself read the dirty flag; the tab-close path looked at the
+  terminals and nothing else, so every close route that went through the tab
+  took the text without asking. The everyday one is ⌘W: after editing a file
+  and clicking back into the terminal, ⌘W closes the pane, the last pane takes
+  its tab, and the edits go with no dialog.
+
+- **A client opening a remote workspace no longer renames somebody else's.**
+  The name a user types travels with the workspace-create rather than
+  following it, because a rename sent before the workspace exists is refused.
+  When the create came back without that name, the name was sent on as a
+  rename — treating "the other create of this window's pair won the race" and
+  "the workspace was already there" as the same thing. The first is a window
+  finishing its own job; the second renamed a workspace that already held
+  nineteen live panes on another machine.
+
+- **Nothing under an ignored directory is treated as re-included.**
+  gitignore(5) is explicit that a file cannot be re-included once a parent
+  directory is excluded — git never descends into one, so a `!pattern` inside
+  it never runs. The chain applied every level to the whole path, so a deeper
+  whitelist could undo an ancestor's exclusion and the tree showed files
+  `git check-ignore` calls ignored. `.git/info/exclude` and the global
+  excludes file are read now too, so a personal ignore counts the way git
+  counts it.
+
+- **`tty7 events` no longer exits 0 when the server goes away.** The verb
+  blocks forever by contract, so returning at all means the connection went
+  with the server — and it returned success. A reader whose server stopped
+  mid-run was told nothing had happened: the lines simply stopped, with no
+  exit code to branch on. It exits 1 and says so on stderr, with nothing extra
+  on stdout, so a reader parsing NDJSON never meets a line of an unexpected
+  shape.
+
 - **`kill -9` on the server no longer leaves it unable to start again.** A
   Unix endpoint is a socket *file*; killed uncleanly, the daemon leaves it on
   disk and `bind` on a path that already exists fails rather than replacing
