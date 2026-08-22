@@ -17,15 +17,23 @@ The panel opens on the remote home directory. **Go to Shell Directory** in the
 overflow menu jumps it to wherever the pane's shell currently is, which is
 usually where you actually want to be.
 
-Right-click a row for **Open**, **Follow Symlink**, **Rename**, **chmod…**, and
-delete. The overflow menu adds **New Folder**, **New File**, **Upload…**, and
-**Refresh**.
+Right-click a row for **Edit** (**Open** on a directory), **Download**,
+**Follow Symlink**, **Rename**, **chmod…**, and delete. The overflow menu adds
+**New Folder**, **New File**, **Upload…**, and **Refresh**.
+
+## Editing
+
+Click a text file and it opens in the [built-in
+editor](/window/side-panel), the same gesture as the local file tree; saving
+writes straight back over the same connection. Files the editor cannot hold —
+binary, or over its 4 MB limit — say so instead; right-click → **Download**
+for those.
 
 ## Transferring
 
 | Direction | How |
 |---|---|
-| Download | Drag a file out of the panel into Finder or Explorer |
+| Download | Right-click → **Download** |
 | Upload | **Upload…**, or drag files into the panel |
 
 Uploads are written under a temporary name and renamed into place at the end, so

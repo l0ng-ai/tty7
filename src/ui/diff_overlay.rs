@@ -7,6 +7,7 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use gpui_component::button::Button;
+use gpui_component::menu::ContextMenuExt as _;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::core::config::{Config, DiffViewMode};
@@ -22,6 +23,7 @@ use crate::terminal::git_diff::{
 const MAX_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
 use crate::ui::app::Tty7App;
 use crate::ui::diff_rows::{Side, SplitCell, SplitRow, UnifiedRow, split_hunk, unified_rows};
+use crate::ui::document_column::DocumentChrome;
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::info_chip;
 use crate::ui::rounding;
@@ -388,6 +390,7 @@ impl Tty7App {
 
     pub(crate) fn render_diff_overlay(
         &mut self,
+        chrome: DocumentChrome,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -426,10 +429,14 @@ impl Tty7App {
             ),
         };
 
-        let header = self.diff_header(overlay, window, cx);
+        let header = chrome
+            .renders_own_header()
+            .then(|| self.diff_header(overlay, chrome, window, cx));
+        let focus_handle = overlay.focus_handle.clone();
 
-        Some(
-            v_flex()
+        let shell = v_flex();
+        let shell = match chrome {
+            DocumentChrome::Fill => shell
                 .absolute()
                 .inset_0()
                 .occlude()
@@ -439,20 +446,41 @@ impl Tty7App {
                     cx.try_global::<crate::ui::presets::ActiveBackground>(),
                     cx.theme().background,
                 ))
+                // The opaque fill above covers the theme background image the
+                // workspace root paints, so the overlay carries its own copy,
+                // dimmed back to the strength it had when this overlay was
+                // itself translucent.
+                .children(crate::ui::app::overlay_surface_layers(cx)),
+            // Docked, the column wrapper has already painted the surface this
+            // sits on — the same one the right panel uses — and nothing behind
+            // it needs stopping.
+            DocumentChrome::Dock | DocumentChrome::DockHoisted => shell.size_full().min_w_0(),
+        };
+        Some(
+            shell
                 .text_color(cx.theme().foreground)
-                .track_focus(&overlay.focus_handle)
+                .track_focus(&focus_handle)
                 .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                     if ev.keystroke.key.as_str() == "escape" {
                         this.close_diff_overlay(window, cx);
                     }
                 }))
-                // The opaque fill above covers the theme background image the
-                // workspace root paints, so the overlay carries its own copy,
-                // dimmed back to the strength it had when this overlay was
-                // itself translucent.
-                .children(crate::ui::app::overlay_surface_layers(cx))
-                .child(header)
+                .children(header)
                 .child(content)
+                .into_any_element(),
+        )
+    }
+
+    /// The diff header alone, for the strip above a docked column.
+    pub(crate) fn render_diff_header_only(
+        &mut self,
+        chrome: DocumentChrome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let overlay = self.tabs.get(self.active)?.diff_overlay.as_ref()?;
+        Some(
+            self.diff_header(overlay, chrome, window, cx)
                 .into_any_element(),
         )
     }
@@ -460,6 +488,7 @@ impl Tty7App {
     fn diff_header(
         &self,
         overlay: &DiffOverlayState,
+        chrome: DocumentChrome,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -471,19 +500,25 @@ impl Tty7App {
             }
             _ => (String::new(), 0, 0, 0, 0),
         };
-        let lead = if self.left_panel_open(cx) {
+        // See `render_editor_header`: the traffic-light inset belongs to a
+        // header that starts at the window's left edge, which a column's does
+        // not.
+        let lead = if self.left_panel_open(cx) || chrome.is_dock() {
             crate::ui::app::CONTENT_INSET
         } else {
             crate::ui::app::TITLE_BAR_LEAD
         };
         let mono = SharedString::from(self.font_family.clone());
         let subject = source_subject(&overlay.source, branch);
-        let row = crate::ui::app::title_bar_drag(
-            h_flex().id("diff-overlay-header"),
-            "diff-overlay-header",
-            window,
-            cx,
-        );
+        let subject_takes_the_slack =
+            chrome.is_dock() && !subject.is_rev && subject.label.is_none();
+        let menu_app = cx.entity().downgrade();
+        let row = h_flex().id("diff-overlay-header");
+        let row = if chrome.header_is_title_strip() {
+            crate::ui::app::title_bar_drag(row, "diff-overlay-header", window, cx)
+        } else {
+            row
+        };
         row.flex_shrink_0()
             .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
             .pl(px(lead))
@@ -509,7 +544,16 @@ impl Tty7App {
                     .child(subject.text)
                     .into_any_element()
             } else {
+                // Docked, this is the name that gives: the header has a
+                // column's width rather than a window's, and a branch name that
+                // refused to yield any of it pushed the view toggle and the
+                // close tile off the end. It takes the slack the spacer below
+                // would otherwise have — the same trade the label branch makes,
+                // and for the same reason two `flex_1` siblings would split the
+                // line and truncate the name with empty space beside it.
                 div()
+                    .when(subject_takes_the_slack, |d| d.flex_1().min_w_0().truncate())
+                    .when(!subject_takes_the_slack, |d| d.flex_shrink_0())
                     .text_sm()
                     .font_weight(FontWeight::MEDIUM)
                     .child(subject.text)
@@ -588,12 +632,17 @@ impl Tty7App {
                     if untracked > 0 {
                         summary.push_str(&t_plural(L10nKey::DiffUntrackedCount, untracked, &[]));
                     }
-                    bar.child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(summary),
-                    )
+                    // The file count is the first thing a column drops: the
+                    // same number is one line down, at the top of the list.
+                    // The totals stay — they have no second home.
+                    bar.when(!chrome.is_dock(), |bar| {
+                        bar.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(summary),
+                        )
+                    })
                     .when(added > 0, |bar| {
                         bar.child(
                             div()
@@ -623,7 +672,9 @@ impl Tty7App {
                     )
                 },
             )
-            .when(subject.label.is_none(), |bar| bar.child(div().flex_1()))
+            .when(subject.label.is_none() && !subject_takes_the_slack, |bar| {
+                bar.child(div().flex_1())
+            })
             .child(div().occlude().flex_shrink_0().child({
                 let sf = cx.global::<crate::ui::presets::Surfaces>().window;
                 let selected = usize::from(view_mode(cx) == DiffViewMode::Unified);
@@ -659,6 +710,9 @@ impl Tty7App {
                     })),
                 ),
             )
+            .context_menu(move |menu, _window, cx| {
+                Tty7App::document_header_menu(menu, &menu_app, cx)
+            })
     }
 
     /// Dispatch the byte read behind an untracked file's preview, at most

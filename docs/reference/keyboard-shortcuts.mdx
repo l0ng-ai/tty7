@@ -53,6 +53,34 @@ it shows what *your* copy is bound to. This is the shipped default.
 | Accept ghost suggestion | <kbd>→</kbd> | same |
 | Completion menu | <kbd>⇥</kbd> | same |
 
+On Windows and Linux plain <kbd>Ctrl V</kbd> also pastes at a shell prompt.
+Inside a full-screen application — vim, less, tmux — it is passed through as
+the key, so it means what the application says it means (blockwise Visual mode
+in vim); paste there with <kbd>Ctrl ⇧ V</kbd> or <kbd>⇧ Insert</kbd>.
+
+That convenience is the **Paste (outside full-screen apps)** binding, and it is
+yours to move. Clearing it hands <kbd>Ctrl V</kbd> to the shell everywhere,
+including readline's `quoted-insert`:
+
+```json
+{ "keybindings": { "AlternatePaste": "" } }
+```
+
+Putting Paste itself on the chord goes the other way, pasting on every screen
+the way Windows Terminal does out of the box:
+
+```json
+{ "keybindings": { "PasteText": "ctrl-v" } }
+```
+
+Every <kbd>Ctrl</kbd> chord that stands for a control code reaches the program
+you are running: <kbd>Ctrl 6</kbd> and <kbd>Ctrl ⇧ 6</kbd> are `^^` (vim's
+alternate file), <kbd>Ctrl /</kbd> and <kbd>Ctrl ⇧ −</kbd> are `^_` (readline's
+undo), <kbd>Ctrl 3</kbd> is Escape. The plain <kbd>Ctrl</kbd> chords tty7 keeps
+are the ones that stand for nothing: <kbd>Ctrl ⇥</kbd> for the next tab, and on
+Windows and Linux <kbd>Ctrl +</kbd> · <kbd>Ctrl −</kbd> · <kbd>Ctrl 0</kbd> for
+the font size.
+
 ## Git and SSH
 
 | Action | macOS | Windows / Linux |

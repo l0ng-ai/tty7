@@ -531,6 +531,68 @@ async fn run_op(sftp: &SftpSession, op: &SftpOp) -> Result<SftpOpResult, String>
                 .map_err(|e| format!("{e}"))?;
             SftpOpResult::Link(resolved)
         }
+        SftpOp::ReadFile { path, max_bytes } => {
+            let attrs = sftp
+                .metadata(path.clone())
+                .await
+                .map_err(|e| format!("{e}"))?;
+            if attrs.is_dir() {
+                return Err("is a directory".to_string());
+            }
+            // Checked before the read, not after: a body clipped at the limit
+            // would round-trip through the editor and be saved back short.
+            let size = attrs.size.unwrap_or(0);
+            if size > *max_bytes {
+                return Err(format!(
+                    "file is {size} bytes, larger than the {max_bytes}-byte limit"
+                ));
+            }
+            let mut file = sftp.open(path.clone()).await.map_err(|e| format!("{e}"))?;
+            let mut bytes = Vec::with_capacity(size.min(*max_bytes) as usize);
+            let mut buf = vec![0u8; CHUNK];
+            loop {
+                let n = file.read(&mut buf).await.map_err(|e| format!("{e}"))?;
+                if n == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buf[..n]);
+                // The size the stat reported is a moment old; the file may
+                // have grown since. The limit holds either way.
+                if bytes.len() as u64 > *max_bytes {
+                    return Err(format!(
+                        "file grew past the {max_bytes}-byte limit mid-read"
+                    ));
+                }
+            }
+            SftpOpResult::File {
+                entry: entry_from_attrs(&remote_basename(path), &attrs),
+                bytes,
+            }
+        }
+        SftpOp::WriteFile { path, bytes } => {
+            // In place on purpose — truncate and rewrite the same inode. The
+            // temp-and-rename dance the transfer path does would hand the file
+            // fresh default permissions and ownership, and this op overwrites
+            // a file the user just had open in the editor, so its identity is
+            // worth more than crash-atomicity here.
+            let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
+            let mut file = sftp
+                .open_with_flags(path.clone(), flags)
+                .await
+                .map_err(|e| format!("{e}"))?;
+            for chunk in bytes.chunks(CHUNK) {
+                file.write_all(chunk).await.map_err(|e| format!("{e}"))?;
+            }
+            file.flush().await.map_err(|e| format!("{e}"))?;
+            file.shutdown().await.map_err(|e| format!("{e}"))?;
+            // The fresh stat is the editor's baseline for spotting external
+            // changes; without it every save would read as a conflict.
+            let attrs = sftp
+                .metadata(path.clone())
+                .await
+                .map_err(|e| format!("written, but stat after failed: {e}"))?;
+            SftpOpResult::Stat(entry_from_attrs(&remote_basename(path), &attrs))
+        }
     })
 }
 

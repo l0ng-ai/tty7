@@ -214,6 +214,8 @@ l10n_keys! {
     ThemeDuplicateFailed,
     ThemeSaveFailed,
     OpenInFileManagerFailed,
+    ExplorerMenuOpenIn,
+    ExplorerMenuOpenHere,
     SettingsCustomThemesIntro,
     SettingsDuplicateToEdit,
     SettingsHosts,
@@ -377,6 +379,9 @@ l10n_keys! {
     SettingsFocusFollowsMouseDesc,
     SettingsHideMouseWhileTyping,
     SettingsHideMouseWhileTypingDesc,
+    SettingsMouseZoom,
+    SettingsMouseZoomDesc,
+    SettingsMouseZoomOff,
     SettingsReportMouseToApps,
     SettingsReportMouseToAppsDesc,
     SettingsBell,
@@ -467,6 +472,8 @@ l10n_keys! {
     SettingsSidebarGroupingDesc,
     SettingsDiffPreviewFromCounts,
     SettingsDiffPreviewFromCountsDesc,
+    DocumentDock,
+    DocumentFill,
     SettingsNotifications,
     SettingsWindow,
     SettingsNotifyOnCommandFinish,
@@ -558,7 +565,6 @@ l10n_keys! {
     SettingsInstallCliOnPath,
     SettingsServer,
     SettingsServerDesc,
-    SettingsHowShellsWorkBody,
     SettingsRestartServer,
     SettingsAppHttpProxy,
     SettingsAppHttpProxyDesc,
@@ -570,6 +576,11 @@ l10n_keys! {
     SettingsAgentPi,
     SettingsAgentGrokBuild,
     SettingsAgentOhMyPi,
+    SettingsAgentGemini,
+    SettingsAgentDroid,
+    SettingsAgentQwenCode,
+    SettingsAgentGoose,
+    SettingsAgentKimiCode,
     SettingsSearchAppHttpProxyKeywords,
     SettingsSearchAboutKeywords,
     SettingsSearchAutoDownloadKeywords,
@@ -592,20 +603,22 @@ l10n_keys! {
     SettingsSearchDetectUrlsKeywords,
     SettingsSearchDiffPreviewFromCountsKeywords,
     SettingsSearchDimInactivePanesKeywords,
+    SettingsSearchDroidKeywords,
     SettingsSearchFocusFollowsMouseKeywords,
     SettingsSearchFontFamilyKeywords,
     SettingsSearchFontLigaturesKeywords,
     SettingsSearchFontSizeKeywords,
     SettingsSearchForwardSshLoopbackLinksKeywords,
+    SettingsSearchGeminiKeywords,
+    SettingsSearchGooseKeywords,
     SettingsSearchGrokBuildKeywords,
     SettingsSearchHideMouseWhileTypingKeywords,
     SettingsSearchHistorySearchKeywords,
     SettingsSearchHostsKeywords,
-    SettingsSearchHowShellsWorkKeywords,
-    SettingsSearchHowShellsWorkTitle,
     SettingsSearchItalicFontKeywords,
     SettingsSearchKeybindingsKeywords,
     SettingsSearchKeybindingsTitle,
+    SettingsSearchKimiCodeKeywords,
     SettingsSearchLineHeightKeywords,
     SettingsSearchNewTabPositionKeywords,
     SettingsSearchNotifyOnCommandFinishKeywords,
@@ -618,6 +631,7 @@ l10n_keys! {
     SettingsSearchPiKeywords,
     SettingsSearchPortForwardingKeywords,
     SettingsSearchProgramKeywords,
+    SettingsSearchQwenCodeKeywords,
     SettingsSearchRememberWindowSizeKeywords,
     SettingsSearchReportMouseToAppsKeywords,
     SettingsSearchRestoreLastLayoutKeywords,
@@ -660,6 +674,7 @@ l10n_keys! {
     SftpLoading,
     SftpEmptyDirectory,
     SftpContextOpen,
+    SftpContextEdit,
     SftpContextFollowSymlink,
     SftpContextRename,
     SftpContextChmod,
@@ -755,6 +770,7 @@ l10n_keys! {
     PanelNoChangesHint,
     PanelMoreChangedFiles,
     PanelSessionSubtitle,
+    PanelConversationSubtitle,
     PanelProcessesSubtitle,
     PanelPortsSubtitle,
     PanelCwd,
@@ -762,8 +778,6 @@ l10n_keys! {
     PanelSsh,
     PanelBranch,
     PanelChangesRow,
-    PanelAgent,
-    PanelAgentIdle,
     PanelAgentWorking,
     PanelAgentWaiting,
     PanelAgentDone,
@@ -1153,6 +1167,12 @@ l10n_keys! {
     CmdResetFontSize,
     CmdEnterFullScreen,
     CmdToggleDiffViewMode,
+    CmdDocumentDock,
+    CmdDocumentFill,
+    CmdToggleDocumentFill,
+    CmdDocumentWidthThird,
+    CmdDocumentWidthHalf,
+    CmdDocumentWidthTwoThirds,
     CmdGitCommit,
     CmdGitStageAll,
     CmdGitUnstageAll,
@@ -1173,6 +1193,7 @@ l10n_keys! {
     CmdCopy,
     CmdCut,
     CmdPaste,
+    CmdAlternatePaste,
     CmdSelectAll,
     CmdSshAddConnection,
     CmdSshManageProfiles,
@@ -1483,10 +1504,15 @@ mod tests {
             L10nKey::SettingsAgentClaudeCode,
             L10nKey::SettingsAgentCodex,
             L10nKey::SettingsAgentCopilotCli,
+            L10nKey::SettingsAgentDroid,
+            L10nKey::SettingsAgentGemini,
+            L10nKey::SettingsAgentGoose,
             L10nKey::SettingsAgentGrokBuild,
+            L10nKey::SettingsAgentKimiCode,
             L10nKey::SettingsAgentOhMyPi,
             L10nKey::SettingsAgentOpencode,
             L10nKey::SettingsAgentPi,
+            L10nKey::SettingsAgentQwenCode,
             // Windows names its backdrop materials, and Japanese Windows keeps
             // those names in Latin script — so does this list. Chinese does
             // translate them (云母 / 亚克力), which is what Microsoft's own
@@ -1498,10 +1524,9 @@ mod tests {
             L10nKey::SettingsLanguageEnglish,
             L10nKey::SettingsLanguageChinese,
             L10nKey::SettingsLanguageJapanese,
-            // The pane-type labels are one set — shell / agent / ssh — and
-            // translating only the middle one would break the set.
+            // The pane-type labels: one names a program, the other a protocol,
+            // and no locale renames either.
             L10nKey::PanelShell,
-            L10nKey::PanelAgent,
             L10nKey::PanelSsh,
             // The zh copy calls the background process "server" throughout —
             // this heading is that word on its own.
@@ -1543,6 +1568,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Three settings rows talked about macOS as if it were the only platform
+    /// they were ever shown on: "(macOS)" on a blur switch Linux honors too,
+    /// "⌘C" on a shortcut that is Ctrl+Shift+C everywhere else, and XQuartz as
+    /// the only X server anyone could need. All three were wrong in all three
+    /// languages at once — each translation had faithfully carried the English
+    /// text's assumption across — which is why this walks every locale rather
+    /// than trusting en to stand for them.
+    #[test]
+    fn wording_that_names_a_platform_names_this_one() {
+        for lang in SUPPORTED_LANGUAGES {
+            set_locale(lang.code);
+            let code = lang.code;
+
+            let copy = t(L10nKey::SettingsCopyOnSelectDesc);
+            let x11 = t(L10nKey::SettingsX11ForwardingDesc);
+
+            // This row is shown on macOS and Linux alike (Windows gets the
+            // backdrop picker instead), and both honor the switch, so naming
+            // either one of them is wrong wherever it is read.
+            let blur = t(L10nKey::SettingsBlurDesc);
+            assert!(!blur.contains("macOS"), "{code} blur desc: {blur:?}");
+
+            if cfg!(target_os = "macos") {
+                assert!(copy.contains('⌘'), "{code} copy-on-select: {copy:?}");
+                assert!(x11.contains("XQuartz"), "{code} x11: {x11:?}");
+            } else {
+                assert!(!copy.contains('⌘'), "{code} copy-on-select: {copy:?}");
+                assert!(!x11.contains("XQuartz"), "{code} x11: {x11:?}");
+            }
+        }
+        set_locale(default_language_code());
     }
 
     #[test]

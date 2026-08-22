@@ -26,5 +26,9 @@ tty7-core = { path = "../tty7-core" }
 # Sandboxes for the suite: an empty directory per case, removed on drop. The
 # server is on this machine, so a local temp dir is a path in its namespace.
 tempfile = "3"
+# `tests/daemon_stop.rs` probes and, on failure, kills the daemon it spawned;
+# a pid needs `kill(2)`, which `Child` cannot express once ownership has moved
+# to the thread collecting the exit.
+libc = "0.2"
 [lints]
 workspace = true

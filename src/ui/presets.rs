@@ -174,7 +174,7 @@ impl Theme {
             sidebar,
             // Blended, not bisected, so a palette's own softness carries into
             // the sidebar — but floored on the fill it is actually painted on
-            // (`sidebar`, not `background`), because four of the nine builtins
+            // (`sidebar`, not `background`), because four of the builtins
             // land this under 4.5:1 and it is the tab title, not a caption.
             sidebar_fg: at_least(mix(fg, bg, 0.28), fg, sidebar, TEXT_FLOOR),
             accent: legible_accent(bg, self.accent),
@@ -1035,7 +1035,7 @@ struct BuiltinSpec {
     ansi16: [(u8, u8, u8); 16],
 }
 
-static BUILTINS: [BuiltinSpec; 9] = [
+static BUILTINS: [BuiltinSpec; 13] = [
     BuiltinSpec {
         id: "light",
         name: "Light",
@@ -1270,6 +1270,112 @@ static BUILTINS: [BuiltinSpec; 9] = [
             (0xe0, 0xde, 0xf4),
         ],
     },
+    BuiltinSpec {
+        id: "catppuccin_mocha",
+        name: "Catppuccin Mocha",
+        background: 0x1e1e2e,
+        foreground: 0xcdd6f4,
+        accent: 0x89b4fa,
+        // Rosewater, the cursor colour Catppuccin's own terminal spec names —
+        // the accent fallback would paint it blue.
+        caret: Some(0xf5e0dc),
+        ansi16: [
+            (0x45, 0x47, 0x5a),
+            (0xf3, 0x8b, 0xa8),
+            (0xa6, 0xe3, 0xa1),
+            (0xf9, 0xe2, 0xaf),
+            (0x89, 0xb4, 0xfa),
+            (0xf5, 0xc2, 0xe7),
+            (0x94, 0xe2, 0xd5),
+            (0xba, 0xc2, 0xde),
+            (0x58, 0x5b, 0x70),
+            (0xf3, 0x8b, 0xa8),
+            (0xa6, 0xe3, 0xa1),
+            (0xf9, 0xe2, 0xaf),
+            (0x89, 0xb4, 0xfa),
+            (0xf5, 0xc2, 0xe7),
+            (0x94, 0xe2, 0xd5),
+            (0xa6, 0xad, 0xc8),
+        ],
+    },
+    BuiltinSpec {
+        id: "gruvbox_dark",
+        name: "Gruvbox Dark",
+        background: 0x282828,
+        foreground: 0xebdbb2,
+        accent: 0xfe8019,
+        caret: Some(0xebdbb2),
+        ansi16: [
+            (0x28, 0x28, 0x28),
+            (0xcc, 0x24, 0x1d),
+            (0x98, 0x97, 0x1a),
+            (0xd7, 0x99, 0x21),
+            (0x45, 0x85, 0x88),
+            (0xb1, 0x62, 0x86),
+            (0x68, 0x9d, 0x6a),
+            (0xa8, 0x99, 0x84),
+            (0x92, 0x83, 0x74),
+            (0xfb, 0x49, 0x34),
+            (0xb8, 0xbb, 0x26),
+            (0xfa, 0xbd, 0x2f),
+            (0x83, 0xa5, 0x98),
+            (0xd3, 0x86, 0x9b),
+            (0x8e, 0xc0, 0x7c),
+            (0xeb, 0xdb, 0xb2),
+        ],
+    },
+    BuiltinSpec {
+        id: "nord",
+        name: "Nord",
+        background: 0x2e3440,
+        foreground: 0xd8dee9,
+        accent: 0x88c0d0,
+        caret: Some(0xd8dee9),
+        ansi16: [
+            (0x3b, 0x42, 0x52),
+            (0xbf, 0x61, 0x6a),
+            (0xa3, 0xbe, 0x8c),
+            (0xeb, 0xcb, 0x8b),
+            (0x81, 0xa1, 0xc1),
+            (0xb4, 0x8e, 0xad),
+            (0x88, 0xc0, 0xd0),
+            (0xe5, 0xe9, 0xf0),
+            (0x4c, 0x56, 0x6a),
+            (0xbf, 0x61, 0x6a),
+            (0xa3, 0xbe, 0x8c),
+            (0xeb, 0xcb, 0x8b),
+            (0x81, 0xa1, 0xc1),
+            (0xb4, 0x8e, 0xad),
+            (0x8f, 0xbc, 0xbb),
+            (0xec, 0xef, 0xf4),
+        ],
+    },
+    BuiltinSpec {
+        id: "tokyo_night",
+        name: "Tokyo Night",
+        background: 0x1a1b26,
+        foreground: 0xc0caf5,
+        accent: 0x7aa2f7,
+        caret: Some(0xc0caf5),
+        ansi16: [
+            (0x15, 0x16, 0x1e),
+            (0xf7, 0x76, 0x8e),
+            (0x9e, 0xce, 0x6a),
+            (0xe0, 0xaf, 0x68),
+            (0x7a, 0xa2, 0xf7),
+            (0xbb, 0x9a, 0xf7),
+            (0x7d, 0xcf, 0xff),
+            (0xa9, 0xb1, 0xd6),
+            (0x41, 0x48, 0x68),
+            (0xf7, 0x76, 0x8e),
+            (0x9e, 0xce, 0x6a),
+            (0xe0, 0xaf, 0x68),
+            (0x7a, 0xa2, 0xf7),
+            (0xbb, 0x9a, 0xf7),
+            (0x7d, 0xcf, 0xff),
+            (0xc0, 0xca, 0xf5),
+        ],
+    },
 ];
 
 #[cfg(test)]
@@ -1290,10 +1396,14 @@ mod tests {
 
     /// Every built-in theme is on the page that lists them.
     ///
-    /// The page names them one by one and calls them "Nine built-ins", so a
-    /// tenth added here leaves the page wrong in two places at once — a
-    /// reader counting the table against the picker finds a theme nobody
-    /// wrote down.
+    /// The page names them one by one *and* counts them in its description
+    /// ("Thirteen built-ins, ..."), so a fourteenth added here leaves the page
+    /// wrong in two places at once — a reader counting the table against the
+    /// picker finds a theme nobody wrote down.
+    ///
+    /// The count is read out of the page rather than repeated here: writing the
+    /// number in the test too would make a new theme wrong in *three* places,
+    /// and the one that matters is the page.
     ///
     /// Display names rather than ids, because the page is written for someone
     /// reading the picker: `rose_pine` is "Rosé Pine" there, accent and all.
@@ -1311,7 +1421,41 @@ mod tests {
             absent.is_empty(),
             "these built-in themes are not on the themes page: {absent:?}"
         );
-        assert_eq!(builtins().len(), 9, "the page's description counts them");
+
+        // The description opens with the count spelled out, which is the form a
+        // reader meets it in; only the words a plausible built-in count can
+        // reach are worth knowing.
+        const WORDS: &[(&str, usize)] = &[
+            ("Eight", 8),
+            ("Nine", 9),
+            ("Ten", 10),
+            ("Eleven", 11),
+            ("Twelve", 12),
+            ("Thirteen", 13),
+            ("Fourteen", 14),
+            ("Fifteen", 15),
+            ("Sixteen", 16),
+            ("Seventeen", 17),
+            ("Eighteen", 18),
+            ("Nineteen", 19),
+            ("Twenty", 20),
+        ];
+        let description = PAGE
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("description:"))
+            .expect("the themes page has a frontmatter description");
+        let claimed = WORDS
+            .iter()
+            .find(|(word, _)| description.contains(&format!("{word} built-in")))
+            .map(|(_, n)| *n)
+            .unwrap_or_else(|| {
+                panic!("the themes page description does not count its built-ins: {description}")
+            });
+        assert_eq!(
+            claimed,
+            builtins().len(),
+            "the themes page says how many built-ins there are, and it is out of date"
+        );
     }
 
     #[test]
@@ -1323,7 +1467,17 @@ mod tests {
             .collect();
         assert_eq!(
             dark,
-            ["dark", "dracula", "harbor", "one_dark_pro", "rose_pine"]
+            [
+                "dark",
+                "dracula",
+                "harbor",
+                "one_dark_pro",
+                "rose_pine",
+                "catppuccin_mocha",
+                "gruvbox_dark",
+                "nord",
+                "tokyo_night",
+            ]
         );
     }
 

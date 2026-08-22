@@ -258,10 +258,12 @@ impl Tty7App {
 
         let branch = self.scm_branch_row(&repo, &status, cx);
         let naming = self.scm_new_branch_row(&repo, cx);
+        let switching = self.scm_checkout_branch_row(&repo, cx);
         let commit = self.scm_commit_box(&repo, &status, window, cx);
         let buttons = self.scm_commit_buttons(&repo, &status, cx);
         let mut pinned = vec![branch];
         pinned.extend(naming);
+        pinned.extend(switching);
         pinned.push(commit);
         pinned.push(buttons);
         // A commit's detail replaces the working tree's, so the two can never
@@ -678,7 +680,29 @@ impl Tty7App {
         let input =
             cx.new(|cx| InputState::new(window, cx).placeholder(t(L10nKey::ScmCreateBranch)));
         let handle = input.read(cx).focus_handle(cx);
+        self.scm.checkout_branch = None;
         self.scm.new_branch = Some(input);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Open the inline "switch to which branch" input.
+    ///
+    /// The branch-name button already drops a menu of every local branch, and
+    /// that is the better way to pick one. This is the other half: the command
+    /// palette entry and its key binding, which have no button to hang a menu
+    /// off. It used to be wired to nothing at all — the action was registered,
+    /// listed and bindable, and invoking it silently did nothing.
+    pub(crate) fn scm_begin_checkout_branch(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t(L10nKey::ScmCheckoutBranch)));
+        let handle = input.read(cx).focus_handle(cx);
+        self.scm.new_branch = None;
+        self.scm.checkout_branch = Some(input);
         window.focus(&handle, cx);
         cx.notify();
     }
@@ -724,6 +748,58 @@ impl Tty7App {
                                         start: None,
                                         checkout: true,
                                     },
+                                    window,
+                                    cx,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The inline "switch to which branch" row, twin of [`Self::scm_new_branch_row`].
+    fn scm_checkout_branch_row(
+        &mut self,
+        repo: &RepoKey,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let input = self.scm.checkout_branch.clone()?;
+        let repo = repo.clone();
+        Some(
+            h_flex()
+                .id("scm-checkout-branch")
+                .flex_none()
+                .items_center()
+                .h(px(30.))
+                .px(px(CONTENT_INSET))
+                .child(div().flex_1().min_w_0().child(Input::new(&input).xsmall()))
+                .on_key_down(
+                    cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
+                        match ev.keystroke.key.as_str() {
+                            "escape" => {
+                                this.scm.checkout_branch = None;
+                                cx.notify();
+                            }
+                            "enter" => {
+                                let Some(input) = this.scm.checkout_branch.take() else {
+                                    return;
+                                };
+                                let name = input.read(cx).value().trim().to_string();
+                                cx.notify();
+                                if name.is_empty() {
+                                    return;
+                                }
+                                // A name that is not a branch is git's to
+                                // reject — `scm_op` surfaces the failure the
+                                // same way it does for every other operation,
+                                // and second-guessing it here would also have
+                                // to know about remote-tracking refs and tags.
+                                this.scm_op(
+                                    repo.clone(),
+                                    GitOp::CheckoutBranch { name },
                                     window,
                                     cx,
                                 );
@@ -1665,11 +1741,17 @@ impl Tty7App {
             .separator()
             .item(
                 PopupMenuItem::new(t(L10nKey::FileTreeContextCopyPath)).on_click({
-                    let absolute = absolute.clone();
+                    // Same locality rule as Reveal below: a remote
+                    // repository's paths belong to its own filesystem and
+                    // are left spelled the way that machine spells them.
+                    let text = match repo.host == HostId::LOCAL {
+                        true => crate::ui::path_display::native_separators(&absolute)
+                            .display()
+                            .to_string(),
+                        false => absolute.display().to_string(),
+                    };
                     move |_, _window, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                            absolute.display().to_string(),
-                        ));
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
                     }
                 }),
             );
@@ -1680,7 +1762,9 @@ impl Tty7App {
             menu = menu.item(
                 PopupMenuItem::new(crate::ui::right_panel::reveal_label()).on_click({
                     let absolute = absolute.clone();
-                    move |_, _window, cx| cx.reveal_path(&absolute)
+                    move |_, _window, cx| {
+                        cx.reveal_path(&crate::ui::path_display::native_separators(&absolute))
+                    }
                 }),
             );
         }

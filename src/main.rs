@@ -132,6 +132,12 @@ fn apply_reloaded_config(
     // alone, so there is nothing to compare and the user's keys stay in the
     // keymap the app is dispatching on.
     let keymap_before = crate::ui::keymap::keybinding_config(cx);
+    // Explorer's verbs live in the registry rather than in this process, so a
+    // hand-edited `gui_language` leaves them behind unless something restates
+    // them. Gated on the language actually moving, for the same reason the
+    // keymap below is: this watcher fires on every config write, and a sidebar
+    // drag has no business touching the registry.
+    let language_changed = cx.global::<Config>().gui_language != config.gui_language;
     crate::ui::i18n::set_locale(&config.gui_language);
     cx.set_global(config);
     reload_themes(cx);
@@ -140,6 +146,9 @@ fn apply_reloaded_config(
     // gui_language by hand has to rebuild it the same way the in-app language
     // picker does.
     crate::ui::theme::set_menus(cx);
+    if language_changed {
+        crate::core::explorer_context_menu::refresh_labels();
+    }
     crate::ui::windows::WindowRegistry::refresh_locale(cx, None);
     // `custom_shells` is only ever hand-edited, so this file is the one place
     // it can change from — and the inventory that carries it to the new-tab
@@ -468,6 +477,11 @@ fn main() {
     // the log is the only place the reason can survive.
     if let Some(register) = explorer_menu_action_from(&args) {
         let result = if register {
+            // The verb labels are localized, and this process stops at the
+            // `return` below — it never reaches the `set_locale` on the GUI
+            // path. Without this read every install would write English
+            // entries, whatever language the user runs tty7 in.
+            crate::ui::i18n::set_locale(&Config::load().gui_language);
             crate::core::explorer_context_menu::register()
         } else {
             crate::core::explorer_context_menu::unregister()

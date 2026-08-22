@@ -710,32 +710,12 @@ fn rollback_write(
     children.remove(host, &dir.to_path_buf());
 }
 
-/// Quote a path for the shell the pane is actually running. cmd.exe only
-/// treats double quotes as quoting — a single quote is an ordinary character
-/// there, so the POSIX form would split the path at its first space
-/// (#593). PowerShell and every POSIX shell take the single-quoted form, so
-/// an unknown shell keeps it too.
+/// Quote a path for the shell the pane is actually running.
+///
+/// The rules live in [`crate::core::shell_quote`], shared with the terminal's
+/// own path insertion so the two cannot drift apart again (#593).
 pub(crate) fn shell_quote_for(path: &Path, shell_program: Option<&str>) -> String {
-    let s = path.to_string_lossy();
-    if !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_alphanumeric() || "/.-_~+".contains(c))
-    {
-        return s.into_owned();
-    }
-    let is_cmd = shell_program
-        .map(|p| {
-            let base = p.rsplit(['\\', '/']).next().unwrap_or(p);
-            base.eq_ignore_ascii_case("cmd") || base.eq_ignore_ascii_case("cmd.exe")
-        })
-        .unwrap_or(false);
-    if is_cmd {
-        // Windows paths cannot contain a double quote, so there is nothing
-        // to escape inside the quotes.
-        format!("\"{s}\"")
-    } else {
-        format!("'{}'", s.replace('\'', r"'\''"))
-    }
+    crate::core::shell_quote::quote_for_shell(&path.to_string_lossy(), shell_program)
 }
 
 impl Tty7App {
@@ -1776,9 +1756,12 @@ impl Tty7App {
         }
 
         let sf = cx.global::<crate::ui::presets::Surfaces>().popover;
-        let dirty = self
-            .tab_code()
-            .is_some_and(|c| c.files.iter().any(|f| f.dirty && f.path == *path));
+        let tree_host = self.spawn_host(cx);
+        let dirty = self.tab_code().is_some_and(|c| {
+            c.files
+                .iter()
+                .any(|f| f.dirty && f.host.id() == tree_host && f.path == *path)
+        });
 
         let renaming = matches!(
             &self.file_tree.editing,
@@ -2049,9 +2032,18 @@ impl Tty7App {
 
         menu = menu.separator().item(
             PopupMenuItem::new(t(L10nKey::FileTreeContextCopyPath)).on_click({
-                let p = p.clone();
+                // Only a path on this machine gets re-spelled: a remote
+                // host's paths are already native over there, and giving
+                // them this OS's separators would copy something that names
+                // nothing on either machine.
+                let text = match paths_are_local {
+                    true => crate::ui::path_display::native_separators(&p)
+                        .display()
+                        .to_string(),
+                    false => p.display().to_string(),
+                };
                 move |_, _window, cx| {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(p.display().to_string()));
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
                 }
             }),
         );
@@ -2060,7 +2052,7 @@ impl Tty7App {
                 PopupMenuItem::new(crate::ui::right_panel::reveal_label()).on_click({
                     let p = p.clone();
                     move |_, _window, cx| {
-                        cx.reveal_path(&p);
+                        cx.reveal_path(&crate::ui::path_display::native_separators(&p));
                     }
                 }),
             );
@@ -2668,7 +2660,13 @@ mod tests {
     fn shell_quote_leaves_safe_paths_and_quotes_the_rest() {
         assert_eq!(shell_quote_for(Path::new("/a/b.txt"), None), "/a/b.txt");
         assert_eq!(shell_quote_for(Path::new("/a dir/f"), None), "'/a dir/f'");
-        assert_eq!(shell_quote_for(Path::new("/a'b"), None), r"'/a'\''b'");
+        // An apostrophe is the one character the dialects disagree about, so
+        // the shell has to be named — with none given the answer is the
+        // platform's, and this assertion is about the POSIX rule.
+        assert_eq!(
+            shell_quote_for(Path::new("/a'b"), Some("zsh")),
+            r"'/a'\''b'"
+        );
     }
 
     #[test]

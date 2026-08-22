@@ -11,6 +11,14 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Every job here checks out, builds, tests and greps — none of them write
+# anything back to the repo, so the token needs nothing but read. The repository
+# default is already `read`, but that is a settings toggle anyone with admin can
+# flip; declaring it in the file is what actually pins it, and it is what
+# CodeQL's `actions/missing-workflow-permissions` asks for.
+permissions:
+  contents: read
+
 # A superseded PR run is dead weight the moment the next push lands, and a run
 # left going is not free: the account's concurrent-job budget is shared, and
 # macOS slots are the scarce ones. A zombie Windows job (see the `Test` step's
@@ -178,7 +186,6 @@ jobs:
         run: cargo test --locked --target ${{ matrix.target }}
 
       - name: Test desktop updater
-        if: runner.os == 'macOS' || runner.os == 'Windows'
         timeout-minutes: 10
         run: cargo test --locked --features updater --bin tty7-updater --target ${{ matrix.target }}
 

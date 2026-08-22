@@ -58,8 +58,13 @@ pub(crate) const MAX_LOG_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const REC_SEP: u8 = 0x1e;
 pub(crate) const FIELD_SEP: u8 = 0x1f;
 
-/// A timestamp plus the author's own UTC offset, so times can be shown in the
-/// zone they were written in. Parsed from `%aI` / `%cI`.
+/// A timestamp plus the author's own UTC offset, parsed from `%aI` / `%cI`.
+///
+/// `offset_minutes` is already subtracted out of `unix`, which is the field
+/// everything currently renders from. Keeping the offset costs four bytes and
+/// preserves the one thing the conversion to UTC throws away — what o'clock it
+/// was where the commit was written. Nothing shows that yet; the parser is
+/// simply not the place to lose it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct OffsetTs {
     pub unix: i64,

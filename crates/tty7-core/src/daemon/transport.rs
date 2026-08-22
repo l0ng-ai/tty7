@@ -72,7 +72,7 @@ mod imp_unix {
         Ok(stream)
     }
 
-    pub(crate) fn tune(stream: &Stream) {
+    pub fn tune(stream: &Stream) {
         use std::os::unix::io::AsRawFd as _;
         let size: libc::c_int = 256 * 1024;
         for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
@@ -410,7 +410,7 @@ mod imp_windows {
         }
     }
 
-    pub(crate) fn tune(stream: &Stream) {
+    pub fn tune(stream: &Stream) {
         let _ = stream.set_nodelay(true);
     }
 

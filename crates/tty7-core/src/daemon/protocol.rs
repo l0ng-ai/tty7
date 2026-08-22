@@ -190,22 +190,6 @@ pub struct LoopbackForward {
     pub local_port: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct LoopbackForwardId {
-    pub pane_id: u64,
-    pub target: String,
-    pub remote_host: String,
-    pub remote_port: u16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoopbackForwardInfo {
-    pub id: LoopbackForwardId,
-    pub local_port: u16,
-    pub age_secs: u64,
-    pub idle_secs: u64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum SshAuthMode {
@@ -294,15 +278,50 @@ pub struct SftpEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SftpOp {
-    Stat { path: String },
-    Mkdir { path: String },
-    CreateFile { path: String },
-    RemoveFile { path: String },
-    RemoveDir { path: String },
-    Rename { from: String, to: String },
-    Chmod { path: String, mode: u32 },
-    Readlink { path: String },
-    Realpath { path: String },
+    Stat {
+        path: String,
+    },
+    Mkdir {
+        path: String,
+    },
+    CreateFile {
+        path: String,
+    },
+    RemoveFile {
+        path: String,
+    },
+    RemoveDir {
+        path: String,
+    },
+    Rename {
+        from: String,
+        to: String,
+    },
+    Chmod {
+        path: String,
+        mode: u32,
+    },
+    Readlink {
+        path: String,
+    },
+    Realpath {
+        path: String,
+    },
+    /// Whole-file read, for the built-in editor. `max_bytes` is the reader's
+    /// own ceiling; a file larger than it answers with an error instead of a
+    /// truncated body that would later be saved back short.
+    ReadFile {
+        path: String,
+        max_bytes: u64,
+    },
+    /// Whole-file write, in place (truncate + write, no temp-and-rename): the
+    /// editor saves over a file the user already has open, and replacing the
+    /// inode would silently drop its mode and ownership.
+    WriteFile {
+        path: String,
+        #[serde(with = "crate::host::b64")]
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +331,16 @@ pub enum SftpOpResult {
     Stat(SftpEntry),
     Link(String),
     Error(String),
+    /// Reply to [`SftpOp::ReadFile`]: the bytes, plus the stat they were
+    /// actually read under. The stat costs nothing — the size check before
+    /// the read has it in hand either way — and it is the only description of
+    /// the body that cannot disagree with it, which a separate `Stat` round
+    /// trip either side of the read can.
+    File {
+        entry: SftpEntry,
+        #[serde(with = "crate::host::b64")]
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -732,8 +761,6 @@ pub enum ClientMsg {
         exe: PathBuf,
     },
     EnsureLoopbackForward(LoopbackForwardRequest),
-    ListLoopbackForwards,
-    CloseLoopbackForward(LoopbackForwardId),
     SpawnNativeSsh {
         cwd: Option<PathBuf>,
         size: WinSize,
@@ -820,7 +847,6 @@ pub enum DaemonMsg {
     Agent(Option<crate::core::cli_agent::CLIAgent>),
     AgentStatus(Option<crate::core::cli_agent::AgentSessionState>),
     LoopbackForward(LoopbackForward),
-    LoopbackForwardList(Vec<LoopbackForwardInfo>),
     AuthPrompt {
         request_id: u64,
         prompt: AuthPromptKind,
@@ -843,38 +869,36 @@ pub enum DaemonMsg {
 }
 
 mod kind {
-    pub(crate) const SPAWN: u8 = 1;
-    pub(crate) const ATTACH: u8 = 2;
-    pub(crate) const INPUT: u8 = 3;
-    pub(crate) const RESIZE: u8 = 4;
-    pub(crate) const DETACH: u8 = 5;
-    pub(crate) const KILL: u8 = 6;
-    pub(crate) const LIST: u8 = 7;
-    pub(crate) const SHUTDOWN: u8 = 8;
-    pub(crate) const SPAWN_SHELL: u8 = 9;
-    pub(crate) const ENSURE_LOOPBACK_FORWARD: u8 = 10;
-    pub(crate) const LIST_LOOPBACK_FORWARDS: u8 = 11;
-    pub(crate) const CLOSE_LOOPBACK_FORWARD: u8 = 12;
-    pub(crate) const SPAWN_NATIVE_SSH: u8 = 14;
-    pub(crate) const AUTH_RESPONSE: u8 = 15;
-    pub(crate) const LIST_KNOWN_HOSTS: u8 = 16;
-    pub(crate) const DELETE_KNOWN_HOST: u8 = 17;
-    pub(crate) const TEST_SSH: u8 = 18;
-    pub(crate) const SFTP_LIST: u8 = 30;
-    pub(crate) const SFTP_OP: u8 = 31;
-    pub(crate) const SFTP_TRANSFER_START: u8 = 32;
-    pub(crate) const SFTP_TRANSFER_CANCEL: u8 = 33;
-    pub(crate) const SFTP_TRANSFER_LIST: u8 = 34;
-    pub(crate) const ADD_FORWARD: u8 = 20;
-    pub(crate) const REMOVE_FORWARD: u8 = 21;
-    pub(crate) const LIST_FORWARDS: u8 = 22;
-    pub(crate) const VERSION: u8 = 40;
-    pub(crate) const QUERY_PROCS: u8 = 50;
-    pub(crate) const ON_WORKSPACE: u8 = 52;
-    pub(crate) const SPAWN_OWNED: u8 = 53;
-    pub(crate) const OBSERVE: u8 = 54;
-    pub(crate) const SEND_INPUT: u8 = 55;
-    pub(crate) const HANDOFF: u8 = 56;
+    pub const SPAWN: u8 = 1;
+    pub const ATTACH: u8 = 2;
+    pub const INPUT: u8 = 3;
+    pub const RESIZE: u8 = 4;
+    pub const DETACH: u8 = 5;
+    pub const KILL: u8 = 6;
+    pub const LIST: u8 = 7;
+    pub const SHUTDOWN: u8 = 8;
+    pub const SPAWN_SHELL: u8 = 9;
+    pub const ENSURE_LOOPBACK_FORWARD: u8 = 10;
+    pub const SPAWN_NATIVE_SSH: u8 = 14;
+    pub const AUTH_RESPONSE: u8 = 15;
+    pub const LIST_KNOWN_HOSTS: u8 = 16;
+    pub const DELETE_KNOWN_HOST: u8 = 17;
+    pub const TEST_SSH: u8 = 18;
+    pub const SFTP_LIST: u8 = 30;
+    pub const SFTP_OP: u8 = 31;
+    pub const SFTP_TRANSFER_START: u8 = 32;
+    pub const SFTP_TRANSFER_CANCEL: u8 = 33;
+    pub const SFTP_TRANSFER_LIST: u8 = 34;
+    pub const ADD_FORWARD: u8 = 20;
+    pub const REMOVE_FORWARD: u8 = 21;
+    pub const LIST_FORWARDS: u8 = 22;
+    pub const VERSION: u8 = 40;
+    pub const QUERY_PROCS: u8 = 50;
+    pub const ON_WORKSPACE: u8 = 52;
+    pub const SPAWN_OWNED: u8 = 53;
+    pub const OBSERVE: u8 = 54;
+    pub const SEND_INPUT: u8 = 55;
+    pub const HANDOFF: u8 = 56;
 
     pub(crate) const SPAWNED: u8 = 1;
     pub(crate) const SNAPSHOT: u8 = 2;
@@ -885,18 +909,17 @@ mod kind {
     pub(crate) const PANE_LIST: u8 = 7;
     pub(crate) const ERROR: u8 = 8;
     pub const SIZE: u8 = 9;
-    pub(crate) const REMOTE_CONTEXT: u8 = 10;
-    pub(crate) const LOOPBACK_FORWARD: u8 = 11;
-    pub(crate) const LOOPBACK_FORWARD_LIST: u8 = 12;
-    pub(crate) const AUTH_PROMPT: u8 = 13;
-    pub(crate) const SSH_STATUS: u8 = 14;
-    pub(crate) const KNOWN_HOSTS_LIST: u8 = 15;
-    pub(crate) const SSH_TEST_RESULT: u8 = 16;
-    pub(crate) const SFTP_ENTRIES: u8 = 30;
-    pub(crate) const SFTP_OP_RESULT: u8 = 31;
-    pub(crate) const SFTP_TRANSFER_STARTED: u8 = 32;
-    pub(crate) const SFTP_TRANSFER_PROGRESS: u8 = 33;
-    pub(crate) const FORWARD_LIST: u8 = 20;
+    pub const REMOTE_CONTEXT: u8 = 10;
+    pub const LOOPBACK_FORWARD: u8 = 11;
+    pub const AUTH_PROMPT: u8 = 13;
+    pub const SSH_STATUS: u8 = 14;
+    pub const KNOWN_HOSTS_LIST: u8 = 15;
+    pub const SSH_TEST_RESULT: u8 = 16;
+    pub const SFTP_ENTRIES: u8 = 30;
+    pub const SFTP_OP_RESULT: u8 = 31;
+    pub const SFTP_TRANSFER_STARTED: u8 = 32;
+    pub const SFTP_TRANSFER_PROGRESS: u8 = 33;
+    pub const FORWARD_LIST: u8 = 20;
     pub const AGENT: u8 = 21;
     pub(crate) const AGENT_STATUS: u8 = 22;
     pub(crate) const VERSION_REPLY: u8 = 40;
@@ -1083,10 +1106,6 @@ impl ClientMsg {
             ClientMsg::EnsureLoopbackForward(req) => {
                 write_frame(w, kind::ENSURE_LOOPBACK_FORWARD, &to_json(req)?)
             }
-            ClientMsg::ListLoopbackForwards => write_frame(w, kind::LIST_LOOPBACK_FORWARDS, &[]),
-            ClientMsg::CloseLoopbackForward(id) => {
-                write_frame(w, kind::CLOSE_LOOPBACK_FORWARD, &to_json(id)?)
-            }
             ClientMsg::SpawnNativeSsh { cwd, size, spec } => {
                 write_frame(w, kind::SPAWN_NATIVE_SSH, &to_json(&(cwd, size, spec))?)
             }
@@ -1198,8 +1217,6 @@ impl ClientMsg {
                 exe: from_json(&payload)?,
             },
             kind::ENSURE_LOOPBACK_FORWARD => ClientMsg::EnsureLoopbackForward(from_json(&payload)?),
-            kind::LIST_LOOPBACK_FORWARDS => ClientMsg::ListLoopbackForwards,
-            kind::CLOSE_LOOPBACK_FORWARD => ClientMsg::CloseLoopbackForward(from_json(&payload)?),
             kind::SPAWN_NATIVE_SSH => {
                 let (cwd, size, spec) = from_json(&payload)?;
                 ClientMsg::SpawnNativeSsh { cwd, size, spec }
@@ -1291,9 +1308,6 @@ impl DaemonMsg {
             DaemonMsg::LoopbackForward(forward) => {
                 write_frame(w, kind::LOOPBACK_FORWARD, &to_json(forward)?)
             }
-            DaemonMsg::LoopbackForwardList(forwards) => {
-                write_frame(w, kind::LOOPBACK_FORWARD_LIST, &to_json(forwards)?)
-            }
             DaemonMsg::AuthPrompt { request_id, prompt } => {
                 write_frame(w, kind::AUTH_PROMPT, &to_json(&(request_id, prompt))?)
             }
@@ -1353,7 +1367,6 @@ impl DaemonMsg {
             kind::AGENT => DaemonMsg::Agent(from_json(&payload)?),
             kind::AGENT_STATUS => DaemonMsg::AgentStatus(from_json(&payload)?),
             kind::LOOPBACK_FORWARD => DaemonMsg::LoopbackForward(from_json(&payload)?),
-            kind::LOOPBACK_FORWARD_LIST => DaemonMsg::LoopbackForwardList(from_json(&payload)?),
             kind::AUTH_PROMPT => {
                 let (request_id, prompt) = from_json(&payload)?;
                 DaemonMsg::AuthPrompt { request_id, prompt }
@@ -1535,13 +1548,6 @@ mod tests {
                 remote_host: "127.0.0.1".into(),
                 remote_port: 3000,
             }),
-            ClientMsg::ListLoopbackForwards,
-            ClientMsg::CloseLoopbackForward(LoopbackForwardId {
-                pane_id: 7,
-                target: "dev".into(),
-                remote_host: "127.0.0.1".into(),
-                remote_port: 3000,
-            }),
             ClientMsg::ListKnownHosts,
             ClientMsg::DeleteKnownHost(KnownHostId {
                 host: "example.com".into(),
@@ -1581,6 +1587,20 @@ mod tests {
             ClientMsg::SftpOp {
                 pane_id: 4,
                 op: SftpOp::Realpath { path: ".".into() },
+            },
+            ClientMsg::SftpOp {
+                pane_id: 4,
+                op: SftpOp::ReadFile {
+                    path: "/etc/nginx/nginx.conf".into(),
+                    max_bytes: 4 * 1024 * 1024,
+                },
+            },
+            ClientMsg::SftpOp {
+                pane_id: 4,
+                op: SftpOp::WriteFile {
+                    path: "/home/deploy/笔记.md".into(),
+                    bytes: vec![0x00, 0xff, b'h', b'i'],
+                },
             },
             ClientMsg::SftpTransferStart(SftpTransferSpec {
                 pane_id: 4,
@@ -1692,17 +1712,6 @@ mod tests {
             })),
             DaemonMsg::AgentStatus(None),
             DaemonMsg::LoopbackForward(LoopbackForward { local_port: 49152 }),
-            DaemonMsg::LoopbackForwardList(vec![LoopbackForwardInfo {
-                id: LoopbackForwardId {
-                    pane_id: 7,
-                    target: "dev".into(),
-                    remote_host: "127.0.0.1".into(),
-                    remote_port: 3000,
-                },
-                local_port: 49152,
-                age_secs: 12,
-                idle_secs: 3,
-            }]),
             DaemonMsg::KnownHostsList(vec![KnownHostEntry {
                 host: "example.com".into(),
                 marker: Some("@revoked".into()),
@@ -1751,6 +1760,17 @@ mod tests {
                 permissions: 0o100644,
                 target_is_dir: false,
             })),
+            DaemonMsg::SftpOpResult(SftpOpResult::File {
+                entry: SftpEntry {
+                    name: "nginx.conf".into(),
+                    kind: SftpEntryKind::File,
+                    size: 4,
+                    mtime: 1_700_000_000,
+                    permissions: 0o100644,
+                    target_is_dir: false,
+                },
+                bytes: vec![0x00, 0xff, 0x80, b'!'],
+            }),
             DaemonMsg::SftpTransferStarted { job_id: 3 },
             DaemonMsg::SftpTransferProgress(vec![SftpJobProgress {
                 job_id: 3,

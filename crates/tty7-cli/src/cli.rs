@@ -652,19 +652,11 @@ pub enum ServerCmd {
     #[command(about = "Stop the server; sessions end")]
     Stop,
 
-    #[command(
-        about = "Stop, then start; sessions end",
-        long_about = "Stop, then start.\n\n\
-                      Sessions end, exactly as `stop` says of itself: every pane the \
-                      server is running is a child of it, and this kills the server. The \
-                      workspaces survive — the tree is on disk — so the layout is still \
-                      there afterwards with dead leaves the GUI revives into fresh \
-                      shells. What does not survive is what those shells were running.\n\n\
-                      The server can hand panes to a new build of itself with their pids \
-                      and ptys intact, which is how an update keeps your sessions, but \
-                      that path is not this one: this stops and starts."
-    )]
-    Restart,
+    #[command(about = "Restart in place; sessions keep running (--hard: stop, then start)")]
+    Restart {
+        #[arg(long, help = "Stop, then start — every session ends")]
+        hard: bool,
+    },
 
     #[command(about = "Version, uptime, panes, links")]
     Status,
@@ -1005,7 +997,7 @@ mod tests {
         for (verb, want) in [
             ("start", ServerCmd::Start),
             ("stop", ServerCmd::Stop),
-            ("restart", ServerCmd::Restart),
+            ("restart", ServerCmd::Restart { hard: false }),
             ("status", ServerCmd::Status),
             ("logs", ServerCmd::Logs),
         ] {
@@ -1019,6 +1011,10 @@ mod tests {
                 "server {verb} parsed as the wrong verb"
             );
         }
+        assert!(matches!(
+            parse(&["tty7", "server", "restart", "--hard"]).command,
+            Some(Command::Server(ServerCmd::Restart { hard: true }))
+        ));
     }
 
     #[test]

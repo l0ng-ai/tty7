@@ -240,45 +240,45 @@ fn associated_text(ks: &gpui::Keystroke) -> Option<Vec<u32>> {
     (!cps.is_empty()).then_some(cps)
 }
 
+/// The C0 control byte a `Ctrl+<key>` chord stands for, or `None` when the
+/// chord is not a control code at all.
+///
+/// The letters fold onto `0x01..=0x1A` — `Ctrl+A` is 1, `Ctrl+Z` is 26 — which
+/// is the whole alphabet in one line instead of twenty-six. The rest is the
+/// VT-220 table (chapter 3.2.5): the digits 2..8, and beside each the
+/// punctuation that shares its key, because `Ctrl+^` is typed as Ctrl+Shift+6
+/// and every platform hands that over as `^` with the Shift already spent.
+///
+/// `Ctrl+/` is not in that table. xterm and every terminal since encode it as
+/// US and editors bind against it — vim's `<C-/>` — but unlike `Ctrl+[` and
+/// its neighbours no keyboard layer folds it into a control byte for us, so it
+/// has to be spelled out here. `Ctrl+-` is deliberately absent: off macOS that
+/// is Decrease Font Size, and the chord this table owes readline's undo is
+/// `Ctrl+_`, which arrives as `_`.
+fn ctrl_c0(key: &str) -> Option<u8> {
+    if let [b] = key.as_bytes()
+        && b.is_ascii_alphabetic()
+    {
+        return Some(b.to_ascii_uppercase() & 0x1f);
+    }
+    Some(match key {
+        "space" | "2" | "@" => 0x00,
+        "3" | "[" => 0x1b,
+        "4" | "\\" => 0x1c,
+        "5" | "]" => 0x1d,
+        "6" | "^" => 0x1e,
+        "7" | "_" | "/" => 0x1f,
+        "8" | "?" => 0x7f,
+        _ => return None,
+    })
+}
+
 fn legacy_keystroke_to_bytes(ks: &gpui::Keystroke, flags: KeyFlags) -> Option<Vec<u8>> {
     let m = &ks.modifiers;
     let key = ks.key.as_str();
 
     if m.control && !m.platform {
-        let b = match key {
-            "space" | "2" => Some(0x00),
-            "a" => Some(0x01),
-            "b" => Some(0x02),
-            "c" => Some(0x03),
-            "d" => Some(0x04),
-            "e" => Some(0x05),
-            "f" => Some(0x06),
-            "g" => Some(0x07),
-            "h" => Some(0x08),
-            "i" => Some(0x09),
-            "j" => Some(0x0a),
-            "k" => Some(0x0b),
-            "l" => Some(0x0c),
-            "m" => Some(0x0d),
-            "n" => Some(0x0e),
-            "o" => Some(0x0f),
-            "p" => Some(0x10),
-            "q" => Some(0x11),
-            "r" => Some(0x12),
-            "s" => Some(0x13),
-            "t" => Some(0x14),
-            "u" => Some(0x15),
-            "v" => Some(0x16),
-            "w" => Some(0x17),
-            "x" => Some(0x18),
-            "y" => Some(0x19),
-            "z" => Some(0x1a),
-            "[" => Some(0x1b),
-            "\\" => Some(0x1c),
-            "]" => Some(0x1d),
-            _ => None,
-        };
-        if let Some(b) = b {
+        if let Some(b) = ctrl_c0(key) {
             if m.alt {
                 return Some(vec![0x1b, b]);
             }
@@ -622,6 +622,42 @@ mod tests {
         assert_eq!(legacy(&ks(ctrl, "2", None)), Some(vec![0x00]));
         assert_eq!(legacy(&ks(ctrl, "h", None)), Some(vec![0x08]));
         assert_eq!(legacy(&ks(ctrl, "z", None)), Some(vec![0x1a]));
+    }
+
+    #[test]
+    fn keystroke_to_bytes_maps_the_whole_vt220_control_table() {
+        let ctrl = Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        // The VT-220 table, each digit next to the punctuation that shares its
+        // key: whichever of the two the platform reports, the byte is the same.
+        let cases: &[(&str, u8)] = &[
+            ("2", 0x00),
+            ("@", 0x00),
+            ("3", 0x1b),
+            ("4", 0x1c),
+            ("5", 0x1d),
+            ("6", 0x1e),
+            // vim's `Ctrl-^`, the whole reason the digits are here.
+            ("^", 0x1e),
+            ("7", 0x1f),
+            ("_", 0x1f),
+            // readline's undo; xterm's addition to the table, not VT-220's.
+            ("/", 0x1f),
+            ("8", 0x7f),
+            ("?", 0x7f),
+        ];
+        for (key, byte) in cases {
+            assert_eq!(
+                legacy(&ks(ctrl, key, None)),
+                Some(vec![*byte]),
+                "ctrl-{key}"
+            );
+        }
+        // Decrease Font Size owns Ctrl+- off macOS, and readline is served by
+        // Ctrl+_ above, so the bare minus stays out of the table.
+        assert_eq!(legacy(&ks(ctrl, "-", None)), None);
     }
 
     #[test]

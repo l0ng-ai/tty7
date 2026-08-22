@@ -1,3 +1,4 @@
+pub(crate) mod agent_marks;
 mod boxdraw;
 mod cmd_editor;
 mod completion;
@@ -29,5 +30,5 @@ mod typeahead;
 pub mod view;
 
 pub(crate) use remote::notify_desktop;
-pub use remote::{PaneRoute, PaneWorkspace, RemoteTerminal};
+pub use remote::{PaneRoute, PaneWorkspace, RemoteTerminal, attach_unanswered};
 pub use size::TermSize;

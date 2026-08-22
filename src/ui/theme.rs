@@ -836,6 +836,12 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // a wallpaper image, and any flat colour would show as a seam against it.
     // The current line and the invisibles become translucent ink for the same
     // reason — they read correctly on light and dark presets alike.
+    //
+    // A transparent gutter is only safe because our gpui-component fork clips
+    // the editor's scrolling content to the right of the line-number column.
+    // Upstream leans on the opaque gutter fill to hide horizontally scrolled
+    // text, so on a stock build clearing this key lets the text run straight
+    // across the line numbers.
     let ink: Hsla = rgb(m.foreground).into();
     let mut highlight = (*t.highlight_theme).clone();
     highlight.style.editor_background = Some(gpui::transparent_black());

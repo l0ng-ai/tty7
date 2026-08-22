@@ -1,6 +1,6 @@
 use gpui::{
-    App, Axis, Bounds, Context, Entity, Focusable, Pixels, PromptLevel, Subscription, Window, div,
-    img, point, prelude::*, px, size,
+    App, Axis, Bounds, Context, Edges, Entity, Focusable, Pixels, PromptLevel, Size, Subscription,
+    Window, div, img, point, prelude::*, px, size,
 };
 use gpui_component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{InputEvent, InputState};
@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use crate::core::actions::*;
 use crate::core::config::{
-    Config, CursorStyle as ConfigCursorStyle, NewTabPosition, RightPanelTab, ShellConfig,
-    TabBarPosition, WindowBackdrop,
+    Config, CursorStyle as ConfigCursorStyle, MouseZoomModifier, NewTabPosition, RightPanelTab,
+    ShellConfig, TabBarPosition, WindowBackdrop,
 };
 use crate::core::session::{
     Session, SessionAxis, SessionPane, SessionTab, WorkspaceId, WorkspaceStore,
@@ -173,16 +173,47 @@ pub(crate) const HOME_CURSOR_BLINK_MS: u64 = 600;
 /// dropping it would have let a panel grow past where it could before under
 /// cover of a change that is only meant to take width away from panels.
 ///
-/// `other_floor` is zero when the other panel is closed, which is why this
-/// takes floors rather than reading them: only the caller knows what is up.
-pub(crate) fn side_panel_max(viewport: f32, own_floor: f32, other_floor: f32) -> f32 {
-    (viewport - TERMINAL_MIN_W - other_floor)
+/// `others_floor` is the sum of the floors under every *other* column that is
+/// open — the panel opposite, and the document column when a file or a diff is
+/// docked. It is zero for each of them that is closed, which is why this takes
+/// floors rather than reading them: only the caller knows what is up.
+pub(crate) fn side_panel_max(viewport: f32, own_floor: f32, others_floor: f32) -> f32 {
+    (viewport - TERMINAL_MIN_W - others_floor)
         .min(viewport * SIDE_PANEL_MAX_RATIO)
         .max(own_floor)
 }
 
 /// The half of the window neither panel may grow past on its own.
 const SIDE_PANEL_MAX_RATIO: f32 = 0.5;
+
+/// The narrowest a docked document column may be squeezed to: the header, a
+/// readable run of about thirty columns, and the status bar under them. Below
+/// this a file is a ribbon of hyphenated fragments and the column is worth
+/// less than the terminal width it costs.
+pub(crate) const DOCUMENT_MIN_W: f32 = 280.;
+
+/// How wide the docked document column is, given the width the terminal and the
+/// document share — the window less the sidebar and the right panel — and the
+/// share of it the user asked for.
+///
+/// `None` is the narrow-window answer: there is no way to give both the
+/// terminal and a document a width worth reading, so the caller falls back to
+/// filling the workspace for this frame. That fallback is *derived*, never
+/// stored — widening the window docks again on the next frame, and the user's
+/// saved `document_layout` is untouched throughout.
+///
+/// The named two-thirds deliberately runs past the half-window cap the side
+/// panels obey. That cap is there so neither *panel* can dominate a wide
+/// display; the document is the thing the user is reading, and an increment
+/// that silently became a half on every window wider than about 720 points of
+/// body would be a lie. The terminal's floor still binds.
+pub(crate) fn document_column_px(body: f32, ratio: f32) -> Option<f32> {
+    if !body.is_finite() || body < TERMINAL_MIN_W + DOCUMENT_MIN_W {
+        return None;
+    }
+    let ratio = if ratio.is_finite() { ratio } else { 0.5 };
+    Some((body * ratio).clamp(DOCUMENT_MIN_W, body - TERMINAL_MIN_W))
+}
 
 pub(crate) const TITLE_BAR_HEIGHT: f32 = 40.;
 
@@ -257,6 +288,50 @@ pub(crate) fn title_bar_hug_offset() -> f32 {
         0.
     } else {
         tile_trailing_inset() - TITLE_BAR_LEAD
+    }
+}
+
+/// The bounds to remember for reopening this window at the same place.
+///
+/// Under client-side decorations the window's *outer* rectangle is the whole
+/// surface, shadow included, and both Linux backends put the shadow back on
+/// their own once the window is up: Wayland's first sized configure adds the
+/// inset to whatever geometry was asked for (`compute_outer_size`), and on X11
+/// the inset travels as `_GTK_FRAME_EXTENTS`, which a window manager only
+/// advertises — and gpui only turns CSD on for — when it honours those extents
+/// by keeping the *visible* frame put. Save the outer rectangle either way and
+/// it comes back twice the shadow larger every launch; that is the bug Zed
+/// fixed in ca9cee85e1 ("linux: Fix non-maximized Zed windows growing larger
+/// across sessions", #22301), whose own measurements were taken on X11.
+///
+/// So save the inner rectangle, exactly as Zed does, on every platform. It is
+/// the visible frame, which is what the backends re-inflate back to, and it
+/// costs nothing elsewhere: `inner_window_bounds` defaults to `window_bounds`
+/// on the `PlatformWindow` trait, and neither the macOS nor the Windows backend
+/// nor gpui's `TestWindow` overrides it. On X11 without a compositor the same
+/// holds for a different reason — `window_decorations()` answers `Server`, the
+/// window border never calls `set_client_inset`, and the insets stay zero.
+fn window_bounds_to_remember(window: &Window) -> Bounds<Pixels> {
+    window.inner_window_bounds().get_bounds()
+}
+
+/// The band the tab strip claims for a drop, in the window's outer coordinates.
+///
+/// The strip is the top of the *content*, and under client-side decorations the
+/// content sits inside the frame padding while `viewport` still measures the
+/// whole surface, shadow included — so the band starts at the padding and stops
+/// at the far edge of the frame, one padding in from each side. Anything else
+/// leaves the outermost chips outside the zone that is supposed to contain
+/// them. `window_paddings` answers `Edges::all(0)` under server-side
+/// decorations, which is every platform but Linux CSD, so off Linux this stays
+/// the full-width rectangle from the window's corner it has always been.
+fn strip_band(viewport: Size<Pixels>, pad: Edges<Pixels>) -> Bounds<Pixels> {
+    Bounds {
+        origin: point(pad.left, pad.top),
+        size: size(
+            (viewport.width - pad.left - pad.right).max(px(0.)),
+            px(TITLE_BAR_HEIGHT),
+        ),
     }
 }
 
@@ -366,6 +441,16 @@ pub struct Tab {
     pub(crate) code: Option<Box<crate::ui::code_editor::TabCode>>,
     pub(crate) sidebar_group: std::cell::RefCell<Option<std::path::PathBuf>>,
     pub(crate) overlay_top: OverlayTop,
+    /// Whether this tab's document fills the workspace or docks beside the
+    /// terminal, once the tab has been told. `None` follows `document_layout`
+    /// in the config, which is the default a fresh tab starts from and the
+    /// last explicit choice anyone made.
+    ///
+    /// Per tab rather than per window because what you are doing differs per
+    /// tab: reading a long file in one while an agent works in another wants
+    /// the whole window here and half of it there, and a global switch made
+    /// each of those flip the other.
+    pub(crate) document_layout: Option<crate::core::config::DocumentLayout>,
     pub(crate) tree_id: std::cell::Cell<tty7_core::core::machine::TabId>,
     /// Monotonic stamp of when this tab was last activated, used to order the
     /// switcher's tab column most-recently-used first. Zero means never.
@@ -380,7 +465,7 @@ pub(crate) enum OverlayTop {
 }
 
 impl Tab {
-    fn new(pane: Pane) -> Self {
+    pub(crate) fn new(pane: Pane) -> Self {
         Self {
             pane,
             name: None,
@@ -389,6 +474,7 @@ impl Tab {
             diff_overlay: None,
             code: None,
             overlay_top: OverlayTop::default(),
+            document_layout: None,
             sidebar_group: std::cell::RefCell::new(None),
             tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
             last_used: std::cell::Cell::new(0),
@@ -404,6 +490,7 @@ impl Tab {
             diff_overlay: None,
             code: None,
             overlay_top: OverlayTop::default(),
+            document_layout: None,
             sidebar_group: std::cell::RefCell::new(
                 tree.sidebar_group.clone().map(std::path::PathBuf::from),
             ),
@@ -649,6 +736,12 @@ pub struct Tty7App {
     pub(crate) settings_hit_anchored: Cell<bool>,
     pub(crate) right_panel_width: Rc<Cell<f32>>,
     pub(crate) right_panel_dragging: Rc<Cell<bool>>,
+    /// The docked document column's share of the terminal column, live. Held
+    /// beside the config value rather than in it for the same reason the two
+    /// panel widths are: a drag writes this cell on every mouse move and the
+    /// config once, on mouse up.
+    pub(crate) document_ratio: Rc<Cell<f32>>,
+    pub(crate) document_dragging: Rc<Cell<bool>>,
     pub(crate) right_panel_visible: bool,
     pub(crate) right_panel_tab: RightPanelTab,
     pub(crate) sidebar_collapsed: bool,
@@ -1071,6 +1164,7 @@ impl Tty7App {
         });
         let sidebar_width = cx.global::<Config>().sidebar_width;
         let right_panel_width = cx.global::<Config>().right_panel_width;
+        let document_ratio = cx.global::<Config>().document_ratio;
         let right_panel_visible = cx.global::<Config>().right_panel_visible;
         let right_panel_tab = cx.global::<Config>().right_panel_tab;
         let scm_graph_expanded = cx.global::<Config>().scm_graph_expanded;
@@ -1241,6 +1335,8 @@ impl Tty7App {
             settings_hit_anchored: Cell::new(false),
             right_panel_width: Rc::new(Cell::new(right_panel_width)),
             right_panel_dragging: Rc::new(Cell::new(false)),
+            document_ratio: Rc::new(Cell::new(document_ratio)),
+            document_dragging: Rc::new(Cell::new(false)),
             right_panel_visible,
             right_panel_tab,
             sidebar_collapsed,
@@ -1260,7 +1356,7 @@ impl Tty7App {
             settings: None,
             ssh_prompt: crate::ui::ssh_prompt::SshPromptState::new(cx),
             close_prompt_open: false,
-            window_bounds: window.window_bounds().get_bounds(),
+            window_bounds: window_bounds_to_remember(window),
             workspace,
             workspace_rename: None,
             window_title: std::cell::RefCell::new(String::new()),
@@ -1285,7 +1381,7 @@ impl Tty7App {
         .detach();
 
         cx.observe_window_bounds(window, |this, window, _cx| {
-            this.window_bounds = window.window_bounds().get_bounds();
+            this.window_bounds = window_bounds_to_remember(window);
         })
         .detach();
 
@@ -1576,6 +1672,7 @@ impl Tty7App {
                 diff_overlay: None,
                 code: None,
                 overlay_top: OverlayTop::default(),
+                document_layout: None,
                 sidebar_group: std::cell::RefCell::new(st.sidebar_group),
                 tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
                 last_used: std::cell::Cell::new(0),
@@ -1804,53 +1901,71 @@ impl Tty7App {
                     }
                 })
                 .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                match &restarted {
-                    Ok(()) => {
-                        // The link we held pointed at the server we just killed;
-                        // the reconnect finds a new process whose registry knows
-                        // nothing about these panes. The helper drops the dead
-                        // link first — a pull sent down it dies on a dead socket
-                        // before the reader notices — and rebuilds every local
-                        // window from the tree.
-                        crate::ui::tree_sync::resync_after_local_daemon_change(cx);
-                    }
-                    Err(e) => {
-                        // A refused handoff leaves the daemon exactly as it was,
-                        // still serving the panes this window just dropped. Leaving
-                        // it at the error here strands them: every restore path is
-                        // tree-driven, and the next sync of this emptied window
-                        // would diff into "close every tab" against the mirror —
-                        // deleting the pane records under the still-running shells,
-                        // or the whole workspace if the user simply closes the
-                        // window first (#554). Pull the layout back instead; where
-                        // the failure really did take the daemon away (an exec that
-                        // never re-listened), the pull misses and the rehydration
-                        // debt keeps the empty window from being pushed up.
-                        //
-                        // The invalidating helper, not the one the reconnect uses:
-                        // nothing here handshaked a link. Half of `hand_off`'s
-                        // failures happen *after* the exec — a daemon that never
-                        // started listening again is gone, and the client we still
-                        // hold points at its socket, which `is_connected` keeps
-                        // calling good until its reader sees the EOF.
-                        log::error!(
-                            "restart background service failed, resyncing from the tree: {e}"
-                        );
-                        let text = t_fmt(
-                            L10nKey::AppRestartServerFailed,
-                            &[("error", &e.to_string())],
-                        );
-                        this.startup_error = Some(gpui::SharedString::from(text.clone()));
-                        window.push_notification(text, cx);
-                        crate::ui::tree_sync::resync_after_local_daemon_change(cx);
-                    }
-                }
-                this.focus_active(window, cx);
-                cx.notify();
-            });
+            Self::settle_after_restart(this, restarted, cx).await;
         })
         .detach();
+    }
+
+    /// Put the window back together once the restart has been attempted, either
+    /// way it went.
+    ///
+    /// Split into three steps because the middle one must not run with this
+    /// window's entity leased. `resync_after_local_daemon_change` takes the
+    /// whole `App` and rebuilds *every* local window from the tree, and the
+    /// first thing it asks each one is which tabs it is showing — which it gets
+    /// by reading that window's `Tty7App` back out of the registry. Called from
+    /// inside `update_in`, the window it reaches for first is the one already
+    /// leased to the closure, and gpui's answer to a double lease is a panic
+    /// that takes the process with it: clicking Restart Server made the whole
+    /// app vanish.
+    async fn settle_after_restart(
+        this: gpui::WeakEntity<Self>,
+        restarted: anyhow::Result<()>,
+        cx: &mut gpui::AsyncApp,
+    ) {
+        // A refused handoff leaves the daemon exactly as it was, still serving
+        // the panes this window just dropped. Leaving it at the error here
+        // strands them: every restore path is tree-driven, and the next sync of
+        // this emptied window would diff into "close every tab" against the
+        // mirror — deleting the pane records under the still-running shells, or
+        // the whole workspace if the user simply closes the window first (#554).
+        // So the resync below runs either way; this step only says so on screen.
+        if this
+            .update_in(cx, |this, window, cx| {
+                if let Err(e) = &restarted {
+                    log::error!("restart background service failed, resyncing from the tree: {e}");
+                    let text = t_fmt(
+                        L10nKey::AppRestartServerFailed,
+                        &[("error", &e.to_string())],
+                    );
+                    this.startup_error = Some(gpui::SharedString::from(text.clone()));
+                    window.push_notification(text, cx);
+                }
+            })
+            .is_err()
+        {
+            return;
+        }
+
+        // The link we held pointed at the server we just killed; the reconnect
+        // finds a new process whose registry knows nothing about these panes.
+        // The helper drops the dead link first — a pull sent down it dies on a
+        // dead socket before the reader notices — and rebuilds every local
+        // window from the tree. Where the restart failed and the daemon is
+        // really gone, the pull misses and the rehydration debt keeps the empty
+        // window from being pushed back up.
+        //
+        // The invalidating helper, not the one the reconnect uses: nothing here
+        // handshaked a link. Half of `hand_off`'s failures happen *after* the
+        // exec — a daemon that never started listening again is gone, and the
+        // client we still hold points at its socket, which `is_connected` keeps
+        // calling good until its reader sees the EOF.
+        let _ = cx.update(crate::ui::tree_sync::resync_after_local_daemon_change);
+
+        let _ = this.update_in(cx, |this, window, cx| {
+            this.focus_active(window, cx);
+            cx.notify();
+        });
     }
 
     fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
@@ -2947,6 +3062,16 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.smooth_scroll = on);
     }
 
+    /// Panes read the modifier off the global config as each wheel event
+    /// arrives, so there is nothing to push at them here.
+    pub(crate) fn set_mouse_zoom_modifier(
+        &mut self,
+        modifier: MouseZoomModifier,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.mouse_zoom_modifier = modifier);
+    }
+
     pub(crate) fn set_clipboard_trim(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.clipboard_trim_trailing_spaces = on);
     }
@@ -3734,6 +3859,8 @@ impl Tty7App {
     /// Which gap between tabs the pointer is in, as the tab a newcomer would
     /// be inserted before and the caret marking it — on the strip, or on the
     /// sidebar, whichever the pointer is over.
+    ///
+    /// `viewport` and the pointer are both in the window's outer coordinates.
     fn detach_slot(&self, window: &Window, cx: &App) -> Option<(usize, Bounds<Pixels>)> {
         /// How far above its first row the sidebar's band starts, so the gap
         /// over that row is inside it.
@@ -3745,6 +3872,7 @@ impl Tty7App {
         let vertical = matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
             && !self.tabs.is_empty();
         let viewport = window.viewport_size();
+        let pad = gpui_component::window_paddings(window);
         // The band each surface claims, read off the tabs it drew rather than
         // measured as an element of its own: the chips and the rows are the
         // only part of either surface a drop has anything to say about, and a
@@ -3760,10 +3888,7 @@ impl Tty7App {
                 .map(|(_, b)| b.origin.x + b.size.width)
                 .reduce(Pixels::max)?;
             Some(match axis {
-                Axis::Horizontal => Bounds {
-                    origin: point(px(0.), px(0.)),
-                    size: size(viewport.width, px(TITLE_BAR_HEIGHT)),
-                },
+                Axis::Horizontal => strip_band(viewport, pad),
                 Axis::Vertical => Bounds {
                     origin: point(left, top - px(BAND_REACH)),
                     size: size(
@@ -3913,6 +4038,25 @@ impl Tty7App {
         };
         self.pending_tab = None;
         self.activate(index, window, cx);
+    }
+
+    /// Declare to the pane registry which terminals are on screen this
+    /// frame: the active tab's, nobody else's. Stated per frame rather than
+    /// maintained at every tab operation, the way `scm_sync_watchers` is.
+    /// Entity ids only — reading the entities here would put them into the
+    /// window's tracked set, which is exactly what the registry routes
+    /// around.
+    fn declare_displayed_panes(&self, cx: &App) {
+        let active = self.active;
+        crate::terminal::view::declare_displayed(
+            cx,
+            self.tabs.iter().enumerate().flat_map(|(i, tab)| {
+                tab.pane
+                    .leaves()
+                    .into_iter()
+                    .filter_map(move |slot| Some((slot.terminal()?.entity_id(), i == active)))
+            }),
+        );
     }
 
     /// Stamps whichever tab is active right now. Called once per frame rather
@@ -4203,22 +4347,29 @@ impl Tty7App {
         cx.notify();
     }
 
-    pub(crate) fn tab_cwd(
-        &self,
-        index: usize,
-        window: &Window,
-        cx: &App,
-    ) -> Option<std::path::PathBuf> {
-        self.tabs
-            .get(index)?
-            .pane
-            .focused_or_first(window, cx)
-            .and_then(|leaf| leaf.read(cx).cwd())
+    /// A tab's working directory, spelled for the clipboard.
+    ///
+    /// A cwd on this machine is re-spelled with this OS's separators, because
+    /// what goes on the clipboard is meant to be pasted into a shell and a
+    /// mixed-separator path is not one Windows will take. A remote pane's cwd
+    /// keeps the spelling its own machine uses — it is already native over
+    /// there. Both "Copy working directory" entry points (the app-menu action
+    /// and the tab context menu) come through here so the two cannot drift.
+    pub(crate) fn tab_cwd_text(&self, index: usize, window: &Window, cx: &App) -> Option<String> {
+        let leaf = self.tabs.get(index)?.pane.focused_or_first(window, cx)?;
+        let view = leaf.read(cx);
+        let cwd = view.cwd()?;
+        Some(match view.local_cwd().is_some() {
+            true => crate::ui::path_display::native_separators(&cwd)
+                .display()
+                .to_string(),
+            false => cwd.display().to_string(),
+        })
     }
 
     pub(crate) fn copy_active_cwd(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if let Some(cwd) = self.tab_cwd(self.active, window, cx) {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(cwd.display().to_string()));
+        if let Some(text) = self.tab_cwd_text(self.active, window, cx) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         }
     }
 
@@ -4600,12 +4751,14 @@ impl Tty7App {
         cx.notify();
     }
 
-    fn palette_commands(&self, window: &Window, cx: &App) -> Vec<Command> {
+    pub(crate) fn palette_commands(&self, window: &Window, cx: &App) -> Vec<Command> {
         let mut commands = Command::base_commands(
             cx,
             ChromeState {
                 rail_collapsed: self.sidebar_collapsed,
                 right_panel_visible: self.right_panel_visible,
+                document_filled: self.document_layout(cx)
+                    == crate::core::config::DocumentLayout::Fill,
             },
         );
 
@@ -4840,6 +4993,16 @@ impl Tty7App {
             ToggleSftp => self.toggle_sftp(window, cx),
             ShowSshForwards => self.show_ssh_forwards(window, cx),
             ToggleCodePanel => self.toggle_code_panel(window, cx),
+            ToggleDocumentFill => self.toggle_document_fill(cx),
+            DocumentWidthThird => {
+                self.set_document_ratio(crate::core::config::DOCUMENT_RATIO_THIRD, cx)
+            }
+            DocumentWidthHalf => {
+                self.set_document_ratio(crate::core::config::DOCUMENT_RATIO_HALF, cx)
+            }
+            DocumentWidthTwoThirds => {
+                self.set_document_ratio(crate::core::config::DOCUMENT_RATIO_TWO_THIRDS, cx)
+            }
             RestartSshSession => self.restart_ssh_session(window, cx),
             SetTheme(i) => {
                 if let Some(id) = crate::ui::presets::all(cx).get(i).map(|t| t.id.clone()) {
@@ -4869,9 +5032,6 @@ impl Tty7App {
             ScmSync => self.run_scm_action(ScmIntent::Sync, window, cx),
             ScmCreateBranch => self.run_scm_action(ScmIntent::CreateBranch, window, cx),
             OpenBranchPicker => self.run_scm_action(ScmIntent::CheckoutBranch, window, cx),
-            // The branch picker fills this in once it can list refs; until
-            // then the palette never emits it.
-            CheckoutBranch(_) => {}
             ToggleDiffViewMode => self.toggle_diff_view_mode(cx),
             OpenThemePicker | OpenSshConnectInput => {}
             ActivateTab(i) => self.activate(i, window, cx),
@@ -5280,6 +5440,10 @@ impl Tty7App {
         set_locale(code);
         cx.global::<Config>().save();
         set_menus(cx);
+        // Explorer reads its menu wording from the registry, so it is the one
+        // surface a language change does not reach on its own. No-op unless
+        // the user installed the context menu, and off Windows entirely.
+        crate::core::explorer_context_menu::refresh_labels();
         self.refresh_locale_state(window, cx);
         crate::ui::windows::WindowRegistry::refresh_locale(cx, Some(self.workspace));
     }
@@ -5697,6 +5861,8 @@ impl Tty7App {
         self.sidebar_width.set(cx.global::<Config>().sidebar_width);
         self.right_panel_width
             .set(cx.global::<Config>().right_panel_width);
+        self.document_ratio
+            .set(cx.global::<Config>().document_ratio);
         if font_size != self.font_size {
             self.font_size = font_size;
             let px_size = px(font_size);
@@ -6803,6 +6969,7 @@ impl Render for Tty7App {
         window.set_rem_size(px(cx.global::<Config>().ui_font_size));
         self.claim_pending_tab(window, cx);
         self.touch_active_tab();
+        self.declare_displayed_panes(cx);
         self.scm_sync_watchers(window, cx);
         if cx.has_active_drag() {
             crate::ui::reorder::clear_pending(&self.reorder);
@@ -6920,27 +7087,72 @@ impl Render for Tty7App {
                 this.child(el)
             });
 
-        let diff_overlay = self.render_diff_overlay(window, cx);
-
-        let code_overlay = self.render_code_overlay(window, cx);
-
-        let overlays: Vec<gpui::AnyElement> = {
-            let mut pair = vec![
-                (OverlayTop::Diff, diff_overlay),
-                (OverlayTop::Code, code_overlay),
-            ];
-            if self
-                .tabs
-                .get(self.active)
-                .is_some_and(|t| t.overlay_top == OverlayTop::Diff)
-            {
-                pair.reverse();
-            }
-            pair.into_iter().filter_map(|(_, el)| el).collect()
+        // One decision for the whole document surface. Docked, exactly one of
+        // the two surfaces is drawn — a column has one child, and two `flex_1`
+        // siblings would split it and fight — so `overlay_top` stops ordering a
+        // pair and starts choosing between them. Filling, nothing changes: both
+        // are rendered, ordered by `overlay_top`, and the front one wins on
+        // paint order as it always has.
+        let document_dock_px = self.document_dock_px(window, cx);
+        // Where the docked header sits. Everywhere but macOS the title bar
+        // spans the workspace and leaves the strip above the column empty, so
+        // the header goes up into it; on macOS the column already reaches the
+        // top of the window and its own first row lands there.
+        let document_chrome = if cfg!(target_os = "macos") {
+            crate::ui::document_column::DocumentChrome::Dock
+        } else {
+            crate::ui::document_column::DocumentChrome::DockHoisted
         };
+        let document_header = document_dock_px
+            .is_some()
+            .then(|| self.render_document_header(document_chrome, window, cx))
+            .flatten();
+        let (overlays, document_column) = match document_dock_px {
+            Some(w) => (
+                Vec::new(),
+                self.render_document_column(w, document_chrome, window, cx),
+            ),
+            None => {
+                let diff_overlay = self.render_diff_overlay(
+                    crate::ui::document_column::DocumentChrome::Fill,
+                    window,
+                    cx,
+                );
+                let code_overlay = self.render_code_overlay(
+                    crate::ui::document_column::DocumentChrome::Fill,
+                    window,
+                    cx,
+                );
+                let mut pair = vec![
+                    (OverlayTop::Diff, diff_overlay),
+                    (OverlayTop::Code, code_overlay),
+                ];
+                if self
+                    .tabs
+                    .get(self.active)
+                    .is_some_and(|t| t.overlay_top == OverlayTop::Diff)
+                {
+                    pair.reverse();
+                }
+                (
+                    pair.into_iter()
+                        .filter_map(|(_, el)| el)
+                        .collect::<Vec<gpui::AnyElement>>(),
+                    None,
+                )
+            }
+        };
+        let document_px = document_column
+            .as_ref()
+            .map_or(0., |_| document_dock_px.unwrap_or_default());
 
         let right_panel = self.render_right_panel(window, cx);
-        let panel_below_title_bar = right_panel.is_some() && !cfg!(target_os = "macos");
+        // A docked document takes the same fork the right panel does: on
+        // Windows and Linux the window controls live at the right end of the
+        // title bar, so the bar has to span the workspace rather than sit
+        // inside the terminal column with a column drawn to the right of it.
+        let panel_below_title_bar =
+            (right_panel.is_some() || document_column.is_some()) && !cfg!(target_os = "macos");
         let (column_title_bar, spanning_title_bar) = if panel_below_title_bar {
             (None, Some(title_bar))
         } else {
@@ -6951,7 +7163,11 @@ impl Render for Tty7App {
         } else {
             (overlays, Vec::new())
         };
-        let panel_px = self.right_panel_px(window, cx);
+        let panel_px = if right_panel.is_some() {
+            self.right_panel_px(window, cx)
+        } else {
+            0.
+        };
         let terminal_column = div()
             .flex_1()
             .min_w_0()
@@ -6968,6 +7184,7 @@ impl Render for Tty7App {
             .flex()
             .flex_row()
             .child(terminal_column)
+            .when_some(document_column, |this, column| this.child(column))
             .when_some(right_panel, |this, panel| this.child(panel));
         let main_layout = div()
             .flex_1()
@@ -6987,18 +7204,59 @@ impl Render for Tty7App {
                         div()
                             .relative()
                             .flex_none()
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .bottom_0()
-                                    .right_0()
-                                    .w(px(self.right_panel_px(window, cx)))
-                                    .bg(crate::ui::theme::workspace_surface_color(cx))
-                                    .border_l_1()
-                                    .border_color(cx.theme().sidebar_border),
-                            )
-                            .child(bar),
+                            // One patch per column below, rather than one for
+                            // both: each carries the left border its own column
+                            // carries, so the rule between the document and the
+                            // detail panel runs the full height of the window
+                            // instead of stopping at the title bar.
+                            .when(panel_px > 0., |this| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .bottom_0()
+                                        .right_0()
+                                        .w(px(panel_px))
+                                        .bg(crate::ui::theme::workspace_surface_color(cx))
+                                        .border_l_1()
+                                        .border_color(cx.theme().sidebar_border),
+                                )
+                            })
+                            .when(document_px > 0., |this| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .bottom_0()
+                                        .right(px(panel_px))
+                                        .w(px(document_px))
+                                        .bg(crate::ui::theme::workspace_surface_color(cx))
+                                        .border_l_1()
+                                        .border_color(cx.theme().sidebar_border),
+                                )
+                            })
+                            .child(bar)
+                            // The document's header, in the strip the spanning
+                            // title bar leaves empty above its column. Drawn
+                            // after the bar so it sits over the tab strip's
+                            // slack — and stopping short of the trailing
+                            // chrome, which is only in the way when the detail
+                            // panel is closed and this column is the one at the
+                            // window's right edge.
+                            .when_some(document_header, |this, header| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .h(px(TITLE_BAR_HEIGHT))
+                                        .right(px(panel_px))
+                                        .w(px(document_px))
+                                        .when(panel_px <= 0., |d| {
+                                            d.pr(px(crate::ui::tab_strip::trailing_chrome_w()))
+                                        })
+                                        .child(header),
+                                )
+                            }),
                     )
                     .child(panel_row)
                     .children(hoisted_overlays.into_iter().map(|overlay| {
@@ -7214,6 +7472,20 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &ToggleDiffViewMode, _window, cx| {
                     this.toggle_diff_view_mode(cx)
                 }))
+                .on_action(cx.listener(|this, _: &ToggleDocumentFill, _window, cx| {
+                    this.toggle_document_fill(cx)
+                }))
+                .on_action(cx.listener(|this, _: &DocumentWidthThird, _window, cx| {
+                    this.set_document_ratio(crate::core::config::DOCUMENT_RATIO_THIRD, cx)
+                }))
+                .on_action(cx.listener(|this, _: &DocumentWidthHalf, _window, cx| {
+                    this.set_document_ratio(crate::core::config::DOCUMENT_RATIO_HALF, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &DocumentWidthTwoThirds, _window, cx| {
+                        this.set_document_ratio(crate::core::config::DOCUMENT_RATIO_TWO_THIRDS, cx)
+                    }),
+                )
                 .on_action(cx.listener(|this, _: &ScmCommit, window, cx| {
                     this.run_scm_action(ScmIntent::Commit, window, cx)
                 }))
@@ -7590,6 +7862,7 @@ fn tabs_from_session(
             diff_overlay: None,
             code: None,
             overlay_top: OverlayTop::default(),
+            document_layout: None,
             sidebar_group: std::cell::RefCell::new(st.sidebar_group.clone()),
             tree_id: std::cell::Cell::new(
                 st.tree_id
@@ -8426,11 +8699,13 @@ mod window_drag_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseReason, ForwardRoute, TERMINAL_MIN_W, TabAgentSession, clear_window_override_values,
-        close_prompt, join_shell_args, leaf_shares_the_window_daemon, merge_typed_ssh_over_alias,
-        mru_order, pane_free_for, parse_ssh_connect_input, parse_ssh_option_words, side_panel_max,
-        split_shell_args, wd_path_saveable,
+        CloseReason, DOCUMENT_MIN_W, ForwardRoute, TERMINAL_MIN_W, TITLE_BAR_HEIGHT,
+        TabAgentSession, clear_window_override_values, close_prompt, document_column_px,
+        join_shell_args, leaf_shares_the_window_daemon, merge_typed_ssh_over_alias, mru_order,
+        pane_free_for, parse_ssh_connect_input, parse_ssh_option_words, side_panel_max,
+        split_shell_args, strip_band, wd_path_saveable,
     };
+    use gpui::{Edges, point, px, size};
 
     /// A teardown that was never delivered must not answer the way a teardown
     /// that found nothing left answers.
@@ -8471,6 +8746,45 @@ mod tests {
     const SIDEBAR_MIN: f32 = crate::ui::tab_sidebar::MIN_SIDEBAR_WIDTH;
     const PANEL_MIN: f32 = crate::ui::right_panel::MIN_WIDTH;
 
+    /// #679: the band now starts at the frame padding rather than at the
+    /// window's corner, and off Linux CSD there is no padding to start at —
+    /// `window_paddings` answers `Edges::all(0)` under server-side decorations,
+    /// which is what macOS, Windows and a bare X session all report.
+    #[test]
+    fn an_undecorated_frame_leaves_the_strips_drop_band_where_it_was() {
+        let band = strip_band(size(px(1200.), px(800.)), Edges::all(px(0.)));
+        assert_eq!(band.origin, point(px(0.), px(0.)));
+        assert_eq!(band.size, size(px(1200.), px(TITLE_BAR_HEIGHT)));
+    }
+
+    /// The viewport measures the whole surface, shadow included, so the band
+    /// has to lose one padding at each end — not one twice over, and not none.
+    /// Getting it wrong puts the outermost chips outside the band drawn to hold
+    /// them, and a drop on them reads as a drop on nothing.
+    #[test]
+    fn a_client_side_frame_pulls_the_drop_band_in_by_the_shadow_on_both_sides() {
+        let viewport = size(px(1200.), px(800.));
+        let pad = Edges::all(px(12.));
+        let band = strip_band(viewport, pad);
+
+        assert_eq!(band.origin, point(pad.left, pad.top));
+        assert_eq!(
+            band.origin.x + band.size.width,
+            viewport.width - pad.right,
+            "the band must reach the far edge of the frame, not of the surface"
+        );
+        assert_eq!(band.size.height, px(TITLE_BAR_HEIGHT));
+    }
+
+    /// A surface narrower than its own shadow is only reachable mid-resize, but
+    /// a negative width would make `Bounds::contains` answer for a rectangle
+    /// that is inside out.
+    #[test]
+    fn a_drop_band_narrower_than_its_frame_collapses_instead_of_inverting() {
+        let band = strip_band(size(px(10.), px(800.)), Edges::all(px(12.)));
+        assert_eq!(band.size.width, px(0.));
+    }
+
     /// Two panels that each cap themselves at half the window leave the
     /// terminal nothing when both are open, so the cap is what is left after
     /// the terminal's floor and the *other* panel's floor — or half the window,
@@ -8489,6 +8803,47 @@ mod tests {
         // terminal the other half, so the older cap is the one that binds and
         // a lone panel behaves exactly as it always did.
         assert_eq!(side_panel_max(mid, SIDEBAR_MIN, 0.), mid / 2.);
+    }
+
+    /// A docked document is a third column in the same budget, so it has to be
+    /// reserved by the two panels the way they already reserve each other —
+    /// otherwise a panel dragged to its old limit takes the width out of the
+    /// document, which then has nowhere to take it from but the terminal.
+    #[test]
+    fn a_docked_document_is_reserved_by_the_panels_too() {
+        let wide = 1440.;
+        let max = side_panel_max(wide, PANEL_MIN, SIDEBAR_MIN + DOCUMENT_MIN_W);
+        assert_eq!(
+            wide - SIDEBAR_MIN - DOCUMENT_MIN_W - max,
+            TERMINAL_MIN_W,
+            "a panel at its cap, with both other columns at their floors,              leaves the terminal exactly its floor"
+        );
+        assert!(
+            max < side_panel_max(wide, PANEL_MIN, SIDEBAR_MIN),
+            "the reservation only ever takes width away"
+        );
+    }
+
+    /// The floors are not what the panels are actually drawn at. Both are
+    /// draggable and both persist, so the budget has to be fed the live widths
+    /// or a widened sidebar is width the terminal silently loses.
+    #[test]
+    fn widened_panels_still_leave_the_terminal_its_floor() {
+        let viewport = 1440.;
+        // Both dragged well past their floors, and the document asked for the
+        // widest named share there is.
+        let body = viewport - 400. - 320.;
+        let document = document_column_px(body, 2. / 3.).expect("720 points seats both");
+        assert!(
+            body - document >= TERMINAL_MIN_W,
+            "terminal got {}",
+            body - document
+        );
+
+        // Squeezed further, the document is the one that gives up first — and
+        // then stops existing rather than dropping under its own floor.
+        let squeezed = viewport - 600. - 400.;
+        assert_eq!(document_column_px(squeezed, 0.5), None);
     }
 
     /// The reservation must only ever take width away from a panel. On a wide
@@ -9369,6 +9724,69 @@ mod keybinding_gpui_tests {
 }
 
 #[cfg(test)]
+mod restart_server_gpui_tests {
+    use crate::core::config::Config;
+    use crate::core::session::Session;
+    use crate::ui::app::Tty7App;
+    use gpui::{AppContext, TestAppContext};
+
+    /// Clicking Restart Server made the whole app disappear.
+    ///
+    /// The work that puts the window back together after the restart ends by
+    /// rebuilding every local window from the machine tree, and the first thing
+    /// that rebuild asks each window is which tabs it is showing — which it
+    /// reads back out of the window registry. Run from inside `update_in` on
+    /// this window's own entity, the first window it reaches for is the one the
+    /// closure already holds leased, and gpui answers a double lease by
+    /// panicking, which on the main thread is the process.
+    ///
+    /// Driven through `settle_after_restart` with a restart that "succeeded",
+    /// because the crash is in the part that runs either way, not in the
+    /// restart itself.
+    #[gpui::test]
+    async fn settling_after_a_restart_does_not_lease_the_window_twice(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+            crate::ui::windows::WindowRegistry::init(cx);
+        });
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty7App::with_session(None, Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view()
+                    .clone()
+                    .downcast::<Tty7App>()
+                    .ok()
+                    .expect("window root wraps a Tty7App")
+            })
+            .unwrap();
+
+        // Registered the way an opened window registers itself: without this
+        // the rebuild finds no window to ask and never reaches for the entity,
+        // which is the whole thing under test.
+        let handle = window.into();
+        let weak = app.downgrade();
+        app.update(cx, |app, cx| {
+            crate::ui::windows::WindowRegistry::register(cx, app.workspace, handle, weak);
+        });
+
+        Tty7App::settle_after_restart(app.downgrade(), Ok(()), &mut cx.to_async()).await;
+
+        assert!(
+            app.update(cx, |app, _| app.startup_error.is_none()),
+            "a restart reported as successful must not leave an error banner"
+        );
+    }
+}
+
+#[cfg(test)]
 mod shell_menu_gpui_tests {
     use crate::core::config::Config;
     use crate::core::session::{
@@ -9554,6 +9972,110 @@ mod rename_gpui_tests {
             assert!(app.renaming.is_some());
             app.close_tab_inner(0, true, window, cx);
             assert!(app.renaming.is_none(), "losing its own tab closes the box");
+        });
+    }
+}
+
+// The output gate: a pane repaints on PTY output only while it is on screen.
+// `Tty7App::render` declares the active tab's panes displayed each frame and
+// everything else hidden; a pane nobody has declared — or whose id nobody
+// registered — must err toward displayed, because the failure direction that
+// matters is a visible pane that stops repainting.
+#[cfg(all(test, unix))]
+mod displayed_gpui_tests {
+    use gpui::TestAppContext;
+
+    use crate::terminal::view::{declare_displayed, displayed_for_test, quiet_test_pane};
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    fn pane_id(app: &super::Tty7App, tab: usize) -> gpui::EntityId {
+        app.tabs[tab]
+            .pane
+            .first_leaf()
+            .expect("tab has a pane")
+            .entity_id()
+    }
+
+    #[gpui::test]
+    fn the_output_gate_follows_the_active_tab(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let (front, back) = (pane_id(app, 0), pane_id(app, 1));
+
+            app.declare_displayed_panes(cx);
+            assert_eq!(
+                displayed_for_test(cx, front),
+                Some(true),
+                "the active tab's pane repaints on output"
+            );
+            assert_eq!(
+                displayed_for_test(cx, back),
+                Some(false),
+                "a background tab's pane stays out of the frame loop"
+            );
+
+            app.activate(1, window, cx);
+            app.declare_displayed_panes(cx);
+            assert_eq!(displayed_for_test(cx, front), Some(false));
+            assert_eq!(
+                displayed_for_test(cx, back),
+                Some(true),
+                "switching tabs hands the frame loop to the new tab"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_pane_nobody_declared_counts_as_displayed(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        let _orphan = app.update_in(&mut vcx, |app, window, cx| {
+            // A pane that exists but sits in no tab — the shape of every
+            // "path that never declares": it registers as displayed and a
+            // declaration pass over the app's own tabs leaves it alone.
+            let (view, stream) = quiet_test_pane(99, window, cx);
+            let orphan = view.entity_id();
+            assert_eq!(
+                displayed_for_test(cx, orphan),
+                Some(true),
+                "a fresh pane defaults to displayed"
+            );
+
+            app.declare_displayed_panes(cx);
+            assert_eq!(
+                displayed_for_test(cx, orphan),
+                Some(true),
+                "declaring only speaks about panes the app holds"
+            );
+
+            // An id nobody registered is declared into the void, not
+            // inserted: the registry only ever holds live panes' flags.
+            let ghost = gpui::EntityId::from(u64::MAX);
+            declare_displayed(cx, [(ghost, false)]);
+            assert_eq!(displayed_for_test(cx, ghost), None);
+
+            (view, stream)
+        });
+    }
+
+    #[gpui::test]
+    fn a_released_pane_leaves_the_registry(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+
+        let back = app.update_in(&mut vcx, |app, _window, _cx| {
+            let back = pane_id(app, 1);
+            app.tabs.remove(1);
+            back
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |_, _, cx| {
+            assert_eq!(
+                displayed_for_test(cx, back),
+                None,
+                "a closed pane's flag does not outlive it"
+            );
         });
     }
 }

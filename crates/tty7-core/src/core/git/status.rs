@@ -147,23 +147,6 @@ impl ConflictKind {
             _ => return None,
         })
     }
-
-    /// Whether our side still has a file — decides if "open changes" can show
-    /// an ours/theirs diff or only one stage.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn ours_exists(self) -> bool {
-        !matches!(self, ConflictKind::BothDeleted | ConflictKind::DeletedByUs)
-    }
-
-    /// The mirror of `ours_exists`, which the tests do use. Half a pair is worse
-    /// /// than a spare, so it stays.
-    #[allow(dead_code)]
-    pub(crate) fn theirs_exists(self) -> bool {
-        !matches!(
-            self,
-            ConflictKind::BothDeleted | ConflictKind::DeletedByThem
-        )
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -1317,13 +1300,6 @@ mod tests {
             by_path(&parsed, "deleted-by-us.rs").conflict,
             Some(ConflictKind::DeletedByUs)
         );
-        assert!(
-            !by_path(&parsed, "deleted-by-us.rs")
-                .conflict
-                .unwrap()
-                .ours_exists()
-        );
-
         for entry in &parsed.entries {
             assert_eq!(entry.kind, EntryKind::Unmerged);
             assert!(!entry.is_staged(), "{} leaked into Staged", entry.path.text);

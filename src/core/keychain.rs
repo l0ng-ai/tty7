@@ -66,16 +66,6 @@ pub trait CredentialStore: Send + Sync {
     fn delete_key_passphrase(&self, key_sha512_hex: &str) -> CredentialResult<()> {
         self.delete(SERVICE_KEY_PASSPHRASE, key_sha512_hex)
     }
-
-    #[allow(dead_code)]
-    fn get_ref(&self, cref: &CredentialRef) -> CredentialResult<Option<String>> {
-        self.get(cref.service(), &cref.account)
-    }
-
-    #[allow(dead_code)]
-    fn delete_ref(&self, cref: &CredentialRef) -> CredentialResult<()> {
-        self.delete(cref.service(), &cref.account)
-    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -172,7 +162,6 @@ mod tests {
 
         let cref = store.set_password("deploy", "host", 22, "hunter2").unwrap();
         assert_eq!(cref, CredentialRef::password("deploy", "host", 22));
-        assert_eq!(store.get_ref(&cref).unwrap().as_deref(), Some("hunter2"));
         assert_eq!(
             store.password_for("deploy", "host", 22).unwrap().as_deref(),
             Some("hunter2")

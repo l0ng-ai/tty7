@@ -26,13 +26,16 @@
 
 ## Why
 
+A background server owns your shells and panes — not the window. Everything
+below follows from that.
+
 - **Performance** — ~2× the throughput of Alacritty, Ghostty, or Kitty ([benchmarks](#benchmarks))
-- **Persistent sessions** — quit the app and your shells keep running; after a reboot the layout comes back and supported agent conversations resume, no tmux
-- **Editor-grade input** — suggestions, completion, highlighting, history search
-- **Remote development** — files, repos, panes, and git data stay on the remote machine
-- **Native SSH** — profiles, SFTP, port forwarding, and jump hosts
-- **Agent-aware** — Claude Code, Codex & co.: status, notifications, git context
-- **CLI + Skills** — agents create panes, run commands, and inspect output
+- **Persistent sessions** — quit or reboot; your shells and supported agent sessions keep running, no tmux
+- **Agent-aware** — Claude Code, Codex & co.: status, notifications, and git context for every repo at once
+- **Scriptable by agents** — one agent opens a pane for another, hands off a task, waits, and reads the result, with or without the GUI running
+- **Editor-grade input** — suggestions, completion, highlighting, history search, with no plugin to install
+- **Remote development** — files, repos, panes, and git data stay on the remote machine, over a native SSH stack
+- **Git beside the terminal** — source control, diffs, and worktrees without leaving the window
 
 ## Install
 
@@ -48,12 +51,55 @@ Native builds for macOS, Windows, and Linux on [**Releases**](https://github.com
 
 | | |
 |---|---|
+| **Agent-aware** | per-pane detection (19 CLIs) · status dot · notifications · branch + diff · tray icon when input is needed · resume after reboot · tab sidebar grouped by repository |
+| **CLI + Skills** | bundled `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · `run` streams a command and exits with its code · `split` · `send` · `wait --until free` · `capture` |
 | **Editor-grade input** | ghost suggestions from history · explained tab completion · syntax highlighting · multi-line editing · click places the caret · <kbd>⌃ R</kbd> fuzzy history |
-| **Window** | tabs & splits · <kbd>⌘ P</kbd> palette · <kbd>⌘ F</kbd> scrollback search · nine themes · IME |
-| **Agent-aware** | per-pane detection (18 CLIs): status dot · notifications · branch + diff · resume after reboot · tray icon when input is needed |
+| **Window** | tabs & splits · <kbd>⌘ P</kbd> palette · <kbd>⌘ F</kbd> scrollback search · <kbd>⌘ J</kbd> panel with process tree and listening ports · 13 themes, your own YAML, iTerm2 import · IME |
+| **Shell integration** | injected when a pane starts, nothing to install · prompt marks · working directory · exit codes · command-finished notifications · zsh, bash, fish, PowerShell, WSL, remote panes |
 | **Remote workspaces** | remote files, repos, changes, diffs, worktrees, tabs, and panes · reconnect from any client and continue where you left off |
-| **CLI + Skills** | bundled `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · pane/workspace control · real PTY commands · output, process, port, and agent status |
 | **SSH** | native russh stack: profiles with keychain secrets · SFTP panel · port forwarding · jump hosts · one-time, unprivileged `tty7-server` install |
+| **Git** | panel follows the focused pane · stage, commit, amend, branch, push, stash · side-by-side or unified diffs · commit graph with cherry-pick, revert, and reset · a new worktree opens its own tab |
+
+## Supported agents
+
+**Detection** is free: brand avatar, branch + diff, tab title.
+**Status** takes one click under Settings → Agents to install that agent's hook,
+and brings the status dot, notifications, the tray icon, `tty7 wait`, and resume
+after a reboot. **Fork** needs both — the agent's own fork command, and the hook
+that tells tty7 which session to fork.
+
+<details>
+<summary>The full support matrix, all nineteen</summary>
+
+| Agent | Detected | Status · resume | Fork |
+|---|:-:|:-:|:-:|
+| **Claude Code** | ✓ | ✓ | ✓ |
+| **Codex** | ✓ | ✓ | ✓ |
+| **Grok** | ✓ | ✓ | ✓ |
+| **OpenCode** | ✓ | ✓ | ✓ |
+| **Oh My Pi** | ✓ | ✓ | ✓ |
+| **Droid** | ✓ | ✓ | ✓ |
+| **Qwen Code** | ✓ | ✓ | ✓ |
+| **Goose** | ✓ | ✓ | ✓ |
+| **Gemini** | ✓ | ✓ | |
+| **Copilot** | ✓ | ✓ | |
+| **Kimi Code** | ✓ | ✓ | |
+| **Pi** | ✓ | ✓ | |
+| Aider | ✓ | | |
+| Amp | ✓ | | |
+| Cursor | ✓ | | |
+| Auggie | ✓ | | |
+| Hermes | ✓ | | |
+| Vibe | ✓ | | |
+| Antigravity | ✓ | | |
+
+</details>
+
+None of them are wrapped or proxied — the agent you start is the agent you get,
+in a normal PTY, with its own interface. An agent launched through a wrapper
+script can be mapped to one by name with `agent_commands` in `config.json`.
+
+## Documentation
 
 Full documentation lives in [**`docs/`**](docs/) —
 [keyboard shortcuts](docs/reference/keyboard-shortcuts.mdx) ·

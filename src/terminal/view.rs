@@ -4,9 +4,9 @@ use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
 use gpui::{
-    App, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FocusHandle, Focusable, Font,
-    KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, Pixels, ScrollDelta, ScrollWheelEvent,
-    WeakEntity, Window, actions, div, prelude::*, px,
+    App, ClipboardEntry, ClipboardItem, Context, EntityId, ExternalPaths, FocusHandle, Focusable,
+    Font, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, Pixels, ScrollDelta,
+    ScrollWheelEvent, WeakEntity, Window, actions, div, prelude::*, px,
 };
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
@@ -29,7 +29,8 @@ use crate::core::actions::{
     ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab, SendBackTab, SendTab,
     SplitDown, SplitRight, ToggleMaximizePane,
 };
-use crate::core::config::{BellMode, Config, LinkFileOpen, NotifyMode};
+use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier, NotifyMode};
+use crate::core::shell_quote::quote_for_shell;
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use unicode_segmentation::UnicodeSegmentation as _;
@@ -44,12 +45,59 @@ use unicode_segmentation::UnicodeSegmentation as _;
 const GRID_PAD_X: f32 = 8.;
 const GRID_PAD_Y: f32 = 4.;
 
+/// Which panes are on screen right now, readable without touching the entity
+/// map. The chrome (tab strip, sidebar, switcher) reads every pane entity
+/// while the window draws, so gpui tracks them all and `notify()` from a
+/// hidden pane still dirties the window — this flag is the out-of-band answer
+/// the output pump consults instead. `Tty7App::render` declares it each frame
+/// for its own tabs; a pane nobody has declared yet counts as displayed, so a
+/// missed path can only cost extra repaints, never a frozen grid.
+///
+/// A gpui `Global` rather than a `static`: entity ids are only unique within
+/// one `App`, and parallel `#[gpui::test]` apps mint colliding ids — a
+/// process-wide map would let one test's declarations flip another's flags.
+/// In the shipped binary there is exactly one `App`, so the two are the same.
+#[derive(Default)]
+struct DisplayedRegistry(
+    std::sync::Mutex<
+        std::collections::HashMap<EntityId, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    >,
+);
+
+impl gpui::Global for DisplayedRegistry {}
+
+pub fn declare_displayed(cx: &App, panes: impl IntoIterator<Item = (EntityId, bool)>) {
+    // No registry means no pane has ever been built in this app.
+    let Some(registry) = cx.try_global::<DisplayedRegistry>() else {
+        return;
+    };
+    let map = registry.0.lock().unwrap();
+    for (id, on) in panes {
+        if let Some(flag) = map.get(&id) {
+            flag.store(on, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// What the registry holds for `id`: `None` when the pane never registered
+/// (or already released), otherwise the flag the output gate would consult.
+#[cfg(all(test, unix))]
+pub(crate) fn displayed_for_test(cx: &App, id: EntityId) -> Option<bool> {
+    cx.try_global::<DisplayedRegistry>()?
+        .0
+        .lock()
+        .unwrap()
+        .get(&id)
+        .map(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 actions!(
     terminal,
     [
         CopyText,
         CutText,
         PasteText,
+        AlternatePaste,
         SelectAll,
         UndoEdit,
         RedoEdit,
@@ -168,6 +216,9 @@ pub struct TerminalView {
     /// "preparation failed" — see [`staging_cache`].
     remote_clipboard_dir: Option<String>,
     pub focus_handle: FocusHandle,
+    /// See [`displayed_registry`]. Shared with the registry so the app can
+    /// flip it during a draw without an entity access.
+    displayed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub font: Font,
     pub font_bold: Option<Font>,
     pub font_italic: Option<Font>,
@@ -655,56 +706,7 @@ fn trim_trailing_spaces(text: &str) -> String {
         .join("\n")
 }
 
-fn shell_escape_path(path: &str) -> String {
-    if path.is_empty() {
-        return "''".to_string();
-    }
-    if path.contains(['\n', '\r']) {
-        return format!("'{}'", path.replace('\'', "'\\''"));
-    }
-    let mut out = String::with_capacity(path.len() + 8);
-    for ch in path.chars() {
-        if matches!(
-            ch,
-            ' ' | '\t'
-                | '"'
-                | '\''
-                | '\\'
-                | '$'
-                | '`'
-                | '#'
-                | '='
-                | '!'
-                | '~'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '('
-                | ')'
-                | '<'
-                | '>'
-                | '|'
-                | ';'
-                | '*'
-                | '?'
-                | '&'
-        ) {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
-}
-
-fn escape_candidate(text: &str) -> String {
-    match text.strip_prefix("~/") {
-        Some(rest) => format!("~/{}", shell_escape_path(rest)),
-        None => shell_escape_path(text),
-    }
-}
-
-fn clipboard_paste_text(item: &ClipboardItem) -> Option<String> {
+fn clipboard_paste_text(item: &ClipboardItem, shell: Option<&str>) -> Option<String> {
     let escaped: Vec<String> = item
         .entries()
         .iter()
@@ -713,7 +715,7 @@ fn clipboard_paste_text(item: &ClipboardItem) -> Option<String> {
             _ => None,
         })
         .flatten()
-        .map(|p| shell_escape_path(&p.to_string_lossy()))
+        .map(|p| quote_for_shell(&p.to_string_lossy(), shell))
         .collect();
     if !escaped.is_empty() {
         return Some(escaped.join(" "));
@@ -989,6 +991,13 @@ impl TerminalView {
         let attached = match restore_pane {
             Some(id) => match RemoteTerminal::attach_on(&route, TermSize::new(80, 24), 8, 17, id) {
                 Ok(terminal) => Some((terminal, id, None)),
+                Err(e) if crate::terminal::attach_unanswered(&e) => {
+                    // Not "gone": nobody answered, which a daemon still coming
+                    // up also does. Whoever finds an orphaned shell later
+                    // reads this line.
+                    log::warn!("attach to pane {id} went unanswered ({e:#}); spawning fresh");
+                    None
+                }
                 Err(e) => {
                     log::info!("pane {id} is gone on its machine ({e:#}); spawning fresh");
                     None
@@ -1140,6 +1149,12 @@ impl TerminalView {
                 while let Ok(ev) = events.try_recv() {
                     batch.push(ev);
                 }
+                // Output reaches the screen through `handle_event`'s
+                // `notify()`, which gpui scopes to windows currently
+                // rendering this view. A pane in a background tab must stay
+                // out of the frame loop entirely: refreshing the window
+                // directly from here pinned the visible tab at full frame
+                // rate whenever any hidden pane was producing output.
                 let res = this.update(cx, |view, cx| {
                     let mut woke = false;
                     for ev in batch.drain(..) {
@@ -1148,14 +1163,9 @@ impl TerminalView {
                         }
                         view.handle_event(ev, cx);
                     }
-                    woke
                 });
-                let woke = match res {
-                    Ok(woke) => woke,
-                    Err(_) => break,
-                };
-                if woke {
-                    let _ = this.update_in(cx, |_, window, _| window.refresh());
+                if res.is_err() {
+                    break;
                 }
             }
         })
@@ -1220,7 +1230,18 @@ impl TerminalView {
         })
         .detach();
 
-        cx.on_release_in(window, |view, window, cx| {
+        let displayed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let entity_id = cx.entity().entity_id();
+        cx.default_global::<DisplayedRegistry>()
+            .0
+            .lock()
+            .unwrap()
+            .insert(entity_id, displayed.clone());
+
+        cx.on_release_in(window, move |view, window, cx| {
+            if let Some(registry) = cx.try_global::<DisplayedRegistry>() {
+                registry.0.lock().unwrap().remove(&entity_id);
+            }
             view.terminal.detach_link();
             for image in view.terminal.images().take_for_release() {
                 cx.drop_image(image, Some(window));
@@ -1251,6 +1272,7 @@ impl TerminalView {
             ssh_spec: None,
             remote_clipboard_dir: None,
             focus_handle,
+            displayed,
             font,
             font_bold,
             font_italic,
@@ -1510,6 +1532,50 @@ impl TerminalView {
         self.terminal.agent_session()
     }
 
+    /// One entry per turn of the agent's conversation, oldest first — see
+    /// [`crate::terminal::agent_marks`].
+    pub fn agent_turns(&self) -> Vec<crate::terminal::agent_marks::AgentTurn> {
+        self.terminal.agent_turns().list()
+    }
+
+    /// Scroll back to where a turn began, putting that row at the top of the
+    /// viewport so the answer to it reads downwards from there.
+    ///
+    /// The stored anchor only says roughly where the agent was drawing when the
+    /// turn started, so the prompt's own text gets the final say; the row it is
+    /// found on is written back, and a second click on the same turn lands in
+    /// the same place without searching again.
+    pub fn scroll_to_agent_turn(
+        &mut self,
+        turn: &crate::terminal::agent_marks::AgentTurn,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(anchor) = turn.row else {
+            return false;
+        };
+        // Nothing behind the alt screen to scroll to, and `scroll_display` is a
+        // no-op there anyway — say so rather than pretending the click worked.
+        if self.on_alt_screen() {
+            return false;
+        }
+        self.cancel_scroll_anim();
+        let row = {
+            let mut term = self.terminal.term.lock();
+            use alacritty_terminal::grid::Dimensions as _;
+            let history = term.grid().history_size() as i64;
+            let row = crate::terminal::agent_marks::locate(&term, anchor, &turn.text);
+            let target = (history - row).clamp(0, history);
+            let delta = (target - term.grid().display_offset() as i64)
+                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+            term.scroll_display(Scroll::Delta(delta));
+            row
+        };
+        self.terminal.agent_turns().recenter(turn.id, row);
+        self.scroll_frac = 0.;
+        cx.notify();
+        true
+    }
+
     /// What this pane is in the middle of, when it can say so. `None` means
     /// either nothing is running or the shell never told us — and a terminal
     /// that guessed would raise this question on every single close.
@@ -1623,6 +1689,16 @@ impl TerminalView {
         self.shell_spec.clone()
     }
 
+    /// The shell binary this pane is running, for the path-quoting rules.
+    ///
+    /// `None` before the pane has resolved one, which [`quote_for_shell`]
+    /// answers from the platform — PowerShell on Windows, POSIX elsewhere.
+    /// The one pane that guess is wrong for is a cmd.exe pane that has not
+    /// reported in yet.
+    fn shell_program(&self) -> Option<String> {
+        self.shell_spec.as_ref().map(|s| s.program.clone())
+    }
+
     pub fn ssh_spec(&self) -> Option<Box<crate::daemon::protocol::NativeSshSpec>> {
         self.ssh_spec.clone()
     }
@@ -1682,7 +1758,13 @@ impl TerminalView {
             AlacEvent::Wakeup => {
                 // The grid moved under whatever the search bar last measured.
                 self.note_output_under_search(cx);
-                cx.notify();
+                // Only a pane that is on screen repaints on output. The
+                // chrome's per-frame entity reads keep every pane in the
+                // window's tracked set, so an ungated notify from a
+                // background tab would dirty the window at output rate.
+                if self.displayed.load(std::sync::atomic::Ordering::Relaxed) {
+                    cx.notify();
+                }
             }
             AlacEvent::Title(title) => self.set_title_when_settled(title, cx),
             AlacEvent::ResetTitle => self.set_title_when_settled(self.default_title.clone(), cx),
@@ -1812,11 +1894,20 @@ impl TerminalView {
             }
         }
 
+        // Ctrl+V is not here: off macOS it is the `AlternatePaste` binding,
+        // which the keymap withholds on the alternate screen so a full-screen
+        // program gets its SYN, and which the user can retire outright. Copy
+        // and cut stay, because both answer a selection this view owns and
+        // fall through to the PTY when there is none.
+        //
+        // Ctrl+Shift+C/X are the keymap's alone: rebinding Copy has to retire
+        // Ctrl+Shift+C, which it cannot if this path answers it too.
         if cfg!(not(target_os = "macos"))
             && m.control
             && !m.platform
             && !m.alt
-            && matches!(ks.key.as_str(), "c" | "v" | "x")
+            && !m.shift
+            && matches!(ks.key.as_str(), "c" | "x")
         {
             match self.handle_cmd_shortcut(ks, window, cx) {
                 CmdKey::Consumed => {
@@ -1825,18 +1916,6 @@ impl TerminalView {
                 }
                 CmdKey::Bubble | CmdKey::FallThrough => {}
             }
-        }
-
-        if cfg!(not(target_os = "macos"))
-            && m.control
-            && !m.platform
-            && !m.alt
-            && matches!(
-                ks.key.as_str(),
-                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
-            )
-        {
-            return;
         }
 
         if !self.accepts_input(cx) {
@@ -1950,6 +2029,9 @@ impl TerminalView {
                     CmdKey::FallThrough
                 }
             }
+            // Cmd+V only: macOS leaves `PasteText` unbound and pastes from
+            // here, and Cmd carries no control code to lose. The Ctrl+V half
+            // of this key lives in the keymap as `AlternatePaste`.
             "v" => {
                 self.paste_from_clipboard(cx);
                 CmdKey::Consumed
@@ -2290,7 +2372,7 @@ impl TerminalView {
             }
             "w" => {
                 if !self.cmd.delete_selection() {
-                    self.cmd.delete_word_left();
+                    self.cmd.delete_path_component_left();
                 }
             }
             "u" => {
@@ -2424,6 +2506,41 @@ impl TerminalView {
 
     fn any_selection(&self) -> bool {
         self.has_selection() || (self.input_active() && self.cmd.selected_text().is_some())
+    }
+
+    /// The keymap context this pane declares each frame.
+    ///
+    /// `alt_screen` is how a binding steps aside for a full-screen program:
+    /// `AlternatePaste` carries `Terminal && !alt_screen`, so Ctrl+V pastes at
+    /// a prompt, reaches vim as SYN, and can still be handed the whole screen
+    /// by rebinding `PasteText` onto it (#677).
+    pub(super) fn key_context(&self) -> gpui::KeyContext {
+        let mut context = gpui::KeyContext::new_with_defaults();
+        context.add("Terminal");
+        if self.on_alt_screen() {
+            context.add("alt_screen");
+        }
+        context
+    }
+
+    /// `AlternatePaste`, with the grid asked again before it pastes.
+    ///
+    /// The `!alt_screen` half of the binding's context comes from the frame
+    /// that was last *painted*, and gpui matches keystrokes against that frame
+    /// — so a program that took the alternate screen after the last paint is
+    /// still "at a prompt" as far as the keymap is concerned. One frame is
+    /// enough: the keystroke that launches a full-screen program and the
+    /// Ctrl+V after it can land either side of a paint. Pasting there is not a
+    /// mistake the user can take back — vim in normal mode runs the clipboard
+    /// as commands — so the last word belongs to the terminal mode, not to the
+    /// frame. Propagating hands the chord on to `on_key_down`, which encodes it
+    /// as the SYN the program is waiting for.
+    fn alternate_paste(&mut self, cx: &mut Context<Self>) {
+        if self.on_alt_screen() {
+            cx.propagate();
+            return;
+        }
+        self.paste_from_clipboard(cx);
     }
 
     pub(super) fn key_flags(&self) -> super::input::KeyFlags {
@@ -2712,7 +2829,7 @@ impl TerminalView {
         let Some(item) = cx.read_from_clipboard() else {
             return;
         };
-        if let Some(text) = clipboard_paste_text(&item) {
+        if let Some(text) = clipboard_paste_text(&item, self.shell_program().as_deref()) {
             self.paste(text, cx);
             return;
         }
@@ -2728,10 +2845,11 @@ impl TerminalView {
     }
 
     fn drop_files(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
+        let shell = self.shell_program();
         let text = paths
             .paths()
             .iter()
-            .map(|p| shell_escape_path(&p.to_string_lossy()))
+            .map(|p| quote_for_shell(&p.to_string_lossy(), shell.as_deref()))
             .collect::<Vec<_>>()
             .join(" ");
         if text.is_empty() {
@@ -2779,7 +2897,7 @@ impl TerminalView {
             .as_ref()
             .is_some_and(|w| w.shares_localhost());
         let path = staged_path_for_pane(&path.to_string_lossy(), shares_localhost);
-        let text = shell_escape_path(&path);
+        let text = quote_for_shell(&path, self.shell_program().as_deref());
         self.paste(format!("{text} "), cx);
         true
     }
@@ -2856,9 +2974,11 @@ impl TerminalView {
                     return;
                 }
             };
-            let text = shell_escape_path(&remote);
             if this
-                .update(cx, |view, cx| view.paste(format!("{text} "), cx))
+                .update(cx, |view, cx| {
+                    let text = quote_for_shell(&remote, view.shell_program().as_deref());
+                    view.paste(format!("{text} "), cx)
+                })
                 .is_err()
             {
                 return;
@@ -2882,8 +3002,9 @@ impl TerminalView {
         host: &str,
         reason: &str,
     ) {
-        let text = shell_escape_path(&local.to_string_lossy());
+        let local = local.to_string_lossy().into_owned();
         let _ = this.update_in(cx, |view, window, cx| {
+            let text = quote_for_shell(&local, view.shell_program().as_deref());
             view.paste(format!("{text} "), cx);
             view.warn_image_upload_failed(host, reason, window, cx);
         });
@@ -3000,6 +3121,9 @@ impl TerminalView {
         // not replay out-of-band image frames, so a browser redraws on its next
         // transmit (same reasoning as the reattach path in `adopt_relink`).
         self.terminal.images().clear();
+        // Agent turn anchors are rows in the same discarded history, and unlike
+        // images they cannot be redrawn back into place.
+        self.terminal.agent_turns().clear();
         self.scroll_frac = 0.;
         self.terminal.write(vec![0x0c_u8]);
         cx.notify();
@@ -4101,7 +4225,12 @@ impl TerminalView {
         let cursor = self.cmd.cursor();
         let comp = match &share_cwd {
             Some(share) => super::completion::complete_foreign(&line, cursor, share),
-            None => super::completion::complete(&line, cursor, cwd.as_deref()),
+            None => super::completion::complete(
+                &line,
+                cursor,
+                cwd.as_deref(),
+                self.shell_program().as_deref(),
+            ),
         };
         let Some(comp) = comp else {
             if self.spawn_remote_path_completion(&line, cursor, forward, cx) {
@@ -4173,11 +4302,12 @@ impl TerminalView {
             .skip(word_start)
             .take(word_end - word_start)
             .collect();
+        let shell = self.shell_program();
         let s = CompletionSession::new(word_start, word.clone(), cands, pending_generators);
         if !has_pending
             && let Some(lcp) = s.common_prefix()
             && lcp.chars().count() > word.chars().count()
-            && escape_candidate(&lcp) == lcp
+            && quote_for_shell(&lcp, shell.as_deref()) == lcp
         {
             self.apply_candidate(line, word_start, word_end, &lcp);
         }
@@ -4389,6 +4519,7 @@ impl TerminalView {
 
     fn completion_tab_step(&mut self, forward: bool, cx: &mut Context<Self>) {
         if forward {
+            let shell = self.shell_program();
             let Some(s) = self.completion.as_ref() else {
                 return;
             };
@@ -4402,7 +4533,7 @@ impl TerminalView {
                     self.completion_accept(cx);
                     return;
                 }
-                if escape_candidate(&lcp) == lcp {
+                if quote_for_shell(&lcp, shell.as_deref()) == lcp {
                     self.apply_candidate(&line, word_start, cursor, &lcp);
                     self.cursor_visible = true;
                     cx.notify();
@@ -4436,7 +4567,7 @@ impl TerminalView {
         let line = self.cmd.text();
         let len = line.chars().count();
         let cursor = self.cmd.cursor().min(len);
-        let mut text = escape_candidate(&cand.text);
+        let mut text = quote_for_shell(&cand.text, self.shell_program().as_deref());
         if cand.is_dir() {
             if !text.ends_with('/') {
                 text.push('/');
@@ -4683,11 +4814,11 @@ impl TerminalView {
     }
 
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // The platform modifier alone turns the wheel into a zoom, the way it
-        // does in a browser. Any other modifier alongside it is somebody else's
-        // gesture — shift in particular is the escape hatch that scrolls the
-        // scrollback out from under a mouse-reporting program.
-        if ev.modifiers.secondary() && ev.modifiers.number_of_modifiers() == 1 {
+        // One modifier turns the wheel into a zoom, the way it does in a
+        // browser. Which one is the user's to say, because the default is the
+        // platform modifier and on macOS that is a key half the world is
+        // already holding for something else (#668).
+        if zoom_wheel(cx.global::<Config>().mouse_zoom_modifier, &ev.modifiers) {
             self.zoom_scroll(ev, window, cx);
             return;
         }
@@ -5480,9 +5611,14 @@ impl TerminalView {
                 }
             }
         };
-        let cell = |color: gpui::Hsla, ch: char, selected: bool, caret: bool, underline: bool| {
+        let cell = |color: gpui::Hsla,
+                    text: String,
+                    width: usize,
+                    selected: bool,
+                    caret: bool,
+                    underline: bool| {
             let inverted = caret && block_cursor;
-            let w = cell_w * (display_width(ch) as f32);
+            let w = cell_w * (width as f32);
             let mut d = div()
                 .relative()
                 .flex_none()
@@ -5499,7 +5635,7 @@ impl TerminalView {
             if underline {
                 d = d.border_b_1().border_color(fg);
             }
-            d = d.child(ch.to_string());
+            d = d.child(text);
             if caret && !inverted {
                 d = d.child(caret_bar());
             }
@@ -5517,15 +5653,24 @@ impl TerminalView {
 
         let is_multiline = chars.contains(&'\n');
 
-        for i in 0..len {
-            if i == cursor && has_marked {
-                for mc in marked.chars() {
-                    lines
-                        .last_mut()
-                        .unwrap()
-                        .push(cell(fg, mc, false, false, true));
+        let marked_cells = input_cells(&marked.chars().collect::<Vec<char>>());
+        for c in input_cells(&chars) {
+            // The caret sits on the base of a cell, so an IME's in-flight text
+            // opens wherever the caret is drawn — anywhere inside the cell, not
+            // only on its first character.
+            if has_marked && (c.start..c.end).contains(&cursor) {
+                for mc in &marked_cells {
+                    lines.last_mut().unwrap().push(cell(
+                        fg,
+                        mc.text.clone(),
+                        mc.width,
+                        false,
+                        false,
+                        true,
+                    ));
                 }
             }
+            let i = c.start;
             if chars[i] == '\n' {
                 if selection.is_none() && !has_marked && cursor_on && cursor == i {
                     lines.last_mut().unwrap().push(
@@ -5543,12 +5688,18 @@ impl TerminalView {
                 lines.push(Vec::new());
                 continue;
             }
-            let selected = selection.is_some_and(|(s, e)| i >= s && i < e);
-            let caret = selection.is_none() && !has_marked && cursor_on && cursor == i;
+            // A cell is one glyph, so it tints as a unit: a selection that
+            // covers any character in it — the base or a mark riding on it —
+            // covers the whole thing.
+            let selected = selection.is_some_and(|(s, e)| s < c.end && c.start < e);
+            let caret = selection.is_none()
+                && !has_marked
+                && cursor_on
+                && (c.start..c.end).contains(&cursor);
             lines
                 .last_mut()
                 .unwrap()
-                .push(cell(colors[i], chars[i], selected, caret, false));
+                .push(cell(colors[i], c.text, c.width, selected, caret, false));
         }
 
         let ghost: Option<String> = if selection.is_none() && !has_marked && !is_multiline {
@@ -5562,8 +5713,8 @@ impl TerminalView {
         if cursor == len {
             let last = lines.last_mut().unwrap();
             if has_marked {
-                for mc in marked.chars() {
-                    last.push(cell(fg, mc, false, false, true));
+                for mc in &marked_cells {
+                    last.push(cell(fg, mc.text.clone(), mc.width, false, false, true));
                 }
             } else if ghost.is_none() {
                 let mut tail = blank(cell_w).relative();
@@ -5576,9 +5727,10 @@ impl TerminalView {
 
         if let Some(rem) = ghost {
             let last = lines.last_mut().unwrap();
-            for (gi, gc) in rem.chars().map(one_line_char).enumerate() {
+            let flat: Vec<char> = rem.chars().map(one_line_char).collect();
+            for (gi, gc) in input_cells(&flat).into_iter().enumerate() {
                 let caret = gi == 0 && cursor == len && cursor_on;
-                last.push(cell(muted, gc, false, caret, false));
+                last.push(cell(muted, gc.text, gc.width, false, caret, false));
             }
         }
 
@@ -6026,7 +6178,7 @@ impl Render for TerminalView {
         div()
             .id("terminal-surface")
             .track_focus(&self.focus_handle)
-            .key_context("Terminal")
+            .key_context(self.key_context())
             .size_full()
             .relative()
             .overflow_hidden()
@@ -6070,6 +6222,7 @@ impl Render for TerminalView {
                 this.cut_contextual(cx);
             }))
             .on_action(cx.listener(|this, _: &PasteText, _w, cx| this.paste_from_clipboard(cx)))
+            .on_action(cx.listener(|this, _: &AlternatePaste, _w, cx| this.alternate_paste(cx)))
             .on_action(cx.listener(|this, _: &SelectAll, _w, cx| this.select_all_contextual(cx)))
             .on_action(cx.listener(|this, _: &UndoEdit, _w, cx| this.undo_edit(false, cx)))
             .on_action(cx.listener(|this, _: &RedoEdit, _w, cx| this.undo_edit(true, cx)))
@@ -6119,16 +6272,16 @@ impl Render for TerminalView {
                     .menu_element_with_disabled(
                         Box::new(CopyText),
                         !has_selection,
-                        menu_row_with_hint(t(L10nKey::AppMenuCopy), Some("secondary-c")),
+                        menu_row_with_hint(t(L10nKey::AppMenuCopy), mac_only("secondary-c")),
                     )
                     .menu_element_with_disabled(
                         Box::new(CutText),
                         !has_selection,
-                        menu_row_with_hint(t(L10nKey::AppMenuCut), Some("secondary-x")),
+                        menu_row_with_hint(t(L10nKey::AppMenuCut), mac_only("secondary-x")),
                     )
                     .menu_element(
                         Box::new(PasteText),
-                        menu_row_with_hint(t(L10nKey::AppMenuPaste), Some("secondary-v")),
+                        menu_row_with_hint(t(L10nKey::AppMenuPaste), mac_only("secondary-v")),
                     )
                     .menu_element(
                         Box::new(SelectAll),
@@ -6279,24 +6432,88 @@ fn highlight_runs(line: &str, positions: &[usize]) -> Vec<(String, bool)> {
     runs
 }
 
+/// Columns this character occupies in the input bar.
+///
+/// The bar lays out text the terminal is about to receive, so it has to agree
+/// with the grid on where every character lands. The grid gets its widths from
+/// `unicode-width` by way of `alacritty_terminal`, so the bar reads the same
+/// table: a hand-written range list drifts from it the moment Unicode assigns
+/// another block, and it silently counted `🀄`, `⌚` and every combining mark
+/// as one plain column (#701).
+///
+/// Control characters have no width of their own. The bar still gives them a
+/// column — one was typed, and a cell that occupies nothing is a cell nobody
+/// can put the caret on.
 fn display_width(c: char) -> usize {
-    let u = c as u32;
-    let wide = matches!(u,
-        0x1100..=0x115F
-        | 0x2329 | 0x232A
-        | 0x2E80..=0x303E
-        | 0x3041..=0x33FF
-        | 0x3400..=0x4DBF
-        | 0x4E00..=0x9FFF
-        | 0xA000..=0xA4CF
-        | 0xAC00..=0xD7A3
-        | 0xF900..=0xFAFF
-        | 0xFE10..=0xFE19 | 0xFE30..=0xFE6F
-        | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6
-        | 0x1F300..=0x1FAFF
-        | 0x20000..=0x3FFFD
-    );
-    if wide { 2 } else { 1 }
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
+}
+
+/// One drawn cell of the input bar.
+#[derive(Debug, PartialEq)]
+struct InputCell {
+    /// Character indices the cell covers, as `start..end`.
+    start: usize,
+    end: usize,
+    /// What to draw in it — a base character and whatever rides along with it.
+    text: String,
+    /// Columns it occupies. Zero for a newline, which ends the row rather than
+    /// taking space on it.
+    width: usize,
+}
+
+/// Splits input-bar text into the cells it draws.
+///
+/// Combining marks, variation selectors and the joiner inside an emoji
+/// sequence take no column of their own, and the shaper has to see them in the
+/// same run as their base to compose a single glyph — so they ride in the cell
+/// of the character in front of them instead of each getting a box. Handing
+/// them their own cell is what left `e` and its accent side by side, and every
+/// mark shifted the rest of the row a column left (#701).
+///
+/// A mark with no base ahead of it — text pasted mid-sequence, an IME's
+/// in-flight buffer — keeps a cell and a column, so it stays visible and the
+/// caret has somewhere to sit.
+fn input_cells(chars: &[char]) -> Vec<InputCell> {
+    let mut cells: Vec<InputCell> = Vec::with_capacity(chars.len());
+    for (i, &ch) in chars.iter().enumerate() {
+        if ch == '\n' {
+            cells.push(InputCell {
+                start: i,
+                end: i + 1,
+                text: String::new(),
+                width: 0,
+            });
+            continue;
+        }
+        let w = display_width(ch);
+        match cells.last_mut() {
+            // `width > 0` keeps a mark off a newline's cell, which ends a row
+            // and draws nothing.
+            Some(last) if w == 0 && last.width > 0 => {
+                last.text.push(ch);
+                last.end = i + 1;
+                // U+FE0F asks for the emoji glyph, and an emoji presentation
+                // sequence is two columns wide even where its base is one — a
+                // rule that only exists at string level (UTS #51), which is why
+                // scoring character by character misses it. The grid re-scores
+                // the sequence the same way (our `alacritty_terminal` fork,
+                // #203), so the bar has to as well or `❤️` sits a column
+                // narrower here than where it lands. Never narrower than the
+                // base: giving a column back would mean pulling the row left.
+                if ch == '\u{FE0F}' {
+                    let scored = unicode_width::UnicodeWidthStr::width(last.text.as_str());
+                    last.width = scored.max(last.width);
+                }
+            }
+            _ => cells.push(InputCell {
+                start: i,
+                end: i + 1,
+                text: ch.to_string(),
+                width: w.max(1),
+            }),
+        }
+    }
+    cells
 }
 
 #[derive(Debug, PartialEq)]
@@ -6669,6 +6886,17 @@ fn menu_layout(
     (place_above, visible, first)
 }
 
+/// Where each character of the input bar lands: `(row, column, width)`, one
+/// entry per character, plus the row and column the text ends on.
+///
+/// Walks the same cells the bar draws rather than re-deriving widths per
+/// character — an emoji presentation sequence is two columns and a stranded
+/// combining mark is one, and a second width table would put clicks, wrapping
+/// and the caret a column away from the glyph on screen.
+///
+/// Only the base of a cell carries the width, so a click can never land on a
+/// character riding along with it. Those riders are parked at the column the
+/// caret takes after the cell, which is where a caret sitting on one belongs.
 fn input_char_positions(
     chars: &[char],
     scol: usize,
@@ -6677,20 +6905,22 @@ fn input_char_positions(
     let mut positions: Vec<(usize, usize, usize)> = Vec::with_capacity(chars.len());
     let mut r = 0usize;
     let mut c = scol;
-    for &ch in chars {
-        if ch == '\n' {
+    for cell in input_cells(chars) {
+        if chars[cell.start] == '\n' {
             positions.push((r, c, 0));
             r += 1;
             c = 0;
             continue;
         }
-        let w = display_width(ch).max(1);
-        if c + w > cols {
+        if c + cell.width > cols {
             r += 1;
             c = 0;
         }
-        positions.push((r, c, w));
-        c += w;
+        positions.push((r, c, cell.width));
+        c += cell.width;
+        for _ in cell.start + 1..cell.end {
+            positions.push((r, c, 0));
+        }
     }
     (positions, r, c)
 }
@@ -6755,6 +6985,27 @@ fn wrapped_click_index(
     match positions.iter().position(|&(pr, _, _)| pr > target) {
         Some(ni) => Some(ni),
         None => Some(len),
+    }
+}
+
+/// Whether this wheel event is a zoom rather than a scroll.
+///
+/// Exactly one modifier, and it has to be the configured one: anything
+/// alongside it is somebody else's gesture — shift in particular is the escape
+/// hatch that scrolls the scrollback out from under a mouse-reporting program.
+///
+/// Off macOS the platform modifier *is* Ctrl, so `Platform` and `Ctrl` describe
+/// the same key there; the setting still round-trips, so a config file shared
+/// with a Mac keeps meaning what it meant.
+fn zoom_wheel(modifier: MouseZoomModifier, mods: &Modifiers) -> bool {
+    if mods.number_of_modifiers() != 1 {
+        return false;
+    }
+    match modifier {
+        MouseZoomModifier::Platform => mods.secondary(),
+        MouseZoomModifier::Ctrl => mods.control,
+        MouseZoomModifier::Alt => mods.alt,
+        MouseZoomModifier::None => false,
     }
 }
 
@@ -6890,11 +7141,11 @@ mod tests {
         staging_cache, staging_dir_is_safe, wsl_path, wsl_share_distro, wsl_share_path,
     };
     use super::{
-        description_budget, drag_scroll_step, elide, encode_mouse, escape_candidate,
-        expand_file_command_template, fallback_chain, fig_icon_emoji, fig_icon_glyph,
-        focus_report_bytes, highlight_runs, input_overflow_shift, input_overlay_rows, menu_layout,
-        paste_bytes, select_end_copy, shell_escape_path, should_show_context_menu,
-        smooth_scroll_step, submit_bytes, trim_trailing_spaces, wheel_route, wrapped_click_index,
+        description_budget, drag_scroll_step, elide, encode_mouse, expand_file_command_template,
+        fallback_chain, fig_icon_emoji, fig_icon_glyph, focus_report_bytes, highlight_runs,
+        input_cells, input_char_positions, input_overflow_shift, input_overlay_rows, menu_layout,
+        paste_bytes, select_end_copy, should_show_context_menu, smooth_scroll_step, submit_bytes,
+        trim_trailing_spaces, wheel_route, wrapped_click_index,
     };
     use alacritty_terminal::term::TermMode;
     use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Modifiers};
@@ -7980,43 +8231,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_escape_path_escapes_spaces_and_metachars() {
-        assert_eq!(
-            shell_escape_path("/Users/me/notes.txt"),
-            "/Users/me/notes.txt"
-        );
-        assert_eq!(
-            shell_escape_path("/Users/me/My File (1).txt"),
-            "/Users/me/My\\ File\\ \\(1\\).txt"
-        );
-        assert_eq!(
-            shell_escape_path("/a/$HOME & more"),
-            "/a/\\$HOME\\ \\&\\ more"
-        );
-        assert_eq!(shell_escape_path(""), "''");
-        assert_eq!(shell_escape_path("a\nb"), "'a\nb'");
-    }
-
-    #[test]
-    fn escape_candidate_quotes_what_the_shell_would_resplit() {
-        assert_eq!(escape_candidate("notes.txt"), "notes.txt");
-        assert_eq!(escape_candidate("--message"), "--message");
-        assert_eq!(escape_candidate("My Documents"), "My\\ Documents");
-        assert_eq!(escape_candidate("a(1)&b"), "a\\(1\\)\\&b");
-        assert_eq!(
-            escape_candidate("~/My Documents"),
-            "~/My\\ Documents",
-            "a leading ~/ is the user's own text and must stay expandable"
-        );
-        assert_eq!(
-            escape_candidate("~weird name"),
-            "\\~weird\\ name",
-            "a bare ~ that is not a home prefix is just a filename character"
-        );
-    }
-
-    #[test]
-    fn clipboard_paste_text_escapes_and_space_joins_files() {
+    fn clipboard_paste_text_quotes_and_space_joins_files() {
         let item = ClipboardItem {
             entries: vec![ClipboardEntry::ExternalPaths(ExternalPaths(
                 vec![
@@ -8027,12 +8242,15 @@ mod tests {
             ))],
         };
         assert_eq!(
-            clipboard_paste_text(&item).as_deref(),
-            Some("/Users/me/My\\ File.txt /tmp/b.log")
+            clipboard_paste_text(&item, Some("zsh")).as_deref(),
+            Some("'/Users/me/My File.txt' /tmp/b.log")
         );
 
         let text = ClipboardItem::new_string("echo hi".to_string());
-        assert_eq!(clipboard_paste_text(&text).as_deref(), Some("echo hi"));
+        assert_eq!(
+            clipboard_paste_text(&text, Some("zsh")).as_deref(),
+            Some("echo hi")
+        );
     }
 
     #[test]
@@ -8062,6 +8280,184 @@ mod tests {
         assert_eq!(display_width('é'), 1);
         assert_eq!(display_width('©'), 1);
         assert_eq!(display_width('±'), 1);
+    }
+
+    /// Wide characters the grid reserves two columns for, scattered outside the
+    /// ranges anyone would think to hand-write: mahjong and playing cards below
+    /// the Miscellaneous Symbols and Pictographs block, and the handful of Wide
+    /// code points stranded in Misc Technical and Dingbats.
+    #[test]
+    fn display_width_covers_wide_chars_outside_the_main_emoji_blocks() {
+        assert_eq!(display_width('🀄'), 2);
+        assert_eq!(display_width('🃏'), 2);
+        assert_eq!(display_width('⌚'), 2);
+        assert_eq!(display_width('⏰'), 2);
+        assert_eq!(display_width('✅'), 2);
+        assert_eq!(display_width('❌'), 2);
+    }
+
+    /// Combining marks ride on the cell of the character they decorate. Giving
+    /// one a column of its own shifts the rest of the line and hands the mark
+    /// to the shaper alone, with no base to attach to.
+    #[test]
+    fn display_width_combining_marks_take_no_column() {
+        // COMBINING ACUTE ACCENT — the second half of a decomposed `é`.
+        assert_eq!(display_width('\u{0301}'), 0);
+        // VARIATION SELECTOR-16, which asks for the emoji glyph.
+        assert_eq!(display_width('\u{FE0F}'), 0);
+        // ZERO WIDTH JOINER, the glue inside 👩‍💻.
+        assert_eq!(display_width('\u{200D}'), 0);
+    }
+
+    /// The width table feeds the bar's own line breaking, so a character
+    /// counted short pulls everything after it one column left.
+    #[test]
+    fn input_char_positions_reserve_two_columns_for_wide_chars() {
+        let chars: Vec<char> = "a🀄b".chars().collect();
+        let (positions, _, _) = input_char_positions(&chars, 0, 80);
+        assert_eq!(positions, vec![(0, 0, 1), (0, 1, 2), (0, 3, 1)]);
+    }
+
+    /// Geometry and drawing read the same cells, so a sequence the bar draws
+    /// two columns wide is two columns wide to wrapping and clicks as well. Two
+    /// width tables would put `X` under the right half of the heart.
+    #[test]
+    fn input_char_positions_agree_with_the_cells_the_bar_draws() {
+        for text in [
+            "a🀄b",
+            "e\u{0301}X",
+            "\u{2764}\u{FE0F}X",
+            "\u{0301}ab",
+            "a\nb",
+        ] {
+            let chars: Vec<char> = text.chars().collect();
+            let (positions, _, _) = input_char_positions(&chars, 0, 80);
+            assert_eq!(positions.len(), chars.len(), "{text:?}");
+            for cell in input_cells(&chars) {
+                let drawn = if chars[cell.start] == '\n' {
+                    0
+                } else {
+                    cell.width
+                };
+                assert_eq!(positions[cell.start].2, drawn, "{text:?} at {}", cell.start);
+                for i in cell.start + 1..cell.end {
+                    assert_eq!(positions[i].2, 0, "{text:?} at {i}");
+                }
+            }
+        }
+    }
+
+    /// `❤️` is two columns in the bar, so the character after it starts at
+    /// column 2 — and a click on either half of it lands on the heart.
+    #[test]
+    fn input_char_positions_reserve_two_columns_for_an_emoji_presentation_sequence() {
+        let chars: Vec<char> = "\u{2764}\u{FE0F}X".chars().collect();
+        let (positions, _, _) = input_char_positions(&chars, 0, 80);
+        assert_eq!(positions, vec![(0, 0, 2), (0, 2, 0), (0, 2, 1)]);
+        assert_eq!(click("\u{2764}\u{FE0F}X", 0, 80, 0, 0), Some(0));
+        assert_eq!(click("\u{2764}\u{FE0F}X", 0, 80, 1, 0), Some(0));
+        assert_eq!(click("\u{2764}\u{FE0F}X", 0, 80, 2, 0), Some(2));
+    }
+
+    /// A mark with no base gets a cell of its own on screen, so it has to get a
+    /// column here too — otherwise everything after it clicks one column off.
+    #[test]
+    fn input_char_positions_give_a_stranded_combining_mark_a_column() {
+        let chars: Vec<char> = "\u{0301}ab".chars().collect();
+        let (positions, _, _) = input_char_positions(&chars, 0, 80);
+        assert_eq!(positions, vec![(0, 0, 1), (0, 1, 1), (0, 2, 1)]);
+    }
+
+    /// A cell wraps whole. Splitting `❤️` across rows would draw its two
+    /// columns on one row and count them on two.
+    #[test]
+    fn input_char_positions_wrap_a_cell_without_splitting_it() {
+        let chars: Vec<char> = "abc\u{2764}\u{FE0F}".chars().collect();
+        let (positions, r, c) = input_char_positions(&chars, 0, 4);
+        assert_eq!(positions[3], (1, 0, 2));
+        assert_eq!((r, c), (1, 2));
+    }
+
+    /// Clicking the right half of a wide character lands on that character, not
+    /// on the one after it.
+    #[test]
+    fn wrapped_click_index_hits_both_halves_of_a_wide_char() {
+        assert_eq!(click("a🀄b", 0, 80, 1, 0), Some(1));
+        assert_eq!(click("a🀄b", 0, 80, 2, 0), Some(1));
+        assert_eq!(click("a🀄b", 0, 80, 3, 0), Some(2));
+    }
+
+    /// A combining mark shares its base's column, so a click there hits the
+    /// base — there is nowhere on screen that is the mark and not the base.
+    #[test]
+    fn wrapped_click_index_lands_on_the_base_not_its_combining_mark() {
+        // e + COMBINING ACUTE ACCENT + X.
+        assert_eq!(click("e\u{0301}X", 0, 80, 0, 0), Some(0));
+        assert_eq!(click("e\u{0301}X", 0, 80, 1, 0), Some(2));
+    }
+
+    fn cells(text: &str) -> Vec<(usize, usize, String, usize)> {
+        let chars: Vec<char> = text.chars().collect();
+        input_cells(&chars)
+            .into_iter()
+            .map(|c| (c.start, c.end, c.text, c.width))
+            .collect()
+    }
+
+    #[test]
+    fn input_cells_keep_a_combining_mark_with_its_base() {
+        assert_eq!(
+            cells("e\u{0301}X"),
+            vec![
+                (0, 2, "e\u{0301}".to_string(), 1),
+                (2, 3, "X".to_string(), 1),
+            ]
+        );
+    }
+
+    /// An emoji presentation sequence is two columns wide even though its base
+    /// is one on its own — the same re-scoring the terminal grid does.
+    #[test]
+    fn input_cells_widen_an_emoji_presentation_sequence() {
+        assert_eq!(
+            cells("\u{2764}\u{FE0F}X"),
+            vec![
+                (0, 2, "\u{2764}\u{FE0F}".to_string(), 2),
+                (2, 3, "X".to_string(), 1),
+            ]
+        );
+        // U+FE0E asks for the text glyph, and stays one column.
+        assert_eq!(
+            cells("\u{2764}\u{FE0E}"),
+            vec![(0, 2, "\u{2764}\u{FE0E}".to_string(), 1)]
+        );
+    }
+
+    /// A ZWJ sequence stays two cells, because that is what the grid does with
+    /// it: the joiner rides on the first emoji and the second one still claims
+    /// its own two columns. Composing the pair into one glyph is a separate
+    /// problem (#209) and fixing it here would put the bar a column off from
+    /// the row the text lands on.
+    #[test]
+    fn input_cells_split_a_zwj_sequence_the_way_the_grid_does() {
+        assert_eq!(
+            cells("\u{1F469}\u{200D}\u{1F4BB}"),
+            vec![
+                (0, 2, "\u{1F469}\u{200D}".to_string(), 2),
+                (2, 3, "\u{1F4BB}".to_string(), 2),
+            ]
+        );
+    }
+
+    /// A mark with no base ahead of it still needs a column, or it is invisible
+    /// and the caret has nowhere to sit. A newline is not a base to hang one on.
+    #[test]
+    fn input_cells_give_a_stranded_combining_mark_a_column() {
+        assert_eq!(cells("\u{0301}"), vec![(0, 1, "\u{0301}".to_string(), 1)]);
+        assert_eq!(
+            cells("\n\u{0301}"),
+            vec![(0, 1, String::new(), 0), (1, 2, "\u{0301}".to_string(), 1),]
+        );
     }
 
     fn click(text: &str, scol: usize, cols: usize, col: usize, row: usize) -> Option<usize> {
@@ -8436,6 +8832,27 @@ mod gpui_tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         panic!("the prompt report never reached the view");
+    }
+
+    fn alt_screen_ready(
+        window: &gpui::WindowHandle<TerminalView>,
+        cx: &mut TestAppContext,
+        daemon: &mut UnixStream,
+    ) {
+        DaemonMsg::Output(b"\x1b[?1049h".to_vec())
+            .encode(daemon)
+            .unwrap();
+        for _ in 0..400 {
+            cx.run_until_parked();
+            if window
+                .update(cx, |view, _, _| view.on_alt_screen())
+                .unwrap()
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the alternate-screen switch never reached the grid");
     }
 
     #[gpui::test]
@@ -9197,6 +9614,34 @@ mod gpui_tests {
     }
 
     #[gpui::test]
+    fn ctrl_v_on_the_alternate_screen_reaches_the_pty_as_syn(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("echo hi".into())));
+        alt_screen_ready(&window, cx, &mut daemon);
+        window
+            .update(cx, |view, window, cx| {
+                assert!(!view.input_active(), "the full-screen program owns input");
+                view.on_key_down(
+                    &KeyDownEvent {
+                        keystroke: key("ctrl-v"),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x16]));
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "the clipboard must stay where it is: vim's Ctrl+V is blockwise select, not paste"
+        );
+    }
+
+    #[gpui::test]
     fn shell_vi_mode_prompt_bypasses_the_local_editor(cx: &mut TestAppContext) {
         let (window, mut daemon) = harness(cx);
         DaemonMsg::Prompt {
@@ -9549,7 +9994,7 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn accepting_a_candidate_escapes_it_for_the_shell(cx: &mut TestAppContext) {
+    fn accepting_a_candidate_quotes_it_for_the_shell(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
         let (window, _daemon) = harness(cx);
         window
@@ -9558,13 +10003,17 @@ mod gpui_tests {
                 view.completion_insert(&dir_candidate("My Documents", 3, 5), 3);
                 assert_eq!(
                     view.cmd.text(),
-                    "cd My\\ Documents/",
-                    "an unescaped candidate resplits into two arguments and the command breaks"
+                    "cd 'My Documents'/",
+                    "an unquoted candidate resplits into two arguments and the command breaks"
                 );
 
                 view.cmd.set("cd ~/My");
                 view.completion_insert(&dir_candidate("~/My Documents", 3, 6), 3);
-                assert_eq!(view.cmd.text(), "cd ~/My\\ Documents/");
+                assert_eq!(
+                    view.cmd.text(),
+                    "cd ~/'My Documents'/",
+                    "the ~ stays outside the quotes so the shell still expands it"
+                );
 
                 view.cmd.set("git commit --mess");
                 view.completion_insert(
@@ -10590,6 +11039,55 @@ mod gpui_tests {
             .unwrap();
     }
 
+    /// #668: the platform modifier is the wrong key to hardwire a zoom to —
+    /// on a Mac it is ⌘, which people are already holding for something
+    /// else — so which key zooms is a setting, all the way down to none.
+    #[test]
+    fn the_zoom_modifier_is_configurable_and_can_be_turned_off() {
+        let secondary = Modifiers::secondary_key();
+        let alt = Modifiers::alt();
+        assert!(zoom_wheel(MouseZoomModifier::Platform, &secondary));
+        assert!(
+            !zoom_wheel(MouseZoomModifier::None, &secondary),
+            "off is off"
+        );
+        assert!(!zoom_wheel(MouseZoomModifier::Alt, &secondary));
+        assert!(zoom_wheel(MouseZoomModifier::Alt, &alt));
+        assert!(!zoom_wheel(MouseZoomModifier::Platform, &alt));
+        assert!(zoom_wheel(MouseZoomModifier::Ctrl, &Modifiers::control()));
+        assert_eq!(
+            zoom_wheel(MouseZoomModifier::Platform, &Modifiers::control()),
+            !cfg!(target_os = "macos"),
+            "off macOS the platform modifier is Ctrl itself"
+        );
+        // A second modifier is somebody else's gesture, whichever key is bound.
+        let both = Modifiers { shift: true, ..alt };
+        assert!(!zoom_wheel(MouseZoomModifier::Alt, &both));
+        assert!(!zoom_wheel(MouseZoomModifier::Platform, &Modifiers::none()));
+    }
+
+    /// The point of turning it off: the modifier goes back to being an
+    /// ordinary scroll, rather than eating the wheel.
+    #[gpui::test]
+    fn zooming_off_hands_the_wheel_back_to_the_scrollback(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        cx.update(|cx| {
+            cx.global_mut::<Config>().mouse_zoom_modifier = MouseZoomModifier::None;
+        });
+        window
+            .update(cx, |view, w, cx| {
+                scroll_into_history(view, 10);
+                let mut ev = notch(view, -4.9);
+                ev.modifiers = Modifiers::secondary_key();
+                view.on_scroll(&ev, w, cx);
+                assert!(
+                    view.scroll_anim.is_some(),
+                    "the wheel never reached the scrollback"
+                );
+            })
+            .unwrap();
+    }
+
     /// A detent is one step however many lines the platform bills it as —
     /// macOS calls a single notch five.
     #[test]
@@ -10718,6 +11216,94 @@ mod gpui_tests {
                 view.on_scroll(&ev, w, cx);
                 assert!(view.scroll_anim.is_none(), "half a line was animated");
                 assert!(view.scroll_frac > 0., "and it did not move either");
+            })
+            .unwrap();
+    }
+
+    /// The agent's prompt drawn on row 20, with enough output after it that the
+    /// row can actually be scrolled to the top of the viewport.
+    const CONVERSATION_ROW: i64 = 20;
+
+    fn painted_conversation(view: &TerminalView) {
+        let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+        let mut term = view.terminal.term.lock();
+        for i in 0..300 {
+            let line = match i {
+                20 => "> restore the outline\r\n".to_string(),
+                _ => format!("line {i}\r\n"),
+            };
+            parser.advance(&mut *term, line.as_bytes());
+        }
+    }
+
+    fn viewport_top(view: &TerminalView) -> String {
+        use alacritty_terminal::index::{Column, Line};
+        let term = view.terminal.term.lock();
+        let grid = term.grid();
+        let line = -(grid.display_offset() as i32);
+        (0..grid.columns())
+            .map(|c| grid[Line(line)][Column(c)].c)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[gpui::test]
+    fn jumping_to_a_turn_puts_the_prompt_at_the_top_of_the_viewport(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _w, cx| {
+                painted_conversation(view);
+                // Off by three, the way a hook firing into a live repaint is.
+                let turn = crate::terminal::agent_marks::AgentTurn {
+                    row: Some(CONVERSATION_ROW + 3),
+                    text: "restore the outline".into(),
+                    done: true,
+                    id: 1,
+                };
+                assert!(view.scroll_to_agent_turn(&turn, cx));
+                assert_eq!(
+                    viewport_top(view),
+                    "> restore the outline",
+                    "the text corrected the anchor's three-row error"
+                );
+                let history = {
+                    use alacritty_terminal::grid::Dimensions as _;
+                    view.terminal.term.lock().grid().history_size() as i64
+                };
+                assert_eq!(
+                    display_offset(view) as i64,
+                    history - CONVERSATION_ROW,
+                    "the turn's row is the first one shown, not merely on screen"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_turn_with_nowhere_to_go_reports_that_it_did_not_move(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _w, cx| {
+                painted_conversation(view);
+                let mut turn = crate::terminal::agent_marks::AgentTurn {
+                    row: None,
+                    text: "restore the outline".into(),
+                    done: true,
+                    id: 1,
+                };
+                assert!(
+                    !view.scroll_to_agent_turn(&turn, cx),
+                    "a turn that began on the alt screen has no row"
+                );
+
+                turn.row = Some(CONVERSATION_ROW);
+                let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+                parser.advance(&mut *view.terminal.term.lock(), b"\x1b[?1049h");
+                assert!(
+                    !view.scroll_to_agent_turn(&turn, cx),
+                    "and a pane sitting on the alt screen has no scrollback to show"
+                );
             })
             .unwrap();
     }
@@ -12098,6 +12684,125 @@ mod gpui_tests {
             .unwrap();
         let text = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
         assert_eq!(text.as_deref(), Some("hello"));
+    }
+
+    #[gpui::test]
+    fn cmd_v_pastes_on_the_alternate_screen(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("echo hi".into())));
+        alt_screen_ready(&window, cx, &mut daemon);
+
+        window
+            .update(cx, |view, window, cx| {
+                let pasted = view.handle_cmd_shortcut(&key("cmd-v"), window, cx);
+                assert!(
+                    matches!(pasted, CmdKey::Consumed),
+                    "Cmd+V carries no control code and pastes on every screen"
+                );
+            })
+            .unwrap();
+        assert_eq!(next_input(&mut daemon), b"echo hi".to_vec());
+        assert_eq!(next_input_until_timeout(&mut daemon), None);
+    }
+
+    /// The Ctrl+V half of the same key, through the real keymap: whether it
+    /// pastes is the `AlternatePaste` binding's decision, not this view's, so
+    /// these two drive it the way a user does rather than calling in.
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn ctrl_v_pastes_at_a_prompt(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("echo hi".into())));
+        window
+            .update(cx, |view, window, cx| {
+                assert!(!view.on_alt_screen());
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
+            })
+            .unwrap();
+
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.simulate_keystrokes("ctrl-v");
+
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"echo hi".to_vec())
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn ctrl_v_reaches_a_full_screen_program_as_syn(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("echo hi".into())));
+        alt_screen_ready(&window, cx, &mut daemon);
+        window
+            .update(cx, |view, window, cx| {
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
+            })
+            .unwrap();
+
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.simulate_keystrokes("ctrl-v");
+
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x16]));
+    }
+
+    /// The other half of that rule, which the binding's context cannot state.
+    ///
+    /// gpui matches a keystroke against the frame it last *painted*, so
+    /// `!alt_screen` outlives the switch by a frame: launch a full-screen
+    /// program and hit Ctrl+V before the next paint and the keymap still
+    /// believes the pane is at a prompt. The action asks the grid itself, so
+    /// the clipboard never lands in a program that would run it as commands.
+    #[gpui::test]
+    fn alternate_paste_asks_the_grid_and_not_the_last_frame(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("echo hi".into())));
+
+        window
+            .update(cx, |view, _window, cx| {
+                assert!(!view.on_alt_screen());
+                view.alternate_paste(cx);
+            })
+            .unwrap();
+        assert_eq!(next_input(&mut daemon), b"echo hi".to_vec());
+
+        alt_screen_ready(&window, cx, &mut daemon);
+        window
+            .update(cx, |view, _window, cx| view.alternate_paste(cx))
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "the paste is withheld even when the frame that matched said otherwise"
+        );
+    }
+
+    /// `Ctrl-^`, which used to die in a hardcoded block that swallowed every
+    /// Ctrl+digit off macOS — nothing has claimed those chords since tabs
+    /// moved to Alt+1..9.
+    #[gpui::test]
+    fn ctrl_6_reaches_the_pty_as_rs(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| crate::ui::keymap::init(cx));
+        window
+            .update(cx, |view, window, cx| {
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
+            })
+            .unwrap();
+
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.simulate_keystrokes("ctrl-6");
+
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x1e]));
     }
 
     #[cfg(target_os = "macos")]

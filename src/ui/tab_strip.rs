@@ -488,6 +488,27 @@ pub(crate) fn chrome_tile(button: Button, selected: bool, cx: &gpui::App) -> But
     chrome_tile_sized(button, TILE_SIZE, TILE_GLYPH, selected, cx)
 }
 
+/// How wide the two chrome tiles at the trailing end of the title bar are, with
+/// the padding around them.
+pub(crate) fn trailing_chrome_tiles_w() -> f32 {
+    let trailing_pad = if cfg!(target_os = "macos") {
+        tile_trailing_inset()
+    } else {
+        4.
+    };
+    trailing_pad + crate::ui::app::TILE_SIZE + 2. + crate::ui::app::TILE_SIZE
+}
+
+/// The whole trailing cluster: those tiles and the OS window buttons beyond
+/// them.
+///
+/// Anything else drawn into that end of the title bar has to stop short of it —
+/// which for the hoisted document header means the case where the detail panel
+/// is closed and the document column runs to the window's right edge.
+pub(crate) fn trailing_chrome_w() -> f32 {
+    trailing_chrome_tiles_w() + crate::ui::app::WINDOW_CONTROLS_W
+}
+
 pub(crate) fn chrome_tile_sized(
     button: Button,
     tile: f32,
@@ -1321,7 +1342,7 @@ impl Tty7App {
         };
         let this = entity.read(cx);
         let tab_count = this.tabs.len();
-        let cwd = this.tab_cwd(index, window, cx);
+        let cwd = this.tab_cwd_text(index, window, cx);
         let has_cwd = cwd.is_some();
         let mut menu = menu.min_w(px(200.));
 
@@ -1439,10 +1460,8 @@ impl Tty7App {
                 .action(Box::new(CopyWorkingDirectory))
                 .disabled(!has_cwd)
                 .on_click(move |_, _window, cx| {
-                    if let Some(cwd) = cwd.as_ref() {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                            cwd.display().to_string(),
-                        ));
+                    if let Some(text) = cwd.as_ref() {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
                     }
                 }),
         );
@@ -1517,8 +1536,18 @@ impl Tty7App {
             true => self.right_panel_px(window, cx),
             false => 0.,
         };
+        // A docked document column has the same claim on this strip the detail
+        // panel does, and it is answered in the same two ways. On macOS the
+        // strip lives *inside* the terminal column, so the column's width comes
+        // off `strip_w` the way the panel's does — sizing the strip to more
+        // than it gets is what pushed the New Tab button out before.
+        // Everywhere else the strip spans the workspace and the column's header
+        // is drawn over its trailing end, so the width is reserved as a corner
+        // instead: that header carries no fill of its own, and a chip left
+        // under it showed through the file name while staying clickable.
+        let document_w = self.document_dock_px(window, cx).unwrap_or(0.);
         let strip_w = if cfg!(target_os = "macos") {
-            (window.viewport_size().width - px(80. + panel_w)).max(px(160.))
+            (window.viewport_size().width - px(80. + panel_w + document_w)).max(px(160.))
         } else {
             (window.viewport_size().width - px(114.)).max(px(140.))
         };
@@ -1532,14 +1561,13 @@ impl Tty7App {
         let corner_w = if panel_w > 0. {
             0.
         } else {
-            chrome_band_w.unwrap_or_else(|| {
-                let trailing_pad = if cfg!(target_os = "macos") {
-                    tile_trailing_inset()
-                } else {
-                    4.
-                };
-                trailing_pad + crate::ui::app::TILE_SIZE + 2. + crate::ui::app::TILE_SIZE
-            })
+            chrome_band_w.unwrap_or_else(trailing_chrome_tiles_w)
+        } + if cfg!(target_os = "macos") {
+            // Already taken out of `strip_w` above; charging it here too would
+            // narrow the chips by a column's width twice over.
+            0.
+        } else {
+            document_w
         };
         let fixed_w = 3. * CHIP_GAP + crate::ui::app::TILE_SIZE + corner_w;
         let chips_avail = (strip_w - px(fixed_w + GRAB_HANDLE_W)).max(px(80.));

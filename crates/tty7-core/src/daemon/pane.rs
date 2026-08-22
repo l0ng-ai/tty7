@@ -1366,7 +1366,11 @@ pub struct Restore {
 /// for and cannot see. Leaving the alternate screen also does the useful thing
 /// in the common case: the primary buffer still holds the pre-`vim` scrollback
 /// from earlier in the same snapshot.
-fn restore_preamble(banner: Option<&str>) -> Vec<u8> {
+///
+/// On Windows it ends by scrolling the restored screen out of the viewport
+/// ([`SCROLL_RESTORED_AWAY`]), which is a correctness requirement rather than a
+/// matter of taste — see that constant.
+pub fn restore_preamble(banner: Option<&str>) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"\x1b[?1049l\x1b[?25h\x1b[?7h\x1b[0m");
     if let Some(banner) = banner.map(str::trim).filter(|b| !b.is_empty()) {
@@ -1376,8 +1380,39 @@ fn restore_preamble(banner: Option<&str>) -> Vec<u8> {
         out.extend_from_slice(banner.replace(['\r', '\n'], " ").as_bytes());
         out.extend_from_slice(b" \xe2\x94\x80\xe2\x94\x80\x1b[0m\r\n");
     }
+    if cfg!(windows) {
+        out.extend_from_slice(SCROLL_RESTORED_AWAY);
+    }
     out
 }
+
+/// Push the restored screen into the client's scrollback and put the cursor
+/// back at the top-left, so the incoming shell starts on a blank viewport.
+///
+/// A pty on unix hands the terminal a stream; a ConPTY hands it a *rendering of
+/// a screen buffer it owns*. That buffer starts blank with its cursor at the
+/// top-left, and conhost addresses it absolutely: PSReadLine redrawing the line
+/// being typed emits `ESC[6;20H`, meaning row 6 of conhost's buffer, and every
+/// frame conhost paints is positioned the same way. Those row numbers are only
+/// correct if the client's viewport is conhost's buffer, row for row.
+///
+/// Restored output breaks exactly that. It is output conhost never produced and
+/// knows nothing about, so leaving it on screen puts the shell's first prompt
+/// some rows below where conhost believes it is, and the first keystroke
+/// repaints the input line *over the restored text* — the prompt stops
+/// responding and the old screen fills with fragments of what is being typed.
+/// Nothing the client can do fixes that after the fact: the offset is not a
+/// constant (the screen scrolls) and it would have to be unpicked from every
+/// absolute address in the stream.
+///
+/// So the restored screen goes where it can be kept without claiming a row:
+/// `ESC[2J` on the primary screen scrolls the viewport into history rather than
+/// erasing it, so it is a scroll away, and `ESC[H` leaves the cursor where a
+/// fresh ConPTY expects to find it.
+///
+/// Not done on unix, where the shell positions itself relatively and the
+/// restored screen can simply stay where the user can see it.
+pub const SCROLL_RESTORED_AWAY: &[u8] = b"\x1b[2J\x1b[H";
 
 impl DaemonPane {
     pub fn spawn(
@@ -2276,7 +2311,7 @@ impl DaemonPane {
             .lock()
             .ok()
             .and_then(|m| m.as_ref().and_then(|m| m.process_group_leader()))
-            .and_then(proc_name)
+            .and_then(super::procinfo::proc_name)
             .unwrap_or_default()
     }
 
@@ -3130,39 +3165,6 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn proc_name(pid: i32) -> Option<String> {
-    if pid <= 0 {
-        return None;
-    }
-    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-    let ret =
-        unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
-    if ret <= 0 {
-        return None;
-    }
-    let path = std::str::from_utf8(&buf[..ret as usize]).ok()?;
-    Some(path.rsplit('/').next().unwrap_or(path).to_string())
-}
-
-#[cfg(target_os = "linux")]
-fn proc_name(pid: i32) -> Option<String> {
-    if pid <= 0 {
-        return None;
-    }
-    if let Ok(path) = std::fs::read_link(format!("/proc/{pid}/exe")) {
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            let name = name.strip_suffix(" (deleted)").unwrap_or(name);
-            if !name.is_empty() {
-                return Some(name.to_string());
-            }
-        }
-    }
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-    let comm = comm.trim();
-    (!comm.is_empty()).then(|| comm.to_string())
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -3812,6 +3814,33 @@ mod tests {
         assert!(text.contains("\x1b[?7h"), "put autowrap back");
         assert!(text.contains("\x1b[0m"), "drop any colour left mid-run");
         assert!(text.contains("this shell is new"));
+    }
+
+    /// The ConPTY constraint, from the daemon's side. A pane whose shell runs
+    /// on a ConPTY must open with an empty viewport and the cursor at the
+    /// top-left, because that is the state conhost's own screen buffer starts
+    /// in and every row it names afterwards is counted from there. Restored
+    /// output left on screen shifts all of them, and the shell's first repaint
+    /// of the line being typed lands on the old text — see
+    /// [`SCROLL_RESTORED_AWAY`].
+    #[test]
+    fn the_preamble_clears_the_way_for_conpty_and_only_for_conpty() {
+        let text = String::from_utf8(restore_preamble(Some("this shell is new"))).unwrap();
+        if cfg!(windows) {
+            assert!(
+                text.ends_with("\x1b[2J\x1b[H"),
+                "the restored screen has to be scrolled into history and the cursor \
+                 homed *last*, after the banner: anything printed afterwards would \
+                 take back the row conhost counts from. The preamble ends {:?}",
+                &text[text.len().saturating_sub(16)..]
+            );
+        } else {
+            assert!(
+                !text.contains("\x1b[2J"),
+                "on a real pty the shell positions itself relatively, so the screen \
+                 the user asked to have back stays where they can see it"
+            );
+        }
     }
 
     #[test]

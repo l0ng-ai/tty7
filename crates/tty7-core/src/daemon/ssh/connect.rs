@@ -295,6 +295,20 @@ async fn socks5_connect(
         .map_err(|e| {
             anyhow::anyhow!("connect to SOCKS proxy {proxy_host}:{proxy_port} failed: {e}")
         })?;
+    socks5_handshake(&mut s, target, target_port).await?;
+    Ok(s)
+}
+
+/// The SOCKS5 exchange itself, over a stream that is already connected.
+///
+/// Generic over the stream rather than taking a `TcpStream`, which is what
+/// lets a test drive it from an in-memory duplex instead of standing up a
+/// proxy. This is hand-rolled wire format with length prefixes in it; it
+/// deserves to be exercised.
+async fn socks5_handshake<S>(s: &mut S, target: &str, target_port: u16) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     s.write_all(&[0x05, 0x01, 0x00]).await?;
     let mut reply = [0u8; 2];
     s.read_exact(&mut reply).await?;
@@ -326,7 +340,7 @@ async fn socks5_connect(
     };
     let mut discard = vec![0u8; addr_len + 2];
     s.read_exact(&mut discard).await?;
-    Ok(s)
+    Ok(())
 }
 
 async fn http_connect(
@@ -340,6 +354,15 @@ async fn http_connect(
         .map_err(|e| {
             anyhow::anyhow!("connect to HTTP proxy {proxy_host}:{proxy_port} failed: {e}")
         })?;
+    http_connect_handshake(&mut s, target, target_port).await?;
+    Ok(s)
+}
+
+/// See [`socks5_handshake`] — same split, same reason.
+async fn http_connect_handshake<S>(s: &mut S, target: &str, target_port: u16) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let req = format!(
         "CONNECT {target}:{target_port} HTTP/1.1\r\nHost: {target}:{target_port}\r\nProxy-Connection: keep-alive\r\n\r\n"
     );
@@ -366,7 +389,7 @@ async fn http_connect(
         let first = head.lines().next().unwrap_or("").trim();
         anyhow::bail!("HTTP CONNECT failed: {first}");
     }
-    Ok(s)
+    Ok(())
 }
 
 pub(crate) fn build_config(spec: &NativeSshSpec) -> Arc<russh::client::Config> {
@@ -578,5 +601,179 @@ mod tests {
                 },
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod proxy_handshake_tests {
+    use super::*;
+    use tokio::io::duplex;
+
+    /// Drive a handshake against a scripted peer.
+    ///
+    /// `script` is what the fake proxy says, in order; the bytes the handshake
+    /// sent come back for inspection. An in-memory duplex stands in for the
+    /// socket, which is the whole reason the handshakes take a generic stream.
+    async fn run_socks5(script: &[u8], target: &str, port: u16) -> (anyhow::Result<()>, Vec<u8>) {
+        let (mut client, mut proxy) = duplex(4096);
+        let script = script.to_vec();
+        let peer = tokio::spawn(async move {
+            // Answer first so a handshake that reads before writing cannot
+            // deadlock against a duplex nobody is draining.
+            let _ = proxy.write_all(&script).await;
+            let mut seen = Vec::new();
+            let mut chunk = [0u8; 512];
+            while let Ok(n) = proxy.read(&mut chunk).await {
+                if n == 0 {
+                    break;
+                }
+                seen.extend_from_slice(&chunk[..n]);
+            }
+            seen
+        });
+        let out = socks5_handshake(&mut client, target, port).await;
+        drop(client);
+        let sent = peer.await.unwrap_or_default();
+        (out, sent)
+    }
+
+    #[tokio::test]
+    async fn socks5_greets_with_no_auth_and_addresses_the_target_by_name() {
+        // no-auth accepted, then CONNECT granted with an IPv4 bound address.
+        let script = [
+            &[0x05u8, 0x00][..],
+            &[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x1f, 0x90][..],
+        ]
+        .concat();
+        let (out, sent) = run_socks5(&script, "example.com", 22).await;
+        assert!(out.is_ok(), "{:?}", out.err());
+        assert_eq!(
+            &sent[..3],
+            &[0x05, 0x01, 0x00],
+            "greeting is SOCKS5 no-auth"
+        );
+        let req = &sent[3..];
+        assert_eq!(
+            &req[..5],
+            &[0x05, 0x01, 0x00, 0x03, 11],
+            "CONNECT by domain name, 11 bytes of it"
+        );
+        assert_eq!(&req[5..16], b"example.com");
+        assert_eq!(&req[16..18], &22u16.to_be_bytes(), "port is big-endian");
+    }
+
+    #[tokio::test]
+    async fn socks5_reads_the_variable_length_bound_address_before_returning() {
+        // ATYP 0x03: a length byte then that many bytes, then the port. Getting
+        // this wrong leaves unread bytes that the SSH banner exchange would
+        // then read as protocol.
+        let mut script = vec![0x05, 0x00, 0x05, 0x00, 0x00, 0x03, 3];
+        script.extend_from_slice(b"abc");
+        script.extend_from_slice(&[0x00, 0x16]);
+        let (out, _) = run_socks5(&script, "example.com", 22).await;
+        assert!(out.is_ok(), "{:?}", out.err());
+    }
+
+    #[tokio::test]
+    async fn socks5_refuses_a_proxy_that_wants_authentication() {
+        let (out, _) = run_socks5(&[0x05, 0x02], "example.com", 22).await;
+        let msg = out
+            .expect_err("a proxy demanding auth must fail")
+            .to_string();
+        assert!(msg.contains("no-auth"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn socks5_surfaces_the_connect_reply_code() {
+        let (out, _) = run_socks5(&[0x05, 0x00, 0x05, 0x05, 0x00, 0x01], "example.com", 22).await;
+        let msg = out.expect_err("reply code 5 is a refusal").to_string();
+        assert!(msg.contains("reply code 5"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn socks5_rejects_a_host_too_long_for_its_length_byte() {
+        let long = "a".repeat(256);
+        let (out, _) = run_socks5(&[0x05, 0x00], &long, 22).await;
+        let msg = out
+            .expect_err("256 bytes will not fit in one byte")
+            .to_string();
+        assert!(msg.contains("too long"), "{msg}");
+    }
+
+    async fn run_http(script: &str, target: &str, port: u16) -> (anyhow::Result<()>, String) {
+        let (mut client, mut proxy) = duplex(16384);
+        let script = script.to_string();
+        let peer = tokio::spawn(async move {
+            let _ = proxy.write_all(script.as_bytes()).await;
+            let mut seen = Vec::new();
+            let mut chunk = [0u8; 512];
+            while let Ok(n) = proxy.read(&mut chunk).await {
+                if n == 0 {
+                    break;
+                }
+                seen.extend_from_slice(&chunk[..n]);
+            }
+            seen
+        });
+        let out = http_connect_handshake(&mut client, target, port).await;
+        drop(client);
+        let sent = peer.await.unwrap_or_default();
+        (out, String::from_utf8_lossy(&sent).into_owned())
+    }
+
+    #[tokio::test]
+    async fn http_connect_asks_for_the_target_and_accepts_200() {
+        let (out, sent) = run_http(
+            "HTTP/1.1 200 Connection established\r\nVia: 1.1 proxy\r\n\r\n",
+            "example.com",
+            22,
+        )
+        .await;
+        assert!(out.is_ok(), "{:?}", out.err());
+        assert!(
+            sent.starts_with("CONNECT example.com:22 HTTP/1.1\r\n"),
+            "{sent:?}"
+        );
+        assert!(sent.contains("Host: example.com:22\r\n"), "{sent:?}");
+        assert!(sent.ends_with("\r\n\r\n"), "request must be terminated");
+    }
+
+    #[tokio::test]
+    async fn http_connect_stops_at_the_header_terminator_and_not_before() {
+        // A header block containing a bare \r\n must not be mistaken for the
+        // end; only \r\n\r\n ends it. If this read short, the leftover header
+        // bytes would land in the SSH banner exchange.
+        let (out, _) = run_http(
+            "HTTP/1.1 200 OK\r\nX-A: 1\r\nX-B: 2\r\n\r\n",
+            "example.com",
+            22,
+        )
+        .await;
+        assert!(out.is_ok(), "{:?}", out.err());
+    }
+
+    #[tokio::test]
+    async fn http_connect_reports_the_status_line_on_refusal() {
+        let (out, _) = run_http(
+            "HTTP/1.1 407 Proxy Authentication Required\r\n\r\n",
+            "h",
+            22,
+        )
+        .await;
+        let msg = out.expect_err("407 is a refusal").to_string();
+        assert!(msg.contains("407"), "{msg}");
+    }
+
+    /// `" 200"` with the space is what the status check looks for, so a 2000-ish
+    /// code or a 200 appearing in a header must not be mistaken for success.
+    #[tokio::test]
+    async fn http_connect_does_not_take_a_header_mentioning_200_for_success() {
+        let (out, _) = run_http(
+            "HTTP/1.1 502 Bad Gateway\r\nX-Upstream: 200\r\n\r\n",
+            "h",
+            22,
+        )
+        .await;
+        assert!(out.is_err(), "only the status line decides");
     }
 }

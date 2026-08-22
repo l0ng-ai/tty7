@@ -74,15 +74,15 @@ jobs:
       # recorded, not whatever cargo would re-resolve at build time. Safe here
       # (unlike nightly) precisely because nothing rewrites Cargo.toml: this is
       # a plain checkout of the tagged commit.
+      # The updater ships on every GUI platform now: inside the macOS bundle,
+      # beside the Windows app, and inside the Linux AppImage.
       - name: Build
         working-directory: tty7
         shell: bash
         run: |
           cargo build --release --locked --target "${{ matrix.target }}"
-          if [[ "${{ matrix.os }}" == "macos" || "${{ matrix.os }}" == "windows" ]]; then
-            cargo build --release --locked --features updater \
-              --bin tty7-updater --target "${{ matrix.target }}"
-          fi
+          cargo build --release --locked --features updater \
+            --bin tty7-updater --target "${{ matrix.target }}"
 
       # ---- Packaging: one step per OS ----------------------------------------
       # macOS gets a signed + notarized drag-to-Applications DMG. Windows gets
@@ -116,6 +116,26 @@ jobs:
         if: matrix.os == 'linux'
         working-directory: tty7
         run: bash .github/scripts/bundle-appimage.sh "${{ matrix.target }}" "${{ matrix.arch }}"
+
+      # The in-app updater refuses an image whose bundled helper or stamped
+      # version is wrong — on the user's machine, after the download. Check the
+      # same facts here so a packaging mistake fails the release instead.
+      - name: Verify Linux AppImage update package
+        if: matrix.os == 'linux'
+        working-directory: tty7
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(grep -m1 '^version = "' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          IMAGE="$PWD/dist/tty7-${VERSION}-linux-${{ matrix.arch }}.AppImage"
+          VERIFY_ROOT="$RUNNER_TEMP/tty7-appimage-update-verify"
+          rm -rf "$VERIFY_ROOT"
+          mkdir -p "$VERIFY_ROOT"
+          (cd "$VERIFY_ROOT" && "$IMAGE" --appimage-extract >/dev/null)
+          test -x "$VERIFY_ROOT/squashfs-root/usr/bin/tty7-app"
+          test -x "$VERIFY_ROOT/squashfs-root/usr/bin/tty7-updater"
+          grep -Fxq "X-AppImage-Version=${VERSION}" \
+            "$VERIFY_ROOT/squashfs-root/usr/share/applications/tty7.desktop"
 
       # The bundled server for WSL. `continue-on-error` mirrors `server-musl`'s
       # own probe step: if there is no server asset, the release still ships and

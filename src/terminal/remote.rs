@@ -10,6 +10,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config, Osc52, Term, TermMode};
 use alacritty_terminal::vte::ansi::{self, CursorShape, CursorStyle};
 
+use crate::terminal::agent_marks::{AgentTurnScanner, AgentTurns, TurnCut};
 use crate::terminal::parked_cursor::{CursorCut, ParkedCursorRepair, ParkedCursorScanner};
 
 use std::collections::VecDeque;
@@ -18,10 +19,10 @@ use crate::core::cli_agent::{AgentSessionState, CLIAgent};
 use crate::core::config::CursorStyle as ConfigCursorStyle;
 use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
-    AuthPromptKind, AuthResponse, ClientMsg, DaemonMsg, LoopbackForward, LoopbackForwardRequest,
-    ManagedForward, NativeSshSpec, PaneProcs, RemoteContext, RestoreFrom, SftpEntry,
-    SftpJobProgress, SftpOp, SftpOpResult, SftpTransferSpec, ShellSpec, SshForwardRule, SshPhase,
-    SshTestReport, WinSize, WorkspaceOp, WorkspaceRequest,
+    AuthPromptKind, AuthResponse, ClientMsg, DaemonMsg, KnownHostEntry, KnownHostId,
+    LoopbackForward, LoopbackForwardRequest, ManagedForward, NativeSshSpec, PaneProcs,
+    RemoteContext, RestoreFrom, SftpEntry, SftpJobProgress, SftpOp, SftpOpResult, SftpTransferSpec,
+    ShellSpec, SshForwardRule, SshPhase, SshTestReport, WinSize, WorkspaceOp, WorkspaceRequest,
 };
 use crate::daemon::transport::{self, Stream};
 use gpui::EntityId;
@@ -61,6 +62,16 @@ struct ShellState {
     cycle: u64,
 }
 
+/// A point in a batch of pty output where the emulator has to stop, because
+/// something wants to read the state the sequence there left behind — the cell
+/// a repaint hid the cursor on, or the row an agent turn began at. Both are
+/// positions, and a position is only knowable by parsing up to it and no
+/// further.
+enum Cut {
+    Cursor(CursorCut),
+    Turn(TurnCut),
+}
+
 struct ReaderSignals {
     cwd: Arc<Mutex<Option<PathBuf>>>,
     shell: Arc<Mutex<ShellState>>,
@@ -78,6 +89,10 @@ struct ReaderSignals {
     /// anchored to the grid for the paint path to blit. Shared with the reader,
     /// which places/deletes them as `DaemonMsg::Image`/`DeleteImage` frames land.
     images: crate::terminal::images::ImageStore,
+    /// Where each agent turn started, anchored to the grid the same way — see
+    /// [`crate::terminal::agent_marks`]. The daemon reads the same events for
+    /// the status dot, but only the client holds the rows they point into.
+    turns: AgentTurns,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -172,6 +187,290 @@ impl PaneRoute {
     }
 }
 
+/// How much unsent input a pane holds before it calls the link lost. A link
+/// that is draining never gets near this: the sender thread is parked waiting
+/// for work, so the queue holds at most the frames of one burst. Reaching it
+/// means nothing on the far side has taken a byte for as long as it takes to
+/// type — or paste — four megabytes, which is a dead link, not a slow one.
+const MAX_BACKLOG: usize = 4 << 20;
+
+/// How long a teardown lets the sender finish what is already queued before it
+/// cuts the socket out from under it. `Detach` is the last frame a pane sends
+/// and it is worth a moment: on a draining link the sender is idle, so it goes
+/// out in microseconds and this returns at once. On a link that has stopped
+/// draining it will never go out at all, and closing the pane must not wait
+/// around to discover that — the daemon reads the closed socket as a detach
+/// anyway.
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// What the sender thread needs to report a link that stopped taking input.
+/// The signals the pane holds, cloned out so the failure can be raised from the
+/// thread that actually meets it.
+#[derive(Clone)]
+struct InputLoss {
+    /// Set by the first frame *this* link refused, so the loss is said once
+    /// rather than once per keystroke. One per link rather than one per pane: a
+    /// relink hands the retired sender's last, doomed write and the new
+    /// sender's first real one two different flags, so the dying link cannot
+    /// spend the new link's one chance to speak.
+    said: Arc<AtomicBool>,
+    reader_quit: Arc<AtomicBool>,
+    exited: Arc<AtomicBool>,
+    proxy: EventProxy,
+}
+
+impl InputLoss {
+    fn new(reader_quit: Arc<AtomicBool>, exited: Arc<AtomicBool>, proxy: EventProxy) -> InputLoss {
+        InputLoss {
+            said: Arc::new(AtomicBool::new(false)),
+            reader_quit,
+            exited,
+            proxy,
+        }
+    }
+
+    /// The link refused a frame. Every keystroke after the first would say the
+    /// same thing, so this side says it once; and unless the reader has been
+    /// retired for a relink or a release, the pane is marked exited the way the
+    /// reader marks it on EOF — it is the same socket, noticed from the writing
+    /// side first — so the window shows the pane as gone instead of taking
+    /// input into it that nothing will ever read. The reader still raises its
+    /// own `Exit` when it finds the same socket closed; the handler is
+    /// idempotent, so a link that is genuinely gone may be reported twice.
+    ///
+    /// This is hardening for a *closed* link, not the cure for #673: a socket
+    /// some process holds open and never reads accepts writes into its send
+    /// buffer, so they succeed and vanish until the buffer fills, and nothing
+    /// here fires until the backlog bound does. What stops that pane existing
+    /// at all is `attach_on` refusing to call a silent `Attach` attached.
+    fn note(&self, err: &std::io::Error) {
+        if self.said.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        log::warn!("the daemon link stopped taking this pane's input: {err}");
+        if self.reader_quit.load(Ordering::SeqCst) {
+            return;
+        }
+        self.exited.store(true, Ordering::SeqCst);
+        self.proxy.send_event(AlacEvent::Wakeup);
+        self.proxy.send_event(AlacEvent::Exit);
+    }
+}
+
+#[derive(Default)]
+struct SendQueue {
+    frames: VecDeque<Vec<u8>>,
+    /// Bytes queued but not yet on the wire — including the batch the sender
+    /// currently holds, which is why this is not just `frames`' total. That
+    /// batch is exactly what a stalled link parks in, so leaving it out would
+    /// mean the backlog bound could never be reached.
+    bytes: usize,
+    /// How much of `bytes` belongs to frames that were over the whole bound on
+    /// their own, and so were let through on their own terms. The bound is
+    /// raised by exactly this while they are outstanding, and put back the
+    /// moment the queue empties — otherwise one big paste would leave every
+    /// keystroke behind it looking like a dead link.
+    oversize: usize,
+    /// Set by teardown, or by a sender that has given up: either way the queue
+    /// takes nothing more. Teardown's sender writes what is left first.
+    closing: bool,
+    /// Set by the sender once there is nothing left to write. Teardown waits
+    /// on this for `DRAIN_GRACE`, no longer.
+    drained: bool,
+}
+
+/// A pane's writing half, moved onto a thread of its own.
+///
+/// The socket underneath is blocking and has no write timeout, so a peer that
+/// stops reading parks `write(2)` in the kernel until it starts again. Every
+/// caller of `RemoteTerminal::write` is a gpui event handler — a keystroke, a
+/// paste, a mouse report, a focus change — and one UI thread draws every
+/// window, so a park there is every window frozen. On macOS a unix stream gives
+/// up after 8K of send buffer, which is about 1400 keystrokes: a single paste.
+///
+/// So nothing on the UI thread touches the socket. Frames are encoded, queued,
+/// and handed to a sender thread that is welcome to park for as long as the far
+/// end makes it.
+struct LinkWriter {
+    /// A second handle on the same socket, kept for `shutdown` alone.
+    /// `shutdown(2)` returns at once even while another thread is parked in
+    /// `write(2)` on that socket — which is exactly the state teardown has to
+    /// be able to break, and exactly what a handle behind the sender's own lock
+    /// could not do.
+    closer: Stream,
+    queue: Arc<(Mutex<SendQueue>, std::sync::Condvar)>,
+    loss: InputLoss,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl LinkWriter {
+    fn new(stream: Stream, loss: InputLoss) -> std::io::Result<LinkWriter> {
+        let closer = stream.try_clone()?;
+        let queue = Arc::new((Mutex::new(SendQueue::default()), std::sync::Condvar::new()));
+        let sending = Arc::clone(&queue);
+        let sender_loss = loss.clone();
+        let thread = std::thread::Builder::new()
+            .name("tty7-pane-writer".into())
+            .spawn(move || send_loop(stream, sending, sender_loss))?;
+        Ok(LinkWriter {
+            closer,
+            queue,
+            loss,
+            thread: Some(thread),
+        })
+    }
+
+    /// Queues a frame. Never blocks: the socket belongs to the sender thread,
+    /// and the only thing that happens here is a push onto a `VecDeque`.
+    fn send(&self, msg: ClientMsg) {
+        let mut frame = Vec::new();
+        if let Err(e) = msg.encode(&mut frame) {
+            log::warn!("could not encode a frame for this pane's link: {e}");
+            return;
+        }
+        let (lock, wake) = &*self.queue;
+        let Ok(mut q) = lock.lock() else { return };
+        if q.closing {
+            return;
+        }
+        // A frame over the bound all by itself is not a backlog — a paste is
+        // whatever the clipboard holds, and refusing a big one would kill a
+        // perfectly healthy pane. Onto an empty queue it goes through anyway,
+        // and lifts the bound by its own size for as long as it is outstanding,
+        // so what piles up behind it is still held to the same four megabytes.
+        // Onto a queue that already has something on it, the ordinary bound
+        // applies: one such frame is a paste, a second one arriving before the
+        // first has moved is a link that is not moving.
+        let oversize = frame.len() > MAX_BACKLOG && q.bytes == 0;
+        if !oversize && q.bytes + frame.len() > MAX_BACKLOG + q.oversize {
+            // Dropped rather than queued: a backlog this deep is a link nothing
+            // is reading, and growing it only trades a frozen window for an
+            // exhausted heap. Reported in the same words, and once, as a write
+            // the link refuses outright — the pane is gone either way.
+            drop(q);
+            self.loss.note(&std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!("nothing has drained this pane's link for {MAX_BACKLOG} bytes of input"),
+            ));
+            return;
+        }
+        if oversize {
+            q.oversize = frame.len();
+        }
+        q.bytes += frame.len();
+        q.frames.push_back(frame);
+        q.drained = false;
+        drop(q);
+        wake.notify_one();
+    }
+
+    /// Retires the sender and cuts the link. Gives what is queued `DRAIN_GRACE`
+    /// to go out — see the constant — and then shuts the socket down whether it
+    /// went or not. Never joins: a sender parked on a dead link would take the
+    /// UI thread down with it, the same trap `stop_reader` documents.
+    ///
+    /// Called twice on the way out — `stop_reader` closes the link, then the
+    /// field drop closes it again — so the second call has to be free rather
+    /// than another `DRAIN_GRACE` spent waiting for a sender that is already
+    /// gone. A retired handle is one whose thread has been let go.
+    fn close(&mut self) {
+        if self.thread.is_none() {
+            return;
+        }
+        let (lock, wake) = &*self.queue;
+        if let Ok(mut q) = lock.lock() {
+            q.closing = true;
+            wake.notify_one();
+            if let Ok((waited, _)) = wake.wait_timeout_while(q, DRAIN_GRACE, |q| !q.drained) {
+                drop(waited);
+            }
+        }
+        let _ = self.closer.shutdown(std::net::Shutdown::Both);
+        drop(self.thread.take());
+    }
+}
+
+impl Drop for LinkWriter {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+fn send_loop(
+    mut stream: Stream,
+    queue: Arc<(Mutex<SendQueue>, std::sync::Condvar)>,
+    loss: InputLoss,
+) {
+    use std::io::Write as _;
+    let (lock, wake) = &*queue;
+
+    // Abandons whatever is still queued and reports the link settled. Wakes a
+    // teardown that is inside `DRAIN_GRACE` waiting to hear it: what is left
+    // here is never going out, and there is nothing to be gained by making the
+    // window sit out the rest of the grace period to find that out. Closes the
+    // queue on the way, too — with no thread left to drain it, anything queued
+    // after this is just a keystroke held onto until the pane drops.
+    let give_up = || {
+        if let Ok(mut q) = lock.lock() {
+            q.frames.clear();
+            q.bytes = 0;
+            q.oversize = 0;
+            q.closing = true;
+            q.drained = true;
+            wake.notify_all();
+        }
+    };
+
+    loop {
+        let batch = {
+            let Ok(mut q) = lock.lock() else { return };
+            loop {
+                if !q.frames.is_empty() {
+                    break;
+                }
+                // Nothing left to write, so the link is as flushed as this
+                // thread can make it. Said before the `closing` check, so a
+                // teardown racing a sender that has already finished hears it
+                // rather than waiting out `DRAIN_GRACE` for nothing.
+                q.drained = true;
+                wake.notify_all();
+                if q.closing {
+                    return;
+                }
+                let Ok(next) = wake.wait(q) else { return };
+                q = next;
+            }
+            std::mem::take(&mut q.frames)
+        };
+        // Counted against the backlog until it is actually out. Discounting it
+        // at the moment it left the `VecDeque` would let a sender parked on the
+        // first frame of a huge batch hold the whole thing off the books, and
+        // the bound the batch is meant to enforce would never be reached.
+        let taken: usize = batch.iter().map(Vec::len).sum();
+        // Written with the lock released: parking here is the whole point, and
+        // a sender holding the queue lock while it parked would put every
+        // `send` — every keystroke — behind the same wait it exists to absorb.
+        for frame in batch {
+            if let Err(e) = stream.write_all(&frame) {
+                loss.note(&e);
+                give_up();
+                return;
+            }
+        }
+        if let Err(e) = stream.flush() {
+            loss.note(&e);
+            give_up();
+            return;
+        }
+        if let Ok(mut q) = lock.lock() {
+            q.bytes = q.bytes.saturating_sub(taken);
+            if q.bytes == 0 {
+                q.oversize = 0;
+            }
+        }
+    }
+}
+
 pub struct RemoteTerminal {
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     pub events: smol::channel::Receiver<AlacEvent>,
@@ -183,7 +482,7 @@ pub struct RemoteTerminal {
     /// alongside `size` so a display-scale change still reaches the child even
     /// when the grid dimensions are unchanged.
     synced_cell: (u16, u16),
-    writer: Mutex<Stream>,
+    link: LinkWriter,
     cwd: Arc<Mutex<Option<PathBuf>>>,
     shell_state: Arc<Mutex<ShellState>>,
     remote_context: Arc<Mutex<Option<RemoteContext>>>,
@@ -213,6 +512,9 @@ pub struct RemoteTerminal {
     /// frames, read by the paint path — only the client holds the grid the
     /// anchors are relative to, so the store lives here rather than in the daemon.
     images: crate::terminal::images::ImageStore,
+    /// The conversation's shape, for the outline in the Info panel: one entry
+    /// per agent turn, anchored to the scrollback row it began on.
+    turns: AgentTurns,
     route: PaneRoute,
     proxy: EventProxy,
     reader_thread: Option<JoinHandle<()>>,
@@ -343,7 +645,7 @@ impl RemoteTerminal {
             restore,
         }
         .encode(&mut stream)?;
-        let pane_id = match DaemonMsg::read(&mut stream)? {
+        let pane_id = match spawn_reply(&mut stream, attach_reply_wait(route), "Spawn")? {
             DaemonMsg::Spawned { pane_id } => pane_id,
             // Passed through, not wrapped: the caller already logs which
             // spawn this was, and the window shows only this text.
@@ -386,7 +688,36 @@ impl RemoteTerminal {
         let win = win_size(size, cell_w, cell_h);
 
         ClientMsg::Attach { pane_id, size: win }.encode(&mut stream)?;
-        let buffered = attach_reply_prefix(&mut stream, pane_id, attach_reply_wait(route))?;
+        let buffered = match attach_reply_prefix(&mut stream, pane_id, attach_reply_wait(route)) {
+            Ok(buffered) => buffered,
+            Err(e) if route.is_local() && attach_unanswered(&e) => {
+                // Silence on the attach socket has two readings, and only one
+                // of them is safe to act on. Ask the daemon on a fresh
+                // connection: if it answers `Version` there, it is up and
+                // serving, and the attach connection is one it will never
+                // serve — a socket some process holds open, or one from a
+                // listener no longer drained — so the verdict stands and the
+                // caller spawns fresh. If it does not answer there either, it
+                // is not serving anyone yet — mid-restart, mid-handoff — and
+                // a fresh pane spawned now would land on a live one the moment
+                // it comes up (its history carried across, its agent session
+                // resumed twice). There is no third path from a synchronous
+                // UI-thread call, so the attach still fails, but says which
+                // silence it was: the log line someone reads while diagnosing
+                // an orphaned shell must not claim the pane was gone.
+                //
+                // Only local routes probe: a remote attach already waits 15 s
+                // and a second routed connection is a second bridge process.
+                if local_daemon_answers() {
+                    return Err(e);
+                }
+                return Err(e.context(
+                    "the daemon answered nothing on a fresh connection either — it is not \
+                     serving yet (restarting?), so this pane may still be alive",
+                ));
+            }
+            Err(e) => return Err(e),
+        };
         let mut term = Self::from_stream_with(stream, size, buffered)?;
         term.route = route.clone();
         Ok(term)
@@ -432,6 +763,10 @@ impl RemoteTerminal {
         // Drop them; the daemon does not replay out-of-band image frames, so a
         // browser redraws on its next transmit (see issue #213's reattach note).
         self.images.clear();
+        // Turn anchors point into the same grid. The replay that follows
+        // carries the agent's events with it, so the outline rebuilds itself
+        // from the bytes rather than being kept across the reset.
+        self.turns.clear();
 
         let quit = Arc::new(AtomicBool::new(false));
         let reader = Self::spawn_reader(
@@ -454,13 +789,15 @@ impl RemoteTerminal {
                 auth: self.auth_prompts.clone(),
                 phase: self.ssh_phase.clone(),
                 images: self.images.clone(),
+                turns: self.turns.clone(),
             },
         );
-        if let Ok(mut writer) = self.writer.lock() {
-            *writer = stream;
-        }
         self.reader_thread = Some(reader);
         self.reader_quit = quit;
+        // Installed after `reader_quit`, so the sender reports a refusal
+        // against the reader this link actually has. Assigning retires the old
+        // `LinkWriter` through its `Drop`, which is what closes the old socket.
+        self.link = LinkWriter::new(stream, self.input_loss())?;
         self.route = route.clone();
         self.synced_size = false;
         self.resize(size, cell_w, cell_h);
@@ -504,6 +841,7 @@ impl RemoteTerminal {
             Arc::new(Mutex::new(VecDeque::new()));
         let ssh_phase: Arc<Mutex<Option<SshPhase>>> = Arc::new(Mutex::new(None));
         let images = crate::terminal::images::ImageStore::new();
+        let turns = AgentTurns::new();
 
         let reader_quit = Arc::new(AtomicBool::new(false));
         let reader_thread = Self::spawn_reader(
@@ -526,8 +864,14 @@ impl RemoteTerminal {
                 auth: auth_prompts.clone(),
                 phase: ssh_phase.clone(),
                 images: images.clone(),
+                turns: turns.clone(),
             },
         );
+
+        let link = LinkWriter::new(
+            write_half,
+            InputLoss::new(reader_quit.clone(), exited_flag.clone(), proxy.clone()),
+        )?;
 
         Ok(Self {
             term,
@@ -537,7 +881,7 @@ impl RemoteTerminal {
             size,
             synced_size: false,
             synced_cell: (0, 0),
-            writer: Mutex::new(write_half),
+            link,
             cwd,
             shell_state,
             remote_context,
@@ -554,6 +898,7 @@ impl RemoteTerminal {
             agent,
             agent_session,
             images,
+            turns,
             route: PaneRoute::Local,
             proxy,
             reader_thread: Some(reader_thread),
@@ -561,10 +906,19 @@ impl RemoteTerminal {
         })
     }
 
+    /// The signals the sender thread raises a refused frame through, bundled
+    /// for the `LinkWriter` about to be installed. Read after `reader_quit` has
+    /// been swapped, so a relink's new sender answers to the new reader.
+    fn input_loss(&self) -> InputLoss {
+        InputLoss::new(
+            self.reader_quit.clone(),
+            self.exited_flag.clone(),
+            self.proxy.clone(),
+        )
+    }
+
     pub fn detach_link(&mut self) {
-        if let Ok(mut writer) = self.writer.lock() {
-            let _ = ClientMsg::Detach.encode(&mut *writer);
-        }
+        self.link.send(ClientMsg::Detach);
         self.stop_reader();
         self.poll_exited();
     }
@@ -579,9 +933,10 @@ impl RemoteTerminal {
     /// touching the grid again.
     fn stop_reader(&mut self) {
         self.reader_quit.store(true, Ordering::SeqCst);
-        if let Ok(writer) = self.writer.lock() {
-            let _ = writer.shutdown(std::net::Shutdown::Both);
-        }
+        // The sender owns the socket now, and closing it is its job: `close`
+        // gives whatever is queued a brief moment to go out and then shuts the
+        // socket down regardless, which is also what wakes the reader.
+        self.link.close();
         drop(self.reader_thread.take());
     }
 
@@ -626,6 +981,7 @@ impl RemoteTerminal {
                     auth,
                     phase,
                     images,
+                    turns,
                 } = signals;
                 crate::core::threads::promote_to_user_interactive();
                 let mut stream = read_half;
@@ -635,6 +991,7 @@ impl RemoteTerminal {
                 let mut zle_tok = OscTokenizer::new(&[b"133"]);
                 let mut cursor_scan = ParkedCursorScanner::new();
                 let mut parked_cursor = ParkedCursorRepair::default();
+                let mut turn_scan = AgentTurnScanner::new();
                 let mut pending: Vec<u8> = buffered;
                 // Kitty-graphics decode runs on its own thread with newest-frame
                 // coalescing (issue #213): inflating a full-window browser frame
@@ -679,14 +1036,25 @@ impl RemoteTerminal {
                     macro_rules! flush_batch {
                         () => {
                             if !out_batch.is_empty() {
-                                // The scanner reports an offset one past the
+                                // Each scanner reports an offset one past the
                                 // sequence it matched, in ascending order, so the
                                 // batch splits at each of them: advance the
                                 // emulator to the cut, act on the state that
                                 // sequence left behind, carry on.
-                                let mut cuts: Vec<(usize, CursorCut)> = Vec::new();
+                                let mut cuts: Vec<(usize, Cut)> = Vec::new();
                                 if Self::REPAIR_PARKED_CURSOR {
-                                    cursor_scan.feed(&out_batch, |off, c| cuts.push((off, c)));
+                                    cursor_scan
+                                        .feed(&out_batch, |off, c| cuts.push((off, Cut::Cursor(c))));
+                                }
+                                // Two ascending runs concatenated are not one
+                                // ascending run, and a cut out of order would
+                                // advance the emulator backwards — but only a
+                                // batch carrying both kinds pays for the sort,
+                                // and agent events are a handful per turn.
+                                let cursor_cuts = cuts.len();
+                                turn_scan.feed(&out_batch, |off, c| cuts.push((off, Cut::Turn(c))));
+                                if cursor_cuts > 0 && cuts.len() > cursor_cuts {
+                                    cuts.sort_by_key(|(off, _)| *off);
                                 }
                                 {
                                     let t0 = trace.then(std::time::Instant::now);
@@ -702,7 +1070,10 @@ impl RemoteTerminal {
                                         for (off, cut) in cuts {
                                             processor.advance(&mut *term, &out_batch[at..off]);
                                             at = off;
-                                            parked_cursor.apply(&mut term, cut);
+                                            match cut {
+                                                Cut::Cursor(c) => parked_cursor.apply(&mut term, c),
+                                                Cut::Turn(t) => turns.apply(&term, t),
+                                            }
                                         }
                                         processor.advance(&mut *term, &out_batch[at..]);
                                     }
@@ -821,13 +1192,27 @@ impl RemoteTerminal {
                                 flush_batch!();
                                 cursor_scan.reset();
                                 parked_cursor.reset();
+                                turn_scan.reset();
                                 proxy.replaying.store(true, Ordering::Relaxed);
+                                // A replayed ring is the pane's own history
+                                // coming back, agent events and all, so cut it
+                                // the same way live output is cut: the outline
+                                // of a conversation is rebuilt by reattaching
+                                // to the pane, not lost with the old client.
+                                let mut turn_cuts: Vec<(usize, TurnCut)> = Vec::new();
+                                turn_scan.feed(&bytes, |off, c| turn_cuts.push((off, c)));
                                 {
                                     let mut term = term.lock();
                                     if quit.load(Ordering::SeqCst) {
                                         return;
                                     }
-                                    processor.advance(&mut *term, &bytes);
+                                    let mut at = 0usize;
+                                    for (off, cut) in turn_cuts {
+                                        processor.advance(&mut *term, &bytes[at..off]);
+                                        at = off;
+                                        turns.apply(&term, cut);
+                                    }
+                                    processor.advance(&mut *term, &bytes[at..]);
                                     if processor.sync_timeout().sync_timeout().is_some() {
                                         processor.stop_sync(&mut *term);
                                     }
@@ -1070,14 +1455,17 @@ impl RemoteTerminal {
         self.child_exited.load(Ordering::SeqCst)
     }
 
+    /// Queues a keystroke — or a paste, or a mouse report — for the link.
+    ///
+    /// Callers are gpui event handlers on the UI thread, so this returns
+    /// without touching the socket. A link that has stopped draining is a
+    /// problem for the sender thread, not for the window.
     pub fn write<B: Into<Cow<'static, [u8]>>>(&self, bytes: B) {
         let bytes = bytes.into();
         if bytes.is_empty() {
             return;
         }
-        if let Ok(mut writer) = self.writer.lock() {
-            let _ = ClientMsg::Input(bytes.into_owned()).encode(&mut *writer);
-        }
+        self.link.send(ClientMsg::Input(bytes.into_owned()));
     }
 
     /// Whether the daemon behind this pane echoes a `DaemonMsg::Size` into the
@@ -1133,9 +1521,7 @@ impl RemoteTerminal {
         }
 
         let win = win_size(size, cell_w, cell_h);
-        if let Ok(mut writer) = self.writer.lock() {
-            let _ = ClientMsg::Resize(win).encode(&mut *writer);
-        }
+        self.link.send(ClientMsg::Resize(win));
     }
 
     pub fn foreground_cwd(&self) -> Option<PathBuf> {
@@ -1182,6 +1568,12 @@ impl RemoteTerminal {
 
     pub fn agent_session(&self) -> Option<AgentSessionState> {
         self.agent_session.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// This pane's agent turns, anchored to the scrollback. Same cheap handle
+    /// clone as [`images`](Self::images), shared with the reader thread.
+    pub fn agent_turns(&self) -> AgentTurns {
+        self.turns.clone()
     }
 
     pub fn zle_reading(&self) -> bool {
@@ -1292,7 +1684,13 @@ impl RemoteTerminal {
             spec,
         }
         .encode(&mut stream)?;
-        let pane_id = match DaemonMsg::read(&mut stream)? {
+        // Native SSH is always dialled through the local daemon, whatever the
+        // far end turns out to be, so this waits on the local budget.
+        let pane_id = match spawn_reply(
+            &mut stream,
+            attach_reply_wait(&PaneRoute::Local),
+            "SpawnNativeSsh",
+        )? {
             DaemonMsg::Spawned { pane_id } => pane_id,
             DaemonMsg::Error(msg) => {
                 return Err(anyhow::anyhow!("daemon refused SpawnNativeSsh: {msg}"));
@@ -1352,13 +1750,32 @@ impl RemoteTerminal {
     }
 
     pub fn respond_auth(&self, request_id: u64, response: AuthResponse) {
-        if let Ok(mut writer) = self.writer.lock() {
-            let _ = ClientMsg::AuthResponse {
-                request_id,
-                response,
+        self.link.send(ClientMsg::AuthResponse {
+            request_id,
+            response,
+        });
+    }
+
+    /// The client half of known-hosts management.
+    ///
+    /// Nothing calls this yet: there is no known-hosts surface in the window or
+    /// the CLI. What sits behind it is not a stub, though — `ssh::known_hosts`
+    /// parses the real file, fingerprints each key, and rewrites through a
+    /// 0600 temp file — so this is an interface waiting for a screen, not
+    /// scaffolding around nothing. Deleting it would throw away the finished
+    /// half of the feature.
+    pub fn list_known_hosts() -> Vec<KnownHostEntry> {
+        fn query() -> anyhow::Result<Vec<KnownHostEntry>> {
+            let mut stream = connect()?;
+            ClientMsg::ListKnownHosts.encode(&mut stream)?;
+            match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::KnownHostsList(list) => Ok(list),
+                other => Err(anyhow::anyhow!(
+                    "unexpected reply to ListKnownHosts: {other:?}"
+                )),
             }
-            .encode(&mut *writer);
         }
+        query().unwrap_or_default()
     }
 
     /// Ask the daemon to dial this spec and say what happened. Blocking, and
@@ -1376,6 +1793,22 @@ impl RemoteTerminal {
         query(spec).unwrap_or_else(|e| SshTestReport::Failed {
             reason: e.to_string(),
         })
+    }
+
+    /// See [`Self::list_known_hosts`] — same story, and it returns the list
+    /// after the removal so a caller can redraw from one round trip.
+    pub fn delete_known_host(id: KnownHostId) -> Vec<KnownHostEntry> {
+        fn query(id: KnownHostId) -> anyhow::Result<Vec<KnownHostEntry>> {
+            let mut stream = connect()?;
+            ClientMsg::DeleteKnownHost(id).encode(&mut stream)?;
+            match DaemonMsg::read(&mut stream)? {
+                DaemonMsg::KnownHostsList(list) => Ok(list),
+                other => Err(anyhow::anyhow!(
+                    "unexpected reply to DeleteKnownHost: {other:?}"
+                )),
+            }
+        }
+        query(id).unwrap_or_default()
     }
 
     pub fn sftp_list(pane_id: u64, path: &str) -> Result<Vec<SftpEntry>, String> {
@@ -1549,6 +1982,21 @@ fn daemon_not_listening(err: &anyhow::Error) -> bool {
     })
 }
 
+/// How long an `Attach` may stay silent before it is called unanswered.
+///
+/// Only a silent connection ever pays this: a dead pane answers `Error` at
+/// once and a live one answers `Size` at once, so the budget is not a cost in
+/// the common case. What bounds it is the caller — a local restore attaches
+/// synchronously on the UI thread, one pane after another, so N silent panes
+/// hold the window still for N times this. What argues for more is the other
+/// side of the same silence: a daemon merely slow to serve — an execve handoff
+/// keeps the listener and its backlog across the exec, and a fresh daemon is
+/// adopting panes and seeding ids before it can take an `Attach` — would have
+/// served this connection a moment later, and calling it unanswered spawns a
+/// fresh pane over a live one, carries the live pane's history onto it and
+/// starts an agent resume against a session the old process still holds. The
+/// [`AttachUnanswered`] verdict is confirmed against that case in `attach_on`
+/// rather than by waiting longer here.
 fn attach_reply_wait(route: &PaneRoute) -> std::time::Duration {
     match route.is_local() {
         true => std::time::Duration::from_secs(2),
@@ -1556,6 +2004,79 @@ fn attach_reply_wait(route: &PaneRoute) -> std::time::Duration {
     }
 }
 
+/// Read the daemon's answer to a spawn request, under the deadline `Attach`
+/// uses for the same route.
+///
+/// A daemon caught mid-restart accepts the connection and then never serves
+/// it. `Attach` has been guarded against that silence since #673, and core's
+/// `PaneSession::spawn_over` bounds the identical exchange, but this path read
+/// with no deadline at all — and the local route spawns synchronously on the
+/// UI thread (`ui::app`'s `PaneRoute::Local` branch), so a daemon that went
+/// quiet froze the whole window on "new tab".
+///
+/// The timeout is reported as a plain message with no `io::Error` in its
+/// chain, which is what keeps `daemon_disconnected_before_spawn_reply` from
+/// claiming it: silence is not a hangup, and retrying it would only wait
+/// again. `what` names the request, since the window shows only this text.
+fn spawn_reply(
+    stream: &mut Stream,
+    wait: std::time::Duration,
+    what: &str,
+) -> anyhow::Result<DaemonMsg> {
+    let _ = stream.set_read_timeout(Some(wait));
+    let reply = DaemonMsg::read(stream);
+    let _ = stream.set_read_timeout(None);
+    match reply {
+        Ok(msg) => Ok(msg),
+        Err(e) if would_block(&e) => Err(anyhow::anyhow!("no answer to {what} within {wait:?}")),
+        Err(e) => {
+            Err(anyhow::Error::new(e).context(format!("reading the daemon's answer to {what}")))
+        }
+    }
+}
+
+/// An `Attach` that produced no bytes within its wait — nobody served the
+/// connection. Distinct from a refusal (`Error` frame) and from a hangup so
+/// the caller can say the true thing: the pane may well still exist.
+#[derive(Debug)]
+struct AttachUnanswered {
+    pane_id: u64,
+    wait: std::time::Duration,
+}
+
+impl std::fmt::Display for AttachUnanswered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the daemon did not answer Attach for pane {} within {:?} (an attached pane replays \
+             its screen at once, so nobody is serving this connection)",
+            self.pane_id, self.wait
+        )
+    }
+}
+
+impl std::error::Error for AttachUnanswered {}
+
+/// Whether `err` is an `Attach` that went unanswered, as opposed to refused or
+/// hung up on. The pane behind an unanswered attach may still be alive.
+pub fn attach_unanswered(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<AttachUnanswered>().is_some())
+}
+
+/// Reads far enough into the daemon's answer to an `Attach` to classify it, and
+/// hands back every byte read so the reader thread loses none of the replay.
+///
+/// Silence is a verdict, not a quiet pane. A daemon that attached replays the
+/// pane's ring before it reads a byte of our input, and the ring always holds
+/// a segment, so the first frame on a good attach is a `Size` — a quiet pane
+/// still sends that. An `Attach` that produced nothing within `wait` is one
+/// nobody is serving: a daemon still mid-restart, a socket held open by a
+/// process that will never read it. Taken for success it gave the window a
+/// pane drawn as restored whose every keystroke went into that socket — no
+/// fresh shell, no restored-screen banner, no agent resume, and Ctrl-C did
+/// nothing (#673). Taken for the failure it is, the caller spawns fresh and
+/// asks for the old screen back.
 fn attach_reply_prefix(
     stream: &mut Stream,
     pane_id: u64,
@@ -1587,6 +2108,9 @@ fn attach_reply_prefix(
         kind = crate::daemon::protocol::peek_frame_kind(&buffered);
     }
     let _ = stream.set_read_timeout(None);
+    if buffered.is_empty() {
+        return Err(anyhow::Error::new(AttachUnanswered { pane_id, wait }));
+    }
     if !kind.is_some_and(crate::daemon::protocol::is_error_kind) {
         return Ok(buffered);
     }
@@ -1644,9 +2168,7 @@ fn daemon_disconnected_before_spawn_reply(err: &anyhow::Error) -> bool {
 
 impl Drop for RemoteTerminal {
     fn drop(&mut self) {
-        if let Ok(mut writer) = self.writer.lock() {
-            let _ = ClientMsg::Detach.encode(&mut *writer);
-        }
+        self.link.send(ClientMsg::Detach);
         self.stop_reader();
     }
 }
@@ -2058,6 +2580,30 @@ fn connect() -> anyhow::Result<Stream> {
     })
 }
 
+/// Whether the local daemon answers `Version` on a fresh connection right now.
+///
+/// The one question a silent `Attach` leaves open — is the daemon serving and
+/// this socket orphaned, or is nobody serving yet? A daemon answers `Version`
+/// before it touches any state, so this is the cheapest thing it can say. One
+/// second is the same budget `spawn` gives the same handshake; a healthy
+/// daemon answers in microseconds.
+fn local_daemon_answers() -> bool {
+    use std::io::Write as _;
+
+    let Ok(mut stream) = transport::connect() else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+    if ClientMsg::Version
+        .encode(&mut stream)
+        .and_then(|()| stream.flush())
+        .is_err()
+    {
+        return false;
+    }
+    matches!(DaemonMsg::read(&mut stream), Ok(DaemonMsg::Version(_)))
+}
+
 fn connect_routed(route: &PaneRoute) -> anyhow::Result<Stream> {
     if let PaneRoute::Unroutable(reason) = route {
         return Err(anyhow::anyhow!("{reason}"));
@@ -2180,7 +2726,7 @@ fn win_size(size: TermSize, cell_w: u16, cell_h: u16) -> WinSize {
 }
 
 #[cfg(all(test, windows))]
-mod windows_teardown_tests {
+mod windows_tests {
     use super::*;
 
     fn tcp_pair() -> (std::net::TcpStream, std::net::TcpStream) {
@@ -2279,6 +2825,110 @@ mod windows_teardown_tests {
             !term.exited_flag.load(Ordering::SeqCst),
             "the abandoned link must not tear the adopted pane down"
         );
+    }
+
+    /// What the daemon replays into a pane restored from a stored screen, in
+    /// the frames and the order it sends them: the dead pane's screen, then the
+    /// preamble, then the new shell's own first output.
+    fn replay_restore_into(daemon: &mut std::net::TcpStream, old_screen: &[u8], shell: &[u8]) {
+        let size = WinSize {
+            cols: 40,
+            rows: 10,
+            cell_w: 8,
+            cell_h: 17,
+        };
+        DaemonMsg::Size(size).encode(daemon).unwrap();
+        DaemonMsg::Snapshot(old_screen.to_vec())
+            .encode(daemon)
+            .unwrap();
+        DaemonMsg::Size(size).encode(daemon).unwrap();
+        DaemonMsg::Snapshot(crate::daemon::pane::restore_preamble(Some(
+            "the shell below is new",
+        )))
+        .encode(daemon)
+        .unwrap();
+        DaemonMsg::Output(shell.to_vec()).encode(daemon).unwrap();
+    }
+
+    fn row(term: &RemoteTerminal, line: i32) -> String {
+        use alacritty_terminal::grid::Dimensions as _;
+        use alacritty_terminal::index::{Column, Line};
+        let term = term.term.lock();
+        let grid = term.grid();
+        (0..grid.columns())
+            .map(|c| grid[Line(line)][Column(c)].c)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    /// A restored screen must not be sitting in the viewport when the new
+    /// shell's ConPTY starts drawing on it.
+    ///
+    /// conhost addresses its own screen buffer absolutely — PSReadLine repaints
+    /// the line being typed with `ESC[6;20H` and conhost frames it the same way
+    /// — and that buffer starts blank with the cursor at the top-left. Restored
+    /// output is output conhost never produced: left on screen it shifts every
+    /// row conhost names, so the first keystroke repaints the input line on top
+    /// of the old text instead of at the prompt. The restored screen belongs in
+    /// scrollback, where it survives without claiming a row.
+    #[test]
+    fn a_restored_screen_leaves_the_new_shell_the_viewport_conpty_thinks_it_has() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = tcp_pair();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(40, 10)).unwrap();
+
+        // Five lines of the dead pane, then the shell painting its prompt the
+        // way conhost does: at row 1 of a buffer it believes is blank.
+        replay_restore_into(
+            &mut daemon_side,
+            b"line one\r\nline two\r\nline three\r\nline four\r\nline five\r\n",
+            b"\x1b[?25l\x1b[1;1HPS C:\\> \x1b[?25h",
+        );
+
+        let mut top = String::new();
+        for _ in 0..400 {
+            top = row(&term, 0);
+            if top.starts_with("PS C:") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            top, "PS C:\\>",
+            "the shell's prompt paints where conhost put it"
+        );
+
+        for line in 1..10 {
+            assert_eq!(
+                row(&term, line),
+                "",
+                "row {line} still holds restored output, so conhost and the client \
+                 disagree about which row is which: the next repaint of the input \
+                 line lands on the old screen instead of at the prompt"
+            );
+        }
+
+        // Kept, not erased: `ESC[2J` on the primary screen scrolls the viewport
+        // into history, so the screen the daemon restored is one scroll away.
+        let depth = {
+            use alacritty_terminal::grid::Dimensions as _;
+            term.term.lock().grid().history_size() as i32
+        };
+        let history: Vec<String> = (-depth..0).map(|line| row(&term, line)).collect();
+        for wanted in [
+            "line one",
+            "line two",
+            "line three",
+            "line four",
+            "line five",
+        ] {
+            assert!(
+                history.iter().any(|row| row == wanted),
+                "{wanted:?} is not in the scrollback; the restored screen was erased \
+                 rather than scrolled away. History holds {history:?}"
+            );
+        }
     }
 }
 
@@ -2587,6 +3237,61 @@ mod tests {
         drop(daemon_side);
         assert!(
             attach_reply_prefix(&mut client_side, 7, attach_reply_wait(&PaneRoute::Local)).is_err()
+        );
+    }
+
+    /// #673: a daemon that attached replays the pane's ring at once, and the
+    /// ring always holds a segment, so even a pane that has printed nothing
+    /// answers with a `Size`. A connection that stays silent for the whole wait
+    /// is therefore one nobody is serving — read as success, it became a pane
+    /// the window drew as restored while every keystroke, Ctrl-C included,
+    /// went into a socket nothing drained.
+    #[test]
+    fn an_attach_nobody_answers_is_not_an_attach() {
+        let (mut client_side, _daemon_side) = UnixStream::pair().unwrap();
+        let wait = std::time::Duration::from_millis(200);
+        let err = attach_reply_prefix(&mut client_side, 7, wait)
+            .expect_err("silence for the whole wait must not pass for an attached pane");
+        assert!(
+            format!("{err:#}").contains("did not answer"),
+            "the failure has to say the daemon never answered, not that the pane is gone: {err:#}"
+        );
+        assert!(
+            attach_unanswered(&err),
+            "silence is its own verdict, told apart from a refusal or a hangup"
+        );
+        // A refusal is not it: the pane really is gone then, and the caller
+        // may say so.
+        let (mut client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        DaemonMsg::Error("no such pane 7".into())
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+        let refused = attach_reply_prefix(&mut client_side, 7, wait).expect_err("refused");
+        assert!(!attach_unanswered(&refused));
+    }
+
+    /// The other side of the rule above: the frame a quiet pane does send is
+    /// enough. Nothing else is required of the daemon for the attach to stand.
+    #[test]
+    fn a_size_frame_alone_is_a_live_attach() {
+        let (mut client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        DaemonMsg::Size(WinSize {
+            cols: 80,
+            rows: 24,
+            cell_w: 8,
+            cell_h: 17,
+        })
+        .encode(&mut daemon_side)
+        .unwrap();
+        daemon_side.flush().unwrap();
+
+        let buffered =
+            attach_reply_prefix(&mut client_side, 7, std::time::Duration::from_millis(200))
+                .expect("the daemon's first frame is the attach ack");
+        assert!(
+            !buffered.is_empty(),
+            "the Size frame was read to classify the reply; it must reach the reader"
         );
     }
 
@@ -2981,6 +3686,165 @@ mod tests {
             ClientMsg::Input(bytes) => assert_eq!(bytes, b"echo hi\r"),
             other => panic!("expected Input, got {other:?}"),
         }
+    }
+
+    /// A peer that holds the link open and stops reading is what the router
+    /// looks like from here when the far end is congested: `copy_bidirectional`
+    /// stops draining our half and the send buffer fills. The socket is
+    /// blocking and has no write timeout, so `write(2)` parks — and it used to
+    /// park on the UI thread, which draws every window. macOS gives a unix
+    /// stream 8K, so it took about 1400 keystrokes, or one paste.
+    ///
+    /// Typing into such a pane must now cost the window nothing at all.
+    #[test]
+    fn a_link_that_stopped_reading_does_not_park_the_writing_thread() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        // Far past the 8K that used to be fatal, one keystroke at a time, on
+        // this very thread: a park anywhere in here is a frozen window.
+        let started = std::time::Instant::now();
+        for _ in 0..64 * 1024 {
+            term.write(vec![b'x']);
+        }
+        let spent = started.elapsed();
+
+        drop(daemon_side);
+        assert!(
+            spent < std::time::Duration::from_secs(1),
+            "64K keystrokes into a link nobody is draining took {spent:?} — \
+             the caller is a gpui event handler, so this is the UI thread"
+        );
+    }
+
+    /// The backlog is bounded, and reaching the bound is not a slow link but a
+    /// dead one: nothing has taken a byte for four megabytes of typing. Saying
+    /// so is what stops the pane quietly swallowing input forever, and it is
+    /// said in the same words — and once — as an outright refused write.
+    #[test]
+    fn a_backlog_nothing_drains_is_reported_as_a_lost_link() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        // 8K a shot rather than a byte, so this is a few hundred frames and not
+        // a few million: the bound is on bytes queued, not on frames.
+        //
+        // Twice the bound rather than a frame or two past it. The sender does
+        // get some of this onto the wire before it parks — as much as the send
+        // buffer holds, which is 8K on macOS but a couple hundred K on Linux —
+        // and that much is discounted from the backlog. A margin narrower than
+        // the widest of those buffers is a test that passes on one platform and
+        // not the other.
+        let chunk = vec![b'x'; 8 << 10];
+        for _ in 0..2 * MAX_BACKLOG / chunk.len() {
+            term.write(chunk.clone());
+        }
+
+        assert!(
+            term.exited_flag.load(Ordering::SeqCst),
+            "a link that has taken nothing for {MAX_BACKLOG} bytes is gone, and the pane must say so"
+        );
+        let mut exits = 0;
+        while let Ok(ev) = term.events.try_recv() {
+            exits += usize::from(matches!(ev, AlacEvent::Exit));
+        }
+        assert_eq!(exits, 1, "said once, not once per keystroke");
+        drop(daemon_side);
+    }
+
+    /// One frame can be larger than the whole backlog bound: a paste is
+    /// whatever the clipboard holds. That is not a link nothing is draining,
+    /// and a pane must not die of being pasted into — nor may the keystrokes
+    /// that follow read as a backlog merely because the paste is still going.
+    #[test]
+    fn a_paste_larger_than_the_backlog_bound_is_not_a_dead_link() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        // A peer that keeps reading: the link is healthy, just carrying a lot.
+        let draining = std::thread::spawn(move || {
+            let _ = std::io::copy(&mut daemon_side, &mut std::io::sink());
+        });
+
+        term.write(vec![b'x'; MAX_BACKLOG + (1 << 20)]);
+        for _ in 0..1024 {
+            term.write(vec![b'y']);
+        }
+
+        assert!(
+            !term.exited_flag.load(Ordering::SeqCst),
+            "a five megabyte paste is a paste, not a link that has stopped taking input"
+        );
+        drop(term);
+        draining.join().unwrap();
+    }
+
+    /// Input the link refuses used to vanish: `write` threw the error away, so a
+    /// pane whose daemon had stopped reading kept taking keystrokes into
+    /// nothing. The refusal now marks the pane exited by the reader's own signal
+    /// — only our sending half is shut here, so the reader is still parked on
+    /// an open receiving half and the writing side is the one that finds out.
+    /// (Shutting the peer's receiving half instead is not portable: Linux
+    /// answers the next write with EPIPE, macOS buffers it.)
+    ///
+    /// The refusal is met on the sender thread now, so the pane learns of it a
+    /// moment after the keystroke rather than during it. That is the trade the
+    /// queue buys: the window never waits on the socket to find out.
+    #[test]
+    fn a_write_the_link_refuses_marks_the_pane_gone_once() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, _daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        term.link
+            .closer
+            .shutdown(std::net::Shutdown::Write)
+            .unwrap();
+
+        term.write(b"echo hi\r".to_vec());
+        let noticed = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !term.exited_flag.load(Ordering::SeqCst) && std::time::Instant::now() < noticed {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            term.exited_flag.load(Ordering::SeqCst),
+            "a refused Input is the link gone, and the pane has to say so"
+        );
+        let mut exits = 0;
+        while let Ok(ev) = term.events.try_recv() {
+            exits += usize::from(matches!(ev, AlacEvent::Exit));
+        }
+        assert_eq!(
+            exits, 1,
+            "reported through the same event the reader raises on EOF"
+        );
+
+        term.write(b"echo again\r".to_vec());
+        while let Ok(ev) = term.events.try_recv() {
+            exits += usize::from(matches!(ev, AlacEvent::Exit));
+        }
+        assert_eq!(exits, 1, "said once, not once per keystroke");
+    }
+
+    /// A link retired for a relink takes no more input — `stop_reader` closes
+    /// the queue and shuts the socket down — and that must not read as the pane
+    /// dying under the swap, for the same reason the retired reader exits
+    /// silently. The frame is now turned away at the queue rather than by the
+    /// socket, but the pane has to stay alive either way.
+    #[test]
+    fn a_write_on_a_retired_link_does_not_mark_the_pane_gone() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, _daemon_side) = UnixStream::pair().unwrap();
+        let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        term.stop_reader();
+
+        term.write(b"echo hi\r".to_vec());
+        assert!(
+            !term.exited_flag.load(Ordering::SeqCst),
+            "the pane is being relinked or released, not dying"
+        );
     }
 
     #[test]
@@ -3699,6 +4563,75 @@ mod tests {
             .unwrap();
         daemon_side.flush().unwrap();
         assert!(poll(""), "an unnamed command start does not inherit a name");
+    }
+
+    /// A `prompt-submit` the hook wrote into the middle of a batch of output.
+    fn prompt_event(prompt: &str) -> Vec<u8> {
+        format!(
+            "\x1b]777;notify;{};{{\"v\":1,\"agent\":\"claude\",\
+             \"event\":\"prompt-submit\",\"prompt\":\"{prompt}\"}}\x07",
+            crate::core::cli_agent::AGENT_EVENT_SENTINEL
+        )
+        .into_bytes()
+    }
+
+    fn poll_turns(term: &RemoteTerminal) -> Vec<crate::terminal::agent_marks::AgentTurn> {
+        for _ in 0..200 {
+            let turns = term.agent_turns().list();
+            if !turns.is_empty() {
+                return turns;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Vec::new()
+    }
+
+    #[test]
+    fn an_agent_turn_anchors_where_its_event_sits_in_the_batch() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        // One frame, so one batch: the event's row is only reachable by
+        // splitting the batch at it. Reading the cursor after the whole batch
+        // has been parsed would answer 5.
+        let mut out = b"a\r\nb\r\n".to_vec();
+        out.extend_from_slice(&prompt_event("restore the outline"));
+        out.extend_from_slice(b"c\r\nd\r\ne\r\n");
+        DaemonMsg::Output(out).encode(&mut daemon_side).unwrap();
+        daemon_side.flush().unwrap();
+
+        let turns = poll_turns(&term);
+        assert_eq!(turns.len(), 1, "one prompt, one turn");
+        assert_eq!(
+            turns[0].row,
+            Some(2),
+            "the anchor is the row the event arrived on, not the end of the batch"
+        );
+        assert_eq!(turns[0].text, "restore the outline");
+        assert!(!turns[0].done, "no stop yet");
+    }
+
+    #[test]
+    fn a_replayed_ring_brings_the_conversation_back_with_it() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        // What reattaching to a pane looks like: its history arrives as a
+        // snapshot, agent events and all. The outline has to be rebuilt from
+        // those bytes — nothing else carries it across a client restart.
+        let mut snapshot = b"older output\r\n".to_vec();
+        snapshot.extend_from_slice(&prompt_event("what did we decide"));
+        DaemonMsg::Snapshot(snapshot)
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+
+        let turns = poll_turns(&term);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].row, Some(1));
+        assert_eq!(turns[0].text, "what did we decide");
     }
 
     #[test]

@@ -43,9 +43,12 @@ fn effective_agent(agent: &str, ran_by_grok: bool) -> &str {
 }
 
 fn effective_event<'a>(agent: &str, event: &'a str, stdin_json: &str) -> Option<&'a str> {
-    if matches!(agent, "copilot" | "grok") && event == "notification" {
+    if matches!(agent, "copilot" | "grok" | "droid" | "gemini") && event == "notification" {
         let blocks = stdin_json.contains("elicitation_dialog")
-            || (agent == "copilot" && stdin_json.contains("permission_prompt"));
+            || (matches!(agent, "copilot" | "droid") && stdin_json.contains("permission_prompt"))
+            // Gemini's only notification kind so far, but naming it keeps a
+            // future non-blocking one from being read as a block.
+            || (agent == "gemini" && stdin_json.contains("ToolPermission"));
         return blocks.then_some("permission-request");
     }
     Some(event)
@@ -63,6 +66,8 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
         ("session_id", "sessionId"),
         ("message", "message"),
         ("cwd", "cwd"),
+        // Goose spells the working directory its own way.
+        ("cwd", "working_dir"),
     ] {
         if let Some(v) = payload
             .get(key)
@@ -73,7 +78,39 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
             body[key] = serde_json::Value::String(v.to_string());
         }
     }
+    if let Some(prompt) = ["prompt", "userPrompt", "user_prompt"]
+        .iter()
+        .find_map(|k| payload.get(*k))
+        .and_then(|v| v.as_str())
+        .and_then(prompt_label)
+    {
+        body["prompt"] = serde_json::Value::String(prompt);
+    }
     format!("\x1b]777;notify;{AGENT_EVENT_SENTINEL};{body}\x07").into_bytes()
+}
+
+/// How much of a prompt rides back to the terminal.
+///
+/// Two reasons it is short. The payload goes out as an OSC, and the tokenizer
+/// reading it *abandons* anything past 8 KiB rather than truncating — a pasted
+/// file would silently cost the whole event, not just its tail. And what the
+/// client does with this is label one row of a list and look for that text in
+/// the scrollback, neither of which can use more than a line.
+const PROMPT_LABEL_MAX: usize = 200;
+
+/// The first line of what the user typed, which is both the label an outline
+/// row shows and the needle that finds the turn again in the scrollback.
+///
+/// A line rather than the whole prompt because the terminal wrapped it across
+/// rows: a needle spanning a line break matches no single row, so the later
+/// lines would only make the search fail.
+fn prompt_label(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let end = line
+        .char_indices()
+        .nth(PROMPT_LABEL_MAX)
+        .map_or(line.len(), |(i, _)| i);
+    Some(line[..end].to_string())
 }
 
 #[cfg(unix)]
@@ -214,10 +251,15 @@ pub enum HookAgent {
     Pi,
     Grok,
     OhMyPi,
+    Gemini,
+    Droid,
+    Qwen,
+    Goose,
+    Kimi,
 }
 
 impl HookAgent {
-    pub const ALL: [HookAgent; 7] = [
+    pub const ALL: [HookAgent; 12] = [
         HookAgent::Claude,
         HookAgent::Codex,
         HookAgent::Copilot,
@@ -225,6 +267,11 @@ impl HookAgent {
         HookAgent::Pi,
         HookAgent::Grok,
         HookAgent::OhMyPi,
+        HookAgent::Gemini,
+        HookAgent::Droid,
+        HookAgent::Qwen,
+        HookAgent::Goose,
+        HookAgent::Kimi,
     ];
 
     /// The hooks behind a detected agent process, if it has any.
@@ -241,17 +288,48 @@ impl HookAgent {
             CLIAgent::Pi => Some(HookAgent::Pi),
             CLIAgent::Grok => Some(HookAgent::Grok),
             CLIAgent::OhMyPi => Some(HookAgent::OhMyPi),
-            CLIAgent::Gemini
-            | CLIAgent::Aider
+            CLIAgent::Gemini => Some(HookAgent::Gemini),
+            CLIAgent::Droid => Some(HookAgent::Droid),
+            CLIAgent::Qwen => Some(HookAgent::Qwen),
+            CLIAgent::Goose => Some(HookAgent::Goose),
+            CLIAgent::Kimi => Some(HookAgent::Kimi),
+            CLIAgent::Aider
             | CLIAgent::Amp
             | CLIAgent::Cursor
-            | CLIAgent::Goose
-            | CLIAgent::Droid
             | CLIAgent::Auggie
             | CLIAgent::Hermes
             | CLIAgent::Vibe
-            | CLIAgent::Antigravity
-            | CLIAgent::Qwen => None,
+            | CLIAgent::Antigravity => None,
+        }
+    }
+
+    /// The events this agent's hooks merge into a shared JSON config, if that
+    /// is how it takes them. `None` means the agent owns a generated file
+    /// instead — see [`owned_file_content`].
+    fn hook_map_events(self) -> Option<&'static [(&'static str, &'static str)]> {
+        match self {
+            HookAgent::Claude => Some(CLAUDE_HOOK_EVENTS),
+            HookAgent::Codex => Some(CODEX_HOOK_EVENTS),
+            HookAgent::Gemini => Some(GEMINI_HOOK_EVENTS),
+            HookAgent::Droid => Some(DROID_HOOK_EVENTS),
+            HookAgent::Qwen => Some(QWEN_HOOK_EVENTS),
+            HookAgent::Copilot
+            | HookAgent::OpenCode
+            | HookAgent::Pi
+            | HookAgent::Grok
+            | HookAgent::OhMyPi
+            | HookAgent::Goose
+            | HookAgent::Kimi => None,
+        }
+    }
+
+    /// The events this agent's hooks merge into a shared TOML config, if that
+    /// is how it takes them — the third strategy, for the agents whose hooks
+    /// live as `[[hooks]]` entries in a config file the user also hand-edits.
+    fn toml_hook_events(self) -> Option<&'static [(&'static str, &'static str)]> {
+        match self {
+            HookAgent::Kimi => Some(KIMI_HOOK_EVENTS),
+            _ => None,
         }
     }
 
@@ -264,6 +342,11 @@ impl HookAgent {
             HookAgent::Pi => "pi",
             HookAgent::Grok => "grok",
             HookAgent::OhMyPi => "omp",
+            HookAgent::Gemini => "gemini",
+            HookAgent::Droid => "droid",
+            HookAgent::Qwen => "qwen",
+            HookAgent::Goose => "goose",
+            HookAgent::Kimi => "kimi",
         }
     }
 
@@ -276,6 +359,11 @@ impl HookAgent {
             HookAgent::Pi => "Pi",
             HookAgent::Grok => "Grok Build",
             HookAgent::OhMyPi => "Oh My Pi",
+            HookAgent::Gemini => "Gemini",
+            HookAgent::Droid => "Droid",
+            HookAgent::Qwen => "Qwen Code",
+            HookAgent::Goose => "Goose",
+            HookAgent::Kimi => "Kimi Code",
         }
     }
 
@@ -297,6 +385,16 @@ impl HookAgent {
             HookAgent::OhMyPi => {
                 target.under_home(&[".omp", "agent", "extensions", "tty7", "index.ts"])
             }
+            HookAgent::Gemini => target.under_home(&[".gemini", "settings.json"]),
+            HookAgent::Droid => target.under_home(&[".factory", "settings.json"]),
+            HookAgent::Qwen => target.under_home(&[".qwen", "settings.json"]),
+            // The Open Plugins layout, which Goose implements rather than
+            // inventing its own: any `.agents/plugins/<name>/hooks/hooks.json`
+            // is picked up at startup.
+            HookAgent::Goose => {
+                target.under_home(&[".agents", "plugins", "tty7", "hooks", "hooks.json"])
+            }
+            HookAgent::Kimi => target.kimi_config_path(),
         }
     }
 
@@ -380,6 +478,15 @@ impl<'a> HookTarget<'a> {
         self.under_home(&[".config"])
     }
 
+    fn kimi_config_path(&self) -> PathBuf {
+        if self.is_local()
+            && let Some(dir) = std::env::var_os("KIMI_CODE_HOME").filter(|d| !d.is_empty())
+        {
+            return PathBuf::from(dir).join("config.toml");
+        }
+        self.under_home(&[".kimi-code", "config.toml"])
+    }
+
     fn hook_command(&self, agent: HookAgent, event: &str) -> String {
         if let Some(exe) = self.hook_command_exe() {
             return format!("{exe} agent-hook {} {event}", agent.slug());
@@ -449,20 +556,16 @@ pub enum HooksState {
 
 pub fn hooks_state(target: &HookTarget, agent: HookAgent) -> HooksState {
     let path = agent.target_path(target);
-    match agent {
-        HookAgent::Claude => hook_map_state(target, &path, agent, CLAUDE_HOOK_EVENTS),
-        HookAgent::Codex => hook_map_state(target, &path, agent, CODEX_HOOK_EVENTS),
-        HookAgent::Copilot
-        | HookAgent::OpenCode
-        | HookAgent::Pi
-        | HookAgent::Grok
-        | HookAgent::OhMyPi => {
-            let Some(expected) = owned_file_content(target, agent) else {
-                return HooksState::NotInstalled;
-            };
-            owned_file_state(target, &path, &expected, &agent.marker())
-        }
+    if let Some(events) = agent.toml_hook_events() {
+        return toml_hooks_state(target, &path, agent, events);
     }
+    if let Some(events) = agent.hook_map_events() {
+        return hook_map_state(target, &path, agent, events);
+    }
+    let Some(expected) = owned_file_content(target, agent) else {
+        return HooksState::NotInstalled;
+    };
+    owned_file_state(target, &path, &expected, &agent.marker())
 }
 
 /// What an install or uninstall actually did.
@@ -489,43 +592,37 @@ pub enum HookOutcome {
 
 pub fn install_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<HookOutcome> {
     let path = agent.target_path(target);
-    match agent {
-        HookAgent::Claude => {
-            hook_map_install(target, &path, agent, CLAUDE_HOOK_EVENTS)?;
-            Ok(HookOutcome::Installed)
-        }
-        HookAgent::Codex => {
-            hook_map_install(target, &path, agent, CODEX_HOOK_EVENTS)?;
-            if !target.is_local() {
-                return Ok(HookOutcome::InstalledEnableCodexThere);
-            }
-            Ok(match enable_codex_hooks_feature() {
-                Ok(()) => HookOutcome::Installed,
-                Err(e) => HookOutcome::InstalledCodexEnableFailed(e.to_string()),
-            })
-        }
-        HookAgent::Copilot
-        | HookAgent::OpenCode
-        | HookAgent::Pi
-        | HookAgent::Grok
-        | HookAgent::OhMyPi => {
-            let content = owned_file_content(target, agent)
-                .ok_or_else(|| anyhow::anyhow!("{agent:?} has no owned file"))?;
-            owned_file_install(target, &path, &content, &agent.marker())?;
-            Ok(HookOutcome::Installed)
-        }
+    if let Some(events) = agent.toml_hook_events() {
+        toml_hooks_install(target, &path, agent, events)?;
+        return Ok(HookOutcome::Installed);
     }
+    if let Some(events) = agent.hook_map_events() {
+        hook_map_install(target, &path, agent, events)?;
+        if agent != HookAgent::Codex {
+            return Ok(HookOutcome::Installed);
+        }
+        if !target.is_local() {
+            return Ok(HookOutcome::InstalledEnableCodexThere);
+        }
+        return Ok(match enable_codex_hooks_feature() {
+            Ok(()) => HookOutcome::Installed,
+            Err(e) => HookOutcome::InstalledCodexEnableFailed(e.to_string()),
+        });
+    }
+    let content = owned_file_content(target, agent)
+        .ok_or_else(|| anyhow::anyhow!("{agent:?} has no owned file"))?;
+    owned_file_install(target, &path, &content, &agent.marker())?;
+    Ok(HookOutcome::Installed)
 }
 
 pub fn uninstall_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<HookOutcome> {
     let path = agent.target_path(target);
-    match agent {
-        HookAgent::Claude | HookAgent::Codex => hook_map_uninstall(target, &path, agent),
-        HookAgent::Copilot
-        | HookAgent::OpenCode
-        | HookAgent::Pi
-        | HookAgent::Grok
-        | HookAgent::OhMyPi => owned_file_uninstall(target, &path, &agent.marker()),
+    if agent.toml_hook_events().is_some() {
+        return toml_hooks_uninstall(target, &path, agent);
+    }
+    match agent.hook_map_events() {
+        Some(_) => hook_map_uninstall(target, &path, agent),
+        None => owned_file_uninstall(target, &path, &agent.marker()),
     }
 }
 
@@ -598,6 +695,64 @@ const CODEX_HOOK_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "prompt-submit"),
     ("Stop", "stop"),
+];
+
+/// Gemini names the turn boundaries after the agent rather than the user, and
+/// omitting `matcher` matches everything (`hookPlanner.ts`, `!entry.matcher`),
+/// so the bare entries [`hook_map_install`] already writes are enough.
+const GEMINI_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("BeforeAgent", "prompt-submit"),
+    ("Notification", "notification"),
+    ("AfterTool", "tool-complete"),
+    ("AfterAgent", "stop"),
+    ("SessionEnd", "session-end"),
+];
+
+const DROID_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt-submit"),
+    ("Notification", "notification"),
+    ("PostToolUse", "tool-complete"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session-end"),
+];
+
+/// Qwen is the only agent here with a first-class permission event, so it needs
+/// none of the notification sniffing in [`effective_event`] — and it gets no
+/// `Notification` hook at all, which would only muddy a status the dedicated
+/// event already reports precisely.
+const QWEN_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt-submit"),
+    ("PermissionRequest", "permission-request"),
+    ("PostToolUse", "tool-complete"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session-end"),
+];
+
+/// Kimi Code's hooks live as `[[hooks]]` entries in its main `config.toml` —
+/// the same file that holds the user's providers and models — so they go
+/// through the TOML merge strategy rather than a JSON map or an owned file.
+/// Like Qwen it has a first-class permission event, so it needs no
+/// `Notification` hook and none of the sniffing in [`effective_event`].
+///
+/// `Stop` alone does not cover every way a turn ends here: Kimi's own event
+/// reference says `Stop` "does not fire on interrupts, so this event fires
+/// instead" of `Interrupt`, and a turn that dies on an error reports
+/// `StopFailure`. Without those two an <kbd>Esc</kbd> or a failed turn would
+/// leave the pane on "working" forever and `tty7 wait` would only ever time
+/// out, so both report the same end-of-turn as `Stop` does. All three are
+/// observation-only events, and a doubled `stop` is idempotent.
+const KIMI_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt-submit"),
+    ("PermissionRequest", "permission-request"),
+    ("PostToolUse", "tool-complete"),
+    ("Stop", "stop"),
+    ("Interrupt", "stop"),
+    ("StopFailure", "stop"),
+    ("SessionEnd", "session-end"),
 ];
 
 const GROK_HOOK_TIMEOUT_SECS: u32 = 10;
@@ -753,6 +908,145 @@ fn marker_command<'a>(matcher: &'a serde_json::Value, marker: &str) -> Option<&'
         })
 }
 
+fn toml_hooks_state(
+    target: &HookTarget,
+    path: &Path,
+    agent: HookAgent,
+    events: &[(&str, &str)],
+) -> HooksState {
+    let Ok(text) = target.read(path) else {
+        return HooksState::NotInstalled;
+    };
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return HooksState::NotInstalled;
+    };
+    let marker = agent.marker();
+    let marked: Vec<&toml_edit::Table> = doc
+        .get("hooks")
+        .and_then(|h| h.as_array_of_tables())
+        .into_iter()
+        .flatten()
+        .filter(|entry| toml_command_is_marked(entry, &marker))
+        .collect();
+    if marked.is_empty() {
+        return HooksState::NotInstalled;
+    }
+    // Every marked entry counts towards the total, `event` or no `event`: a
+    // hand-edit that drops the key leaves an entry that is ours and is broken,
+    // which is exactly what Outdated means. Reporting NotInstalled instead
+    // would hide it from `refresh_hooks`, which only ever revisits Outdated.
+    let complete = marked.len() == events.len()
+        && events.iter().all(|(hook_event, tty7_event)| {
+            let command = target.hook_command(agent, tty7_event);
+            marked.iter().any(|entry| {
+                entry.get("event").and_then(|e| e.as_str()) == Some(*hook_event)
+                    && entry.get("command").and_then(|c| c.as_str()) == Some(command.as_str())
+            })
+        });
+    if complete {
+        HooksState::Installed
+    } else {
+        HooksState::Outdated
+    }
+}
+
+fn toml_hooks_install(
+    target: &HookTarget,
+    path: &Path,
+    agent: HookAgent,
+    events: &[(&str, &str)],
+) -> anyhow::Result<()> {
+    let mut doc: toml_edit::DocumentMut = match target.read(path) {
+        Ok(text) => text.parse().map_err(|e| {
+            anyhow::anyhow!(
+                "{} is not valid TOML ({e}); not touching it",
+                path.display()
+            )
+        })?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => toml_edit::DocumentMut::new(),
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", path.display())),
+    };
+
+    // `hooks = []` and no `hooks` key at all say the same thing, but toml_edit
+    // keeps an empty inline array and an array of tables apart. Promote the
+    // one to the other rather than refusing over a difference that carries no
+    // configuration and that the user cannot see.
+    if doc
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .is_some_and(|a| a.is_empty())
+    {
+        doc.remove("hooks");
+    }
+
+    let hooks = doc.entry("hooks").or_insert(toml_edit::Item::ArrayOfTables(
+        toml_edit::ArrayOfTables::new(),
+    ));
+    let Some(list) = hooks.as_array_of_tables_mut() else {
+        return Err(anyhow::anyhow!(
+            "\"hooks\" in {} is not an array of tables; not touching it",
+            path.display()
+        ));
+    };
+
+    let marker = agent.marker();
+    list.retain(|entry| !toml_command_is_marked(entry, &marker));
+    for (hook_event, tty7_event) in events {
+        let mut entry = toml_edit::Table::new();
+        entry["event"] = toml_edit::value(*hook_event);
+        entry["command"] = toml_edit::value(target.hook_command(agent, tty7_event));
+        list.push(entry);
+    }
+
+    target.write(path, doc.to_string().as_bytes())
+}
+
+fn toml_hooks_uninstall(
+    target: &HookTarget,
+    path: &Path,
+    agent: HookAgent,
+) -> anyhow::Result<HookOutcome> {
+    let text = match target.read(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(HookOutcome::NothingInstalled);
+        }
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", path.display())),
+    };
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "{} is not valid TOML ({e}); not touching it",
+            path.display()
+        )
+    })?;
+
+    let marker = agent.marker();
+    let mut removed = 0;
+    if let Some(list) = doc
+        .get_mut("hooks")
+        .and_then(|h| h.as_array_of_tables_mut())
+    {
+        let before = list.len();
+        list.retain(|entry| !toml_command_is_marked(entry, &marker));
+        removed = before - list.len();
+        if list.is_empty() {
+            doc.remove("hooks");
+        }
+    }
+    if removed == 0 {
+        return Ok(HookOutcome::NoTty7Hooks);
+    }
+    target.write(path, doc.to_string().as_bytes())?;
+    Ok(HookOutcome::Removed)
+}
+
+fn toml_command_is_marked(entry: &toml_edit::Table, marker: &str) -> bool {
+    entry
+        .get("command")
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| c.contains(marker))
+}
+
 /// Returns the bare file name of `exe` when resolving that name from PATH
 /// yields the same binary. Returns `None` when the name does not resolve, or
 /// when an earlier PATH entry contains a different file with the same name
@@ -809,7 +1103,13 @@ fn owned_file_content(target: &HookTarget, agent: HookAgent) -> Option<String> {
         HookAgent::OpenCode => opencode_plugin_js(target),
         HookAgent::Pi | HookAgent::OhMyPi => pi_extension_ts(target, agent),
         HookAgent::Grok => grok_hooks_json(target),
-        HookAgent::Claude | HookAgent::Codex => None,
+        HookAgent::Goose => goose_hooks_json(target),
+        HookAgent::Claude
+        | HookAgent::Codex
+        | HookAgent::Gemini
+        | HookAgent::Droid
+        | HookAgent::Qwen
+        | HookAgent::Kimi => None,
     }
 }
 
@@ -862,10 +1162,26 @@ fn owned_file_uninstall(
         ));
     }
     target.host.remove(path, false)?;
-    if let Some(parent) = path.parent()
-        && parent.file_name().is_some_and(|n| n == "tty7")
-    {
-        let _ = target.host.remove(parent, false);
+    // Take the directories tty7 generated with it, innermost first, stopping at
+    // the one named after tty7. `remove` is not recursive, so a directory still
+    // holding someone else's file simply survives the attempt. Goose nests one
+    // level deeper than the rest (`.../tty7/hooks/hooks.json`), which is why
+    // this walks rather than checking a single parent.
+    let mut dir = path.parent();
+    while let Some(d) = dir {
+        if d.file_name().is_some_and(|n| n == "tty7") {
+            let _ = target.host.remove(d, false);
+            break;
+        }
+        if !d
+            .parent()
+            .and_then(|p| p.file_name())
+            .is_some_and(|n| n == "tty7")
+        {
+            break;
+        }
+        let _ = target.host.remove(d, false);
+        dir = d.parent();
     }
     Ok(HookOutcome::Removed)
 }
@@ -905,6 +1221,33 @@ fn grok_hooks_json(target: &HookTarget) -> Option<String> {
             group["matcher"] = serde_json::Value::String((*matcher).to_string());
         }
         hooks.insert((*event).to_string(), serde_json::json!([group]));
+    }
+    serde_json::to_string_pretty(&serde_json::json!({ "hooks": hooks })).ok()
+}
+
+/// Goose has no permission hook — `PreToolUse` fires on every call, approved or
+/// not, so there is nothing here that could report a blocked turn. The four
+/// events it does have still carry the pane from idle to working to done.
+const GOOSE_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt-submit"),
+    ("PostToolUse", "tool-complete"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session-end"),
+];
+
+fn goose_hooks_json(target: &HookTarget) -> Option<String> {
+    let mut hooks = serde_json::Map::new();
+    for (event, sentinel) in GOOSE_HOOK_EVENTS {
+        hooks.insert(
+            (*event).to_string(),
+            serde_json::json!([{
+                "hooks": [{
+                    "type": "command",
+                    "command": target.hook_command(HookAgent::Goose, sentinel),
+                }]
+            }]),
+        );
     }
     serde_json::to_string_pretty(&serde_json::json!({ "hooks": hooks })).ok()
 }
@@ -1106,6 +1449,80 @@ mod tests {
         assert_eq!(ev.cwd.as_deref(), Some(std::path::Path::new("/w")));
     }
 
+    /// Parses a built sequence back the way the terminal's scanner does.
+    fn round_trip(
+        agent: &str,
+        event: &str,
+        stdin_json: &str,
+    ) -> crate::core::cli_agent::AgentEvent {
+        let seq = build_hook_sequence(agent, event, stdin_json);
+        crate::core::cli_agent::parse_agent_event(&seq[2..seq.len() - 1]).expect("parses")
+    }
+
+    #[test]
+    fn a_submitted_prompt_rides_back_as_the_turns_label() {
+        let ev = round_trip(
+            "claude",
+            "prompt-submit",
+            r#"{"prompt":"restore the outline","session_id":"s-1"}"#,
+        );
+        assert_eq!(ev.prompt.as_deref(), Some("restore the outline"));
+        assert_eq!(
+            ev.message, None,
+            "a prompt is not a message; the turn starts with nothing said back"
+        );
+    }
+
+    #[test]
+    fn a_prompt_is_cut_to_its_first_line() {
+        let ev = round_trip(
+            "claude",
+            "prompt-submit",
+            r#"{"prompt":"\n\n  what did we decide  \nand then some more\nand more"}"#,
+        );
+        assert_eq!(
+            ev.prompt.as_deref(),
+            Some("what did we decide"),
+            "later lines wrapped when they were drawn and would only fail the search"
+        );
+    }
+
+    #[test]
+    fn a_pasted_file_cannot_cost_the_whole_event() {
+        let prompt = "x".repeat(64 * 1024);
+        let ev = round_trip(
+            "claude",
+            "prompt-submit",
+            &serde_json::json!({ "prompt": prompt }).to_string(),
+        );
+        assert_eq!(
+            ev.prompt.map(|p| p.chars().count()),
+            Some(PROMPT_LABEL_MAX),
+            "the tokenizer abandons an oversized payload rather than truncating it"
+        );
+    }
+
+    #[test]
+    fn a_prompt_of_wide_characters_is_cut_on_a_character_boundary() {
+        let prompt = "把大纲恢复一下".repeat(100);
+        let ev = round_trip(
+            "claude",
+            "prompt-submit",
+            &serde_json::json!({ "prompt": prompt }).to_string(),
+        );
+        assert_eq!(ev.prompt.map(|p| p.chars().count()), Some(PROMPT_LABEL_MAX));
+    }
+
+    #[test]
+    fn an_agent_that_reports_no_prompt_carries_none() {
+        assert_eq!(round_trip("codex", "stop", "{}").prompt, None);
+        assert_eq!(
+            round_trip("claude", "prompt-submit", r#"{"prompt":"   "}"#).prompt,
+            None,
+            "whitespace is not a label"
+        );
+    }
+
     #[test]
     fn grok_run_hooks_are_relabeled_to_grok() {
         assert_eq!(effective_agent("claude", true), "grok");
@@ -1121,6 +1538,11 @@ mod tests {
         let mut events: Vec<&str> = CLAUDE_HOOK_EVENTS
             .iter()
             .chain(CODEX_HOOK_EVENTS)
+            .chain(GEMINI_HOOK_EVENTS)
+            .chain(DROID_HOOK_EVENTS)
+            .chain(QWEN_HOOK_EVENTS)
+            .chain(GOOSE_HOOK_EVENTS)
+            .chain(KIMI_HOOK_EVENTS)
             .map(|(_, e)| *e)
             .chain(GROK_HOOK_EVENTS.iter().map(|(_, e, _)| *e))
             .collect();
@@ -1138,6 +1560,141 @@ mod tests {
             let kind_json = serde_json::to_value(ev.kind).unwrap();
             assert_eq!(kind_json, serde_json::Value::String(event.to_string()));
         }
+    }
+
+    #[test]
+    fn the_new_hook_agents_target_the_paths_their_clis_read() {
+        let host = FakeRemote::shared();
+        let t = HookTarget::remote(&*host, PathBuf::from("/home/me"));
+
+        for (agent, want) in [
+            (HookAgent::Gemini, "/home/me/.gemini/settings.json"),
+            (HookAgent::Droid, "/home/me/.factory/settings.json"),
+            (HookAgent::Qwen, "/home/me/.qwen/settings.json"),
+            (
+                HookAgent::Goose,
+                "/home/me/.agents/plugins/tty7/hooks/hooks.json",
+            ),
+            (HookAgent::Kimi, "/home/me/.kimi-code/config.toml"),
+        ] {
+            assert_eq!(
+                agent.target_path(&t),
+                PathBuf::from(want),
+                "{} writes somewhere its CLI does not read",
+                agent.slug()
+            );
+        }
+
+        let dir = std::env::temp_dir().join(format!("tty7-new-hooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = HookTarget::remote(&*host, dir.clone());
+
+        for agent in [
+            HookAgent::Gemini,
+            HookAgent::Droid,
+            HookAgent::Qwen,
+            HookAgent::Goose,
+            HookAgent::Kimi,
+        ] {
+            assert_eq!(hooks_state(&real, agent), HooksState::NotInstalled);
+            install_hooks(&real, agent).unwrap_or_else(|e| panic!("{}: {e}", agent.slug()));
+            assert_eq!(
+                hooks_state(&real, agent),
+                HooksState::Installed,
+                "{} does not read back what it wrote",
+                agent.slug()
+            );
+            let written = std::fs::read_to_string(agent.target_path(&real)).unwrap();
+            assert!(
+                written.contains(&format!("agent-hook {}", agent.slug())),
+                "{} wrote a config without its own emitter",
+                agent.slug()
+            );
+            uninstall_hooks(&real, agent).unwrap_or_else(|e| panic!("{}: {e}", agent.slug()));
+            assert_eq!(hooks_state(&real, agent), HooksState::NotInstalled);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Qwen is the one agent that reports a blocked turn outright, so it must
+    /// not also carry the `Notification` hook the others need — that event fires
+    /// for non-blocking alerts too and would strand the pane on "waiting".
+    #[test]
+    fn qwen_reports_permission_requests_natively() {
+        assert!(
+            QWEN_HOOK_EVENTS
+                .iter()
+                .any(|(hook, tty7)| *hook == "PermissionRequest" && *tty7 == "permission-request")
+        );
+        assert!(
+            !QWEN_HOOK_EVENTS
+                .iter()
+                .any(|(hook, _)| *hook == "Notification")
+        );
+        assert_eq!(
+            effective_event("qwen", "permission-request", "{}"),
+            Some("permission-request")
+        );
+    }
+
+    #[test]
+    fn gemini_and_droid_notifications_filter_to_permission_requests() {
+        assert_eq!(
+            effective_event(
+                "gemini",
+                "notification",
+                r#"{"notification_type":"ToolPermission"}"#
+            ),
+            Some("permission-request")
+        );
+        assert_eq!(
+            effective_event(
+                "droid",
+                "notification",
+                r#"{"notification_type":"permission_prompt"}"#
+            ),
+            Some("permission-request")
+        );
+        // A non-blocking alert must not strand the pane on "waiting".
+        for agent in ["gemini", "droid"] {
+            assert_eq!(
+                effective_event(
+                    agent,
+                    "notification",
+                    r#"{"notification_type":"auth_success"}"#
+                ),
+                None,
+                "{agent} reported an idle notification as a block"
+            );
+        }
+    }
+
+    #[test]
+    fn uninstalling_goose_takes_its_generated_plugin_dirs_with_it() {
+        let root = std::env::temp_dir().join(format!("tty7-goose-test-{}", std::process::id()));
+        let plugins = root.join("plugins");
+        let plugin = plugins.join("tty7");
+        let hooks_dir = plugin.join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let path = hooks_dir.join("hooks.json");
+
+        let host = local_host();
+        let t = HookTarget::local(&*host).expect("home resolves in tests");
+        let content = goose_hooks_json(&t).expect("goose content builds");
+        assert!(content.contains("agent-hook goose"));
+        let marker = "agent-hook goose";
+
+        owned_file_install(&t, &path, &content, marker).expect("install");
+        owned_file_uninstall(&t, &path, marker).expect("uninstall");
+
+        assert!(!path.exists());
+        assert!(!hooks_dir.exists(), "the generated hooks/ dir goes too");
+        assert!(!plugin.exists(), "and the tty7 plugin dir above it");
+        assert!(plugins.exists(), "but never the shared plugins/ dir");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1316,6 +1873,7 @@ mod tests {
                 HookAgent::OhMyPi,
                 "/home/me/.omp/agent/extensions/tty7/index.ts",
             ),
+            (HookAgent::Kimi, "/home/me/.kimi-code/config.toml"),
         ] {
             assert_eq!(
                 agent.target_path(&target),
@@ -1629,5 +2187,297 @@ mod tests {
 
         unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Kimi's hooks share `config.toml` with the user's providers and models,
+    /// so the merge must leave everything that is not ours — including
+    /// comments and formatting — byte-for-byte alone.
+    #[test]
+    fn kimi_install_preserves_the_user_s_config_toml() {
+        let dir = std::env::temp_dir().join(format!("tty7-kimi-hooks-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.toml");
+        let user_half = concat!(
+            "# my providers\n",
+            "default_model = \"kimi-k2\"\n",
+            "\n",
+            "[[hooks]]\n",
+            "event = \"Stop\"\n",
+            "command = \"afplay ding.aiff\"\n",
+        );
+        std::fs::write(&config, user_half).unwrap();
+        unsafe { std::env::set_var("KIMI_CODE_HOME", &dir) };
+
+        let host = local_host();
+        let t = HookTarget::local(&*host).expect("home resolves in tests");
+        assert_eq!(HookAgent::Kimi.target_path(&t), config);
+
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::NotInstalled);
+        install_hooks(&t, HookAgent::Kimi).expect("install succeeds");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Installed);
+        install_hooks(&t, HookAgent::Kimi).expect("re-install succeeds");
+
+        let written = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            written.starts_with(user_half),
+            "the user's half of config.toml — comment included — survives untouched"
+        );
+        let doc: toml_edit::DocumentMut = written.parse().expect("still valid TOML");
+        let hooks = doc["hooks"].as_array_of_tables().unwrap();
+        assert_eq!(
+            hooks
+                .iter()
+                .filter(|e| toml_command_is_marked(e, "agent-hook kimi"))
+                .count(),
+            KIMI_HOOK_EVENTS.len(),
+            "exactly one tty7 entry per event after two installs"
+        );
+        for (event, _) in KIMI_HOOK_EVENTS {
+            assert!(
+                hooks.iter().any(|e| {
+                    toml_command_is_marked(e, "agent-hook kimi")
+                        && e.get("event").and_then(|v| v.as_str()) == Some(*event)
+                }),
+                "{event} carries the tty7 hook"
+            );
+        }
+
+        let healthy = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(
+            &config,
+            healthy.replace("agent-hook kimi stop", "agent-hook kimi stop --stale"),
+        )
+        .unwrap();
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Outdated);
+        install_hooks(&t, HookAgent::Kimi).expect("reinstall over an outdated entry succeeds");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Installed);
+
+        uninstall_hooks(&t, HookAgent::Kimi).expect("uninstall succeeds");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::NotInstalled);
+        let after = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            after.contains("afplay ding.aiff"),
+            "the user's own Stop hook survives uninstall"
+        );
+        assert!(!after.contains("agent-hook kimi"));
+        uninstall_hooks(&t, HookAgent::Kimi).expect("uninstall is idempotent");
+
+        std::fs::write(&config, "not = valid = toml").unwrap();
+        assert!(
+            install_hooks(&t, HookAgent::Kimi).is_err(),
+            "a config.toml that does not parse is left alone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "not = valid = toml",
+            "and is not rewritten on the way out"
+        );
+        assert!(
+            uninstall_hooks(&t, HookAgent::Kimi).is_err(),
+            "uninstall refuses the same file"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "not = valid = toml"
+        );
+
+        unsafe { std::env::remove_var("KIMI_CODE_HOME") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `config.toml` that parses but spells `hooks` as something other than
+    /// an array of tables is a file we do not understand. Every one of these
+    /// must come back as a refusal with the file untouched — the one thing
+    /// that must never happen to the file holding the user's API keys is a
+    /// silent rewrite.
+    #[test]
+    fn kimi_refuses_a_hooks_key_of_the_wrong_toml_type() {
+        let host = FakeRemote::shared();
+        let base = std::env::temp_dir().join(format!("tty7-kimi-shapes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        for (name, text) in [
+            ("a_string", "hooks = \"nope\"\n"),
+            ("a_table", "[hooks]\nfoo = 1\n"),
+            (
+                "an_inline_array",
+                "hooks = [{ event = \"Stop\", command = \"afplay a.aiff\" }]\n",
+            ),
+        ] {
+            let home = base.join(name);
+            let t = HookTarget::remote(&*host, home.clone());
+            let config = HookAgent::Kimi.target_path(&t);
+            std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+            std::fs::write(&config, text).unwrap();
+
+            assert_eq!(
+                hooks_state(&t, HookAgent::Kimi),
+                HooksState::NotInstalled,
+                "{name}: nothing of ours is in there"
+            );
+            assert!(
+                install_hooks(&t, HookAgent::Kimi).is_err(),
+                "{name}: install refuses"
+            );
+            assert_eq!(
+                uninstall_hooks(&t, HookAgent::Kimi).unwrap(),
+                HookOutcome::NoTty7Hooks,
+                "{name}: uninstall finds nothing of ours"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&config).unwrap(),
+                text,
+                "{name}: the file is byte-for-byte what it was"
+            );
+        }
+
+        // `hooks = []` is the one shape that carries no configuration at all,
+        // so it is promoted instead of refused.
+        let home = base.join("an_empty_array");
+        let t = HookTarget::remote(&*host, home.clone());
+        let config = HookAgent::Kimi.target_path(&t);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "model = \"k2\"\nhooks = []\n").unwrap();
+        install_hooks(&t, HookAgent::Kimi).expect("an empty inline array is promoted, not refused");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Installed);
+        let written = std::fs::read_to_string(&config).unwrap();
+        assert!(written.starts_with("model = \"k2\"\n"), "{written}");
+        assert!(!written.contains("hooks = []"), "{written}");
+        assert_eq!(
+            uninstall_hooks(&t, HookAgent::Kimi).unwrap(),
+            HookOutcome::Removed
+        );
+        assert!(
+            !std::fs::read_to_string(&config).unwrap().contains("hooks"),
+            "the key goes when the last entry in it does"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The rest of the TOML merge contract: a file that does not exist yet, a
+    /// second install that changes nothing, entries a hand-edit has mangled,
+    /// and an uninstall that has to thread its removals between the user's own
+    /// entries and the tables that follow them.
+    #[test]
+    fn kimi_toml_merge_holds_up_across_the_awkward_shapes() {
+        let host = FakeRemote::shared();
+        let base = std::env::temp_dir().join(format!("tty7-kimi-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let marker = "agent-hook kimi";
+
+        // Nothing there at all: install creates the directory and the file.
+        let t = HookTarget::remote(&*host, base.join("fresh"));
+        let config = HookAgent::Kimi.target_path(&t);
+        assert!(!config.exists());
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::NotInstalled);
+        assert_eq!(
+            uninstall_hooks(&t, HookAgent::Kimi).unwrap(),
+            HookOutcome::NothingInstalled,
+            "there is no file to take anything out of"
+        );
+        install_hooks(&t, HookAgent::Kimi).expect("install writes a fresh config.toml");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Installed);
+        let once = std::fs::read_to_string(&config).unwrap();
+        install_hooks(&t, HookAgent::Kimi).expect("re-install succeeds");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            once,
+            "a second install is byte-for-byte the first — no churn, no growth"
+        );
+
+        // A hand-edit that drops `event` leaves an entry that is ours and is
+        // broken. That is Outdated, not NotInstalled: `refresh_hooks` only
+        // ever revisits Outdated, so anything else hides the damage.
+        let mangled = once.replacen("event = \"SessionStart\"\n", "", 1);
+        assert_ne!(mangled, once);
+        std::fs::write(&config, &mangled).unwrap();
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Outdated);
+        install_hooks(&t, HookAgent::Kimi).expect("install repairs it");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Installed);
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), once);
+
+        // One marked entry too many is Outdated too, and install prunes it.
+        // This one has no `event` at all, so counting only the entries that
+        // still name one would find the full roster and call it Installed
+        // while a broken ninth entry sat there.
+        let mut extra = std::fs::read_to_string(&config).unwrap();
+        extra.push_str("\n[[hooks]]\ncommand = \"tty7 agent-hook kimi stop\"\n");
+        std::fs::write(&config, &extra).unwrap();
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Outdated);
+        install_hooks(&t, HookAgent::Kimi).expect("install prunes the stray");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Installed);
+        let doc: toml_edit::DocumentMut =
+            std::fs::read_to_string(&config).unwrap().parse().unwrap();
+        assert_eq!(
+            doc["hooks"]
+                .as_array_of_tables()
+                .unwrap()
+                .iter()
+                .filter(|e| toml_command_is_marked(e, marker))
+                .count(),
+            KIMI_HOOK_EVENTS.len()
+        );
+
+        // The user's own entry comes first and another table follows ours:
+        // uninstall has to take out the middle and leave both ends alone.
+        let t = HookTarget::remote(&*host, base.join("sandwich"));
+        let config = HookAgent::Kimi.target_path(&t);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let user_half = concat!(
+            "# mine\n",
+            "[[hooks]]\n",
+            "event = \"Stop\"\n",
+            "command = \"afplay a.aiff\"  # ding\n",
+            "\n",
+            "[providers.moonshot]\n",
+            "api_key = \"secret\"\n",
+        );
+        std::fs::write(&config, user_half).unwrap();
+        install_hooks(&t, HookAgent::Kimi).expect("install");
+        assert_eq!(hooks_state(&t, HookAgent::Kimi), HooksState::Installed);
+        let merged = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            merged.starts_with(
+                "# mine\n[[hooks]]\nevent = \"Stop\"\ncommand = \"afplay a.aiff\"  # ding\n"
+            ),
+            "the user's entry and its trailing comment come through verbatim:\n{merged}"
+        );
+        assert!(merged.contains("[providers.moonshot]\napi_key = \"secret\"\n"));
+        assert_eq!(
+            uninstall_hooks(&t, HookAgent::Kimi).unwrap(),
+            HookOutcome::Removed
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            user_half,
+            "uninstall puts the file back exactly as the user left it"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Kimi's `Stop` does not fire when the user interrupts a turn or when one
+    /// dies on an error, so the pane would sit on "working" forever without
+    /// the two events that do.
+    #[test]
+    fn kimi_reports_every_way_a_turn_ends() {
+        for event in ["Stop", "Interrupt", "StopFailure"] {
+            assert_eq!(
+                KIMI_HOOK_EVENTS
+                    .iter()
+                    .find(|(hook_event, _)| *hook_event == event)
+                    .map(|(_, tty7_event)| *tty7_event),
+                Some("stop"),
+                "{event} has to end the turn like Stop does"
+            );
+        }
+        assert!(
+            !KIMI_HOOK_EVENTS
+                .iter()
+                .any(|(hook_event, _)| *hook_event == "Notification"),
+            "Notification fires for background-task chatter and would strand the pane on waiting"
+        );
     }
 }

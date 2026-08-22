@@ -1,6 +1,7 @@
 use gpui::{
     AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Bounds, Global, Styled as _,
-    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowOptions, point, px, size,
+    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, point, px,
+    size,
 };
 use gpui_component::{Root, TitleBar};
 
@@ -708,6 +709,12 @@ fn window_options(cx: &mut App, workspace: Option<WorkspaceId>) -> WindowOptions
             traffic_light_position: Some(crate::ui::theme::traffic_light_position()),
             ..TitleBar::title_bar_options()
         }),
+        // The title bar above is tty7's own, so the compositor must not add a
+        // second one: left unset, gpui asks Wayland for server-side
+        // decorations (#679). Only the Linux backends read this — macOS and
+        // Windows ignore the request — and X11 falls back to the window
+        // manager's frame on its own when no compositor is running.
+        window_decorations: Some(WindowDecorations::Client),
         window_background: crate::ui::theme::background_appearance(cx),
         window_min_size: Some(size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
         ..Default::default()
@@ -811,6 +818,25 @@ mod tests {
         let b = bounds_at(100., 100.);
         assert_eq!(cascade(b, 5).origin, b.origin);
         assert_eq!(cascade(b, 6).origin, cascade(b, 1).origin);
+    }
+
+    #[gpui::test]
+    fn a_window_asks_the_compositor_for_client_side_decorations(cx: &mut gpui::TestAppContext) {
+        // #679: tty7 draws its own title bar, so the request must say so —
+        // gpui's default asks Wayland for a server-side frame on top of it.
+        cx.update(|cx| {
+            WindowRegistry::init(cx);
+            let mut config = Config::default();
+            config.remember_window_size = false;
+            cx.set_global(config);
+
+            let options = window_options(cx, None);
+            assert_eq!(options.window_decorations, Some(WindowDecorations::Client));
+            assert!(
+                options.titlebar.is_some_and(|t| t.appears_transparent),
+                "the in-app title bar is what the client-side request stands in for"
+            );
+        });
     }
 
     #[gpui::test]

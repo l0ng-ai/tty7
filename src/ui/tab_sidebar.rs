@@ -120,8 +120,18 @@ impl Tty7App {
         crate::ui::app::side_panel_max(
             window.viewport_size().width.as_f32(),
             MIN_SIDEBAR_WIDTH,
-            self.right_panel_floor(cx),
+            self.right_panel_floor(cx) + self.document_floor(cx),
         )
+    }
+
+    /// How wide the sidebar is drawn, given the live cell and the cap the rest
+    /// of the window leaves it. Read here rather than clamped at each caller so
+    /// the document column's budget and the sidebar itself can never disagree
+    /// about how much width is already spoken for.
+    pub(crate) fn sidebar_px(&self, window: &Window, cx: &gpui::App) -> f32 {
+        self.sidebar_width
+            .get()
+            .clamp(MIN_SIDEBAR_WIDTH, self.sidebar_max_px(window, cx))
     }
 
     pub(crate) fn tab_sidebar(
@@ -132,8 +142,7 @@ impl Tty7App {
         let active = self.active;
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let show_badges = self.mod_hint_badges;
-        let max_width = self.sidebar_max_px(window, cx);
-        let width = self.sidebar_width.get().clamp(MIN_SIDEBAR_WIDTH, max_width);
+        let width = self.sidebar_px(window, cx);
         let query = self.sidebar_search.read(cx).value().trim().to_lowercase();
         // Blanked here, written again from paint: a row filtered out by the
         // search — or hidden with its collapsed group — must leave no rectangle
@@ -148,6 +157,7 @@ impl Tty7App {
             .track_scroll(&self.sidebar_scroll)
             .flex_1()
             .min_h_0()
+            .w_full()
             .overflow_y_scroll()
             .px_1()
             .py_1p5()
@@ -992,13 +1002,17 @@ impl Tty7App {
                 ),
             );
         // The tile inside asks for `w_full`, and a percentage is only a width
-        // while every box above it has one. This row had none of its own — it
-        // borrowed the column's by cross-axis stretch — so on any pass that
-        // sizes the column from its content the chain resolves against nothing
-        // and the tile falls back to hugging the workspace name. Declaring the
-        // width here anchors it to the rail, which is a fixed `w(px(width))`.
+        // while some box above it has a real one. This row used to have none of
+        // its own and borrowed the column's by cross-axis stretch, which did not
+        // always hold; `w_full` here swapped that for a second percentage, and a
+        // row whose width is `Percent` is no longer `auto`, so it lost stretch
+        // as well — on the passes that size the column from its content there
+        // was still nothing to resolve against and the tile fell back to hugging
+        // the workspace name. Hand the row real pixels: the rail is
+        // `w(px(width))` and layout is border-box, so its content is one pixel
+        // narrower than that because of the right border.
         let workspace_head = h_flex()
-            .w_full()
+            .w(px(width - 1.))
             .flex_shrink_0()
             .px(px(crate::ui::app::CONTENT_INSET - 7.))
             .pt(px(4.))
@@ -1037,7 +1051,7 @@ impl Tty7App {
         // below only ever sees a `Window`, and the cap it clamps against has to
         // be the same one the layout applies or the sidebar springs back from
         // wherever it was dropped.
-        let panel_floor = self.right_panel_floor(cx);
+        let others_floor = self.right_panel_floor(cx) + self.document_floor(cx);
         let backing = canvas(
             {
                 let container = container.clone();
@@ -1063,7 +1077,7 @@ impl Tty7App {
                             let max = crate::ui::app::side_panel_max(
                                 window.viewport_size().width.as_f32(),
                                 MIN_SIDEBAR_WIDTH,
-                                panel_floor,
+                                others_floor,
                             );
                             width_cell.set(raw.clamp(MIN_SIDEBAR_WIDTH, max));
                             window.refresh();
@@ -1130,8 +1144,17 @@ impl Tty7App {
             .border_color(cx.theme().sidebar_border)
             .child(backing)
             .child(
+                // Real pixels, not `size_full`: the rail's own width is a
+                // definite `px`, but a percentage off it is still a percentage,
+                // and on the passes that size this column from its content it
+                // resolves against nothing. Everything below asks for `w_full`
+                // — the tab rows, their group blocks, the scroll area — so one
+                // unresolved link here collapsed the whole chain and every row
+                // fell back to hugging the longest tab name. Border-box takes
+                // the rail's 1px right border off the content width.
                 v_flex()
-                    .size_full()
+                    .w(px(width - 1.))
+                    .h_full()
                     .child(crate::ui::app::title_bar_drag(
                         controls.id("sidebar-titlebar-drag"),
                         "sidebar-titlebar-drag",

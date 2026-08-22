@@ -9,12 +9,14 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, Position, TabSize};
+use gpui_component::menu::ContextMenuExt as _;
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 
 use crate::ui::app::Tty7App;
-use crate::ui::host_ops::{HostOps, MTime, SharedHost, WatchSub};
+use crate::ui::document_column::DocumentChrome;
+use crate::ui::host_ops::{HostId, HostOps, MTime, SharedHost, WatchSub};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -23,6 +25,12 @@ const RELOAD_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(20
 
 pub(crate) struct OpenFile {
     pub(crate) path: PathBuf,
+    /// The machine `path` lives on, held rather than looked up. Saves,
+    /// reloads and duplicate detection all key on its id — an SFTP file and a
+    /// local file can share the string `/etc/hosts` without being the same
+    /// file — and saving goes straight through this handle, so a buffer stays
+    /// saveable however the window's own machine has changed underneath it.
+    pub(crate) host: SharedHost,
     pub(crate) input: Entity<InputState>,
     pub(crate) dirty: bool,
     disk_mtime: Option<MTime>,
@@ -286,11 +294,24 @@ impl Tty7App {
     }
 
     fn editor_rebuild_watcher(&mut self, cx: &mut Context<Self>) {
+        // Only files on the host the watch itself runs on. A path from
+        // another machine — an SFTP file, say — does not exist under that
+        // watcher's feet, and would either miss or, worse, match a local file
+        // that happens to share its name.
+        //
+        // A host that cannot watch therefore gets no external-change
+        // detection at all: an SFTP buffer will not notice the file changing
+        // underneath it, and saving overwrites whatever is there. Catching
+        // that at save time needs a "keep mine" that survives to the next
+        // save, which the conflict banner does not have yet.
+        let watch_host = self.spawn_host(cx);
         let files: HashSet<PathBuf> = self
             .tabs
             .iter()
             .filter_map(|t| t.code.as_deref())
-            .flat_map(|c| c.files.iter().map(|f| f.path.clone()))
+            .flat_map(|c| c.files.iter())
+            .filter(|f| f.host.id() == watch_host)
+            .map(|f| f.path.clone())
             .collect();
         let dirs: HashSet<PathBuf> = files
             .iter()
@@ -431,6 +452,7 @@ impl Tty7App {
     /// than throwing the cursor somewhere it was never meant to go.
     fn apply_pending_cursor(
         &mut self,
+        host: HostId,
         requested: &Path,
         opened: &Path,
         window: &mut Window,
@@ -449,10 +471,11 @@ impl Tty7App {
         let Some((_, line, column)) = self.editor.pending_cursor.take() else {
             return;
         };
-        let Some(file) = self
-            .tab_code()
-            .and_then(|c| c.files.iter().find(|f| f.path == *opened))
-        else {
+        let Some(file) = self.tab_code().and_then(|c| {
+            c.files
+                .iter()
+                .find(|f| f.host.id() == host && f.path == *opened)
+        }) else {
             return;
         };
         let input = file.input.clone();
@@ -471,20 +494,33 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(host) = self.active_host(cx) else {
+            return;
+        };
+        self.editor_open_on_host(host, path, window, cx);
+    }
+
+    /// [`Self::open_file_in_editor`] against an explicit host — the SFTP
+    /// browser's files live on a host that is never the active one.
+    pub(crate) fn editor_open_on_host(
+        &mut self,
+        host: SharedHost,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.tabs.get(self.active).is_none() {
             return;
         }
         self.raise_code_overlay();
-        if self.editor_activate_open(path, window, cx) {
+        if self.editor_activate_open(host.id(), path, window, cx) {
             return;
         }
-        let Some(host) = self.active_host(cx) else {
-            return;
-        };
+        let host_id = host.id();
         let p = path.to_path_buf();
         let requested = p.clone();
         HostOps::run_in(
-            host,
+            host.clone(),
             window,
             cx,
             move |h| -> Result<(PathBuf, String, Option<MTime>), String> {
@@ -538,11 +574,11 @@ impl Tty7App {
             },
             move |app, opened, window, cx| match opened {
                 Ok((path, text, mtime)) => {
-                    app.editor_install_file(path.clone(), text, mtime, window, cx);
+                    app.editor_install_file(host, path.clone(), text, mtime, window, cx);
                     // Against `requested`, not `path`: the host canonicalised
                     // it on the way through, and a link that named a symlink
                     // would otherwise lose the line it asked for.
-                    app.apply_pending_cursor(&requested, &path, window, cx);
+                    app.apply_pending_cursor(host_id, &requested, &path, window, cx);
                 }
                 Err(message) => window.push_notification(message, cx),
             },
@@ -551,6 +587,7 @@ impl Tty7App {
 
     fn editor_activate_open(
         &mut self,
+        host: HostId,
         path: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -558,7 +595,11 @@ impl Tty7App {
         let Some(code) = self.tab_code_mut() else {
             return false;
         };
-        let Some(ix) = code.files.iter().position(|f| f.path == *path) else {
+        let Some(ix) = code
+            .files
+            .iter()
+            .position(|f| f.host.id() == host && f.path == *path)
+        else {
             return false;
         };
         code.visible = true;
@@ -566,20 +607,22 @@ impl Tty7App {
         code.files.insert(0, f);
         code.active = 0;
         self.focus_editor(window, cx);
-        self.apply_pending_cursor(path, path, window, cx);
+        self.apply_pending_cursor(host, path, path, window, cx);
         cx.notify();
         true
     }
 
     fn editor_install_file(
         &mut self,
+        host: SharedHost,
         path: PathBuf,
         text: String,
         mtime: Option<MTime>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.editor_activate_open(&path, window, cx) {
+        let host_id = host.id();
+        if self.editor_activate_open(host_id, &path, window, cx) {
             return;
         }
         if self.tabs.get(self.active).is_none() {
@@ -610,7 +653,7 @@ impl Tty7App {
                         .iter_mut()
                         .filter_map(|t| t.code.as_deref_mut())
                         .flat_map(|c| c.files.iter_mut())
-                        .find(|f| f.path == path)
+                        .find(|f| f.host.id() == host_id && f.path == path)
                     else {
                         return;
                     };
@@ -630,6 +673,7 @@ impl Tty7App {
             0,
             OpenFile {
                 path,
+                host,
                 input,
                 dirty: false,
                 disk_mtime: mtime,
@@ -738,7 +782,9 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(host) = self.active_host(cx) else {
+        // The file's own host, not the active one: the buffer keeps pointing
+        // at the machine it was read from, however the focus has moved since.
+        let Some(host) = self.editor_file_mut(id).map(|f| f.host.clone()) else {
             return;
         };
         let Some(f) = self.editor_file_mut(id) else {
@@ -933,6 +979,7 @@ impl Tty7App {
         let Some(host) = self.active_host(cx) else {
             return;
         };
+        let host_id = host.id();
         let p = path.to_path_buf();
         let landed = p.clone();
         HostOps::run_in(
@@ -941,13 +988,14 @@ impl Tty7App {
             cx,
             move |h| h.stat(&p).ok().and_then(|m| m.mtime),
             move |app, mtime, window, cx| {
-                app.editor_apply_external_change(&landed, mtime, window, cx)
+                app.editor_apply_external_change(host_id, &landed, mtime, window, cx)
             },
         );
     }
 
     fn editor_apply_external_change(
         &mut self,
+        host: HostId,
         path: &Path,
         mtime: Option<MTime>,
         window: &mut Window,
@@ -960,7 +1008,7 @@ impl Tty7App {
                 continue;
             };
             for (ix, f) in code.files.iter_mut().enumerate() {
-                if f.path != *path {
+                if f.host.id() != host || f.path != *path {
                     continue;
                 }
                 match classify_external_change(f.saving.is_some(), f.dirty, f.disk_mtime, mtime) {
@@ -997,12 +1045,10 @@ impl Tty7App {
             return;
         };
         let target = f.path.clone();
+        let host = f.host.clone();
         let id = f.input.entity_id();
         f.reload_seq = f.reload_seq.wrapping_add(1);
         let seq = f.reload_seq;
-        let Some(host) = self.active_host(cx) else {
-            return;
-        };
         HostOps::run_in(
             host,
             window,
@@ -1043,6 +1089,7 @@ impl Tty7App {
 impl Tty7App {
     pub(crate) fn render_code_overlay(
         &mut self,
+        chrome: DocumentChrome,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -1094,17 +1141,25 @@ impl Tty7App {
             .filter(|f| f.conflict)
             .map(|_| self.render_editor_conflict_banner(cx));
 
+        let header = chrome
+            .renders_own_header()
+            .then(|| self.render_editor_header(chrome, window, cx));
         let editor_col = v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(self.render_editor_header(window, cx))
+            .children(header)
             .when_some(conflict_banner, |this, b| this.child(b))
             .child(div().flex_1().min_h_0().child(body));
 
-        Some(
-            v_flex()
-                .id("code-panel")
+        // The panel's own paint is the same either way; only the box is not.
+        // Filling the workspace means stopping the window's translucency and
+        // repainting the theme image the root's copy now sits under; docking
+        // means sitting in the same plane as the right panel, which the column
+        // wrapper has already painted.
+        let shell = v_flex().id("code-panel");
+        let shell = match chrome {
+            DocumentChrome::Fill => shell
                 .absolute()
                 .inset_0()
                 .occlude()
@@ -1116,33 +1171,58 @@ impl Tty7App {
                 // theme background image is repainted on top of it, since the
                 // root's copy now sits below this fill.
                 .bg(crate::ui::theme::overlay_background(cx))
+                .children(crate::ui::app::overlay_surface_layers(cx)),
+            DocumentChrome::Dock | DocumentChrome::DockHoisted => shell.size_full().min_w_0(),
+        };
+        Some(
+            shell
                 .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                     if ev.keystroke.key == "escape" {
                         this.toggle_code_panel(window, cx);
                     }
                 }))
-                .children(crate::ui::app::overlay_surface_layers(cx))
                 .child(h_flex().flex_1().min_h_0().w_full().child(editor_col))
                 .child(self.render_code_status_bar(window, cx))
                 .into_any_element(),
         )
     }
 
-    fn render_editor_header(
+    /// The editor header alone, for the strip above a docked column.
+    pub(crate) fn render_editor_header_only(
         &self,
+        chrome: DocumentChrome,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    ) -> gpui::AnyElement {
+        self.render_editor_header(chrome, window, cx)
+            .into_any_element()
+    }
+
+    fn render_editor_header(
+        &self,
+        chrome: DocumentChrome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let active = self.tab_code().and_then(|c| c.active_file());
         let name = active.map(|f| f.label());
         let dirty = active.is_some_and(|f| f.dirty);
-        let lead = if self.left_panel_open(cx) {
+        // `TITLE_BAR_LEAD` is the room macOS's traffic lights need. Only a
+        // header that starts at the left edge of the window has them to clear,
+        // and a docked column never does.
+        let lead = if self.left_panel_open(cx) || chrome.is_dock() {
             crate::ui::app::CONTENT_INSET
         } else {
             crate::ui::app::TITLE_BAR_LEAD
         };
-        crate::ui::app::title_bar_drag(h_flex().id("editor-header"), "editor-header", window, cx)
-            .flex_none()
+        let row = h_flex().id("editor-header");
+        let row = if chrome.header_is_title_strip() {
+            crate::ui::app::title_bar_drag(row, "editor-header", window, cx)
+        } else {
+            row
+        };
+        let menu_app = cx.entity().downgrade();
+        row.flex_none()
             .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
             .items_center()
             .gap_1p5()
@@ -1188,9 +1268,16 @@ impl Tty7App {
                     })),
                 ),
             )
+            .context_menu(move |menu, _window, cx| {
+                Tty7App::document_header_menu(menu, &menu_app, cx)
+            })
     }
 
     fn render_code_status_bar(&self, _window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        // The roots below belong to this window's own machine. A file read
+        // over SFTP is on another one, where they mean nothing, so it shows
+        // its own full path rather than borrowing the local repo's name.
+        let tree_host = self.spawn_host(cx);
         let code = self.tab_code();
         let muted = cx.theme().muted_foreground;
         let path_text: Option<SharedString> = code.map(|c| {
@@ -1201,6 +1288,7 @@ impl Tty7App {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             match c.active_file() {
+                Some(f) if f.host.id() != tree_host => f.path.display().to_string().into(),
                 Some(f) => {
                     let rel = c
                         .roots

@@ -9,6 +9,10 @@
 #     -> hardened-runtime signature, then notarize + staple. Passes Gatekeeper.
 #   * Otherwise -> adhoc signature, same as before. Fine for local dev, but the
 #     OS will quarantine it on other machines.
+#
+# Before either artifact is packaged, every Mach-O inside the bundle is
+# asserted to be a thin <arch-label> binary (the sweep below), so a wrong-arch
+# or universal file fails the build here instead of shipping.
 set -euo pipefail
 
 TARGET="$1"
@@ -198,6 +202,88 @@ else
     echo "⚠️  no Developer ID secrets — adhoc signing (won't pass Gatekeeper on other machines)"
     codesign --force --deep --sign - "$APP"
 fi
+
+# ---- Architecture sweep ----------------------------------------------------
+# Everything the bundle ships has to be the thin slice its filename claims. A
+# macOS 26 user read "contains Intel parts" off the Apple Silicon bundle (#687).
+# The published bundles turned out clean — every Mach-O in them thin arm64 —
+# but nothing here had ever checked: assert-macho.sh only ever pointed at the
+# standalone tty7-server asset, so a helper built without --target, a dylib
+# dragged in from the runner, or a universal binary would have shipped, and been
+# found by a user rather than by this script.
+#
+# After the signing block, because assert-macho.sh also insists on a code
+# signature, and after both postures so one pass covers Developer ID and adhoc
+# alike. Before the zip and the DMG, so a bundle that fails here never becomes
+# an artifact — and before the `mv` below, after which dist/tty7.app no longer
+# exists. For a Developer ID build that puts it after notarization, which
+# spends a few minutes of notary time on a bundle that was never going to ship;
+# cheap next to carrying a second copy of this block inside each branch.
+BUNDLE_FAIL=0
+ASSERT_MACHO="$(dirname "$0")/assert-macho.sh"
+BUNDLED_BINS=(tty7-app tty7)
+if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
+    BUNDLED_BINS+=(tty7-updater)
+fi
+# First the binaries we staged ourselves, held to the full standard the server
+# asset is: the right arch, links nothing macOS does not ship, carries a
+# signature. This also leaves every shipped binary's load commands in the
+# release log, which is where the next report like #687 gets answered from.
+for bin in "${BUNDLED_BINS[@]}"; do
+    bash "$ASSERT_MACHO" "$APP/Contents/MacOS/$bin" "$ARCH" || BUNDLE_FAIL=1
+done
+
+# Then the whole bundle, for whatever that list did not know to look at: walk
+# every file, let `file` say which are Mach-O of any kind — executable, dylib,
+# bundle — and have `lipo` name the slices in each. The answer has to be
+# exactly "$ARCH". Any other name is the wrong build; two names is a universal
+# binary, which is what the report described and what nothing in this pipeline
+# should ever produce.
+#
+# `file` detects and `lipo -archs` judges, rather than reading the arch out of
+# `file`'s prose: Apple's build says "64-bit executable arm64" where upstream
+# libmagic says "64-bit arm64 executable, flags:<...>", and a parser written
+# against one misreads the other. lipo's slice names are the same on every
+# macOS, and it is the tool that would have made a fat binary in the first
+# place. Captured into variables, never piped into `grep -q` — see
+# assert-macho.sh for the pipefail race. Process substitution rather than
+# `find | while`, so the counters survive the loop.
+echo "--- Mach-O sweep of $APP, expecting ${ARCH} ---"
+SWEEP_SEEN=0
+while IFS= read -r -d '' f; do
+    KIND="$(file -b "$f")"
+    [[ "$KIND" == *"Mach-O"* ]] || continue
+    SWEEP_SEEN=$((SWEEP_SEEN + 1))
+    # Multi-line for a universal file (one line per slice); the first line is
+    # the verdict.
+    KIND="${KIND%%$'\n'*}"
+    if ! ARCHS="$(lipo -archs "$f" 2>&1)"; then
+        echo "::error::lipo could not read $f ($KIND): $ARCHS"
+        BUNDLE_FAIL=1
+        continue
+    fi
+    case "$ARCHS" in
+        "$ARCH")
+            echo "${ARCHS}  $f  ($KIND)" ;;
+        *" "*)
+            echo "::error::$f is a universal binary carrying [${ARCHS}]; this bundle ships ${ARCH} only"
+            BUNDLE_FAIL=1 ;;
+        *)
+            echo "::error::$f is ${ARCHS}, not ${ARCH} ($KIND)"
+            BUNDLE_FAIL=1 ;;
+    esac
+done < <(find "$APP" -type f -print0)
+# A sweep that sees fewer Mach-Os than the binaries copied in above is not
+# looking at the bundle — a changed `file` wording, an empty find — and must not
+# pass as "nothing wrong found".
+if (( SWEEP_SEEN < ${#BUNDLED_BINS[@]} )); then
+    echo "::error::the sweep found ${SWEEP_SEEN} Mach-O file(s) in $APP, fewer than the ${#BUNDLED_BINS[@]} staged above — it is not seeing the bundle"
+    BUNDLE_FAIL=1
+fi
+if [[ "$BUNDLE_FAIL" -ne 0 ]]; then
+    exit 1
+fi
+echo "✅ every Mach-O in $APP is a thin ${ARCH} binary (${SWEEP_SEEN} checked)"
 
 # The in-app updater needs the signed, notarized .app itself rather than a disk
 # image that requires Finder interaction. The helper re-reads the full embedded

@@ -66,8 +66,22 @@ fi
 # Rosetta shell (`uname -sm` = "Darwin x86_64"), and that is not a machine to
 # hand an unsigned binary to on a guess. The workflow signs it; this catches the
 # day it stops.
-SIGNING=$(codesign -dv "$BIN" 2>&1 || true)
-if [[ "$SIGNING" != *"Signature="* ]]; then
+# The verdict is `codesign -dv`'s exit status, not a word in its output. It
+# spells the signature line differently per posture — `Signature=adhoc` for an
+# ad-hoc or linker signature, `Signature size=8968` for a Developer ID one with
+# a timestamp — so the `*"Signature="*` this used to match held only for ad-hoc.
+# While the script pointed at the standalone tty7-server, which is ad-hoc
+# signed, that was invisible; #692 pointed it at the bundle's binaries as well,
+# and those are Developer ID signed whenever the signing secrets are present.
+# Pull requests do not see the secrets, so every PR run took the ad-hoc branch
+# and passed, and the first build that signed for real — the nightly — failed
+# on all three binaries with `Signature size=` in the very output it printed as
+# proof they were unsigned.
+#
+# Exit status has no such split: 0 for anything signed, 1 with `code object is
+# not signed at all` for anything not. The output is still captured so the
+# failure message can carry it.
+if ! SIGNING=$(codesign -dv "$BIN" 2>&1); then
   echo "::error::$BIN carries no code signature — arm64 macOS will refuse to run it"
   echo "$SIGNING"
   fail=1

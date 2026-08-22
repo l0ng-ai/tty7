@@ -677,7 +677,7 @@ fn serve_sigterm(registry: Arc<Registry>) {
                 store_scrollback_now(&registry);
                 registry.drain_and_kill();
                 on_shutdown();
-                std::process::exit(0);
+                exit_now();
             }
         })
         .ok();
@@ -690,7 +690,32 @@ fn on_shutdown() {
     transport::remove_stale_endpoint();
     #[cfg(windows)]
     crate::host::server::remove_control_endpoint();
-    crate::daemon::pidfile::remove();
+    // The pidfile stays. Once the endpoint above is unlinked it is the only
+    // name anything has for this process, and the process is not gone yet —
+    // a stalled exit after this point used to leave a daemon holding the
+    // singleton lock with no pidfile, which `spawn::stop` and
+    // `ensure_running` could then never find or reap: every later launch
+    // stood down against a server serving nobody (#653). A pidfile that
+    // outlives a clean exit is already handled — `recorded_daemon_is_dead`
+    // reads a dead pid as stale, and `reap_recorded_daemon` deletes the file
+    // once the process is confirmed gone.
+}
+
+/// Ends the daemon immediately, skipping libc `exit`'s atexit handlers and
+/// static destructors. Those run while this process's other threads — the
+/// accept loop, the control listeners — are still live, and a finalizer that
+/// blocks on anything one of them holds never returns: the daemon then
+/// lingers with its endpoint already unlinked but the singleton lock still
+/// held (#653). Everything that must reach disk is flushed explicitly in
+/// `on_shutdown`, so nothing is owed to the handlers being skipped.
+fn exit_now() -> ! {
+    log::logger().flush();
+    #[cfg(unix)]
+    unsafe {
+        libc::_exit(0)
+    }
+    #[cfg(not(unix))]
+    std::process::exit(0)
 }
 
 fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
@@ -842,7 +867,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                 std::time::Duration::from_secs(3),
             );
             on_shutdown();
-            std::process::exit(0);
+            exit_now();
         }
 
         ClientMsg::Kill { pane_id } => {
@@ -890,21 +915,6 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                 Ok(forward) => DaemonMsg::LoopbackForward(forward).encode(&mut w)?,
                 Err(e) => DaemonMsg::Error(format!("forward failed: {e}")).encode(&mut w)?,
             }
-            Ok(())
-        }
-
-        ClientMsg::ListLoopbackForwards => {
-            let mut w = write_stream;
-            let list = crate::daemon::ssh::SshManager::global().list_loopback_forwards();
-            DaemonMsg::LoopbackForwardList(list).encode(&mut w)?;
-            Ok(())
-        }
-
-        ClientMsg::CloseLoopbackForward(id) => {
-            let mut w = write_stream;
-            crate::daemon::ssh::SshManager::global().close_loopback_forward(&id);
-            let list = crate::daemon::ssh::SshManager::global().list_loopback_forwards();
-            DaemonMsg::LoopbackForwardList(list).encode(&mut w)?;
             Ok(())
         }
 

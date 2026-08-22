@@ -59,6 +59,20 @@ impl SftpRoute {
         Self { pane_id, workspace }
     }
 
+    /// What makes this route *this* route, for a [`HostId`]. Keyed by pane —
+    /// two panes into the same server are two routes, because every op is
+    /// addressed to a pane's SSH connection — and by workspace, because a
+    /// workspace pane's id was minted by the far daemon and can collide with
+    /// a local one.
+    ///
+    /// [`HostId`]: crate::ui::host_registry::HostId
+    pub(crate) fn connection_key(&self) -> String {
+        match &self.workspace {
+            Some(ws) => format!("sftp:{}:{}", ws.workspace, self.pane_id),
+            None => format!("sftp:{}", self.pane_id),
+        }
+    }
+
     fn workspace_op(
         &self,
         op: crate::daemon::protocol::WorkspaceOp,
@@ -593,19 +607,40 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// The double-click gesture and the row menu's first item both land here.
-    /// They used to differ: double-click ran a directory-only handler, so
-    /// double-clicking a file — the gesture every file browser answers by
-    /// opening it — did nothing at all, with no cursor change or message to
-    /// say why. A download is visible in the transfers tray and cancellable
-    /// from it, so the worst case is a click you can take back.
-    pub(crate) fn sftp_open_entry(&mut self, entry: SftpEntry, cx: &mut Context<Self>) {
+    /// A click on a row and the row menu's first item both land here.
+    /// A directory opens in place; a file opens in the built-in editor, the
+    /// way it already does on a local or remote-workspace tree (#656). What
+    /// the editor cannot hold — binary, oversized — gets the same toast the
+    /// local tree gives it; a single click must never start a transfer, so
+    /// downloading lives in the row menu and nowhere else.
+    pub(crate) fn sftp_open_entry(
+        &mut self,
+        entry: SftpEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let target = remote_join(&self.sftp_panel.cwd, &entry.name);
         if is_dir_like(&entry) {
             self.sftp_navigate(target, cx);
-        } else {
-            self.sftp_download_entry(entry, cx);
+        } else if let Some(host) = self.sftp_editor_host() {
+            self.editor_open_on_host(host, Path::new(&target), window, cx);
         }
+    }
+
+    /// The [`Host`] the editor reads and saves this pane's files through.
+    ///
+    /// Handed to the editor rather than filed in `HostRegistry`: that table
+    /// means "a machine this window has a link to", and its entries are
+    /// listed as machines and swept when no workspace is left holding one.
+    /// An SFTP channel borrowed from a pane is neither, so the buffer holds
+    /// the host itself and stays saveable for as long as it is open.
+    ///
+    /// [`Host`]: crate::ui::host_ops::Host
+    fn sftp_editor_host(&self) -> Option<crate::ui::host_ops::SharedHost> {
+        self.sftp_panel.open_pane_id?;
+        Some(std::sync::Arc::new(crate::ui::sftp_host::SftpHost::new(
+            self.sftp_route(),
+        )))
     }
 
     pub(crate) fn sftp_download_entry(&mut self, entry: SftpEntry, cx: &mut Context<Self>) {
@@ -1033,7 +1068,8 @@ impl Tty7App {
     }
 
     pub(crate) fn sftp_reveal_download(&self, local: String, cx: &mut Context<Self>) {
-        cx.reveal_path(Path::new(&local));
+        let local = Path::new(&local);
+        cx.reveal_path(&crate::ui::path_display::native_separators(local));
     }
 
     fn sftp_poll_jobs(&mut self, cx: &mut Context<Self>) {
@@ -1528,8 +1564,14 @@ impl Tty7App {
             .rounded(cx.theme().radius)
             .cursor_pointer()
             .hover(|s| s.bg(list_hover))
-            .on_double_click(
-                cx.listener(move |this, _, _w, cx| this.sftp_open_entry(open_entry.clone(), cx)),
+            // Single click, the same gesture the local file tree answers —
+            // this panel used to demand a double click because its open
+            // action was a download, and that caution outlived the download.
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.sftp_open_entry(open_entry.clone(), window, cx)
+                }),
             )
             .child(
                 Icon::new(icon)
@@ -1566,16 +1608,29 @@ impl Tty7App {
         let primary_label = if dir_like {
             t(L10nKey::SftpContextOpen)
         } else {
-            t(L10nKey::Download)
+            t(L10nKey::SftpContextEdit)
         };
         menu = menu.item(PopupMenuItem::new(primary_label).on_click({
             let app = app.clone();
             let entry = entry.clone();
-            move |_, _window, cx| {
+            move |_, window, cx| {
                 let entry = entry.clone();
-                let _ = app.update(cx, |this, cx| this.sftp_open_entry(entry, cx));
+                let _ = app.update(cx, |this, cx| this.sftp_open_entry(entry, window, cx));
             }
         }));
+
+        // Editing is the double-click now, but a copy in ~/Downloads is still
+        // a thing people come to this menu for.
+        if !dir_like {
+            menu = menu.item(PopupMenuItem::new(t(L10nKey::Download)).on_click({
+                let app = app.clone();
+                let entry = entry.clone();
+                move |_, _window, cx| {
+                    let entry = entry.clone();
+                    let _ = app.update(cx, |this, cx| this.sftp_download_entry(entry, cx));
+                }
+            }));
+        }
 
         if is_symlink {
             menu = menu.item(

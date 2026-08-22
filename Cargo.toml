@@ -55,6 +55,12 @@ memchr = "2"
 # emoji, and half a flag renders as a bare letter. Already in the tree via
 # gpui, so this pins no new code.
 unicode-segmentation = "1"
+# Column widths for the input bar (`terminal::view`). The bar has to lay text
+# out the way the terminal grid will, and the grid gets its widths from this
+# same crate by way of `alacritty_terminal` — a hand-rolled code-point table
+# drifts from it the moment Unicode adds a block. Already in the tree via
+# `tty7-cli`, so this pins no new code.
+unicode-width = "0.2"
 smol.workspace = true
 smallvec.workspace = true
 serde = { workspace = true }

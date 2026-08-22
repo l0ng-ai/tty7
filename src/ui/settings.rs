@@ -23,8 +23,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::core::config::{
-    BellMode, Config, CursorStyle, LinkFileOpen, NewTabPosition, NotifyMode, TabBarPosition,
-    UI_FONT_SIZE_DEFAULT, UpdateChannel, WindowBackdrop,
+    BellMode, Config, CursorStyle, LinkFileOpen, MouseZoomModifier, NewTabPosition, NotifyMode,
+    TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel, WindowBackdrop,
 };
 use crate::core::keychain::CredentialRef;
 use crate::core::ssh_profile::{
@@ -609,6 +609,31 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchOhMyPiKeywords,
         },
         SearchEntry {
+            section: Agents,
+            title: SettingsAgentGemini,
+            keywords: SettingsSearchGeminiKeywords,
+        },
+        SearchEntry {
+            section: Agents,
+            title: SettingsAgentDroid,
+            keywords: SettingsSearchDroidKeywords,
+        },
+        SearchEntry {
+            section: Agents,
+            title: SettingsAgentQwenCode,
+            keywords: SettingsSearchQwenCodeKeywords,
+        },
+        SearchEntry {
+            section: Agents,
+            title: SettingsAgentGoose,
+            keywords: SettingsSearchGooseKeywords,
+        },
+        SearchEntry {
+            section: Agents,
+            title: SettingsAgentKimiCode,
+            keywords: SettingsSearchKimiCodeKeywords,
+        },
+        SearchEntry {
             section: WindowTabs,
             title: SettingsStartupWindow,
             keywords: SettingsSearchStartupWindowKeywords,
@@ -672,11 +697,6 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: About,
             title: SettingsAppHttpProxy,
             keywords: SettingsSearchAppHttpProxyKeywords,
-        },
-        SearchEntry {
-            section: About,
-            title: SettingsSearchHowShellsWorkTitle,
-            keywords: SettingsSearchHowShellsWorkKeywords,
         },
         SearchEntry {
             section: About,
@@ -748,8 +768,8 @@ pub(crate) fn section_match_count(section: SettingsSection, query: &str) -> usiz
 
 /// Whether a rendered row is one of the ones the section's `(n)` badge counted.
 /// A row can match on its own label, or through the keyword list the search
-/// index carries for it — "persist" finds "How shells work" and nothing on that
-/// page contains the word.
+/// index carries for it — "palette" finds "Theme" and nothing in that label
+/// contains the word.
 fn row_matches_query(section: SettingsSection, label: &str, query: &str) -> bool {
     if query.is_empty() {
         return false;
@@ -2503,9 +2523,10 @@ impl Tty7App {
                     .into_any_element();
             self.settings_row(
                 t(L10nKey::SettingsBlur),
-                // Not `SettingsBlurDesc` — that one says "(macOS)", which is
-                // exactly wrong here. This row explains the flag's one
-                // remaining job on Windows: feeding the `Auto` material.
+                // Not `SettingsBlurDesc` — that one describes the switch's
+                // usual job, blurring whatever sits behind the window. This
+                // row explains its one remaining job on Windows: feeding the
+                // `Auto` material.
                 t(L10nKey::SettingsBlurAutoDesc),
                 control,
                 cx,
@@ -5220,6 +5241,7 @@ impl Tty7App {
         let scroll_mult = cfg.mouse_scroll_multiplier;
         let smooth_scroll = cfg.smooth_scroll;
         let mouse_reporting = cfg.mouse_reporting;
+        let mouse_zoom = cfg.mouse_zoom_modifier;
         let bell = cfg.bell;
         // A bucket highlights only on an exact match; any other value gets a
         // "Custom (N)" cell so the highlight never claims a number the config
@@ -5307,6 +5329,42 @@ impl Tty7App {
             .checked(mouse_reporting)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_mouse_reporting(*on, cx)))
             .into_any_element();
+        // Ctrl only earns a cell where it is a different key from the
+        // platform modifier: off macOS the two are the same key, and a
+        // segmented control with the same key twice is a bug the user has to
+        // decode. A config that names `ctrl` there still highlights it, in the
+        // one cell that means it.
+        let mac = cfg!(target_os = "macos");
+        let zoom_labels: Vec<&str> = if mac {
+            vec!["⌘", "⌃", "⌥", t(L10nKey::SettingsMouseZoomOff)]
+        } else {
+            vec!["Ctrl", "Alt", t(L10nKey::SettingsMouseZoomOff)]
+        };
+        let zoom_idx = match (mouse_zoom, mac) {
+            (MouseZoomModifier::Platform, _) => 0,
+            (MouseZoomModifier::Ctrl, true) => 1,
+            (MouseZoomModifier::Ctrl, false) => 0,
+            (MouseZoomModifier::Alt, true) => 2,
+            (MouseZoomModifier::Alt, false) => 1,
+            (MouseZoomModifier::None, true) => 3,
+            (MouseZoomModifier::None, false) => 2,
+        };
+        let zoom_control = self.segmented(
+            "term-mouse-zoom",
+            &zoom_labels,
+            zoom_idx,
+            cx,
+            move |this, ix, _w, cx| {
+                let modifier = match (ix, mac) {
+                    (0, _) => MouseZoomModifier::Platform,
+                    (1, true) => MouseZoomModifier::Ctrl,
+                    (1, false) => MouseZoomModifier::Alt,
+                    (2, true) => MouseZoomModifier::Alt,
+                    _ => MouseZoomModifier::None,
+                };
+                this.set_mouse_zoom_modifier(modifier, cx);
+            },
+        );
         let bell_idx = match bell {
             BellMode::None => 0,
             BellMode::Visual => 1,
@@ -5396,6 +5454,12 @@ impl Tty7App {
                 t(L10nKey::SettingsReportMouseToApps),
                 t(L10nKey::SettingsReportMouseToAppsDesc),
                 mouse_report_switch,
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsMouseZoom),
+                t(L10nKey::SettingsMouseZoomDesc),
+                zoom_control,
                 cx,
             ))
             .child(self.section_rule(cx))
@@ -6898,18 +6962,6 @@ impl Tty7App {
                     .text_color(muted_fg)
                     .child(t(L10nKey::SettingsAboutDesc1)),
             )
-            // The search index has promised a "How shells work" entry on this
-            // page since it was written, and it pointed at nothing — the one
-            // thing that makes tty7 different from any other terminal was
-            // never stated in the app.
-            .child(self.section_rule(cx))
-            .child(self.section_header(t(L10nKey::SettingsSearchHowShellsWorkTitle), cx))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(muted_fg)
-                    .child(t(L10nKey::SettingsHowShellsWorkBody)),
-            )
             .child(self.section_rule(cx))
             .child(self.section_header(t(L10nKey::SettingsUpdates), cx))
             .child(
@@ -7589,19 +7641,19 @@ mod tests {
             "Blur",
             "blur"
         ));
-        // Keyword hit: nothing on the About page contains "persist", but the
-        // index says the "How shells work" block answers it.
+        // Keyword hit: the label says "Theme" and nothing more, but the index
+        // says that row answers "palette".
         assert!(row_matches_query(
-            SettingsSection::About,
-            t(L10nKey::SettingsSearchHowShellsWorkTitle),
-            "persist"
+            SettingsSection::Appearance,
+            t(L10nKey::SettingsThemeIntroTitle),
+            "palette"
         ));
         // A row on some other page is not a hit just because the query matches
         // an entry elsewhere.
         assert!(!row_matches_query(
             SettingsSection::Terminal,
             "Blur",
-            "persist"
+            "palette"
         ));
         // An empty query marks nothing at all, so no page ever renders greyed
         // out just because the field is focused.
@@ -7612,21 +7664,7 @@ mod tests {
     fn a_query_that_matches_nothing_is_distinguishable_from_one_that_does() {
         assert_eq!(total_match_count("zzqqxx"), 0);
         assert!(total_match_count("blur") > 0);
-        assert!(total_match_count("persist") > 0);
-    }
-
-    #[test]
-    fn the_how_shells_work_entry_has_something_to_point_at() {
-        // The index promised this page an explanation of the one thing that
-        // makes tty7 different; for a long time it pointed at nothing.
-        assert!(
-            !t(L10nKey::SettingsHowShellsWorkBody).is_empty(),
-            "the About page has no body copy for its own search entry"
-        );
-        assert_eq!(
-            best_matching_section("persist").map(|s| s.profile_label()),
-            Some(SettingsSection::About.profile_label())
-        );
+        assert!(total_match_count("palette") > 0);
     }
 
     #[test]
@@ -8087,7 +8125,7 @@ mod tests {
 #[cfg(test)]
 mod gpui_tests {
     use super::SettingsSection;
-    use crate::core::config::Config;
+    use crate::core::config::{Config, MouseZoomModifier};
     use crate::core::session::Session;
     use crate::ui::app::Tty7App;
     use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
@@ -8141,6 +8179,34 @@ mod gpui_tests {
             matches!(section, Some(SettingsSection::Appearance)),
             "the panel should still be on Appearance after two paint passes",
         );
+    }
+
+    /// #668: the Terminal page carries the control that moves the zoom off the
+    /// platform modifier, so the page has to paint with it, and the pick has to
+    /// reach the config the wheel reads.
+    #[gpui::test]
+    fn the_terminal_page_paints_the_zoom_modifier_row(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Terminal, window, cx);
+        });
+        vcx.simulate_resize(size(px(1100.), px(800.)));
+        vcx.run_until_parked();
+
+        let modifier = vcx.update(|_, cx| cx.global::<Config>().mouse_zoom_modifier);
+        assert_eq!(
+            modifier,
+            MouseZoomModifier::Platform,
+            "the wheel still zooms out of the box"
+        );
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.set_mouse_zoom_modifier(MouseZoomModifier::None, cx)
+        });
+        vcx.run_until_parked();
+        let modifier = vcx.update(|_, cx| cx.global::<Config>().mouse_zoom_modifier);
+        assert_eq!(modifier, MouseZoomModifier::None, "and the pick sticks");
     }
 
     /// The Input page paints with the prompt editor off — that is the state

@@ -75,3 +75,29 @@ have opened `vim` for.
 Files are watched on disk: a change underneath you is picked up, and closing
 with unsaved edits asks before discarding them. Files over 4 MB and anything
 that looks binary are refused with a note rather than opened badly.
+
+### Where it opens
+
+The editor docks beside the terminal, taking half the space between the sidebar
+and the right panel. The terminal keeps running, stays visible, and stays
+typeable — click it, read what your agent said, click back. Diffs open in the
+same column.
+
+Drag the divider for any width between a fifth and four fifths of that space —
+the range `document_ratio` keeps — or double-click it to cycle a third, a half
+and two thirds. **Document: Third / Half / Two-Thirds Width** in the command
+palette do the same. On a narrow window the terminal's own floor stops the
+divider sooner.
+
+Right-click the document's header for **Fill window**, which is the old
+full-workspace overlay, unchanged. **Document: Fill Window** and **Document:
+Dock Beside Terminal** in the palette are the same switch.
+
+Fill or dock is **per tab**: read a long file over the whole window in one tab
+while an agent keeps half of another, and neither moves the other. A fresh tab
+starts from `document_layout` in `config.json`. The width is shared, and
+persists as `document_ratio`.
+
+A window too narrow to give both the terminal and the document a readable width
+fills for that file only — widen it and the column comes back, without your
+setting having changed.

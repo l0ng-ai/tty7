@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Documents dock beside the terminal** (#625). Opening a file, toggling the
+  code panel or opening a diff no longer covers the workspace: the document
+  takes a column to the right of the terminal — half the space between the
+  sidebar and the right panel by default — and the pane you were reading stays
+  visible and typeable underneath none of it. Reviewing a file while an agent
+  talks stopped being a toggle loop. Drag the divider for any width, double-click
+  it to cycle a third, a half and two thirds, or use **Document: Third / Half /
+  Two-Thirds Width** in the palette. Right-click the document's header for
+  **Fill window** — the old overlay, unchanged, and per tab, so a file read
+  over the whole window in one tab leaves the agent beside its own in the next.
+  The terminal keeps its floor through all of it, and a window too narrow to
+  seat both fills for that file only, without changing what any tab chose. New
+  in `config.json`: `document_ratio`, and `document_layout` for what a fresh
+  tab starts as.
+
 - **A tab can be dropped into another tab, as a pane of it** (#621). Drag a tab
   by its chip or by its sidebar row, out over the panes, and it lands where the
   highlight says — the same reading as dragging a pane, minus the middle, which
@@ -62,8 +77,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thing that cannot come along is an ad-hoc `-J` hop, and that is said out
   loud rather than saved broken (#438).
 
+- **A coding agent's conversation is an outline, and a way back into it.** The
+  Info panel grows a **CONVERSATION** section: one row per turn, the prompt's
+  first line as its label, a dot that says whether the turn is still running.
+  Click a row and the pane scrolls so that turn's prompt is the top line — a
+  long agent session in a terminal has never had a way back to "what did I ask
+  an hour ago". It rides on the OSC 777 the hooks already send for the tab's
+  status dot, so it costs a cut only when an agent event actually arrives, and
+  it works wherever the agent runs — over ssh, in a container, in a remote
+  workspace — rather than only where a transcript file happens to be readable.
+  Reattaching to a pane rebuilds the outline from its own replayed history. A
+  turn that began on the alt screen is listed but not clickable, because there
+  is no scrollback behind it to return to. Agents whose hooks do not report
+  prompt text (Codex, Copilot, Grok) are left out rather than drawn as a column
+  of anonymous dots.
+
 ### Changed
 
+- **The Info panel's `agent` row is gone.** It said `Claude Code · working`
+  beside a status dot — the same name and the same dot the tab and its sidebar
+  row were already wearing, two panels away from neither of them. The
+  CONVERSATION section below now says what that agent is doing in a form the
+  row never could, and the dot stays where it was learned.
 - **A zsh or fish you gave your own arguments to is no longer injected into.**
   Custom arguments have always been the line where tty7 backs off — the bash,
   PowerShell and WSL setups checked for them — but the zsh and fish setups did
