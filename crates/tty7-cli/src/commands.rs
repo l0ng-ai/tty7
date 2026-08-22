@@ -1806,6 +1806,28 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
         vec![address::ENV_PANE.to_string(), mark(&ctx.pane)],
         vec!["config".to_string(), config_state.clone()],
     ];
+    // A key tty7 does not read is the likeliest thing to go wrong in a
+    // hand-edited config, and the quietest: the file parses, so the row above
+    // says `ok`, and the setting simply does nothing. `note_unknown_keys`
+    // already finds these — it just says so into a log that is not written
+    // unless `TTY7_LOG` is set.
+    //
+    // Only when the config parsed. A quarantined one is running on defaults
+    // and every key in it is unread; naming them all would bury the row that
+    // matters.
+    let unread_keys = config_ok
+        .then(tty7_core::core::config::unknown_config_keys)
+        .filter(|keys| !keys.is_empty());
+    if let Some(keys) = &unread_keys {
+        rows.push(vec![
+            "config keys".to_string(),
+            format!(
+                "not settings tty7 reads, so they do nothing: {} — check the spelling against \
+                 the reference page",
+                keys.join(", ")
+            ),
+        ]);
+    }
     if let Some(kept) = &quarantined_tree {
         let newest = kept
             .last()

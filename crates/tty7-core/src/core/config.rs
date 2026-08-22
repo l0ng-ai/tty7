@@ -1136,6 +1136,29 @@ fn note_unknown_keys(text: &str) {
     }
 }
 
+/// The keys in the user's `config.json` that tty7 does not read, or an empty
+/// list when the file is absent or does not parse.
+///
+/// [`note_unknown_keys`] already finds these and says so with `log::warn!`,
+/// behind a `log_enabled!` guard — and per `docs/reference/privacy.mdx` there
+/// is no log at all unless `TTY7_LOG` is set. Mistyping a setting name is the
+/// likeliest thing to go wrong in a hand-edited config, and on a default
+/// install it is answered with silence: the file parses, so `doctor` reports
+/// the config `ok` while the setting does nothing.
+///
+/// A file that does not parse answers empty on purpose. It is already
+/// quarantined and reported as such, and every key in it is unread — naming
+/// them all would bury the one thing worth saying.
+pub fn unknown_config_keys() -> Vec<String> {
+    let Some(path) = config_path("config.json") else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    unknown_keys(strip_bom(&text))
+}
+
 /// The comparison behind [`note_unknown_keys`], separated so the property that
 /// matters can be tested: no real field may ever be named here.
 fn unknown_keys(text: &str) -> Vec<String> {
@@ -1680,6 +1703,39 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.dim_inactive_panes);
+    }
+
+    /// What a reader can be told about a hand-edited config.
+    ///
+    /// `note_unknown_keys` has found these all along and said so with
+    /// `log::warn!` behind a `log_enabled!` guard, so on a default install —
+    /// where no log is written at all — mistyping a setting name is answered
+    /// with silence: the file parses, `doctor` calls the config `ok`, and the
+    /// setting does nothing. This is the question `doctor` asks instead.
+    ///
+    /// Asked of the text rather than through `unknown_config_keys`, which
+    /// reads `TTY7_CONFIG_DIR`: setting that from a test steers every other
+    /// test in the process, and the suite runs them in parallel. The wrapper
+    /// adds only "no file is not a typo" to what is checked here.
+    #[test]
+    fn the_keys_a_config_file_wastes_can_be_named() {
+        assert!(
+            unknown_keys(r#"{"font_size": 13.0}"#).is_empty(),
+            "a real setting is not a typo"
+        );
+        assert_eq!(
+            unknown_keys(r#"{"font_siz": 13.0, "font_size": 13.0}"#),
+            vec!["font_siz".to_string()],
+            "the typo is named and its correct neighbour is not"
+        );
+        assert!(
+            unknown_keys(r#"{"font_size": "#).is_empty(),
+            "a file that does not parse is the quarantine's news, not this one's"
+        );
+        assert!(
+            unknown_keys("").is_empty(),
+            "and nothing at all says nothing"
+        );
     }
 
     /// Every field the struct has must be recognised, and only those.
