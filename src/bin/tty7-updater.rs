@@ -4162,8 +4162,23 @@ mod windows {
     }
 }
 
+/// Record a panic where someone can find it.
+///
+/// This binary runs *detached*, after the GUI it is replacing has exited, so
+/// its stderr is attached to nothing a user will ever read — and it is doing
+/// the one job in the product that can leave an install broken. Without this a
+/// panic mid-swap is simply silence: the app does not come back, `tty7-updater.log`
+/// stops mid-sentence, and there is nothing to say why.
+///
+/// `crash.log` is the same file the app and the server write to, in the config
+/// directory, so the three roles land in one place in the order they failed.
+fn install_crash_log() {
+    tty7_core::core::crash::install("updater");
+}
+
 #[cfg(target_os = "macos")]
 fn main() {
+    install_crash_log();
     if let Err(error) = macos::run() {
         eprintln!("tty7-updater: {error}");
         std::process::exit(1);
@@ -4172,6 +4187,7 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 fn main() {
+    install_crash_log();
     if let Err(error) = windows::run() {
         eprintln!("tty7-updater: {error}");
         std::process::exit(1);
@@ -4180,6 +4196,7 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn main() {
+    install_crash_log();
     if let Err(error) = linux::run() {
         eprintln!("tty7-updater: {error}");
         std::process::exit(1);

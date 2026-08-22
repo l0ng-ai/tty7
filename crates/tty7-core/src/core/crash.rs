@@ -121,6 +121,37 @@ mod tests {
         assert!(body.contains("test v"), "role + version: {body}");
     }
 
+    /// Every binary whose stderr nobody is watching installs the hook.
+    ///
+    /// A panic is only as useful as the place it lands. The GUI and the server
+    /// both outlive the terminal that started them, and the updater is worse
+    /// than either: it runs *detached*, after the GUI it is replacing has
+    /// exited, doing the one job in this product that can leave an install
+    /// broken. It shipped without the hook — a panic mid-swap was silence, with
+    /// `tty7-updater.log` stopping mid-sentence and nothing to say why.
+    ///
+    /// The CLI is deliberately absent. It is a short-lived foreground process
+    /// whose panic prints to a terminal someone is already looking at, and a
+    /// second copy in `crash.log` buys nothing.
+    #[test]
+    fn every_detached_binary_records_its_panics() {
+        for (role, source) in [
+            ("app", include_str!("../../../../src/main.rs")),
+            (
+                "updater",
+                include_str!("../../../../src/bin/tty7-updater.rs"),
+            ),
+            ("server", include_str!("../../../tty7-server/src/main.rs")),
+        ] {
+            assert!(
+                source.contains("crash::install"),
+                "the {role} binary never installs the panic hook, so its crashes \
+                 go wherever its stderr goes — which for a detached process is \
+                 nowhere"
+            );
+        }
+    }
+
     #[test]
     fn civil_from_days_matches_known_dates() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
