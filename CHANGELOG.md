@@ -153,6 +153,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The file tree now ignores the same files git does when a `.gitignore`
+  pattern and the name on disk differ in case.** `git init` turns on
+  `core.ignorecase` after probing the filesystem, so it is on for essentially
+  every repository made on macOS or Windows, and git then matches ignore
+  patterns without regard to case. tty7 matched case-sensitively regardless. A
+  `Build/` in `.gitignore` against a `build/` on disk — the everyday version,
+  since the templates and the tools that create the directory disagree about
+  the capital — was ignored by git and drawn as tracked here, and the tree
+  walked into a directory git would not have descended. `core.ignorecase` is
+  now read per repository and obeyed in both directions, so setting it false
+  still gets case-sensitive matching.
+
 - **Turning on per-pane history no longer turns off history search.** The
   window keeps the input bar's own command store in the file
   `<config>/history`, and the daemon put each pane's `HISTFILE` in a

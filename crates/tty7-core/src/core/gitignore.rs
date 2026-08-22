@@ -6,9 +6,14 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 #[derive(Default, Clone)]
 pub(crate) struct GitignoreChain {
-    matchers: HashMap<PathBuf, Option<Arc<Gitignore>>>,
+    /// Keyed by the fold flag as well as the directory, because the same
+    /// directory can sit under two roots -- a repository inside a repository --
+    /// that answer `core.ignorecase` differently.
+    matchers: HashMap<(bool, PathBuf), Option<Arc<Gitignore>>>,
     /// `<repo>/.git/info/exclude`, per repository root.
     excludes: HashMap<PathBuf, Option<Arc<Gitignore>>>,
+    /// `core.ignorecase`, per repository root. See `folds_case`.
+    fold_case: HashMap<PathBuf, bool>,
     /// `core.excludesFile`, or the XDG default. One per process.
     global: Option<Option<Arc<Gitignore>>>,
 }
@@ -28,6 +33,7 @@ impl GitignoreChain {
         if parent != root && parent.starts_with(root) && self.is_ignored(parent, true, root) {
             return true;
         }
+        let fold = self.folds_case(root);
         let mut state = false;
         // git reads these below every `.gitignore`, so they are consulted
         // first and a `.gitignore` further down can still whitelist what they
@@ -52,6 +58,7 @@ impl GitignoreChain {
                 // Rooted at the repository, not at `.git/info`, so its patterns
                 // are read against the paths they are written about.
                 let mut builder = GitignoreBuilder::new(root);
+                builder.case_insensitive(fold).ok();
                 builder.add(&file);
                 builder.build().ok().map(Arc::new)
             })
@@ -71,12 +78,17 @@ impl GitignoreChain {
         for dir in chain {
             let gi = self
                 .matchers
-                .entry(dir.to_path_buf())
+                .entry((fold, dir.to_path_buf()))
                 .or_insert_with(|| {
                     let file = dir.join(".gitignore");
                     file.is_file().then(|| {
-                        let (gi, _err) = Gitignore::new(&file);
-                        Arc::new(gi)
+                        let mut builder = GitignoreBuilder::new(dir);
+                        builder.case_insensitive(fold).ok();
+                        builder.add(&file);
+                        builder.build().map(Arc::new).unwrap_or_else(|_| {
+                            let (gi, _err) = Gitignore::new(&file);
+                            Arc::new(gi)
+                        })
                     })
                 })
                 .clone();
@@ -91,6 +103,31 @@ impl GitignoreChain {
             }
         }
         state
+    }
+
+    /// Whether this repository matches ignore patterns without regard to case.
+    ///
+    /// git does when `core.ignorecase` is on, and `git init` turns it on by
+    /// probing the filesystem -- so it is on for every repository made on a
+    /// stock macOS or Windows, which is most of them. Matching case-sensitively
+    /// there disagrees with git on any pattern whose case differs from the name
+    /// on disk: `Build/` against a `build/`, `*.LOG` against an `a.log`. git
+    /// calls those ignored, the tree drew them as tracked, and worse, walked
+    /// into a directory git would not have descended.
+    ///
+    /// Read from config rather than probed, because config is what git obeys:
+    /// someone who set it false on a case-insensitive disk means it.
+    ///
+    /// Once per root -- a `.gitignore` edit clears the matchers but not this,
+    /// since editing one does not change the other, and a spawn per keystroke
+    /// in the ignore file is not worth an answer that cannot have moved.
+    fn folds_case(&mut self, root: &Path) -> bool {
+        *self.fold_case.entry(root.to_path_buf()).or_insert_with(|| {
+            crate::core::git::git_output(root, &["config", "--type=bool", "--get", "core.ignorecase"])
+                .ok()
+                .filter(|out| out.success())
+                .is_some_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "true")
+        })
     }
 
     /// Unused: the matcher sets are built whole rather than merged. Kept beside
@@ -208,6 +245,57 @@ mod tests {
 
     use super::*;
 
+    /// `core.ignorecase` decides whether case matters, and git is asked.
+    ///
+    /// `git init` turns it on by probing the filesystem, so it is on for
+    /// essentially every repository made on macOS or Windows. Matching
+    /// case-sensitively there disagreed with git wherever a pattern's case
+    /// differed from the name on disk -- `Build/` against a `build/` is the
+    /// everyday one, since the templates and the tools that make the directory
+    /// do not agree on the capital. git called those ignored; the tree drew
+    /// them as tracked and walked into them.
+    ///
+    /// Both directions, and set explicitly rather than left to the filesystem
+    /// probe, so the test says the same thing on a case-sensitive disk: with it
+    /// on the fold happens, with it off it does not. The answers are
+    /// `git check-ignore`'s on this layout under each setting.
+    #[test]
+    fn case_folding_follows_core_ignorecase() {
+        for (setting, folded) in [("true", true), ("false", false)] {
+            let root = scratch(&format!("ignorecase-{setting}"));
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["init", "-q"])
+                .output()
+                .unwrap();
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["config", "core.ignorecase", setting])
+                .output()
+                .unwrap();
+            write_ignore(&root, "*.LOG\nBuild/\n");
+            std::fs::create_dir_all(root.join("build")).unwrap();
+
+            let mut chain = GitignoreChain::default();
+            assert_eq!(
+                chain.is_ignored(&root.join("a.log"), false, &root),
+                folded,
+                "core.ignorecase={setting}: `*.LOG` against a.log"
+            );
+            assert_eq!(
+                chain.is_ignored(&root.join("build"), true, &root),
+                folded,
+                "core.ignorecase={setting}: `Build/` against build/"
+            );
+            assert!(
+                chain.is_ignored(&root.join("a.LOG"), false, &root),
+                "the exact case matches either way"
+            );
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
     fn write_ignore(dir: &Path, body: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join(".gitignore"), body).unwrap();
@@ -268,3 +356,5 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+
