@@ -66,7 +66,7 @@ pub fn parse_tab(s: &str) -> Result<TabAddress> {
     // the one id you are certain of the one shape the CLI refused.
     let body = s.strip_prefix('@').unwrap_or(s);
     let not_an_address =
-        || anyhow!("'{s}' is not a tab address — @7 as numbered by `tty7 ls`, or a full tab id");
+        || anyhow!("'{s}' is not a tab address — @7 as numbered by `tty7 tab ls`, or a full tab id");
     if body.is_empty() {
         return Err(not_an_address());
     }
@@ -130,6 +130,49 @@ pub fn workspace_or_context(explicit: Option<&str>, ctx: &Context) -> Result<Wor
 
 #[cfg(test)]
 mod tests {
+    /// Everything that says where the `@` numbers come from says `tab ls`.
+    ///
+    /// Five places teach it: three `--help` strings and two runtime errors.
+    /// They had drifted to three different answers. `tty7 ls` was simply
+    /// wrong — it prints workspaces with a tab *count* and no `@` at all, so
+    /// someone handed a bad tab address was sent to a table that could not
+    /// help them. `tty7 pane ls` was true but sideways: it happens to carry a
+    /// TAB column, and the verb the person was already using is `tab`.
+    ///
+    /// Read from the sources rather than restated here, so a sixth place, or a
+    /// sixth answer, is caught rather than assumed.
+    #[test]
+    fn the_at_numbers_are_always_attributed_to_tab_ls() {
+        for (file, src) in [
+            ("address.rs", include_str!("address.rs")),
+            ("resolve.rs", include_str!("resolve.rs")),
+            ("cli.rs", include_str!("cli.rs")),
+        ] {
+            // Only the code above the tests: this very test names the phrases
+            // it looks for, and would otherwise find itself.
+            let src = src.split("\nmod tests {").next().unwrap_or(src);
+            let mut found = 0usize;
+            for line in src.lines() {
+                if !(line.contains("as numbered by") || line.contains("the @ numbers")) {
+                    continue;
+                }
+                found += 1;
+                assert!(
+                    line.contains("`tty7 tab ls`") || line.contains("`tab ls`"),
+                    "{file} tells someone where the @ numbers come from without \
+                     naming `tty7 tab ls`: {}",
+                    line.trim()
+                );
+            }
+            if file == "cli.rs" {
+                assert!(found >= 3, "{file}: expected the three tab-address helps, found {found}");
+            } else {
+                assert!(found >= 1, "{file}: expected a message about @ numbers, found {found}");
+            }
+        }
+    }
+
+
     use super::*;
 
     fn shell_context() -> Context {

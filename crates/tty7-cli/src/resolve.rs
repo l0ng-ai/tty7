@@ -128,7 +128,7 @@ pub fn tab(machine: &Machine, addr: &TabAddress) -> Result<(WorkspaceId, TabId)>
             .into_iter()
             .find(|e| e.ordinal == *n)
             .map(|e| (e.workspace, e.tab))
-            .ok_or_else(|| anyhow::anyhow!("no tab @{n} — `tty7 pane ls` shows the @ numbers")),
+            .ok_or_else(|| anyhow::anyhow!("no tab @{n} — `tty7 tab ls` shows the @ numbers")),
         TabAddress::Id(text) => {
             for ws in &machine.workspaces {
                 for tab in &ws.tabs {

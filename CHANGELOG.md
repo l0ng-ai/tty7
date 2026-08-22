@@ -153,6 +153,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A bad tab address now points at the command that lists them.** Handed
+  something like `@deadbeef`, the CLI said "@7 as numbered by `tty7 ls`" —
+  but `tty7 ls` prints workspaces with a tab *count* and no `@` numbers at
+  all, so the one table it named could not answer. `tty7 tab ls` is where
+  they come from, which is what the `--help` for those arguments has always
+  said. `no tab @N` now names it too, instead of `tty7 pane ls`.
+
 - **A kitty graphics transfer naming a FIFO no longer wedges the pane.**
   `t=f`/`t=t` name a path for the terminal to read, and the name comes out of
   an escape sequence — displaying a file is enough to send one. Opening a FIFO
