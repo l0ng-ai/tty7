@@ -153,6 +153,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A kitty graphics transfer naming a FIFO no longer wedges the pane.**
+  `t=f`/`t=t` name a path for the terminal to read, and the name comes out of
+  an escape sequence — displaying a file is enough to send one. Opening a FIFO
+  for reading blocks until a writer arrives, which for one nobody intends to
+  write to is never, and this runs on the pane's reader thread: that pane's
+  output would stop for the life of the process. The check that refuses
+  anything which is not a regular file was already there and says it keeps us
+  off FIFOs, but it sat one call after the open. The open now uses
+  `O_NONBLOCK`, so it returns and the check can do its job.
+
 - **A second agent in the same pane no longer inherits the first one's
   turn.** The foreground process is read twice a second, and a chained
   `claude; codex` starts the second agent microseconds after the first exits

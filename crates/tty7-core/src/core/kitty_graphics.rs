@@ -930,9 +930,25 @@ impl MediumTransfer {
         // -reachable (any program that can write to the pty picks it), and
         // `fs::read` on `/dev/zero` never returns — on the daemon *reader*
         // thread, which would wedge the pane's whole output path. Refusing
-        // anything that isn't a regular file also keeps us off fifos and
-        // devices, where the open itself can block.
-        let file = std::fs::File::open(&path).ok()?;
+        // anything that isn't a regular file keeps us off fifos and devices.
+        //
+        // `O_NONBLOCK` on the *open*, because that check comes after it and
+        // opening is where a fifo hangs: `open(O_RDONLY)` on one blocks until a
+        // writer arrives, which for a fifo nobody intends to write to is never.
+        // Naming one costs an attacker a `mkfifo` and a line of output, and it
+        // would wedge that pane's reader thread for the life of the process —
+        // the exact failure the next few lines are written to prevent, reached
+        // one call too early to prevent it. On a regular file the flag changes
+        // nothing: it is not inherited by `read`, and reads of regular files do
+        // not block regardless.
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+                .ok()?
+        };
         let meta = file.metadata().ok()?;
         if !meta.is_file() || meta.len() as usize > MAX_IMAGE_BYTES {
             return None;
@@ -1731,6 +1747,57 @@ mod tests {
             format: WireFormat::Rgba,
             compressed: false,
         }
+    }
+
+    /// A transfer naming a fifo is refused, and refused *promptly*.
+    ///
+    /// `open(O_RDONLY)` on a fifo blocks until a writer arrives, and for one
+    /// nobody intends to write to that is never. `resolve` runs on the daemon's
+    /// pane reader thread, so a single line of output naming a fifo — `mkfifo`
+    /// plus a `printf` of an APC sequence, or any file someone `cat`s — would
+    /// wedge that pane's output for the life of the process.
+    ///
+    /// The "not a regular file" check has always been there and says it keeps
+    /// us off fifos; it sat one call *after* the open, so it never got the
+    /// chance. The open now carries `O_NONBLOCK`, which returns immediately on
+    /// a fifo and lets the check do its job.
+    ///
+    /// Run on a worker with a deadline rather than inline: without the fix this
+    /// does not fail, it hangs, and a test that hangs tells whoever broke it
+    /// much less than one that says what happened.
+    #[test]
+    #[cfg(unix)]
+    fn a_transfer_naming_a_fifo_is_refused_instead_of_blocking_the_reader() {
+        let dir = std::env::temp_dir().join(format!("tty7-kitty-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("pipe");
+
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // 0o600: nothing else needs it, and the test should not depend on umask.
+        let made = unsafe { libc::mkfifo(c.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "could not create the fifo to test against");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(temp_file_transfer(&probe).resolve());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(resolved) => assert_eq!(
+                resolved, None,
+                "a fifo is not a regular file and must not resolve"
+            ),
+            Err(_) => panic!(
+                "resolving a transfer that names a fifo blocked; on the daemon \
+                 this is the pane's reader thread and it would never come back"
+            ),
+        }
+
+        // The fifo is not in the sender's gift to delete either — the temp-dir
+        // check allows it here, but a refused read must not have unlinked it.
+        assert!(fifo.exists(), "a refused transfer should leave the path alone");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
