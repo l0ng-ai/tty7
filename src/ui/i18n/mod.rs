@@ -95,6 +95,8 @@ l10n_keys! {
     NewFolderName,
     NewFileName,
     HomeNewTab,
+    CloseUnsavedEditsBody,
+    CloseUnsavedEditsTitle,
     HomeReopenClosedTab,
     HomeSwitchWorkspace,
     HomeCommandPalette,

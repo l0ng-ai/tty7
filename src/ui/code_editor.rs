@@ -276,6 +276,63 @@ fn settle_save(ok: bool, wrote_seq: u64, current_seq: u64, pending: bool) -> Sav
 }
 
 impl Tty7App {
+    /// Puts a file into the active tab's code panel and marks it dirty, for
+    /// tests about what closing that tab costs.
+    ///
+    /// The real path (`editor_open_on_host`) goes to the filesystem and back
+    /// through a host round trip; this is the state that arrives at the end of
+    /// it, which is all the close paths can see.
+    #[cfg(all(test, unix))]
+    pub(crate) fn editor_seed_dirty_file_for_test(
+        &mut self,
+        path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let host = tty7_core::host::local::LocalHost::new();
+        let input = cx.new(|cx| InputState::new(window, cx).multi_line(true));
+        let file = OpenFile {
+            path: PathBuf::from(path),
+            host,
+            dirty: true,
+            disk_mtime: None,
+            edit_seq: 1,
+            saving: None,
+            save_pending: false,
+            save_then_close: false,
+            reload_seq: 0,
+            conflict: false,
+            preview: false,
+            wrap: false,
+            preview_scroll: gpui::ScrollHandle::new(),
+            _sub: cx.subscribe_in(&input, window, |_, _, _: &InputEvent, _, _| {}),
+            _observe: cx.observe(&input, |_, _, _| {}),
+            input,
+        };
+        if let Some(code) = self.tab_code_mut_or_init() {
+            code.files.push(file);
+        }
+    }
+
+    /// The unsaved file a tab would take with it, if it has one.
+    ///
+    /// The code panel hangs off the *tab*, so closing the tab drops every
+    /// buffer in it. The editor asks before closing a file (`editor_close_file`)
+    /// and the file tree marks a dirty one, but nothing outside this module
+    /// read `dirty` at all — so closing the tab, which is the ordinary ⌘W when
+    /// focus is anywhere but the editor, threw the edits away without a word.
+    /// This is what the close paths ask.
+    ///
+    /// The first one, not a count: the question is whether anything would be
+    /// lost, and a name reads better in a dialog than a number.
+    pub(crate) fn tab_unsaved_edit(&self, index: usize) -> Option<String> {
+        let files = &self.tabs.get(index)?.code.as_deref()?.files;
+        files
+            .iter()
+            .find(|f| f.dirty)
+            .map(|f| f.label().to_string())
+    }
+
     pub(crate) fn tab_code(&self) -> Option<&TabCode> {
         self.tabs.get(self.active)?.code.as_deref()
     }
@@ -1545,5 +1602,100 @@ mod tests {
                 requeue: false
             }
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unsaved_close_gpui_tests {
+    use gpui::TestAppContext;
+
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    /// Closing a tab must not throw away edits nobody wrote down.
+    ///
+    /// The code panel hangs off the tab, so the tab closing takes every buffer
+    /// in it. `editor_close_file` asks before closing a *file*, but that is
+    /// only reached while the editor has focus: the ordinary ⌘W with focus in
+    /// the terminal goes to `close_pane` and then `close_tab_inner`, and
+    /// `tab_close_reason` looked at `pane.terminals()` and nothing else.
+    /// Nothing outside `code_editor` read `dirty` at all, so the edits went
+    /// without a word.
+    #[gpui::test]
+    fn a_tab_with_unsaved_edits_asks_before_it_closes(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.editor_seed_dirty_file_for_test("/w/repo/notes.md", window, cx);
+            assert_eq!(
+                app.tab_unsaved_edit(app.active).as_deref(),
+                Some("notes.md"),
+                "the tab is holding an unwritten buffer"
+            );
+            app.close_tab(app.active, window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.tabs.len(),
+                2,
+                "the tab is still here, pending an answer"
+            );
+        });
+    }
+
+    /// The same tab with nothing unsaved closes straight away — the guard has
+    /// to be the edits, not the presence of a code panel.
+    #[gpui::test]
+    fn a_tab_whose_buffers_are_saved_still_closes_outright(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.editor_seed_dirty_file_for_test("/w/repo/notes.md", window, cx);
+            if let Some(code) = app.tab_code_mut() {
+                for f in &mut code.files {
+                    f.dirty = false;
+                }
+            }
+            assert!(app.tab_unsaved_edit(app.active).is_none());
+            app.close_tab(app.active, window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            assert_eq!(app.tabs.len(), 1, "nothing to ask about")
+        });
+    }
+
+    /// A bulk close spares it instead of asking.
+    ///
+    /// One dialog per tab is not a question anyone can answer, so the bargain
+    /// for "Close Other Tabs" is to skip what it will not take silently. That
+    /// list holds the SSH profiles that asked to be warned about, and now the
+    /// unsaved buffers — but deliberately not merely busy tabs, which on a
+    /// working window is most of them.
+    #[gpui::test]
+    fn a_bulk_close_leaves_the_tab_holding_unsaved_edits(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.activate(1, window, cx);
+            app.editor_seed_dirty_file_for_test("/w/repo/draft.rs", window, cx);
+            // Keep tab 0, which would otherwise close tabs 1 and 2.
+            app.close_other_tabs(0, window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.tabs.len(),
+                2,
+                "the kept tab and the one still holding an unwritten buffer"
+            );
+            assert!(
+                app.tabs.iter().any(|t| t
+                    .code
+                    .as_deref()
+                    .is_some_and(|c| c.files.iter().any(|f| f.dirty))),
+                "and the one spared is the one with the edits"
+            );
+        });
     }
 }

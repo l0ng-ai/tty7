@@ -835,6 +835,12 @@ pub(crate) enum CloseTarget {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum CloseReason {
     LiveSsh,
+    /// A file open in this tab's code panel has edits that were never written.
+    /// Carries the file's name, because "a file" is not something a reader can
+    /// act on. Unlike the other two this loss is not recoverable: a killed
+    /// command can be run again and a dropped SSH link reconnected, but the
+    /// text is simply gone.
+    UnsavedEdits(String),
     Busy(crate::terminal::view::PaneBusy),
 }
 
@@ -846,6 +852,10 @@ fn close_prompt(ends_the_tab: bool, reason: &CloseReason) -> (String, String) {
         CloseReason::LiveSsh => (
             t(L10nKey::CloseSshConnectionTitle).to_string(),
             t(L10nKey::CloseSshConnectionBody).to_string(),
+        ),
+        CloseReason::UnsavedEdits(name) => (
+            t(L10nKey::CloseUnsavedEditsTitle).to_string(),
+            t_fmt(L10nKey::CloseUnsavedEditsBody, &[("name", name)]),
         ),
         CloseReason::Busy(busy) => {
             let title = match ends_the_tab {
@@ -4305,8 +4315,14 @@ impl Tty7App {
         // deliberately does *not* skip merely busy tabs: on a working window
         // that is most of them, and a menu item that quietly closes nothing is
         // worse than one that closes what it says.
+        //
+        // Unsaved edits are skipped for the SSH reason rather than the busy
+        // one, and the difference is what the skip costs. Busy is the state
+        // most tabs are in, so skipping it would close nothing; unsaved edits
+        // are rare, and they are the one loss here that cannot be undone by
+        // doing the thing again.
         for i in (0..self.tabs.len()).rev() {
-            if i == index || self.tab_has_warn_ssh(i, cx) {
+            if i == index || self.tab_keeps_unclosed_work(i, cx) {
                 continue;
             }
             self.close_tab_inner(i, true, window, cx);
@@ -4321,7 +4337,7 @@ impl Tty7App {
     ) {
         // Same bargain as `close_other_tabs`.
         for i in ((index + 1)..self.tabs.len()).rev() {
-            if self.tab_has_warn_ssh(i, cx) {
+            if self.tab_keeps_unclosed_work(i, cx) {
                 continue;
             }
             self.close_tab_inner(i, true, window, cx);
@@ -6169,6 +6185,12 @@ impl Tty7App {
     /// Whether closing this tab would drop a connection the user asked to be
     /// warned about. Narrower than [`Self::tab_close_reason`] on purpose — see
     /// the bulk closes, which skip these and only these.
+    /// What a bulk close leaves standing: the two losses worth refusing to
+    /// take without being asked, where a busy command is not one.
+    fn tab_keeps_unclosed_work(&self, index: usize, cx: &App) -> bool {
+        self.tab_has_warn_ssh(index, cx) || self.tab_unsaved_edit(index).is_some()
+    }
+
     fn tab_has_warn_ssh(&self, index: usize, cx: &App) -> bool {
         self.tabs.get(index).is_some_and(|tab| {
             tab.pane
@@ -6178,7 +6200,12 @@ impl Tty7App {
         })
     }
 
+    /// Unsaved edits come first, because they are the only loss here that
+    /// cannot be undone by doing the thing again.
     fn tab_close_reason(&self, index: usize, cx: &App) -> Option<CloseReason> {
+        if let Some(name) = self.tab_unsaved_edit(index) {
+            return Some(CloseReason::UnsavedEdits(name));
+        }
         self.tabs
             .get(index)?
             .pane
@@ -6188,11 +6215,17 @@ impl Tty7App {
     }
 
     fn focused_pane_close_reason(&self, window: &Window, cx: &App) -> Option<CloseReason> {
-        let leaf = self
-            .tabs
-            .get(self.active)?
-            .pane
-            .focused_or_first(window, cx)?;
+        let tab = self.tabs.get(self.active)?;
+        // Closing the last pane takes the tab, and the tab's code panel with
+        // it. `close_pane_inner` carries its own `confirmed` into
+        // `close_tab_inner` so the tab does not ask a second question, which
+        // means a question the pane never asked is never asked at all.
+        if tab.pane.leaves().len() <= 1
+            && let Some(name) = self.tab_unsaved_edit(self.active)
+        {
+            return Some(CloseReason::UnsavedEdits(name));
+        }
+        let leaf = tab.pane.focused_or_first(window, cx)?;
         self.leaf_close_reason(&leaf, cx)
     }
 

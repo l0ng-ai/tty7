@@ -17,6 +17,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::NewFolderName => "新しいフォルダ名",
         L10nKey::NewFileName => "新しいファイル名",
         L10nKey::HomeNewTab => "新規タブ",
+        L10nKey::CloseUnsavedEditsBody => "{name} に未保存の変更があります。閉じると失われます。",
+        L10nKey::CloseUnsavedEditsTitle => "このタブを閉じますか？",
         L10nKey::HomeReopenClosedTab => "閉じたタブをもう一度開く",
         L10nKey::HomeSwitchWorkspace => "ワークスペースを切り替える…",
         L10nKey::HomeCommandPalette => "コマンドパレット…",
