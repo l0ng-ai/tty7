@@ -153,6 +153,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Searching for `Error` finds `error` again.** With case sensitivity off —
+  the default — typing a capital found nothing on a screen full of matches.
+  The regex engine applies smart case of its own, turning matching insensitive
+  only when the pattern carries no uppercase letter; tty7 passed the query
+  through bare for the insensitive setting, so the engine's rule decided
+  instead of the toggle, and the toggle looked broken exactly when someone
+  typed a capital.
+
+- **The SCM confirmation dialogs answer Escape in every language.** gpui picks
+  a prompt button's role by matching the English word, so a localized
+  "Cancel" became a button that answers neither Escape nor Return. Sixteen of
+  the app's dialogs go through the helper that says which button is which; the
+  two SCM confirmations built theirs by hand from translated strings — so
+  discard, reset and amend, the dialogs guarding the operations that lose
+  work, had nothing on Escape for Chinese and Japanese users. They also put
+  Cancel where every other dialog puts "do it".
+
+- **Quick connect no longer ignores a typed port of 22.** The typed line was
+  merged over a matching `~/.ssh/config` alias by asking whether the parsed
+  port was 22 — which is also what the parser fills in when nothing named a
+  port. So `myalias -p 22` against an alias carrying `Port 2222` read as
+  silence and connected to 2222, where `ssh -G` has the command line
+  outranking the config file.
+
+- **A workspace's port forwards no longer stay bound in silence.** They are
+  released by exactly one request as the workspace closes, and nothing on the
+  daemon side reaps them afterwards, so that request failing is what leaves
+  ports held for the life of the daemon. It was also the case nobody could
+  see: an unaddressable route and an unanswered request both reported the same
+  empty result as a clean teardown, so the one path that partly worked warned
+  and the three that did nothing at all said nothing.
+
+- **`tty7 wait && tty7 capture` no longer comes back empty when the pane
+  exits.** `exit` is one of the three states `wait` waits for by default, so
+  the documented idiom succeeds on it, `&&` proceeds, and capture finds
+  nothing running — an agent following the published pattern got no output for
+  a command that produced some.
+
 - **In-app updates work again on macOS.** `codesign -d -r-` writes the
   designated requirement to *stdout* and puts only its display header on
   stderr; the updater read stderr, so the prefix it was looking for could
