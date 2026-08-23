@@ -763,6 +763,35 @@ mod tests {
     /// nineteenth agent would leave two sentences quietly wrong in the file
     /// most people read first. Checked the way `keymap` checks its action
     /// list and `aumid` checks the installer script: read the other file.
+    /// An agent state from a peer that predates its later fields still
+    /// decodes.
+    ///
+    /// This one travels further than most: `DaemonMsg::AgentStatus` on the
+    /// pane wire, the control reply behind `tty7 agents` and `tty7 wait`, and
+    /// the handoff blob a daemon writes so panes survive its own restart. It
+    /// has no struct-level `#[serde(default)]`, so each field default is what
+    /// keeps an older writer readable — and a state that fails to decode is an
+    /// agent whose status silently stops arriving.
+    ///
+    /// `status` deliberately falls back to `Idle` rather than the derived
+    /// default, which is why it names a function.
+    #[test]
+    fn an_agent_state_from_an_older_peer_still_decodes() {
+        let empty: AgentSessionState =
+            serde_json::from_str("{}").expect("a state with none of the later fields");
+        assert_eq!(empty.status, AgentStatus::Idle, "not the derived default");
+        assert!(!empty.rich);
+        assert_eq!(empty.activity, 0);
+        assert_eq!(empty.session_id, None);
+
+        // And the shape a peer that only ever reported a status would send.
+        let older: AgentSessionState = serde_json::from_str(r#"{"status":"working"}"#)
+            .expect("a state carrying only its status");
+        assert_eq!(older.status, AgentStatus::Working);
+        assert!(!older.rich);
+        assert_eq!(older.activity, 0);
+    }
+
     #[test]
     fn the_readmes_count_the_agents_this_enum_holds() {
         let n = CLIAgent::ALL.len();
