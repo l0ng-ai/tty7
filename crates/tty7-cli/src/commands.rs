@@ -1144,10 +1144,7 @@ fn pane_close(
 /// listing counts it, and the doctor's row names it and points at the reaper —
 /// so they cannot be allowed to drift. A row that says seven and a reaper that
 /// ends none is a worse answer than either alone.
-fn is_stray(
-    info: &tty7_core::daemon::protocol::PaneInfo,
-    held: impl Fn(u64) -> bool,
-) -> bool {
+fn is_stray(info: &tty7_core::daemon::protocol::PaneInfo, held: impl Fn(u64) -> bool) -> bool {
     !info.attached && !held(info.pane_id)
 }
 
@@ -1809,7 +1806,9 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     let loaded = tty7_core::core::config::Config::load_with_outcome();
     let (config_state, config_ok) = match loaded.1 {
         tty7_core::core::config::LoadOutcome::Parsed => ("ok".to_string(), true),
-        tty7_core::core::config::LoadOutcome::Absent => ("none yet — the defaults are the config".to_string(), true),
+        tty7_core::core::config::LoadOutcome::Absent => {
+            ("none yet — the defaults are the config".to_string(), true)
+        }
         tty7_core::core::config::LoadOutcome::Quarantined => {
             // What failed and where, not just that something did. serde
             // already names the field, the type it wanted and the line and
@@ -1832,8 +1831,7 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
             )
         }
         tty7_core::core::config::LoadOutcome::Unreadable => (
-            "UNREADABLE — running on defaults and not saving"
-                .to_string(),
+            "UNREADABLE — running on defaults and not saving".to_string(),
             false,
         ),
     };
@@ -4922,7 +4920,11 @@ mod tests {
             .filter(|p| p["orphan"] == serde_json::json!(true))
             .map(|p| p["pane"].as_u64().expect("an id"))
             .collect();
-        assert_eq!(flagged, vec![78], "only the pane nobody is watching is flagged");
+        assert_eq!(
+            flagged,
+            vec![78],
+            "only the pane nobody is watching is flagged"
+        );
         assert_eq!(
             listed["orphans"].as_u64(),
             Some(flagged.len() as u64),
@@ -5080,7 +5082,9 @@ mod tests {
         const DOC: &str = include_str!("../../../docs/cli/reference.mdx");
 
         let lead = "JSON: `{\"context\":";
-        let at = DOC.find(lead).expect("the reference documents doctor's JSON");
+        let at = DOC
+            .find(lead)
+            .expect("the reference documents doctor's JSON");
         let line = &DOC[at..at + DOC[at..].find('\n').expect("the line ends")];
         let documented: Vec<&str> = line
             .split('"')

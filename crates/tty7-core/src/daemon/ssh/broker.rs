@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use tokio::sync::oneshot;
 
-use crate::daemon::protocol::{AuthPromptKind, AuthResponse, DaemonMsg, SshPhase};
 use crate::core::threads::Locked as _;
+use crate::daemon::protocol::{AuthPromptKind, AuthResponse, DaemonMsg, SshPhase};
 
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 const DELIVERY_WINDOW: Duration = Duration::from_secs(15);

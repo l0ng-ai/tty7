@@ -1796,7 +1796,10 @@ mod tests {
 
         // The fifo is not in the sender's gift to delete either — the temp-dir
         // check allows it here, but a refused read must not have unlinked it.
-        assert!(fifo.exists(), "a refused transfer should leave the path alone");
+        assert!(
+            fifo.exists(),
+            "a refused transfer should leave the path alone"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1850,7 +1853,9 @@ mod tests {
 
         let precious = dir.join("id_ed25519");
         std::fs::write(&precious, [0u8, 1, 2, 3, 4, 5, 6, 7]).unwrap();
-        let img = temp_file_transfer(&precious).resolve().expect("still reads");
+        let img = temp_file_transfer(&precious)
+            .resolve()
+            .expect("still reads");
         assert_eq!(img.data.len(), 8);
         assert!(
             precious.exists(),

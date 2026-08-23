@@ -1437,7 +1437,9 @@ impl Tty7App {
             if let Some(app) = weak_app.upgrade()
                 && let Some((tab, name)) = app.read(cx).unsaved_edit_to_confirm()
             {
-                app.update(cx, |app, cx| app.confirm_window_close(tab, name, window, cx));
+                app.update(cx, |app, cx| {
+                    app.confirm_window_close(tab, name, window, cx)
+                });
                 return false;
             }
             let last_window = crate::ui::windows::WindowRegistry::count(cx) <= 1;

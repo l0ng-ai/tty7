@@ -963,9 +963,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeDeleteFolderBody => {
             "该文件夹及其中的所有内容都将被删除。不会放入回收站，且无法撤销。"
         }
-        L10nKey::FileTreeDeleteFileBody => {
-            "该文件将被删除。不会放入回收站，且无法撤销。"
-        }
+        L10nKey::FileTreeDeleteFileBody => "该文件将被删除。不会放入回收站，且无法撤销。",
         L10nKey::SftpDeleteFolderBody => {
             "该文件夹及其中所有内容将在 {host} 上被删除。远端没有回收站。"
         }

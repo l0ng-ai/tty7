@@ -491,11 +491,7 @@ impl<'a> HookTarget<'a> {
         if let Some(exe) = self.hook_command_exe() {
             return format!("{exe} agent-hook {} {event}", agent.slug());
         }
-        format!(
-            "{} agent-hook {} {event}",
-            self.quoted_exe(),
-            agent.slug()
-        )
+        format!("{} agent-hook {} {event}", self.quoted_exe(), agent.slug())
     }
 
     /// The executable path, quoted for whichever shell is going to re-read it.
@@ -1822,9 +1818,9 @@ mod tests {
         let end = body.find("\n}\n").expect("the entry point ends");
         let body = &body[..end];
 
-        let gate = body
-            .find("TTY7_ENV_MARKER")
-            .unwrap_or_else(|| panic!("`run_agent_hook` no longer checks {TTY7_ENV_MARKER}: {body}"));
+        let gate = body.find("TTY7_ENV_MARKER").unwrap_or_else(|| {
+            panic!("`run_agent_hook` no longer checks {TTY7_ENV_MARKER}: {body}")
+        });
         assert!(
             body[gate..].contains("return"),
             "the marker is named but nothing returns on it: {body}"
@@ -1872,10 +1868,16 @@ mod tests {
         }
 
         fn walk(d: &Path, out: &mut Vec<PathBuf>) {
-            let Ok(entries) = std::fs::read_dir(d) else { return };
+            let Ok(entries) = std::fs::read_dir(d) else {
+                return;
+            };
             for e in entries.flatten() {
                 let p = e.path();
-                if p.is_dir() { walk(&p, out) } else { out.push(p) }
+                if p.is_dir() {
+                    walk(&p, out)
+                } else {
+                    out.push(p)
+                }
             }
         }
         let mut files = Vec::new();
@@ -1891,13 +1893,21 @@ mod tests {
                 .to_string()
         };
         for file in &files {
-            let Ok(text) = std::fs::read_to_string(file) else { continue };
-            let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let Ok(text) = std::fs::read_to_string(file) else {
+                continue;
+            };
+            let name = file
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             for line in text.lines() {
                 // Every bridge explains itself in comments that spell the
                 // command out; that is prose, not a command line.
                 let trimmed = line.trim_start();
-                if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('#')
+                if trimmed.starts_with("//")
+                    || trimmed.starts_with("/*")
+                    || trimmed.starts_with('#')
                 {
                     continue;
                 }
@@ -2113,8 +2123,7 @@ mod tests {
             format!("{command_exe} agent-hook claude stop")
         );
         assert!(
-            command_exe.contains(&exe.display().to_string())
-                || here.hook_command_exe().is_some(),
+            command_exe.contains(&exe.display().to_string()) || here.hook_command_exe().is_some(),
             "the full path is in there unless it resolved by name"
         );
     }
@@ -2689,5 +2698,3 @@ mod tests {
         );
     }
 }
-
-

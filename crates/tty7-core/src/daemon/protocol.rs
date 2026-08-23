@@ -1576,7 +1576,10 @@ mod tests {
             let mut rest = &body[..end];
             while let Some(at) = rest.find(&needle) {
                 rest = &rest[at + needle.len()..];
-                let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
                 if !name.is_empty() {
                     out.push(name);
                 }

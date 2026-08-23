@@ -1807,10 +1807,14 @@ mod unsaved_close_gpui_tests {
             input.update(cx, |state, cx| state.insert("three\n", window, cx));
             let saved = to_crlf(&input.read(cx).text().to_string());
             assert!(
-                !saved.contains("\n") || saved.split("\n").count() - 1 == saved.matches("\r\n").count(),
+                !saved.contains("\n")
+                    || saved.split("\n").count() - 1 == saved.matches("\r\n").count(),
                 "a bare newline survived into a CRLF file: {saved:?}"
             );
-            assert!(saved.contains("three\r\n"), "the added line is there: {saved:?}");
+            assert!(
+                saved.contains("three\r\n"),
+                "the added line is there: {saved:?}"
+            );
         });
     }
 
@@ -1822,7 +1826,10 @@ mod unsaved_close_gpui_tests {
             let input = new_buffer("one\ntwo\n", window, cx);
             input.update(cx, |state, cx| state.insert("three\n", window, cx));
             let text = input.read(cx).text().to_string();
-            assert!(!uniformly_crlf("one\ntwo\n"), "a unix file is not a crlf one");
+            assert!(
+                !uniformly_crlf("one\ntwo\n"),
+                "a unix file is not a crlf one"
+            );
             assert!(!text.contains('\r'), "a carriage return appeared: {text:?}");
         });
     }
@@ -1832,7 +1839,10 @@ mod unsaved_close_gpui_tests {
     fn a_mixed_file_is_not_given_a_winner() {
         assert!(!uniformly_crlf("a\r\nb\n"), "mixed endings are not CRLF");
         assert!(!uniformly_crlf("a\nb\r\n"), "in either order");
-        assert!(!uniformly_crlf("no newline at all"), "and neither is a single line");
+        assert!(
+            !uniformly_crlf("no newline at all"),
+            "and neither is a single line"
+        );
         assert!(uniformly_crlf("a\r\n"), "one CRLF line is a CRLF file");
     }
 
@@ -1918,7 +1928,10 @@ mod unsaved_close_gpui_tests {
             let (tab, name) = app
                 .unsaved_edit_to_confirm()
                 .expect("the window is holding an unwritten buffer");
-            assert_eq!(tab, 1, "and it names the tab holding it, not the active one");
+            assert_eq!(
+                tab, 1,
+                "and it names the tab holding it, not the active one"
+            );
             assert_eq!(name, "notes.md");
         });
     }
@@ -1931,9 +1944,7 @@ mod unsaved_close_gpui_tests {
     /// is the same as no guard — and one wired wrongly is worse: a window
     /// that will not shut.
     #[gpui::test]
-    fn the_window_close_callback_refuses_only_when_something_is_unwritten(
-        cx: &mut TestAppContext,
-    ) {
+    fn the_window_close_callback_refuses_only_when_something_is_unwritten(cx: &mut TestAppContext) {
         cx.update(crate::ui::windows::WindowRegistry::init);
 
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
@@ -2022,8 +2033,8 @@ mod unsaved_close_gpui_tests {
         });
 
         cx.update(|cx| {
-            let (found_ws, tab, name) =
-                crate::ui::app::Tty7App::quit_loses_unwritten_work(cx).expect("quitting would lose it");
+            let (found_ws, tab, name) = crate::ui::app::Tty7App::quit_loses_unwritten_work(cx)
+                .expect("quitting would lose it");
             assert_eq!(found_ws, ws, "the window holding it, not the one in front");
             assert_eq!(tab, 1, "and the tab holding it");
             assert_eq!(name, "notes.md");

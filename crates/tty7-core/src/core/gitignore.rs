@@ -123,10 +123,13 @@ impl GitignoreChain {
     /// in the ignore file is not worth an answer that cannot have moved.
     fn folds_case(&mut self, root: &Path) -> bool {
         *self.fold_case.entry(root.to_path_buf()).or_insert_with(|| {
-            crate::core::git::git_output(root, &["config", "--type=bool", "--get", "core.ignorecase"])
-                .ok()
-                .filter(|out| out.success())
-                .is_some_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "true")
+            crate::core::git::git_output(
+                root,
+                &["config", "--type=bool", "--get", "core.ignorecase"],
+            )
+            .ok()
+            .filter(|out| out.success())
+            .is_some_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "true")
         })
     }
 
@@ -356,5 +359,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
-
-

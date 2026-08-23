@@ -31,10 +31,10 @@ use crate::daemon::remote_link::{self, RemoteEntry, RemoteLink};
 use crate::daemon::router::{RouteChannel, RouteSetup};
 use crate::daemon::shell_integration::remote;
 
+use crate::core::threads::Locked as _;
 use forward::RemoteForwardTable;
 use handler::ClientHandler;
 use session::drive_channel;
-use crate::core::threads::Locked as _;
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -955,7 +955,11 @@ mod tests {
                     _ => {}
                 }
             }
-            assert_eq!(said.trim(), "tty7-live-check", "the far side ran it and answered");
+            assert_eq!(
+                said.trim(),
+                "tty7-live-check",
+                "the far side ran it and answered"
+            );
             assert_eq!(code, Some(0), "and said how it went");
 
             // The second ask has to come back on the same connection: sharing
@@ -964,7 +968,10 @@ mod tests {
                 .open_connection(&spec, &broker)
                 .await
                 .expect("a second connection to the same host");
-            assert!(reused, "the second ask should have been given the first one");
+            assert!(
+                reused,
+                "the second ask should have been given the first one"
+            );
             assert_eq!(again.key(), conn.key());
 
             conn.mark_dead();

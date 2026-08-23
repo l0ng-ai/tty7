@@ -4,11 +4,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
+use crate::core::threads::Locked as _;
 use crate::daemon::pane::DaemonPane;
 use crate::daemon::protocol::{ClientMsg, DaemonMsg, DaemonVersion, RemoteKind};
 use crate::daemon::ssh::SshConnection;
 use crate::daemon::transport::{self, Stream};
-use crate::core::threads::Locked as _;
 
 struct Registry {
     panes: Mutex<HashMap<u64, Arc<DaemonPane>>>,
@@ -697,10 +697,7 @@ fn raise_open_file_limit() {
         rlim_max: limit.rlim_max,
     };
     if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
-        log::debug!(
-            "open-file limit raised from {} to {want}",
-            limit.rlim_cur
-        );
+        log::debug!("open-file limit raised from {} to {want}", limit.rlim_cur);
     }
 }
 

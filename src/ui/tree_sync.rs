@@ -2583,8 +2583,8 @@ fn settle_hydration(
             state.said_why_empty = false;
             dirty
         };
-        let Some(app) =
-            crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|app| app.upgrade())
+        let Some(app) = crate::ui::windows::WindowRegistry::app_for(cx, client_ws)
+            .and_then(|app| app.upgrade())
         else {
             break 'landed false;
         };
@@ -2608,8 +2608,8 @@ fn settle_hydration(
         }
         if session.tabs.is_empty() && adopt == Adopt::IfEmpty {
             if was_dirty
-                && let Some(app) =
-                    crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|a| a.upgrade())
+                && let Some(app) = crate::ui::windows::WindowRegistry::app_for(cx, client_ws)
+                    .and_then(|a| a.upgrade())
             {
                 app.update(cx, |app, cx| sync_window(app, cx));
             }
@@ -3268,7 +3268,9 @@ mod tests {
                 .unwrap_or_default();
             assert_eq!(
                 census,
-                [7, 9].into_iter().collect::<std::collections::HashSet<u64>>(),
+                [7, 9]
+                    .into_iter()
+                    .collect::<std::collections::HashSet<u64>>(),
                 "every pane the window made, counted once"
             );
 

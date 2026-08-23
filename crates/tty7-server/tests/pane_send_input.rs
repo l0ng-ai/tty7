@@ -315,8 +315,14 @@ fn awkward_text_survives_the_pty_and_the_ring_unchanged() {
         ("a CJK pair", &b"cjk:\xe4\xbd\xa0\xe5\xa5\xbd|"[..]),
         ("a decomposed accent", &b"dec:e\xcc\x81|"[..]),
         ("a precomposed accent", &b"pre:\xc3\xa9|"[..]),
-        ("a regional-indicator flag", &b"flag:\xf0\x9f\x87\xaf\xf0\x9f\x87\xb5|"[..]),
-        ("a ZWJ sequence", &b"zwj:\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x92\xbb|"[..]),
+        (
+            "a regional-indicator flag",
+            &b"flag:\xf0\x9f\x87\xaf\xf0\x9f\x87\xb5|"[..],
+        ),
+        (
+            "a ZWJ sequence",
+            &b"zwj:\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x92\xbb|"[..],
+        ),
     ] {
         assert!(
             windows_contain(&seen, bytes),

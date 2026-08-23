@@ -216,7 +216,11 @@ pub(crate) struct OrphanPane {
 /// not empty itself when a window is busy.
 fn vouched_for_pane_ids(cx: &mut App) -> HashSet<u64> {
     let mut held = held_local_pane_ids(cx);
-    held.extend(crate::ui::tree_sync::shown_pane_ids(cx).into_iter().flatten());
+    held.extend(
+        crate::ui::tree_sync::shown_pane_ids(cx)
+            .into_iter()
+            .flatten(),
+    );
     held
 }
 
@@ -3456,7 +3460,9 @@ mod tests {
         });
 
         // Whatever the harness put on screen is live and must not be offered.
-        let shown = cx.update(crate::ui::tree_sync::shown_pane_ids).unwrap_or_default();
+        let shown = cx
+            .update(crate::ui::tree_sync::shown_pane_ids)
+            .unwrap_or_default();
         assert!(!shown.is_empty(), "the harness window is showing panes");
 
         let listed: Vec<PaneInfo> = shown

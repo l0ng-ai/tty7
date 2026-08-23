@@ -1467,7 +1467,9 @@ mod tests {
         loop {
             let e = rest.find("\npub enum ");
             let t = rest.find("\npub struct ");
-            let Some(at) = [e, t].into_iter().flatten().min() else { break };
+            let Some(at) = [e, t].into_iter().flatten().min() else {
+                break;
+            };
             rest = &rest[at + 1..];
             let Some(open) = rest.find('{') else { break };
             let name: String = rest[..open]
@@ -3146,5 +3148,3 @@ mod tests {
         assert!(!client.is_connected());
     }
 }
-
-

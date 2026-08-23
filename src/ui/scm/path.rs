@@ -146,19 +146,37 @@ mod tests {
 
     #[test]
     fn split_display_path_separates_the_name_from_its_directory() {
-        assert_eq!(split_display_path("src/ui/app.rs"), ("app.rs".to_string(), "src/ui".to_string()));
-        assert_eq!(split_display_path("README.md"), ("README.md".to_string(), "".to_string()));
-        assert_eq!(split_display_path("a/b"), ("b".to_string(), "a".to_string()));
+        assert_eq!(
+            split_display_path("src/ui/app.rs"),
+            ("app.rs".to_string(), "src/ui".to_string())
+        );
+        assert_eq!(
+            split_display_path("README.md"),
+            ("README.md".to_string(), "".to_string())
+        );
+        assert_eq!(
+            split_display_path("a/b"),
+            ("b".to_string(), "a".to_string())
+        );
         assert_eq!(split_display_path(""), ("".to_string(), "".to_string()));
     }
 
     #[test]
     fn split_display_path_ignores_a_trailing_slash() {
-        assert_eq!(split_display_path("src/ui/"), ("ui".to_string(), "src".to_string()));
-        assert_eq!(split_display_path("src/"), ("src".to_string(), "".to_string()));
+        assert_eq!(
+            split_display_path("src/ui/"),
+            ("ui".to_string(), "src".to_string())
+        );
+        assert_eq!(
+            split_display_path("src/"),
+            ("src".to_string(), "".to_string())
+        );
         // A leading slash leaves an empty directory half rather than dropping
         // the root — the caller decides how to render that.
-        assert_eq!(split_display_path("/etc"), ("etc".to_string(), "".to_string()));
+        assert_eq!(
+            split_display_path("/etc"),
+            ("etc".to_string(), "".to_string())
+        );
     }
 
     #[test]

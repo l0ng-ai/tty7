@@ -353,7 +353,10 @@ mod tests {
             "cd /\n",
             "the window's own history file is not the daemon's to move"
         );
-        assert!(!dir.exists(), "and nothing should have appeared at the new name");
+        assert!(
+            !dir.exists(),
+            "and nothing should have appeared at the new name"
+        );
 
         let (displaced, dir) = case("both");
         std::fs::create_dir_all(&displaced).unwrap();

@@ -1094,15 +1094,14 @@ mod tests {
             .collect();
         assert_eq!(
             kept,
-            vec![(9000, "localhost".to_string(), 90), (1080, String::new(), 0)],
+            vec![
+                (9000, "localhost".to_string(), 90),
+                (1080, String::new(), 0)
+            ],
             "the forwards that fit a host and a port still come across whole"
         );
 
-        let named: Vec<&str> = report
-            .ignored
-            .iter()
-            .map(|i| i.option.as_str())
-            .collect();
+        let named: Vec<&str> = report.ignored.iter().map(|i| i.option.as_str()).collect();
         assert!(
             named.contains(&"LocalForward") && named.contains(&"RemoteForward"),
             "the four that were dropped have to appear in the report, spelled as \
@@ -1707,4 +1706,3 @@ mod tests {
         crate::testutil::temp_root(&format!("ssh-config-test-{name}"))
     }
 }
-

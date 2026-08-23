@@ -65,8 +65,9 @@ pub fn parse_tab(s: &str) -> Result<TabAddress> {
     // handed back has to address the tab it created. Demanding the sigil made
     // the one id you are certain of the one shape the CLI refused.
     let body = s.strip_prefix('@').unwrap_or(s);
-    let not_an_address =
-        || anyhow!("'{s}' is not a tab address — @7 as numbered by `tty7 tab ls`, or a full tab id");
+    let not_an_address = || {
+        anyhow!("'{s}' is not a tab address — @7 as numbered by `tty7 tab ls`, or a full tab id")
+    };
     if body.is_empty() {
         return Err(not_an_address());
     }
@@ -165,13 +166,18 @@ mod tests {
                 );
             }
             if file == "cli.rs" {
-                assert!(found >= 3, "{file}: expected the three tab-address helps, found {found}");
+                assert!(
+                    found >= 3,
+                    "{file}: expected the three tab-address helps, found {found}"
+                );
             } else {
-                assert!(found >= 1, "{file}: expected a message about @ numbers, found {found}");
+                assert!(
+                    found >= 1,
+                    "{file}: expected a message about @ numbers, found {found}"
+                );
             }
         }
     }
-
 
     use super::*;
 

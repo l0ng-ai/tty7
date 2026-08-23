@@ -1683,7 +1683,10 @@ mod tests {
     /// the stored one. After folding, both halves are on the row.
     #[test]
     fn a_commit_subject_carrying_control_characters_draws_on_one_row() {
-        assert_eq!(row_subject("fix: something\rHIDDEN"), "fix: something HIDDEN");
+        assert_eq!(
+            row_subject("fix: something\rHIDDEN"),
+            "fix: something HIDDEN"
+        );
         assert_eq!(row_subject("feat:\tindented"), "feat: indented");
         assert_eq!(row_subject("chore: a\u{b}b\u{c}c"), "chore: a b c");
         assert_eq!(
@@ -1696,10 +1699,12 @@ mod tests {
         // reason the fold happens before it rather than after.
         let folded = row_subject("fix: something\rHIDDEN");
         let (prefix, subject) = split_conventional(&folded);
-        assert_eq!(prefix.map(|(p, breaking)| (p.to_string(), breaking)), Some(("fix".to_string(), false)));
+        assert_eq!(
+            prefix.map(|(p, breaking)| (p.to_string(), breaking)),
+            Some(("fix".to_string(), false))
+        );
         assert_eq!(subject, "something HIDDEN");
     }
-
 
     use super::*;
     use crate::ui::app::test_window::harness;

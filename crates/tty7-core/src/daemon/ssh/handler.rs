@@ -108,9 +108,7 @@ impl ClientHandler {
         // `record_trusted` drops the line this key supersedes before adding it,
         // and adds nothing if that drop fails — see its comment for why the
         // order is not optional.
-        if remember
-            && let Err(e) = known_hosts::record_trusted(&self.host, self.port, key)
-        {
+        if remember && let Err(e) = known_hosts::record_trusted(&self.host, self.port, key) {
             log::warn!("not recording host key in known_hosts: {e}");
         }
         true

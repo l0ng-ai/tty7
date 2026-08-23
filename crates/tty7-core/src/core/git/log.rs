@@ -1138,8 +1138,16 @@ mod tests {
         // naive rule, and a recent leap day.
         assert_eq!(days_from_civil(1970, 1, 1), 0, "the epoch is day zero");
         assert_eq!(days_from_civil(1969, 12, 31), -1, "and the day before it");
-        assert_eq!(days_in_month(2000, 2), 29, "2000 is a leap year: divisible by 400");
-        assert_eq!(days_in_month(1900, 2), 28, "1900 is not: divisible by 100, not 400");
+        assert_eq!(
+            days_in_month(2000, 2),
+            29,
+            "2000 is a leap year: divisible by 400"
+        );
+        assert_eq!(
+            days_in_month(1900, 2),
+            28,
+            "1900 is not: divisible by 100, not 400"
+        );
         assert_eq!(days_in_month(2024, 2), 29);
         assert_eq!(days_in_month(2023, 2), 28);
 
@@ -1172,7 +1180,11 @@ mod tests {
         // leap year, so 200 years hold 49 + 1 = 48 ordinary leap years plus
         // 2000 itself.
         assert_eq!(leap_days, 49, "two centuries hold 49 leap days here");
-        assert_eq!(days_in_month(2024, 13), 0, "a month out of range has no days");
+        assert_eq!(
+            days_in_month(2024, 13),
+            0,
+            "a month out of range has no days"
+        );
         assert_eq!(days_in_month(2024, 0), 0);
     }
 
@@ -1195,7 +1207,10 @@ mod tests {
 
         let (mut y, mut m, mut d) = (1900i64, 1u32, 1u32);
         let mut days = days_from_civil(1900, 1, 1);
-        assert!(days < 0, "the walk has to start before the epoch to exercise it");
+        assert!(
+            days < 0,
+            "the walk has to start before the epoch to exercise it"
+        );
         let mut checked = 0usize;
         while y < 2100 {
             assert_eq!(
@@ -1223,7 +1238,10 @@ mod tests {
         }
         // 200 x 365 + 49 leap days: every fourth year from 1904 to 2096, less
         // 1900, plus 2000. The same 49 the walk above counts.
-        assert_eq!(checked, 73_049, "two centuries of days, 1900-01-01 to 2099-12-31");
+        assert_eq!(
+            checked, 73_049,
+            "two centuries of days, 1900-01-01 to 2099-12-31"
+        );
     }
 
     fn commit(sha: &str, parents: &[&str]) -> (Oid, SmallVec<[Oid; 2]>) {
@@ -1306,7 +1324,10 @@ mod tests {
     struct Lcg(u64);
     impl Lcg {
         fn n(&mut self, m: usize) -> usize {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((self.0 >> 33) as usize) % m.max(1)
         }
     }
@@ -1318,7 +1339,11 @@ mod tests {
         let mut page = Vec::with_capacity(n);
         for i in 0..n {
             let remaining = n - i - 1;
-            let want = if remaining == 0 { 0 } else { 1 + r.n(max_parents) };
+            let want = if remaining == 0 {
+                0
+            } else {
+                1 + r.n(max_parents)
+            };
             let mut ps: SmallVec<[Oid; 2]> = SmallVec::new();
             for _ in 0..want.min(remaining) {
                 let p = i + 1 + r.n(remaining);
@@ -1350,12 +1375,18 @@ mod tests {
                     parents.len().min(u8::MAX as usize),
                     "seed {seed} row {i}: parent count"
                 );
-                let outs = row.edges.iter().filter(|e| matches!(e, Edge::Out { .. })).count();
+                let outs = row
+                    .edges
+                    .iter()
+                    .filter(|e| matches!(e, Edge::Out { .. }))
+                    .count();
                 if parents.is_empty() {
                     assert_eq!(outs, 0, "seed {seed} row {i}: a root must not send an Out");
                 }
                 assert!(
-                    !row.edges.iter().any(|e| matches!(*e, Edge::Pass { lane, .. } if lane == row.node)),
+                    !row.edges
+                        .iter()
+                        .any(|e| matches!(*e, Edge::Pass { lane, .. } if lane == row.node)),
                     "seed {seed} row {i}: a Pass crosses the row's own node lane: {row:?}"
                 );
             }
@@ -1376,7 +1407,10 @@ mod tests {
             let mut alloc = LaneAlloc::new();
             alloc.push(&page[..cut], &mut split);
             alloc.push(&page[cut..], &mut split);
-            assert_eq!(whole, split, "seed {seed}: page boundary at {cut} changed the layout");
+            assert_eq!(
+                whole, split,
+                "seed {seed}: page boundary at {cut} changed the layout"
+            );
             assert_lanes_line_up(&split);
         }
     }
@@ -2273,4 +2307,3 @@ mod tests {
         assert!(!page.complete, "five of the seven is not the whole history");
     }
 }
-

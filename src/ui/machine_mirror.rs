@@ -558,7 +558,6 @@ mod tests {
         );
     }
 
-
     use tty7_core::core::machine::{Axis, PaneNode, PaneSeed, Tab, TabId};
 
     use super::*;
@@ -986,11 +985,14 @@ mod tests {
         let (first, second, third) = (leaf_tab(1), leaf_tab(2), leaf_tab(3));
         let (a, b, c) = (first.id, second.id, third.id);
         for (at, tab) in [(0, first), (1, second), (0, third)] {
-            assert!(apply(&mut machine, id, &LayoutDelta::TabCreated { at, tab }));
+            assert!(apply(
+                &mut machine,
+                id,
+                &LayoutDelta::TabCreated { at, tab }
+            ));
         }
-        let order = |m: &Machine| -> Vec<TabId> {
-            m.workspaces[0].tabs.iter().map(|t| t.id).collect()
-        };
+        let order =
+            |m: &Machine| -> Vec<TabId> { m.workspaces[0].tabs.iter().map(|t| t.id).collect() };
         assert_eq!(
             order(&machine),
             vec![c, a, b],
@@ -1068,11 +1070,18 @@ mod tests {
             },
         };
         let tab_id = tab.id;
-        assert!(apply(&mut machine, id, &LayoutDelta::TabCreated { at: 0, tab }));
+        assert!(apply(
+            &mut machine,
+            id,
+            &LayoutDelta::TabCreated { at: 0, tab }
+        ));
 
         let ratios = |m: &Machine| -> (f32, f32) {
             let root = &m.workspaces[0].tabs[0].root;
-            let PaneNode::Split { ratio: outer, b, .. } = root else {
+            let PaneNode::Split {
+                ratio: outer, b, ..
+            } = root
+            else {
                 panic!("the root is a split")
             };
             let PaneNode::Split { ratio: inner, .. } = &**b else {
@@ -1154,7 +1163,11 @@ mod tests {
 
         let tab = leaf_tab(1);
         let only = tab.id;
-        assert!(apply(&mut machine, id, &LayoutDelta::TabCreated { at: 0, tab }));
+        assert!(apply(
+            &mut machine,
+            id,
+            &LayoutDelta::TabCreated { at: 0, tab }
+        ));
         assert!(apply(
             &mut machine,
             id,
@@ -1162,7 +1175,11 @@ mod tests {
         ));
         assert_eq!(machine.workspaces[0].active_tab, Some(only));
 
-        assert!(apply(&mut machine, id, &LayoutDelta::TabClosed { tab: only }));
+        assert!(apply(
+            &mut machine,
+            id,
+            &LayoutDelta::TabClosed { tab: only }
+        ));
         assert!(machine.workspaces[0].tabs.is_empty());
         assert_eq!(
             machine.workspaces[0].active_tab, None,

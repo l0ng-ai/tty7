@@ -40,8 +40,7 @@ pub fn init(cx: &mut App) {
 /// has no business knowing what a window is.
 pub(crate) fn install_relaunch_guard() {
     crate::core::update::set_relaunch_guard(Box::new(|cx, proceed| {
-        let Some((workspace, tab, name)) =
-            crate::ui::app::Tty7App::quit_loses_unwritten_work(cx)
+        let Some((workspace, tab, name)) = crate::ui::app::Tty7App::quit_loses_unwritten_work(cx)
         else {
             proceed(cx);
             return;
@@ -94,7 +93,8 @@ pub(crate) fn install_relaunch_guard() {
 /// more than one window is not the frontmost one. Answering it quits
 /// everything, which is what was asked for.
 fn quit_or_ask(cx: &mut App) {
-    let Some((workspace, tab, name)) = crate::ui::app::Tty7App::quit_loses_unwritten_work(cx) else {
+    let Some((workspace, tab, name)) = crate::ui::app::Tty7App::quit_loses_unwritten_work(cx)
+    else {
         cx.quit();
         return;
     };
@@ -1648,7 +1648,9 @@ mod tests {
         let body = &SRC[start..];
         let body = &body[..body.find("\n}\n").expect("the function ends")];
 
-        let fixed = body.find("bindings.extend(fixed_bindings())").expect("fixed");
+        let fixed = body
+            .find("bindings.extend(fixed_bindings())")
+            .expect("fixed");
         let config = body
             .find("bindings.extend(action_bindings(")
             .expect("the config's own bindings");

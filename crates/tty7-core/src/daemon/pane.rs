@@ -12,12 +12,12 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use crate::core::kitty_graphics::{GraphicsSniffer, Segment, Sniffed};
 use crate::core::osc::OscTokenizer;
 use crate::core::shells::program_problem as shell_program_problem;
+use crate::core::threads::Locked as _;
 use crate::daemon::protocol::{
     AuthResponse, DaemonMsg, MAX_FRAME, NativeSshSpec, PaneInfo, RemoteContext, RemoteKind,
     ShellSpec, WinSize,
 };
 use crate::daemon::shell_integration;
-use crate::core::threads::Locked as _;
 
 #[cfg(windows)]
 fn default_prog() -> CommandBuilder {

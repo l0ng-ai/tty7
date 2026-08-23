@@ -1832,7 +1832,10 @@ mod tests {
         let lead = "`delta` is externally tagged the same way. The kinds are";
         // From *after* the lead, so the sentence's own `delta` is not read as
         // one of the kinds it introduces.
-        let at = DOC.find(lead).expect("the reference still enumerates the kinds") + lead.len();
+        let at = DOC
+            .find(lead)
+            .expect("the reference still enumerates the kinds")
+            + lead.len();
         let listed = &DOC[at..at + DOC[at..].find(".\n\n").expect("the sentence ends")];
         let named: Vec<&str> = listed
             .split('`')
@@ -1841,7 +1844,10 @@ mod tests {
             .filter(|t| t.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
             .collect();
 
-        let missing: Vec<&String> = variants.iter().filter(|v| !named.contains(&v.as_str())).collect();
+        let missing: Vec<&String> = variants
+            .iter()
+            .filter(|v| !named.contains(&v.as_str()))
+            .collect();
         assert!(
             missing.is_empty(),
             "these layout deltas reach `tty7 events` with nothing in \
@@ -2387,10 +2393,10 @@ mod tests {
     #[test]
     fn emptying_a_tab_moves_the_active_mark_and_announces_it() {
         let (store, _dir, ws, first) = store_with_tab();
-        let second = store.tab_create(ws, None, seed(9, "/b"), None, None).unwrap();
-        store
-            .workspace_set_active_tab(ws, second.id, None)
+        let second = store
+            .tab_create(ws, None, seed(9, "/b"), None, None)
             .unwrap();
+        store.workspace_set_active_tab(ws, second.id, None).unwrap();
         assert_eq!(store.workspace(ws).unwrap().active_tab, Some(second.id));
 
         // Closing the second tab's only pane takes the tab with it.
@@ -2431,7 +2437,12 @@ mod tests {
         let dropped = store.pane_close(ws, 2, None).unwrap();
         assert_eq!(dropped, vec![2], "the caller is told to hang it up");
         assert_eq!(
-            store.machine().panes.iter().map(|p| p.id).collect::<Vec<_>>(),
+            store
+                .machine()
+                .panes
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
             vec![1],
             "and the record goes with it, or it is an orphan on every later look"
         );
