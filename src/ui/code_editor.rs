@@ -40,6 +40,14 @@ pub(crate) struct OpenFile {
     save_then_close: bool,
     reload_seq: u64,
     pub(crate) conflict: bool,
+    /// Whether the file arrived with every line ending `\r\n`.
+    ///
+    /// The buffer keeps the bytes it was given, `\r` and all, but Enter is the
+    /// widget's own and inserts a bare `\n` whatever the rest of the file
+    /// does. Left alone, editing one line of a CRLF file mixes the two endings
+    /// and git reports the whole line rewritten. Recorded here so the save can
+    /// put back the ending the file already had.
+    crlf: bool,
     pub(crate) preview: bool,
     pub(crate) wrap: bool,
     /// The rendered-Markdown pane's own scroll. Per file, so switching away
@@ -232,6 +240,39 @@ fn place_cursor(
     window.refresh();
 }
 
+/// Whether every line ending in `text` is `\r\n`, and there is at least one.
+///
+/// Deliberately unanimous rather than a majority. A file that already mixes
+/// its endings is one this editor should hand back exactly as it found it —
+/// guessing a winner there would rewrite lines the user never touched.
+fn uniformly_crlf(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut saw_one = false;
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == b'\n' {
+            if i == 0 || bytes[i - 1] != b'\r' {
+                return false;
+            }
+            saw_one = true;
+        }
+    }
+    saw_one
+}
+
+/// Gives every bare `\n` in `text` the `\r` its neighbours have.
+fn to_crlf(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut prev = '\0';
+    for c in text.chars() {
+        if c == '\n' && prev != '\r' {
+            out.push('\r');
+        }
+        out.push(c);
+        prev = c;
+    }
+    out
+}
+
 fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|b| *b == 0)
 }
@@ -302,6 +343,7 @@ impl Tty7App {
             save_then_close: false,
             reload_seq: 0,
             conflict: false,
+            crlf: false,
             preview: false,
             wrap: false,
             preview_scroll: gpui::ScrollHandle::new(),
@@ -686,6 +728,7 @@ impl Tty7App {
             return;
         }
         let language = language_for_path(&path);
+        let crlf = uniformly_crlf(&text);
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .code_editor(language)
@@ -740,6 +783,7 @@ impl Tty7App {
                 save_then_close: false,
                 reload_seq: 0,
                 conflict: false,
+                crlf,
                 preview: false,
                 wrap: false,
                 preview_scroll: gpui::ScrollHandle::new(),
@@ -854,7 +898,9 @@ impl Tty7App {
         }
         let seq = f.edit_seq;
         f.saving = Some(seq);
+        let crlf = f.crlf;
         let text = f.input.read(cx).text().to_string();
+        let text = if crlf { to_crlf(&text) } else { text };
         let target = f.path.clone();
         let host_id = host.id();
         let saved_in = target.parent().map(std::path::Path::to_path_buf);
@@ -1134,6 +1180,7 @@ impl Tty7App {
                 f.disk_mtime = mtime;
                 f.dirty = false;
                 f.conflict = false;
+                f.crlf = uniformly_crlf(&text);
                 f.edit_seq = f.edit_seq.wrapping_add(1);
                 let input = f.input.clone();
                 input.update(cx, |input, cx| input.set_value(text, window, cx));
@@ -1607,6 +1654,7 @@ mod tests {
 
 #[cfg(all(test, unix))]
 mod unsaved_close_gpui_tests {
+    use super::{to_crlf, uniformly_crlf};
     use gpui::TestAppContext;
 
     use crate::ui::app::test_window::harness_with_tabs;
@@ -1697,5 +1745,155 @@ mod unsaved_close_gpui_tests {
                 "and the one spared is the one with the edits"
             );
         });
+    }
+
+    /// A buffer hands back exactly the bytes it was given.
+    ///
+    /// This is what `editor_save_file` writes, so anything the buffer quietly
+    /// tidies on the way in is written over the user's file the first time
+    /// they hit save — without them having edited that part of it. The cases
+    /// are the ones an editor is most often caught rewriting: both line
+    /// endings, hard tabs in a file where they are load-bearing, and a final
+    /// line with no newline after it.
+    #[gpui::test]
+    fn a_buffer_hands_back_the_bytes_it_was_given(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        app.update_in(&mut vcx, |_app, window, cx| {
+            for (what, text) in [
+                ("windows line endings", "a\r\nb\r\n"),
+                ("a make recipe's hard tabs", "all:\n\tcc -o x x.c\n"),
+                ("no newline at end of file", "last line"),
+                ("a blank line at the end", "a\n\n"),
+                ("a bare carriage return", "a\rb"),
+                ("text that is not ascii", "\u{4f60}\u{597d} \u{1f600}\n"),
+                ("whitespace nobody trimmed", "a   \nb\t\n"),
+            ] {
+                let input = new_buffer(text, window, cx);
+                assert_eq!(
+                    input.read(cx).text().to_string(),
+                    text,
+                    "the buffer rewrote {what}"
+                );
+            }
+        });
+    }
+
+    /// A file that came in with Windows endings goes back out with them.
+    ///
+    /// Enter belongs to the input widget and inserts a bare `\n` whatever the
+    /// file around it does, so every line added to a CRLF file used to end
+    /// differently from every line already in it — which git reports as a
+    /// rewrite of lines the user never visited.
+    #[gpui::test]
+    fn a_line_added_to_a_crlf_file_keeps_the_file_s_own_ending(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        app.update_in(&mut vcx, |_app, window, cx| {
+            let input = new_buffer("one\r\ntwo\r\n", window, cx);
+            // What Enter leaves behind, spelled out: the widget's own newline.
+            input.update(cx, |state, cx| state.insert("three\n", window, cx));
+            let saved = to_crlf(&input.read(cx).text().to_string());
+            assert!(
+                !saved.contains("\n") || saved.split("\n").count() - 1 == saved.matches("\r\n").count(),
+                "a bare newline survived into a CRLF file: {saved:?}"
+            );
+            assert!(saved.contains("three\r\n"), "the added line is there: {saved:?}");
+        });
+    }
+
+    /// The same buffer with Unix endings is not given carriage returns.
+    #[gpui::test]
+    fn a_unix_file_is_left_alone(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        app.update_in(&mut vcx, |_app, window, cx| {
+            let input = new_buffer("one\ntwo\n", window, cx);
+            input.update(cx, |state, cx| state.insert("three\n", window, cx));
+            let text = input.read(cx).text().to_string();
+            assert!(!uniformly_crlf("one\ntwo\n"), "a unix file is not a crlf one");
+            assert!(!text.contains('\r'), "a carriage return appeared: {text:?}");
+        });
+    }
+
+    /// A file that already mixes its endings is handed back untouched.
+    #[test]
+    fn a_mixed_file_is_not_given_a_winner() {
+        assert!(!uniformly_crlf("a\r\nb\n"), "mixed endings are not CRLF");
+        assert!(!uniformly_crlf("a\nb\r\n"), "in either order");
+        assert!(!uniformly_crlf("no newline at all"), "and neither is a single line");
+        assert!(uniformly_crlf("a\r\n"), "one CRLF line is a CRLF file");
+    }
+
+    /// Saving actually writes, and writes the file's own line ending.
+    ///
+    /// The buffer-level tests above cannot see the save path: they check what
+    /// `to_crlf` does, not that anybody calls it. This one opens a real file,
+    /// adds a line the way Enter would, saves through the ordinary path, and
+    /// reads the bytes back off the disk.
+    #[gpui::test]
+    fn a_saved_crlf_file_is_still_a_crlf_file_on_disk(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let dir = std::env::temp_dir().join(format!("tty7-crlf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("windows.txt");
+        std::fs::write(&path, b"one\r\ntwo\r\n").expect("seed the file");
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let host = tty7_core::host::local::LocalHost::new();
+            app.editor_install_file(
+                host,
+                path.clone(),
+                "one\r\ntwo\r\n".to_string(),
+                None,
+                window,
+                cx,
+            );
+            let input = app
+                .tab_code()
+                .and_then(|c| c.files.first())
+                .map(|f| f.input.clone())
+                .expect("the file is open");
+            // The bare newline is the point: it is what Enter inserts.
+            input.update(cx, |state, cx| state.insert("three\n", window, cx));
+            app.editor_save_file(input.entity_id(), false, window, cx);
+        });
+
+        // The write goes out on a blocking pool that `run_until_parked` does
+        // not wait for, so watch the file rather than assume a single turn.
+        let mut wrote = Vec::new();
+        for _ in 0..200 {
+            vcx.run_until_parked();
+            wrote = std::fs::read(&path).unwrap_or_default();
+            if wrote != b"one\r\ntwo\r\n" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            String::from_utf8_lossy(&wrote),
+            "three\r\none\r\ntwo\r\n",
+            "the saved file kept the endings it came with"
+        );
+    }
+
+    /// Building the buffer the way `editor_install_file` does.
+    fn new_buffer(
+        text: &str,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) -> gpui::Entity<gpui_component::input::InputState> {
+        use gpui::AppContext as _;
+        use gpui_component::input::{InputState, TabSize};
+        cx.new(|cx| {
+            InputState::new(window, cx)
+                .code_editor("rust")
+                .multi_line(true)
+                .tab_size(TabSize {
+                    tab_size: 4,
+                    hard_tabs: false,
+                })
+                .soft_wrap(false)
+                .default_value(text)
+        })
     }
 }
