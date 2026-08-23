@@ -181,6 +181,72 @@ pub fn unquote_word(word: &str, quoting: Quoting) -> String {
 mod tests {
     use super::*;
 
+    /// Completion leans on these two being inverses: it inserts a quoted
+    /// candidate, and the next Tab reads that word back off the line and has
+    /// to resolve it against the filesystem again. A path that does not survive
+    /// the round trip is a directory the second Tab cannot enter.
+    ///
+    /// Every path here is one that can exist. The single exception is a `"`
+    /// under `Quoting::Cmd`: `quote_as` wraps a cmd argument in double quotes
+    /// without a seam for a literal one, so `a"b` comes back as `ab`. Cmd is
+    /// reached only for a Windows shell, and Windows forbids `"` in a file
+    /// name along with `< > : / \ | ? *` — so there is no such path to lose.
+    /// Asserted as it stands rather than fixed, because the fix would be a
+    /// quoting rule for a case that cannot arrive.
+    #[test]
+    fn a_quoted_path_reads_back_as_the_path_it_was() {
+        let paths = [
+            "/Users/me/notes.txt",
+            "a b",
+            "a'b",
+            "a\\b",
+            "~/x",
+            "~/a b",
+            "~",
+            "~/",
+            "don't",
+            "a$b",
+            "a`b",
+            "a;b",
+            "a|b",
+            "a\nb",
+            "",
+            " ",
+            "a  b",
+            "'",
+            "\\",
+            "a\\",
+            "ünïcø∂é",
+            "a*b",
+            "C:\\Users\\me",
+            "~/My Documents",
+            "#a",
+            "-x",
+            "a=b",
+        ];
+        for quoting in [Quoting::Posix, Quoting::Cmd, Quoting::PowerShell] {
+            for path in paths {
+                let quoted = quote_as(path, quoting);
+                assert_eq!(
+                    unquote_word(&quoted, quoting),
+                    path,
+                    "{quoting:?} did not round-trip {path:?} (as {quoted:?})"
+                );
+            }
+        }
+
+        // The one that does not, and cannot arise. Stated so that a future
+        // reader meets the limit here rather than in a bug report.
+        assert_eq!(
+            unquote_word(&quote_as("a\"b", Quoting::Cmd), Quoting::Cmd),
+            "ab"
+        );
+        for quoting in [Quoting::Posix, Quoting::PowerShell] {
+            let path = "a\"b";
+            assert_eq!(unquote_word(&quote_as(path, quoting), quoting), path);
+        }
+    }
+
     #[test]
     fn a_plain_path_is_left_alone() {
         assert_eq!(
