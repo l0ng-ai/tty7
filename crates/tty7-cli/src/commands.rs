@@ -994,11 +994,9 @@ fn pane_ls_all(backend: &mut dyn Backend) -> Result<Outcome> {
             })
         })
         .collect();
-    // The same test `orphan_panes` makes, so the count and the reaper cannot
-    // disagree — the line names `pane close --orphans` as the fix for it.
     let orphans = running
         .iter()
-        .filter(|info| !info.attached && holder(info.pane_id).is_none())
+        .filter(|info| is_stray(info, |pane| holder(pane).is_some()))
         .count();
     let mut human = output::registry_table(&running, &|pane| holder(pane).map(|ws| ws.to_string()));
     if orphans > 0 {
@@ -1137,6 +1135,19 @@ fn pane_close(
 /// that predates it simply omits it — but it is a wire change, and until it
 /// happens the honest thing is that the docs say plainly that `--orphans` will
 /// kill a `run` started from another shell.
+/// The one test for "nothing holds this pane and nobody is watching it".
+///
+/// Three places tell the user about the same set — the reaper takes it, the
+/// listing counts it, and the doctor's row names it and points at the reaper —
+/// so they cannot be allowed to drift. A row that says seven and a reaper that
+/// ends none is a worse answer than either alone.
+fn is_stray(
+    info: &tty7_core::daemon::protocol::PaneInfo,
+    held: impl Fn(u64) -> bool,
+) -> bool {
+    !info.attached && !held(info.pane_id)
+}
+
 /// The panes nothing holds and nobody is watching.
 ///
 /// "No workspace holds it" is not enough on its own, and the gap is not
@@ -1165,9 +1176,8 @@ fn orphan_panes(machine: &Machine, backend: &mut dyn Backend) -> Result<Vec<u64>
     Ok(backend
         .list_panes()?
         .iter()
-        .filter(|info| !info.attached)
+        .filter(|info| is_stray(info, |pane| held.contains(&pane)))
         .map(|info| info.pane_id)
-        .filter(|pane| !held.contains(pane))
         .collect())
 }
 
@@ -2047,7 +2057,7 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
                         .collect();
                     strays = running
                         .iter()
-                        .filter(|info| !held.contains(&info.pane_id))
+                        .filter(|info| is_stray(info, |pane| held.contains(&pane)))
                         .count();
                 }
                 if strays > 0 {
@@ -4846,6 +4856,51 @@ mod tests {
         }));
         backend.replies.push_back(ReplyOk::Routes(Vec::new()));
         backend
+    }
+
+    /// The doctor's row names the set its own advice would act on.
+    ///
+    /// The row reads "N running that no workspace holds — `tty7 pane close
+    /// --orphans` ends them", so a number arrived at any other way sends the
+    /// reader after panes the reaper will not touch. During a restore that is
+    /// exactly what happened: every pane a window was adopting counted, and
+    /// the command it recommends now correctly ends none of them.
+    #[test]
+    fn the_doctor_counts_the_strays_its_advice_would_end() {
+        let registry = || {
+            vec![
+                pane_info(1, None),
+                attached_pane_info(77, Some("tty7-app")),
+                pane_info(78, Some("tty7-app")),
+            ]
+        };
+
+        let mut backend = doctor_backend();
+        backend.registry = registry();
+        let doctored = json_of(run_cli(
+            &["tty7", "doctor"],
+            &Context::default(),
+            &mut backend,
+        ))["server"]["orphans"]
+            .as_u64()
+            .expect("the doctor counts them");
+
+        let mut backend = mock();
+        backend.registry = registry();
+        let reaped = json_of(run_cli(
+            &["tty7", "pane", "close", "--orphans"],
+            &Context::default(),
+            &mut backend,
+        ))["closed"]
+            .as_array()
+            .expect("the reaper lists them")
+            .len() as u64;
+
+        assert_eq!(
+            doctored, reaped,
+            "the doctor and the command it recommends must name one set"
+        );
+        assert_eq!(doctored, 1, "and it is the pane nobody is watching");
     }
 
     #[test]
