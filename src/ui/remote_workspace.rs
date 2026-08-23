@@ -2115,6 +2115,83 @@ pub(crate) fn workspace_is_preempted(cx: &gpui::App, workspace: WorkspaceId) -> 
 mod tests {
     use super::*;
 
+    /// A Take Back is still due after an attach has already gone out.
+    ///
+    /// `reclaims_due` says what lands in it: "a Take Back sits in `reclaiming`
+    /// until an attach answers for it", *and* a workspace nobody has attached
+    /// over the link that is up now. Those are two reasons, joined by `||`,
+    /// and only the second was held — dropping the `reclaiming` half left the
+    /// suite green while Take Back did nothing for any workspace this client
+    /// had already sent an attach for, which is every workspace it is showing.
+    ///
+    /// Like its neighbour, unreachable by driving the app: a remote link
+    /// cannot be opened from here at all.
+    #[gpui::test]
+    fn a_take_back_is_due_even_when_an_attach_was_already_sent(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::core::config::Config::default());
+            let target = RemoteTarget::Alias {
+                alias: "build-box".into(),
+            };
+            let host_ref = RemoteRef::new(target.clone(), WorkspaceId::new());
+            let host = host_ref.host_id();
+            let view = crate::core::session::WindowView {
+                host: Some(host_ref),
+                open: true,
+                ..Default::default()
+            };
+            let id = view.id;
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![view],
+                    active: None,
+                },
+            );
+
+            // An attach has already gone out over the link that is up, which
+            // is the ordinary state of a workspace on screen.
+            {
+                let links = cx.default_global::<RemoteLinks>();
+                links.machines.entry(host).or_insert(MachineLink {
+                    state: LinkState::Attached,
+                    backoff: Backoff::default(),
+                    next_attempt: None,
+                    attempting: false,
+                    last_error: None,
+                    attach_sent: Default::default(),
+                });
+                links
+                    .machines
+                    .get_mut(&host)
+                    .expect("just inserted")
+                    .attach_sent
+                    .insert(id);
+            }
+            assert!(
+                reclaims_due(cx, host).is_empty(),
+                "with the attach sent and no Take Back asked for, nothing is due"
+            );
+
+            // Now the user asks for it back. `reclaims_due` marks what it
+            // returns as in flight, so the earlier call also cleared
+            // `attaching` — put the workspace back in play the way a fresh
+            // tick would.
+            {
+                let links = cx.default_global::<RemoteLinks>();
+                links.attaching.remove(&id);
+                links.reclaiming.insert(id, "someone else".to_string());
+            }
+            let due: Vec<WorkspaceId> =
+                reclaims_due(cx, host).into_iter().map(|(w, _)| w).collect();
+            assert_eq!(
+                due,
+                vec![id],
+                "a Take Back is due however many attaches have already gone out"
+            );
+        });
+    }
+
     /// A link still being made survives its profile being deleted.
     ///
     /// `link_alive_or_connecting` says why: the connection holds an
