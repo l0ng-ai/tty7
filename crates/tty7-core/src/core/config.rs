@@ -905,7 +905,7 @@ impl Config {
             return;
         };
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = ensure_private_dir(parent);
         }
         match serde_json::to_string_pretty(self) {
             Ok(text) => {
@@ -1103,6 +1103,57 @@ fn quarantine_path(path: &std::path::Path) -> PathBuf {
     candidates
         .find(|candidate| !candidate.exists())
         .unwrap_or(base)
+}
+
+/// Create `dir`, and close it to this user.
+///
+/// The config directory holds the command history, the SSH profiles, the
+/// session's working directories and the workspace tree. Not all of that is
+/// written with a private mode of its own — `history` is appended by the app
+/// under the process umask, which is 022 on a stock box, so the file lands
+/// 0644 — and the directory it sits in was created the same way. Between them
+/// nothing was closed, and on a shared machine another account could read
+/// every command you had run, with its directory and its exit status.
+///
+/// `daemon::history` already says this about the subdirectory it writes:
+/// "closing the directory is what makes the mode of what is inside it moot".
+/// This is that rule for the directory holding it, which is where the rest of
+/// the state lives.
+///
+/// Applied on every call rather than only when the directory is new, so a
+/// config directory an earlier build left open is closed the next time
+/// anything writes to it.
+pub fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    // Every directory this call brings into being, not just the last one.
+    // `create_dir_all("<config>/history.d")` makes `<config>` too, and closing
+    // only the leaf would leave the directory holding `config.json`, `history`
+    // and `session.json` exactly as open as before.
+    //
+    // Ancestors that already existed are left alone: `$HOME` and `~/.config`
+    // are not ours to re-permission, and on a first run they are the ones this
+    // walk stops at.
+    #[cfg(unix)]
+    let fresh: Vec<&std::path::Path> = dir.ancestors().take_while(|p| !p.exists()).collect();
+    std::fs::create_dir_all(dir)?;
+    // Windows has no umask; the config directory inherits an ACL that is
+    // already per-user, which is the same reason `daemon::history` skips it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let private = std::fs::Permissions::from_mode(0o700);
+        for made in fresh {
+            let _ = std::fs::set_permissions(made, private.clone());
+        }
+        // The config directory itself even when it was already there, so one
+        // an earlier build left open is repaired rather than skipped. Only
+        // that one: a directory this call did not create and that is not ours
+        // is somebody else's to permission, which is the distinction
+        // `transport::bind` drew with `owns_parent` before this existed.
+        if config_dir().is_some_and(|c| c == dir) {
+            let _ = std::fs::set_permissions(dir, private);
+        }
+    }
+    Ok(())
 }
 
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -2112,6 +2163,56 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_config_directory_is_closed_to_other_users() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _guard = lock_config_file();
+        let mode_of =
+            |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        // Every directory the call brings into being, not only the last one.
+        // A stock box runs umask 022, which would leave these 0755 and the
+        // `history` file inside them 0644 — readable by every other account.
+        let scratch = std::env::temp_dir().join(format!("tty7-privdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let nested = scratch.join("history.d");
+        super::ensure_private_dir(&nested).expect("the directory is created");
+        for made in [&scratch, &nested] {
+            assert_eq!(
+                mode_of(made),
+                0o700,
+                "{} is open, so anyone on this machine can read what is in it",
+                made.display()
+            );
+        }
+
+        // A directory that was already there and is not ours stays as it is:
+        // `$HOME` and `~/.config` are on this walk on a first run, and neither
+        // is this code's to re-permission.
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o755)).unwrap();
+        super::ensure_private_dir(&nested.join("deeper")).expect("still there");
+        assert_eq!(
+            mode_of(&nested),
+            0o755,
+            "a directory this call did not create was re-permissioned anyway"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        // The config directory is the exception, so one an earlier build left
+        // open is repaired the next time anything writes to it rather than
+        // staying open for the life of the install.
+        pin_config_dir();
+        let cfg = config_dir().expect("the pinned config dir resolves");
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o755)).unwrap();
+        super::ensure_private_dir(&cfg).expect("the config dir is there");
+        assert_eq!(
+            mode_of(&cfg),
+            0o700,
+            "a config directory an earlier build left open stayed open"
+        );
     }
 
     #[test]

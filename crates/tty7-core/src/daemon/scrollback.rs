@@ -168,7 +168,7 @@ pub fn save(pane_id: u64, segments: &[Segment]) {
     let Some(parent) = path.parent().map(|p| p.to_path_buf()) else {
         return;
     };
-    if let Err(e) = std::fs::create_dir_all(&parent) {
+    if let Err(e) = crate::core::config::ensure_private_dir(&parent) {
         log::debug!("no scrollback directory ({e}); pane {pane_id} is not persisted");
         return;
     }

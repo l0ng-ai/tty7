@@ -438,7 +438,7 @@ mod imp_windows {
         let path = port_path_named(file)
             .ok_or_else(|| anyhow::anyhow!("could not resolve {file} path (no config dir)"))?;
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = config::ensure_private_dir(parent);
         }
         let listener = TcpListener::bind(loopback(0))
             .map_err(|e| anyhow::anyhow!("bind 127.0.0.1:0 failed: {e}"))?;

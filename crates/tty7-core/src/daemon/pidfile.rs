@@ -9,7 +9,7 @@ pub fn path() -> Option<PathBuf> {
 pub(crate) fn write_current() {
     let Some(path) = path() else { return };
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = crate::core::config::ensure_private_dir(parent);
     }
     if let Err(e) = std::fs::write(&path, std::process::id().to_string()) {
         log::warn!("could not write pidfile {}: {e}", path.display());

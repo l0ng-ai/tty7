@@ -37,7 +37,7 @@ fn spawn_config_watcher(cx: &mut App) {
     let Some(dir) = crate::core::config::config_dir_path() else {
         return;
     };
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = crate::core::config::ensure_private_dir(&dir);
 
     const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
 

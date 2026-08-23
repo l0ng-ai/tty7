@@ -721,7 +721,7 @@ pub fn to_yaml(t: &Theme) -> String {
 pub fn fork_to_file(t: &Theme) -> std::io::Result<String> {
     let dir = themes_dir()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no themes directory"))?;
-    std::fs::create_dir_all(&dir)?;
+    crate::core::config::ensure_private_dir(&dir)?;
     let base = format!("{}-custom", t.id.trim_end_matches("-custom"));
     let mut stem = base.clone();
     let mut n = 2;

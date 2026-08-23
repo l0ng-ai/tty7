@@ -495,7 +495,7 @@ impl WindowViews {
             return;
         };
         if let Some(parent) = path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
+            && let Err(e) = crate::core::config::ensure_private_dir(parent)
         {
             log::warn!("failed to create views dir {}: {e}", parent.display());
             return;

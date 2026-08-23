@@ -153,6 +153,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The config directory is now created closed to other users, and one an earlier
+  build left open is repaired on the next write. It holds the command history —
+  every command with its working directory and exit status — along with the SSH
+  profiles in `config.json`, the session's directories and the workspace tree,
+  and it was created under the process umask: 022 on a stock box, which makes
+  the directory 0755 and the history file 0644. On a shared machine another
+  account could read all of it. The daemon's own history subdirectory already
+  closed itself for exactly this reason, as did the unix socket's parent; the
+  directory holding the rest did not.
 - A control request whose handler fails outright is now answered with an error
   instead of silently dropped. Every other way out already answered — even a
   request the queue was too full to accept — but a panic inside the handler

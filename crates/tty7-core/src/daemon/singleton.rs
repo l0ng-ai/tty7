@@ -117,7 +117,7 @@ pub fn claim() -> Claim {
         return Claim::Unavailable("no config directory".into());
     };
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = crate::core::config::ensure_private_dir(parent);
     }
     match open_exclusive(&path) {
         Ok(Some(file)) => {

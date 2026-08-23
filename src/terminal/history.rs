@@ -233,7 +233,7 @@ pub fn append(scope: &Scope, cmd: &str, cwd: Option<&Path>, ts: u64, exit: Optio
         return;
     };
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = tty7_core::core::config::ensure_private_dir(parent);
     }
     let cwd = match cwd.and_then(Path::to_str) {
         Some(c) if looks_absolute(c) && !c.contains(['\t', '\n', '\r']) => c,
