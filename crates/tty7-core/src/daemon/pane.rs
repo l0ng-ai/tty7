@@ -675,7 +675,15 @@ impl OutputGate {
             if left.is_zero() {
                 return;
             }
-            let (guard, _) = self.drained.wait_timeout(park, left).unwrap();
+            // Poison-tolerant for the same reason the lock above is: this is
+            // the PTY reader parking on a pane's own backlog, and a thread that
+            // panicked holding the mutex must not stop this one reading. The
+            // `.locked()` a line up and an `.unwrap()` here would have been the
+            // guard and the hole in it.
+            let (guard, _) = self
+                .drained
+                .wait_timeout(park, left)
+                .unwrap_or_else(|e| e.into_inner());
             park = guard;
         }
     }

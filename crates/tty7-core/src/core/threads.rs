@@ -77,6 +77,11 @@ mod tests {
     /// Scoped to `daemon/` deliberately. That is the process holding every
     /// shell on the machine, where the cascade costs the most; a tool that
     /// panics takes only itself with it.
+    ///
+    /// Condvar waits count too. `Condvar::wait`/`wait_timeout` hand back the
+    /// same poison the lock does, and `pane.rs` had one site that took its
+    /// mutex through `locked()` and then unwrapped the wait on the very next
+    /// line — poison-tolerant and poison-fatal, four lines apart.
     #[test]
     fn the_daemon_takes_no_lock_that_dies_of_poison() {
         fn walk(dir: &std::path::Path, found: &mut Vec<String>) {
@@ -100,7 +105,18 @@ mod tests {
                 let mut in_tests = false;
                 for (n, line) in text.lines().enumerate() {
                     in_tests |= line.contains("#[cfg(test)]");
-                    if !in_tests && line.contains(".lock().unwrap()") {
+                    if in_tests {
+                        continue;
+                    }
+                    // Both ways a poisoned mutex reaches a caller. Taking the
+                    // lock was covered from the start; waiting on its condvar
+                    // was not, and one site took the lock poison-tolerantly and
+                    // then panicked on the same poison a line later — the guard
+                    // and the hole in it, in four lines of code.
+                    let dies = line.contains(".lock().unwrap()")
+                        || line.contains("wait_timeout(") && line.contains(".unwrap()")
+                        || line.contains(".wait(") && line.contains(".unwrap()");
+                    if dies {
                         found.push(format!("{}:{}", path.display(), n + 1));
                     }
                 }
