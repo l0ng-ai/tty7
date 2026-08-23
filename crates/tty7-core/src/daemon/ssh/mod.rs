@@ -855,6 +855,102 @@ mod tests {
         );
     }
 
+    /// The common case, end to end: key auth against a real sshd.
+    ///
+    /// tty7 speaks SSH itself rather than shelling out, and everything above
+    /// this — remote workspaces, the routed pane socket, SFTP — stands on the
+    /// connection it makes. The only live test beside it needs Kerberos, which
+    /// is the case almost nobody runs, so the case almost everybody runs had no
+    /// end-to-end check at all.
+    ///
+    /// Ignored because it needs a server, like its neighbour. It needs much
+    /// less of one: Remote Login on the machine running the test and a key it
+    /// accepts, which is a `ssh localhost true` away. Defaults are chosen so
+    /// that on such a machine the whole thing is
+    /// `cargo test -p tty7-core --lib live_key_auth -- --ignored`.
+    ///
+    /// `verify_host_keys` is off for the same reason it is off next door: the
+    /// point is the transport, and a first connection to a host nobody has
+    /// approved would otherwise sit on a prompt no test can answer.
+    #[test]
+    #[ignore = "requires a live SSH server that accepts a key of yours"]
+    fn live_key_auth_connects_and_opens_a_channel() {
+        let host = std::env::var("TTY7_LIVE_SSH_HOST").unwrap_or_else(|_| "localhost".into());
+        let user = std::env::var("TTY7_LIVE_SSH_USER")
+            .or_else(|_| std::env::var("USER"))
+            .expect("a user to log in as");
+        let port = std::env::var("TTY7_LIVE_SSH_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(22);
+        let key = std::env::var("TTY7_LIVE_SSH_KEY").unwrap_or_else(|_| {
+            format!(
+                "{}/.ssh/id_ed25519",
+                std::env::var("HOME").unwrap_or_default()
+            )
+        });
+
+        let mut spec = base_spec();
+        spec.host = host.clone();
+        spec.user = user.clone();
+        spec.port = port;
+        spec.auth_mode = SshAuthMode::PublicKey;
+        spec.identity_files = vec![key.clone()];
+        spec.connect_timeout_s = Some(10);
+        spec.verify_host_keys = false;
+
+        let manager = SshManager::global();
+        let broker = PromptBroker::new(Box::new(|_| true));
+        manager.runtime.block_on(async {
+            let (conn, reused) = manager
+                .open_connection(&spec, &broker)
+                .await
+                .unwrap_or_else(|e| panic!("connecting to {user}@{host}:{port} with {key}: {e}"));
+            assert!(!reused, "the first connection of a run is not a reuse");
+            // Not just that a channel opens: run something and read what comes
+            // back. Opening proves the handshake; this proves the transport,
+            // which is what every pane on a remote machine is.
+            let mut channel = conn
+                .open_session_channel()
+                .await
+                .expect("a channel on a connection that authenticated");
+            channel
+                .exec(true, "echo tty7-live-check")
+                .await
+                .expect("exec on the channel");
+            let mut said = String::new();
+            let mut code = None;
+            while let Some(msg) = channel.wait().await {
+                match msg {
+                    russh::ChannelMsg::Data { ref data } => {
+                        said.push_str(&String::from_utf8_lossy(data));
+                    }
+                    russh::ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
+                    // Deliberately no `break` on `Eof`: openssh sends the exit
+                    // status *after* it, so stopping there reads the output and
+                    // misses how it ended. `wait` returns `None` when the
+                    // channel is really finished, which is the only end worth
+                    // waiting for.
+                    _ => {}
+                }
+            }
+            assert_eq!(said.trim(), "tty7-live-check", "the far side ran it and answered");
+            assert_eq!(code, Some(0), "and said how it went");
+
+            // The second ask has to come back on the same connection: sharing
+            // one transport across panes is the reason `SshManager` exists.
+            let (again, reused) = manager
+                .open_connection(&spec, &broker)
+                .await
+                .expect("a second connection to the same host");
+            assert!(reused, "the second ask should have been given the first one");
+            assert_eq!(again.key(), conn.key());
+
+            conn.mark_dead();
+            manager.evict_connection(conn.key());
+        });
+    }
+
     #[test]
     #[ignore = "requires a live SSH server and local GSSAPI credentials"]
     fn live_gssapi_connects_and_opens_a_channel() {
