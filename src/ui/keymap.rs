@@ -27,8 +27,56 @@ pub fn init(cx: &mut App) {
         cx.set_global(BaseBindings(base));
     }
     rebuild_keymap(cx);
-    cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+    cx.on_action(|_: &Quit, cx: &mut App| quit_or_ask(cx));
     set_menus(cx);
+}
+
+/// Quit, unless a window is holding text nothing has written down.
+///
+/// Quitting used to be `cx.quit()` and nothing else. The shells survive it —
+/// they are the daemon's — so it reads like a safe key, and for a terminal it
+/// is. A code panel's buffers are not the daemon's, and no session file
+/// carries them, so ⌘Q was the shortest path in the product to losing work
+/// that cannot be got back.
+///
+/// The prompt is raised in front of the window the buffer is in, which for
+/// more than one window is not the frontmost one. Answering it quits
+/// everything, which is what was asked for.
+fn quit_or_ask(cx: &mut App) {
+    let Some((workspace, tab, name)) = crate::ui::app::Tty7App::quit_loses_unwritten_work(cx) else {
+        cx.quit();
+        return;
+    };
+    let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, workspace) else {
+        cx.quit();
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        let Some(app) = crate::ui::windows::WindowRegistry::app_in(cx, window) else {
+            cx.quit();
+            return;
+        };
+        window.activate_window();
+        app.update(cx, |app, cx| app.activate(tab, window, cx));
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            crate::ui::i18n::t(crate::ui::i18n::L10nKey::QuitUnsavedEditsTitle),
+            Some(&crate::ui::i18n::t_fmt(
+                crate::ui::i18n::L10nKey::CloseUnsavedEditsBody,
+                &[("name", &name)],
+            )),
+            &crate::ui::confirm_answers(
+                crate::ui::i18n::t(crate::ui::i18n::L10nKey::AppMenuQuit),
+                crate::ui::i18n::t(crate::ui::i18n::L10nKey::Keep),
+            ),
+            cx,
+        );
+        cx.spawn(async move |cx| {
+            let Ok(0) = answer.await else { return };
+            cx.update(|cx| cx.quit());
+        })
+        .detach();
+    });
 }
 
 /// The fixed bindings every keymap carries, whatever the config says. These

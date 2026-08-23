@@ -6236,6 +6236,23 @@ impl Tty7App {
         self.unsaved_edit_in_window()
     }
 
+    /// The window quitting would take an unwritten buffer from, if any.
+    ///
+    /// Every window, because quitting takes them all. The workspace comes back
+    /// with it so the answer can be asked in front of the window it is about
+    /// rather than whichever one happens to be frontmost.
+    pub(crate) fn quit_loses_unwritten_work(
+        cx: &mut App,
+    ) -> Option<(crate::core::session::WorkspaceId, usize, String)> {
+        crate::ui::windows::WindowRegistry::open_windows(cx)
+            .into_iter()
+            .find_map(|(ws, weak)| {
+                let app = weak.upgrade()?;
+                let (tab, name) = app.read(cx).unsaved_edit_in_window()?;
+                Some((ws, tab, name))
+            })
+    }
+
     #[cfg(test)]
     pub(crate) fn confirm_window_close_for_test(&mut self) {
         self.close_confirmed = true;

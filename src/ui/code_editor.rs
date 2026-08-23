@@ -1980,6 +1980,57 @@ mod unsaved_close_gpui_tests {
         });
     }
 
+    /// Quitting looks at every window, not just the one in front.
+    ///
+    /// ⌘Q was `cx.quit()` and nothing else — the shortest path in the product
+    /// to losing text that cannot be got back, and the one most likely to be
+    /// pressed by habit. The shells survive it, which is exactly what makes
+    /// the key feel safe; the buffers do not.
+    ///
+    /// The window holding the buffer is the one to ask in front of, and with
+    /// more than one open that is not the frontmost. Registering a second
+    /// window is what makes this test worth having.
+    #[gpui::test]
+    fn quitting_finds_an_unwritten_buffer_in_any_window(cx: &mut TestAppContext) {
+        cx.update(crate::ui::windows::WindowRegistry::init);
+        let (first, mut vcx, _s1) = harness_with_tabs(cx, 2);
+        let (second, mut vcx2, _s2) = harness_with_tabs(cx, 2);
+
+        // Registered the way `windows::open` does it, because that is what
+        // `quit_loses_unwritten_work` walks.
+        first.update_in(&mut vcx, |app, window, cx| {
+            let (ws, weak) = (app.workspace, cx.weak_entity());
+            crate::ui::windows::WindowRegistry::register(cx, ws, window.window_handle(), weak);
+        });
+        second.update_in(&mut vcx2, |app, window, cx| {
+            let (ws, weak) = (app.workspace, cx.weak_entity());
+            crate::ui::windows::WindowRegistry::register(cx, ws, window.window_handle(), weak);
+        });
+
+        cx.update(|cx| {
+            assert!(
+                crate::ui::app::Tty7App::quit_loses_unwritten_work(cx).is_none(),
+                "nothing unwritten anywhere: quitting asks nothing"
+            );
+        });
+
+        // The buffer goes in the *second* window, and in its second tab.
+        let ws = second.read_with(cx, |app, _| app.workspace);
+        second.update_in(&mut vcx2, |app, window, cx| {
+            app.activate(1, window, cx);
+            app.editor_seed_dirty_file_for_test("/w/repo/notes.md", window, cx);
+        });
+
+        cx.update(|cx| {
+            let (found_ws, tab, name) =
+                crate::ui::app::Tty7App::quit_loses_unwritten_work(cx).expect("quitting would lose it");
+            assert_eq!(found_ws, ws, "the window holding it, not the one in front");
+            assert_eq!(tab, 1, "and the tab holding it");
+            assert_eq!(name, "notes.md");
+        });
+        let _ = (first, vcx);
+    }
+
     /// Building the buffer the way `editor_install_file` does.
     fn new_buffer(
         text: &str,

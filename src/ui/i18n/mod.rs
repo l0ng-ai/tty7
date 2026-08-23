@@ -98,6 +98,7 @@ l10n_keys! {
     CloseUnsavedEditsBody,
     CloseUnsavedEditsTitle,
     CloseWindowUnsavedEditsTitle,
+    QuitUnsavedEditsTitle,
     HomeReopenClosedTab,
     HomeSwitchWorkspace,
     HomeCommandPalette,
