@@ -166,6 +166,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this account's open-file limit is the ceiling on how many panes can run at
   once; raise it (`ulimit -n`, …)", keeping the original error in parentheses.
 
+- **`doctor` now says when the server is running panes nothing holds.** An
+  interrupted `tty7 run` leaves one behind, and a window reconciling its layout
+  against concurrent edits leaves more — each a live shell holding a pty and
+  its descriptors. They were findable (`tty7 pane ls --all`, the switcher) and
+  recoverable (`tty7 pane close --orphans`), but nothing volunteered that they
+  were there: doctor's status row counted them among the panes without saying
+  any were stray. It is a row and a `server.orphans` count, not an exit code —
+  one stray after an interrupted `run` is ordinary, and failing on it would cry
+  wolf.
+
 - **`doctor` now checks the configured shell.** A `shell` naming something
   that is not there — missing, a directory, not executable — makes every new
   tab and every `tty7 new` fail, while `doctor` reported `config ok`, because

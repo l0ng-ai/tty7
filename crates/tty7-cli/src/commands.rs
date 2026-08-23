@@ -2000,13 +2000,51 @@ fn doctor(ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
             // an id the reader has no reason to doubt, which is the state
             // `doctor` is run in. Only checked when the server answered —
             // there is nothing to check against otherwise.
+            // Shells the server runs that no workspace holds. An interrupted
+            // `tty7 run` leaves one; a window reconciling its layout against
+            // concurrent edits leaves more — measured at 17 from 160
+            // operations, every one a live shell holding a pty and its
+            // descriptors. They are recoverable and findable, but nothing
+            // volunteered that they were there: the `status` row counts them
+            // among the panes without saying any are stray.
+            //
+            // A row, not an exit code. One orphan after an interrupted `run`
+            // is ordinary and documented as such, and `tty7 doctor || alert`
+            // firing on it would cry wolf. What was missing is the sentence.
+            //
+            // Counted here because the tree is already in hand for the row
+            // below, and because it takes a server to have panes at all.
+            let mut strays = 0usize;
             if let Ok(machine) = fetch_machine(backend) {
                 dangling = Some(note_dangling_context(&mut rows, ctx, &machine));
+                if let Ok(running) = backend.list_panes() {
+                    let held: std::collections::HashSet<u64> = machine
+                        .workspaces
+                        .iter()
+                        .flat_map(|ws| ws.tabs.iter())
+                        .flat_map(|tab| tab.root.pane_ids())
+                        .collect();
+                    strays = running
+                        .iter()
+                        .filter(|info| !held.contains(&info.pane_id))
+                        .count();
+                }
+                if strays > 0 {
+                    rows.push(vec![
+                        "stray panes".to_string(),
+                        format!(
+                            "{} running that no workspace holds — `tty7 pane ls --all` \
+                             names them, `tty7 pane close --orphans` ends them",
+                            panes_count(strays)
+                        ),
+                    ]);
+                }
             }
             server = json!({
                 "reachable": true,
                 "dialect_ok": dialect_ok,
                 "build": hello.build,
+                "orphans": strays,
                 "status": serde_json::to_value(&status)?,
                 "routes": serde_json::to_value(&routes)?,
             });

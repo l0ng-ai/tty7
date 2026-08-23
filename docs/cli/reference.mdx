@@ -320,7 +320,7 @@ nothing, so `tty7 agents` shows it standing still and `tty7 wait` sits there
 until it times out. Outdated hooks fail the same quiet way. Hooks are a local
 install, so under `-m` the row reads `unknown`.
 
-JSON: `{"context":{"config_dir","workspace","pane"},"server":{"reachable","dialect_ok","build","status","routes"},"config":{"ok","state","dir_writable","shell_problem"},"hooks":{"installed","outdated","not_installed"}}`
+JSON: `{"context":{"config_dir","workspace","pane"},"server":{"reachable","dialect_ok","build","orphans","status","routes"},"config":{"ok","state","dir_writable","shell_problem"},"hooks":{"installed","outdated","not_installed"}}`
 — the context fields are booleans, not values, and each `hooks` field is a list
 of agent slugs. `context` also carries `workspace_gone` and `pane_gone` when a
 server answered and could be asked; both are absent when none did, so that "it
@@ -329,7 +329,11 @@ false only when the file failed to parse and tty7 is running on defaults;
 `config.state` is the same sentence the table prints. `config.dir_writable` is
 probed by writing, not read off the mode bits, because a read-only mount or an
 ACL leaves a `0700` directory that refuses every write — false means settings
-cannot be saved and `tty7 new` cannot file a workspace. `config.shell_problem` is null unless the
+cannot be saved and `tty7 new` cannot file a workspace. `server.orphans` counts the panes the
+server is running that no workspace holds — an interrupted `run` leaves one,
+and each is a live shell holding a pty. It is a row and a number, not an exit
+code: one stray is ordinary, and `tty7 pane close --orphans` ends them.
+`config.shell_problem` is null unless the
 configured `shell` names something that cannot be launched — missing, a
 directory, not executable — in which case every new tab and every `tty7 new`
 fails; a shell given as a bare name is left to `PATH` and never reported here,
