@@ -1368,7 +1368,18 @@ fn worker(inner: Arc<PoolInner>) {
                 }
             }
         };
-        job();
+        // Caught, so the worker outlives the job. A control request runs a
+        // long way from here — a filesystem walk, a git parse, an SSH read —
+        // and a panic anywhere in it unwinds this thread. Leaving `worker`
+        // that way skips the `st.workers -= 1` both exits above perform, so
+        // the count keeps believing in a thread that is gone. After
+        // `MAX_WORKERS` of them `wants_another_worker` is false for good and
+        // this connection queues every later request without answering one:
+        // the client goes on asking and waiting, and nothing says why. The
+        // same shape as the UI-side pool in `ui::host_ops`, found with it.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+            log::error!("a control-request job panicked; its caller gets no reply");
+        }
     }
 }
 
@@ -1811,6 +1822,46 @@ mod pool_tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
+
+    /// A panicking job costs the pool no worker.
+    ///
+    /// `worker` used to run `job()` bare, so an unwind left the loop without
+    /// the `st.workers -= 1` that both its exits perform, and the count went
+    /// on believing in a thread that was gone. `MAX_WORKERS` panics later
+    /// `wants_another_worker` is false for good and the connection queues
+    /// every request without answering one — the client asks and waits, and
+    /// nothing says why.
+    ///
+    /// Exhausted rather than counted. Counting cannot tell a worker the pool
+    /// believes in and has from one it believes in and has lost, and the
+    /// jobs here return to the queue faster than a worker returns to idle, so
+    /// the count climbs either way. Reaching the ceiling separates them: past
+    /// it the pool spawns nothing more and only a live worker can answer.
+    #[test]
+    fn a_panicking_job_costs_the_pool_no_worker() {
+        let pool = Pool::new();
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        for _ in 0..MAX_WORKERS {
+            let (tx, rx) = std::sync::mpsc::channel();
+            assert!(pool.submit(move || {
+                let _ = tx.send(());
+                panic!("a control request blew up");
+            }));
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("the job never ran");
+        }
+        std::panic::set_hook(hook);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(pool.submit(move || {
+            let _ = tx.send(());
+        }));
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the pool answered nothing after {MAX_WORKERS} panics"
+        );
+    }
 
     #[test]
     fn the_pool_reuses_a_warm_worker() {

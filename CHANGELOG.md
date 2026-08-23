@@ -153,6 +153,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A panicking background job no longer costs a thread pool a worker for good.
+  Both pools — the one the app runs filesystem, git and SFTP work on, and the
+  one the daemon answers control requests on — called the job bare, so an
+  unwind left the worker loop without the decrement that retiring performs, and
+  the count went on believing in a thread that was gone. Sixty-four such panics
+  later the pool would not start another worker and never ran another job: the
+  file tree, git status, saving a file, SFTP and the diffs all stopped at once,
+  and the daemon queued requests without answering them, with nothing on screen
+  to say why and nothing short of a restart to clear it.
 - Assigning a shortcut that two actions already hold now takes it from both. On
   macOS ⌘Return ships held twice — Fullscreen in the window, Commit inside the
   commit box, which is legitimate because their scopes differ — and rebinding

@@ -118,13 +118,67 @@ mod blocking {
                     }
                 }
             };
-            job();
+            // Caught, so the worker outlives the job. A host op runs somebody
+            // else's code — a git parse, an SFTP read, a filesystem walk — and
+            // an `unwrap` in any of it panics on this thread. Unwinding out of
+            // `worker` returns without the `st.threads -= 1` that retiring
+            // does, so every panic used to cost the pool a thread the count
+            // still believed in. After `MAX_THREADS` of them `threads` reads
+            // 64 with no thread alive, `wants_another_thread` is false for
+            // good, and every later job sits in the queue with nobody to run
+            // it: the file tree, git status, saving a file, SFTP and the diffs
+            // all stop, silently, until the app is restarted.
+            //
+            // The op itself is still lost — `off_thread`'s sender drops
+            // unsent, so `HostOps::run` never lands and whatever in-flight
+            // flag the caller set stays set. That costs the one operation
+            // rather than the whole pool, and landing would need a value the
+            // panic is the reason we do not have.
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+                log::error!("a host op panicked; its caller will not be told");
+            }
         }
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// A panicking job costs the pool nothing but that job.
+        ///
+        /// `worker` used to call `job()` bare, so an unwind left the loop
+        /// without the `st.threads -= 1` that retiring does. The count kept
+        /// believing in a thread that was gone. `MAX_THREADS` panics later,
+        /// `wants_another_thread` is false for good and no job ever runs
+        /// again — the file tree, git status, saving a file, SFTP and the
+        /// diffs all stop at once, with nothing on screen to say why.
+        ///
+        /// Exactly `MAX_THREADS` panics, because that is the number that
+        /// distinguishes the two: below the ceiling the pool still had room to
+        /// spawn and looked healthy.
+        #[test]
+        fn panicking_jobs_do_not_exhaust_the_pool() {
+            let hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            for _ in 0..MAX_THREADS {
+                let (tx, rx) = std::sync::mpsc::channel();
+                submit(move || {
+                    let _ = tx.send(());
+                    panic!("a host op blew up");
+                });
+                let _ = rx.recv_timeout(Duration::from_secs(5));
+            }
+            std::panic::set_hook(hook);
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            submit(move || {
+                let _ = tx.send(());
+            });
+            assert!(
+                rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+                "the pool stopped running jobs after {MAX_THREADS} panics"
+            );
+        }
 
         fn state(jobs: usize, threads: usize, idle: usize) -> State {
             let mut q: VecDeque<Job> = VecDeque::new();
