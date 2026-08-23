@@ -1262,6 +1262,56 @@ mod tests {
         );
     }
 
+    /// A `!pattern` in a Host line excludes the alias from that block.
+    ///
+    /// OpenSSH reads `Host *.example.com !secret.example.com` as "everything
+    /// under example.com except that one", and people write it to keep a
+    /// production host off a wildcard's shared user and key. If the negation
+    /// stops excluding, tty7 connects to the excluded host as somebody else,
+    /// with somebody else's identity file — quietly, because the connection
+    /// still succeeds.
+    ///
+    /// `import_skips_match_blocks_and_negations` covers what *import* makes of
+    /// such a block; this is resolution, which is the path that decides what a
+    /// connection actually uses.
+    #[test]
+    fn a_negated_host_pattern_keeps_the_block_off_that_alias() {
+        let root = temp_root("ssh-negation");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            concat!(
+                "Host *.example.com !secret.example.com\n",
+                "  User shared\n",
+                "  Port 2222\n",
+                "Host secret.example.com\n",
+                "  User locked-down\n",
+            ),
+        )
+        .unwrap();
+        let cfg = ssh.join("config");
+
+        let ordinary = resolve_alias_to_profile_from(cfg.clone(), &root, "web.example.com")
+            .expect("the wildcard covers this one");
+        assert_eq!(
+            ordinary.profile.user, "shared",
+            "the wildcard block applies"
+        );
+        assert_eq!(ordinary.profile.port, 2222);
+
+        let excluded = resolve_alias_to_profile_from(cfg, &root, "secret.example.com")
+            .expect("it has a block of its own");
+        assert_eq!(
+            excluded.profile.user, "locked-down",
+            "the negated alias must not take the wildcard's user"
+        );
+        assert_ne!(
+            excluded.profile.port, 2222,
+            "nor its port: the block it names itself out of cannot reach it"
+        );
+    }
+
     #[test]
     fn import_skips_match_blocks_and_negations() {
         let root = temp_root("import-match");
