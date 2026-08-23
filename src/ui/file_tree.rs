@@ -1318,6 +1318,16 @@ impl Tty7App {
         } else {
             t(L10nKey::FileTreeDeleteFileBody)
         };
+        // Taken before the question, not after it. `active_host` is the host of
+        // the *window's workspace*, and a workspace can be repointed at another
+        // machine while a prompt is up — a reconnect landing is enough. Reading
+        // it afterwards would delete the path the user was shown on whichever
+        // machine the window had by then. `editor_save_file` states the same
+        // rule for the same reason: the operation belongs to the host it was
+        // asked about, however the window has moved since.
+        let Some(host) = self.active_host(cx) else {
+            return;
+        };
         let answer = window.prompt(
             PromptLevel::Warning,
             &t_fmt(L10nKey::FileTreeDeleteTitle, &[("name", &name)]),
@@ -1328,9 +1338,6 @@ impl Tty7App {
         cx.spawn_in(window, async move |app, cx| {
             let Ok(0) = answer.await else { return };
             let _ = app.update_in(cx, |app, window, cx| {
-                let Some(host) = app.active_host(cx) else {
-                    return;
-                };
                 let id = host.id();
                 let Some(parent) = path.parent().map(Path::to_path_buf) else {
                     return;
@@ -3643,6 +3650,58 @@ mod drop_gpui_tests {
         );
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&from);
+    }
+
+    /// Delete asks, and only deletes when the answer is yes.
+    ///
+    /// The one destructive thing the tree does, and it had no test — the
+    /// prompt's wording was corrected without anything checking that the
+    /// prompt is reached at all, or that cancelling leaves the file alone.
+    #[gpui::test]
+    fn deleting_a_file_asks_first_and_honours_the_answer(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("delete-answer");
+        let keep = root.join("keep.txt");
+        let drop = root.join("drop.txt");
+        std::fs::write(&keep, "keep").unwrap();
+        std::fs::write(&drop, "drop").unwrap();
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+
+        // Cancelled: the file is still there.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_tree_delete(keep.clone(), false, window, cx);
+        });
+        wait_until(&mut vcx, "deleting did not ask", |vcx| {
+            vcx.has_pending_prompt()
+        });
+        vcx.simulate_prompt_answer(t(L10nKey::Cancel));
+        settle(&app, &mut vcx, &root);
+        assert!(
+            keep.exists(),
+            "cancelling the prompt still deleted the file"
+        );
+
+        // Confirmed: it goes, and only it.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_tree_delete(drop.clone(), false, window, cx);
+        });
+        wait_until(&mut vcx, "deleting did not ask", |vcx| {
+            vcx.has_pending_prompt()
+        });
+        vcx.simulate_prompt_answer(t(L10nKey::Delete));
+        // The removal goes out on a blocking pool that `run_until_parked` does
+        // not wait for, so watch the file rather than assume one turn.
+        for _ in 0..200 {
+            settle(&app, &mut vcx, &root);
+            if !drop.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!drop.exists(), "answering yes did not delete the file");
+        assert!(keep.exists(), "and it took the neighbour with it");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[gpui::test]
