@@ -1573,6 +1573,45 @@ mod tests {
         assert_eq!((link.start, link.end), (6, 21));
     }
 
+    /// The two spellings of `~` the existing cases never reach.
+    ///
+    /// `expand_home` has three arms and only the middle one was covered. A
+    /// bare `~` on its own is a link to the home directory — nothing requires
+    /// a file of it, since `require_file` is false without a line number — and
+    /// `~\` is how the same path is written where the separator is a
+    /// backslash. Dropping either left the whole suite green while the link
+    /// silently resolved to a literal `~` relative to each root, which names
+    /// nothing.
+    #[test]
+    #[cfg(unix)]
+    fn tilde_expands_on_its_own_and_with_either_separator() {
+        let cwd = Path::new("/Users/alice/clone/tty7");
+        let home = PathBuf::from("/Users/alice");
+
+        assert_eq!(
+            expand_home("~", Some(cwd), true),
+            Some(home.clone()),
+            "a bare ~ is the home directory itself"
+        );
+        assert_eq!(
+            expand_home("~/src/main.rs", Some(cwd), true),
+            Some(home.join("src/main.rs"))
+        );
+        assert_eq!(
+            expand_home("~\\src\\main.rs", Some(cwd), true),
+            Some(home.join("src\\main.rs")),
+            "the backslash spelling expands too — a pane may print either"
+        );
+
+        // A `~` that begins something else is not a home reference: `~tmp` is
+        // a filename, and `~user` is an expansion this does not perform.
+        assert_eq!(
+            expand_home("~tmp", Some(cwd), true),
+            Some(PathBuf::from("~tmp")),
+            "only a bare ~ or one followed by a separator means the home"
+        );
+    }
+
     #[test]
     #[cfg(unix)]
     fn tilde_expansion_prefers_home_inferred_from_the_pane_cwd() {
