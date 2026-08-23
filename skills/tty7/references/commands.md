@@ -320,18 +320,23 @@ still tell a real name from a stand-in.
 | `pane ls --all` | the server's whole pane registry, including orphans no workspace holds | `{"panes":[...],"orphans":N}` |
 | `pane split ...` | identical to top-level `split` | `{"pane"}` |
 | `pane close [%PANE…]` | close panes; their shells are hung up | `{"closed":[...]}` |
-| `pane close --orphans` | close every pane no workspace holds | `{"closed":[...]}` |
+| `pane close --orphans` | close every pane no workspace holds and nobody is watching | `{"closed":[...]}` |
 
 `--all` is the one that shows leaks. Each entry is
 `{"pane","workspace","orphan","owner","title","cwd","live"}`: `owner` is the id
 of the workspace that may attach to the pane (absent when none may — a
 free-floating `tty7 run` before `--keep` files it), and `orphan: true` means
-no workspace holds it. An interrupted `tty7 run` is what leaves them.
+no workspace holds it *and* no client is attached to it. Both halves matter: a
+window restoring a layout spawns each pane, attaches to it, and only then files
+it into the tree, so for that moment the tree holds nothing for a pane that is
+very much wanted. An interrupted `tty7 run` is what leaves real ones.
 
 `close` takes several ids at once and keeps going after a failure: the rest are
 still attempted, and it exits 1 with `{"closed":[...],"failed":[...]}` so you
 know what is left. `--orphans` closes exactly what `pane ls --all` marks
-orphaned, and reports an empty list instead of an error when there is nothing
+orphaned — panes a workspace holds are untouched, and so are panes a window is
+attached to, which is what keeps it from taking a session that is still being
+restored — and reports an empty list instead of an error when there is nothing
 to do.
 
 **`--orphans` is the user's broom, not yours.** It closes every abandoned pane

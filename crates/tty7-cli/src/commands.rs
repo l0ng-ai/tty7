@@ -4861,6 +4861,36 @@ mod tests {
         backend
     }
 
+    /// The two documents that define an orphan define it the same way.
+    ///
+    /// `docs/cli/reference.mdx` is drift-guarded against the CLI; the skill
+    /// that *ships* with the product is not, and that is how it came to still
+    /// say `--orphans` "closes every pane no workspace holds" after the code
+    /// had learned to spare panes a client is attached to. The skill is what an
+    /// agent reads before it runs anything, so it is the worse of the two to
+    /// have wrong.
+    ///
+    /// Held to the rule rather than to a sentence: both files have to say that
+    /// attachment is part of the test, in whatever words. A reword that drops
+    /// it from either one fails here, which is the moment to check the other.
+    #[test]
+    fn both_orphan_contracts_name_the_attachment_rule() {
+        const REFERENCE: &str = include_str!("../../../docs/cli/reference.mdx");
+        const SKILL: &str = include_str!("../../../skills/tty7/references/commands.md");
+
+        for (what, page) in [
+            ("docs/cli/reference.mdx", REFERENCE),
+            ("skills/tty7/references/commands.md", SKILL),
+        ] {
+            assert!(
+                page.contains("no client is attached"),
+                "{what} defines an orphan without the attachment half of the test — \
+                 `--orphans` spares panes a window is adopting, and a reader told \
+                 otherwise will go after a session that is still coming up"
+            );
+        }
+    }
+
     /// Every place that says "orphan" means the same panes.
     ///
     /// `pane ls --all` flags each row, counts them in a footer, and names
