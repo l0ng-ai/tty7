@@ -1473,3 +1473,29 @@ mod tests {
         assert_eq!(before, after);
     }
 }
+
+/// POSIX single-quoting, for a string some other shell has to re-parse.
+///
+/// Single quotes rather than double: inside double quotes `sh` still expands
+/// `$`, a backtick and a backslash, so `"/opt/build$stage/tty7"` is handed to
+/// the shell as `/opt/build/tty7` and the command silently runs the wrong
+/// thing — or nothing. Only a single quote itself has to be escaped, and the
+/// `'\''` dance is the one portable way to do it.
+pub(crate) fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+#[cfg(test)]
+mod shell_quote_tests {
+    use super::shell_quote;
+
+    #[test]
+    fn quoting_survives_what_a_shell_would_otherwise_read() {
+        assert_eq!(shell_quote("/home/me/bin"), "'/home/me/bin'");
+        assert_eq!(shell_quote("/home/my box/x"), "'/home/my box/x'");
+        // The one this exists for: a path a shell would rewrite.
+        assert_eq!(shell_quote("/opt/build$stage/x"), "'/opt/build$stage/x'");
+        assert_eq!(shell_quote("/opt/`whoami`/x"), "'/opt/`whoami`/x'");
+        assert_eq!(shell_quote("/home/o'brien/x"), r"'/home/o'\''brien/x'");
+    }
+}

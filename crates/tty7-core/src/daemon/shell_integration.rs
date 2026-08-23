@@ -1157,10 +1157,7 @@ const WSL_RCFILE_ENV: &str = "TTY7_RC";
 /// whether this becomes `ZDOTDIR`, and it only decides that for a zsh distro.
 const WSL_ZDOTDIR_ENV: &str = "TTY7_ZDOTDIR";
 
-/// POSIX single-quoting, for a body some other shell has to re-parse.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
+use crate::core::shells::shell_quote;
 
 /// The bootstrap `sh` runs inside the distro. `$SHELL` is the only place the
 /// user's real shell is named, so every arm dispatches on it: bash re-execs

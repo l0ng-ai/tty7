@@ -492,10 +492,33 @@ impl<'a> HookTarget<'a> {
             return format!("{exe} agent-hook {} {event}", agent.slug());
         }
         format!(
-            "\"{}\" agent-hook {} {event}",
-            self.exe.display(),
+            "{} agent-hook {} {event}",
+            self.quoted_exe(),
             agent.slug()
         )
+    }
+
+    /// The executable path, quoted for whichever shell is going to re-read it.
+    ///
+    /// Every agent takes this as a *command line*, not an argv, so something
+    /// parses it again before anything runs. Double quotes were not enough for
+    /// a POSIX shell: inside them `sh` still expands `$`, a backtick and a
+    /// backslash, so an install under `/opt/build$stage` was handed to `sh -c`
+    /// as `/opt/build/tty7` and every hook silently stopped firing — no error
+    /// anywhere, just an agent that never reports its status again.
+    ///
+    /// The shell that re-reads it belongs to the *target*, not to us: a hook
+    /// installed on a remote machine runs there. So the question is asked of
+    /// the target, and only a local Windows one keeps the double-quoted form,
+    /// which is what `cmd.exe` understands and what the PATH-resolvable case
+    /// above avoids needing at all.
+    fn quoted_exe(&self) -> String {
+        let path = self.exe.display().to_string();
+        if cfg!(windows) && self.is_local() {
+            format!("\"{path}\"")
+        } else {
+            crate::core::shells::shell_quote(&path)
+        }
     }
 
     /// A shell-safe executable path for generated hook commands.
@@ -2006,7 +2029,7 @@ mod tests {
         // name: PowerShell cannot invoke a quoted path without the `&` call
         // operator, so quoting is avoided whenever possible.
         #[cfg(not(windows))]
-        assert!(cmd.starts_with('"'));
+        assert!(cmd.starts_with('\''), "{cmd}");
         assert!(cmd.ends_with("agent-hook claude stop"));
     }
 
@@ -2044,6 +2067,29 @@ mod tests {
         }
     }
 
+    /// An install path a shell would rewrite still reaches the shell intact.
+    ///
+    /// This is the whole reason the quoting changed. `sh` expands `$`, a
+    /// backtick and a backslash *inside double quotes*, so the old form handed
+    /// `/opt/build$stage/tty7` over as `/opt/build/tty7`: the hook never ran,
+    /// nothing logged a thing, and the agent simply stopped reporting status.
+    /// Verified against a real `sh` before the change — the double-quoted form
+    /// really does lose the segment.
+    #[test]
+    fn a_path_the_shell_would_rewrite_survives_the_hook_command() {
+        let host = FakeRemote::shared();
+        let target = HookTarget::remote(&*host, PathBuf::from("/opt/build$stage"));
+        let cmd = target.hook_command(HookAgent::Claude, "stop");
+        assert!(
+            cmd.contains("/opt/build$stage/"),
+            "the dollar segment is still there: {cmd}"
+        );
+        assert!(
+            cmd.starts_with('\'') && cmd.contains("' agent-hook"),
+            "and it is single-quoted, so the shell will not read it: {cmd}"
+        );
+    }
+
     #[test]
     fn the_hook_command_names_the_binary_on_that_machine() {
         let host = FakeRemote::shared();
@@ -2052,18 +2098,24 @@ mod tests {
         let name = format!("tty7-server-c{}p{}", dialect.control, dialect.protocol);
         assert_eq!(
             target.hook_command(HookAgent::Claude, "stop"),
-            format!("\"/home/me/.local/share/tty7/bin/{name}\" agent-hook claude stop")
+            format!("'/home/me/.local/share/tty7/bin/{name}' agent-hook claude stop")
         );
 
         let local = local_host();
         let here = HookTarget::local(&*local).expect("home resolves in tests");
         let exe = std::env::current_exe().unwrap();
-        let command_exe = here
-            .hook_command_exe()
-            .unwrap_or_else(|| format!("\"{}\"", exe.display()));
+        // Named after the binary, however that machine's shell needs it
+        // spelled — the spelling itself is what the two quoting tests above
+        // are for, and repeating the rule here would only assert it twice.
+        let command_exe = here.hook_command_exe().unwrap_or_else(|| here.quoted_exe());
         assert_eq!(
             here.hook_command(HookAgent::Claude, "stop"),
             format!("{command_exe} agent-hook claude stop")
+        );
+        assert!(
+            command_exe.contains(&exe.display().to_string())
+                || here.hook_command_exe().is_some(),
+            "the full path is in there unless it resolved by name"
         );
     }
 

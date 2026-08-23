@@ -1150,9 +1150,7 @@ fn unique_temp(shared: &str) -> String {
     }
 }
 
-pub(crate) fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
+pub(crate) use crate::core::shells::shell_quote;
 
 fn connection_label(conn: &SshConnection) -> String {
     conn.key().as_str().to_string()
