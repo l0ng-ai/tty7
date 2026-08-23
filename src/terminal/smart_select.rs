@@ -827,6 +827,21 @@ mod tests {
         let close = chars.iter().rposition(|&c| c == '\'').unwrap();
         assert_eq!(quote_range(&chars, open), Some((open, close)));
         assert_eq!(quote_range(&chars, close), Some((open, close)));
+
+        // And the contraction's own apostrophe pairs with nothing. It is the
+        // only click that reaches the refusal in `quote_range` itself: the
+        // parity count already skips contractions, so on a line with no real
+        // quote on it there is nothing for a contraction to pair with anyway,
+        // and the check looks redundant. Here there is — clicking inside
+        // `isn't` would take `'it isn'`, a selection that starts at a quote
+        // and stops in the middle of a word.
+        let contraction = chars
+            .iter()
+            .position(|&c| c == '\'')
+            .and_then(|first| chars[first + 1..].iter().position(|&c| c == '\''))
+            .map(|i| i + open + 1)
+            .expect("the fixture has a contraction between its quotes");
+        assert_eq!(quote_range(&chars, contraction), None);
     }
 
     #[test]
