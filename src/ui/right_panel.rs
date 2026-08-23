@@ -1443,8 +1443,8 @@ pub(crate) fn git_badge(letter: &str, color: gpui::Hsla, mono: &gpui::SharedStri
 ///
 /// The padding and radius are in pixels while the text is in rems, so the two
 /// stop being derived from each other once the interface font scale leaves
-/// 100%: the text grows and the padding does not. That is the same trap
-/// [`PIP_SIZE`] below is written in rems to avoid, and this chip has not been
+/// 100%: the text grows and the padding does not. That is the same trap the
+/// rem-sized constants above are written to avoid, and this chip has not been
 /// through it yet.
 pub(crate) fn info_chip(
     text: &str,

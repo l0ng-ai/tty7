@@ -216,7 +216,7 @@ pub struct TerminalView {
     /// "preparation failed" — see [`staging_cache`].
     remote_clipboard_dir: Option<String>,
     pub focus_handle: FocusHandle,
-    /// See [`displayed_registry`]. Shared with the registry so the app can
+    /// See [`DisplayedRegistry`]. Shared with the registry so the app can
     /// flip it during a draw without an entity access.
     displayed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub font: Font,
