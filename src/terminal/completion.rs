@@ -893,6 +893,47 @@ mod tests {
         assert!(remote_path_request("ls | grep /et", 13, "/home/me").is_some());
     }
 
+    /// `segment_start` itself, on the cases the indirect test cannot separate.
+    ///
+    /// `a_metacharacter_inside_quotes_does_not_start_a_new_command` asks
+    /// `at_command_position`, which is false whenever *any* non-whitespace
+    /// sits between the boundary and the word — and a closing quote is
+    /// non-whitespace. So it holds equally whether or not quoting suppresses
+    /// the separator: making `|` split a segment inside quotes passed it, and
+    /// the whole suite.
+    ///
+    /// The case that separates them is a separator inside an *unterminated*
+    /// quote with only space after it — `echo "a| ` and Tab — where reading
+    /// the `|` as a pipe puts the cursor in command position and fills the
+    /// menu with every binary on PATH instead of the files the argument wants.
+    #[test]
+    fn a_separator_only_ends_a_segment_when_the_shell_would_read_it_as_one() {
+        // Real separators, outside quotes: the segment starts after them.
+        assert_eq!(segment_start("ls | "), 4);
+        assert_eq!(segment_start("a && b"), 4);
+        assert_eq!(segment_start("a; b"), 2);
+        assert_eq!(segment_start("(cd /tmp"), 1);
+
+        // Inside quotes they are text. The unterminated forms are the ones
+        // that tell the two readings apart.
+        assert_eq!(segment_start(r#"echo "a| "#), 0);
+        assert_eq!(segment_start(r#"echo 'a; "#), 0);
+        assert_eq!(segment_start(r#"echo "a|b" "#), 0);
+
+        // Escaped outside quotes is text too, and a backslash inside single
+        // quotes is not an escape — the shell takes it literally.
+        assert_eq!(segment_start(r"echo a\| "), 0);
+        assert_eq!(segment_start(r#"echo "a\| "#), 0);
+        assert_eq!(
+            segment_start(r"echo 'a\'; "),
+            10,
+            "a backslash inside single quotes is literal, so the quote closed at it"
+        );
+
+        // A closed quote stops protecting what follows it.
+        assert_eq!(segment_start(r#"echo "a" | "#), 10);
+    }
+
     #[test]
     fn a_metacharacter_inside_quotes_does_not_start_a_new_command() {
         // `;` in a commit message is text. Reading it as a pipeline separator
