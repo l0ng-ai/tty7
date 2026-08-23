@@ -483,6 +483,42 @@ mod tests {
     use super::*;
     use crate::host::conformance::Sandbox;
 
+    /// `limit` is a promise to the caller, not a suggestion. The file tree
+    /// asks for `SEARCH_LIMIT` hits and tells the user it is showing "the
+    /// first N" — a number that is only true if the walk actually stops there.
+    ///
+    /// The stop that matters is the one at the *top* of the directory loop.
+    /// The break further in only ends the directory it is inside, so with the
+    /// outer check weakened every remaining directory adds another hit and the
+    /// list runs past the number on screen. The fixture therefore spreads its
+    /// matches over many directories: matches in a single one would be stopped
+    /// by the inner break alone and never ask the outer question.
+    #[test]
+    fn a_search_stops_at_the_number_of_hits_it_was_asked_for() {
+        let host = LocalHost::new();
+        let root = tempfile::TempDir::new().expect("a scratch directory");
+        for dir in 0..10 {
+            let sub = root.path().join(format!("dir{dir}"));
+            std::fs::create_dir_all(&sub).unwrap();
+            for file in 0..3 {
+                std::fs::write(sub.join(format!("needle{file}.txt")), b"").unwrap();
+            }
+        }
+
+        let roots = [root.path().to_path_buf()];
+        let hits = host.search(&roots, "needle", 5, 2000, false).unwrap();
+        assert_eq!(
+            hits.len(),
+            5,
+            "thirty files match and five were asked for: {:?}",
+            hits.iter().map(|h| &h.name).collect::<Vec<_>>()
+        );
+
+        // Asking for more than exist returns what exists, and no note is due.
+        let all = host.search(&roots, "needle", 500, 2000, false).unwrap();
+        assert_eq!(all.len(), 30, "every match, when there is room for them");
+    }
+
     struct TempSandbox(tempfile::TempDir);
 
     impl Sandbox for TempSandbox {
