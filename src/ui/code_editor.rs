@@ -1784,6 +1784,61 @@ mod unsaved_close_gpui_tests {
         );
     }
 
+    /// And it spares a live SSH tab the same way.
+    ///
+    /// `tab_keeps_unclosed_work` is two halves — an unsaved buffer, and a
+    /// connection whose profile asked to be warned about — and only the first
+    /// was held. Dropping the SSH half left every test green while "Close
+    /// Other Tabs" started taking live sessions without asking, which is the
+    /// one thing a bulk close is documented not to do.
+    ///
+    /// The phase is seeded rather than connected: reaching `Connected` for
+    /// real wants a server, a handshake and a channel, and what the gate reads
+    /// is this one value.
+    #[gpui::test]
+    fn a_bulk_close_leaves_the_tab_holding_a_live_ssh_session(cx: &mut TestAppContext) {
+        use crate::daemon::protocol::SshPhase;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+        vcx.update(|_, cx| {
+            cx.global_mut::<crate::core::config::Config>()
+                .ssh_warn_on_close = true;
+        });
+
+        // Tab 1 is holding a connection; tabs 0 and 2 are ordinary.
+        app.update_in(&mut vcx, |app, _window, cx| {
+            let leaf = app.tabs[1]
+                .pane
+                .terminals()
+                .first()
+                .cloned()
+                .expect("the harness tab has a terminal");
+            leaf.read(cx)
+                .terminal
+                .seed_ssh_phase_for_test(Some(SshPhase::Connected));
+            assert!(
+                app.tab_has_warn_ssh(1, cx),
+                "the fixture has to actually look like a live SSH tab"
+            );
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_other_tabs(0, window, cx);
+        });
+
+        app.update(cx, |app, cx| {
+            assert_eq!(
+                app.tabs.len(),
+                2,
+                "the kept tab and the one holding the connection"
+            );
+            assert!(
+                (0..app.tabs.len()).any(|i| app.tab_has_warn_ssh(i, cx)),
+                "the tab that was spared is the one with the session"
+            );
+        });
+    }
+
     /// A bulk close spares it instead of asking.
     ///
     /// One dialog per tab is not a question anyone can answer, so the bargain

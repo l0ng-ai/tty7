@@ -6301,7 +6301,7 @@ impl Tty7App {
         self.tab_has_warn_ssh(index, cx) || self.tab_unsaved_edit(index).is_some()
     }
 
-    fn tab_has_warn_ssh(&self, index: usize, cx: &App) -> bool {
+    pub(crate) fn tab_has_warn_ssh(&self, index: usize, cx: &App) -> bool {
         self.tabs.get(index).is_some_and(|tab| {
             tab.pane
                 .terminals()

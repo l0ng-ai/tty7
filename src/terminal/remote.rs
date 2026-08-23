@@ -1737,6 +1737,20 @@ impl RemoteTerminal {
         self.ssh_phase.lock().ok().and_then(|g| g.clone())
     }
 
+    /// Put a pane into a connected SSH state without a connection.
+    ///
+    /// `leaf_is_warn_ssh` is the gate a bulk close consults before sparing a
+    /// tab, and it reads this phase. Nothing else can set it from a test —
+    /// reaching `Connected` for real means a server, a handshake and a
+    /// channel — so the one thing standing between "Close Other Tabs" and a
+    /// live SSH session was reachable only by hand.
+    #[cfg(test)]
+    pub(crate) fn seed_ssh_phase_for_test(&self, phase: Option<SshPhase>) {
+        if let Ok(mut slot) = self.ssh_phase.lock() {
+            *slot = phase;
+        }
+    }
+
     pub fn ssh_endpoint(&self) -> Option<(String, u16)> {
         self.ssh_endpoint.clone()
     }
