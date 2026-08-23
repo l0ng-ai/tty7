@@ -6,6 +6,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use crate::daemon::protocol::{AuthPromptKind, AuthResponse, DaemonMsg, SshPhase};
+use crate::core::threads::Locked as _;
 
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 const DELIVERY_WINDOW: Duration = Duration::from_secs(15);
@@ -27,27 +28,27 @@ impl PromptBroker {
     }
 
     pub fn has_pending(&self) -> bool {
-        !self.pending.lock().unwrap().is_empty()
+        !self.pending.locked().is_empty()
     }
 
     pub async fn prompt(&self, kind: AuthPromptKind) -> AuthResponse {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
+        self.pending.locked().insert(id, tx);
 
         let frame = DaemonMsg::AuthPrompt {
             request_id: id,
             prompt: kind,
         };
         if !self.deliver_with_retry(frame).await {
-            self.pending.lock().unwrap().remove(&id);
+            self.pending.locked().remove(&id);
             return AuthResponse::Cancelled;
         }
 
         match tokio::time::timeout(PROMPT_TIMEOUT, rx).await {
             Ok(Ok(resp)) => resp,
             _ => {
-                self.pending.lock().unwrap().remove(&id);
+                self.pending.locked().remove(&id);
                 AuthResponse::Cancelled
             }
         }
@@ -78,7 +79,7 @@ impl PromptBroker {
     }
 
     pub fn deliver(&self, request_id: u64, response: AuthResponse) {
-        if let Some(tx) = self.pending.lock().unwrap().remove(&request_id) {
+        if let Some(tx) = self.pending.locked().remove(&request_id) {
             let _ = tx.send(response);
         }
     }

@@ -15,6 +15,7 @@ use crate::daemon::protocol::{
 };
 
 use super::{ConnectionKey, SshConnection, SshManager};
+use crate::core::threads::Locked as _;
 
 const CHUNK: usize = 256 * 1024;
 
@@ -196,34 +197,34 @@ impl Job {
     }
 
     fn set_total(&self, total: u64) {
-        self.progress.lock().unwrap().set_total(total);
+        self.progress.locked().set_total(total);
     }
 
     fn set_current(&self, path: impl Into<String>) {
-        self.progress.lock().unwrap().set_current(path);
+        self.progress.locked().set_current(path);
     }
 
     fn add_bytes(&self, n: u64) {
-        self.progress.lock().unwrap().add_bytes(n);
+        self.progress.locked().add_bytes(n);
     }
 
     fn finish(&self) {
-        self.progress.lock().unwrap().finish();
-        *self.done_at.lock().unwrap() = Some(Instant::now());
+        self.progress.locked().finish();
+        *self.done_at.locked() = Some(Instant::now());
     }
 
     fn fail(&self, reason: impl Into<String>) {
-        self.progress.lock().unwrap().fail(reason);
-        *self.done_at.lock().unwrap() = Some(Instant::now());
+        self.progress.locked().fail(reason);
+        *self.done_at.locked() = Some(Instant::now());
     }
 
     fn mark_cancelled(&self) {
-        self.progress.lock().unwrap().cancel();
-        *self.done_at.lock().unwrap() = Some(Instant::now());
+        self.progress.locked().cancel();
+        *self.done_at.locked() = Some(Instant::now());
     }
 
     fn snapshot(&self) -> SftpJobProgress {
-        let p = self.progress.lock().unwrap();
+        let p = self.progress.locked();
         SftpJobProgress {
             job_id: self.id,
             pane_id: self.pane_id,
@@ -240,7 +241,7 @@ impl Job {
 
     fn is_expired(&self) -> bool {
         matches!(
-            *self.done_at.lock().unwrap(),
+            *self.done_at.locked(),
             Some(t) if t.elapsed() > JOB_RETENTION
         )
     }
@@ -337,7 +338,7 @@ impl SftpManager {
             progress: Mutex::new(JobProgress::new()),
             done_at: Mutex::new(None),
         });
-        self.jobs.lock().unwrap().insert(id, job.clone());
+        self.jobs.locked().insert(id, job.clone());
 
         SshManager::global().handle().spawn(async move {
             run_transfer(sftp, spec, job).await;
@@ -347,7 +348,7 @@ impl SftpManager {
 
     pub fn cancel(&self, job_id: u64) -> Vec<SftpJobProgress> {
         let pane = {
-            let jobs = self.jobs.lock().unwrap();
+            let jobs = self.jobs.locked();
             if let Some(job) = jobs.get(&job_id) {
                 job.cancel.store(true, Ordering::SeqCst);
                 Some(job.pane_id)
@@ -362,7 +363,7 @@ impl SftpManager {
     }
 
     pub(crate) fn list_jobs(&self, pane_id: u64) -> Vec<SftpJobProgress> {
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = self.jobs.locked();
         jobs.retain(|_, job| !job.is_expired());
         let mut out: Vec<SftpJobProgress> = jobs
             .values()
@@ -392,7 +393,7 @@ impl SftpManager {
 
     async fn session_for(&self, conn: &Arc<SshConnection>) -> Result<Arc<SftpSession>, String> {
         let slot = {
-            let mut map = self.sessions.lock().unwrap();
+            let mut map = self.sessions.locked();
             map.entry(conn.key().clone())
                 .or_insert_with(|| {
                     Arc::new(SessionSlot {
@@ -417,7 +418,7 @@ impl SftpManager {
     }
 
     fn invalidate(&self, key: &ConnectionKey) {
-        self.sessions.lock().unwrap().remove(key);
+        self.sessions.locked().remove(key);
     }
 }
 

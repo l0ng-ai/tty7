@@ -8,6 +8,7 @@ use crate::daemon::pane::DaemonPane;
 use crate::daemon::protocol::{ClientMsg, DaemonMsg, DaemonVersion, RemoteKind};
 use crate::daemon::ssh::SshConnection;
 use crate::daemon::transport::{self, Stream};
+use crate::core::threads::Locked as _;
 
 struct Registry {
     panes: Mutex<HashMap<u64, Arc<DaemonPane>>>,
@@ -57,20 +58,20 @@ impl Registry {
     }
 
     fn insert(&self, pane: Arc<DaemonPane>) {
-        self.panes.lock().unwrap().insert(pane.id, pane);
+        self.panes.locked().insert(pane.id, pane);
     }
 
     fn get(&self, id: u64) -> Option<Arc<DaemonPane>> {
-        self.panes.lock().unwrap().get(&id).cloned()
+        self.panes.locked().get(&id).cloned()
     }
 
     fn remove(&self, id: u64) -> Option<Arc<DaemonPane>> {
-        self.panes.lock().unwrap().remove(&id)
+        self.panes.locked().remove(&id)
     }
 
     fn drain_and_kill(&self) {
         let panes: Vec<Arc<DaemonPane>> = {
-            let mut guard = self.panes.lock().unwrap();
+            let mut guard = self.panes.locked();
             guard.drain().map(|(_, p)| p).collect()
         };
         for pane in panes {
@@ -79,7 +80,7 @@ impl Registry {
     }
 
     fn all(&self) -> Vec<Arc<DaemonPane>> {
-        self.panes.lock().unwrap().values().cloned().collect()
+        self.panes.locked().values().cloned().collect()
     }
 
     fn list(&self) -> Vec<crate::daemon::protocol::PaneInfo> {
@@ -94,7 +95,7 @@ impl Registry {
 
 impl crate::host::server::PaneDirectory for Registry {
     fn pane_count(&self) -> u64 {
-        self.panes.lock().unwrap().len() as u64
+        self.panes.locked().len() as u64
     }
 
     fn panes(&self) -> Vec<crate::daemon::protocol::PaneInfo> {
@@ -102,7 +103,7 @@ impl crate::host::server::PaneDirectory for Registry {
     }
 
     fn agent_states(&self) -> Vec<crate::daemon::control::PaneAgentState> {
-        let panes: Vec<Arc<DaemonPane>> = self.panes.lock().unwrap().values().cloned().collect();
+        let panes: Vec<Arc<DaemonPane>> = self.panes.locked().values().cloned().collect();
         let mut states: Vec<_> = panes.iter().filter_map(|p| p.agent_state()).collect();
         states.sort_by_key(|s| s.pane_id);
         states

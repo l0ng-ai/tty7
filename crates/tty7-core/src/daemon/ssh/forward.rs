@@ -15,6 +15,7 @@ use crate::daemon::protocol::{
 
 use super::session::SshConnection;
 use super::{ConnectionKey, SshManager};
+use crate::core::threads::Locked as _;
 
 async fn accept_retrying(listener: &TcpListener) -> Option<(TcpStream, std::net::SocketAddr)> {
     let mut failures = 0u32;
@@ -166,7 +167,7 @@ impl RemoteForwardTable {
     }
 
     pub(super) fn rekey(&self, bind_host: &str, from_port: u16, to_port: u16) {
-        let mut map = self.inner.lock().unwrap();
+        let mut map = self.inner.locked();
         if let Some(target) = map.remove(&(bind_host.to_string(), from_port)) {
             map.insert((bind_host.to_string(), to_port), target);
         }
@@ -177,7 +178,7 @@ impl RemoteForwardTable {
         connected_address: &str,
         connected_port: u16,
     ) -> Option<(String, u16)> {
-        let map = self.inner.lock().unwrap();
+        let map = self.inner.locked();
         if let Some(t) = map.get(&(connected_address.to_string(), connected_port)) {
             return Some(t.clone());
         }
@@ -276,7 +277,7 @@ impl ForwardEntry {
             target_host: self.target_host.clone(),
             target_port: self.target_port,
             description: self.description.clone(),
-            status: self.status.lock().unwrap().clone(),
+            status: self.status.locked().clone(),
         }
     }
 }
@@ -381,7 +382,7 @@ impl SshForwardRegistry {
     }
 
     fn list_owned(&self, owner: &ForwardOwner, view_pane: u64) -> Vec<ManagedForward> {
-        let owners = self.owners.lock().unwrap();
+        let owners = self.owners.locked();
         let mut list: Vec<_> = owners
             .get(owner)
             .into_iter()
@@ -399,7 +400,7 @@ impl SshForwardRegistry {
         forward_id: u64,
     ) -> Vec<ManagedForward> {
         let removed = {
-            let mut owners = self.owners.lock().unwrap();
+            let mut owners = self.owners.locked();
             owners.get_mut(owner).and_then(|entries| {
                 let pos = entries.iter().position(|e| e.id == forward_id)?;
                 Some(entries.remove(pos))
@@ -412,7 +413,7 @@ impl SshForwardRegistry {
     }
 
     async fn teardown_owned(&self, owner: &ForwardOwner) {
-        let entries = self.owners.lock().unwrap().remove(owner);
+        let entries = self.owners.locked().remove(owner);
         for entry in entries.into_iter().flatten() {
             Self::cancel_entry(entry).await;
         }
@@ -479,7 +480,7 @@ impl SshForwardRegistry {
                     }
                 });
             };
-            *task_status.lock().unwrap() = loop_exit_status(exit);
+            *task_status.locked() = loop_exit_status(exit);
         });
         (bound, status, ForwardCancel::Task(handle))
     }
@@ -535,7 +536,7 @@ impl SshForwardRegistry {
                     }
                 });
             };
-            *task_status.lock().unwrap() = loop_exit_status(exit);
+            *task_status.locked() = loop_exit_status(exit);
         });
         (bound, status, ForwardCancel::Task(handle))
     }
@@ -625,7 +626,7 @@ impl SshForwardRegistry {
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (bind_port, status, cancel) = self.start_local(&conn, &rule).await;
-        if let ForwardStatus::Error(e) = &*status.lock().unwrap() {
+        if let ForwardStatus::Error(e) = &*status.locked() {
             return Err(io::Error::other(e.clone()));
         }
         let entry = ForwardEntry {
@@ -657,7 +658,7 @@ impl SshForwardRegistry {
         remote_host: &str,
         remote_port: u16,
     ) -> Option<u16> {
-        let owners = self.owners.lock().unwrap();
+        let owners = self.owners.locked();
         owners
             .get(owner)?
             .iter()
@@ -668,7 +669,7 @@ impl SshForwardRegistry {
                     && e.target_port == remote_port
                     // Now that a dead loop says so, this stops handing out the
                     // port of a forward that no longer serves anything.
-                    && matches!(*e.status.lock().unwrap(), ForwardStatus::Listening)
+                    && matches!(*e.status.locked(), ForwardStatus::Listening)
             })
             .map(|e| e.bind_port)
     }
@@ -677,7 +678,7 @@ impl SshForwardRegistry {
 impl SshManager {
     pub(crate) fn existing_connection(&self, spec: &NativeSshSpec) -> Option<Arc<SshConnection>> {
         let key = ConnectionKey::from_spec(spec);
-        let slot = self.conns.lock().unwrap().get(&key).cloned()?;
+        let slot = self.conns.locked().get(&key).cloned()?;
         let guard = slot.try_lock().ok()?;
         let conn = guard.upgrade()?;
         conn.is_alive().then_some(conn)

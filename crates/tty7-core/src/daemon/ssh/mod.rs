@@ -34,6 +34,7 @@ use crate::daemon::shell_integration::remote;
 use forward::RemoteForwardTable;
 use handler::ClientHandler;
 use session::drive_channel;
+use crate::core::threads::Locked as _;
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -233,7 +234,7 @@ impl SshManager {
             .await
             .map_err(|e| format!("{e}"))?;
 
-        *conn_slot.lock().unwrap() = Arc::downgrade(&conn);
+        *conn_slot.locked() = Arc::downgrade(&conn);
 
         broker.status(SshPhase::Connected);
 
@@ -252,7 +253,7 @@ impl SshManager {
                     .await
                     .map_err(|e| format!("{e}"))?;
                 conn = fresh;
-                *conn_slot.lock().unwrap() = Arc::downgrade(&conn);
+                *conn_slot.locked() = Arc::downgrade(&conn);
                 conn.open_session_channel()
                     .await
                     .map_err(|e| format!("open shell channel failed: {e}"))?
@@ -411,11 +412,11 @@ impl SshManager {
     }
 
     fn evict_connection(&self, key: &ConnectionKey) {
-        self.conns.lock().unwrap().remove(key);
+        self.conns.locked().remove(key);
     }
 
     pub fn routes(&self) -> Vec<crate::daemon::control::RouteInfo> {
-        let conns = self.conns.lock().unwrap();
+        let conns = self.conns.locked();
         let mut routes: Vec<_> = conns
             .iter()
             .map(|(key, slot)| {
@@ -442,7 +443,7 @@ impl SshManager {
 
     async fn remote_bootstrap(&self, conn: &Arc<SshConnection>) -> Option<String> {
         let key = conn.key().clone();
-        let cached = { self.probes.lock().unwrap().get(&key).cloned() };
+        let cached = { self.probes.locked().get(&key).cloned() };
         let probed = match cached {
             Some(hit) => hit,
             // Only an answer is remembered. This map is on the process-wide
@@ -459,7 +460,7 @@ impl SshManager {
                         }
                         None => log::debug!("ssh {key:?}: no remote shell integration"),
                     }
-                    self.probes.lock().unwrap().insert(key, answer.clone());
+                    self.probes.locked().insert(key, answer.clone());
                     answer
                 }
                 None => {
@@ -502,7 +503,7 @@ impl SshManager {
             let mut guard = match reuse {
                 true => {
                     let slot: ConnSlot = {
-                        let mut map = self.conns.lock().unwrap();
+                        let mut map = self.conns.locked();
                         map.entry(key.clone())
                             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(Weak::new())))
                             .clone()

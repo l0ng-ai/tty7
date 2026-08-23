@@ -17,6 +17,7 @@ use crate::daemon::protocol::{
     ShellSpec, WinSize,
 };
 use crate::daemon::shell_integration;
+use crate::core::threads::Locked as _;
 
 #[cfg(windows)]
 fn default_prog() -> CommandBuilder {
@@ -644,14 +645,14 @@ impl OutputGate {
     pub fn sub(&self, n: usize) {
         let prev = self.queued.fetch_sub(n as i64, Ordering::Relaxed);
         if prev >= Self::HIGH_WATER && prev - (n as i64) < Self::HIGH_WATER {
-            let _park = self.park.lock().unwrap();
+            let _park = self.park.locked();
             self.drained.notify_all();
         }
     }
 
     fn reset(&self) {
         self.queued.store(0, Ordering::Relaxed);
-        let _park = self.park.lock().unwrap();
+        let _park = self.park.locked();
         self.drained.notify_all();
     }
 
@@ -668,7 +669,7 @@ impl OutputGate {
             return;
         }
         let deadline = std::time::Instant::now() + Self::MAX_WAIT;
-        let mut park = self.park.lock().unwrap();
+        let mut park = self.park.locked();
         while self.queued.load(Ordering::Relaxed) >= Self::HIGH_WATER {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
@@ -973,7 +974,7 @@ impl DeathReporter {
     }
 
     fn probe_exit_code(&self, probe: impl FnMut() -> Option<i32> + Send + 'static) {
-        *self.exit_code.lock().unwrap() = Some(Box::new(probe));
+        *self.exit_code.locked() = Some(Box::new(probe));
     }
 
     #[cfg(windows)]
@@ -991,7 +992,7 @@ impl DeathReporter {
             .unwrap()
             .as_mut()
             .and_then(|probe| probe());
-        let mut st = state.lock().unwrap();
+        let mut st = state.locked();
         st.alive = false;
         st.exit_code = code;
         let pane = st.id;
@@ -1007,7 +1008,7 @@ impl DeathReporter {
         if subscribed {
             return;
         }
-        if let Some(on_dead) = self.on_dead.lock().unwrap().take() {
+        if let Some(on_dead) = self.on_dead.locked().take() {
             on_dead();
         }
     }
@@ -1599,7 +1600,7 @@ impl DaemonPane {
             },
             death,
         );
-        *pane.reader.lock().unwrap() = Some(reader);
+        *pane.reader.locked() = Some(reader);
 
         pane
     }
@@ -1625,7 +1626,7 @@ impl DaemonPane {
             .ok()?
             .as_ref()
             .and_then(|master| master.as_raw_fd())?;
-        let st = self.state.lock().unwrap();
+        let st = self.state.locked();
         Some(Carried {
             id: self.id,
             owner: self.owner.clone(),
@@ -1769,7 +1770,7 @@ impl DaemonPane {
         let broker = {
             let state = state.clone();
             crate::daemon::ssh::PromptBroker::new(Box::new(move |msg: DaemonMsg| {
-                match &state.lock().unwrap().subscriber {
+                match &state.locked().subscriber {
                     Some(sub) => sub.send(msg).is_ok(),
                     None => false,
                 }
@@ -1807,7 +1808,7 @@ impl DaemonPane {
             },
             death,
         );
-        *pane.reader.lock().unwrap() = Some(reader);
+        *pane.reader.locked() = Some(reader);
 
         crate::daemon::ssh::SshManager::global().spawn_native_session(
             id,
@@ -1830,7 +1831,7 @@ impl DaemonPane {
 
     pub(crate) fn ssh_connection(&self) -> Option<Arc<crate::daemon::ssh::SshConnection>> {
         match &self.backend {
-            PaneBackend::NativeSsh(b) => b.connection.lock().unwrap().upgrade(),
+            PaneBackend::NativeSsh(b) => b.connection.locked().upgrade(),
             PaneBackend::Pty(_) => None,
         }
     }
@@ -1870,7 +1871,7 @@ impl DaemonPane {
                 // local can `ssh` out mid-session, so the flag is refreshed from
                 // the same remote-context poll below. Seed it from the pane's
                 // current context so the first probe answers correctly.
-                let starts_local = state.lock().unwrap().remote.is_none();
+                let starts_local = state.locked().remote.is_none();
                 let mut graphics = GraphicsSniffer::new_local(starts_local);
                 let mut buf = [0u8; 65536];
 
@@ -1993,7 +1994,7 @@ impl DaemonPane {
                             }
                             let remote = if poll_now {
                                 let managed = {
-                                    let st = state.lock().unwrap();
+                                    let st = state.locked();
                                     st.remote
                                         .as_ref()
                                         .is_some_and(|remote| remote.kind != RemoteKind::Ssh)
@@ -2014,7 +2015,7 @@ impl DaemonPane {
                                 || remote.is_some()
                                 || agent.is_some()
                                 || probed_cwd.is_some();
-                            let mut st = state.lock().unwrap();
+                            let mut st = state.locked();
                             let facts_before = may_change_facts.then(|| observed_facts(&st));
                             st.ring.append(bytes);
                             fan_out_output(&mut st, bytes, frames, &gate);
@@ -2070,14 +2071,14 @@ impl DaemonPane {
     }
 
     pub fn attach(&self, subscriber: Sender<DaemonMsg>) -> u64 {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.locked();
         let epoch = attach_subscriber(&mut st, subscriber);
         self.gate.reset();
         epoch
     }
 
     pub fn detach(&self, epoch: u64) -> bool {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.locked();
         if st.subscriber_epoch == epoch {
             st.subscriber = None;
             self.gate.reset();
@@ -2086,21 +2087,21 @@ impl DaemonPane {
     }
 
     pub fn observe(&self, observer: Sender<DaemonMsg>, gate: Arc<OutputGate>) -> u64 {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.locked();
         observe_subscriber(&mut st, observer, gate)
     }
 
     pub(crate) fn unobserve(&self, observer_id: u64) {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.locked();
         st.observers.retain(|obs| obs.id != observer_id);
     }
 
     pub fn controls(&self, epoch: u64) -> bool {
-        self.state.lock().unwrap().subscriber_epoch == epoch
+        self.state.locked().subscriber_epoch == epoch
     }
 
     pub fn agent_state(&self) -> Option<crate::daemon::control::PaneAgentState> {
-        agent_state_snapshot(&self.state.lock().unwrap())
+        agent_state_snapshot(&self.state.locked())
     }
 
     pub fn gate(&self) -> Arc<OutputGate> {
@@ -2135,7 +2136,7 @@ impl DaemonPane {
     }
 
     pub fn resize(&self, size: WinSize) {
-        resize_state(&mut self.state.lock().unwrap(), size);
+        resize_state(&mut self.state.locked(), size);
         match &self.backend {
             PaneBackend::Pty(p) => {
                 if let Ok(master) = p.master.lock()
@@ -2149,12 +2150,12 @@ impl DaemonPane {
     }
 
     pub fn alive(&self) -> bool {
-        self.state.lock().unwrap().alive
+        self.state.locked().alive
     }
 
     pub fn info(&self) -> PaneInfo {
         let (cwd, osc_title, alive) = {
-            let st = self.state.lock().unwrap();
+            let st = self.state.locked();
             (st.cwd.clone(), st.osc_title.clone(), st.alive)
         };
         PaneInfo {
@@ -2168,7 +2169,7 @@ impl DaemonPane {
     }
 
     pub(crate) fn remote_context(&self) -> Option<RemoteContext> {
-        let cached = self.state.lock().unwrap().remote.clone();
+        let cached = self.state.locked().remote.clone();
         cached.or_else(|| self.foreground_remote_context())
     }
 
@@ -2179,7 +2180,7 @@ impl DaemonPane {
     /// snapshot is fine — the snapshot returns its own mark, and that pair is
     /// what gets recorded.
     pub(crate) fn scrollback_mark(&self) -> u64 {
-        self.state.lock().unwrap().ring.appended
+        self.state.locked().ring.appended
     }
 
     /// The pane's screen, capped for storage, with the mark that says how much
@@ -2191,7 +2192,7 @@ impl DaemonPane {
     /// that stopped producing at that moment would keep the stale copy for
     /// good, because its mark would never move again.
     pub(crate) fn scrollback_snapshot(&self) -> (Vec<crate::daemon::scrollback::Segment>, u64) {
-        let st = self.state.lock().unwrap();
+        let st = self.state.locked();
         let mut segments = st.ring.snapshot();
         crate::daemon::scrollback::trim_to(&mut segments, crate::daemon::scrollback::SNAPSHOT_CAP);
         (segments, st.ring.appended)
@@ -2345,7 +2346,7 @@ impl Drop for DaemonPane {
         {
             let _ = child.wait();
         }
-        if let Some(handle) = self.reader.lock().unwrap().take() {
+        if let Some(handle) = self.reader.locked().take() {
             join_bounded(handle, Duration::from_secs(2));
         }
         if let PaneBackend::Pty(p) = &mut self.backend
