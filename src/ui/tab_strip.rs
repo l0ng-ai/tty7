@@ -2257,6 +2257,38 @@ mod tests {
         assert_eq!(elide_keep_edges(&ts, &font, size, branch, max), "main");
     }
 
+    /// A short label that still does not fit is elided, not a panic.
+    ///
+    /// The head candidates include a hardcoded 6 and 3, and `longest_tail`
+    /// computes `cells.len() - head_n`. On a label with fewer than six
+    /// clusters that subtraction underflows, so the filter keeping a candidate
+    /// within the label is what stands between a narrow tab and a crash.
+    ///
+    /// Nothing reached it: the long-branch cases have clusters to spare, and
+    /// "main" returns early because it fits. A label has to be *both* short
+    /// and too wide, which is an ordinary tab in a narrow column.
+    #[gpui::test]
+    fn a_short_label_that_still_does_not_fit_is_elided_rather_than_panicking(
+        cx: &mut TestAppContext,
+    ) {
+        let (ts, font, size) = elide_setup(cx);
+        for label in ["abcde", "abcd", "abc", "ab", "a"] {
+            let full = measure_text(&ts, &font, size, label);
+            // Narrow enough that the label cannot be shown whole, which is
+            // what gets past the early return.
+            let max = full / 2.;
+            let out = elide_keep_edges(&ts, &font, size, label, max);
+            assert!(
+                measure_text(&ts, &font, size, &out) <= max || out.chars().count() <= 1,
+                "{label:?} elided to {out:?}, which is still wider than {max}"
+            );
+            assert!(
+                out.chars().count() <= label.chars().count() + 1,
+                "{label:?} came back longer than it went in: {out:?}"
+            );
+        }
+    }
+
     #[gpui::test]
     fn elide_edges_falls_back_to_a_tail_sliver_when_the_head_cannot_fit(cx: &mut TestAppContext) {
         let (ts, font, size) = elide_setup(cx);
