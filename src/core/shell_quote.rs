@@ -27,6 +27,12 @@
 //!
 //! A leading `~/` stays outside the quotes: quoting it would make it a literal
 //! and lose the home expansion the user is asking for.
+//!
+//! This is for the shell in front of the *user*. What tty7 sends to a machine
+//! — an SSH command line, a WSL bootstrap, an agent hook installed on the far
+//! side — is always re-read by `sh`, and uses `tty7_core::core::shells::
+//! shell_quote` instead. Two rules for two questions, rather than one that has
+//! to guess which it is being asked.
 
 /// Characters that need no quoting in any shell we target.
 fn is_bare(c: char) -> bool {

@@ -1476,6 +1476,13 @@ mod tests {
 
 /// POSIX single-quoting, for a string some other shell has to re-parse.
 ///
+/// POSIX only, on purpose. Everything reached from here — a remote server over
+/// SSH, a WSL distro's bootstrap, a hook command installed on the far side —
+/// is re-read by `sh`. Putting a path in front of the *user's own* shell is a
+/// different question with three answers, and the app crate's
+/// `core::shell_quote` already answers it; this is not the place to grow a
+/// second copy of that.
+///
 /// Single quotes rather than double: inside double quotes `sh` still expands
 /// `$`, a backtick and a backslash, so `"/opt/build$stage/tty7"` is handed to
 /// the shell as `/opt/build/tty7` and the command silently runs the wrong
