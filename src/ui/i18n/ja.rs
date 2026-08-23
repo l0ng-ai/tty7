@@ -1051,8 +1051,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreePlaceholderFolderName => "フォルダ名",
         L10nKey::FileTreePlaceholderNewName => "新しい名前",
         L10nKey::FileTreeDeleteTitle => "「{name}」を削除しますか？",
-        L10nKey::FileTreeDeleteFolderBody => "フォルダとその中のすべての項目が削除されます",
-        L10nKey::FileTreeDeleteFileBody => "ファイルが削除されます",
+        L10nKey::FileTreeDeleteFolderBody => {
+            "フォルダとその中のすべての項目が削除されます。ゴミ箱には入らず、元に戻すことはできません。"
+        }
+        L10nKey::FileTreeDeleteFileBody => {
+            "ファイルが削除されます。ゴミ箱には入らず、元に戻すことはできません。"
+        }
         L10nKey::SftpDeleteFolderBody => {
             "{host} 上でフォルダとその中身がすべて削除されます。リモート側にゴミ箱はありません。"
         }

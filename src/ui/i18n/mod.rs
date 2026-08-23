@@ -1500,6 +1500,50 @@ fn translate_variant(locale_idx: usize, key: L10nKey, branch: &'static str) -> &
 mod tests {
     use super::*;
 
+    /// Every confirmation for a delete says the file is not coming back.
+    ///
+    /// The remote ones always did — "there is no trash on the far side" — and
+    /// the local ones said only that the file "will be deleted". Read together
+    /// that is worse than saying nothing: naming the missing trash on one side
+    /// implies there is one on the other, and there is not. `LocalHost::remove`
+    /// is `remove_file` and `remove_dir_all`, so a local delete from the file
+    /// tree is as final as the remote one.
+    ///
+    /// Checked by the word each locale itself uses for the trash, taken from
+    /// the remote strings that already had to name it. A rewording that drops
+    /// the warning fails here rather than shipping — which is the whole risk
+    /// with a sentence nobody reads until the day it matters.
+    #[test]
+    fn a_delete_confirmation_never_implies_a_trash_that_is_not_there() {
+        // What each locale calls the trash, looked up by code rather than by
+        // position so that adding a language cannot quietly skip the check.
+        let trash = [("en", "trash"), ("ja-JP", "ゴミ箱"), ("zh-CN", "回收站")];
+        assert_eq!(
+            trash.len(),
+            SUPPORTED_LANGUAGES.len(),
+            "a language was added without saying what it calls the trash"
+        );
+        for (code, word) in trash {
+            let locale = SUPPORTED_LANGUAGES
+                .iter()
+                .position(|lang| lang.code == code)
+                .unwrap_or_else(|| panic!("no locale {code}"));
+            for key in [
+                L10nKey::FileTreeDeleteFolderBody,
+                L10nKey::FileTreeDeleteFileBody,
+                L10nKey::SftpDeleteFolderBody,
+                L10nKey::SftpDeleteFileBody,
+            ] {
+                let text = translate_for_test(locale, key);
+                assert!(
+                    text.contains(word),
+                    "{key:?} in locale {locale} must say the delete does not go to \
+                     the {word}, because it does not: {text:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_key_is_translated_in_every_locale() {
         // Deliberately the same in every locale. Each of these reads as

@@ -990,8 +990,12 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::FileTreePlaceholderFolderName => "folder name",
         L10nKey::FileTreePlaceholderNewName => "new name",
         L10nKey::FileTreeDeleteTitle => "Delete \"{name}\"?",
-        L10nKey::FileTreeDeleteFolderBody => "The folder and everything inside it will be deleted.",
-        L10nKey::FileTreeDeleteFileBody => "The file will be deleted.",
+        L10nKey::FileTreeDeleteFolderBody => {
+            "The folder and everything inside it will be deleted. It does not go to the trash, and this cannot be undone."
+        }
+        L10nKey::FileTreeDeleteFileBody => {
+            "The file will be deleted. It does not go to the trash, and this cannot be undone."
+        }
         L10nKey::SftpDeleteFolderBody => {
             "The folder and everything inside it will be deleted on {host}. There is no trash on the far side."
         }
