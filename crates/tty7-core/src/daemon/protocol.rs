@@ -2358,6 +2358,47 @@ mod tests {
         let port: PortEntry = serde_json::from_str(r#"{"port":80,"pid":1,"name":"sh"}"#)
             .expect("PortEntry must decode without its later fields");
         assert_eq!(port.addr, "");
+
+        // The nested ones the spec above never constructs, because its own
+        // defaults leave them out of the JSON entirely — so they need saying
+        // separately or they are held by nothing.
+        // The oldest daemon of all: it answered with a protocol number alone.
+        let ver: DaemonVersion = serde_json::from_str(r#"{"protocol":1}"#)
+            .expect("DaemonVersion must decode from a daemon that sent only its number");
+        assert_eq!(ver.protocol, 1);
+        assert_eq!(ver.build, "");
+        assert!(ver.features.is_empty());
+        assert_eq!(ver.instance, "");
+
+        let algs: SshAlgorithms = serde_json::from_str(r#"{}"#)
+            .expect("SshAlgorithms must decode from a peer that sent none of it");
+        assert!(algs.kex.is_empty() && algs.cipher.is_empty());
+        assert!(algs.mac.is_empty() && algs.host_key.is_empty());
+        assert!(algs.compression.is_empty());
+
+        let rule: SshForwardRule =
+            serde_json::from_str(r#"{"kind":"local","bind_host":"127.0.0.1","bind_port":8080}"#)
+                .expect("SshForwardRule must decode without its later fields");
+        assert_eq!(rule.target_host, "");
+        assert_eq!(rule.target_port, 0);
+
+        let spec: SftpTransferSpec =
+            serde_json::from_str(r#"{"pane_id":1,"kind":"upload","local":"/l","remote":"/r"}"#)
+                .expect("SftpTransferSpec must decode without its later fields");
+        assert!(!spec.recursive);
+
+        let job: SftpJobProgress =
+            serde_json::from_str(r#"{"job_id":1,"pane_id":2,"kind":"download","state":"running"}"#)
+                .expect("SftpJobProgress must decode without its later fields");
+        assert_eq!(job.current, "");
+        assert_eq!((job.bytes_done, job.bytes_total), (0, 0));
+
+        let fwd: ManagedForward = serde_json::from_str(
+            r#"{"id":1,"pane_id":2,"kind":"remote","bind_host":"::1","bind_port":9,"status":"listening"}"#,
+        )
+        .expect("ManagedForward must decode without its later fields");
+        assert_eq!(fwd.target_host, "");
+        assert_eq!(fwd.target_port, 0);
     }
 
     /// A `ShellSpec` from a peer that predates its later fields still decodes.
