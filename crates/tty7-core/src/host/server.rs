@@ -2092,6 +2092,62 @@ mod gui_registry_tests {
         );
     }
 
+    /// Releasing one workspace releases that one, not the connection.
+    ///
+    /// `release` and `release_conn` are two operations on purpose: one lets go
+    /// of a single workspace, the other lets go of everything a connection
+    /// holds when it disappears. Dropping the workspace half of `release`'s
+    /// filter collapses the first into the second, and the suite stayed green
+    /// — a client detaching from one remote workspace would silently lose its
+    /// hold on all of them, leaving the far end free to hand them to somebody
+    /// else.
+    ///
+    /// The connection half *was* held. Only the pairing was not.
+    #[test]
+    fn releasing_one_workspace_leaves_the_connections_others_alone() {
+        let registry = AttachRegistry::default();
+        let holder = |token: &str| Holder {
+            token: token.to_string(),
+            hostname: "here".to_string(),
+            sink: Arc::new(Sink::new(SharedWriter(Arc::new(Mutex::new(Vec::new()))))),
+            shutdown: Arc::new(NoShutdown),
+        };
+
+        // One connection holding two workspaces, which is an ordinary window
+        // with two remotes open.
+        assert!(registry.claim("alpha", 1, &holder("t1"), false).is_none());
+        assert!(registry.claim("beta", 1, &holder("t2"), false).is_none());
+
+        assert!(
+            registry.release("alpha", 1),
+            "the held workspace is released"
+        );
+        assert!(
+            !registry.release("alpha", 1),
+            "and releasing it twice reports nothing the second time"
+        );
+
+        // The other is still held: `release_conn` is what finally lets it go,
+        // and it still has something to report.
+        assert_eq!(
+            registry.release_conn(1),
+            vec!["beta".to_string()],
+            "beta was still this connection's to release"
+        );
+        assert!(
+            registry.release_conn(1).is_empty(),
+            "and nothing is left after that"
+        );
+    }
+
+    struct NoShutdown;
+
+    impl LinkShutdown for NoShutdown {
+        fn shutdown_link(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn gui_open_is_delivered_only_while_a_gui_is_registered() {
         let registry = AttachRegistry::default();
