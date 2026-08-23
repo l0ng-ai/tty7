@@ -6211,10 +6211,8 @@ impl Tty7App {
     }
 
     fn leaf_is_warn_ssh(&self, leaf: &Entity<TerminalView>, cx: &App) -> bool {
-        use crate::daemon::protocol::SshPhase;
         let v = leaf.read(cx);
-        let connected = matches!(v.ssh_phase(), Some(SshPhase::Connected)) && !v.terminal.exited;
-        if !connected {
+        if !v.ssh_session_live() {
             return false;
         }
         let cfg = cx.global::<Config>();
@@ -6426,7 +6424,7 @@ impl Tty7App {
         window: &Window,
         cx: &App,
     ) -> Option<(u64, RemoteContext)> {
-        use crate::daemon::protocol::{RemoteKind, SshPhase};
+        use crate::daemon::protocol::RemoteKind;
         let (pane_id, remote) = self.active_ssh_pane(window, cx)?;
         if remote.kind != RemoteKind::NativeSsh {
             return None;
@@ -6436,7 +6434,9 @@ impl Tty7App {
             .get(self.active)?
             .pane
             .focused_or_first(window, cx)?;
-        matches!(leaf.read(cx).ssh_phase(), Some(SshPhase::Connected)).then_some((pane_id, remote))
+        leaf.read(cx)
+            .ssh_session_live()
+            .then_some((pane_id, remote))
     }
 
     pub(crate) fn select_settings_section(
@@ -10571,6 +10571,67 @@ mod managed_forward_gpui_tests {
                 "the form is still editing it"
             );
             assert!(app.loopback_panel.mf_error.is_some());
+        });
+    }
+
+    /// A phase is a report, not a state the app keeps up to date. Nothing walks
+    /// `Connected` back when the pane's process ends, so a session that has
+    /// exited still says the last thing it said — and every feature that asked
+    /// the phase alone went on offering itself over a link that was gone. Two
+    /// of the four places that asked had already drifted to exactly that.
+    ///
+    /// The features are what this pins, not the predicate: the close warning
+    /// stops nagging about a session that is already over, and the remote file
+    /// pane stops offering to browse it.
+    #[gpui::test]
+    fn a_session_that_has_exited_is_not_a_live_ssh_session(cx: &mut TestAppContext) {
+        use crate::daemon::protocol::SshPhase;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        vcx.update(|_, cx| {
+            cx.global_mut::<crate::core::config::Config>()
+                .ssh_warn_on_close = true;
+        });
+
+        let leaf = app.update_in(&mut vcx, |app, _window, cx| {
+            let leaf = app.tabs[0]
+                .pane
+                .terminals()
+                .first()
+                .cloned()
+                .expect("the harness tab has a terminal");
+            leaf.read(cx)
+                .terminal
+                .seed_ssh_phase_for_test(Some(SshPhase::Connected));
+            leaf
+        });
+
+        app.update_in(&mut vcx, |app, _window, cx| {
+            assert!(
+                leaf.read(cx).ssh_session_live(),
+                "the fixture has to look like a live session first"
+            );
+            assert!(
+                app.tab_has_warn_ssh(0, cx),
+                "and closing it is worth asking about"
+            );
+        });
+
+        // The far side hung up. The phase still says Connected, because that is
+        // the last thing the status stream said and nothing retracts it.
+        leaf.update(&mut vcx, |v, _| v.terminal.exited = true);
+
+        app.update_in(&mut vcx, |app, _window, cx| {
+            assert_eq!(
+                leaf.read(cx).ssh_phase(),
+                Some(SshPhase::Connected),
+                "the phase is not walked back — that is the whole trap"
+            );
+            assert!(!leaf.read(cx).ssh_session_live(), "but the session is over");
+            assert!(
+                !app.tab_has_warn_ssh(0, cx),
+                "so closing the pane is not worth asking about any more"
+            );
         });
     }
 }

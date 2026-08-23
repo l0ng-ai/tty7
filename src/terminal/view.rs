@@ -1782,6 +1782,26 @@ impl TerminalView {
         self.ssh_spec.is_some() && self.terminal.exited
     }
 
+    /// Whether this pane's SSH session is still up.
+    ///
+    /// Two halves, and the second is the one that is easy to forget. The phase
+    /// is whatever the daemon's status stream last reported, and nothing walks
+    /// it back when the pane's process ends: an `exit` on the far side, a
+    /// dropped link, a killed client all leave `Connected` standing as the last
+    /// thing anyone said. Asking the phase alone therefore answers "was it ever
+    /// connected", and every feature gated on it — remote file browsing, the
+    /// SSH actions, the close warning — goes on offering itself over a link
+    /// that is gone.
+    ///
+    /// One method rather than the four spellings this had, two of which had
+    /// already drifted.
+    pub fn ssh_session_live(&self) -> bool {
+        matches!(
+            self.ssh_phase(),
+            Some(crate::daemon::protocol::SshPhase::Connected)
+        ) && !self.terminal.exited
+    }
+
     /// Takes a title the program set, and gives it to the tab only once it has
     /// stood for `TITLE_SETTLE`.
     ///

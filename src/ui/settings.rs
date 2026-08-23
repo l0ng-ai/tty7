@@ -3245,12 +3245,11 @@ impl Tty7App {
     }
 
     fn live_ssh_profiles(&self, cx: &App) -> std::collections::HashSet<Uuid> {
-        use crate::daemon::protocol::SshPhase;
         let mut live = std::collections::HashSet::new();
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 let v = leaf.read(cx);
-                if !matches!(v.ssh_phase(), Some(SshPhase::Connected)) || v.terminal.exited {
+                if !v.ssh_session_live() {
                     continue;
                 }
                 if let Some(id) = v

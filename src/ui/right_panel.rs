@@ -1392,13 +1392,11 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<(u64, String)> {
-        use crate::daemon::protocol::{RemoteKind, SshPhase};
+        use crate::daemon::protocol::RemoteKind;
         let leaf = self.tabs.get(self.active)?.detail_pane(window, cx)?;
         let view = leaf.read(cx);
         let remote = view.remote_context()?;
-        if remote.kind != RemoteKind::NativeSsh
-            || !matches!(view.ssh_phase(), Some(SshPhase::Connected))
-        {
+        if remote.kind != RemoteKind::NativeSsh || !view.ssh_session_live() {
             return None;
         }
         Some((view.pane_id, remote.target))
