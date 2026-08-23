@@ -1778,6 +1778,22 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
                         //
                         // Until then `tty7 pane close --orphans` is the
                         // recovery, and `tty7 pane ls --all` points at it.
+                        // Confirmed at larger scale since: 160 CLI operations
+                        // against a live window left 17, every one of them a
+                        // *live* `zsh` rather than a stale record, and the
+                        // reaper ended all 17.
+                        //
+                        // One experiment already run, so it need not be run
+                        // again: parking the pane here — `park_dropped`, letting
+                        // the existing `sweep_parked` judge it after the re-pull
+                        // instead of hanging it up on the spot — is safe and
+                        // does *not* measurably help. Across four runs the share
+                        // of panes reaching this arm that were still orphaned at
+                        // the end was 33–60% without it and 43–50% with it: the
+                        // panes that get here are mostly already caught by the
+                        // sweep the layout rewrite arms. The leak is the two
+                        // paths that never refuse an operation, which is what
+                        // the end-state sweep above is for.
                         log::warn!(
                             "pane {pane} was spawned for that operation and nothing holds it \
                              now; it will show up in `tty7 pane ls --all` as an orphan"
