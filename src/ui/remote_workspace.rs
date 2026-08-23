@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+
+use crate::terminal::view::one_line;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -828,8 +830,14 @@ impl Tty7App {
     ) {
         let answer = window.prompt(
             PromptLevel::Warning,
-            &t_fmt(L10nKey::RemoteRestartTitle, &[("machine", &label)]),
-            Some(&t_fmt(L10nKey::RemoteRestartBody, &[("machine", &label)])),
+            &t_fmt(
+                L10nKey::RemoteRestartTitle,
+                &[("machine", &one_line(&label))],
+            ),
+            Some(&t_fmt(
+                L10nKey::RemoteRestartBody,
+                &[("machine", &one_line(&label))],
+            )),
             &crate::ui::confirm_answers(t(L10nKey::RestartServer), t(L10nKey::Cancel)),
             cx,
         );
@@ -901,8 +909,14 @@ impl Tty7App {
     ) {
         let answer = window.prompt(
             PromptLevel::Warning,
-            &t_fmt(L10nKey::RemoteMismatchTitle, &[("machine", &label)]),
-            Some(&t_fmt(L10nKey::RemoteReplaceBody, &[("machine", &label)])),
+            &t_fmt(
+                L10nKey::RemoteMismatchTitle,
+                &[("machine", &one_line(&label))],
+            ),
+            Some(&t_fmt(
+                L10nKey::RemoteReplaceBody,
+                &[("machine", &one_line(&label))],
+            )),
             &crate::ui::confirm_answers(t(action), t(L10nKey::Cancel)),
             cx,
         );
@@ -994,10 +1008,15 @@ impl Tty7App {
 
         let answer = window.prompt(
             PromptLevel::Warning,
-            &t_fmt(L10nKey::RemoteRestartFailedTitle, &[("machine", label)]),
+            &t_fmt(
+                L10nKey::RemoteRestartFailedTitle,
+                &[("machine", &one_line(label))],
+            ),
+            // The error is the far end's words, not ours, and a server that
+            // fails in two lines gets two lines of this dialog.
             Some(&t_fmt(
                 L10nKey::RemoteRestartFailedBody,
-                &[("error", error)],
+                &[("error", &one_line(error))],
             )),
             // Spelled out rather than passed as a string: gpui's `&str`
             // conversion decides a button's role by matching the English word,

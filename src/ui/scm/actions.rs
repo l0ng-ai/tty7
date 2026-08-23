@@ -516,7 +516,10 @@ fn confirm_question(op: &GitOp, loss: Destructive) -> String {
         // One file gets named; a whole group does not, because a list of two
         // hundred paths in a system dialog says less than the count does.
         _ => match op.paths() {
-            [only] => t_fmt(L10nKey::ScmDiscardConfirm, &[("path", only.as_str())]),
+            [only] => t_fmt(
+                L10nKey::ScmDiscardConfirm,
+                &[("path", &crate::terminal::view::one_line(only.as_str()))],
+            ),
             _ => t(L10nKey::ScmDiscardAllConfirm).to_string(),
         },
     }

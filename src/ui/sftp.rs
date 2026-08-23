@@ -715,11 +715,18 @@ impl Tty7App {
                 true => L10nKey::SftpDeleteFolderBody,
                 false => L10nKey::SftpDeleteFileBody,
             },
-            &[("host", &host)],
+            &[("host", &one_line(&host))],
         );
+        // Folded here for the reason the row folds it, and more so: this is the
+        // dialog the delete is authorised in, and the name in it comes off a
+        // machine the user does not administer. A name carrying a newline gets
+        // to write its own second line of dialog text.
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
-            &t_fmt(L10nKey::FileTreeDeleteTitle, &[("name", &entry.name)]),
+            &t_fmt(
+                L10nKey::FileTreeDeleteTitle,
+                &[("name", &one_line(&entry.name))],
+            ),
             Some(&body),
             &crate::ui::confirm_answers(t(L10nKey::Delete), t(L10nKey::Cancel)),
             cx,

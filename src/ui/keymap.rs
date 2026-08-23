@@ -59,7 +59,7 @@ pub(crate) fn install_relaunch_guard() {
                 crate::ui::i18n::t(crate::ui::i18n::L10nKey::RelaunchUnsavedEditsTitle),
                 Some(&crate::ui::i18n::t_fmt(
                     crate::ui::i18n::L10nKey::CloseUnsavedEditsBody,
-                    &[("name", &name)],
+                    &[("name", &crate::terminal::view::one_line(&name))],
                 )),
                 &crate::ui::confirm_answers(
                     crate::ui::i18n::t(crate::ui::i18n::L10nKey::SettingsUpdateAndRelaunch),
@@ -114,7 +114,7 @@ fn quit_or_ask(cx: &mut App) {
             crate::ui::i18n::t(crate::ui::i18n::L10nKey::QuitUnsavedEditsTitle),
             Some(&crate::ui::i18n::t_fmt(
                 crate::ui::i18n::L10nKey::CloseUnsavedEditsBody,
-                &[("name", &name)],
+                &[("name", &crate::terminal::view::one_line(&name))],
             )),
             &crate::ui::confirm_answers(
                 crate::ui::i18n::t(crate::ui::i18n::L10nKey::AppMenuQuit),

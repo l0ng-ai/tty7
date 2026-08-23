@@ -1011,7 +1011,10 @@ impl Tty7App {
         let name = f.label();
         let answer = window.prompt(
             PromptLevel::Warning,
-            &t_fmt(L10nKey::EditorUnsavedChanges, &[("name", &name)]),
+            &t_fmt(
+                L10nKey::EditorUnsavedChanges,
+                &[("name", &crate::terminal::view::one_line(&name))],
+            ),
             None,
             // Cancel sits between Save and Discard on purpose. The platform
             // renders the first button as the default and lays the rest out

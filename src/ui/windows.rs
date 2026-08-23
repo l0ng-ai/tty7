@@ -475,7 +475,10 @@ fn confirm_destructive(
         let verb_label = t(verb_key);
         let title = t_fmt(
             L10nKey::WindowConfirmTitle,
-            &[("verb", verb_label), ("name", &name)],
+            &[
+                ("verb", verb_label),
+                ("name", &crate::terminal::view::one_line(&name)),
+            ],
         );
         let Ok(answer) = handle.update(cx, |_, window, cx| {
             window.prompt(

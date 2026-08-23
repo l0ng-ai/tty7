@@ -153,6 +153,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Confirmation dialogs no longer let a filename write its own lines of the
+  question. A name carrying a newline — off a cloned repository, an extracted
+  archive or a remote SFTP listing — used to be interpolated raw into the
+  delete, discard, replace, remove-worktree and unsaved-changes prompts, so it
+  could append text of its own to the question authorising the action. Every
+  name a dialog did not compose is now folded onto one line, the rule the file
+  tree, the SFTP list and the sidebar already followed when drawing the same
+  names.
 - **A tab created and closed again before the window has reconciled no longer
   leaves its shell running.** This was listed here as a known issue: with a
   window open, `tab new` immediately followed by `tab close` stranded a live

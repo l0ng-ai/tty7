@@ -4278,11 +4278,20 @@ impl Tty7App {
                 let Some(wt) = found else { return };
                 let path = wt.path.display().to_string();
                 let detail = if wt.dirty {
-                    t_fmt(L10nKey::AppWorktreeRemoveDetailDirty, &[("path", &path)])
+                    t_fmt(
+                        L10nKey::AppWorktreeRemoveDetailDirty,
+                        &[("path", &crate::terminal::view::one_line(&path))],
+                    )
                 } else {
-                    t_fmt(L10nKey::AppWorktreeRemoveDetailClean, &[("path", &path)])
+                    t_fmt(
+                        L10nKey::AppWorktreeRemoveDetailClean,
+                        &[("path", &crate::terminal::view::one_line(&path))],
+                    )
                 };
-                let title = t_fmt(L10nKey::AppWorktreeRemoveTitle, &[("branch", &wt.branch)]);
+                let title = t_fmt(
+                    L10nKey::AppWorktreeRemoveTitle,
+                    &[("branch", &crate::terminal::view::one_line(&wt.branch))],
+                );
                 let level = if wt.dirty {
                     PromptLevel::Warning
                 } else {
@@ -6290,7 +6299,10 @@ impl Tty7App {
         let answer = window.prompt(
             PromptLevel::Warning,
             t(L10nKey::CloseWindowUnsavedEditsTitle),
-            Some(&t_fmt(L10nKey::CloseUnsavedEditsBody, &[("name", &name)])),
+            Some(&t_fmt(
+                L10nKey::CloseUnsavedEditsBody,
+                &[("name", &crate::terminal::view::one_line(&name))],
+            )),
             &crate::ui::confirm_answers(t(L10nKey::Close), t(L10nKey::Keep)),
             cx,
         );

@@ -3967,7 +3967,10 @@ impl Tty7App {
         }
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
-            &t_fmt(L10nKey::FileTreeDeleteTitle, &[("name", &name)]),
+            &t_fmt(
+                L10nKey::FileTreeDeleteTitle,
+                &[("name", &crate::terminal::view::one_line(&name))],
+            ),
             Some(&body),
             &crate::ui::confirm_answers(t(L10nKey::Delete), t(L10nKey::Cancel)),
             cx,

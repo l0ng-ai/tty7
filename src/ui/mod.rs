@@ -105,4 +105,124 @@ mod tests {
         assert!(!action.is_cancel());
         assert!(keep.is_cancel(), "the cancel is marked, not guessed");
     }
+
+    /// Every name a confirmation dialog did not compose is folded onto one
+    /// line before it goes in.
+    ///
+    /// `terminal::view::one_line` says the rule out loud — "anything that
+    /// draws a name it did not compose is exposed to it" — and every *row*
+    /// surface follows it. No dialog did. `sftp.rs` held both halves fifteen
+    /// lines apart: the row folded `entry.name` with a comment about bytes
+    /// chosen on a machine this window has no say over, and the delete
+    /// confirmation for the same entry interpolated it raw.
+    ///
+    /// A dialog is the worse place to lose it. gpui breaks text on `\n`
+    /// whatever the style says, and NSAlert renders one too, so a file named
+    /// `notes.txt\n\nThis one is safe to delete.` writes its own second line
+    /// into the question authorising the delete — on a remote listing, or in
+    /// any repository you cloned.
+    ///
+    /// Keys, not expressions, because the keys are what name user data:
+    /// `{name}`, `{path}`, `{branch}` and the rest are always someone else's
+    /// bytes, while `{verb}` and `{n}` are ours.
+    #[test]
+    fn a_dialog_folds_every_name_it_did_not_compose() {
+        /// Substitution keys whose value is never text this app wrote.
+        const THEIRS: [&str; 9] = [
+            "name", "path", "branch", "machine", "host", "file", "subject", "author", "error",
+        ];
+
+        fn walk(dir: &std::path::Path, found: &mut Vec<String>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .expect("the ui sources are readable")
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    walk(&path, found);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path).expect("a source file reads");
+                for (n, region) in prompt_regions(&src) {
+                    for key in THEIRS {
+                        for value in substitutions(&region, key) {
+                            if !value.contains("one_line(") {
+                                found.push(format!(
+                                    "{}:{} — {{{key}}} is {value}",
+                                    path.display(),
+                                    n
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Each `prompt(` call in `src`, as (1-based line, argument text).
+        fn prompt_regions(src: &str) -> Vec<(usize, String)> {
+            let mut out = Vec::new();
+            let bytes = src.as_bytes();
+            let mut at = 0;
+            while let Some(hit) = src[at..].find(".prompt(") {
+                let open = at + hit + ".prompt(".len();
+                let mut depth = 1usize;
+                let mut end = open;
+                while end < bytes.len() && depth > 0 {
+                    match bytes[end] {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        _ => {}
+                    }
+                    end += 1;
+                }
+                out.push((src[..open].lines().count(), src[open..end].to_string()));
+                at = open;
+            }
+            out
+        }
+
+        /// The value expression of every `("<key>", <value>)` pair in `region`.
+        fn substitutions(region: &str, key: &str) -> Vec<String> {
+            let needle = format!("(\"{key}\", ");
+            let mut out = Vec::new();
+            let mut at = 0;
+            while let Some(hit) = region[at..].find(&needle) {
+                let start = at + hit + needle.len();
+                let mut depth = 1usize;
+                let mut end = start;
+                for (i, c) in region[start..].char_indices() {
+                    match c {
+                        '(' => depth += 1,
+                        ')' if depth == 1 => {
+                            end = start + i;
+                            break;
+                        }
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                out.push(region[start..end].trim().to_string());
+                at = start;
+            }
+            out
+        }
+
+        let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert!(ui.is_dir(), "the sources moved: {ui:?}");
+        let mut found = Vec::new();
+        walk(&ui, &mut found);
+        assert!(
+            found.is_empty(),
+            "these dialogs interpolate a name nobody folded, so the name gets \
+             to write its own lines of the question; wrap it in \
+             `terminal::view::one_line`:\n{}",
+            found.join("\n")
+        );
+    }
 }

@@ -1330,7 +1330,7 @@ impl Tty7App {
         };
         let answer = window.prompt(
             PromptLevel::Warning,
-            &t_fmt(L10nKey::FileTreeDeleteTitle, &[("name", &name)]),
+            &t_fmt(L10nKey::FileTreeDeleteTitle, &[("name", &one_line(&name))]),
             Some(detail),
             &crate::ui::confirm_answers(t(L10nKey::Delete), t(L10nKey::Cancel)),
             cx,
@@ -1473,7 +1473,7 @@ impl Tty7App {
             return;
         };
         let title = match conflicts.as_slice() {
-            [one] => t_fmt(L10nKey::FileDropReplaceTitle, &[("name", one)]),
+            [one] => t_fmt(L10nKey::FileDropReplaceTitle, &[("name", &one_line(one))]),
             many => t_fmt(
                 L10nKey::FileDropReplaceManyTitle,
                 &[("n", &many.len().to_string())],
