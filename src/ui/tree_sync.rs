@@ -1783,6 +1783,24 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
                         // *live* `zsh` rather than a stale record, and the
                         // reaper ended all 17.
                         //
+                        // And bounded, which matters more than the total for
+                        // deciding what this costs. It is not volume that
+                        // strands them, it is closing something before the
+                        // window has finished reconciling the thing that made
+                        // it. Measured against a live window:
+                        //
+                        //   tab new / split / send, paced or as fast as the
+                        //   CLI will go                              0 orphans
+                        //   tab new then tab close, 1s apart, x4     0 orphans
+                        //   tab new then tab close, no pause,  x6    5 orphans
+                        //
+                        // The last one reproduced exactly — 5 of 6, three runs
+                        // in a row. A person cannot type that fast and an agent
+                        // does it by default: a loop that opens a tab per task
+                        // and closes it when the task is done strands a live
+                        // shell on nearly every iteration, which is the shape
+                        // this product is built for.
+                        //
                         // One experiment already run, so it need not be run
                         // again: parking the pane here — `park_dropped`, letting
                         // the existing `sweep_parked` judge it after the re-pull
