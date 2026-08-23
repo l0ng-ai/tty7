@@ -256,6 +256,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsCouldntForgetPassword => {
             "Could not forget the saved password for {endpoint}: {error}"
         }
+        L10nKey::SettingsCouldntForgetPassphrase => {
+            "Could not forget the saved passphrase for {path}: {error}"
+        }
         L10nKey::SettingsSecurity => "Security",
         L10nKey::SettingsSecurityIntro => {
             "A host can override either of these under its own Advanced."

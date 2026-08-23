@@ -233,6 +233,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "有 {count} 个已保存的远程工作区条目指向 {endpoint}，会一并从本机清除。远端机器上的会话照常跑——新建配置连上去就能在工作区列表里找回。"
         }
         L10nKey::SettingsCouldntForgetPassword => "无法清除 {endpoint} 的已保存密码：{error}",
+        L10nKey::SettingsCouldntForgetPassphrase => "无法清除 {path} 的已保存密码短语：{error}",
         L10nKey::SettingsSecurity => "安全",
         L10nKey::SettingsSecurityIntro => "主机可以在自己的高级选项中覆盖这些设置。",
         L10nKey::SettingsVerifyHostKeys => "校验主机密钥",

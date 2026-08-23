@@ -3976,12 +3976,30 @@ impl Tty7App {
         );
         cx.spawn_in(window, async move |this, cx| {
             let Ok(0) = answer.await else { return };
-            let _ = this.update(cx, |this, cx| this.delete_profile_confirmed(id, cx));
+            // The profile is the last thing that pointed at these secrets, so
+            // a keychain that refuses to let one go strands it for good with no
+            // UI left anywhere to try again. Raised on the window the prompt
+            // belonged to, for the same reason forgetting a password alone is.
+            let _ = this.update_in(cx, |this, window, cx| {
+                for problem in this.delete_profile_confirmed(id, cx) {
+                    window.push_notification(problem, cx);
+                }
+            });
         })
         .detach();
     }
 
-    fn delete_profile_confirmed(&mut self, id: Uuid, cx: &mut Context<Self>) {
+    /// Deletes the profile, and returns whatever it could not finish.
+    ///
+    /// The keychain work below is best-effort in the sense that it must not
+    /// stop the delete — but not in the sense that it can go unsaid. Every
+    /// caller of `delete_password` and `delete_key_passphrase` elsewhere says
+    /// when the store refuses; this one used to throw the answer away, which
+    /// is the one place it matters most, because the profile that reached
+    /// those secrets is on its way out.
+    #[must_use]
+    fn delete_profile_confirmed(&mut self, id: Uuid, cx: &mut Context<Self>) -> Vec<String> {
+        let mut problems = Vec::new();
         // "Forget password" lives on the menu that is about to stop existing,
         // so deleting the profile used to strand its keychain entry with no UI
         // left to remove it. Only let go of the secret when nothing else on the
@@ -3995,7 +4013,14 @@ impl Tty7App {
         let shared = profiles_sharing_endpoint(cfg, id) > 0;
         if let Some((user, host, port)) = endpoint.filter(|_| !shared) {
             use crate::core::keychain::{CredentialStore, OsCredentialStore};
-            let _ = OsCredentialStore.delete_password(&user, &host, port);
+            if let Err(e) = OsCredentialStore.delete_password(&user, &host, port) {
+                let endpoint = format!("{user}@{host}:{port}");
+                log::warn!("could not forget password for {endpoint} in keychain: {e}");
+                problems.push(t_fmt(
+                    L10nKey::SettingsCouldntForgetPassword,
+                    &[("endpoint", &endpoint), ("error", &e.to_string())],
+                ));
+            }
         }
         // The same argument for the key passphrases this profile taught the
         // app about: the comment above says "the secret", but until now only
@@ -4022,7 +4047,16 @@ impl Tty7App {
                 continue;
             };
             let account = crate::core::keychain::key_account_from_contents(&bytes);
-            let _ = OsCredentialStore.delete_key_passphrase(&account);
+            if let Err(e) = OsCredentialStore.delete_key_passphrase(&account) {
+                log::warn!("could not forget passphrase for {path} in keychain: {e}");
+                problems.push(t_fmt(
+                    L10nKey::SettingsCouldntForgetPassphrase,
+                    &[
+                        ("path", &crate::terminal::view::one_line(path)),
+                        ("error", &e.to_string()),
+                    ],
+                ));
+            }
         }
 
         // Forget the entries that routed through this profile (#485) —
@@ -4046,6 +4080,7 @@ impl Tty7App {
             s.ssh_detail = SshDetail::None;
         }
         cx.notify();
+        problems
     }
 
     /// Import `~/.ssh/config`, and say what that did.

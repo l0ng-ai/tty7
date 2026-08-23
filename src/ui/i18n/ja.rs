@@ -261,6 +261,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCouldntForgetPassword => {
             "{endpoint} のパスワードを消去できませんでした: {error}"
         }
+        L10nKey::SettingsCouldntForgetPassphrase => {
+            "{path} のパスフレーズを消去できませんでした: {error}"
+        }
         L10nKey::SettingsSecurity => "セキュリティ",
         L10nKey::SettingsSecurityIntro => "ホストは詳細設定でこれらを上書きできます",
         L10nKey::SettingsVerifyHostKeys => "ホストキーを検証",

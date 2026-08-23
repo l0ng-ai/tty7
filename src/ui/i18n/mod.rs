@@ -261,6 +261,7 @@ l10n_keys! {
     SettingsDeleteProfileBody,
     SettingsDeleteProfileCascade,
     SettingsCouldntForgetPassword,
+    SettingsCouldntForgetPassphrase,
     SettingsSecurity,
     SettingsSecurityIntro,
     SettingsVerifyHostKeys,
