@@ -8987,6 +8987,47 @@ mod tests {
         assert_eq!(side_panel_max(wide, PANEL_MIN, SIDEBAR_MIN), wide / 2.);
     }
 
+    /// The cap never lands under the floor it was given, for any viewport at
+    /// all.
+    ///
+    /// Three callers spend this on `clamp(own_floor, side_panel_max(..))` —
+    /// the sidebar and right panel widths, and both of their drag handlers —
+    /// and `f32::clamp` *panics* when its low bound is above its high one. So
+    /// a cap below the floor is not a layout glitch, it is the render path
+    /// going down, and it would go down on the frame a window got narrow
+    /// enough. The tests above pin the answer at three widths; this pins the
+    /// property, including the degenerate widths a window reports while it is
+    /// being made or taken apart.
+    #[test]
+    fn the_cap_is_never_below_the_floor_it_was_given() {
+        for viewport in [
+            0.,
+            1.,
+            -100.,
+            320.,
+            719.,
+            720.,
+            1440.,
+            f32::MAX,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ] {
+            for own in [SIDEBAR_MIN, PANEL_MIN, DOCUMENT_MIN_W] {
+                for others in [0., SIDEBAR_MIN, PANEL_MIN + DOCUMENT_MIN_W] {
+                    let cap = side_panel_max(viewport, own, others);
+                    assert!(
+                        cap >= own,
+                        "viewport {viewport}, floor {own}, others {others} capped at \
+                         {cap} — a clamp against this panics"
+                    );
+                    // And the clamp those callers make really is well formed.
+                    let _ = 0f32.clamp(own, cap);
+                }
+            }
+        }
+    }
+
     /// Below the width where everything fits, the floor wins over the
     /// reservation: a cap under a panel's own minimum would be a panel drawn
     /// narrower than it can be read at, and the terminal — which can reflow —
