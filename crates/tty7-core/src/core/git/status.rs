@@ -1910,6 +1910,112 @@ mod tests {
         }
     }
 
+    /// Every shape of merge conflict, named the way git names it.
+    ///
+    /// `from_xy` maps seven `XY` pairs and three had a test. The rest matter
+    /// because an unrecognised pair falls back to `BothModified`, so a wrong
+    /// entry does not fail — it relabels a conflict as one whose resolution is
+    /// something else entirely. "Both modified" invites merging two versions
+    /// of a file; "deleted by them" means there is no other version to merge.
+    ///
+    /// And the pairs are directional, which is the half that is easy to get
+    /// backwards: `DU` is deleted by *us*, `UD` by *them*, and nothing but a
+    /// real merge says which way round git means it.
+    ///
+    /// Two merges reach all seven. An ordinary content merge gives `AA`, `UU`,
+    /// `UD` and `DU`; a rename/rename gives the other three at once — `DD` at
+    /// the path both sides renamed away from, `AU` at ours and `UA` at theirs.
+    #[test]
+    fn every_kind_of_merge_conflict_is_the_kind_git_reports() {
+        let host = crate::host::local::LocalHost::new();
+        let conflicts = |scratch: &Scratch| -> std::collections::BTreeMap<String, ConflictKind> {
+            probed(
+                probe_status(&*host, &scratch.0),
+                "a conflicted merge still has a status",
+            )
+            .entries
+            .iter()
+            .filter_map(|e| Some((e.path.as_str().to_string(), e.conflict?)))
+            .collect()
+        };
+
+        let Some(content) = scratch("conflict-content") else {
+            return;
+        };
+        let repo = &content.0;
+        if !init_repo(&*host, repo) {
+            return; // no git on this machine
+        }
+        for name in ["both-mod.txt", "we-del.txt", "they-del.txt"] {
+            std::fs::write(repo.join(name), "base\n").unwrap();
+        }
+        assert!(run(&*host, repo, &["add", "-A"]));
+        assert!(run(&*host, repo, &["commit", "--quiet", "-m", "base"]));
+
+        assert!(run(&*host, repo, &["checkout", "-q", "-b", "side"]));
+        std::fs::write(repo.join("both-mod.txt"), "side\n").unwrap();
+        std::fs::write(repo.join("both-add.txt"), "side-add\n").unwrap();
+        std::fs::write(repo.join("we-del.txt"), "side\n").unwrap();
+        std::fs::remove_file(repo.join("they-del.txt")).unwrap();
+        assert!(run(&*host, repo, &["add", "-A"]));
+        assert!(run(&*host, repo, &["commit", "--quiet", "-m", "side"]));
+
+        assert!(run(&*host, repo, &["checkout", "-q", "main"]));
+        std::fs::write(repo.join("both-mod.txt"), "main\n").unwrap();
+        std::fs::write(repo.join("both-add.txt"), "main-add\n").unwrap();
+        std::fs::remove_file(repo.join("we-del.txt")).unwrap();
+        std::fs::write(repo.join("they-del.txt"), "main\n").unwrap();
+        assert!(run(&*host, repo, &["add", "-A"]));
+        assert!(run(&*host, repo, &["commit", "--quiet", "-m", "main"]));
+        // Expected to fail: the conflict is the point.
+        let _ = run(&*host, repo, &["merge", "side"]);
+
+        let got = conflicts(&content);
+        for (path, want) in [
+            ("both-add.txt", ConflictKind::BothAdded),
+            ("both-mod.txt", ConflictKind::BothModified),
+            ("we-del.txt", ConflictKind::DeletedByUs),
+            ("they-del.txt", ConflictKind::DeletedByThem),
+        ] {
+            assert_eq!(
+                got.get(path),
+                Some(&want),
+                "{path} should be {want:?}; the whole set was {got:?}"
+            );
+        }
+
+        let Some(renames) = scratch("conflict-renames") else {
+            return;
+        };
+        let repo = &renames.0;
+        if !init_repo(&*host, repo) {
+            return;
+        }
+        std::fs::write(repo.join("f.txt"), "base\n").unwrap();
+        assert!(run(&*host, repo, &["add", "-A"]));
+        assert!(run(&*host, repo, &["commit", "--quiet", "-m", "base"]));
+        assert!(run(&*host, repo, &["checkout", "-q", "-b", "side"]));
+        assert!(run(&*host, repo, &["mv", "f.txt", "side-name.txt"]));
+        assert!(run(&*host, repo, &["commit", "--quiet", "-am", "side"]));
+        assert!(run(&*host, repo, &["checkout", "-q", "main"]));
+        assert!(run(&*host, repo, &["mv", "f.txt", "main-name.txt"]));
+        assert!(run(&*host, repo, &["commit", "--quiet", "-am", "main"]));
+        let _ = run(&*host, repo, &["merge", "side"]);
+
+        let got = conflicts(&renames);
+        for (path, want) in [
+            ("f.txt", ConflictKind::BothDeleted),
+            ("main-name.txt", ConflictKind::AddedByUs),
+            ("side-name.txt", ConflictKind::AddedByThem),
+        ] {
+            assert_eq!(
+                got.get(path),
+                Some(&want),
+                "{path} should be {want:?}; the whole set was {got:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_merge_in_progress_is_named_and_pre_fills_its_message() {
         let host = crate::host::local::LocalHost::new();
