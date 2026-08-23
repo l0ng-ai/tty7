@@ -691,7 +691,18 @@ impl Parser {
 
     /// Past the cap we keep counting but stop keeping, so the panel can say
     /// "10000 of 42311" rather than quietly showing a short list.
+    ///
+    /// A record with no path is dropped outright, not counted. Git does not
+    /// emit one — a file cannot be named "" — but a record cut off between its
+    /// last field and its path parses down to exactly that, and this module's
+    /// bargain is that a record it cannot read is dropped rather than passed
+    /// on half-built. A pathless entry is worse than a missing one: it draws
+    /// as a blank row, and the row's own Stage and Discard buttons would hand
+    /// git an empty pathspec.
     fn push(&mut self, entry: StatusEntry) {
+        if entry.path.as_str().is_empty() {
+            return;
+        }
         self.total += 1;
         if self.entries.len() < MAX_STATUS_ENTRIES {
             self.entries.push(entry);
@@ -1069,6 +1080,94 @@ mod tests {
             None,
             None,
         )
+    }
+
+    /// Nothing `git status` can hand back makes the parser panic.
+    ///
+    /// It reads a pipe. `git` killed mid-write, a disk that filled, or a
+    /// daemon torn down under a slow repository all end the stream between
+    /// bytes, and the parser sees a record that stops in the middle of a
+    /// field. A panic here used to cost the whole thread pool (see
+    /// `ui::host_ops`); it now costs one operation, which is still an SCM
+    /// panel that never fills in.
+    ///
+    /// Every truncation, not a sampled few — the interesting cuts are exactly
+    /// the ones between a field and its separator, and there is no guessing
+    /// which those are. The bit flips and splices then cover what a truncation
+    /// cannot reach: a length that disagrees with its payload, a NUL where a
+    /// path was, a record type that does not exist.
+    #[test]
+    fn no_truncation_or_corruption_of_a_status_stream_panics() {
+        let sample = [
+            head_records(),
+            rec(&["# branch.upstream origin/main"]),
+            rec(&["# branch.ab +2 -3"]),
+            ordinary("M.", "src/main.rs"),
+            ordinary(".M", "a file with spaces.txt"),
+            rec(&[
+                "2 R. N... 100644 100644 100644 ",
+                SHA,
+                " ",
+                SHA,
+                " R92 new/path.rs\0old/path.rs",
+            ]),
+            rec(&[
+                "u UU N... 100644 100644 100644 100644 ",
+                SHA,
+                " ",
+                SHA,
+                " ",
+                SHA,
+                " both.rs",
+            ]),
+            rec(&["? untracked.rs"]),
+            rec(&["! ignored.rs"]),
+        ]
+        .concat();
+
+        // A parse that returns is a parse that did not panic; the invariants
+        // are what keep a returned-but-nonsense answer from passing as one.
+        let check = |bytes: &[u8], what: &str| {
+            let parsed = parse_porcelain_v2(bytes);
+            assert!(
+                parsed.entries.len() <= parsed.total_entries,
+                "{what}: {} entries reported out of a total of {}",
+                parsed.entries.len(),
+                parsed.total_entries
+            );
+            for entry in &parsed.entries {
+                assert!(
+                    !entry.path.as_str().is_empty(),
+                    "{what}: an entry naming no file, whose Stage and Discard \
+                     buttons would hand git an empty pathspec"
+                );
+            }
+        };
+
+        for cut in 0..=sample.len() {
+            check(&sample[..cut], &format!("truncated to {cut} bytes"));
+        }
+
+        // Deterministic, so a failure is reproducible from the message alone.
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..2_000 {
+            let mut bytes = sample.clone();
+            for _ in 0..(next() % 8 + 1) {
+                let at = (next() as usize) % bytes.len();
+                match next() % 3 {
+                    0 => bytes[at] ^= 1 << (next() % 8),
+                    1 => bytes[at] = 0,
+                    _ => bytes[at] = b'\n',
+                }
+            }
+            check(&bytes, &format!("corruption round {round}"));
+        }
     }
 
     #[test]
