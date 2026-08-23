@@ -2939,6 +2939,44 @@ mod tests {
             assert!(app.scm.committing.is_none());
         });
     }
+
+    /// A Git command with no repository under the pane says so.
+    ///
+    /// The panel's tiles and the menu grey themselves out, but every Git
+    /// action is bindable and every one is listed in the palette whatever
+    /// directory the pane is in — `palette.rs` pins that: "every Git action
+    /// you can bind is also a palette command". All of them reach
+    /// `run_scm_action`, whose first guard used to return with nothing said,
+    /// so choosing "Git: Commit" in a directory that is not a repository was
+    /// indistinguishable from a commit that happened instantly (#545).
+    #[gpui::test]
+    fn a_git_command_with_no_repository_says_why_nothing_happened(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        let shown = |vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|window, cx| {
+                gpui_component::Root::read(window, cx)
+                    .notification
+                    .read(cx)
+                    .notifications()
+                    .len()
+            })
+        };
+        assert_eq!(shown(&mut vcx), 0, "nothing has been said yet");
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert!(
+                app.scm.active_repo().is_none(),
+                "this window has no repository, which is the case under test"
+            );
+            app.run_scm_action(ScmIntent::Commit, window, cx);
+        });
+
+        assert_eq!(
+            shown(&mut vcx),
+            1,
+            "the command did nothing and said nothing about it"
+        );
+    }
 }
 
 /// The panel asks git for a lot, from inside `render`. These hold it to

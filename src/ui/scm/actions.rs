@@ -143,6 +143,17 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         let Some(repo) = self.scm.active_repo().cloned() else {
+            // The same reason `scm_push` gives for its own guard, one level
+            // up. The panel's tiles and the menu disable themselves when
+            // there is no repository, but the key bindings and the palette do
+            // not — every Git command is listed there whatever the pane's
+            // directory is — so all of them land here, and without this the
+            // answer to pressing them is nothing at all (#545).
+            gpui_component::WindowExt::push_notification(
+                window,
+                t(L10nKey::DiffNotARepo).to_string(),
+                cx,
+            );
             return;
         };
         match intent {

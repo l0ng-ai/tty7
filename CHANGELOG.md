@@ -153,6 +153,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Git command run where there is no repository now says so instead of doing
+  nothing. The panel's tiles and the Git menu grey themselves out, but every
+  Git action is bindable and every one is listed in the command palette
+  whatever directory the pane is in — so choosing "Git: Commit" in a directory
+  that is not a repository was indistinguishable from a commit that had
+  happened instantly.
 - "Close Other Tabs" and "Close Tabs to the Right" now say how many tabs they
   kept. Both deliberately spare a tab holding unsaved edits or a connection
   whose profile asked to be warned about — one dialog per tab is not a question
