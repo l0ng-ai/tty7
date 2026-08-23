@@ -6551,6 +6551,21 @@ fn display_width(c: char) -> usize {
     unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
 }
 
+/// Whether the character at `i` opens a drawn cell of its own, or rides in the
+/// one in front of it.
+///
+/// The boundary the bar draws by — and therefore the one it has to edit by,
+/// or Backspace takes half a character and the caret sits somewhere no glyph
+/// begins. `cmd_editor` steps by this; `input_cells` below groups by it.
+///
+/// Zero width is what makes a character a passenger: a combining mark, a
+/// variation selector, an emoji joiner. It still needs something to ride in,
+/// so the first character opens a cell whatever it is, and so does one after a
+/// newline — a newline ends its row and draws nothing for a mark to attach to.
+pub(crate) fn opens_cell(chars: &[char], i: usize) -> bool {
+    i == 0 || i >= chars.len() || display_width(chars[i]) != 0 || chars[i - 1] == '\n'
+}
+
 /// One drawn cell of the input bar.
 #[derive(Debug, PartialEq)]
 struct InputCell {
@@ -6590,9 +6605,7 @@ fn input_cells(chars: &[char]) -> Vec<InputCell> {
         }
         let w = display_width(ch);
         match cells.last_mut() {
-            // `width > 0` keeps a mark off a newline's cell, which ends a row
-            // and draws nothing.
-            Some(last) if w == 0 && last.width > 0 => {
+            Some(last) if !opens_cell(chars, i) => {
                 last.text.push(ch);
                 last.end = i + 1;
                 // U+FE0F asks for the emoji glyph, and an emoji presentation

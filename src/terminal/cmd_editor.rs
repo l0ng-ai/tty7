@@ -108,8 +108,9 @@ impl CmdEditor {
             return;
         }
         if self.cursor > 0 {
-            self.cursor -= 1;
-            self.chars.remove(self.cursor);
+            let start = self.cell_start_before(self.cursor);
+            self.chars.drain(start..self.cursor);
+            self.cursor = start;
         }
     }
 
@@ -122,7 +123,8 @@ impl CmdEditor {
             return;
         }
         if self.cursor < self.chars.len() {
-            self.chars.remove(self.cursor);
+            let end = self.cell_end_after(self.cursor);
+            self.chars.drain(self.cursor..end);
         }
     }
 
@@ -242,14 +244,47 @@ impl CmdEditor {
         self.cursor = idx.min(self.chars.len());
     }
 
+    /// The character index a cell starts at, walking back from `i`.
+    ///
+    /// `i` itself is never the answer: this is "the boundary before here".
+    fn cell_start_before(&self, i: usize) -> usize {
+        let mut j = i.min(self.chars.len());
+        while j > 0 {
+            j -= 1;
+            if crate::terminal::view::opens_cell(&self.chars, j) {
+                break;
+            }
+        }
+        j
+    }
+
+    /// The character index the cell containing `i` ends at.
+    fn cell_end_after(&self, i: usize) -> usize {
+        let n = self.chars.len();
+        let mut j = (i + 1).min(n);
+        while j < n && !crate::terminal::view::opens_cell(&self.chars, j) {
+            j += 1;
+        }
+        j
+    }
+
+    /// A cell boundary at or before `i`, so the caret never sits inside a
+    /// character.
+    fn snap(&self, i: usize) -> usize {
+        let i = i.min(self.chars.len());
+        if crate::terminal::view::opens_cell(&self.chars, i) {
+            i
+        } else {
+            self.cell_start_before(i)
+        }
+    }
+
     pub fn move_left(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
+        self.cursor = self.cell_start_before(self.cursor);
     }
 
     pub fn move_right(&mut self) {
-        if self.cursor < self.chars.len() {
-            self.cursor += 1;
-        }
+        self.cursor = self.cell_end_after(self.cursor);
     }
 
     pub fn line_start(&self, idx: usize) -> usize {
@@ -273,7 +308,7 @@ impl CmdEditor {
     }
 
     pub fn set_cursor(&mut self, idx: usize) {
-        self.cursor = idx.min(self.chars.len());
+        self.cursor = self.snap(idx);
     }
 
     pub fn move_end(&mut self) {
@@ -434,6 +469,93 @@ impl CmdEditor {
 
 #[cfg(test)]
 mod tests {
+
+    /// The bar draws in cells and used to edit in `char`s, so every keystroke
+    /// that moved or deleted took a piece of a character rather than the
+    /// character. `❤️` is a heart plus a variation selector: one Backspace
+    /// left the selector's heart behind as a monochrome `❤`, a different
+    /// glyph nobody typed. Arrow keys parked the caret between a base and its
+    /// mark, where no glyph starts and the next thing typed lands inside
+    /// someone else's character.
+    ///
+    /// Latin looks safe because macOS composes accents on the way in, but
+    /// nothing composes an emoji sequence, and NFD is what the filesystem
+    /// hands back for every pasted path.
+    #[test]
+    fn a_keystroke_moves_and_deletes_whole_characters() {
+        // Each: the text, and the char count that is one visible character.
+        let clusters: [(&str, usize); 5] = [
+            ("\u{2764}\u{FE0F}", 2), // an emoji presentation sequence
+            ("e\u{0301}", 2),        // a decomposed accent
+            ("\u{0e19}\u{0e49}", 2), // Thai base plus tone mark
+            ("\u{1F1E6}", 1),        // a lone regional indicator
+            ("a", 1),                // and plain ASCII, unchanged
+        ];
+        for (text, width) in clusters {
+            let mut e = CmdEditor::new();
+            e.insert_str(text);
+            assert_eq!(e.len(), width, "fixture {text:?}");
+
+            e.backspace();
+            assert_eq!(e.text(), "", "one Backspace takes all of {text:?}");
+
+            let mut e = CmdEditor::new();
+            e.insert_str(text);
+            e.move_left();
+            assert_eq!(e.cursor(), 0, "Left steps over all of {text:?}");
+            e.move_right();
+            assert_eq!(e.cursor(), width, "Right steps over all of {text:?}");
+
+            let mut e = CmdEditor::new();
+            e.insert_str(text);
+            e.set_cursor(0);
+            e.delete();
+            assert_eq!(e.text(), "", "one Delete takes all of {text:?}");
+        }
+    }
+
+    /// The boundary is the drawn cell, not "any zero-width character", so the
+    /// two places a mark has no base to ride in still get a cell of their own —
+    /// the same rule the bar draws by, or editing and drawing disagree about
+    /// where a character begins.
+    #[test]
+    fn a_mark_with_no_base_is_a_character_in_its_own_right() {
+        // Stranded at the start: pasted mid-sequence, or an IME buffer.
+        let mut e = CmdEditor::new();
+        e.insert_str("\u{0301}ab");
+        e.set_cursor(1);
+        e.backspace();
+        assert_eq!(e.text(), "ab", "the stranded mark is its own character");
+
+        // After a newline, which ends a row and draws nothing to attach to.
+        let mut e = CmdEditor::new();
+        e.insert_str("a\n\u{0301}b");
+        e.set_cursor(3);
+        e.backspace();
+        assert_eq!(e.text(), "a\nb");
+
+        // And a second mark rides along with the stranded first one, because by
+        // then there is a cell in front of it.
+        let mut e = CmdEditor::new();
+        e.insert_str("\u{0301}\u{0302}b");
+        e.set_cursor(2);
+        e.backspace();
+        assert_eq!(e.text(), "b", "both marks are the one character");
+    }
+
+    /// A caret handed an index inside a character is put where a character
+    /// starts. Clicks and vertical movement both arrive this way.
+    #[test]
+    fn a_caret_is_never_left_inside_a_character() {
+        let mut e = CmdEditor::new();
+        e.insert_str("a\u{2764}\u{FE0F}b");
+        e.set_cursor(2);
+        assert_eq!(e.cursor(), 1, "snapped back to where the emoji begins");
+        e.set_cursor(3);
+        assert_eq!(e.cursor(), 3, "and left alone where one already does");
+        e.set_cursor(99);
+        assert_eq!(e.cursor(), e.len(), "past the end is still the end");
+    }
 
     /// A keystroke that changes nothing must not throw away the redo.
     ///
