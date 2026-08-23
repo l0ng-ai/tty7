@@ -1757,6 +1757,31 @@ mod tests {
         }
     }
 
+    /// `snap` itself, on values that need snapping.
+    ///
+    /// The end-to-end check below cannot see this one: with `GRAPH_PAD_L` at 6
+    /// and `GRAPH_LANE_W` at 12 every centre is already `12 + 12·column`, an
+    /// integer at 1x, 1.25x, 2x and 3x alike, so deleting the whole of `snap`
+    /// leaves that test green. The rounding is insurance against a constant
+    /// that stops dividing evenly — change either to a half-pixel value and it
+    /// starts carrying the lane strip — so it needs holding on its own terms.
+    #[test]
+    fn snapping_moves_a_centre_that_falls_between_device_pixels() {
+        // A half-lane at 1.25x: 10.3 physical is 12.875, which rounds to 13.
+        assert_eq!(snap(10.3, 1.25), 13.0 / 1.25);
+        // Already on a pixel: unchanged.
+        assert_eq!(snap(12.0, 2.0), 12.0);
+        // The rounding is to the *device* grid, not the logical one.
+        assert_eq!(snap(10.3, 2.0), 10.5);
+        assert_eq!(snap(10.2, 2.0), 10.0);
+
+        // A scale that means nothing leaves the value alone rather than
+        // producing NaN geometry.
+        for nonsense in [0.0f32, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(snap(10.3, nonsense), 10.3, "scale {nonsense} ate the value");
+        }
+    }
+
     #[test]
     fn lane_centres_rise_and_land_on_device_pixels() {
         for scale in [1.0f32, 1.25, 2.0, 3.0] {
