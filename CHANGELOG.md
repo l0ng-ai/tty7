@@ -153,6 +153,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Assigning a shortcut that two actions already hold now takes it from both. On
+  macOS ⌘Return ships held twice — Fullscreen in the window, Commit inside the
+  commit box, which is legitimate because their scopes differ — and rebinding
+  it displaced only the first holder found. The new shortcut was left sharing
+  the chord with an action the takeover message never named, and which of the
+  two survived was decided by their order in the defaults table rather than by
+  anything meaning to decide it. The message now names every action that lost
+  the chord.
 - Escape now abandons an inline edit in the file tree. Renaming a file, or
   naming a new file or folder, answered Return and nothing else: changing your
   mind meant clicking somewhere else to blur the box, and Return — the other

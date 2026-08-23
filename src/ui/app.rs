@@ -6801,17 +6801,36 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Give `action` the chord `spec`, taking it off whoever holds it.
+    ///
+    /// Every holder, not the first one found. A chord can be held twice —
+    /// `secondary-enter` is Fullscreen in the window and Commit inside the
+    /// commit box, which `binding_conflicts` blesses because their scopes
+    /// differ. Taking one and leaving the other left the new binding sharing
+    /// the chord with an action the note had not named, and which of the two
+    /// survived was decided by their order in `default_bindings` rather than
+    /// by anything meaning to decide it.
+    ///
+    /// Scope is deliberately not consulted here, unlike in that check: a user
+    /// who assigns a chord means it to be theirs everywhere, which is what
+    /// `recording_an_extra_default_chord_displaces_its_owner` pins.
     fn assign_keybinding(&mut self, action: String, spec: String, cx: &mut Context<Self>) {
-        let displaced = crate::ui::keymap::effective_bindings(cx)
+        let displaced: Vec<String> = crate::ui::keymap::effective_bindings(cx)
             .into_iter()
             .chain(crate::ui::keymap::extra_bindings(cx))
-            .find(|(a, k)| *k == spec && *a != action)
-            .map(|(a, _)| a);
+            .filter(|(a, k)| *k == spec && *a != action)
+            .map(|(a, _)| a)
+            .collect();
         // A trailing "…" on an action name marks a command that opens
         // something; it is not punctuation, and inside a sentence it reads as
         // the sentence trailing off — "Rename Tab… took the shortcut from".
         let in_prose = |name: &str| name.trim_end_matches('…').to_string();
-        let note = displaced.as_ref().map(|other| {
+        let previous = displaced
+            .iter()
+            .map(|other| in_prose(&crate::ui::keymap::action_entry(other).1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let note = (!displaced.is_empty()).then(|| {
             t_fmt(
                 L10nKey::AppKeybindingDisplacedNote,
                 &[
@@ -6819,15 +6838,12 @@ impl Tty7App {
                         "action",
                         &in_prose(&crate::ui::keymap::action_entry(&action).1),
                     ),
-                    (
-                        "previous",
-                        &in_prose(&crate::ui::keymap::action_entry(other).1),
-                    ),
+                    ("previous", &previous),
                 ],
             )
         });
         self.update_config(cx, |cfg| {
-            if let Some(other) = &displaced {
+            for other in &displaced {
                 cfg.keybindings.insert(other.clone(), String::new());
             }
             cfg.keybindings.insert(action, spec);
@@ -9932,6 +9948,87 @@ mod keybinding_gpui_tests {
                 .is_some_and(|n| n.contains("Insert Newline")),
             "the takeover note must name the action that lost the chord (got {note:?})"
         );
+    }
+
+    /// Taking a chord two actions already hold leaves it with neither.
+    ///
+    /// `secondary-enter` ships held twice on macOS — Fullscreen in the window,
+    /// Commit inside the commit box — which the conflict guard blesses because
+    /// their scopes differ. Assigning it to something else displaced only the
+    /// first holder `find` reached, so the new binding still shared the chord
+    /// with an action the takeover note never named. Which of the two survived
+    /// came down to their order in `default_bindings`.
+    #[gpui::test]
+    fn taking_a_chord_two_actions_hold_displaces_both(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        let holders = |vcx: &mut VisualTestContext, chord: &str| -> Vec<String> {
+            let chord = chord.to_string();
+            vcx.update(|_, cx| {
+                let mut held: Vec<String> = crate::ui::keymap::effective_bindings(cx)
+                    .into_iter()
+                    .chain(crate::ui::keymap::extra_bindings(cx))
+                    .filter(|(_, k)| *k == chord)
+                    .map(|(a, _)| a)
+                    .collect();
+                held.sort();
+                held
+            })
+        };
+
+        // A chord more than one action holds, whatever this platform's
+        // defaults make that. Nothing here depends on which one it is.
+        let Some(chord) = vcx.update(|_, cx| {
+            let mut counts: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            for (a, k) in crate::ui::keymap::effective_bindings(cx) {
+                if !k.is_empty() {
+                    counts.entry(k).or_default().push(a);
+                }
+            }
+            let mut shared: Vec<String> = counts
+                .into_iter()
+                .filter(|(_, a)| a.len() > 1)
+                .map(|(k, _)| k)
+                .collect();
+            shared.sort();
+            shared.into_iter().next()
+        }) else {
+            // Nothing ships doubly held here, so there is nothing to take.
+            return;
+        };
+
+        let before = holders(&mut vcx, &chord);
+        assert!(
+            before.len() > 1,
+            "the chord picked is not actually held twice: {before:?}"
+        );
+        assert!(
+            !before.iter().any(|a| a == "MarkTabUnread"),
+            "pick a taker that is not already a holder"
+        );
+
+        begin_capture(&app, &mut vcx, "MarkTabUnread");
+        vcx.simulate_keystrokes(&chord);
+        wait_for_binding(&mut vcx, "MarkTabUnread", &chord);
+
+        assert_eq!(
+            holders(&mut vcx, &chord),
+            vec!["MarkTabUnread".to_string()],
+            "the chord was taken from one holder and left with the other"
+        );
+
+        let note = app.update_in(&mut vcx, |app, _, _| {
+            app.active_settings().and_then(|s| s.rebinding_note.clone())
+        });
+        let note = note.expect("taking a held chord says so");
+        for lost in &before {
+            let label = crate::ui::keymap::action_entry(lost).1;
+            let label = label.trim_end_matches('\u{2026}');
+            assert!(
+                note.contains(label),
+                "the note names {label:?} among what it displaced (got {note:?})"
+            );
+        }
     }
 
     #[gpui::test]
