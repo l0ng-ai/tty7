@@ -1809,6 +1809,43 @@ mod tests {
         );
     }
 
+    /// The two repairs at a candidate's edges that nothing else holds.
+    ///
+    /// Every other case here walks the happy path — a path-shaped token
+    /// clicked in the middle of itself. Both of these can be removed with the
+    /// suite otherwise green, and both are things a pane prints or a user
+    /// does.
+    ///
+    /// Two neighbouring guards are deliberately *not* asserted, having been
+    /// checked and found to change nothing observable. `url_span_at`'s
+    /// whitespace check is a fast path: a token spanning a space fails the
+    /// scheme test downstream regardless, so removing it still yields `None`.
+    /// And `location.path.is_empty()` has no input that reaches it — `":42"`
+    /// parses as the *path* `":42"`, and a token that trims to nothing is
+    /// refused a line earlier. A test for either would assert a behaviour the
+    /// code does not decide.
+    #[test]
+    fn a_candidate_is_repaired_or_refused_at_each_of_its_edges() {
+        // A compiler that says `src/main.rs:` before its message. The trailing
+        // colon is not part of the name, and a candidate keeping it names a
+        // file that does not exist, so the text never underlines.
+        let trailing = file_candidate_at("error: src/main.rs: expected `;`", 9)
+            .expect("a path followed by a colon is still a path");
+        assert_eq!(trailing.path, "src/main.rs");
+        assert_eq!(trailing.line, None, "the colon carried no line number");
+
+        // And the span a candidate claims has to contain the click. Trimming
+        // moves the edges in, and a click on the punctuation that was trimmed
+        // away is a click on nothing.
+        let quoted = "see (src/lib.rs) here";
+        let on_paren = quoted.find('(').expect("the fixture has one");
+        assert!(
+            file_candidate_at(quoted, on_paren)
+                .is_none_or(|c| (c.start..=c.end).contains(&on_paren)),
+            "a candidate must not claim a column outside the span it reports"
+        );
+    }
+
     #[test]
     fn a_path_shaped_token_is_kept_apart_from_a_bare_word() {
         let path_shaped = file_candidate_at("wrote scratchpad/notes.md now", 8).expect("candidate");
