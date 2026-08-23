@@ -1801,17 +1801,32 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
                         // shell on nearly every iteration, which is the shape
                         // this product is built for.
                         //
-                        // One experiment already run, so it need not be run
-                        // again: parking the pane here — `park_dropped`, letting
+                        // Two experiments already run, so they need not be run
+                        // again. The first: parking the pane here — `park_dropped`, letting
                         // the existing `sweep_parked` judge it after the re-pull
                         // instead of hanging it up on the spot — is safe and
                         // does *not* measurably help. Across four runs the share
                         // of panes reaching this arm that were still orphaned at
                         // the end was 33–60% without it and 43–50% with it: the
                         // panes that get here are mostly already caught by the
-                        // sweep the layout rewrite arms. The leak is the two
-                        // paths that never refuse an operation, which is what
-                        // the end-state sweep above is for.
+                        // sweep the layout rewrite arms.
+                        //
+                        // The second: parking the seeded panes of the queued
+                        // operations `desync` is about to discard — the nearest
+                        // of the two silent paths, and the one that looks most
+                        // tractable, since an op that never left this process
+                        // provably never filed its pane. It fires rarely (0–2
+                        // panes across ten create/close cycles) and does not
+                        // reliably reap even those: the sweep needs a hydration
+                        // to settle, and a parked pane can outlive the window's
+                        // next few pulls. Totals were 4, 4, 5 against a baseline
+                        // of 5, 5, 5.
+                        //
+                        // What both have in common is parking at a *site*. The
+                        // leak does not live at one, which is what this comment
+                        // already says: the sweep has to be phrased against the
+                        // end state, over every pane this window spawned, or it
+                        // keeps missing whichever path was not instrumented.
                         log::warn!(
                             "pane {pane} was spawned for that operation and nothing holds it \
                              now; it will show up in `tty7 pane ls --all` as an orphan"
