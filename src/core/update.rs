@@ -71,6 +71,37 @@ static INSTALL_WHEN_READY: AtomicBool = AtomicBool::new(false);
 /// asking again.
 static APPLY_ON_LAUNCH: AtomicBool = AtomicBool::new(false);
 
+/// Asked before the installer is started, so a relaunch cannot quietly take
+/// text the user has not written down.
+///
+/// A hook rather than a call, because this module knows about downloads and
+/// signatures and deliberately not about windows — and the question needs a
+/// window to ask in. The UI installs one at startup; with none installed the
+/// relaunch behaves exactly as it always did, so the worst a mistake here can
+/// do is fail to ask, never fail to update.
+///
+/// The continuation is the launch itself. Handing it over rather than
+/// returning a verdict is what lets the answer arrive late, which every
+/// prompt in this app does.
+type RelaunchGuard = Box<dyn Fn(&mut App, Box<dyn FnOnce(&mut App)>) + Send + Sync>;
+static RELAUNCH_GUARD: std::sync::OnceLock<RelaunchGuard> = std::sync::OnceLock::new();
+
+/// Installs the question asked before an update relaunch. Called once, at
+/// startup; a second call is ignored.
+pub fn set_relaunch_guard(guard: RelaunchGuard) {
+    let _ = RELAUNCH_GUARD.set(guard);
+}
+
+/// Whether anything has claimed the relaunch question.
+///
+/// The guard is optional by design — with none installed the relaunch is
+/// exactly what it always was — which also means forgetting to install it
+/// fails silently, and silently is how the loss it prevents happens too.
+#[cfg(test)]
+pub(crate) fn relaunch_guard_installed() -> bool {
+    RELAUNCH_GUARD.get().is_some()
+}
+
 /// Byte counters the download thread publishes and the UI samples. Cheaper and
 /// less fussy than a channel for something the user reads a few times a second.
 static DOWNLOAD_RECEIVED: AtomicU64 = AtomicU64::new(0);
@@ -823,6 +854,20 @@ fn spawn_progress_pump(cx: &mut App) {
 }
 
 fn launch_pending(pending: PendingUpdate, cx: &mut App) {
+    // Before anything is started. Past `launch()` the updater is already
+    // waiting on this process to exit, so refusing then would hang the update
+    // rather than protect anything.
+    if let Some(guard) = RELAUNCH_GUARD.get() {
+        guard(
+            cx,
+            Box::new(move |cx| launch_pending_confirmed(pending, cx)),
+        );
+        return;
+    }
+    launch_pending_confirmed(pending, cx);
+}
+
+fn launch_pending_confirmed(pending: PendingUpdate, cx: &mut App) {
     update_status(cx, |status| status.phase = UpdatePhase::Installing);
     #[cfg(target_os = "windows")]
     if pending.needs_elevation {

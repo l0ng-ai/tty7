@@ -28,7 +28,58 @@ pub fn init(cx: &mut App) {
     }
     rebuild_keymap(cx);
     cx.on_action(|_: &Quit, cx: &mut App| quit_or_ask(cx));
+    install_relaunch_guard();
     set_menus(cx);
+}
+
+/// Teaches the updater to ask before a relaunch takes an unwritten buffer.
+///
+/// Same question as [`quit_or_ask`], from the other direction: an update
+/// relaunch is a quit with a restart attached, and the buffers do not survive
+/// it any better. Installed here rather than decided in `core::update`, which
+/// has no business knowing what a window is.
+pub(crate) fn install_relaunch_guard() {
+    crate::core::update::set_relaunch_guard(Box::new(|cx, proceed| {
+        let Some((workspace, tab, name)) =
+            crate::ui::app::Tty7App::quit_loses_unwritten_work(cx)
+        else {
+            proceed(cx);
+            return;
+        };
+        let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, workspace) else {
+            proceed(cx);
+            return;
+        };
+        let updated = handle.update(cx, |_, window, cx| {
+            if let Some(app) = crate::ui::windows::WindowRegistry::app_in(cx, window) {
+                window.activate_window();
+                app.update(cx, |app, cx| app.activate(tab, window, cx));
+            }
+            let answer = window.prompt(
+                gpui::PromptLevel::Warning,
+                crate::ui::i18n::t(crate::ui::i18n::L10nKey::RelaunchUnsavedEditsTitle),
+                Some(&crate::ui::i18n::t_fmt(
+                    crate::ui::i18n::L10nKey::CloseUnsavedEditsBody,
+                    &[("name", &name)],
+                )),
+                &crate::ui::confirm_answers(
+                    crate::ui::i18n::t(crate::ui::i18n::L10nKey::SettingsUpdateAndRelaunch),
+                    crate::ui::i18n::t(crate::ui::i18n::L10nKey::Keep),
+                ),
+                cx,
+            );
+            cx.spawn(async move |cx| {
+                let Ok(0) = answer.await else { return };
+                cx.update(|cx| proceed(cx));
+            })
+            .detach();
+        });
+        // A window that would not take the question is not a reason to stop
+        // updating; it is a reason to stop asking.
+        if updated.is_err() {
+            log::warn!("could not ask about unwritten buffers before the update relaunch");
+        }
+    }));
 }
 
 /// Quit, unless a window is holding text nothing has written down.
@@ -2301,6 +2352,24 @@ mod gpui_tests {
             rebind(cx);
             assert_eq!(backspace(cx), inherited, "nor may a rebind");
         });
+    }
+}
+
+#[cfg(test)]
+mod relaunch_guard {
+    /// Startup claims the relaunch question.
+    ///
+    /// `core::update` treats the guard as optional so that it never blocks an
+    /// update, which means an uninstalled one is indistinguishable from a
+    /// working one right up until a relaunch quietly takes somebody's buffer.
+    /// This is the only thing that says it was installed at all.
+    #[test]
+    fn startup_installs_the_question_asked_before_a_relaunch() {
+        super::install_relaunch_guard();
+        assert!(
+            crate::core::update::relaunch_guard_installed(),
+            "an update relaunch would take unwritten buffers without asking"
+        );
     }
 }
 

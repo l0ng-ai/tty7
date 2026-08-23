@@ -21,6 +21,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CloseUnsavedEditsTitle => "关闭这个标签页？",
         L10nKey::CloseWindowUnsavedEditsTitle => "要关闭此窗口吗？",
         L10nKey::QuitUnsavedEditsTitle => "要退出 tty7 吗？",
+        L10nKey::RelaunchUnsavedEditsTitle => "要重新启动以更新吗？",
         L10nKey::HomeReopenClosedTab => "重新打开已关闭的标签页",
         L10nKey::HomeSwitchWorkspace => "切换工作区…",
         L10nKey::HomeCommandPalette => "命令面板…",

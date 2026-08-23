@@ -21,6 +21,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CloseUnsavedEditsTitle => "このタブを閉じますか？",
         L10nKey::CloseWindowUnsavedEditsTitle => "このウィンドウを閉じますか？",
         L10nKey::QuitUnsavedEditsTitle => "tty7 を終了しますか？",
+        L10nKey::RelaunchUnsavedEditsTitle => "更新のため再起動しますか？",
         L10nKey::HomeReopenClosedTab => "閉じたタブをもう一度開く",
         L10nKey::HomeSwitchWorkspace => "ワークスペースを切り替える…",
         L10nKey::HomeCommandPalette => "コマンドパレット…",
