@@ -532,11 +532,39 @@ fn run_job(conn: &Arc<Conn>, req_id: u64, req: ControlRequest, blob: Vec<u8>) {
     }
 
     let wants_blob = req.returns_blob();
-    let (reply, out_blob) = match run_request(conn, req_id, req, blob) {
-        Ok((ok, bytes)) => (ControlReply::Ok(ok), bytes),
-        Err(e) => (ControlReply::Err(WireError::from_io(&e)), Vec::new()),
+    // Every other way out of here answers — even a queue too full to take the
+    // request answers, in `submit`. A panic inside `run_request` was the one
+    // exception: `finish` never ran, the id stayed in `inflight`, and the
+    // client waited on a reply that was never going to come. The pool now
+    // survives such a panic, but surviving it is not the same as answering
+    // it, and a caller told nothing waits forever.
+    let (reply, out_blob) = match caught(req_id, || run_request(conn, req_id, req, blob)) {
+        Some(Ok((ok, bytes))) => (ControlReply::Ok(ok), bytes),
+        Some(Err(e)) => (ControlReply::Err(WireError::from_io(&e)), Vec::new()),
+        None => (
+            ControlReply::Err(WireError::new(
+                WireErrorKind::Other,
+                "the control server failed while handling this request",
+            )),
+            Vec::new(),
+        ),
     };
     conn.finish(req_id, reply, out_blob, wants_blob);
+}
+
+/// Run `f`, or `None` if it panicked.
+///
+/// The panic is contained here so `run_job` can still answer. Every other way
+/// out of a request answers — even one the queue is too full to take, in
+/// `submit` — and a caller told nothing waits on a reply that is never coming.
+fn caught<R>(req_id: u64, f: impl FnOnce() -> R) -> Option<R> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(out) => Some(out),
+        Err(_) => {
+            log::error!("control request {req_id} panicked; answering with an error");
+            None
+        }
+    }
 }
 
 fn drop_unsendable_hits(hits: &mut Vec<SearchHit>) {
@@ -2033,6 +2061,35 @@ mod gui_registry_tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    /// A handler that panics becomes an answer, not a silence.
+    ///
+    /// `run_job` calls `finish` exactly once on each arm of this, so the
+    /// request leaves `inflight` and the client hears something either way.
+    /// Before, a panic skipped `finish`: the id stayed in `inflight` and the
+    /// caller waited on a reply that was never coming.
+    #[test]
+    fn a_panicking_handler_is_reported_rather_than_dropped() {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let panicked = super::caught(1, || -> u32 { panic!("a handler blew up") });
+        std::panic::set_hook(hook);
+        assert!(panicked.is_none(), "the panic has to be reportable");
+
+        assert_eq!(
+            super::caught(2, || 7),
+            Some(7),
+            "a handler that returns normally is untouched"
+        );
+        assert_eq!(
+            super::caught(3, || -> io::Result<u8> {
+                Err(io::Error::other("a handler failed"))
+            })
+            .map(|r| r.is_err()),
+            Some(true),
+            "an error is a value, not a panic — it must pass straight through"
+        );
     }
 
     #[test]

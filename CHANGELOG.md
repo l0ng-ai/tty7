@@ -153,6 +153,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A control request whose handler fails outright is now answered with an error
+  instead of silently dropped. Every other way out already answered — even a
+  request the queue was too full to accept — but a panic inside the handler
+  skipped the reply, left the id marked in-flight, and left the client waiting
+  on something that was never coming.
 - A panicking background job no longer costs a thread pool a worker for good.
   Both pools — the one the app runs filesystem, git and SFTP work on, and the
   one the daemon answers control requests on — called the job bare, so an
