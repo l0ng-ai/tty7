@@ -831,6 +831,30 @@ mod tests {
         );
     }
 
+    /// A revocation names a host, and revoking a key there says nothing about
+    /// the same key anywhere else — which is how OpenSSH reads `@revoked` too.
+    ///
+    /// Both revocation tests above ask about the host the line names, so the
+    /// host check was never the thing deciding. Without it every `@revoked`
+    /// line in the file would revoke for every host: a key retired at one name
+    /// and still in service at another would be refused, and refused with the
+    /// one message a user is meant to take seriously.
+    #[test]
+    fn a_revocation_belongs_to_the_host_it_names() {
+        let ka = key(KEY_A);
+        let file = format!("other.example.com {KEY_A}\n@revoked example.com {KEY_A}\n");
+        assert_eq!(
+            check_in_str(&file, "other.example.com", 22, &ka),
+            HostKeyStatus::Known,
+            "the revocation is example.com's, and this is not example.com"
+        );
+        assert_eq!(
+            check_in_str(&file, "example.com", 22, &ka),
+            HostKeyStatus::Revoked,
+            "and it still applies where it was written"
+        );
+    }
+
     #[test]
     fn cert_authority_line_is_skipped_not_flagged_as_changed() {
         let ka = key(KEY_A);
