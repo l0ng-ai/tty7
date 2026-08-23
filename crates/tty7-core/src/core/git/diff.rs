@@ -1719,6 +1719,96 @@ index 1..2 100644
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The +N −N the panel and the sidebar draw are git's own numbers.
+    ///
+    /// `added` and `removed` are counted here while parsing the patch, not
+    /// read from git, so they are a second implementation of something git
+    /// already computes — and every test of them so far has been against a
+    /// patch this file wrote. `--numstat` is the same question asked of git
+    /// directly, over a tree holding each shape that counts differently: a
+    /// plain edit, a pure addition, a pure deletion, a rename with an edit,
+    /// and a file with no trailing newline, which is the one that classically
+    /// comes out one line off.
+    #[test]
+    fn the_line_counts_are_the_ones_numstat_reports() {
+        use std::collections::BTreeMap;
+
+        let Some(dir) = merge_repo("numstat") else {
+            return;
+        };
+        let host = crate::host::local::LocalHost::new();
+        let run = |args: &[&str]| {
+            let mut full = PINS.to_vec();
+            full.extend_from_slice(args);
+            git::git_output(&dir, &full)
+                .ok()
+                .filter(|out| out.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+
+        std::fs::write(dir.join("edited.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(dir.join("shrinks.txt"), "a\nb\nc\nd\n").unwrap();
+        std::fs::write(dir.join("renamed-from.txt"), "r1\nr2\nr3\nr4\nr5\nr6\n").unwrap();
+        std::fs::write(dir.join("no-newline.txt"), "tail without a newline").unwrap();
+        assert!(run(&["add", "-A"]).is_some());
+        assert!(run(&["commit", "-qm", "counts base"]).is_some());
+
+        std::fs::write(dir.join("edited.txt"), "one\nTWO\nthree\nfour\n").unwrap();
+        std::fs::write(dir.join("shrinks.txt"), "a\n").unwrap();
+        std::fs::write(dir.join("added.txt"), "n1\nn2\n").unwrap();
+        std::fs::remove_file(dir.join("no-newline.txt")).unwrap();
+        std::fs::rename(dir.join("renamed-from.txt"), dir.join("renamed-to.txt")).unwrap();
+        std::fs::write(dir.join("renamed-to.txt"), "r1\nr2\nr3\nr4\nr5\nCHANGED\n").unwrap();
+        assert!(run(&["add", "-A"]).is_some());
+
+        let snap = probe_diff(
+            &*host,
+            &dir,
+            &DiffRequest {
+                source: DiffSource::Staged,
+                ..Default::default()
+            },
+        )
+        .expect("a staged diff");
+
+        // git, asked the same thing. `-M` so a rename is one entry on both
+        // sides rather than an add and a delete on one of them.
+        let mut theirs: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+        for line in run(&["diff", "--cached", "-M", "--numstat"])
+            .expect("numstat")
+            .lines()
+        {
+            let mut parts = line.split('\t');
+            let (Some(a), Some(r), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
+                continue;
+            };
+            // A rename prints `old => new`; the snapshot names the new path.
+            let path = match path.split_once(" => ") {
+                Some((_, new)) => new.to_string(),
+                None => path.to_string(),
+            };
+            theirs.insert(path, (a.parse().unwrap_or(0), r.parse().unwrap_or(0)));
+        }
+
+        let ours: BTreeMap<String, (u32, u32)> = snap
+            .files
+            .iter()
+            .map(|f| (f.path.clone(), (f.added, f.removed)))
+            .collect();
+
+        assert_eq!(
+            ours, theirs,
+            "the +N -N counts and `git diff --numstat` disagree"
+        );
+        assert!(
+            ours.len() >= 5,
+            "only {} files reached the comparison, so it proved little: {ours:?}",
+            ours.len()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_three_working_tree_sources_split_staged_from_unstaged() {
         let Some(dir) = merge_repo("sources") else {
