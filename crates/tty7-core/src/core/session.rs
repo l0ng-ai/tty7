@@ -548,6 +548,176 @@ mod tests {
     use super::test_support::{lock_session_file, pin_config_dir};
     use super::*;
 
+    /// Every name the window list and the restored session are stored under.
+    ///
+    /// `views.json` is which workspaces a window has open and where they point;
+    /// `session.json` is the tabs and panes a cold start brings back. Both are
+    /// `#[serde(default)]` throughout, so a rename does not fail — the field
+    /// decodes to its default and the windows, or the panes, are quietly not
+    /// there. Same floor as `machine.json` and the settings file: adding a name
+    /// passes, dropping or renaming one does not.
+    ///
+    /// The two enums here are tagged differently and both spellings are on
+    /// disk. `SessionPane` is external — `{"Leaf":{…}}` — so `Leaf` and `Split`
+    /// are keys. `RemoteTarget` is internal, `{"kind":"direct",…}`, so its
+    /// variants are *values* of `kind` and a walk over keys never sees them;
+    /// they are asserted separately. Reading the serialized document is what
+    /// showed the difference — the two look alike in the source.
+    #[test]
+    fn no_name_a_window_or_a_session_is_stored_under_stops_being_read() {
+        fn walk(v: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+            match v {
+                serde_json::Value::Object(o) => {
+                    for (key, sub) in o {
+                        out.insert(key.clone());
+                        walk(sub, out);
+                    }
+                }
+                serde_json::Value::Array(a) => a.iter().for_each(|sub| walk(sub, out)),
+                _ => {}
+            }
+        }
+        fn missing<'a>(
+            shipped: &[&'a str],
+            live: &std::collections::BTreeSet<String>,
+        ) -> Vec<&'a str> {
+            shipped
+                .iter()
+                .copied()
+                .filter(|k| !live.contains(*k))
+                .collect()
+        }
+
+        // views.json, with a remote view so the fields a local one omits are
+        // written too.
+        let mut direct = WindowView::on_remote(RemoteRef::new(
+            RemoteTarget::Direct {
+                user: "u".into(),
+                host: "h".into(),
+                port: 22,
+            },
+            WorkspaceId::new(),
+        ));
+        direct.open = true;
+        direct.label = Some("label".into());
+        direct.subject = Some("subject".into());
+        let views = WindowViews {
+            views: vec![
+                direct,
+                remote_view("an-alias"),
+                profile_view(uuid::Uuid::nil()),
+            ],
+            active: Some(WorkspaceId::new()),
+        };
+        let mut live = std::collections::BTreeSet::new();
+        walk(
+            &serde_json::to_value(&views).expect("views serialize"),
+            &mut live,
+        );
+        const VIEW_NAMES: &[&str] = &[
+            "views",
+            "active",
+            "id",
+            "open",
+            "last_active",
+            "host",
+            "label",
+            "subject",
+            "target",
+            "workspace",
+            "kind",
+            "alias",
+            "user",
+            "port",
+        ];
+        assert!(
+            missing(VIEW_NAMES, &live).is_empty(),
+            "views.json no longer writes {:?}; every file holding one loses what \
+             it named — keep it with #[serde(alias = ...)]. Written now: {live:?}",
+            missing(VIEW_NAMES, &live)
+        );
+        // Internally tagged, so these are values rather than keys.
+        for (target, tag) in [
+            (
+                RemoteTarget::Profile {
+                    id: uuid::Uuid::nil(),
+                },
+                "profile",
+            ),
+            (RemoteTarget::Alias { alias: "a".into() }, "alias"),
+            (
+                RemoteTarget::Direct {
+                    user: "u".into(),
+                    host: "h".into(),
+                    port: 22,
+                },
+                "direct",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&target).expect("a target serializes")["kind"],
+                serde_json::json!(tag),
+                "a window pointed at {target:?} is stored as kind {tag:?}"
+            );
+        }
+
+        // session.json, with both pane shapes so the split's names are written.
+        let leaf = |pane_id| SessionPane::Leaf {
+            cwd: Some("/w".into()),
+            pane_id: Some(pane_id),
+            shell: None,
+            ssh_spec: None,
+            agent: None,
+            agent_session_id: None,
+            agent_launch_argv: None,
+        };
+        let session = Session {
+            active: 0,
+            tabs: vec![SessionTab {
+                name: Some("tab".into()),
+                pane: SessionPane::Split {
+                    axis: SessionAxis::Horizontal,
+                    ratio: 0.5,
+                    a: Box::new(leaf(1)),
+                    b: Box::new(leaf(2)),
+                },
+                sidebar_group: Some("/group".into()),
+                tree_id: None,
+            }],
+        };
+        let mut live = std::collections::BTreeSet::new();
+        walk(
+            &serde_json::to_value(&session).expect("a session serializes"),
+            &mut live,
+        );
+        const SESSION_NAMES: &[&str] = &[
+            "active",
+            "tabs",
+            "name",
+            "pane",
+            "sidebar_group",
+            "Leaf",
+            "Split",
+            "axis",
+            "ratio",
+            "a",
+            "b",
+            "cwd",
+            "pane_id",
+            "shell",
+            "ssh_spec",
+            "agent",
+            "agent_session_id",
+            "agent_launch_argv",
+        ];
+        assert!(
+            missing(SESSION_NAMES, &live).is_empty(),
+            "session.json no longer writes {:?}; a cold start loses what it \
+             named. Written now: {live:?}",
+            missing(SESSION_NAMES, &live)
+        );
+    }
+
     fn view() -> WindowView {
         WindowView::default()
     }
