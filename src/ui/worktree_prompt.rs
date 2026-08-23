@@ -9,6 +9,23 @@ use crate::core::worktree::{WorktreeDefaults, WorktreeRequest};
 use crate::ui::app::Tty7App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
+/// The worktree name and branch these two fields would create, or `None` when
+/// there is nothing to name one after.
+///
+/// Either field alone is enough and each falls back to the other. That rule
+/// was written out three times — once to decide whether Create is live, once
+/// to preview the path the card shows, and once in `submit_worktree_prompt`
+/// to build the request — so the preview and the request were free to drift
+/// into describing different worktrees. They all read this now.
+fn worktree_names(name: &str, branch: &str) -> Option<(String, String)> {
+    match (name.trim(), branch.trim()) {
+        ("", "") => None,
+        ("", b) => Some((b.to_string(), b.to_string())),
+        (n, "") => Some((n.to_string(), n.to_string())),
+        (n, b) => Some((n.to_string(), b.to_string())),
+    }
+}
+
 pub(crate) struct WorktreePrompt {
     host: crate::ui::host_ops::SharedHost,
     cwd: std::path::PathBuf,
@@ -82,14 +99,9 @@ impl Tty7App {
         let name = p.name.read(cx).value().trim().to_string();
         let branch = p.branch.read(cx).value().trim().to_string();
         let base = p.base.read(cx).value().trim().to_string();
-        let (name, branch) = match (name.is_empty(), branch.is_empty()) {
-            (true, true) => {
-                window.push_notification(t(L10nKey::WorktreePromptNeedsName), cx);
-                return;
-            }
-            (true, false) => (branch.clone(), branch),
-            (false, true) => (name.clone(), name),
-            (false, false) => (name, branch),
+        let Some((name, branch)) = worktree_names(&name, &branch) else {
+            window.push_notification(t(L10nKey::WorktreePromptNeedsName), cx);
+            return;
         };
         let req = WorktreeRequest {
             name,
@@ -143,24 +155,15 @@ impl Tty7App {
         };
         let name_now = p.name.read(cx).value().trim().to_string();
         let branch_now = p.branch.read(cx).value().trim().to_string();
-        // Submitting falls back from one field to the other, so either alone
-        // is enough; only both blank has nothing to name a worktree after.
-        // Offering Create there is offering a click that can only fail.
-        let nothing_to_name = name_now.is_empty() && branch_now.is_empty();
-        // Preview what submitting would actually make, which is the same
-        // fallback: with only a branch typed, the worktree takes its name, and
-        // showing "…" there described a path that would never be created.
-        let effective = match name_now.is_empty() {
-            true => branch_now.as_str(),
-            false => name_now.as_str(),
-        };
+        // Asked once, of the same function submitting asks. Offering Create
+        // with nothing to name a worktree after is offering a click that can
+        // only fail, and previewing a path other than the one submit would
+        // create is worse than previewing nothing.
+        let names = worktree_names(&name_now, &branch_now);
+        let nothing_to_name = names.is_none();
         let preview = p
             .dir
-            .join(if effective.is_empty() {
-                "…"
-            } else {
-                effective
-            })
+            .join(names.as_ref().map_or("…", |(dir, _)| dir.as_str()))
             .display()
             .to_string();
 
@@ -246,5 +249,48 @@ impl Tty7App {
                 .child(card)
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::worktree_names;
+
+    /// The prompt takes a worktree name and a branch, and either alone is
+    /// enough because each falls back to the other. Three places used to
+    /// spell that out — the Create button's enabled state, the path the card
+    /// previews, and the request submit builds — so a change to one could
+    /// leave the card describing a worktree that submitting would not make.
+    #[test]
+    fn either_field_alone_names_the_worktree_and_its_branch() {
+        assert_eq!(worktree_names("", ""), None, "nothing to name it after");
+
+        assert_eq!(
+            worktree_names("feat-x", ""),
+            Some(("feat-x".into(), "feat-x".into())),
+            "a name alone also names the branch"
+        );
+        assert_eq!(
+            worktree_names("", "feat-x"),
+            Some(("feat-x".into(), "feat-x".into())),
+            "and a branch alone also names the directory"
+        );
+        assert_eq!(
+            worktree_names("dir", "branch"),
+            Some(("dir".into(), "branch".into())),
+            "both given, both kept"
+        );
+    }
+
+    /// Whitespace is not an answer. Typing a space into either field must not
+    /// make Create live, nor put a directory named " " in the preview.
+    #[test]
+    fn whitespace_is_not_a_name() {
+        assert_eq!(worktree_names("  ", "\t"), None);
+        assert_eq!(
+            worktree_names("  ", " feat-x "),
+            Some(("feat-x".into(), "feat-x".into())),
+            "and the fields are trimmed on the way through"
+        );
     }
 }

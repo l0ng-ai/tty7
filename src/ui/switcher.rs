@@ -4118,6 +4118,24 @@ mod key_tests {
         assert_eq!(key_intent("up", ctrl), Key::Pass);
     }
 
+    /// The arrows are the switcher's only while nothing is held. Ctrl has a
+    /// test above; the secondary modifier did not, and on macOS it is a
+    /// different key — ⌘↑ and ⌘↓ are the system's, not ours. Off macOS the two
+    /// are the same key and this repeats the Ctrl case, which is the point:
+    /// the rule has to hold whichever key the platform calls secondary.
+    #[test]
+    fn the_secondary_modifier_parks_the_arrows_too() {
+        let sec = Modifiers::secondary_key();
+        assert_eq!(key_intent("up", sec), Key::Pass);
+        assert_eq!(key_intent("down", sec), Key::Pass);
+        assert_eq!(key_intent("left", sec), Key::Pass);
+        assert_eq!(key_intent("right", sec), Key::Pass);
+
+        // And Enter is the exception it is documented to be: held, it opens a
+        // new window rather than falling through.
+        assert_eq!(key_intent("enter", sec), Key::Confirm(true));
+    }
+
     #[test]
     fn alt_and_fn_chords_are_left_alone() {
         assert_eq!(key_intent("down", Modifiers::alt()), Key::Pass);
