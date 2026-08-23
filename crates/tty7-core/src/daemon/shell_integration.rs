@@ -2054,6 +2054,69 @@ mod tests {
     /// at all until #583 — every pty round-trip here used to be `#[cfg(windows)]`,
     /// so a script written against `$env:USERNAME` / `$env:COMPUTERNAME` /
     /// `$env:USERPROFILE` shipped for two platforms where all three are empty.
+    /// zsh over a real pty — the shell most of this project's users are in.
+    ///
+    /// Four shells had a pty test: git-bash and WSL on Windows, pwsh, and
+    /// nushell. Not zsh, which is the macOS default, and not bash. So the
+    /// route almost every user takes — ZDOTDIR pointed at a scratch directory
+    /// of redirectors, each sourcing the user's own file and then adding the
+    /// hooks — was exercised only by unit tests of the strings it writes.
+    ///
+    /// Through `setup`, never `setup_zsh`: the empty-sentinel reset lives in
+    /// `setup`, and this suite runs inside a tty7 pane where
+    /// `TTY7_SHELL_INTEGRATION=1` is already in the environment. Reaching for
+    /// the builder directly would leave every redirector guarding itself off,
+    /// and the assertions below would then be passing on marks stock zsh
+    /// emits by itself.
+    #[cfg(unix)]
+    #[test]
+    fn zsh_reports_the_full_prompt_cycle_over_a_real_pty() {
+        let zsh = ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh"]
+            .into_iter()
+            .find(|p| Path::new(p).exists());
+        let Some(zsh) = zsh else {
+            eprintln!("skipping: no zsh on this machine");
+            return;
+        };
+        let injection = setup(Some(zsh), &[], false).expect("zsh integration");
+        assert_eq!(
+            injection
+                .env
+                .get("TTY7_SHELL_INTEGRATION")
+                .map(String::as_str),
+            Some(""),
+            "without the reset the redirectors guard themselves off and this \
+             test would pass on marks zsh emits on its own"
+        );
+
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME"));
+        let text = prompt_cycle_over_pty(zsh, &injection, b"false\r", Some(&home));
+
+        for mark in ["133;A", "133;B", "133;C", FAILED_COMMAND_MARK] {
+            assert!(
+                text.contains(mark),
+                "zsh must report {mark:?}; got:\n{text}"
+            );
+        }
+        assert_eq!(
+            reported_cwd(&text),
+            home.canonicalize().unwrap_or(home.clone()),
+            "OSC 7 must name the pane's real cwd"
+        );
+        // No OSC 0 title is asserted, and none should be: of the five
+        // integrations only PowerShell's writes one, because PowerShell has no
+        // convention of its own — `powershell_integration_sets_an_osc_title`
+        // pins that. On a POSIX shell the title belongs to the user's prompt,
+        // and tty7 names the pane from OSC 7 instead. This test was written
+        // expecting a title and was wrong to; the marks above are what zsh
+        // actually undertakes to send.
+        assert!(
+            !text.contains("\u{1b}]0;"),
+            "zsh's integration has started setting a title; if that is meant, \
+             the pane's own naming has to agree with it:\n{text}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn pwsh_reports_the_full_prompt_cycle_over_a_real_pty_on_unix() {
