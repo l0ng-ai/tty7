@@ -151,6 +151,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loudly and never presses anything anywhere; to type a number as text, name
   the pane too (`tty7 send %5 83 --enter`) (#538).
 
+### Known
+
+- **A tab created and closed again before the window finishes reconciling
+  leaves its shell running.** With a tty7 window open, `tab new` immediately
+  followed by `tab close` strands a live shell on most iterations — measured
+  at 5 of 6, reproducibly. Pausing a second between them, or creating without
+  closing, strands none, so somebody driving the window by hand will not meet
+  it; an orchestration loop that opens a tab per task and closes it when the
+  task is done will, on nearly every pass. The strays are visible
+  (`tty7 pane ls --all`, the switcher, and `tty7 doctor`) and
+  `tty7 pane close --orphans` ends them, but nothing ends them for you yet.
+
 ### Fixed
 
 - **The daemon raises its own open-file limit, and says so when it still runs
