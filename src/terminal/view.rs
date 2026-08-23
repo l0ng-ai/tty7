@@ -723,10 +723,81 @@ fn clipboard_paste_text(item: &ClipboardItem, shell: Option<&str>) -> Option<Str
     item.text()
 }
 
+/// The local staging directory for a pasted image, or `None` if it cannot be
+/// had privately.
+///
+/// The remote half of this feature already says what is at stake: a staging
+/// directory anyone else can enter is one anyone else can read the pasted
+/// screenshots out of, or swap one of their own into before the pane's agent
+/// opens it. See [`REMOTE_CLIPBOARD_MODE`]. The local half staged into
+/// `$TMPDIR/tty7-clipboard` with no mode at all — which on macOS is a per-user
+/// `/var/folders/...` and harmless, and on Linux is `/tmp`, mode 1777, shared
+/// with every other account on the box.
+///
+/// The same proof of ownership as the remote check, and for the reason stated
+/// there: POSIX lets only a file's owner change its mode, so a directory this
+/// process can chmod to 0700 and then observe at 0700 is one it owns. A
+/// directory somebody else made first fails that — either the chmod is refused
+/// and the mode read back is theirs, or they left it 0700 and the write that
+/// follows cannot get in.
+///
+/// Symlinks are refused outright rather than followed: `create_dir_all`
+/// succeeds on a link to an existing directory, and chmod would then land on
+/// whatever it points at.
+/// Whether a staging directory this process has just tried to chmod may be
+/// used, read from what a `stat` says afterwards.
+///
+/// The local twin of [`staging_dir_is_safe`], and the same proof:
+/// POSIX lets only a file's owner change its mode, so a directory this process
+/// chmodded to 0700 and then observes at 0700 is one it owns. One somebody
+/// else got to first fails it — either their ownership refused the chmod and
+/// the mode read back is whatever they chose, or they left it 0700 and the
+/// write that follows cannot get in.
+fn usable_local_clipboard_dir(is_dir: bool, mode: u32) -> bool {
+    is_dir && mode & 0o7777 == REMOTE_CLIPBOARD_MODE
+}
+
+fn private_clipboard_dir() -> Option<std::path::PathBuf> {
+    private_clipboard_dir_in(&std::env::temp_dir())
+}
+
+/// [`private_clipboard_dir`], against a named parent so a test can arrange the
+/// hostile cases without touching the real staging path other tests stage into.
+fn private_clipboard_dir_in(base: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir = base.join("tty7-clipboard");
+    std::fs::create_dir_all(&dir).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let refuse = || {
+            log::warn!(
+                "not staging a pasted image: {} is not a directory this user owns",
+                dir.display()
+            );
+        };
+        // Looked at before it is chmodded, because `set_permissions` follows
+        // links: on a symlinked staging directory the chmod lands on whatever
+        // it points at, and refusing afterwards is too late to take that back.
+        // `symlink_metadata` reports the link itself, so `is_dir` is false for
+        // one and this answers both questions at once.
+        if !std::fs::symlink_metadata(&dir).ok()?.is_dir() {
+            refuse();
+            return None;
+        }
+        let _ =
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(REMOTE_CLIPBOARD_MODE));
+        let md = std::fs::symlink_metadata(&dir).ok()?;
+        if !usable_local_clipboard_dir(md.is_dir(), md.permissions().mode()) {
+            refuse();
+            return None;
+        }
+    }
+    Some(dir)
+}
+
 fn write_clipboard_image(img: &gpui::Image) -> Option<std::path::PathBuf> {
     use gpui::ImageFormat;
-    let dir = std::env::temp_dir().join("tty7-clipboard");
-    std::fs::create_dir_all(&dir).ok()?;
+    let dir = private_clipboard_dir()?;
     let (ext, transcoded) = match img.format {
         ImageFormat::Png => ("png", None),
         ImageFormat::Jpeg => ("jpg", None),
@@ -7640,6 +7711,94 @@ mod tests {
         let path = super::write_clipboard_image(&Image::from_bytes(ImageFormat::Png, png)).unwrap();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         assert!(safe_local_name(&name), "{name} must not traverse or nest");
+    }
+
+    /// The staging directory a `stat` describes is accepted only when it is
+    /// one this user owns.
+    ///
+    /// A predicate rather than a filesystem, for the case a test cannot
+    /// arrange: a directory another account owns, whose chmod this process is
+    /// refused. What reaches the decision is the mode read back afterwards,
+    /// and that is what this pins.
+    #[cfg(unix)]
+    #[test]
+    fn only_an_owner_only_staging_directory_is_used() {
+        assert!(super::usable_local_clipboard_dir(true, 0o700));
+        // Group- or world-readable: a chmod that did not take, because the
+        // directory belongs to somebody else.
+        for open in [0o755, 0o777, 0o750, 0o701] {
+            assert!(
+                !super::usable_local_clipboard_dir(true, open),
+                "{open:o} would let another account read the pasted screenshots"
+            );
+        }
+        // Set-uid and sticky bits are part of the answer, not noise to mask
+        // off: 1700 is a directory somebody dressed up to look like ours.
+        assert!(!super::usable_local_clipboard_dir(true, 0o1700));
+        assert!(!super::usable_local_clipboard_dir(true, 0o4700));
+        // And what `symlink_metadata` says about a link, or a plain file left
+        // at the name the staging directory wants.
+        assert!(!super::usable_local_clipboard_dir(false, 0o700));
+    }
+
+    /// A pasted screenshot is staged only in a directory this user owns.
+    ///
+    /// On Linux `$TMPDIR` is `/tmp`, mode 1777, so the staging directory is a
+    /// name any other account can take first. The remote half of this feature
+    /// refuses a staging directory that is not owner-only for exactly that
+    /// reason; the local half staged into whatever was there.
+    #[cfg(unix)]
+    #[test]
+    fn a_staging_directory_this_user_does_not_own_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let base = std::env::temp_dir().join(format!("tty7-clipdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = super::private_clipboard_dir_in(&base).expect("a directory we made is usable");
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o7777,
+            super::REMOTE_CLIPBOARD_MODE,
+            "the staging directory is left readable by other accounts"
+        );
+
+        // What an attacker who got there first leaves behind: a directory this
+        // process cannot close. Standing in for "somebody else owns it",
+        // which a test cannot arrange without a second uid — the mode read
+        // back after the chmod is the same evidence either way.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let reopened = super::private_clipboard_dir_in(&base);
+        assert_eq!(
+            reopened.as_deref(),
+            Some(dir.as_path()),
+            "a directory this user can still close is closed and used"
+        );
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o7777,
+            super::REMOTE_CLIPBOARD_MODE,
+            "an open staging directory was not closed on the way in"
+        );
+
+        // A symlink is refused rather than followed: `create_dir_all` succeeds
+        // on a link to a directory that exists, and the chmod would land on
+        // whatever it points at.
+        let elsewhere = dir.with_file_name(format!("tty7-clip-target-{}", std::process::id()));
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
+        assert!(
+            super::private_clipboard_dir_in(&base).is_none(),
+            "a symlinked staging directory was followed"
+        );
+        assert_ne!(
+            std::fs::metadata(&elsewhere).unwrap().permissions().mode() & 0o7777,
+            super::REMOTE_CLIPBOARD_MODE,
+            "the chmod followed the link and re-permissioned the target"
+        );
+
+        let _ = std::fs::remove_file(&dir);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

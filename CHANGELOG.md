@@ -153,6 +153,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A screenshot pasted into a pane is staged only in a directory this user owns.
+  The staging directory under the system temp directory was created with no
+  mode at all — harmless on macOS, where that is a per-user location, but on
+  Linux it is `/tmp`, mode 1777, so any other account on the machine could read
+  the pasted images out of it, or take the name first and be handed what you
+  paste. The remote half of the same feature already refused a staging
+  directory that was not owner-only, for exactly these reasons; the local half
+  now applies the same test, and refuses a symlink before chmodding rather than
+  after.
 - The config directory is now created closed to other users, and one an earlier
   build left open is repaired on the next write. It holds the command history —
   every command with its working directory and exit status — along with the SSH
