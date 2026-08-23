@@ -233,16 +233,24 @@ fn held_local_pane_ids(cx: &App) -> HashSet<u64> {
         .unwrap_or_default()
 }
 
-/// The registry's live panes minus the ones a workspace holds. Dead entries
-/// drop out too: a corpse the daemon has not reaped yet is not something the
-/// user can act on.
+/// The registry's live panes minus the ones a workspace holds, minus the ones
+/// somebody is watching. Dead entries drop out too: a corpse the daemon has
+/// not reaped yet is not something the user can act on.
+///
+/// `attached` is the daemon's own answer to "is anybody looking at this",
+/// and it is what `tty7 pane close --orphans` spends, so the card and the
+/// command name one set. It is not redundant with `held`: a window spawns a
+/// pane and attaches to it before it files it, and for that moment the tree
+/// holds nothing. Nor with what the caller passes — a slot still connecting
+/// counts as shown while the daemon has nobody attached yet — so both
+/// questions get asked.
 pub(crate) fn orphan_panes_of(
     listed: Vec<tty7_core::daemon::protocol::PaneInfo>,
     held: &HashSet<u64>,
 ) -> Vec<OrphanPane> {
     listed
         .into_iter()
-        .filter(|info| info.alive && !held.contains(&info.pane_id))
+        .filter(|info| info.alive && !info.attached && !held.contains(&info.pane_id))
         .map(|info| OrphanPane {
             pane_id: info.pane_id,
             title: info.title,
@@ -3496,7 +3504,16 @@ mod tests {
         }
 
         let held: HashSet<u64> = [2].into_iter().collect();
-        let orphans = orphan_panes_of(vec![info(1, true), info(2, true), info(3, false)], &held);
+        // %4 is unheld and live, and a client is watching it — a window in the
+        // middle of adopting it. The card must not offer to close that.
+        let watched = tty7_core::daemon::protocol::PaneInfo {
+            attached: true,
+            ..info(4, true)
+        };
+        let orphans = orphan_panes_of(
+            vec![info(1, true), info(2, true), info(3, false), watched],
+            &held,
+        );
         assert_eq!(
             orphans,
             vec![OrphanPane {
