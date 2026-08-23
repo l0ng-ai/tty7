@@ -636,6 +636,116 @@ mod tests {
         assert!(discard_all_ops(&status_with(Vec::new())).is_empty());
     }
 
+    /// Whatever the working tree looks like, discard-all only ever produces
+    /// the two operations its prompt describes.
+    ///
+    /// This is the one place in the SCM panel where a destructive operation
+    /// runs with no confirmation of its own: `scm_discard_all` asks once, then
+    /// hands the second operation on as `ScmFollowUp::Op`, which
+    /// `scm_follow_up` runs straight through `run_git_op`. That is sound only
+    /// while the follow-up is something the single prompt actually described.
+    ///
+    /// The test above pins one working tree in detail. This one pins the
+    /// property across the shapes a repository is actually found in, because
+    /// the bypass is not "this fixture is fine" — it is "nothing else can ever
+    /// come out of here". An op added for some other status would ride the
+    /// approval given for discarding, and the user would never be asked.
+    #[test]
+    fn discard_all_never_produces_an_operation_its_prompt_did_not_describe() {
+        let shapes: Vec<(&str, Vec<_>)> = vec![
+            ("nothing at all", Vec::new()),
+            (
+                "staged only",
+                vec![entry(
+                    "s.rs",
+                    ChangeCode::Modified,
+                    ChangeCode::None,
+                    EntryKind::Tracked,
+                )],
+            ),
+            (
+                "unstaged only",
+                vec![entry(
+                    "u.rs",
+                    ChangeCode::None,
+                    ChangeCode::Modified,
+                    EntryKind::Tracked,
+                )],
+            ),
+            (
+                "untracked only",
+                vec![entry(
+                    "n.rs",
+                    ChangeCode::None,
+                    ChangeCode::None,
+                    EntryKind::Untracked,
+                )],
+            ),
+            (
+                "an untracked directory",
+                vec![entry(
+                    "build/",
+                    ChangeCode::None,
+                    ChangeCode::None,
+                    EntryKind::Untracked,
+                )],
+            ),
+            (
+                "a deletion on both sides",
+                vec![entry(
+                    "gone.rs",
+                    ChangeCode::Deleted,
+                    ChangeCode::Deleted,
+                    EntryKind::Tracked,
+                )],
+            ),
+            (
+                "everything at once",
+                vec![
+                    entry(
+                        "s.rs",
+                        ChangeCode::Modified,
+                        ChangeCode::None,
+                        EntryKind::Tracked,
+                    ),
+                    entry(
+                        "u.rs",
+                        ChangeCode::None,
+                        ChangeCode::Modified,
+                        EntryKind::Tracked,
+                    ),
+                    entry(
+                        "n.rs",
+                        ChangeCode::None,
+                        ChangeCode::None,
+                        EntryKind::Untracked,
+                    ),
+                    entry(
+                        "d/",
+                        ChangeCode::None,
+                        ChangeCode::None,
+                        EntryKind::Untracked,
+                    ),
+                ],
+            ),
+        ];
+
+        for (what, entries) in shapes {
+            for op in discard_all_ops(&status_with(entries)) {
+                assert!(
+                    matches!(
+                        op,
+                        GitOp::DiscardWorktree { .. } | GitOp::DiscardUntracked { .. }
+                    ),
+                    "with {what}, discard-all produced {:?}, which the one prompt \
+                     the user answered did not describe — and the follow-up runs \
+                     without asking again",
+                    op.label()
+                );
+            }
+        }
+    }
+
     #[test]
     fn an_upstream_splits_on_its_first_slash_only() {
         assert_eq!(split_upstream("origin/main"), Some(("origin", "main")));
