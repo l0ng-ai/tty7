@@ -1084,6 +1084,84 @@ mod tests {
         );
     }
 
+    /// Nothing a program can write to a terminal makes a parser panic.
+    ///
+    /// These four read bytes chosen by whatever is running in the pane —
+    /// `cat` of a hostile file is enough — so a panic in any of them is a pane
+    /// a stranger can end. They are fuzzed together because they sit on the
+    /// same stream and share one property worth holding: an escape sequence is
+    /// either understood or ignored, never fatal.
+    ///
+    /// Seeded, so a failure reproduces from the round number in its message.
+    #[test]
+    fn no_terminal_escape_sequence_makes_a_parser_panic() {
+        use crate::core::kitty_graphics;
+        use crate::core::osc;
+
+        let seeds: [&[u8]; 8] = [
+            br#"777;notify;tty7://cli-agent;{"v":1,"agent":"claude","event":"turn-end"}"#,
+            b"777;notify;Build;done",
+            b"9;a plain notification",
+            b"9;4;progress",
+            b"Ga=T,f=100,s=2,v=2;iVBORw0KGgo=",
+            b"Ga=q,i=1,f=24,s=1,v=1,t=d;AAAA",
+            b"Ga=d,d=A,i=7",
+            b"",
+        ];
+
+        let feed = |bytes: &[u8]| {
+            // Each on its own: what matters is that none of them panics, not
+            // what any of them decides.
+            let _ = parse_agent_event(bytes);
+            let _ = osc::parse_notification(bytes);
+            let _ = kitty_graphics::Control::parse(bytes);
+            let _ = kitty_graphics::ImageDelete::decode(bytes);
+            // And through the tokenizer, which is what actually meets the
+            // stream: wrapped as a real OSC so it reaches the payload path.
+            let mut framed = b"\x1b]".to_vec();
+            framed.extend_from_slice(bytes);
+            framed.extend_from_slice(b"\x07");
+            let mut tok = osc::OscTokenizer::new(&[b"9", b"777", b"G"]);
+            tok.feed(&framed, |_| {});
+        };
+
+        for seed in seeds {
+            feed(seed);
+            for cut in 0..=seed.len() {
+                feed(&seed[..cut]);
+            }
+        }
+
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for round in 0..4_000 {
+            let seed = seeds[(next() as usize) % seeds.len()];
+            let mut bytes = seed.to_vec();
+            if bytes.is_empty() {
+                bytes.push(b'G');
+            }
+            for _ in 0..(next() % 6 + 1) {
+                let at = (next() as usize) % bytes.len();
+                match next() % 5 {
+                    0 => bytes[at] ^= 1 << (next() % 8),
+                    1 => bytes[at] = 0,
+                    2 => bytes[at] = b';',
+                    3 => bytes[at] = b'=',
+                    _ => bytes.push((next() % 256) as u8),
+                }
+            }
+            // The round number is in scope for a failure message; a panic
+            // names this line and the seed above reproduces it.
+            let _ = round;
+            feed(&bytes);
+        }
+    }
+
     #[test]
     fn parses_sentinel_events() {
         let ev = parse_agent_event(
