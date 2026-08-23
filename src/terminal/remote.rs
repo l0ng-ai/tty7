@@ -3802,6 +3802,43 @@ mod tests {
         draining.join().unwrap();
     }
 
+    /// The exemption a huge frame gets is for *one* of them. A paste larger
+    /// than the whole bound goes onto an empty queue and lifts the bound by its
+    /// own size while it is outstanding — but a second one arriving before the
+    /// first has moved a byte is not a paste, it is a link that has stopped
+    /// taking input, and letting it through too would trade the bound for a
+    /// heap that grows by five megabytes a go for as long as the peer is gone.
+    ///
+    /// The empty-queue half of that rule is the whole of it: without it every
+    /// oversize frame is exempt, and a stalled link accepts them forever.
+    #[test]
+    fn a_second_oversize_frame_onto_a_stalled_link_is_still_a_backlog() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, daemon_side) = UnixStream::pair().unwrap();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        // Held open and never read from: the peer is parked, not gone. A closed
+        // peer would fail the write outright and report the link lost for a
+        // different reason than the one under test.
+        let frame = MAX_BACKLOG + (1 << 20);
+        term.write(vec![b'x'; frame]);
+        assert!(
+            !term.exited_flag.load(Ordering::SeqCst),
+            "the first oversize frame is a paste and goes through"
+        );
+
+        // Nothing has drained, so the first frame is still charged in full —
+        // the sender parks inside `write_all` and discounts a frame only once
+        // it is out. The bound stands at MAX_BACKLOG + this frame, and a second
+        // frame of the same size is over it.
+        term.write(vec![b'x'; frame]);
+        assert!(
+            term.exited_flag.load(Ordering::SeqCst),
+            "a second oversize frame with the first still outstanding is a link nothing is reading"
+        );
+        drop(daemon_side);
+    }
+
     /// Input the link refuses used to vanish: `write` threw the error away, so a
     /// pane whose daemon had stopped reading kept taking keystrokes into
     /// nothing. The refusal now marks the pane exited by the reader's own signal

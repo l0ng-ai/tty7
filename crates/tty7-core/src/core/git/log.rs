@@ -2112,6 +2112,53 @@ mod tests {
         assert!(run(host, repo, &["commit", "--quiet", "-m", message]));
     }
 
+    /// The other half of `a_stream_the_parse_cannot_finish_is_never_called_complete`,
+    /// which asserted only that the *parse* raises the flag. What the flag is
+    /// for is `load_page`, and both halves of its test are needed: git answered
+    /// with fewer commits than asked for, which on its own reads as the end of
+    /// history, *and* a record the parse had to drop. Taking the count alone
+    /// would call a graph missing its middle complete, and paging would stop
+    /// there for good — the history below it unreachable, with nothing on
+    /// screen to say so.
+    #[test]
+    fn a_page_the_parse_had_to_cut_is_not_the_end_of_history() {
+        let host = crate::host::local::LocalHost::new();
+        let Some(scratch) = scratch("cut-page") else {
+            return;
+        };
+        let repo = scratch.0.as_path();
+        if !init_repo(&*host, repo) {
+            return;
+        }
+        commit_file(&*host, repo, "a.txt", "1\n", "first");
+
+        // A commit message past MAX_RECORD, which the splitter drops whole.
+        // Written through a file: an argument this size is over the exec limit
+        // on macOS, and would fail as a bad command rather than a big commit.
+        let huge = repo.join("msg.txt");
+        std::fs::write(&huge, "z".repeat(super::super::MAX_RECORD + 1)).unwrap();
+        std::fs::write(repo.join("b.txt"), "2\n").unwrap();
+        assert!(run(&*host, repo, &["add", "--", "b.txt"]));
+        assert!(run(
+            &*host,
+            repo,
+            &["commit", "--quiet", "-F", huge.to_str().unwrap()]
+        ));
+
+        // Thirty asked for and two exist, so the count alone says complete.
+        let page =
+            load_page(&*host, repo, &GraphScope::Head, 30).expect("a repository was just created");
+        assert_eq!(
+            page.commits.len(),
+            1,
+            "the record over the bound is dropped, the readable one survives"
+        );
+        assert!(
+            !page.complete,
+            "a page the parse had to cut is not the end of history, however few commits came back"
+        );
+    }
+
     #[test]
     fn a_real_repository_answers_for_one_commit_and_its_files() {
         let host = crate::host::local::LocalHost::new();
