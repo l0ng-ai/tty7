@@ -144,6 +144,25 @@ pub struct PaneInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub osc_title: Option<String>,
     pub alive: bool,
+    /// Whether a client is attached to this pane right now.
+    ///
+    /// The daemon's own answer to "is anybody watching this", kept by
+    /// `PaneHandle::attach`/`detach` — a pane's connection closing clears the
+    /// seat, so a view that has been dropped stops counting immediately.
+    ///
+    /// It is what tells a pane the tree has not filed *yet* from one it will
+    /// never file. Both are live and unheld, and nothing else distinguishes
+    /// them: a window adopting a pane is attached to it, and a pane whose
+    /// layout was thrown away is not. `orphan_panes` spends it so that
+    /// `tty7 pane close --orphans` cannot reap a session mid-restore.
+    ///
+    /// `#[serde(default)]`, and deliberately not a `PROTOCOL_VERSION` bump,
+    /// for the same reason as `AuthPromptKind::KeyPassphrase::rejected`: an
+    /// older peer on either side never sets it and serde ignores fields it
+    /// does not know, so a peer that cannot answer reads as unattached — which
+    /// is what this command did before the field existed.
+    #[serde(default)]
+    pub attached: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
 }
@@ -1813,6 +1832,7 @@ mod tests {
             DaemonMsg::Exited { code: None },
             DaemonMsg::PaneList(vec![
                 PaneInfo {
+                    attached: false,
                     pane_id: 3,
                     cwd: Some(PathBuf::from("/x")),
                     title: "zsh".into(),
@@ -1821,6 +1841,7 @@ mod tests {
                     owner: None,
                 },
                 PaneInfo {
+                    attached: false,
                     pane_id: 4,
                     cwd: None,
                     title: String::new(),

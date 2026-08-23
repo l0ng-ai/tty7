@@ -994,9 +994,11 @@ fn pane_ls_all(backend: &mut dyn Backend) -> Result<Outcome> {
             })
         })
         .collect();
+    // The same test `orphan_panes` makes, so the count and the reaper cannot
+    // disagree — the line names `pane close --orphans` as the fix for it.
     let orphans = running
         .iter()
-        .filter(|info| holder(info.pane_id).is_none())
+        .filter(|info| !info.attached && holder(info.pane_id).is_none())
         .count();
     let mut human = output::registry_table(&running, &|pane| holder(pane).map(|ws| ws.to_string()));
     if orphans > 0 {
@@ -1135,6 +1137,24 @@ fn pane_close(
 /// that predates it simply omits it — but it is a wire change, and until it
 /// happens the honest thing is that the docs say plainly that `--orphans` will
 /// kill a `run` started from another shell.
+/// The panes nothing holds and nobody is watching.
+///
+/// "No workspace holds it" is not enough on its own, and the gap is not
+/// theoretical: during a restore the window spawns a pane, attaches to it, and
+/// only then files it into the tree. Polled through a cold start, seven live
+/// panes of a seven-tab window each reported as held by no workspace — every
+/// one of them about to be adopted. A reaper run at that moment takes the
+/// session it was meant to clean up after.
+///
+/// So attachment is the other half. It is the daemon's own fact rather than a
+/// guess about timing: `attach` takes the seat and a pane connection closing
+/// calls `detach`, which clears it. A pane a window is adopting is attached; a
+/// pane whose layout was thrown away had its view dropped, which closed the
+/// connection, which emptied the seat. That is the whole difference between
+/// the two, and nothing else in the registry shows it.
+///
+/// An older server that does not send the field reads as unattached, which is
+/// what this command did before.
 fn orphan_panes(machine: &Machine, backend: &mut dyn Backend) -> Result<Vec<u64>> {
     let held: Vec<u64> = machine
         .workspaces
@@ -1145,6 +1165,7 @@ fn orphan_panes(machine: &Machine, backend: &mut dyn Backend) -> Result<Vec<u64>
     Ok(backend
         .list_panes()?
         .iter()
+        .filter(|info| !info.attached)
         .map(|info| info.pane_id)
         .filter(|pane| !held.contains(pane))
         .collect())
@@ -2237,7 +2258,20 @@ mod tests {
             title: "sh".into(),
             osc_title: None,
             alive: true,
+            attached: false,
             owner: owner.map(str::to_string),
+        }
+    }
+
+    /// The same pane with a client watching it — what a window adopting one
+    /// looks like from the registry.
+    fn attached_pane_info(
+        pane_id: u64,
+        owner: Option<&str>,
+    ) -> tty7_core::daemon::protocol::PaneInfo {
+        tty7_core::daemon::protocol::PaneInfo {
+            attached: true,
+            ..pane_info(pane_id, owner)
         }
     }
 
@@ -2894,6 +2928,81 @@ mod tests {
             vec![5],
             "a pane removed from its workspace must also be hung up"
         );
+    }
+
+    /// A pane a client is watching is never reaped, however unheld it looks.
+    ///
+    /// Reproduced before this existed: polling `pane ls --all` through a cold
+    /// start of a seven-tab window reported seven live panes as held by no
+    /// workspace, one after another, because the window spawns and attaches
+    /// before it files them. `--orphans` at that moment takes the session.
+    ///
+    /// The second half matters as much: a stray really is still reaped. It is
+    /// the same pane with nobody attached, which is exactly what a dropped
+    /// view leaves behind, and the reaper must still take it or the recovery
+    /// tool has been quietly turned off.
+    #[test]
+    fn pane_close_orphans_spares_a_pane_a_client_is_still_watching() {
+        let mut backend = mock();
+        backend.registry = vec![
+            pane_info(1, None),
+            // Unheld and attached: a window is adopting it.
+            attached_pane_info(77, Some("tty7-app")),
+            // Unheld and unwatched: a view was dropped and never came back.
+            pane_info(78, Some("tty7-app")),
+        ];
+
+        let json = json_of(run_cli(
+            &["tty7", "pane", "close", "--orphans"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(
+            json["closed"],
+            serde_json::json!([78]),
+            "only the pane nobody is watching"
+        );
+        assert_eq!(backend.killed, vec![78], "and %77 was left running");
+    }
+
+    /// The count in `pane ls --all` names the set `--orphans` would take.
+    ///
+    /// That line tells the reader to run the reaper, so a number arrived at
+    /// some other way sends them after panes it will not touch — or worse,
+    /// reads zero while the reaper is about to take something.
+    #[test]
+    fn the_orphan_count_and_the_reaper_agree() {
+        let mut backend = mock();
+        backend.registry = vec![
+            pane_info(1, None),
+            attached_pane_info(77, Some("tty7-app")),
+            pane_info(78, Some("tty7-app")),
+        ];
+        let counted = json_of(run_cli(
+            &["tty7", "pane", "ls", "--all"],
+            &Context::default(),
+            &mut backend,
+        ))["orphans"]
+            .as_u64()
+            .expect("a count");
+
+        let mut backend = mock();
+        backend.registry = vec![
+            pane_info(1, None),
+            attached_pane_info(77, Some("tty7-app")),
+            pane_info(78, Some("tty7-app")),
+        ];
+        let reaped = json_of(run_cli(
+            &["tty7", "pane", "close", "--orphans"],
+            &Context::default(),
+            &mut backend,
+        ))["closed"]
+            .as_array()
+            .expect("a list")
+            .len() as u64;
+
+        assert_eq!(counted, reaped, "the count is the set the reaper takes");
+        assert_eq!(counted, 1, "and it is the unwatched one");
     }
 
     /// The CLI is what creates orphans, so it should be able to clear them.

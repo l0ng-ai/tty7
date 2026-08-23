@@ -464,6 +464,7 @@ mod tests {
         let held = "9fd8072f-465c-4016-9a81-8143bff1240c";
         let elsewhere = "76698a44-3f13-4961-8fed-90d0b3defff1";
         let pane = |id: u64, owner: Option<&str>| PaneInfo {
+            attached: false,
             pane_id: id,
             cwd: None,
             title: "zsh".into(),

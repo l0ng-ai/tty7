@@ -2154,9 +2154,14 @@ impl DaemonPane {
     }
 
     pub fn info(&self) -> PaneInfo {
-        let (cwd, osc_title, alive) = {
+        let (cwd, osc_title, alive, attached) = {
             let st = self.state.locked();
-            (st.cwd.clone(), st.osc_title.clone(), st.alive)
+            (
+                st.cwd.clone(),
+                st.osc_title.clone(),
+                st.alive,
+                st.subscriber.is_some(),
+            )
         };
         PaneInfo {
             pane_id: self.id,
@@ -2164,6 +2169,7 @@ impl DaemonPane {
             title: self.foreground_title(),
             osc_title,
             alive,
+            attached,
             owner: self.owner.clone(),
         }
     }

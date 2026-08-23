@@ -3454,6 +3454,7 @@ mod tests {
         let listed: Vec<PaneInfo> = shown
             .iter()
             .map(|&pane_id| PaneInfo {
+                attached: false,
                 pane_id,
                 cwd: None,
                 title: "zsh".to_string(),
@@ -3484,6 +3485,7 @@ mod tests {
 
         fn info(pane_id: u64, alive: bool) -> PaneInfo {
             PaneInfo {
+                attached: false,
                 pane_id,
                 cwd: Some(std::path::PathBuf::from("/tmp/x")),
                 title: "zsh".to_string(),

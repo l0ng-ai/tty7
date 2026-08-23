@@ -1762,6 +1762,7 @@ mod aggregate_tests {
             attachments: Arc::new(AttachRegistry::default()),
             panes: Some(Arc::new(ThreePanesOneAgent {
                 panes: vec![PaneInfo {
+                    attached: false,
                     pane_id: 7,
                     cwd: Some(PathBuf::from("/repo/tty7")),
                     title: "nvim".into(),
