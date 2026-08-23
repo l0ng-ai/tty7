@@ -664,6 +664,106 @@ mod tests {
     /// the bypass is not "this fixture is fine" — it is "nothing else can ever
     /// come out of here". An op added for some other status would ride the
     /// approval given for discarding, and the user would never be asked.
+    /// An untracked *directory* is only removed if `clean` is told to recurse.
+    ///
+    /// Porcelain v2 names an untracked directory with a trailing slash —
+    /// `? newdir/` — and that slash is the whole of how this decides. Measured
+    /// against real git: `clean -f` removes `loose.txt` and leaves `newdir/`
+    /// standing, `clean -fd` takes both. Without the flag, "Discard all"
+    /// quietly leaves every untracked directory where it was, which is not
+    /// what the button says and not what its own confirmation described.
+    #[test]
+    fn discard_all_recurses_only_when_an_untracked_directory_is_there() {
+        let files_only = status_with(vec![entry(
+            "loose.txt",
+            ChangeCode::None,
+            ChangeCode::None,
+            EntryKind::Untracked,
+        )]);
+        match &discard_all_ops(&files_only)[..] {
+            [GitOp::DiscardUntracked { directories, .. }] => assert!(
+                !*directories,
+                "nothing here is a directory, so `clean` has no reason to recurse"
+            ),
+            other => panic!("expected one untracked discard, got {other:?}"),
+        }
+
+        let with_a_dir = status_with(vec![
+            entry(
+                "loose.txt",
+                ChangeCode::None,
+                ChangeCode::None,
+                EntryKind::Untracked,
+            ),
+            entry(
+                "newdir/",
+                ChangeCode::None,
+                ChangeCode::None,
+                EntryKind::Untracked,
+            ),
+        ]);
+        match &discard_all_ops(&with_a_dir)[..] {
+            [GitOp::DiscardUntracked { directories, paths }] => {
+                assert!(
+                    *directories,
+                    "an untracked directory survives `clean -f`, so this has to be -fd"
+                );
+                assert_eq!(paths.len(), 2, "both entries are still discarded");
+            }
+            other => panic!("expected one untracked discard, got {other:?}"),
+        }
+    }
+
+    /// One unusable path does not cost the user the whole discard.
+    ///
+    /// A name that is not UTF-8 cannot be sent to git as a pathspec at all.
+    /// It is dropped from the list here rather than carried into the op,
+    /// because `GitOp::validate` rejects an *operation* that carries one — so
+    /// leaving it in would turn "discard everything" into an error that
+    /// discards nothing, on a repository that happens to contain one awkward
+    /// filename.
+    #[test]
+    fn an_unusable_path_is_left_out_rather_than_failing_the_whole_discard() {
+        let mut bad = entry(
+            "ok.txt",
+            ChangeCode::None,
+            ChangeCode::Modified,
+            EntryKind::Tracked,
+        );
+        bad.path = RepoPath::from_bytes(&[0xff, 0xfe, b'.', b'r', b's']);
+        assert!(
+            bad.path.pathspec().is_none(),
+            "this fixture is only meaningful if the path really is unusable"
+        );
+        let status = status_with(vec![
+            entry(
+                "ok.txt",
+                ChangeCode::None,
+                ChangeCode::Modified,
+                EntryKind::Tracked,
+            ),
+            bad,
+        ]);
+
+        let ops = discard_all_ops(&status);
+        match &ops[..] {
+            [GitOp::DiscardWorktree { paths }] => {
+                assert_eq!(
+                    paths.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+                    ["ok.txt"],
+                    "the usable path is still discarded"
+                );
+            }
+            other => panic!("expected one worktree discard, got {other:?}"),
+        }
+        for op in &ops {
+            assert!(
+                op.validate().is_ok(),
+                "an op built here must not be one validate rejects: {op:?}"
+            );
+        }
+    }
+
     #[test]
     fn discard_all_never_produces_an_operation_its_prompt_did_not_describe() {
         let shapes: Vec<(&str, Vec<_>)> = vec![
