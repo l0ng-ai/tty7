@@ -2130,6 +2130,13 @@ mod tests {
     /// `zsh_reports_the_full_prompt_cycle_over_a_real_pty` gives: the empty
     /// sentinel is what stops the injected rc guarding itself off inside a
     /// tty7 pane.
+    ///
+    /// Worth knowing what this covers where: the rcfile installs its hook into
+    /// `PROMPT_COMMAND` as an array only on bash 5.1 and up, and appends to a
+    /// string below that. macOS still ships 3.2.57, so a developer run here
+    /// exercises the older branch and a Linux CI runner exercises the newer
+    /// one — between them both halves of that version check are run, which
+    /// neither machine does alone.
     #[cfg(unix)]
     #[test]
     fn bash_reports_the_full_prompt_cycle_over_a_real_pty() {
