@@ -3016,4 +3016,81 @@ mod tests {
         assert!(p.ends_with("config.json"));
         assert_eq!(p.parent(), config_dir_path().as_deref());
     }
+
+    /// What every enum setting is spelled as on disk, pinned.
+    ///
+    /// `a_config_round_trips_every_field` next door checks bools and numbers
+    /// and skips strings on purpose, because `de_lenient` falls back to the
+    /// default for a spelling it does not know. That is the right behaviour
+    /// for a config a human may have mistyped, and it is exactly what makes a
+    /// rename here invisible: the value does not fail to load, the setting is
+    /// simply forgotten and the user finds their choice reverted with nothing
+    /// said. The wire has `the_wire_spelling_of_every_simple_enum_variant_is_pinned`
+    /// for the same reason; this is the disk's copy of it.
+    ///
+    /// The strings were read out of serde rather than derived from the
+    /// `rename_all`, which is how `RightPanelTab::Scm` turned out to be
+    /// `"changes"` — a rename someone tidying the enum would otherwise undo
+    /// without noticing.
+    #[test]
+    fn every_enum_setting_keeps_the_spelling_it_has_on_disk() {
+        fn spelled<T: serde::Serialize>(value: T) -> String {
+            serde_json::to_value(value)
+                .expect("a setting serializes")
+                .as_str()
+                .expect("an enum setting is a string")
+                .to_string()
+        }
+        macro_rules! pin {
+            ($ty:ty, $($v:ident => $s:literal),+ $(,)?) => {{
+                $(
+                    assert_eq!(
+                        spelled(<$ty>::$v),
+                        $s,
+                        "{}::{} is written {:?} in every config.json already on \
+                         disk; changing it forgets the setting silently",
+                        stringify!($ty),
+                        stringify!($v),
+                        $s
+                    );
+                    assert_eq!(
+                        serde_json::from_value::<$ty>(serde_json::json!($s)).expect("reads back"),
+                        <$ty>::$v,
+                        "{}::{} does not read back from {:?}",
+                        stringify!($ty),
+                        stringify!($v),
+                        $s
+                    );
+                )+
+            }};
+        }
+
+        pin!(WdStrategy, Inherit => "inherit", Home => "home", Custom => "custom");
+        pin!(StartupMode, Normal => "normal", Maximized => "maximized", Fullscreen => "fullscreen");
+        pin!(CursorStyle, Block => "block", Bar => "bar", Underline => "underline");
+        pin!(NewTabPosition, AfterCurrent => "after-current", End => "end");
+        pin!(TabBarPosition, Top => "top", Left => "left");
+        pin!(
+            WindowBackdrop,
+            Auto => "auto", Blur => "blur", Mica => "mica",
+            MicaAlt => "mica-alt", Acrylic => "acrylic", Off => "off",
+        );
+        pin!(
+            SidebarGrouping,
+            Repo => "repo", RepoOrDirectory => "repo-or-directory", None => "none",
+        );
+        pin!(NotifyMode, Never => "never", Unfocused => "unfocused", Always => "always");
+        pin!(UpdateChannel, Stable => "stable", Nightly => "nightly");
+        pin!(
+            MouseZoomModifier,
+            Platform => "platform", Ctrl => "ctrl", Alt => "alt", None => "none",
+        );
+        pin!(BellMode, None => "none", Visual => "visual", Audible => "audible", Both => "both");
+        // Not "scm": the tab is called Changes on screen and the setting has
+        // always said so.
+        pin!(RightPanelTab, Info => "info", Scm => "changes", Files => "files");
+        pin!(LinkFileOpen, Internal => "internal", System => "system", Command => "command");
+        pin!(DiffViewMode, Split => "split", Unified => "unified");
+        pin!(DocumentLayout, Dock => "dock", Fill => "fill");
+    }
 }
