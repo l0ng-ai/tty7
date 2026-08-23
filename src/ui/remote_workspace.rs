@@ -3347,4 +3347,68 @@ mod tests {
         let restarting = install_phase_caption(InstallPhase::Restarting);
         assert!(!restarting.contains('/'), "{restarting}");
     }
+
+    /// Which machine a new pane goes to, and the gate in front of it.
+    ///
+    /// `can_spawn_locally` is one line over `WorkspaceStore::host_of`, and
+    /// nothing called it: inverting it, or letting `guard_local_spawn` pass
+    /// everything, left the whole suite green. Both decide where a user's
+    /// command runs — a window bound to a build box spawning its pane on the
+    /// laptop is the same class of mistake as deleting a path on the wrong
+    /// machine.
+    #[gpui::test]
+    fn a_window_bound_to_a_machine_does_not_spawn_on_this_one(cx: &mut gpui::TestAppContext) {
+        use crate::core::session::{WindowView, WindowViews, WorkspaceStore};
+        use crate::ui::app::test_window::harness_with_tabs;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let ws = app.read_with(cx, |app, _| app.workspace);
+
+        // A window with no remote is this machine's, and may spawn here.
+        cx.update(|cx| {
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![WindowView {
+                        id: ws,
+                        ..Default::default()
+                    }],
+                    active: None,
+                },
+            );
+        });
+        app.update_in(&mut vcx, |app, _window, cx| {
+            assert!(
+                app.can_spawn_locally(cx),
+                "a window with no remote is this machine's"
+            );
+        });
+
+        // The same window bound to a machine is not.
+        cx.update(|cx| {
+            let host = RemoteRef::new(
+                RemoteTarget::Alias {
+                    alias: "build-box".into(),
+                },
+                WorkspaceId::new(),
+            );
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![WindowView {
+                        id: ws,
+                        host: Some(host),
+                        ..Default::default()
+                    }],
+                    active: None,
+                },
+            );
+        });
+        app.update_in(&mut vcx, |app, _window, cx| {
+            assert!(
+                !app.can_spawn_locally(cx),
+                "a pane for build-box must not be started on this machine"
+            );
+        });
+    }
 }
