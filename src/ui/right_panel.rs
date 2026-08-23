@@ -706,10 +706,7 @@ impl Tty7App {
                 let connected_ssh = view
                     .remote_context()
                     .is_some_and(|c| c.kind == crate::daemon::protocol::RemoteKind::NativeSsh)
-                    && matches!(
-                        view.ssh_phase(),
-                        Some(crate::daemon::protocol::SshPhase::Connected)
-                    );
+                    && view.ssh_session_live();
                 if connected_ssh || view.workspace().is_some() {
                     forwards_pane = Some(view.pane_id);
                 }
