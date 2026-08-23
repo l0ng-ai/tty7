@@ -968,6 +968,108 @@ mod tests {
         assert!(machine.workspaces.is_empty());
     }
 
+    /// A tab lands where the machine put it, and moves where it is moved to.
+    ///
+    /// The mirror exists to be identical to the machine's tree, and `tree_sync`
+    /// diffs a window against it to decide what to push back. Order is part of
+    /// that identity: a mirror that agrees on the set of tabs and not on their
+    /// sequence makes the next diff propose moves nobody asked for.
+    ///
+    /// Both indices were unverified — `TabCreated` ignoring `at` and appending,
+    /// and `TabMoved` landing one slot late, each passed the suite untouched.
+    #[test]
+    fn tabs_land_and_move_to_the_index_the_delta_names() {
+        let ws = Workspace::default();
+        let id = ws.id;
+        let mut machine = machine_with(ws);
+
+        let (first, second, third) = (leaf_tab(1), leaf_tab(2), leaf_tab(3));
+        let (a, b, c) = (first.id, second.id, third.id);
+        for (at, tab) in [(0, first), (1, second), (0, third)] {
+            assert!(apply(&mut machine, id, &LayoutDelta::TabCreated { at, tab }));
+        }
+        let order = |m: &Machine| -> Vec<TabId> {
+            m.workspaces[0].tabs.iter().map(|t| t.id).collect()
+        };
+        assert_eq!(
+            order(&machine),
+            vec![c, a, b],
+            "the third was created at 0, so it sits in front"
+        );
+
+        // Past the end is the end, not a panic.
+        let far = leaf_tab(4);
+        let d = far.id;
+        assert!(apply(
+            &mut machine,
+            id,
+            &LayoutDelta::TabCreated { at: 99, tab: far },
+        ));
+        assert_eq!(order(&machine), vec![c, a, b, d]);
+
+        // Moved to an index, not past it.
+        assert!(apply(
+            &mut machine,
+            id,
+            &LayoutDelta::TabMoved { tab: d, to: 1 },
+        ));
+        assert_eq!(order(&machine), vec![c, d, a, b], "it lands *at* 1");
+
+        assert!(apply(
+            &mut machine,
+            id,
+            &LayoutDelta::TabMoved { tab: c, to: 99 },
+        ));
+        assert_eq!(order(&machine), vec![d, a, b, c], "and clamps to the end");
+
+        // A tab the mirror does not have is not a move it can make.
+        assert!(!apply(
+            &mut machine,
+            id,
+            &LayoutDelta::TabMoved {
+                tab: TabId::new(),
+                to: 0,
+            },
+        ));
+    }
+
+    /// Closing the last tab leaves nothing marked active.
+    ///
+    /// `active_tab` is a `TabId`, so a stale one names a tab that is gone —
+    /// and everything downstream looks it up and finds nothing. Emptying the
+    /// workspace is the one case where there is no other tab to fall back to,
+    /// which is exactly why it has to be cleared rather than left.
+    #[test]
+    fn closing_the_last_tab_clears_the_active_one() {
+        let ws = Workspace::default();
+        let id = ws.id;
+        let mut machine = machine_with(ws);
+
+        let tab = leaf_tab(1);
+        let only = tab.id;
+        assert!(apply(&mut machine, id, &LayoutDelta::TabCreated { at: 0, tab }));
+        assert!(apply(
+            &mut machine,
+            id,
+            &LayoutDelta::ActiveTabChanged { tab: only },
+        ));
+        assert_eq!(machine.workspaces[0].active_tab, Some(only));
+
+        assert!(apply(&mut machine, id, &LayoutDelta::TabClosed { tab: only }));
+        assert!(machine.workspaces[0].tabs.is_empty());
+        assert_eq!(
+            machine.workspaces[0].active_tab, None,
+            "nothing is active in a workspace with no tabs"
+        );
+
+        // Closing a tab that is not there changes nothing and says so.
+        assert!(!apply(
+            &mut machine,
+            id,
+            &LayoutDelta::TabClosed { tab: only },
+        ));
+    }
+
     #[test]
     fn structural_deltas_advance_the_mirrored_tree() {
         let ws = Workspace::default();
