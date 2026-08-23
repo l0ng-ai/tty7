@@ -2302,4 +2302,49 @@ mod binding_conflicts {
             clashes.join("\n")
         );
     }
+
+    /// And the same holds once a preset has been laid over the defaults.
+    ///
+    /// A preset only rebinds the actions it names, so every default it does
+    /// *not* name stays where it was — which is exactly where a collision
+    /// would come from, and it would only appear for users who chose that
+    /// preset. Checked with the default prefix, which is what almost everyone
+    /// running the preset has.
+    #[test]
+    fn the_tmux_preset_does_not_collide_with_the_defaults_it_leaves_alone() {
+        let mut effective: Vec<(String, String)> = default_bindings()
+            .into_iter()
+            .map(|(a, k)| (a.to_string(), k.to_string()))
+            .collect();
+        for (action, key) in preset_bindings("tmux", "") {
+            set_binding(&mut effective, &action, key);
+        }
+
+        let mut claimed: HashMap<(String, Option<&str>), Vec<String>> = HashMap::new();
+        for (action, key) in &effective {
+            if key.is_empty() {
+                continue;
+            }
+            claimed
+                .entry((key.clone(), action_context(action)))
+                .or_default()
+                .push(action.clone());
+        }
+
+        let mut clashes: Vec<String> = claimed
+            .into_iter()
+            .filter(|(_, actions)| actions.len() > 1)
+            .map(|((key, scope), actions)| {
+                format!("{key} in {}: {actions:?}", scope.unwrap_or("the window"))
+            })
+            .collect();
+        clashes.sort();
+
+        assert!(
+            clashes.is_empty(),
+            "under the tmux preset these share a key, so one of each pair never \
+             fires:\n{}",
+            clashes.join("\n")
+        );
+    }
 }
