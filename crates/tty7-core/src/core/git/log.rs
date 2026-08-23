@@ -1176,6 +1176,56 @@ mod tests {
         assert_eq!(days_in_month(2024, 0), 0);
     }
 
+    /// The two calendars in this crate are inverses, so make them prove it.
+    ///
+    /// `civil_from_days` lives in `core::crash` — it dates the panic log —
+    /// and `days_from_civil` lives here. They were written separately, they
+    /// are each other's inverse, and each was checked on its own: this one by
+    /// the walk above, that one against four known dates. Four dates leave
+    /// the century years and everything before 1970 unexercised, and that is
+    /// where the era arithmetic earns its keep.
+    ///
+    /// Round-tripping them is worth more than either check alone. Two
+    /// separately written implementations can only agree on seventy-three
+    /// thousand consecutive days if both are right; a single transcription
+    /// slip in either shows up within one era.
+    #[test]
+    fn the_two_calendars_round_trip_through_each_other() {
+        use crate::core::crash::civil_from_days;
+
+        let (mut y, mut m, mut d) = (1900i64, 1u32, 1u32);
+        let mut days = days_from_civil(1900, 1, 1);
+        assert!(days < 0, "the walk has to start before the epoch to exercise it");
+        let mut checked = 0usize;
+        while y < 2100 {
+            assert_eq!(
+                civil_from_days(days),
+                (y, m, d),
+                "day {days} should read as {y:04}-{m:02}-{d:02}"
+            );
+            assert_eq!(
+                days_from_civil(y, m, d),
+                days,
+                "{y:04}-{m:02}-{d:02} should count as day {days}"
+            );
+            checked += 1;
+            let last = days_in_month(y, m);
+            d += 1;
+            days += 1;
+            if d > last {
+                d = 1;
+                m += 1;
+            }
+            if m > 12 {
+                m = 1;
+                y += 1;
+            }
+        }
+        // 200 x 365 + 49 leap days: every fourth year from 1904 to 2096, less
+        // 1900, plus 2000. The same 49 the walk above counts.
+        assert_eq!(checked, 73_049, "two centuries of days, 1900-01-01 to 2099-12-31");
+    }
+
     fn commit(sha: &str, parents: &[&str]) -> (Oid, SmallVec<[Oid; 2]>) {
         (
             sha.to_string(),
