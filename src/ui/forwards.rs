@@ -80,6 +80,18 @@ impl ForwardFields {
         .iter()
         .all(|v| v.trim().is_empty())
     }
+
+    /// Whether the form should be saying what is still missing.
+    ///
+    /// Both halves, and for opposite reasons. Not yet a rule is the whole
+    /// point of the message — but a form nobody has typed into is not a
+    /// mistake, and greeting someone with what they have got wrong before they
+    /// have touched anything is the behaviour the blank check exists to
+    /// prevent. Asked here rather than in the render so the pair cannot be
+    /// half-remembered at the call site, which is where they were.
+    pub(crate) fn incomplete(&self) -> bool {
+        self.collect().is_none() && !self.is_blank()
+    }
 }
 
 /// The entry a forward request just appended: the one the panel did not have
@@ -421,7 +433,7 @@ impl Tty7App {
         // is something to add, and the line below the form says what is still
         // missing — but not while the form has barely been touched.
         let complete = fields.collect().is_some();
-        let incomplete = !complete && !fields.is_blank();
+        let incomplete = fields.incomplete();
         let selected = match kind {
             SshForwardKind::Local => 0,
             SshForwardKind::Remote => 1,
@@ -545,6 +557,61 @@ mod tests {
             bind_port: bind_port.to_string(),
             target_host: host.to_string(),
             target_port: port.to_string(),
+            description: String::new(),
+        }
+    }
+
+    /// The message under the form is for someone who has started and not
+    /// finished. Each half of that is a separate promise, and dropping either
+    /// changes what an untouched panel looks like on open.
+    #[test]
+    fn the_form_says_what_is_missing_only_once_it_has_been_typed_into() {
+        let blank = ForwardFields {
+            kind: SshForwardKind::Local,
+            bind_host: String::new(),
+            bind_port: String::new(),
+            target_host: String::new(),
+            target_port: String::new(),
+            description: String::new(),
+        };
+        assert!(blank.is_blank());
+        assert!(
+            !blank.incomplete(),
+            "an untouched form has nothing to complain about"
+        );
+
+        // Whitespace is still untouched: a stray space must not turn the panel
+        // into an error message.
+        let spaces = ForwardFields {
+            bind_port: "  ".to_string(),
+            ..blank_like()
+        };
+        assert!(!spaces.incomplete(), "whitespace is not an attempt");
+
+        // Half typed: a bind port and nothing to send it to.
+        let started = fields(SshForwardKind::Local, "8080", "", "");
+        assert!(started.collect().is_none());
+        assert!(started.incomplete(), "started and not finished");
+
+        // Finished: nothing left to say.
+        let done = fields(SshForwardKind::Local, "8080", "10.0.0.5", "80");
+        assert!(done.collect().is_some());
+        assert!(!done.incomplete(), "a rule that is ready is not incomplete");
+
+        // Dynamic needs no target, so the same fields that are half typed for a
+        // local forward are a finished rule here.
+        let dynamic = fields(SshForwardKind::Dynamic, "1080", "", "");
+        assert!(dynamic.collect().is_some());
+        assert!(!dynamic.incomplete());
+    }
+
+    fn blank_like() -> ForwardFields {
+        ForwardFields {
+            kind: SshForwardKind::Local,
+            bind_host: String::new(),
+            bind_port: String::new(),
+            target_host: String::new(),
+            target_port: String::new(),
             description: String::new(),
         }
     }
