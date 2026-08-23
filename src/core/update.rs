@@ -3549,6 +3549,24 @@ mod tests {
         assert!(!is_stage_name("tty7.app"));
         assert!(!is_stage_name(".Trash"));
         assert!(!is_stage_name("tty7-update"));
+
+        // Named, not merely containing. On macOS `stage_roots` is the parent
+        // of the app bundle — `/Applications` for an ordinary install — and
+        // what matches here is handed to `remove_dir_all`. A predicate that
+        // asked `contains` instead of `starts_with` would pass every name
+        // below, and the sweep would take somebody's directory on the strength
+        // of a substring.
+        for theirs in [
+            "my-tty7-update-backup",
+            "old.tty7-update-abc123",
+            "backup of tty7-update-1",
+            "Adobe tty7-update-helper",
+        ] {
+            assert!(
+                !is_stage_name(theirs),
+                "{theirs:?} is not one of ours and must survive the sweep"
+            );
+        }
     }
 
     #[test]
