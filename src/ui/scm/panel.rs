@@ -2206,6 +2206,116 @@ mod tests {
             .collect()
     }
 
+    /// The groups the panel draws are the ones git itself would name.
+    ///
+    /// `in_group` is read off `XY` by way of `is_staged` / `is_unstaged` /
+    /// `is_untracked`, and every test of it so far has been against records
+    /// this file wrote. That checks the mapping against our reading of the
+    /// porcelain, not against git — and the two rows a mistake here produces
+    /// are a Stage button on a file with nothing staged and a Discard button
+    /// on a file whose only change is already in the index.
+    ///
+    /// So the same tree, described twice: once by `probe_status` and once by
+    /// the plumbing commands whose answers those groups are supposed to
+    /// mirror.
+    #[test]
+    fn every_group_matches_the_plumbing_command_it_stands_for() {
+        use std::collections::BTreeSet;
+
+        let host = tty7_core::host::local::LocalHost::new();
+        let repo = std::env::temp_dir().join(format!("tty7-groups-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let git = |args: &[&str]| -> Option<String> {
+            let out = host.git(&repo, args).ok()?;
+            out.success()
+                .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        let must = |args: &[&str]| {
+            assert!(git(args).is_some(), "git {args:?} failed");
+        };
+        if git(&["init", "--quiet"]).is_none() {
+            let _ = std::fs::remove_dir_all(&repo);
+            return; // no git on this machine
+        }
+        must(&["config", "user.email", "t@example.invalid"]);
+        must(&["config", "user.name", "t"]);
+        must(&["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+        // A base commit, then one file in each state a working tree can hold.
+        for name in [
+            "staged-edit.txt",
+            "worktree-edit.txt",
+            "both.txt",
+            "gone.txt",
+        ] {
+            std::fs::write(repo.join(name), "base\n").unwrap();
+        }
+        must(&["add", "-A"]);
+        must(&["commit", "--quiet", "-m", "base"]);
+
+        std::fs::write(repo.join("staged-edit.txt"), "staged\n").unwrap();
+        must(&["add", "staged-edit.txt"]);
+        std::fs::write(repo.join("worktree-edit.txt"), "worktree\n").unwrap();
+        std::fs::write(repo.join("both.txt"), "staged\n").unwrap();
+        must(&["add", "both.txt"]);
+        std::fs::write(repo.join("both.txt"), "and then more\n").unwrap();
+        std::fs::remove_file(repo.join("gone.txt")).unwrap();
+        std::fs::write(repo.join("brand-new.txt"), "new\n").unwrap();
+
+        let status = match tty7_core::core::git::status::probe_status(&*host, &repo) {
+            tty7_core::core::git::status::StatusProbe::Status(s) => *s,
+            other => panic!("the scratch repository has no status: {other:?}"),
+        };
+        let ours = |group: ScmGroup| -> BTreeSet<String> {
+            status
+                .entries
+                .iter()
+                .filter(|e| in_group(e, group))
+                .map(|e| e.path.as_str().to_string())
+                .collect()
+        };
+        let theirs = |args: &[&str]| -> BTreeSet<String> {
+            git(args)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+
+        assert_eq!(
+            ours(ScmGroup::Staged),
+            theirs(&["diff", "--cached", "--name-only"]),
+            "the Staged group and `git diff --cached` disagree"
+        );
+        assert_eq!(
+            ours(ScmGroup::Changes),
+            theirs(&["diff", "--name-only"]),
+            "the Changes group and `git diff` disagree"
+        );
+        assert_eq!(
+            ours(ScmGroup::Untracked),
+            theirs(&["ls-files", "--others", "--exclude-standard"]),
+            "the Untracked group and `git ls-files --others` disagree"
+        );
+        // The tree was arranged to put something in each of them, so an empty
+        // set on both sides cannot pass this off as agreement.
+        for (group, name) in [
+            (ScmGroup::Staged, "Staged"),
+            (ScmGroup::Changes, "Changes"),
+            (ScmGroup::Untracked, "Untracked"),
+        ] {
+            assert!(
+                !ours(group).is_empty(),
+                "{name} was empty, so it proved nothing"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
     #[test]
     fn a_file_staged_and_edited_again_lands_in_both_groups() {
         let e = entry(
