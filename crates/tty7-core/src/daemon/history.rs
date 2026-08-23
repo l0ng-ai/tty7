@@ -274,6 +274,93 @@ mod tests {
 
     use super::*;
 
+    /// The path a pane names for its own history is written by the shell, in
+    /// a pane, from an rc file — so it is whatever someone put there, and the
+    /// daemon appends the pane's history bytes to it. Two things have to hold
+    /// before that write, and neither had a fixture.
+    ///
+    /// A relative path resolves against the *daemon's* working directory, not
+    /// the pane's, so it names a file nobody meant — and the daemon's cwd is
+    /// not somewhere a user is thinking about when they set `HISTFILE`. A
+    /// directory is not a file to append to at all.
+    ///
+    /// A path that does not exist yet is fine and is the ordinary first-run
+    /// case, since this append is what creates it — but its parent has to
+    /// exist already, so a typo cannot make the daemon build a tree.
+    #[test]
+    fn a_pane_names_an_absolute_file_for_its_history_or_none() {
+        let dir = tempfile::TempDir::new().expect("a scratch directory");
+        let note = dir.path().join("pane.origin");
+        let say = |text: &str| {
+            std::fs::write(&note, text).unwrap();
+            read_origin(&note)
+        };
+
+        let existing = dir.path().join("zsh_history");
+        std::fs::write(&existing, b"ls\n").unwrap();
+        assert_eq!(
+            say(existing.to_str().unwrap()),
+            Some(existing.clone()),
+            "an absolute path to a file that is there"
+        );
+
+        let not_yet = dir.path().join("first_run_history");
+        assert_eq!(
+            say(not_yet.to_str().unwrap()),
+            Some(not_yet),
+            "and one that this append is about to create"
+        );
+
+        assert_eq!(
+            say("  \n"),
+            None,
+            "an empty note names nothing, and the empty path is not absolute"
+        );
+        assert_eq!(
+            say(".zsh_history"),
+            None,
+            "a relative path would land against the daemon's cwd"
+        );
+        assert_eq!(
+            say("../../.ssh/authorized_keys"),
+            None,
+            "and so would a relative path that walks upward"
+        );
+        // The two above are also refused by the parent check below, so on
+        // their own they never ask whether the path was absolute. This one
+        // does: `cargo test` runs with the package root as the working
+        // directory, so `Cargo.toml` is a relative name that resolves to a
+        // real file — which is the whole hazard, a name that looks harmless
+        // and lands on something the user never pointed at.
+        assert!(
+            Path::new("Cargo.toml").is_file(),
+            "this case needs a relative name that resolves; the test's working \
+             directory is not the package root"
+        );
+        assert_eq!(
+            say("Cargo.toml"),
+            None,
+            "a relative name is refused even when it does name a real file"
+        );
+        assert_eq!(
+            say(dir.path().to_str().unwrap()),
+            None,
+            "a directory is not a file to append to"
+        );
+        assert_eq!(
+            say(dir.path().join("no-such-dir/history").to_str().unwrap()),
+            None,
+            "and a parent that is not there is a typo, not a tree to build"
+        );
+
+        // Whitespace around the path is the shell's, not part of the name.
+        assert_eq!(
+            say(&format!("  {}  \n", existing.to_str().unwrap())),
+            Some(existing),
+            "the note is trimmed"
+        );
+    }
+
     /// A pane's history does not land on top of the window's.
     ///
     /// The window keeps the input bar's command store in the *file*
