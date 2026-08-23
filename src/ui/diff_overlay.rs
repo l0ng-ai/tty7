@@ -1738,6 +1738,24 @@ mod tests {
             "half a ref name says less than the whole of it"
         );
         assert_eq!(short_rev("3f2a1b9"), "3f2a1b9", "already short");
+
+        // Long enough to be an oid, and not one. Every case above is under
+        // forty characters, so `len() >= 40` decides them on its own and the
+        // hex test never gets a say — a ref name this long is the only input
+        // that asks it anything. `DiffSource::Range` puts two of these in one
+        // header, and cutting them to eight characters leaves "origin/…origin/".
+        let long_ref = "origin/feature/a-thoroughly-descriptive-branch-name";
+        assert!(long_ref.len() >= 40, "the fixture has to be oid-length");
+        assert_eq!(
+            short_rev(long_ref),
+            long_ref,
+            "a ref name is not an object id however long it is"
+        );
+
+        // And an oid-length string that is *nearly* hex is still a name.
+        let nearly = "3f2a1b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3z";
+        assert_eq!(nearly.len(), 40);
+        assert_eq!(short_rev(nearly), nearly, "one non-hex character is enough");
     }
 
     #[test]
