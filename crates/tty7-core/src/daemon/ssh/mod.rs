@@ -855,6 +855,41 @@ mod tests {
         );
     }
 
+    /// The live tests share `SshManager::global()`, and sharing is the point of
+    /// it: one asserts that a second `open_connection` is *reused*, and any
+    /// other test evicting the same key underneath it makes that false. Run
+    /// under `--ignored` they are the only tests running, and they still
+    /// overlap with each other, so they take turns.
+    static LIVE_SSH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn live_ssh_turn() -> std::sync::MutexGuard<'static, ()> {
+        LIVE_SSH.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Where the live tests point, and with what. Defaults chosen so that a
+    /// machine with Remote Login on needs no environment at all.
+    fn live_key_spec() -> NativeSshSpec {
+        let mut spec = base_spec();
+        spec.host = std::env::var("TTY7_LIVE_SSH_HOST").unwrap_or_else(|_| "localhost".into());
+        spec.user = std::env::var("TTY7_LIVE_SSH_USER")
+            .or_else(|_| std::env::var("USER"))
+            .expect("a user to log in as");
+        spec.port = std::env::var("TTY7_LIVE_SSH_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(22);
+        spec.identity_files = vec![std::env::var("TTY7_LIVE_SSH_KEY").unwrap_or_else(|_| {
+            format!(
+                "{}/.ssh/id_ed25519",
+                std::env::var("HOME").unwrap_or_default()
+            )
+        })];
+        spec.auth_mode = SshAuthMode::PublicKey;
+        spec.connect_timeout_s = Some(10);
+        spec.verify_host_keys = false;
+        spec
+    }
+
     /// The common case, end to end: key auth against a real sshd.
     ///
     /// tty7 speaks SSH itself rather than shelling out, and everything above
@@ -875,29 +910,14 @@ mod tests {
     #[test]
     #[ignore = "requires a live SSH server that accepts a key of yours"]
     fn live_key_auth_connects_and_opens_a_channel() {
-        let host = std::env::var("TTY7_LIVE_SSH_HOST").unwrap_or_else(|_| "localhost".into());
-        let user = std::env::var("TTY7_LIVE_SSH_USER")
-            .or_else(|_| std::env::var("USER"))
-            .expect("a user to log in as");
-        let port = std::env::var("TTY7_LIVE_SSH_PORT")
-            .ok()
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(22);
-        let key = std::env::var("TTY7_LIVE_SSH_KEY").unwrap_or_else(|_| {
-            format!(
-                "{}/.ssh/id_ed25519",
-                std::env::var("HOME").unwrap_or_default()
-            )
-        });
-
-        let mut spec = base_spec();
-        spec.host = host.clone();
-        spec.user = user.clone();
-        spec.port = port;
-        spec.auth_mode = SshAuthMode::PublicKey;
-        spec.identity_files = vec![key.clone()];
-        spec.connect_timeout_s = Some(10);
-        spec.verify_host_keys = false;
+        let _turn = live_ssh_turn();
+        let spec = live_key_spec();
+        let (host, user, key) = (
+            spec.host.clone(),
+            spec.user.clone(),
+            spec.identity_files[0].clone(),
+        );
+        let port = spec.port;
 
         let manager = SshManager::global();
         let broker = PromptBroker::new(Box::new(|_| true));
@@ -945,6 +965,82 @@ mod tests {
                 .expect("a second connection to the same host");
             assert!(reused, "the second ask should have been given the first one");
             assert_eq!(again.key(), conn.key());
+
+            conn.mark_dead();
+            manager.evict_connection(conn.key());
+        });
+    }
+
+    /// A tunnel through a real server carries bytes both ways.
+    ///
+    /// `open_direct_tcpip` is what every local forward and the SOCKS proxy are
+    /// built on, and what a remote workspace's control link rides. Its own
+    /// tests are about the *bookkeeping* — which rule is registered, what the
+    /// teardown reports — and none of them puts a byte through a socket. The
+    /// far end being this same machine costs nothing here: the channel is a
+    /// real one and the server on the other side of it is a real sshd, which
+    /// is the part that was never exercised.
+    ///
+    /// A listener of our own rather than a well-known port, so the test needs
+    /// nothing to be running and cannot be fooled by something that is.
+    #[test]
+    #[ignore = "requires a live SSH server that accepts a key of yours"]
+    fn live_direct_tcpip_carries_bytes_both_ways() {
+        let _turn = live_ssh_turn();
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let spec = live_key_spec();
+        let manager = SshManager::global();
+        let broker = PromptBroker::new(Box::new(|_| true));
+        manager.runtime.block_on(async {
+            // Something for the tunnel to reach: echo one line back, uppercased,
+            // so a reply cannot be an accident of buffering.
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("a loopback listener");
+            let port = listener.local_addr().expect("its address").port();
+            let served = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.expect("the tunnel connects");
+                let mut buf = [0u8; 64];
+                let n = sock.read(&mut buf).await.expect("read what came through");
+                let said = String::from_utf8_lossy(&buf[..n]).to_uppercase();
+                sock.write_all(said.as_bytes()).await.expect("answer it");
+                sock.flush().await.ok();
+                said
+            });
+
+            let (conn, _) = manager
+                .open_connection(&spec, &broker)
+                .await
+                .expect("a connection to tunnel through");
+            let mut channel = conn
+                .open_direct_tcpip("127.0.0.1", port)
+                .await
+                .expect("a direct-tcpip channel to our own listener");
+            channel
+                .data(&b"tty7-tunnel\n"[..])
+                .await
+                .expect("write into the tunnel");
+
+            let mut back = String::new();
+            while let Some(msg) = channel.wait().await {
+                if let russh::ChannelMsg::Data { ref data } = msg {
+                    back.push_str(&String::from_utf8_lossy(data));
+                    if back.contains('\n') {
+                        break;
+                    }
+                }
+            }
+            assert_eq!(
+                back.trim(),
+                "TTY7-TUNNEL",
+                "the far side answered through the tunnel"
+            );
+            assert_eq!(
+                served.await.expect("the listener finished").trim(),
+                "TTY7-TUNNEL",
+                "and had received what was sent"
+            );
 
             conn.mark_dead();
             manager.evict_connection(conn.key());
