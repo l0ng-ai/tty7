@@ -1710,6 +1710,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PaletteTryDifferentSearch => "Try a different search.",
         L10nKey::CompletionListingRemote => "listing remote…",
         L10nKey::CompletionRemoteListingFailed => "remote listing failed — {error}",
+        L10nKey::AppTabsKeptOnBulkClose => {
+            "{count} tabs kept — they hold unsaved changes, or a connection you asked to be warned about."
+        }
         L10nKey::PanelMoreChangedFiles => {
             "… and {count} more changed files — run git diff to see them."
         }
@@ -1878,6 +1881,13 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::ScmStagedFileCount, "zero") => "No staged changes",
         (L10nKey::ScmStagedFileCount, "one") => "1 file staged",
         (L10nKey::ScmStagedFileCount, "other") => "{count} files staged",
+        (L10nKey::AppTabsKeptOnBulkClose, "zero") => "No tabs were kept.",
+        (L10nKey::AppTabsKeptOnBulkClose, "one") => {
+            "1 tab kept — it holds unsaved changes, or a connection you asked to be warned about."
+        }
+        (L10nKey::AppTabsKeptOnBulkClose, "other") => {
+            "{count} tabs kept — they hold unsaved changes, or a connection you asked to be warned about."
+        }
         (L10nKey::PanelMoreChangedFiles, "zero") => {
             "… and 0 more changed files — run git diff to see them."
         }

@@ -1730,6 +1730,60 @@ mod unsaved_close_gpui_tests {
         });
     }
 
+    /// And it says how many it spared.
+    ///
+    /// Sparing them is the right bargain, but it was silent: "Close Other
+    /// Tabs" would leave two tabs standing with nothing to account for them,
+    /// which reads as the menu item having half worked. `scm_push` states the
+    /// rule this follows — a swallowed click looks exactly like an action that
+    /// finished instantly — and a close that keeps something back is one.
+    #[gpui::test]
+    fn a_bulk_close_says_how_many_tabs_it_kept(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 4);
+        let shown = |vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|window, cx| {
+                gpui_component::Root::read(window, cx)
+                    .notification
+                    .read(cx)
+                    .notifications()
+                    .len()
+            })
+        };
+
+        // Nothing kept, nothing said: a clean sweep needs no explanation.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_other_tabs(0, window, cx);
+        });
+        assert_eq!(shown(&mut vcx), 0, "a close that took everything spoke up");
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 4);
+        app.update_in(&mut vcx, |app, window, cx| {
+            for tab in [1, 2] {
+                app.activate(tab, window, cx);
+                app.editor_seed_dirty_file_for_test("/w/repo/draft.rs", window, cx);
+            }
+            app.activate(0, window, cx);
+            app.close_other_tabs(0, window, cx);
+        });
+        app.update(cx, |app, _| {
+            assert_eq!(app.tabs.len(), 3, "the kept tab and the two with edits");
+        });
+        assert_eq!(
+            shown(&mut vcx),
+            1,
+            "two tabs were left standing with nothing to account for them"
+        );
+
+        // And the sentence counts them, rather than saying only that some
+        // number of tabs survived.
+        let said =
+            crate::ui::i18n::t_plural(crate::ui::i18n::L10nKey::AppTabsKeptOnBulkClose, 2, &[]);
+        assert!(
+            said.contains('2'),
+            "the message does not say how many: {said:?}"
+        );
+    }
+
     /// A bulk close spares it instead of asking.
     ///
     /// One dialog per tab is not a question anyone can answer, so the bargain

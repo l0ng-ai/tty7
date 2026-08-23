@@ -4373,12 +4373,37 @@ impl Tty7App {
         // most tabs are in, so skipping it would close nothing; unsaved edits
         // are rare, and they are the one loss here that cannot be undone by
         // doing the thing again.
+        let mut kept = 0usize;
         for i in (0..self.tabs.len()).rev() {
-            if i == index || self.tab_keeps_unclosed_work(i, cx) {
+            if i == index {
+                continue;
+            }
+            if self.tab_keeps_unclosed_work(i, cx) {
+                kept += 1;
                 continue;
             }
             self.close_tab_inner(i, true, window, cx);
         }
+        self.say_what_a_bulk_close_kept(kept, window, cx);
+    }
+
+    /// Name the tabs a bulk close chose not to take.
+    ///
+    /// The skip is deliberate and stated above, but it was silent, and a menu
+    /// item called "Close Other Tabs" that leaves three of them open has done
+    /// something the reader can see and cannot account for. `scm_push` says
+    /// this about its own swallowed click — "a swallowed click on Push looks
+    /// exactly like a push that finished instantly" — and the same holds for a
+    /// close that keeps something back.
+    fn say_what_a_bulk_close_kept(&self, kept: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if kept == 0 {
+            return;
+        }
+        gpui_component::WindowExt::push_notification(
+            window,
+            crate::ui::i18n::t_plural(crate::ui::i18n::L10nKey::AppTabsKeptOnBulkClose, kept, &[]),
+            cx,
+        );
     }
 
     pub(crate) fn close_tabs_right_of(
@@ -4387,13 +4412,16 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Same bargain as `close_other_tabs`.
+        // Same bargain as `close_other_tabs`, and the same account of it.
+        let mut kept = 0usize;
         for i in ((index + 1)..self.tabs.len()).rev() {
             if self.tab_keeps_unclosed_work(i, cx) {
+                kept += 1;
                 continue;
             }
             self.close_tab_inner(i, true, window, cx);
         }
+        self.say_what_a_bulk_close_kept(kept, window, cx);
     }
 
     pub(crate) fn mark_tab_unread(&mut self, index: usize, cx: &mut Context<Self>) {

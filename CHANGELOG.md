@@ -153,6 +153,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- "Close Other Tabs" and "Close Tabs to the Right" now say how many tabs they
+  kept. Both deliberately spare a tab holding unsaved edits or a connection
+  whose profile asked to be warned about — one dialog per tab is not a question
+  anyone can answer — but they did it silently, so the menu item appeared to
+  half work and the surviving tabs had nothing to account for them.
 - The bootstrap tty7 runs on a remote machine now creates its own scratch
   directory instead of adopting one. The startup files a remote shell sources
   were written into `${TMPDIR:-/tmp}/tty7-zdotdir-$$`, created with `mkdir -p`,

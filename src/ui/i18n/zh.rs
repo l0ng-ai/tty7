@@ -1624,6 +1624,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaletteTryDifferentSearch => "换个关键词试试。",
         L10nKey::CompletionListingRemote => "正在列出远程目录…",
         L10nKey::CompletionRemoteListingFailed => "远程目录列表失败——{error}",
+        L10nKey::AppTabsKeptOnBulkClose => {
+            "保留了 {count} 个标签页——它们有未保存的修改，或有你要求提醒的连接。"
+        }
         L10nKey::PanelMoreChangedFiles => "…还有 {count} 个变更文件——运行 git diff 查看。",
         L10nKey::ScmFilesChanged => "{count} 个文件改动",
         L10nKey::ScmStagedFileCount => "已暂存 {count} 个文件",
@@ -1770,6 +1773,13 @@ pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'stat
         }
         (L10nKey::LaunchWorkspacesLeftRunning, "other") => {
             "只恢复了这个窗口——还有 {count} 个工作区在后台运行，可从侧边栏重新打开。"
+        }
+        (L10nKey::AppTabsKeptOnBulkClose, "zero") => "没有保留任何标签页。",
+        (L10nKey::AppTabsKeptOnBulkClose, "one") => {
+            "保留了 1 个标签页——它有未保存的修改，或有你要求提醒的连接。"
+        }
+        (L10nKey::AppTabsKeptOnBulkClose, "other") => {
+            "保留了 {count} 个标签页——它们有未保存的修改，或有你要求提醒的连接。"
         }
         (L10nKey::PanelMoreChangedFiles, "zero") => "…还有 0 个变更文件——运行 git diff 查看。",
         (L10nKey::PanelMoreChangedFiles, "one") => "…还有 1 个变更文件——运行 git diff 查看。",

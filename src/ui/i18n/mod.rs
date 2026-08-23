@@ -787,6 +787,7 @@ l10n_keys! {
     PanelNoChanges,
     PanelNoChangesHint,
     PanelMoreChangedFiles,
+    AppTabsKeptOnBulkClose,
     PanelSessionSubtitle,
     PanelConversationSubtitle,
     PanelProcessesSubtitle,

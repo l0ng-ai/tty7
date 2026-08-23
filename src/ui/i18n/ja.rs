@@ -1781,6 +1781,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaletteTryDifferentSearch => "別のキーワードを試してください。",
         L10nKey::CompletionListingRemote => "リモートを一覧しています…",
         L10nKey::CompletionRemoteListingFailed => "リモートの一覧に失敗しました — {error}",
+        L10nKey::AppTabsKeptOnBulkClose => {
+            "{count} 個のタブを残しました——保存していない変更、または警告するよう指定した接続があります。"
+        }
         L10nKey::PanelMoreChangedFiles => {
             "… さらに変更されたファイル {count} 個 — 表示するには `git diff` を実行してください"
         }
@@ -1946,6 +1949,13 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::ScmStagedFileCount, "zero") => "ステージされた変更はありません",
         (L10nKey::ScmStagedFileCount, "one") => "1 個のファイルがステージされました",
         (L10nKey::ScmStagedFileCount, "other") => "{count} 個のファイルがステージされました",
+        (L10nKey::AppTabsKeptOnBulkClose, "zero") => "残したタブはありません。",
+        (L10nKey::AppTabsKeptOnBulkClose, "one") => {
+            "1 個のタブを残しました——保存していない変更、または警告するよう指定した接続があります。"
+        }
+        (L10nKey::AppTabsKeptOnBulkClose, "other") => {
+            "{count} 個のタブを残しました——保存していない変更、または警告するよう指定した接続があります。"
+        }
         (L10nKey::PanelMoreChangedFiles, "zero") => {
             "… さらに変更されたファイル 0 個 — 表示するには `git diff` を実行してください"
         }
