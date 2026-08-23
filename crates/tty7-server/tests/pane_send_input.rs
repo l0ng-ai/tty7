@@ -268,3 +268,71 @@ fn a_preempting_attach_closes_the_displaced_controller_and_drops_its_input() {
 
     second.kill().expect("kill the pane");
 }
+
+/// What a pane prints comes back byte for byte, however awkward the text.
+///
+/// The replay's own tests cover wide cells and combining marks at the grid
+/// level, and they are the layer *after* this one: a pty, a ring, and a
+/// snapshot on a socket sit between what a program writes and what any of them
+/// see. Nothing exercised that chain with anything but ASCII.
+///
+/// Both spellings of an accented letter are here on purpose. A terminal must
+/// not normalise — `e` followed by U+0301 and a precomposed U+00E9 are
+/// different byte strings, a program that wrote one and reads back the other
+/// has been lied to, and Unicode normalisation is exactly the kind of
+/// helpfulness a layer in this chain might think to add.
+///
+/// The rest are the shapes that break naive width handling: a CJK pair that
+/// occupies two cells each, an emoji, a regional-indicator flag that is two
+/// code points and one glyph, and a ZWJ sequence that is three.
+#[test]
+fn awkward_text_survives_the_pty_and_the_ring_unchanged() {
+    let daemon = Daemon::start();
+    let panes = daemon.panes();
+
+    // Written with explicit escapes so this file's own encoding cannot decide
+    // what is being asked for.
+    const DECOMPOSED: &str = "e\\314\\201";
+    const PRECOMPOSED: &str = "\\303\\251";
+    let script = format!(
+        "printf 'cjk:\\344\\275\\240\\345\\245\\275|\\n'; \
+         printf 'dec:{DECOMPOSED}|\\n'; \
+         printf 'pre:{PRECOMPOSED}|\\n'; \
+         printf 'flag:\\360\\237\\207\\257\\360\\237\\207\\265|\\n'; \
+         printf 'zwj:\\360\\237\\221\\250\\342\\200\\215\\360\\237\\222\\273|\\n'; \
+         printf 'DONE\\n'"
+    );
+
+    let mut session = panes
+        .spawn(None, size(), Some(one_shot_shell(&script)), None, None)
+        .expect("spawn a pane that prints the corpus");
+    session
+        .set_recv_timeout(Some(STREAM_WITHIN))
+        .expect("bound the stream reads");
+    let seen = collect_until(&mut session, b"DONE");
+
+    for (what, bytes) in [
+        ("a CJK pair", &b"cjk:\xe4\xbd\xa0\xe5\xa5\xbd|"[..]),
+        ("a decomposed accent", &b"dec:e\xcc\x81|"[..]),
+        ("a precomposed accent", &b"pre:\xc3\xa9|"[..]),
+        ("a regional-indicator flag", &b"flag:\xf0\x9f\x87\xaf\xf0\x9f\x87\xb5|"[..]),
+        ("a ZWJ sequence", &b"zwj:\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x92\xbb|"[..]),
+    ] {
+        assert!(
+            windows_contain(&seen, bytes),
+            "{what} did not come back as it was written; saw {:?}",
+            String::from_utf8_lossy(&seen)
+        );
+    }
+
+    // And the two accents stayed different, which is the whole point of
+    // sending both: a normalising layer would make these identical.
+    assert!(
+        !windows_contain(&seen, b"dec:\xc3\xa9|"),
+        "the decomposed accent was normalised into a precomposed one"
+    );
+    assert!(
+        !windows_contain(&seen, b"pre:e\xcc\x81|"),
+        "the precomposed accent was decomposed"
+    );
+}
