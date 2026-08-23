@@ -855,6 +855,100 @@ mod tests {
         );
     }
 
+    /// `glob_match` decides which `known_hosts` line speaks for the machine
+    /// being connected to, so a pattern that matches one host too many trusts
+    /// a key for a host it was never written for, and one that matches too
+    /// few sends someone through a host-key warning they should never see.
+    /// It is also the shape of code — an iterative matcher with one
+    /// backtracking point — whose bugs live in the cases nobody writes a
+    /// fixture for: a trailing star, two stars in a row, a star that has to
+    /// give ground more than once.
+    ///
+    /// So it is checked against the obvious recursive definition, over every
+    /// pattern of up to five characters drawn from `a b * ?` and every text of
+    /// up to four drawn from `a b A` — a hundred and sixty-five thousand
+    /// pairs, which is exhaustive rather than sampled. `A` is in the text
+    /// alphabet and not the pattern's, so case folding is exercised on its own
+    /// rather than only where both sides happen to agree.
+    #[test]
+    fn the_host_glob_agrees_with_the_definition_of_a_glob() {
+        /// `*` matches any run, `?` one character, everything else itself,
+        /// ASCII case-insensitively — read straight off the definition, with
+        /// no state to get wrong.
+        fn reference(pattern: &[u8], text: &[u8]) -> bool {
+            match pattern.first() {
+                None => text.is_empty(),
+                Some(b'*') => {
+                    reference(&pattern[1..], text)
+                        || (!text.is_empty() && reference(pattern, &text[1..]))
+                }
+                Some(b'?') => !text.is_empty() && reference(&pattern[1..], &text[1..]),
+                Some(c) => {
+                    !text.is_empty()
+                        && c.eq_ignore_ascii_case(&text[0])
+                        && reference(&pattern[1..], &text[1..])
+                }
+            }
+        }
+
+        fn every_string(alphabet: &[u8], max_len: usize) -> Vec<Vec<u8>> {
+            let mut out = vec![Vec::new()];
+            let mut frontier = vec![Vec::new()];
+            for _ in 0..max_len {
+                let mut next = Vec::new();
+                for prefix in &frontier {
+                    for &c in alphabet {
+                        let mut s = prefix.clone();
+                        s.push(c);
+                        next.push(s);
+                    }
+                }
+                out.extend_from_slice(&next);
+                frontier = next;
+            }
+            out
+        }
+
+        for pattern in every_string(b"ab*?", 5) {
+            for text in every_string(b"abA", 4) {
+                assert_eq!(
+                    glob_match(&pattern, &text),
+                    reference(&pattern, &text),
+                    "pattern {:?} against {:?}",
+                    String::from_utf8_lossy(&pattern),
+                    String::from_utf8_lossy(&text),
+                );
+            }
+        }
+    }
+
+    /// The shapes an actual `known_hosts` file carries, so the exhaustive
+    /// check above is anchored to something recognisable.
+    #[test]
+    fn a_host_pattern_matches_the_hosts_it_is_meant_to() {
+        assert!(host_glob_matches("*.example.com", "build.example.com"));
+        assert!(host_glob_matches("*.example.com", "a.b.example.com"));
+        assert!(
+            !host_glob_matches("*.example.com", "example.com"),
+            "the dot is part of the pattern"
+        );
+        assert!(
+            !host_glob_matches("*.example.com", "example.com.evil.net"),
+            "a suffix pattern must not match a prefix of a longer name"
+        );
+        assert!(host_glob_matches("web?.example.com", "web1.example.com"));
+        assert!(!host_glob_matches("web?.example.com", "web12.example.com"));
+        assert!(
+            host_glob_matches("EXAMPLE.com", "example.COM"),
+            "host names are case-insensitive, pattern or not"
+        );
+        assert!(
+            host_glob_matches("[*.example.com]:2222", "[a.example.com]:2222"),
+            "a bracketed non-default port is matched as part of the token"
+        );
+        assert!(!host_glob_matches("[*.example.com]:2222", "a.example.com"));
+    }
+
     #[test]
     fn cert_authority_line_is_skipped_not_flagged_as_changed() {
         let ka = key(KEY_A);
