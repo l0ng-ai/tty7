@@ -14,6 +14,18 @@ pub trait Sandbox {
         let _ = (target, link);
         None
     }
+
+    /// Turns `p`'s executable bit on, or `None` where the idea does not apply.
+    fn set_executable(&self, p: &Path) -> Option<io::Result<()>> {
+        let _ = p;
+        None
+    }
+
+    /// Whether `p` is executable, or `None` where the idea does not apply.
+    fn is_executable(&self, p: &Path) -> Option<io::Result<bool>> {
+        let _ = p;
+        None
+    }
 }
 
 #[macro_export]
@@ -39,6 +51,7 @@ macro_rules! for_each_host_case {
             read_file_on_a_dir_errors,
             write_file_creates_and_overwrites,
             write_file_reports_its_own_metadata,
+            write_file_keeps_the_executable_bit,
             write_file_to_missing_parent_errors,
             create_file_new_rejects_existing,
             create_dir_non_recursive_needs_parent,
@@ -431,6 +444,36 @@ pub fn write_file_reports_its_own_metadata(h: &dyn Host, sb: &dyn Sandbox) {
     assert_ne!(
         after, wrote,
         "a subsequent write must be distinguishable from ours"
+    );
+}
+
+/// Saving a file must not cost it its executable bit.
+///
+/// A save is an overwrite of a file that already exists, and the mode belongs
+/// to the file rather than to the write — so a host that writes by creating a
+/// fresh file, or by handing the far side an explicit set of attributes, turns
+/// a script into something the shell will no longer run. Nothing about the
+/// edit said to do that, and nothing in the UI would report it.
+pub fn write_file_keeps_the_executable_bit(h: &dyn Host, sb: &dyn Sandbox) {
+    let f = h.join(sb.path(), "run.sh");
+    h.write_file(&f, b"#!/bin/sh\necho before\n").unwrap();
+
+    let Some(marked) = sb.set_executable(&f) else {
+        return;
+    };
+    marked.unwrap();
+    assert!(
+        sb.is_executable(&f)
+            .expect("a sandbox that can set the bit can read it")
+            .unwrap(),
+        "the sandbox could not make the file executable to begin with"
+    );
+
+    h.write_file(&f, b"#!/bin/sh\necho after\n").unwrap();
+
+    assert!(
+        sb.is_executable(&f).expect("still readable").unwrap(),
+        "saving the script took its executable bit away"
     );
 }
 

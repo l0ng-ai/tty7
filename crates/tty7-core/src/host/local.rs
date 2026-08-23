@@ -501,6 +501,35 @@ mod tests {
                 None
             }
         }
+
+        fn set_executable(&self, p: &Path) -> Option<io::Result<()>> {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                Some(std::fs::set_permissions(
+                    p,
+                    std::fs::Permissions::from_mode(0o755),
+                ))
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = p;
+                None
+            }
+        }
+
+        fn is_executable(&self, p: &Path) -> Option<io::Result<bool>> {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                Some(std::fs::metadata(p).map(|m| m.permissions().mode() & 0o111 != 0))
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = p;
+                None
+            }
+        }
     }
 
     fn sandbox() -> (SharedHost, TempSandbox) {
