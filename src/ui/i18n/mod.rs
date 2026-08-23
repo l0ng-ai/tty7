@@ -1373,9 +1373,12 @@ l10n_keys! {
 /// is folded into one warning and a genuinely stale key hides in the crowd.
 ///
 /// **Delete a key from this list as soon as something renders it.**
+/// `no_key_here_is_already_being_rendered` fails until you do — the
+/// instruction was here before and `ScmCheckoutBranch` sat in the list for as
+/// long as it took someone to notice, which is exactly the crowd this list
+/// exists to prevent.
 #[allow(dead_code)]
 const SCM_KEYS_AWAITING_A_CALLER: &[L10nKey] = &[
-    L10nKey::ScmCheckoutBranch,
     L10nKey::ScmCommitDetailTitle,
     L10nKey::ScmCommitStaged,
     L10nKey::ScmResetToCommit,
@@ -1889,6 +1892,65 @@ mod tests {
         assert!(
             checked > 20,
             "only {checked} keys have branches — did the catalogue move?"
+        );
+    }
+
+    /// Nothing on the awaiting-a-caller list is already being rendered.
+    ///
+    /// The list buys one thing: `dead_code` keeps reporting on the rest of the
+    /// enum, so a genuinely stale key cannot hide in a crowd of unused ones.
+    /// A key that something *does* render spends that in reverse — the list
+    /// stops being an inventory of what is unbuilt and becomes a place things
+    /// are forgotten. `ScmCheckoutBranch` sat here after the inline "switch to
+    /// which branch" input started using it as its placeholder, which is the
+    /// same feature whose action was once "registered, listed and bindable,
+    /// and invoking it silently did nothing".
+    ///
+    /// Read off the sources rather than tracked by hand, because tracking it
+    /// by hand is the thing that failed.
+    #[test]
+    fn no_key_here_is_already_being_rendered() {
+        fn walk(dir: &std::path::Path, out: &mut String) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .expect("the ui sources are readable")
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    walk(&path, out);
+                    continue;
+                }
+                // The language files name every key by definition; only a
+                // rendering site counts.
+                let in_i18n = path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .is_some_and(|n| n == "i18n");
+                if in_i18n || path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                out.push_str(&std::fs::read_to_string(&path).expect("a source file reads"));
+            }
+        }
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert!(src.is_dir(), "the sources moved: {src:?}");
+        let mut all = String::new();
+        walk(&src, &mut all);
+
+        let live: Vec<String> = super::SCM_KEYS_AWAITING_A_CALLER
+            .iter()
+            .map(|key| format!("{key:?}"))
+            .filter(|name| all.contains(&format!("L10nKey::{name}")))
+            .collect();
+        assert!(
+            live.is_empty(),
+            "these are rendered somewhere and no longer await a caller; take \
+             them off SCM_KEYS_AWAITING_A_CALLER so a key that is genuinely \
+             stale still stands out:\n  {}",
+            live.join("\n  ")
         );
     }
 }
