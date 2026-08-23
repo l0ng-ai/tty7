@@ -677,6 +677,23 @@ pub(crate) fn classify(stderr: &str, status: Option<i32>) -> GitOpErrorKind {
     }
 }
 
+/// Why a git command produced no output at all.
+///
+/// The deadline expiring is its own kind, and the distinction is the whole
+/// reason both exist: `Spawn` tells the user git could not be run and to look
+/// at their install, which is the wrong thing to say about a push that is
+/// still going on the far side and may yet land. Only a remote host can
+/// produce it — the local `git_with_deadline` has no timeout of its own — and
+/// the `TimedOut` it turns on is set three files away in
+/// `ControlClient::call_with_deadline`, pinned there by
+/// `a_request_that_outlives_its_deadline_reports_a_timeout_and_cancels`.
+fn unstarted_kind(err: &std::io::Error) -> GitOpErrorKind {
+    match err.kind() {
+        std::io::ErrorKind::TimedOut => GitOpErrorKind::Timeout,
+        _ => GitOpErrorKind::Spawn,
+    }
+}
+
 fn fallback_message(kind: GitOpErrorKind) -> &'static str {
     match kind {
         GitOpErrorKind::NotARepo => "not a git repository",
@@ -748,10 +765,7 @@ pub fn run_op(
             // A deadline expiry is its own kind: "git could not be run" tells
             // the user to check their install, when the truth is the job was
             // running — and on a remote host may still be.
-            kind: match err.kind() {
-                std::io::ErrorKind::TimedOut => GitOpErrorKind::Timeout,
-                _ => GitOpErrorKind::Spawn,
-            },
+            kind: unstarted_kind(&err),
             message: err.to_string(),
             detail: err.to_string(),
             rerun_argv: rerun(),
@@ -1564,6 +1578,34 @@ mod tests {
 
     fn kind_of(stderr: &str) -> GitOpErrorKind {
         classify(stderr, Some(1))
+    }
+
+    /// A deadline that expired is not a git that would not start.
+    #[test]
+    fn a_deadline_expiring_is_its_own_kind_of_failure() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            unstarted_kind(&Error::new(
+                ErrorKind::TimedOut,
+                "control request timed out"
+            )),
+            GitOpErrorKind::Timeout,
+            "a timeout reported as Spawn tells the user to check an install \
+             that is fine, about a job that may still be running"
+        );
+        for other in [
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::ConnectionReset,
+            ErrorKind::BrokenPipe,
+            ErrorKind::Other,
+        ] {
+            assert_eq!(
+                unstarted_kind(&Error::new(other, "x")),
+                GitOpErrorKind::Spawn,
+                "{other:?} is git failing to run, not a deadline"
+            );
+        }
     }
 
     #[test]

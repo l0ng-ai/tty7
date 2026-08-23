@@ -2599,6 +2599,66 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
 
+    /// A request the peer never answers times out *as a timeout*.
+    ///
+    /// `ops::run_op` reads exactly this: `ErrorKind::TimedOut` becomes
+    /// `GitOpErrorKind::Timeout` and everything else becomes `Spawn`, whose
+    /// message tells the user git could not be run and to check their install.
+    /// For a push still going on the far side that is the wrong thing to say,
+    /// which is why the two are separated at all — and the separation rests on
+    /// this one `ErrorKind`, three files away, with nothing holding it there.
+    ///
+    /// The cancel matters as much as the error: the client gives up, but the
+    /// server is still working, and without it the reply arrives for a request
+    /// nobody is waiting on.
+    #[test]
+    fn a_request_that_outlives_its_deadline_reports_a_timeout_and_cancels() {
+        let (seen_tx, seen) = std::sync::mpsc::channel();
+        let client = client_with_peer(no_events(), move |mut sock| {
+            // Read whatever arrives and answer none of it.
+            while let Ok(msg) = ControlClientMsg::read(&mut sock) {
+                if seen_tx.send(format!("{msg:?}")).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let err = client
+            .call_with_deadline(ControlRequest::Ping, &[], Duration::from_millis(300))
+            .expect_err("a peer that never answers cannot succeed");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::TimedOut,
+            "anything else here reaches the user as \"git could not be run\"; \
+             got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the deadline was not honoured: waited {:?}",
+            started.elapsed()
+        );
+
+        let mut saw_request = false;
+        let mut saw_cancel = false;
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < until && !(saw_request && saw_cancel) {
+            if let Ok(msg) = seen.recv_timeout(Duration::from_millis(200)) {
+                saw_request |= msg.contains("Request");
+                saw_cancel |= msg.contains("Cancel");
+            }
+        }
+        assert!(
+            saw_request,
+            "the peer never received the request, so the timeout proved nothing"
+        );
+        assert!(
+            saw_cancel,
+            "the client gave up without telling the server, which leaves it \
+             working on a reply nobody will read"
+        );
+    }
+
     fn client_with_peer<F>(events: EventSink, serve: F) -> ControlClient
     where
         F: FnOnce(TcpStream) + Send + 'static,
