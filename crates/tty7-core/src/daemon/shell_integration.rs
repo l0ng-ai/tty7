@@ -2117,6 +2117,66 @@ mod tests {
         );
     }
 
+    /// bash over a real pty, which reaches the shell a different way.
+    ///
+    /// zsh is steered with `ZDOTDIR` in the environment; bash is steered with
+    /// `--rcfile … -i` on the command line, and `replaces_argv` is true for it
+    /// alone. Those are separate mechanisms with separate ways to break — a
+    /// dropped `-i` leaves a shell that runs the rc and exits, and a bad
+    /// `--rcfile` path leaves a shell with no integration and no complaint.
+    /// Neither had ever been run.
+    ///
+    /// Through `setup` for the reason
+    /// `zsh_reports_the_full_prompt_cycle_over_a_real_pty` gives: the empty
+    /// sentinel is what stops the injected rc guarding itself off inside a
+    /// tty7 pane.
+    #[cfg(unix)]
+    #[test]
+    fn bash_reports_the_full_prompt_cycle_over_a_real_pty() {
+        let bash = [
+            "/bin/bash",
+            "/usr/bin/bash",
+            "/usr/local/bin/bash",
+            "/opt/homebrew/bin/bash",
+        ]
+        .into_iter()
+        .find(|p| Path::new(p).exists());
+        let Some(bash) = bash else {
+            eprintln!("skipping: no bash on this machine");
+            return;
+        };
+        let injection = setup(Some(bash), &[], false).expect("bash integration");
+        assert_eq!(
+            injection
+                .env
+                .get("TTY7_SHELL_INTEGRATION")
+                .map(String::as_str),
+            Some(""),
+            "without the reset the injected rc guards itself off and this test \
+             would pass on whatever bash prints by itself"
+        );
+        assert!(
+            injection.args.iter().any(|a| a == "-i"),
+            "bash needs -i or it runs the rc and exits: {:?}",
+            injection.args
+        );
+
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME"));
+        let text = prompt_cycle_over_pty(bash, &injection, b"false\r", Some(&home));
+
+        for mark in ["133;A", "133;B", "133;C", FAILED_COMMAND_MARK] {
+            assert!(
+                text.contains(mark),
+                "bash must report {mark:?}; got:\n{text}"
+            );
+        }
+        assert_eq!(
+            reported_cwd(&text),
+            home.canonicalize().unwrap_or(home.clone()),
+            "OSC 7 must name the pane's real cwd"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn pwsh_reports_the_full_prompt_cycle_over_a_real_pty_on_unix() {
