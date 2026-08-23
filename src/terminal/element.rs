@@ -2698,6 +2698,35 @@ mod tests {
         );
     }
 
+    /// Every other mark fixture puts something after the marked cell, so the
+    /// lookahead that asks whether the next cell is a wide char's spacer never
+    /// had to cope with there being no next cell. There is one whenever the
+    /// mark lands in the last column — an accented letter typed at the right
+    /// margin — and that read is the only one in this loop that indexes the row
+    /// directly rather than going through `get`. Unguarded it panics, and a
+    /// panic here takes the window down mid-frame.
+    #[test]
+    fn a_mark_in_the_last_column_has_no_cell_to_look_ahead_to() {
+        let mut row = vec![cell('a'), cell('e')];
+        row[1].marks = Some(Box::from(['\u{0301}']));
+        assert_eq!(
+            segment_row(&row),
+            [run(0, 1, "a"), cluster(1, 1, "e\u{0301}")]
+        );
+
+        // The same edge for the sara-am lookahead beside it, and for a row of
+        // exactly one marked cell — the narrowest row that can carry a mark.
+        let mut row = vec![cell('\u{0E19}')];
+        row[0].marks = Some(Box::from(['\u{0E49}']));
+        assert_eq!(segment_row(&row), [cluster(0, 1, "\u{0E19}\u{0E49}")]);
+
+        // And a regional indicator with nothing to pair with, which reaches the
+        // same lookahead by the other branch above it.
+        let mut row = vec![cell('\u{1F1E6}')];
+        row[0].marks = Some(Box::from(['\u{0301}']));
+        assert_eq!(segment_row(&row), [cluster(0, 1, "\u{1F1E6}\u{0301}")]);
+    }
+
     #[test]
     fn segment_row_absorbs_sara_am_into_its_base() {
         let mut row = vec![cell('\u{0E19}'), cell('\u{0E33}'), cell('a')];

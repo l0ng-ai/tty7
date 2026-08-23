@@ -804,6 +804,37 @@ mod tests {
         );
     }
 
+    /// Identity is the *pair*. Kitty lets one image be shown in several places
+    /// at once — that is what the placement id is for, and a shell drawing the
+    /// same icon down a column sends exactly this — so a transmit for one
+    /// placement must leave the others where they are. Matching on the id alone
+    /// makes every new placement evict the previous one, and an image shown
+    /// three times renders once, at the last spot it was sent to.
+    #[test]
+    fn one_image_can_hold_several_placements_at_once() {
+        let store = ImageStore::new();
+        store.place(placed(7, 1));
+        store.place(placed(7, 2));
+        store.place(placed(7, 3));
+        assert_eq!(
+            store.snapshot().len(),
+            3,
+            "one id at three placements is three things on screen"
+        );
+
+        // And a re-transmit still replaces its own placement, only its own.
+        store.place(placed(7, 2));
+        let live = store.snapshot();
+        assert_eq!(
+            live.len(),
+            3,
+            "the re-transmit replaced rather than stacked"
+        );
+        let mut seen: Vec<u32> = live.iter().map(|p| p.placement).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, [1, 2, 3], "and replaced the one it names");
+    }
+
     #[test]
     fn anonymous_images_coexist() {
         let store = ImageStore::new();
