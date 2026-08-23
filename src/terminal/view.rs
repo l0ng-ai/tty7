@@ -3295,7 +3295,12 @@ impl TerminalView {
         if running && self.running_agent.is_none() {
             self.running_agent = self.terminal.foreground_agent();
         }
-        let cmd_finished = self.running_since.is_some() && !running;
+        // Set in the arm rather than restated beside it: this is the same
+        // condition the match below already decides, and two spellings of one
+        // rule five lines apart are two rules the moment either is edited. The
+        // source control edge refresh downstream reads this flag, and a drift
+        // between the copies would show up there and nowhere near here.
+        let mut cmd_finished = false;
         match (self.running_since, running) {
             (None, true) => {
                 self.running_since = Some(std::time::Instant::now());
@@ -3303,6 +3308,7 @@ impl TerminalView {
                 self.running_agent = self.terminal.foreground_agent();
             }
             (Some(start), false) => {
+                cmd_finished = true;
                 let elapsed = start.elapsed();
                 let title = std::mem::take(&mut self.running_title);
                 let agent = self.running_agent.take();
@@ -3560,10 +3566,13 @@ impl TerminalView {
             return false;
         }
         let prev = std::mem::replace(&mut self.last_agent_status, status);
-        let turn_finished = status == Some(AgentStatus::Done) && prev != Some(AgentStatus::Done);
+        // Same rule, same reason as `cmd_finished` above: decided once, in the
+        // arm that already tests it.
+        let mut turn_finished = false;
 
         match status {
             Some(AgentStatus::Done) if prev != Some(AgentStatus::Done) => {
+                turn_finished = true;
                 self.agent_result_unread = !self.focused;
                 self.keep_unread_on_focus = false;
             }
