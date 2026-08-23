@@ -833,15 +833,62 @@ fn is_msys_bash(program: &str) -> bool {
     !(dir == system_root || dir.starts_with(&format!("{system_root}\\")))
 }
 
+/// A scratch directory for a shell's startup files, owned by this user alone.
+///
+/// What goes in here is *sourced by the shell*: `setup_zsh` points `ZDOTDIR`
+/// at it, and zsh then reads `.zshenv`, `.zprofile`, `.zshrc` and `.zlogin`
+/// out of it on every pane. bash and nu are pointed at theirs the same way.
+///
+/// The name is `<prefix><pid>-<seq>`, which the reaper depends on and which is
+/// therefore entirely predictable — and on Linux the system temp directory is
+/// `/tmp`, mode 1777, where any account can create a name before this does.
+/// `create_dir_all` succeeds on a directory that is already there, so the
+/// files would have been written into one somebody else owned, who could then
+/// rewrite them in the moment between the write and the shell reading them.
+///
+/// So: created, never adopted. `DirBuilder::create` fails if the path exists,
+/// and the mode rides on the creating syscall rather than a chmod afterwards,
+/// so there is no instant at which the directory is present and readable by
+/// anyone else. A name already taken is not an error to report but a name to
+/// step over — that is all an attacker holding one can accomplish.
 fn throwaway_dir(prefix: &str) -> Option<PathBuf> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut dir = std::env::temp_dir();
-    dir.push(format!("{prefix}{}-{seq}", std::process::id()));
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
+    let base = std::env::temp_dir();
+    for _ in 0..ATTEMPTS {
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = base.join(format!("{prefix}{}-{seq}", std::process::id()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        match builder.create(&dir) {
+            Ok(()) => return Some(dir),
+            // Ours from an earlier pane in this process, or somebody else's.
+            // Either way the next sequence number is untaken.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                log::warn!(
+                    "could not make a shell scratch dir at {}: {e}",
+                    dir.display()
+                );
+                return None;
+            }
+        }
+    }
+    log::warn!(
+        "gave up making a shell scratch directory under {}",
+        base.display()
+    );
+    None
 }
+
+/// How many names [`throwaway_dir`] will try before giving up. Each failure
+/// means the name was taken, and the shell simply starts without tty7's
+/// integration rather than reading files from a directory it does not own.
+const ATTEMPTS: usize = 64;
 
 /// The `<pid>` a throwaway directory's name carries, if it carries one.
 ///
@@ -2095,6 +2142,57 @@ mod tests {
             !script.contains("TTY7_USER_ZDOTDIR"),
             "the bootstrap must not carry a ZDOTDIR this side made up"
         );
+    }
+
+    /// A shell's scratch directory is made by this process, at 0700, or not
+    /// used at all.
+    ///
+    /// The files in it are sourced by the shell. The name is predictable —
+    /// `<prefix><pid>-<seq>`, which the reaper reads — and on Linux the system
+    /// temp directory is `/tmp`, mode 1777, so the name is one any account can
+    /// take first. `create_dir_all` adopted whatever was there; a directory
+    /// somebody else owns is one they can rewrite `.zshrc` in between tty7
+    /// writing it and zsh reading it.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_scratch_directory_is_created_by_us_and_closed_to_others() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let first = throwaway_dir("tty7-scratchtest-").expect("a scratch directory");
+        assert_eq!(
+            std::fs::metadata(&first).unwrap().permissions().mode() & 0o7777,
+            0o700,
+            "the shell's startup files are readable by other accounts"
+        );
+
+        // A name already taken is stepped over, not adopted: this is what an
+        // attacker who guessed the pid and sequence leaves behind.
+        let squatted = first.with_file_name(format!("tty7-squattest-{}-0", std::process::id()));
+        std::fs::create_dir_all(&squatted).unwrap();
+        std::fs::set_permissions(&squatted, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let got = throwaway_dir("tty7-squattest-").expect("a scratch directory");
+        assert_ne!(
+            got, squatted,
+            "the directory somebody else had already made was used anyway"
+        );
+        assert_eq!(
+            std::fs::metadata(&squatted).unwrap().permissions().mode() & 0o7777,
+            0o777,
+            "somebody else's directory was re-permissioned instead of left alone"
+        );
+
+        // And the reaper still reads the owner out of the names it hands back.
+        for dir in [&first, &got] {
+            let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(
+                name.contains(&format!("{}-", std::process::id())),
+                "{name} no longer carries the pid the reaper matches on"
+            );
+        }
+
+        for dir in [&first, &got, &squatted] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

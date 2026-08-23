@@ -153,6 +153,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A shell's scratch directory is now created by tty7 alone, closed to other
+  accounts. The startup files a pane's shell sources — the redirectors
+  `ZDOTDIR` points zsh at, and bash's and nu's equivalents — were written into
+  a predictably named directory under the system temp directory, adopting one
+  that was already there. On Linux that directory is `/tmp`, mode 1777, so
+  another account could take the name first and then rewrite those files in the
+  moment between tty7 writing them and the shell reading them. The directory is
+  now created exclusively, with its mode set by the creating syscall; a name
+  already taken is stepped over rather than adopted.
 - A screenshot pasted into a pane is staged only in a directory this user owns.
   The staging directory under the system temp directory was created with no
   mode at all — harmless on macOS, where that is a per-user location, but on
