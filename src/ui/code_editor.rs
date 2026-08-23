@@ -375,6 +375,20 @@ impl Tty7App {
             .map(|f| f.label().to_string())
     }
 
+    /// The first unwritten buffer anywhere in the window, and the tab holding
+    /// it.
+    ///
+    /// [`Self::tab_unsaved_edit`] asks about one tab, which is the question a
+    /// tab close has. Closing the *window* takes every tab at once, and had
+    /// been asking nothing at all: the layout is saved and the shells go on
+    /// running under the daemon — that is what makes closing a window the
+    /// keep-everything exit — but a buffer lives in the window, and nothing
+    /// writes it down. So the one loss the tab path calls unrecoverable was
+    /// the one loss the window path took silently.
+    pub(crate) fn unsaved_edit_in_window(&self) -> Option<(usize, String)> {
+        (0..self.tabs.len()).find_map(|ix| Some((ix, self.tab_unsaved_edit(ix)?)))
+    }
+
     pub(crate) fn tab_code(&self) -> Option<&TabCode> {
         self.tabs.get(self.active)?.code.as_deref()
     }
@@ -1874,6 +1888,96 @@ mod unsaved_close_gpui_tests {
             "three\r\none\r\ntwo\r\n",
             "the saved file kept the endings it came with"
         );
+    }
+
+    /// Closing the window asks about a buffer nothing has written down.
+    ///
+    /// A tab close has asked since #672; the window close never did. The
+    /// shells survive a window closing — they belong to the daemon, which is
+    /// what makes it the keep-everything exit — but the code panel's buffers
+    /// belong to the window, and no session file carries them. So the one
+    /// loss the tab path calls unrecoverable was the one the window path took
+    /// without a word.
+    #[gpui::test]
+    fn closing_the_window_asks_about_an_unwritten_buffer(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert!(
+                app.unsaved_edit_to_confirm().is_none(),
+                "a window with nothing unsaved must close without a question"
+            );
+
+            // Put the buffer in a tab that is *not* the active one: closing
+            // the window takes every tab, so the question cannot be about
+            // whichever one happens to be in front.
+            app.activate(1, window, cx);
+            app.editor_seed_dirty_file_for_test("/w/repo/notes.md", window, cx);
+            app.activate(0, window, cx);
+
+            let (tab, name) = app
+                .unsaved_edit_to_confirm()
+                .expect("the window is holding an unwritten buffer");
+            assert_eq!(tab, 1, "and it names the tab holding it, not the active one");
+            assert_eq!(name, "notes.md");
+        });
+    }
+
+    /// The window really does refuse to close, and really does close when
+    /// there is nothing to lose.
+    ///
+    /// The decision is tested above; this drives the callback gpui actually
+    /// calls, because a guard that answers correctly and is wired to nothing
+    /// is the same as no guard — and one wired wrongly is worse: a window
+    /// that will not shut.
+    #[gpui::test]
+    fn the_window_close_callback_refuses_only_when_something_is_unwritten(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::ui::windows::WindowRegistry::init);
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        assert!(
+            vcx.simulate_close(),
+            "a window with nothing unsaved closes when asked"
+        );
+
+        let (app2, mut vcx2, _streams2) = harness_with_tabs(cx, 2);
+        app2.update_in(&mut vcx2, |app, window, cx| {
+            app.editor_seed_dirty_file_for_test("/w/repo/notes.md", window, cx);
+        });
+        assert!(
+            !vcx2.simulate_close(),
+            "a window holding an unwritten buffer does not close on the first ask"
+        );
+
+        // And once answered it goes, rather than asking again forever.
+        app2.update(cx, |app, _| app.confirm_window_close_for_test());
+        assert!(
+            vcx2.simulate_close(),
+            "the answer lets the next close through"
+        );
+        let _ = app;
+    }
+
+    /// Once answered, the close that follows is not asked about again.
+    ///
+    /// `on_window_should_close` has to answer synchronously and the prompt
+    /// lands later, so the real close is a second one made from the answer.
+    /// Without this the window would ask forever and never shut.
+    #[gpui::test]
+    fn a_confirmed_window_close_is_not_asked_about_twice(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.editor_seed_dirty_file_for_test("/w/repo/notes.md", window, cx);
+            assert!(app.unsaved_edit_to_confirm().is_some());
+            app.confirm_window_close_for_test();
+            assert!(
+                app.unsaved_edit_to_confirm().is_none(),
+                "the answer stands for the close it was given for"
+            );
+        });
     }
 
     /// Building the buffer the way `editor_install_file` does.

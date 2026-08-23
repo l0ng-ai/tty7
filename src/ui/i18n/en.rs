@@ -19,6 +19,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::HomeNewTab => "New Tab",
         L10nKey::CloseUnsavedEditsBody => "{name} has unsaved changes. Closing loses them.",
         L10nKey::CloseUnsavedEditsTitle => "Close this tab?",
+        L10nKey::CloseWindowUnsavedEditsTitle => "Close this window?",
         L10nKey::HomeReopenClosedTab => "Reopen Closed Tab",
         L10nKey::HomeSwitchWorkspace => "Switch Workspace…",
         L10nKey::HomeCommandPalette => "Command Palette…",

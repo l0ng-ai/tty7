@@ -692,6 +692,14 @@ pub struct Tty7App {
     /// disk, and closing the palette without confirming puts this one back.
     theme_preview_restore: Option<String>,
     pub(crate) closed: Vec<SessionTab>,
+    /// Set once the user has answered for the unwritten buffers in this
+    /// window, so the close it then asks for goes straight through.
+    ///
+    /// `on_window_should_close` has to answer now and the prompt answers
+    /// later, so the first close is refused and a second one is made from the
+    /// prompt's landing. Without the flag that second close would ask again,
+    /// and the window would never shut.
+    close_confirmed: bool,
     pub(crate) renaming: Option<Renaming>,
     pub(crate) worktree_prompt: Option<crate::ui::worktree_prompt::WorktreePrompt>,
     pub(crate) maximized: Option<Entity<TerminalView>>,
@@ -1303,6 +1311,7 @@ impl Tty7App {
             palette_sub: None,
             theme_preview_restore: None,
             closed: Vec::new(),
+            close_confirmed: false,
             renaming: None,
             worktree_prompt: None,
             maximized: None,
@@ -1420,7 +1429,17 @@ impl Tty7App {
         .detach();
 
         let weak_app = cx.weak_entity();
-        window.on_window_should_close(cx, move |_window, cx| {
+        window.on_window_should_close(cx, move |window, cx| {
+            // Asked before anything is taken down. Closing a window keeps the
+            // shells — they are the daemon's — but the code panel's buffers
+            // are this window's alone and nothing writes them anywhere, so
+            // this is the last moment they exist.
+            if let Some(app) = weak_app.upgrade()
+                && let Some((tab, name)) = app.read(cx).unsaved_edit_to_confirm()
+            {
+                app.update(cx, |app, cx| app.confirm_window_close(tab, name, window, cx));
+                return false;
+            }
             let last_window = crate::ui::windows::WindowRegistry::count(cx) <= 1;
             if let Some(app) = weak_app.upgrade() {
                 app.update(cx, |app, cx| app.detach_workspace(cx));
@@ -6201,6 +6220,53 @@ impl Tty7App {
                 .iter()
                 .any(|l| self.leaf_is_warn_ssh(l, cx))
         })
+    }
+
+    /// What closing the whole window would lose without asking, if anything.
+    ///
+    /// Only unwritten buffers. A busy command and a live SSH link are the
+    /// daemon's and survive the window going away — that is the whole point
+    /// of closing being the keep-everything exit — so warning about them here
+    /// would be warning about nothing. Text that was never written down is
+    /// the one thing in the window that has nowhere else to be.
+    pub(crate) fn unsaved_edit_to_confirm(&self) -> Option<(usize, String)> {
+        if self.close_confirmed {
+            return None;
+        }
+        self.unsaved_edit_in_window()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn confirm_window_close_for_test(&mut self) {
+        self.close_confirmed = true;
+    }
+
+    /// Asks about the buffers, then closes the window for real if told to.
+    fn confirm_window_close(
+        &mut self,
+        tab: usize,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Shown first, so the answer is about a tab the user can see rather
+        // than a file name they have to go looking for.
+        self.activate(tab, window, cx);
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            t(L10nKey::CloseWindowUnsavedEditsTitle),
+            Some(&t_fmt(L10nKey::CloseUnsavedEditsBody, &[("name", &name)])),
+            &crate::ui::confirm_answers(t(L10nKey::Close), t(L10nKey::Keep)),
+            cx,
+        );
+        cx.spawn_in(window, async move |app, cx| {
+            let Ok(0) = answer.await else { return };
+            let _ = app.update_in(cx, |app, window, _cx| {
+                app.close_confirmed = true;
+                window.remove_window();
+            });
+        })
+        .detach();
     }
 
     /// Unsaved edits come first, because they are the only loss here that
