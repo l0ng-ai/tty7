@@ -2256,3 +2256,50 @@ mod gpui_tests {
     }
 }
 
+#[cfg(test)]
+mod binding_conflicts {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// No two default bindings claim the same key in the same scope.
+    ///
+    /// Two bindings on one key is not always wrong — `secondary-enter` is
+    /// fullscreen everywhere and commit inside the commit box, which is what a
+    /// scope is for and what every editor does. It is wrong when the scopes
+    /// are the same, because then one of the two actions simply never fires
+    /// and there is nothing on screen to say which. Nothing checked this, so
+    /// the answer was whichever `rebuild_keymap` happened to install last.
+    ///
+    /// Actions with no default key are exempt: an empty string is "reachable
+    /// from the palette and nowhere else", not a claim on a key, and about
+    /// sixty actions are deliberately in that state.
+    #[test]
+    fn no_two_default_bindings_claim_one_key_in_one_scope() {
+        let mut claimed: HashMap<(&str, Option<&str>), Vec<&str>> = HashMap::new();
+        for (action, key) in default_bindings() {
+            if key.is_empty() {
+                continue;
+            }
+            claimed
+                .entry((key, action_context(action)))
+                .or_default()
+                .push(action);
+        }
+
+        let mut clashes: Vec<String> = claimed
+            .into_iter()
+            .filter(|(_, actions)| actions.len() > 1)
+            .map(|((key, scope), actions)| {
+                format!("{key} in {}: {actions:?}", scope.unwrap_or("the window"))
+            })
+            .collect();
+        clashes.sort();
+
+        assert!(
+            clashes.is_empty(),
+            "these share a key with nothing to tell them apart, so one of each \
+             pair never fires:\n{}",
+            clashes.join("\n")
+        );
+    }
+}
