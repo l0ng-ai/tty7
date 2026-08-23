@@ -1490,6 +1490,48 @@ mod tests {
     }
     use super::*;
 
+    /// `hand_over` hangs every native-SSH pane up before it execs, on the
+    /// promise that this process is about to stop existing. So the checks it
+    /// makes first are the only thing standing between a bad path and panes
+    /// destroyed for an exec that never happens — and a directory is the bad
+    /// path that looks most like a good one, since 0755 is what `mkdir` gives
+    /// you and the mode bits alone say yes.
+    ///
+    /// The mode half had no fixture either: an ordinary file with no execute
+    /// bit is the other everyday way `$0` stops being a program, after a
+    /// half-finished copy or a `chmod` that took the wrong argument.
+    #[cfg(unix)]
+    #[test]
+    fn a_handoff_refuses_a_path_that_is_not_a_program() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::TempDir::new().expect("a scratch directory");
+
+        // A directory, carrying the execute bits every directory carries.
+        let as_dir = dir.path().join("tty7-server");
+        std::fs::create_dir(&as_dir).unwrap();
+        let err = hand_over(&Registry::new(), &as_dir).to_string();
+        assert!(
+            err.contains("not an executable file"),
+            "a directory is not a program: {err}"
+        );
+
+        // A real file with nothing set to run it.
+        let unexecutable = dir.path().join("tty7-server-copy");
+        std::fs::write(&unexecutable, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&unexecutable, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = hand_over(&Registry::new(), &unexecutable).to_string();
+        assert!(
+            err.contains("not an executable file"),
+            "a file nothing can run is not a program: {err}"
+        );
+
+        // And one that is not there at all reports the reason it is not.
+        let missing = dir.path().join("nowhere");
+        let err = hand_over(&Registry::new(), &missing).to_string();
+        assert!(err.contains("cannot become"), "{err}");
+    }
+
     #[test]
     fn alloc_id_is_monotonic_from_one() {
         let reg = Registry::new();

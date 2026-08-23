@@ -1491,6 +1491,18 @@ mod tests {
             "-f",
             "feature.lock",
             "feat@{0}",
+            // Control characters, which the list of punctuation above does not
+            // cover and no fixture reached. A newline is the one that costs:
+            // `for_each_ref` and the log parse are line- and record-oriented,
+            // so a ref carrying one arrives as two, and the second half is
+            // whatever the attacker wrote. An ESC is the other — a branch name
+            // is drawn in the SCM panel and in a pane's own output, and an
+            // escape sequence that reaches either is the terminal's to obey.
+            "feat\nure",
+            "feat\rure",
+            "feat\u{1b}[31mure",
+            "feat\u{0}ure",
+            "feat\u{7f}ure",
         ];
         for name in bad_branches {
             let err = GitOp::CheckoutBranch { name: name.into() }
