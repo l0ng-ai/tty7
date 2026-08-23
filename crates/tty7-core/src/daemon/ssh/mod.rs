@@ -1047,6 +1047,95 @@ mod tests {
         });
     }
 
+    /// The SFTP subsystem against a real server: create, list, stat, rename,
+    /// remove.
+    ///
+    /// `SftpManager` had no live coverage of any kind. Its own tests cover the
+    /// path arithmetic — `remote_join`, `remote_parent`, `safe_local_name` —
+    /// and the transport-failure classifier, none of which needs a server, and
+    /// all of which is downstream of a subsystem that was never opened in a
+    /// test. The panel is built entirely on these two calls.
+    ///
+    /// Everything happens under a scratch directory named for this process, on
+    /// the far side, and is removed at the end. The far side being this same
+    /// machine is what makes that safe to assert about.
+    #[test]
+    #[ignore = "requires a live SSH server that accepts a key of yours"]
+    fn live_sftp_lists_and_edits_a_real_directory() {
+        let _turn = live_ssh_turn();
+        let spec = live_key_spec();
+        let manager = SshManager::global();
+        let broker = PromptBroker::new(Box::new(|_| true));
+        let conn = manager
+            .runtime
+            .block_on(async { manager.open_connection(&spec, &broker).await })
+            .expect("a connection to run sftp over")
+            .0;
+
+        let sftp = crate::daemon::ssh::sftp::SftpManager::global();
+        let root = format!(
+            "{}/tty7-sftp-live-{}",
+            std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
+            std::process::id()
+        );
+        let file = format!("{root}/hello.txt");
+        let moved = format!("{root}/moved.txt");
+
+        use crate::daemon::protocol::{SftpEntryKind, SftpOp, SftpOpResult};
+        let ok = |op: SftpOp| match sftp.op(&conn, &op) {
+            SftpOpResult::Done => {}
+            other => panic!("{op:?} answered {other:?}"),
+        };
+
+        ok(SftpOp::Mkdir { path: root.clone() });
+        ok(SftpOp::CreateFile { path: file.clone() });
+
+        let listed = sftp.list(&conn, &root).expect("list the scratch directory");
+        let hello = listed
+            .iter()
+            .find(|e| e.name == "hello.txt")
+            .unwrap_or_else(|| panic!("hello.txt is missing from {listed:?}"));
+        assert_eq!(hello.kind, SftpEntryKind::File, "and it is a file");
+
+        ok(SftpOp::Rename {
+            from: file.clone(),
+            to: moved.clone(),
+        });
+        let listed = sftp.list(&conn, &root).expect("list it again");
+        assert!(
+            listed.iter().any(|e| e.name == "moved.txt"),
+            "the rename moved it: {listed:?}"
+        );
+        assert!(
+            !listed.iter().any(|e| e.name == "hello.txt"),
+            "and left nothing behind: {listed:?}"
+        );
+
+        // A path that is not there answers rather than hanging or succeeding.
+        assert!(
+            !matches!(
+                sftp.op(
+                    &conn,
+                    &SftpOp::Stat {
+                        path: format!("{root}/never-existed"),
+                    }
+                ),
+                SftpOpResult::Done
+            ),
+            "stat of a missing path is not Done"
+        );
+
+        ok(SftpOp::RemoveFile { path: moved });
+        ok(SftpOp::RemoveDir { path: root.clone() });
+        assert!(
+            sftp.list(&conn, &root).is_err(),
+            "the scratch directory is gone"
+        );
+
+        conn.mark_dead();
+        manager.evict_connection(conn.key());
+    }
+
     #[test]
     #[ignore = "requires a live SSH server and local GSSAPI credentials"]
     fn live_gssapi_connects_and_opens_a_channel() {
