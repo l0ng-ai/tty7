@@ -1033,6 +1033,113 @@ mod tests {
         ));
     }
 
+    /// A split's ratio lands on the node the path names, and only there.
+    ///
+    /// The mirror had no test for this at all: writing a fixed ratio instead
+    /// of the one the delta carries passed the suite, and so did reporting
+    /// success for a path that names no split. The second is the worse half —
+    /// the return value is what tells `apply_delta`'s caller the mirror is
+    /// still in step, and a `true` it has not earned suppresses the re-pull
+    /// that would have repaired it.
+    #[test]
+    fn a_ratio_delta_lands_on_the_split_its_path_names() {
+        use tty7_core::core::machine::Side;
+
+        let ws = Workspace::default();
+        let id = ws.id;
+        let mut machine = machine_with(ws);
+
+        // A split whose B side is itself a split, so a path of length two has
+        // somewhere to go and the two ratios can be told apart.
+        let tab = Tab {
+            id: TabId::new(),
+            name: None,
+            sidebar_group: None,
+            root: PaneNode::Split {
+                axis: Axis::Vertical,
+                ratio: 0.5,
+                a: Box::new(PaneNode::Leaf { pane: 1 }),
+                b: Box::new(PaneNode::Split {
+                    axis: Axis::Horizontal,
+                    ratio: 0.5,
+                    a: Box::new(PaneNode::Leaf { pane: 2 }),
+                    b: Box::new(PaneNode::Leaf { pane: 3 }),
+                }),
+            },
+        };
+        let tab_id = tab.id;
+        assert!(apply(&mut machine, id, &LayoutDelta::TabCreated { at: 0, tab }));
+
+        let ratios = |m: &Machine| -> (f32, f32) {
+            let root = &m.workspaces[0].tabs[0].root;
+            let PaneNode::Split { ratio: outer, b, .. } = root else {
+                panic!("the root is a split")
+            };
+            let PaneNode::Split { ratio: inner, .. } = &**b else {
+                panic!("its B side is a split")
+            };
+            (*outer, *inner)
+        };
+
+        assert!(apply(
+            &mut machine,
+            id,
+            &LayoutDelta::RatioChanged {
+                tab: tab_id,
+                path: vec![Side::B],
+                ratio: 0.25,
+            },
+        ));
+        assert_eq!(
+            ratios(&machine),
+            (0.5, 0.25),
+            "the inner split moved and the outer one did not"
+        );
+
+        assert!(apply(
+            &mut machine,
+            id,
+            &LayoutDelta::RatioChanged {
+                tab: tab_id,
+                path: Vec::new(),
+                ratio: 0.75,
+            },
+        ));
+        assert_eq!(ratios(&machine), (0.75, 0.25), "an empty path is the root");
+
+        // A path that ends on a leaf names no ratio, and saying so is what
+        // orders the re-pull.
+        assert!(!apply(
+            &mut machine,
+            id,
+            &LayoutDelta::RatioChanged {
+                tab: tab_id,
+                path: vec![Side::A],
+                ratio: 0.9,
+            },
+        ));
+        // As does a path that runs off the end of the tree.
+        assert!(!apply(
+            &mut machine,
+            id,
+            &LayoutDelta::RatioChanged {
+                tab: tab_id,
+                path: vec![Side::A, Side::B],
+                ratio: 0.9,
+            },
+        ));
+        assert!(!apply(
+            &mut machine,
+            id,
+            &LayoutDelta::RatioChanged {
+                tab: TabId::new(),
+                path: Vec::new(),
+                ratio: 0.9,
+            },
+        ));
+        assert_eq!(ratios(&machine), (0.75, 0.25), "and none of them wrote");
+    }
+
     /// Closing the last tab leaves nothing marked active.
     ///
     /// `active_tab` is a `TabId`, so a stale one names a tab that is gone —
