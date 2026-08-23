@@ -498,6 +498,16 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
             ],
         )
     };
+    // An unattended next-launch install is a promise an elevation-needing
+    // package cannot keep: nobody is there to answer UAC before the first
+    // window (#504). The only honest offer is "now".
+    //
+    // Decided once and read twice — here to lay the buttons out, and below to
+    // read the answer back. Two spellings would be two rules, and the one that
+    // drifts is the reader: with elevation in play button 1 *is* "Later", so a
+    // reader that still believed it was "next launch" would take a decline as
+    // consent and stage an install nobody agreed to.
+    let offered_next_launch = update.installable && !update.needs_elevation();
     // "Later" is the cancel answer: it takes Escape, and a closed window or a
     // dropped channel falls through to it too, so the outcome nobody chose is
     // always the one that changes nothing. Skipping a version is a decision
@@ -507,10 +517,7 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
         let mut buttons = vec![gpui::PromptButton::ok(t(
             L10nKey::SettingsUpdateAndRelaunch,
         ))];
-        // An unattended next-launch install is a promise an elevation-needing
-        // package cannot keep: nobody is there to answer UAC before the first
-        // window (#504). The only honest offer is "now".
-        if !update.needs_elevation() {
+        if offered_next_launch {
             buttons.push(gpui::PromptButton::ok(t(L10nKey::UpdateDialogNextLaunch)));
         }
         buttons.push(gpui::PromptButton::cancel(t(L10nKey::UpdateDialogLater)));
@@ -531,9 +538,6 @@ fn prompt_update(update: &AvailableUpdate, window: &mut Window, cx: &mut App) {
     let update = update.clone();
     cx.spawn(async move |cx| {
         let installable = update.installable;
-        // With elevation in play, button 1 *is* "Later" — only a layout that
-        // offered "next launch" may treat index 1 as that answer.
-        let offered_next_launch = installable && !update.needs_elevation();
         match answer.await {
             Ok(0) if installable => {
                 cx.update(install_available);
