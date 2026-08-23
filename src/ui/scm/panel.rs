@@ -2879,6 +2879,66 @@ mod tests {
             app.scm.group_collapsed(ScmGroup::Untracked, 500)
         }));
     }
+    /// A landed commit clears its own draft and nobody else's.
+    ///
+    /// `scm.drafts` holds unsent commit messages the user typed, so clearing
+    /// one at the wrong moment throws away their words. Two of the three
+    /// conditions guarding that were held by nothing: committing in one repo
+    /// cleared another's draft, and a message edited while the commit was in
+    /// flight was discarded rather than kept.
+    ///
+    /// The third — waiting for HEAD to move — was already covered, which is
+    /// the one that keeps a message in the box when a hook rejects the commit.
+    #[gpui::test]
+    fn a_landed_commit_clears_its_own_draft_and_no_other(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        let (mine, other) = (repo("/w/mine"), repo("/w/other"));
+        let sent = HeadState::Branch {
+            name: "main".into(),
+            oid: "before".into(),
+        };
+        let landed = status_of_repo("/w/mine", Vec::new());
+
+        let arm = |app: &mut Tty7App| {
+            app.scm.committing = Some((mine.clone(), sent.clone(), "my message".into()));
+            app.scm.drafts.insert(mine.clone(), "my message".into());
+            app.scm
+                .drafts
+                .insert(other.clone(), "someone else's".into());
+        };
+
+        app.update_in(&mut vcx, |app, _window, _cx| {
+            // A commit landing in a *different* repo is not this one's.
+            arm(app);
+            let elsewhere = status_of_repo("/w/other", Vec::new());
+            assert!(!app.scm_commit_landed(&other, &elsewhere, "my message"));
+            assert!(
+                app.scm.drafts.contains_key(&mine),
+                "another repo's commit took this repo's draft"
+            );
+
+            // A message edited while the commit was in flight is kept.
+            arm(app);
+            assert!(!app.scm_commit_landed(&mine, &landed, "my message, edited"));
+            assert!(
+                app.scm.drafts.contains_key(&mine),
+                "the user's newer words were thrown away"
+            );
+
+            // The real thing: same repo, HEAD moved, message untouched.
+            arm(app);
+            assert!(app.scm_commit_landed(&mine, &landed, "my message"));
+            assert!(
+                !app.scm.drafts.contains_key(&mine),
+                "its own draft is cleared"
+            );
+            assert!(
+                app.scm.drafts.contains_key(&other),
+                "and only its own — the other repo still has its message"
+            );
+            assert!(app.scm.committing.is_none());
+        });
+    }
 }
 
 /// The panel asks git for a lot, from inside `render`. These hold it to
