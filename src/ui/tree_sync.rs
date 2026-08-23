@@ -971,6 +971,30 @@ struct WsState {
     /// that came back into the tree or back onto the screen in the meantime is
     /// exactly the one the mirrors were wrong about, and is simply forgotten.
     parked: std::collections::HashSet<u64>,
+    /// Every pane this window has brought into existence, kept for as long as
+    /// the window runs.
+    ///
+    /// [`Self::parked`] is a list of suspects, filed by whichever site noticed
+    /// it was putting a pane down. That is what kept the leak alive: the sites
+    /// that file are not the sites that strand. A hydration whose whole session
+    /// is discarded before it is ever adopted never compares a before against
+    /// an after, so its panes are never parked, and they are the majority —
+    /// `tab new` followed straight away by `tab close` stranded a live shell on
+    /// five runs out of six while every parking site behaved perfectly.
+    ///
+    /// So this is a census rather than a suspicion, and the judgement is the
+    /// same one [`stranded_of`] already makes: a pane no window is showing and
+    /// no workspace on the machine names is nobody's, however it came to be
+    /// that way. Nothing here decides that a pane is doomed; it only makes the
+    /// pane visible to the question.
+    ///
+    /// Kept rather than cleared, unlike `parked` — a pane can be perfectly held
+    /// at one sweep and stranded by the next. Panes actually hung up are
+    /// dropped, so the set tracks the window's living panes and does not grow
+    /// with the session. Pane ids are never reused (the daemon carries
+    /// `next_pane_id` across a handoff for exactly that reason), so an id that
+    /// outlives its pane can only ever name that pane.
+    spawned: std::collections::HashSet<u64>,
     /// Whether this window has already been told why it opened empty.
     ///
     /// The retry is as quiet as the failure was, so a window whose machine
@@ -999,6 +1023,7 @@ impl Default for WsState {
             then_open: None,
             chosen_name: None,
             parked: std::collections::HashSet::new(),
+            spawned: std::collections::HashSet::new(),
             said_why_empty: false,
         }
     }
@@ -1499,6 +1524,12 @@ fn finish_prime(
     // name — it is left out of the deltas its own create raises (#604).
     let name = settle_chosen_name(cx, client_ws, landed.2, holds_tabs);
     crate::ui::machine_mirror::MachineMirrors::note_workspace_name(cx, host, machine_ws, name);
+    // On every prime that landed, including the ones that go no further: a
+    // refused operation ends here, and the pane it stranded is not going to be
+    // mentioned again by anything. The judgement itself re-reads what the
+    // windows are showing when it lands, so ordering against the rebuild below
+    // does not matter.
+    settle_census(cx, client_ws);
     if !was_dirty {
         return;
     }
@@ -1584,12 +1615,37 @@ fn hang_up_detached(cx: &mut App, client_ws: WorkspaceId, detached: Vec<u64>) {
         if showing.contains(&pane) {
             continue;
         }
+        if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) {
+            state.spawned.remove(&pane);
+        }
         log::debug!("hanging up pane {pane}, which the tree no longer holds");
         let route = route.clone();
         cx.background_executor()
             .spawn(async move { crate::terminal::RemoteTerminal::kill_pane_on(&route, pane) })
             .detach();
     }
+}
+
+/// Enters a pane this window has just brought into existence into its census.
+///
+/// Called from the one place both spawn routes meet — the local one builds its
+/// view inline, the remote one from `land_pane` — and always on the main
+/// thread with the pane already going into a tab in the same update, so no
+/// sweep can see a pane between its being noted and its being held.
+///
+/// A pane with no owning workspace is not noted. Nothing would ever be able to
+/// judge it: the sweep works from a workspace's freshly pulled tree, and a pane
+/// belonging to no workspace has no tree to be absent from.
+pub(crate) fn note_spawned(cx: &mut App, owner: Option<WorkspaceId>, pane: u64) {
+    let Some(owner) = owner else {
+        return;
+    };
+    cx.default_global::<TreeSync>()
+        .windows
+        .entry(owner)
+        .or_default()
+        .spawned
+        .insert(pane);
 }
 
 /// Notes the panes a layout change has just put down, for [`sweep_parked`] to
@@ -1618,6 +1674,66 @@ fn park_dropped(
     }
 }
 
+/// Settles the census against the machine, when and only when it might say
+/// something.
+///
+/// The sweep needs the whole machine's tree, and most landings do not carry
+/// one: `desync` orders a *prime*, which pulls this workspace's mirror alone,
+/// and that is the landing a refused operation leads to — so the sweep that
+/// judged only full hydrations never ran once across three create-and-close
+/// cycles that stranded three shells.
+///
+/// Rather than make every prime pull the machine, the cheap half of the
+/// question is asked locally first: a censused pane that some window is still
+/// showing is held, and while every one of them is, there is nothing to ask.
+/// In ordinary use that is always true and this costs one set comparison. The
+/// pull is paid for only once something looks stranded, which is the case where
+/// a shell is otherwise left running for the rest of the session.
+fn settle_census(cx: &mut App, client_ws: WorkspaceId) {
+    let census: std::collections::HashSet<u64> = cx
+        .default_global::<TreeSync>()
+        .windows
+        .get(&client_ws)
+        .map(|s| {
+            s.parked
+                .iter()
+                .chain(s.spawned.iter())
+                .copied()
+                .collect::<std::collections::HashSet<u64>>()
+        })
+        .unwrap_or_default();
+    if census.is_empty() {
+        return;
+    }
+    let Some(showing) = shown_pane_ids(cx) else {
+        return;
+    };
+    if census.iter().all(|pane| showing.contains(pane)) {
+        return;
+    }
+    let host = WorkspaceStore::host_of(cx, client_ws);
+    let TreeLink::Ready(client) = tree_control_for(cx, host) else {
+        return;
+    };
+    cx.spawn(async move |cx| {
+        let pulled = cx
+            .background_executor()
+            .spawn(async move { machine_get(&client) })
+            .await;
+        let Ok(machine) = pulled else {
+            return;
+        };
+        let tree: std::collections::HashSet<u64> = machine
+            .workspaces
+            .iter()
+            .flat_map(|w| w.tabs.iter())
+            .flat_map(|t| t.root.pane_ids())
+            .collect();
+        cx.update(|cx| sweep_parked(cx, client_ws, &tree));
+    })
+    .detach();
+}
+
 /// Ends the parked shells that a freshly pulled tree confirms nothing holds.
 ///
 /// `tree` has to be a tree this window has just pulled — the whole machine's,
@@ -1635,7 +1751,15 @@ fn sweep_parked(cx: &mut App, client_ws: WorkspaceId, tree: &std::collections::H
         .default_global::<TreeSync>()
         .windows
         .get(&client_ws)
-        .map(|s| s.parked.iter().copied().collect())
+        .map(|s| {
+            s.parked
+                .iter()
+                .chain(s.spawned.iter())
+                .copied()
+                .collect::<std::collections::HashSet<u64>>()
+                .into_iter()
+                .collect()
+        })
         .unwrap_or_default();
     if parked.is_empty() {
         return;
@@ -1650,6 +1774,11 @@ fn sweep_parked(cx: &mut App, client_ws: WorkspaceId, tree: &std::collections::H
         crate::ui::remote_workspace::pane_workspace_for(cx, client_ws).as_ref(),
     );
     for pane in stranded_of(&parked, &showing, tree) {
+        // Out of the census as well: the pane is over, and judging it again on
+        // every later sweep would ask the daemon to end it again each time.
+        if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) {
+            state.spawned.remove(&pane);
+        }
         log::debug!("hanging up pane {pane}: the tree it was dropped from does not name it");
         let route = route.clone();
         cx.background_executor()
@@ -1801,8 +1930,21 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
                         // shell on nearly every iteration, which is the shape
                         // this product is built for.
                         //
-                        // Two experiments already run, so they need not be run
-                        // again. The first: parking the pane here — `park_dropped`, letting
+                        // Fixed since, and not here: see `WsState::spawned` and
+                        // `settle_census`. The window now keeps a census of
+                        // every pane it has brought into existence and settles
+                        // it against a freshly pulled machine tree after each
+                        // prime, which is exactly the landing the `desync`
+                        // below leads to. The same reproducer that stranded a
+                        // shell on six runs out of six now strands none, across
+                        // sixteen create-and-close cycles, while four unrelated
+                        // panes kept their ids and their scrollback across a
+                        // GUI restart. This arm is left saying what it always
+                        // said: it names the one path that announces itself,
+                        // and the sweep is what actually collects the pane.
+                        //
+                        // Two earlier experiments, kept because they say where
+                        // the leak is *not*. The first: parking the pane here — `park_dropped`, letting
                         // the existing `sweep_parked` judge it after the re-pull
                         // instead of hanging it up on the spot — is safe and
                         // does *not* measurably help. Across four runs the share
@@ -1823,10 +1965,12 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
                         // of 5, 5, 5.
                         //
                         // What both have in common is parking at a *site*. The
-                        // leak does not live at one, which is what this comment
-                        // already says: the sweep has to be phrased against the
-                        // end state, over every pane this window spawned, or it
-                        // keeps missing whichever path was not instrumented.
+                        // leak does not live at one: the sweep had to be phrased
+                        // against the end state, over every pane this window
+                        // spawned, and it had to run on the landing the failures
+                        // actually reach. Judging only full hydrations, it never
+                        // ran once across three cycles that stranded three
+                        // shells.
                         log::warn!(
                             "pane {pane} was spawned for that operation and nothing holds it \
                              now; it will show up in `tty7 pane ls --all` as an orphan"
@@ -2406,89 +2550,99 @@ fn settle_hydration(
         .flat_map(|w| w.tabs.iter())
         .flat_map(|t| t.root.pane_ids())
         .collect();
-    let machine_ws = tree_workspace_id(cx, client_ws);
-    // What the tree that is about to be installed calls this workspace, which
-    // for a pull that had to create it is the name that create proposed.
-    let answered = machine
-        .workspaces
-        .iter()
-        .find(|w| w.id == machine_ws)
-        .and_then(|w| w.name.clone());
-    crate::ui::machine_mirror::MachineMirrors::install(cx, host, machine);
-    let name = settle_chosen_name(cx, client_ws, answered, !mirror.tabs.is_empty());
-    crate::ui::machine_mirror::MachineMirrors::note_workspace_name(cx, host, machine_ws, name);
-    let machine_was_empty = mirror.tabs.is_empty();
-    let was_dirty = {
-        let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
-            return false;
+    // Swept on every landing that pulled a tree, not only the ones that went
+    // on to rebuild. The tree in hand is authoritative either way, and a pull
+    // whose layout already matched is the common case — it is where a pane
+    // stranded by a refused operation is sitting by the time the re-pull that
+    // the refusal ordered comes back. Judging only rebuilds is why the sweep
+    // never ran at all across three create-and-close cycles.
+    let landed = 'landed: {
+        let machine_ws = tree_workspace_id(cx, client_ws);
+        // What the tree that is about to be installed calls this workspace, which
+        // for a pull that had to create it is the name that create proposed.
+        let answered = machine
+            .workspaces
+            .iter()
+            .find(|w| w.id == machine_ws)
+            .and_then(|w| w.name.clone());
+        crate::ui::machine_mirror::MachineMirrors::install(cx, host, machine);
+        let name = settle_chosen_name(cx, client_ws, answered, !mirror.tabs.is_empty());
+        crate::ui::machine_mirror::MachineMirrors::note_workspace_name(cx, host, machine_ws, name);
+        let machine_was_empty = mirror.tabs.is_empty();
+        let was_dirty = {
+            let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
+                break 'landed false;
+            };
+            let dirty = matches!(state.sync, SyncPhase::Unprimed { dirty: true, .. });
+            state.informed |= machine_was_empty;
+            state.sync = SyncPhase::Primed(mirror);
+            // The machine answered, so the next failure starts its backoff over.
+            state.rehydrate_attempts = 0;
+            // The machine answered, so the explanation has been overtaken by events
+            // and a later outage deserves its own.
+            state.said_why_empty = false;
+            dirty
         };
-        let dirty = matches!(state.sync, SyncPhase::Unprimed { dirty: true, .. });
-        state.informed |= machine_was_empty;
-        state.sync = SyncPhase::Primed(mirror);
-        // The machine answered, so the next failure starts its backoff over.
-        state.rehydrate_attempts = 0;
-        // The machine answered, so the explanation has been overtaken by events
-        // and a later outage deserves its own.
-        state.said_why_empty = false;
-        dirty
-    };
-    let Some(app) =
-        crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|app| app.upgrade())
-    else {
-        return false;
-    };
-    if adopt == Adopt::IfEmpty && !app.read(cx).tabs.is_empty() {
-        // A full window over an empty tree has to write itself back, whether
-        // or not an edit was waiting: the machine is missing tabs this window
-        // is showing, and nothing else would ever put them there.
-        //
-        // Deliberately not limited to this machine. An empty tree means one of
-        // two things and the answer is the same either way: locally the
-        // workspace was removed under the window (`ws rm`, or another client),
-        // and remotely the far end lost its records — a re-imaged box, a store
-        // that was wiped. Writing the window back is what a reattach is for.
-        // The panes it names may well be dead; the window already draws them
-        // that way, and a tab the user can close beats a tab that silently
-        // stops existing.
-        if was_dirty || machine_was_empty {
-            app.update(cx, |app, cx| sync_window(app, cx));
+        let Some(app) =
+            crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|app| app.upgrade())
+        else {
+            break 'landed false;
+        };
+        if adopt == Adopt::IfEmpty && !app.read(cx).tabs.is_empty() {
+            // A full window over an empty tree has to write itself back, whether
+            // or not an edit was waiting: the machine is missing tabs this window
+            // is showing, and nothing else would ever put them there.
+            //
+            // Deliberately not limited to this machine. An empty tree means one of
+            // two things and the answer is the same either way: locally the
+            // workspace was removed under the window (`ws rm`, or another client),
+            // and remotely the far end lost its records — a re-imaged box, a store
+            // that was wiped. Writing the window back is what a reattach is for.
+            // The panes it names may well be dead; the window already draws them
+            // that way, and a tab the user can close beats a tab that silently
+            // stops existing.
+            if was_dirty || machine_was_empty {
+                app.update(cx, |app, cx| sync_window(app, cx));
+            }
+            break 'landed true;
         }
-        return true;
-    }
-    if session.tabs.is_empty() && adopt == Adopt::IfEmpty {
-        if was_dirty
-            && let Some(app) =
-                crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|a| a.upgrade())
-        {
-            app.update(cx, |app, cx| sync_window(app, cx));
+        if session.tabs.is_empty() && adopt == Adopt::IfEmpty {
+            if was_dirty
+                && let Some(app) =
+                    crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|a| a.upgrade())
+            {
+                app.update(cx, |app, cx| sync_window(app, cx));
+            }
+            break 'landed true;
         }
-        return true;
-    }
-    let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, client_ws) else {
-        return false;
-    };
-    let wanted = session.tabs.len();
-    // `tree_id` is not serialized, so only a session built from the tree
-    // carries one on every tab (which is what reaches here today). The guard
-    // below counts the tabs asked for, not the ids found: a session with tabs
-    // and no ids must not read as "nothing was wanted".
-    let wanted_ids: Vec<TabId> = session.tabs.iter().filter_map(|t| t.tree_id).collect();
-    debug_assert_eq!(
-        wanted_ids.len(),
-        wanted,
-        "a session rebuilt from the tree names every tab it holds"
-    );
-    log::info!("rebuilding {wanted} tab(s) of workspace {client_ws} from its machine's tree");
-    let _ = handle.update(cx, move |_, window, cx| {
-        app.update(cx, |app, cx| {
-            app.adopt_workspace(client_ws, session, window, cx)
+        let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, client_ws) else {
+            break 'landed false;
+        };
+        let wanted = session.tabs.len();
+        // `tree_id` is not serialized, so only a session built from the tree
+        // carries one on every tab (which is what reaches here today). The guard
+        // below counts the tabs asked for, not the ids found: a session with tabs
+        // and no ids must not read as "nothing was wanted".
+        let wanted_ids: Vec<TabId> = session.tabs.iter().filter_map(|t| t.tree_id).collect();
+        debug_assert_eq!(
+            wanted_ids.len(),
+            wanted,
+            "a session rebuilt from the tree names every tab it holds"
+        );
+        log::info!("rebuilding {wanted} tab(s) of workspace {client_ws} from its machine's tree");
+        let _ = handle.update(cx, move |_, window, cx| {
+            app.update(cx, |app, cx| {
+                app.adopt_workspace(client_ws, session, window, cx)
+            });
         });
-    });
-    // After the rebuild, so a pane the new layout took back is seen to be held.
+        let showing = tabs_on_screen(cx, client_ws);
+        settle_rebuild(cx, client_ws, wanted, &wanted_ids, &showing);
+        true
+    };
+    // After whatever the landing did to the layout, so a pane it took back is
+    // seen to be held.
     sweep_parked(cx, client_ws, &tree_panes);
-    let showing = tabs_on_screen(cx, client_ws);
-    settle_rebuild(cx, client_ws, wanted, &wanted_ids, &showing);
-    true
+    landed
 }
 
 /// What a rebuild leaves the window entitled to say, from how many tabs the
@@ -3086,6 +3240,44 @@ mod tests {
         );
 
         assert!(stranded_of(&[], &set(&[1]), &set(&[2])).is_empty());
+    }
+
+    /// The census holds every pane this window made, and only those it could
+    /// ever answer for.
+    ///
+    /// The rule above is old and was never the problem; what kept the leak
+    /// alive was that nothing put the stranded panes in front of it. A pane
+    /// with no owning workspace is deliberately left out: the judgement is
+    /// made against a workspace's freshly pulled machine tree, and a pane
+    /// belonging to no workspace has no tree to be absent from, so it would be
+    /// stranded by definition on every sweep.
+    #[gpui::test]
+    fn the_census_holds_the_panes_this_window_made(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            note_spawned(cx, Some(ws), 7);
+            note_spawned(cx, Some(ws), 9);
+            note_spawned(cx, Some(ws), 7);
+            note_spawned(cx, None, 11);
+
+            let census = cx
+                .default_global::<TreeSync>()
+                .windows
+                .get(&ws)
+                .map(|s| s.spawned.clone())
+                .unwrap_or_default();
+            assert_eq!(
+                census,
+                [7, 9].into_iter().collect::<std::collections::HashSet<u64>>(),
+                "every pane the window made, counted once"
+            );
+
+            let other = WorkspaceId::new();
+            assert!(
+                !cx.default_global::<TreeSync>().windows.contains_key(&other),
+                "a pane with no workspace files nothing anywhere"
+            );
+        });
     }
 
     /// Pins which requests carry an already-spawned pane, because that is the

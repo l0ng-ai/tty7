@@ -8107,6 +8107,9 @@ fn build_terminal_view(
     window: &mut Window,
     cx: &mut Context<Tty7App>,
 ) -> Entity<TerminalView> {
+    // Where both spawn routes meet, and the last point at which a pane this
+    // window made is certain to be known to it. See `tree_sync::note_spawned`.
+    crate::ui::tree_sync::note_spawned(cx, parts.owner, parts.pane_id);
     let view = cx.new(|cx| {
         let mut view = TerminalView::from_shell_parts(parts, window, cx);
         view.font_size = px(font_size);
