@@ -3108,6 +3108,112 @@ mod tests {
         );
     }
 
+    /// Every name the workspace tree is stored under, pinned.
+    ///
+    /// `machine.json` is the user's workspaces, tabs, panes and layout. Every
+    /// field on it carries `#[serde(default)]`, which is what lets an older
+    /// file load — and also what makes a rename silent: `workspaces` under any
+    /// other name decodes to an empty `Vec`, and the tree is simply gone at the
+    /// next boot with nothing logged and nothing to repair from.
+    ///
+    /// A floor, like the settings one: adding a field does not fail this,
+    /// dropping or renaming a name does, and the fix is a serde alias.
+    ///
+    /// The split layout's variant tags are in here too. `PaneNode` is stored
+    /// externally tagged — `{"Leaf":{"pane":3}}` — so the variant *name* is on
+    /// disk as much as any field is, and renaming `Leaf` or `Split` unmakes
+    /// every saved layout.
+    #[test]
+    fn no_name_the_workspace_tree_is_stored_under_stops_being_read() {
+        const SHIPPED: &[&str] = &[
+            // Machine
+            "workspaces",
+            "panes",
+            // Workspace
+            "id",
+            "name",
+            "last_active",
+            "tabs",
+            "active_tab",
+            // Tab
+            "root",
+            "sidebar_group",
+            // PaneNode, externally tagged
+            "Leaf",
+            "Split",
+            "pane",
+            "axis",
+            "ratio",
+            "a",
+            "b",
+            // PaneRecord
+            "cwd",
+            "title",
+            "osc_title",
+            "ssh_spec",
+            "agent",
+            "shell",
+            "live",
+        ];
+
+        let mut machine = Machine::default();
+        let mut ws = Workspace::default();
+        ws.tabs.push(Tab {
+            id: TabId::new(),
+            name: None,
+            sidebar_group: None,
+            // Both variants, so the split's own names are on the page too.
+            root: PaneNode::Split {
+                axis: Axis::Horizontal,
+                ratio: 0.5,
+                a: Box::new(PaneNode::Leaf { pane: 3 }),
+                b: Box::new(PaneNode::Leaf { pane: 4 }),
+            },
+        });
+        ws.active_tab = Some(ws.tabs[0].id);
+        machine.workspaces.push(ws);
+        machine.panes.push(PaneRecord::new(3));
+
+        fn walk(v: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+            match v {
+                serde_json::Value::Object(o) => {
+                    for (key, sub) in o {
+                        out.insert(key.clone());
+                        walk(sub, out);
+                    }
+                }
+                serde_json::Value::Array(a) => a.iter().for_each(|sub| walk(sub, out)),
+                _ => {}
+            }
+        }
+        let value = serde_json::to_value(&machine).expect("the tree serializes");
+        let mut live = std::collections::BTreeSet::new();
+        walk(&value, &mut live);
+
+        let dropped: Vec<&str> = SHIPPED
+            .iter()
+            .copied()
+            .filter(|k| !live.contains(*k))
+            .collect();
+        assert!(
+            dropped.is_empty(),
+            "these names are no longer written, so every machine.json holding \
+             one loses what it named — keep them with #[serde(alias = ...)]:\n  {}\n\
+             what is written now: {live:?}",
+            dropped.join("\n  ")
+        );
+
+        // And the tree really did have something in it: a Machine that
+        // serialized to nothing would satisfy the check above by writing no
+        // names at all.
+        assert!(
+            live.len() >= SHIPPED.len(),
+            "only {} names were written, which cannot cover {}: {live:?}",
+            live.len(),
+            SHIPPED.len()
+        );
+    }
+
     #[test]
     fn a_sparse_document_decodes_with_defaults() {
         let machine: Machine =
