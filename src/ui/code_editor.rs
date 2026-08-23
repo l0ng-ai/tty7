@@ -2031,6 +2031,50 @@ mod unsaved_close_gpui_tests {
         let _ = (first, vcx);
     }
 
+    /// Quit-and-stop names the buffer it is about to take.
+    ///
+    /// That prompt already asks a question about loss — it says every shell
+    /// ends — and reassures that "your tabs and layout reopen with fresh
+    /// shells next launch". Unwritten text does not reopen, so a reader who
+    /// accepts on the strength of that sentence loses something the sentence
+    /// implied was safe. Named in the body rather than raised as a second
+    /// dialog: they are already being asked once, and that answer should
+    /// account for all of it.
+    #[gpui::test]
+    fn quit_and_stop_names_an_unwritten_buffer_in_its_body(cx: &mut TestAppContext) {
+        use crate::ui::i18n::{L10nKey, t, t_fmt};
+
+        cx.update(crate::ui::windows::WindowRegistry::init);
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        app.update_in(&mut vcx, |app, window, cx| {
+            let (ws, weak) = (app.workspace, cx.weak_entity());
+            crate::ui::windows::WindowRegistry::register(cx, ws, window.window_handle(), weak);
+        });
+
+        // Nothing unwritten: the body is the plain one, unchanged.
+        cx.update(|cx| {
+            assert!(crate::ui::app::Tty7App::quit_loses_unwritten_work(cx).is_none());
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.editor_seed_dirty_file_for_test("/w/repo/notes.md", window, cx);
+        });
+
+        let (_, _, name) = cx
+            .update(crate::ui::app::Tty7App::quit_loses_unwritten_work)
+            .expect("quit-and-stop would take it");
+        assert_eq!(name, "notes.md");
+
+        // The sentence the body gains says the changes do not come back —
+        // which is the half the plain body does not cover.
+        let added = t_fmt(L10nKey::QuitStopServerUnsaved, &[("name", &name)]);
+        assert!(added.contains("notes.md"), "it names the file: {added}");
+        assert!(
+            !t(L10nKey::QuitStopServerBody).contains("notes.md"),
+            "and the plain body never did"
+        );
+    }
+
     /// Building the buffer the way `editor_install_file` does.
     fn new_buffer(
         text: &str,

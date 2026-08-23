@@ -99,6 +99,7 @@ l10n_keys! {
     CloseUnsavedEditsTitle,
     CloseWindowUnsavedEditsTitle,
     QuitUnsavedEditsTitle,
+    QuitStopServerUnsaved,
     RelaunchUnsavedEditsTitle,
     HomeReopenClosedTab,
     HomeSwitchWorkspace,

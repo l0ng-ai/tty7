@@ -1816,10 +1816,26 @@ impl Tty7App {
     fn quit_stop_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.activate(true);
         window.activate_window();
+        // The body promises the tabs and layout come back. A buffer nobody has
+        // written down does not, so when there is one it is named here rather
+        // than raised as a second dialog — the reader is already being asked
+        // one question about what they are about to lose, and the answer to it
+        // should account for all of it.
+        let body = match Self::quit_loses_unwritten_work(cx) {
+            None => t(crate::ui::i18n::L10nKey::QuitStopServerBody).to_string(),
+            Some((_, _, name)) => format!(
+                "{} {}",
+                t(crate::ui::i18n::L10nKey::QuitStopServerBody),
+                t_fmt(
+                    crate::ui::i18n::L10nKey::QuitStopServerUnsaved,
+                    &[("name", &name)]
+                )
+            ),
+        };
         let answer = window.prompt(
             PromptLevel::Warning,
             t(crate::ui::i18n::L10nKey::QuitStopServerTitle),
-            Some(t(crate::ui::i18n::L10nKey::QuitStopServerBody)),
+            Some(&body),
             &crate::ui::confirm_answers(
                 t(crate::ui::i18n::L10nKey::QuitAndStop),
                 t(crate::ui::i18n::L10nKey::Cancel),
