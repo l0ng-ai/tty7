@@ -1892,7 +1892,7 @@ mod unsaved_close_gpui_tests {
 
     /// Closing the window asks about a buffer nothing has written down.
     ///
-    /// A tab close has asked since #672; the window close never did. The
+    /// A tab close has long asked; the window close never did. The
     /// shells survive a window closing — they belong to the daemon, which is
     /// what makes it the keep-everything exit — but the code panel's buffers
     /// belong to the window, and no session file carries them. So the one

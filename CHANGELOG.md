@@ -151,19 +151,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loudly and never presses anything anywhere; to type a number as text, name
   the pane too (`tty7 send %5 83 --enter`) (#538).
 
-### Known
-
-- **A tab created and closed again before the window finishes reconciling
-  leaves its shell running.** With a tty7 window open, `tab new` immediately
-  followed by `tab close` strands a live shell on most iterations — measured
-  at 5 of 6, reproducibly. Pausing a second between them, or creating without
-  closing, strands none, so somebody driving the window by hand will not meet
-  it; an orchestration loop that opens a tab per task and closes it when the
-  task is done will, on nearly every pass. The strays are visible
-  (`tty7 pane ls --all`, the switcher, and `tty7 doctor`) and
-  `tty7 pane close --orphans` ends them, but nothing ends them for you yet.
-
 ### Fixed
+
+- **A tab created and closed again before the window has reconciled no longer
+  leaves its shell running.** This was listed here as a known issue: with a
+  window open, `tab new` immediately followed by `tab close` stranded a live
+  shell on 6 runs out of 6 — a pty and its descriptors, held until the machine
+  went down. Pausing a second between them strands none, so nobody driving the
+  window by hand meets it, and an orchestration loop that opens a tab per task
+  meets it on nearly every pass. The window now keeps a census of every pane it
+  has brought into existence and settles it against a freshly pulled machine
+  tree, ending the ones neither the tree nor any window holds; while everything
+  it made is still on screen that costs one set comparison and no request.
+  Measured on the same reproducer afterwards: 0 stranded across 16, then 100,
+  then 20 more cycles, with four unrelated panes keeping their ids and their
+  scrollback across the churn and a restart. `tty7 pane close --orphans`
+  remains the way to clear anything an older session left behind.
+
+- **`tty7 pane close --orphans` no longer takes a live session with it.** The
+  reaper's test was "the server is running it and no workspace holds it", and a
+  window restoring a layout spawns each pane, attaches to it, and only then
+  files it into the tree — so for a moment every pane it is adopting answers to
+  that description. Polled through a cold start of a seven-tab window, all
+  seven reported as held by no workspace, one after another. Panes a client is
+  attached to are now left alone, which is the daemon's own fact rather than a
+  guess about timing: a window adopting a pane is attached to it, and a pane
+  whose layout was thrown away had its view dropped, which closed the
+  connection. `tty7 pane ls --all`, `tty7 doctor` and the switcher's card count
+  the same set, so the number you are shown is the one the reaper would act on.
+
+- **Unwritten editor changes survive every way out of the app.** Closing a tab
+  has long asked, on the grounds that text nobody has written down is the
+  one loss that cannot be undone by doing the thing again. Closing the *window*
+  asked nothing, and neither did ⌘Q or an update relaunch. All three keep the
+  shells — those are the daemon's — which is exactly what makes them read as
+  safe; the code panel's buffers are the window's alone and no session file
+  carries them. Each now asks first, in front of the window holding the buffer
+  and with its tab brought forward, which for more than one window is not the
+  frontmost. A busy command and a live SSH link still do not stop a quit: they
+  outlive it.
+
+- **A file saved from the editor keeps the line endings it arrived with.** Enter
+  belongs to the input widget and inserts a bare `\n` whatever the file around
+  it does, so editing one line of a file checked out with CRLF mixed the two and
+  git reported a rewrite of lines nobody had visited. A file that arrived
+  uniformly CRLF now goes back out uniformly CRLF. Deliberately unanimous: a
+  file that already mixes its endings is still written exactly as found rather
+  than being handed a winner it never asked for.
+
+- **Deleting from the file tree no longer implies a trash that is not there.**
+  The prompt said only that the file "will be deleted", which in every file
+  manager means moved to the trash. It is not: the delete is `remove_file` and
+  `remove_dir_all`, and the file is gone. The remote prompts made it worse by
+  saying "there is no trash on the far side", which reads as a promise about
+  the near side. Both now say the same thing.
+
+- **Agent status hooks survive an install path a shell would rewrite.** Every
+  agent takes the hook as a command line, so a shell parses it again before
+  anything runs, and inside double quotes `sh` still expands `$`, a backtick
+  and a backslash. An install under `/opt/build$stage` reached the shell as
+  `/opt/build/tty7`: the hook never fired, nothing logged it, and the agent
+  quietly stopped reporting its status. Existing installs are rewritten on the
+  next launch.
+
+- **One pane's crash no longer costs every pane on the machine.** The daemon
+  holds every shell behind mutexes — the pty master, the child handle, the
+  writer, the pane state — and seventy-four of those locks would panic once
+  another thread had panicked holding one. Poisoning protects nothing here:
+  whatever inconsistency the first panic left is there either way, and the flag
+  only decided whether the next thread died too. A garbled write to one pane is
+  recoverable; losing every session on the box is not.
 
 - **The daemon raises its own open-file limit, and says so when it still runs
   out.** A pane costs about three descriptors, and the daemon inherited its
