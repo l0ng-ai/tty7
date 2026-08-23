@@ -1457,38 +1457,68 @@ mod tests {
 
     #[test]
     fn destructive_marks_exactly_what_can_lose_work() {
+        // Paired with the warning each one is supposed to raise, not merely
+        // with "warns about something". Which warning is a decision in its own
+        // right and the user acts on it: a hard reset onto an older commit
+        // drops commits *and* clobbers the worktree, and telling them only
+        // about the edits invites a yes to the wrong question. Asserting
+        // `is_some()` let that severity be quietly downgraded — checked, and
+        // nothing failed.
         let losing = [
-            GitOp::DiscardWorktree {
-                paths: vec![p("a")],
-            },
-            GitOp::DiscardUntracked {
-                paths: vec![p("a")],
-                directories: true,
-            },
-            GitOp::Reset {
-                rev: "HEAD~1".into(),
-                mode: ResetMode::Hard,
-            },
-            GitOp::Commit {
-                message: "m".into(),
-                amend: true,
-                signoff: false,
-                no_verify: false,
-                all: false,
-            },
-            GitOp::Push {
-                remote: "origin".into(),
-                branch: "main".into(),
-                set_upstream: false,
-                force_with_lease: true,
-            },
-            GitOp::DeleteBranch {
-                name: "dev".into(),
-                force: true,
-            },
+            (
+                GitOp::DiscardWorktree {
+                    paths: vec![p("a")],
+                },
+                Destructive::LosesWorktreeEdits,
+            ),
+            (
+                GitOp::DiscardUntracked {
+                    paths: vec![p("a")],
+                    directories: true,
+                },
+                Destructive::LosesUntrackedFiles,
+            ),
+            (
+                GitOp::Reset {
+                    rev: "HEAD~1".into(),
+                    mode: ResetMode::Hard,
+                },
+                Destructive::LosesCommits,
+            ),
+            (
+                GitOp::Commit {
+                    message: "m".into(),
+                    amend: true,
+                    signoff: false,
+                    no_verify: false,
+                    all: false,
+                },
+                Destructive::RewritesHistory,
+            ),
+            (
+                GitOp::Push {
+                    remote: "origin".into(),
+                    branch: "main".into(),
+                    set_upstream: false,
+                    force_with_lease: true,
+                },
+                Destructive::RewritesHistory,
+            ),
+            (
+                GitOp::DeleteBranch {
+                    name: "dev".into(),
+                    force: true,
+                },
+                Destructive::LosesCommits,
+            ),
         ];
-        for op in losing {
-            assert!(op.destructive().is_some(), "{:?}", op.label());
+        for (op, warning) in losing {
+            assert_eq!(
+                op.destructive(),
+                Some(warning),
+                "{:?} must warn about {warning:?}",
+                op.label()
+            );
         }
 
         let safe = [
