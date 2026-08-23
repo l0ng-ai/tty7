@@ -986,6 +986,14 @@ pub type EventSink = Box<dyn Fn(ControlEvent) + Send + Sync + 'static>;
 /// `shutdown`, a child process has `kill`, an SSH channel has `close` — hence
 /// this one-method abstraction rather than a bound on the stream type.
 ///
+/// One of them reaches the parked reader only by way of the far end. A pipe
+/// has no `shutdown`, so the stdio link closes its *outbound* half and waits
+/// for the peer to read EOF and close the inbound one; see
+/// [`StdioWriter`](crate::daemon::duplex::StdioWriter). Every socket
+/// transport returns the reader itself, and a pipe has no read timeout to
+/// fall back on, so that is the one place a wedged peer can leave a reader
+/// parked.
+///
 /// The server side has the same problem in mirror image, and resolves it with
 /// this same trait rather than a parallel one: every
 /// [`Duplex::split`](crate::daemon::duplex::Duplex::split) hands back a
