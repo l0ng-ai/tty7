@@ -657,6 +657,96 @@ mod tests {
             assert!(Path::new(here).starts_with(&snap.root));
         }
     }
+    /// A real linked worktree, not a hand-written path string.
+    ///
+    /// `repo_home_resolves_worktree_layouts` below feeds `repo_home` the
+    /// `--git-dir` and `--git-common-dir` this file believes git prints. That
+    /// is a test of the model, and the model is the part that can be wrong:
+    /// the whole reason `repo_home` exists is that those two disagree inside a
+    /// linked worktree, and what they look like when they do is git's to
+    /// decide, not ours.
+    ///
+    /// tty7 is developed in worktrees, so this is also the layout the panel
+    /// runs in most days: `root` has to be the worktree the pane sits in, and
+    /// `home` the repository it was added from — swap them and every path the
+    /// SCM panel offers belongs to the wrong checkout.
+    #[test]
+    fn a_real_linked_worktree_reports_its_own_root_and_the_repository_it_came_from() {
+        let base = std::env::temp_dir().join(format!("tty7-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let main = base.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+
+        let run = |cwd: &Path, args: &[&str]| -> Option<String> {
+            let out = git_output(cwd, args).ok()?;
+            out.success()
+                .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        if run(&main, &["init", "--quiet"]).is_none() {
+            let _ = std::fs::remove_dir_all(&base);
+            return; // no git on this machine
+        }
+        for kv in [["user.email", "t@example.invalid"], ["user.name", "t"]] {
+            assert!(run(&main, &["config", kv[0], kv[1]]).is_some());
+        }
+        std::fs::write(main.join("f.txt"), "one\n").unwrap();
+        assert!(run(&main, &["add", "-A"]).is_some());
+        assert!(run(&main, &["commit", "--quiet", "-m", "base"]).is_some());
+
+        let linked = base.join("linked");
+        if run(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "side",
+                linked.to_str().unwrap(),
+            ],
+        )
+        .is_none()
+        {
+            let _ = std::fs::remove_dir_all(&base);
+            return; // this git is too old for `worktree add`
+        }
+
+        let snap = probe(&*h(), &linked).expect("a linked worktree is a repository");
+
+        // What git itself says, canonicalized on both sides because the temp
+        // directory is reached through a symlink on macOS.
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let git_root = run(
+            &linked,
+            &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        )
+        .expect("toplevel");
+        assert_eq!(
+            canon(&snap.root),
+            canon(Path::new(git_root.trim())),
+            "the worktree's own root is not what git calls the toplevel"
+        );
+        assert_eq!(
+            canon(&snap.root),
+            canon(&linked),
+            "the root should be the worktree the pane sits in"
+        );
+        assert_eq!(
+            canon(&snap.home),
+            canon(&main),
+            "the home should be the repository the worktree was added from"
+        );
+        assert_ne!(
+            canon(&snap.home),
+            canon(&snap.root),
+            "a linked worktree is the one case where these two differ, so \
+             equal here means the layout was never exercised"
+        );
+        assert_eq!(snap.branch, "side", "the worktree is on its own branch");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn repo_home_resolves_worktree_layouts() {
         let root = Path::new("/repo/.wt/feat");
