@@ -242,13 +242,58 @@ pub fn append(scope: &Scope, cmd: &str, cwd: Option<&Path>, ts: u64, exit: Optio
     let exit = exit.map(|e| e.to_string()).unwrap_or_default();
     let line = format!("{ts}\t{exit}\t{cwd}\t{cmd}");
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
+    if let Ok(mut f) = open_private_append(&path) {
         let _ = f.write_all(format!("{line}\n").as_bytes());
     }
+}
+
+/// Opens the history file for appending, readable by its owner and nobody
+/// else.
+///
+/// The config directory around it is already closed, so this is the second
+/// lock rather than the first — but it is the lock the file itself carries,
+/// and it is the one that still holds if the directory is ever loosened or
+/// the file is copied out of it. `scrollback` writes a pane's output through
+/// exactly this mode; the commands someone typed are no less theirs.
+///
+/// `mode` only decides the permissions of a file this call creates, so an
+/// existing history left at 0644 by an earlier build is tightened here too —
+/// the same second pass `ensure_private_dir` makes over a directory it did
+/// not create.
+///
+/// Both are needed and the second does not make the first redundant, however
+/// it looks: without `mode` the file is created world-readable and stays that
+/// way until the `chmod` lands, and a reader only has to be there for that
+/// window. The test below sees the end state and so cannot tell them apart —
+/// this comment is the only thing standing between `mode` and someone
+/// deleting it as dead weight.
+#[cfg(unix)]
+fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    if let Ok(meta) = file.metadata() {
+        let mut perms = meta.permissions();
+        if perms.mode() & 0o077 != 0 {
+            perms.set_mode(0o600);
+            let _ = file.set_permissions(perms);
+        }
+    }
+    Ok(file)
+}
+
+/// Windows has no mode bits to set; the file inherits the config directory's
+/// ACL, which is already per-user.
+#[cfg(not(unix))]
+fn open_private_append(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
 }
 
 fn normalize(raw: Vec<Raw>) -> History {
@@ -471,6 +516,38 @@ fn start_of_command(line: &str) -> Option<(&str, Option<u64>)> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The commands someone typed are as private as the output they produced,
+    /// and `scrollback` already writes that at 0600. The directory around this
+    /// file is closed too, but a directory is not the file's own lock: it does
+    /// not travel with the file, and it is one `chmod` away from not being
+    /// there.
+    #[cfg(unix)]
+    #[test]
+    fn history_is_written_readable_by_its_owner_and_nobody_else() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = crate::testutil::temp_root("history-mode");
+        let path = dir.join("history");
+
+        let file = super::open_private_append(&path).expect("a fresh history file");
+        drop(file);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "a file this created is the owner's");
+        // This much would also pass with the creation mode dropped, because
+        // the pass below would clean up after it. What that would lose is the
+        // window between the two, which no test looking at the end state can
+        // see — see the note on `open_private_append`.
+
+        // An existing history from a build that did not set a mode is closed
+        // on the way past, the same way `ensure_private_dir` closes a
+        // directory it did not create.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let file = super::open_private_append(&path).expect("the same file again");
+        drop(file);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "and one it inherited is tightened");
+    }
     use super::*;
 
     fn parse(content: &str) -> Vec<String> {
