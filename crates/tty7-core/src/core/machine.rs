@@ -2377,6 +2377,71 @@ mod tests {
         );
     }
 
+    /// Closing a tab out from under the active mark moves the mark, and says
+    /// so.
+    ///
+    /// `active_tab` is an id, so one naming a tab that has just been removed
+    /// points at nothing — and because the change never went out as a delta,
+    /// every client keeps its own stale answer too. The healing was there; the
+    /// test was not, and removing it passed the suite.
+    #[test]
+    fn emptying_a_tab_moves_the_active_mark_and_announces_it() {
+        let (store, _dir, ws, first) = store_with_tab();
+        let second = store.tab_create(ws, None, seed(9, "/b"), None, None).unwrap();
+        store
+            .workspace_set_active_tab(ws, second.id, None)
+            .unwrap();
+        assert_eq!(store.workspace(ws).unwrap().active_tab, Some(second.id));
+
+        // Closing the second tab's only pane takes the tab with it.
+        let (_sub, heard) = recorded(&store);
+        store.pane_close(ws, 9, None).unwrap();
+
+        let after = store.workspace(ws).unwrap();
+        assert_eq!(after.tabs.len(), 1, "the emptied tab is gone");
+        assert_eq!(
+            after.active_tab,
+            Some(first.id),
+            "the mark moved to the tab that is left, not to one that is not"
+        );
+        assert!(
+            heard.lock().unwrap().iter().any(|(_, d)| matches!(
+                d,
+                LayoutDelta::ActiveTabChanged { tab } if *tab == first.id
+            )),
+            "and the move went out, or every client keeps the dead id"
+        );
+    }
+
+    /// A pane nothing holds any more leaves the document with it.
+    ///
+    /// `collect_orphan_panes` reads `m.panes`, so a record left behind after
+    /// its tab closed answers "orphan" on every later call — for ever, since
+    /// nothing else removes it. It also persists: `machine.json` accumulates a
+    /// row per closed pane, and `pane ls --all` reads them back as panes that
+    /// no workspace holds.
+    #[test]
+    fn a_closed_pane_leaves_no_record_behind() {
+        let (store, _dir, ws, _tab) = store_with_tab();
+        store
+            .pane_split(ws, 1, Axis::Horizontal, 0.5, seed(2, "/b"), false, None)
+            .unwrap();
+        assert_eq!(store.machine().panes.len(), 2);
+
+        let dropped = store.pane_close(ws, 2, None).unwrap();
+        assert_eq!(dropped, vec![2], "the caller is told to hang it up");
+        assert_eq!(
+            store.machine().panes.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![1],
+            "and the record goes with it, or it is an orphan on every later look"
+        );
+
+        // The last one too, when the tab goes with it.
+        let dropped = store.pane_close(ws, 1, None).unwrap();
+        assert_eq!(dropped, vec![1]);
+        assert!(store.machine().panes.is_empty());
+    }
+
     #[test]
     fn splitting_and_closing_panes_reshapes_the_tree() {
         let (store, _dir, ws, tab) = store_with_tab();
