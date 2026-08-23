@@ -3093,4 +3093,131 @@ mod tests {
         pin!(DiffViewMode, Split => "split", Unified => "unified");
         pin!(DocumentLayout, Dock => "dock", Fill => "fill");
     }
+
+    /// Every settings key that has ever shipped is still read.
+    ///
+    /// A key tty7 renames does not fail to load — `de_lenient` leaves the
+    /// field at its default and the user's choice is gone, with the old name
+    /// reported by `unknown_config_keys` only if they run `doctor` and look.
+    /// `every_enum_setting_keeps_the_spelling_it_has_on_disk` holds the values
+    /// still; this holds the names they are stored under.
+    ///
+    /// Adding a setting does not fail this — the list is a floor, not an
+    /// inventory. Renaming or removing one does, and the fix is usually
+    /// `#[serde(alias = "old-name")]`, which is how `RightPanelTab` kept
+    /// reading configs written before it was renamed.
+    #[test]
+    fn no_settings_key_that_has_shipped_stops_being_read() {
+        const SHIPPED: &[&str] = &[
+            "agent_commands",
+            "auto_download_updates",
+            "bell",
+            "check_for_updates",
+            "clipboard_trim_trailing_spaces",
+            "command_frecency",
+            "copy_on_select",
+            "cursor_blink",
+            "cursor_style",
+            "custom_shells",
+            "diff_view",
+            "dim_inactive_panes",
+            "document_layout",
+            "document_ratio",
+            "env",
+            "focus_follows_mouse",
+            "font_fallbacks",
+            "font_family",
+            "font_family_bold",
+            "font_family_italic",
+            "font_features",
+            "font_size",
+            "gui_language",
+            "history_search",
+            "http_proxy",
+            "install_cli_on_path",
+            "keybinding_preset",
+            "keybindings",
+            "line_height",
+            "link_file_command",
+            "link_file_open",
+            "link_url",
+            "macos_option_as_alt",
+            "mouse_hide_while_typing",
+            "mouse_reporting",
+            "mouse_scroll_multiplier",
+            "mouse_zoom_modifier",
+            "new_tab_position",
+            "notify_on_command_finish",
+            "notify_threshold_secs",
+            "per_pane_history",
+            "prefix",
+            "prompt_editor",
+            "remember_window_size",
+            "restore_agent_sessions",
+            "restore_session",
+            "right_panel_tab",
+            "right_panel_visible",
+            "right_panel_width",
+            "scm_graph_expanded",
+            "scrollback_limit",
+            "shell",
+            "show_tray_icon",
+            "sidebar_collapsed",
+            "sidebar_diff_preview",
+            "sidebar_grouping",
+            "sidebar_width",
+            "smart_select",
+            "smooth_scroll",
+            "ssh_loopback_forward",
+            "ssh_profile_frecency",
+            "ssh_profiles",
+            "ssh_warn_on_close",
+            "startup_mode",
+            "tab_bar_position",
+            "tab_completion",
+            "theme_follow_system",
+            "theme_legible_palette",
+            "theme_preset",
+            "theme_preset_dark",
+            "theme_preset_light",
+            "ui_font_size",
+            "update_channel",
+            "verify_host_keys",
+            "window_backdrop",
+            "window_blur",
+            "window_opacity",
+            "word_separators",
+            "working_directory",
+        ];
+
+        let value = serde_json::to_value(Config::default()).expect("Config serializes");
+        let live: std::collections::BTreeSet<&str> = value
+            .as_object()
+            .expect("a config is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+
+        let dropped: Vec<&str> = SHIPPED
+            .iter()
+            .copied()
+            .filter(|k| !live.contains(k))
+            .collect();
+        assert!(
+            dropped.is_empty(),
+            "these settings are no longer read, so every config.json holding \
+             one loses it silently — keep the name with #[serde(alias = ...)] \
+             if the field was renamed:\n  {}",
+            dropped.join("\n  ")
+        );
+
+        // The floor is only a floor if it is not empty, and a Config that
+        // serialized to nothing would pass the check above vacuously.
+        assert!(
+            live.len() >= SHIPPED.len(),
+            "a config with {} keys cannot still be reading {} settings",
+            live.len(),
+            SHIPPED.len()
+        );
+    }
 }
