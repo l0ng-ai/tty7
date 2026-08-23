@@ -1406,11 +1406,20 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.file_tree_copy_into(sources, dir, false, window, cx);
+        let Some(host) = self.active_host(cx) else {
+            return;
+        };
+        self.file_tree_copy_into(host, sources, dir, false, window, cx);
     }
 
+    /// `host` is handed in rather than looked up here, because one caller asks
+    /// a question first and a workspace can be repointed at another machine
+    /// while a prompt is up. Looking it up after the answer would put the files
+    /// on whichever machine the window had by then; taking it as an argument
+    /// makes the caller decide before it asks.
     fn file_tree_copy_into(
         &mut self,
+        host: SharedHost,
         sources: Vec<PathBuf>,
         dir: PathBuf,
         overwrite: bool,
@@ -1420,9 +1429,6 @@ impl Tty7App {
         if sources.is_empty() {
             return;
         }
-        let Some(host) = self.active_host(cx) else {
-            return;
-        };
         let id = host.id();
         let asked_for = sources.clone();
         let target = dir.clone();
@@ -1462,6 +1468,10 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Before the question, for the reason `file_tree_copy_into` gives.
+        let Some(host) = self.active_host(cx) else {
+            return;
+        };
         let title = match conflicts.as_slice() {
             [one] => t_fmt(L10nKey::FileDropReplaceTitle, &[("name", one)]),
             many => t_fmt(
@@ -1479,7 +1489,7 @@ impl Tty7App {
         cx.spawn_in(window, async move |app, cx| {
             let Ok(0) = answer.await else { return };
             let _ = app.update_in(cx, |app, window, cx| {
-                app.file_tree_copy_into(sources, dir, true, window, cx);
+                app.file_tree_copy_into(host, sources, dir, true, window, cx);
             });
         })
         .detach();
