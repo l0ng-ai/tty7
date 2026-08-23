@@ -2322,6 +2322,44 @@ mod tests {
         assert_eq!(info.title, "");
     }
 
+    /// The wire structs an older peer sends short still decode.
+    ///
+    /// `#[serde(default)]` on a non-`Option` field is load-bearing: serde
+    /// defaults a missing `Option` on its own, but a missing `Vec`, `String`,
+    /// number or `bool` fails the whole frame. Every one of these carries the
+    /// attribute because it arrived after its struct shipped, and dropping it
+    /// would refuse messages from any peer that predates it.
+    ///
+    /// Checked struct by struct with the JSON an older peer would send —
+    /// required fields only. Removing any of the attributes named below fails
+    /// here; before this, only `PaneInfo` and `DaemonVersion` were held.
+    #[test]
+    fn wire_structs_decode_from_a_peer_that_sends_only_the_old_fields() {
+        // Every SSH connect carries one of these to the daemon.
+        let spec: NativeSshSpec =
+            serde_json::from_str(r#"{"host":"h","port":22,"user":"u","auth_mode":"agent"}"#)
+                .expect("NativeSshSpec must decode without its later fields");
+        assert!(spec.identity_files.is_empty());
+        assert!(!spec.agent_forward);
+        assert!(spec.forwards.is_empty());
+
+        // Every remote directory listing is a page of these.
+        let entry: SftpEntry = serde_json::from_str(r#"{"name":"f","kind":"file"}"#)
+            .expect("SftpEntry must decode without its later fields");
+        assert_eq!(entry.size, 0);
+        assert_eq!(entry.mtime, 0);
+        assert_eq!(entry.permissions, 0);
+        assert!(!entry.target_is_dir);
+
+        // Process and port rows, read by `tty7 procs`.
+        let proc: ProcEntry = serde_json::from_str(r#"{"pid":1,"name":"sh","depth":0}"#)
+            .expect("ProcEntry must decode without its later fields");
+        assert!(!proc.foreground);
+        let port: PortEntry = serde_json::from_str(r#"{"port":80,"pid":1,"name":"sh"}"#)
+            .expect("PortEntry must decode without its later fields");
+        assert_eq!(port.addr, "");
+    }
+
     /// A `ShellSpec` from a peer that predates its later fields still decodes.
     ///
     /// This crosses the wire inside every `Spawn` that names a shell, in both
