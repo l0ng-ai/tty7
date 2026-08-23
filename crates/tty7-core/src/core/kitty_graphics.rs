@@ -953,7 +953,13 @@ impl MediumTransfer {
         if !meta.is_file() || meta.len() as usize > MAX_IMAGE_BYTES {
             return None;
         }
-        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        // Capped a second time on the way into the allocation, and not because
+        // the check above is in doubt. `name` is an arbitrary path out of an
+        // escape sequence, so `meta.len()` is an attacker's number: reserving
+        // it verbatim is the one place a file that is merely *named* — never
+        // read, since `take` below bounds that — can still ask for its own size
+        // in memory. A hundred-gigabyte sparse file costs nothing to create.
+        let mut bytes = Vec::with_capacity((meta.len() as usize).min(MAX_IMAGE_BYTES));
         file.take(MAX_IMAGE_BYTES as u64 + 1)
             .read_to_end(&mut bytes)
             .ok()?;
@@ -1747,6 +1753,42 @@ mod tests {
             format: WireFormat::Rgba,
             compressed: false,
         }
+    }
+
+    /// A file bigger than the wire could carry is refused on its size alone,
+    /// before any of it is read.
+    ///
+    /// `name` comes out of an escape sequence, so the size is an attacker's
+    /// number and costs nothing to make enormous — a sparse file is a single
+    /// `set_len`. The read below the check is bounded by `take` either way, so
+    /// what the check is really holding is the allocation that reserves the
+    /// file's own length; that is capped a second time now, and this pins the
+    /// refusal itself.
+    #[test]
+    #[cfg(unix)]
+    fn a_file_larger_than_a_frame_is_refused_on_its_size() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("tty7-kitty-huge-{}.rgba", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        // Sparse: no blocks are allocated, so this is as cheap as an empty file.
+        file.set_len(MAX_IMAGE_BYTES as u64 + 1).unwrap();
+        drop(file);
+
+        assert!(
+            temp_file_transfer(&path).resolve().is_none(),
+            "a file past the frame bound is not an image"
+        );
+
+        // One byte under the bound is read, so the refusal is the size and not
+        // something else about the file.
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_len(8).unwrap();
+        drop(file);
+        assert!(
+            temp_file_transfer(&path).resolve().is_some(),
+            "the same file within the bound is read"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A transfer naming a fifo is refused, and refused *promptly*.
