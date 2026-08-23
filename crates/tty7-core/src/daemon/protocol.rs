@@ -2322,6 +2322,49 @@ mod tests {
         assert_eq!(info.title, "");
     }
 
+    /// A `ShellSpec` from a peer that predates its later fields still decodes.
+    ///
+    /// This crosses the wire inside every `Spawn` that names a shell, in both
+    /// directions and between builds — a GUI talks to whatever `tty7-server`
+    /// is installed on the far machine, and that is regularly older. A field
+    /// without `#[serde(default)]` here does not degrade, it fails the frame,
+    /// and the pane never starts.
+    ///
+    /// `default_spawn_stays_wire_compatible_with_old_daemons` covers the
+    /// `shell: None` encoding and so never constructs one of these; removing
+    /// either default below passed the whole suite before this existed.
+    #[test]
+    fn a_shell_spec_from_an_older_peer_still_decodes() {
+        let spec: ShellSpec = serde_json::from_str(r#"{"program": "/bin/zsh"}"#).unwrap();
+        assert_eq!(spec.program, "/bin/zsh");
+        assert!(
+            spec.args.is_empty(),
+            "args must default, not fail the frame"
+        );
+        assert!(
+            !spec.args_are_tty7_defaults,
+            "a peer that never heard of this flag is not claiming tty7 defaults"
+        );
+
+        // And the same message inside the frame it actually travels in.
+        let msg = ClientMsg::Spawn {
+            cwd: None,
+            size: SIZE,
+            shell: Some(spec),
+            owner: None,
+            workspace: None,
+            restore: None,
+        };
+        let mut buf = Vec::new();
+        msg.encode(&mut buf).unwrap();
+        let (kind, payload) = read_frame(&mut std::io::Cursor::new(&buf)).unwrap();
+        assert_eq!(
+            ClientMsg::from_frame(kind, payload).unwrap(),
+            msg,
+            "a spawn naming a shell round-trips"
+        );
+    }
+
     /// The reason `previously_known_as` is a field and not a variant: this
     /// prompt is decoded by whatever GUI or `tty7-server` is at the other end,
     /// and one of them is regularly older than the build that sent it. A
