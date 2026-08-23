@@ -1841,6 +1841,75 @@ mod tests {
         assert_eq!(index.file("untracked.txt"), Some(DecoStatus::Untracked));
     }
 
+    /// Real git, real awkward filenames, read back byte for byte.
+    ///
+    /// `paths_with_spaces_quotes_and_newlines_survive_intact` and
+    /// `a_non_utf8_path_is_shown_but_never_acted_on` cover the same ground
+    /// against records this file writes itself — which tests the model of what
+    /// git emits, not what git emits. Porcelain v2 separates records with NUL
+    /// precisely so these names need no quoting, and that is the assumption
+    /// worth checking against the real thing: if git ever quoted one of them,
+    /// every path here would come back with literal backslashes in it and the
+    /// panel would offer to discard a file that does not exist.
+    ///
+    /// Names are made with `std::fs`, never through a shell, because a shell
+    /// eats exactly the characters under test.
+    #[test]
+    fn real_git_hands_back_awkward_names_exactly_as_they_are_on_disk() {
+        let host = crate::host::local::LocalHost::new();
+        let Some(scratch) = scratch("awkward-names") else {
+            return;
+        };
+        let repo = &scratch.0;
+        if !init_repo(&*host, repo) {
+            return; // no git on this machine
+        }
+
+        // Each of these is legal on this filesystem and none needs a shell to
+        // exist. A `"` and a `\` are the two porcelain v1 would have quoted.
+        let awkward = [
+            "a file with spaces.txt",
+            "quote\"inside.txt",
+            "back\\slash.txt",
+            "new\nline.txt",
+            "tab\there.txt",
+            "unicode-héllo-世界.txt",
+        ];
+        for name in awkward {
+            std::fs::write(repo.join(name), "body\n").expect("the name is legal here");
+        }
+        assert!(run(&*host, repo, &["add", "-A"]));
+        assert!(run(&*host, repo, &["commit", "--quiet", "-m", "awkward"]));
+        // Now change them all, so each arrives as a `1` record with a path.
+        for name in awkward {
+            std::fs::write(repo.join(name), "changed\n").unwrap();
+        }
+
+        let status = probed(
+            probe_status(&*host, repo),
+            "a repository with awkward names still has a status",
+        );
+        let seen: std::collections::BTreeSet<&str> =
+            status.entries.iter().map(|e| e.path.as_str()).collect();
+        for name in awkward {
+            assert!(
+                seen.contains(name),
+                "git reported {name:?} as something else; got {seen:?}"
+            );
+        }
+
+        // And the round trip that matters: every path git named is a path that
+        // opens. A quoted or re-spelled name would not.
+        for entry in &status.entries {
+            let on_disk = repo.join(entry.path.as_str());
+            assert!(
+                on_disk.exists(),
+                "{:?} names nothing on disk, so discarding it would miss",
+                entry.path.as_str()
+            );
+        }
+    }
+
     #[test]
     fn a_merge_in_progress_is_named_and_pre_fills_its_message() {
         let host = crate::host::local::LocalHost::new();
