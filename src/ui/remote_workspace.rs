@@ -353,7 +353,10 @@ impl Tty7App {
             _ => {
                 let machine = self.remote_machine_label(cx);
                 window.push_notification(
-                    t_fmt(L10nKey::RemoteNoConnectionDetails, &[("machine", &machine)]),
+                    t_fmt(
+                        L10nKey::RemoteNoConnectionDetails,
+                        &[("machine", &one_line(&machine))],
+                    ),
                     cx,
                 );
                 false

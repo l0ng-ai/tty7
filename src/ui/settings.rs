@@ -4077,7 +4077,7 @@ impl Tty7App {
             window.push_notification(
                 Notification::error(t_fmt(
                     L10nKey::SettingsImportUnreadable,
-                    &[("path", &source)],
+                    &[("path", &crate::terminal::view::one_line(&source))],
                 ))
                 .id1::<Self>(NOTIFICATION),
                 cx,
@@ -4086,8 +4086,11 @@ impl Tty7App {
         }
         if report.profiles.is_empty() {
             window.push_notification(
-                Notification::warning(t_fmt(L10nKey::SettingsImportNoHosts, &[("path", &source)]))
-                    .id1::<Self>(NOTIFICATION),
+                Notification::warning(t_fmt(
+                    L10nKey::SettingsImportNoHosts,
+                    &[("path", &crate::terminal::view::one_line(&source))],
+                ))
+                .id1::<Self>(NOTIFICATION),
                 cx,
             );
             return;

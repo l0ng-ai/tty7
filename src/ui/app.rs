@@ -863,7 +863,10 @@ fn close_prompt(ends_the_tab: bool, reason: &CloseReason) -> (String, String) {
         ),
         CloseReason::UnsavedEdits(name) => (
             t(L10nKey::CloseUnsavedEditsTitle).to_string(),
-            t_fmt(L10nKey::CloseUnsavedEditsBody, &[("name", name)]),
+            t_fmt(
+                L10nKey::CloseUnsavedEditsBody,
+                &[("name", &crate::terminal::view::one_line(name))],
+            ),
         ),
         CloseReason::Busy(busy) => {
             let title = match ends_the_tab {
@@ -4327,7 +4330,10 @@ impl Tty7App {
                             move |h| crate::core::worktree::remove(h, &wt, force),
                             move |_this, result, window, cx| match result {
                                 Ok(()) => window.push_notification(
-                                    t_fmt(L10nKey::AppWorktreeRemoved, &[("branch", &branch)]),
+                                    t_fmt(
+                                        L10nKey::AppWorktreeRemoved,
+                                        &[("branch", &crate::terminal::view::one_line(&branch))],
+                                    ),
                                     cx,
                                 ),
                                 Err(e) => window.push_notification(
@@ -4584,27 +4590,54 @@ impl Tty7App {
         };
         let name = agent.display_name();
         if agent.fork_label().is_none() {
-            window.push_notification(t_fmt(L10nKey::AppForkNoCommand, &[("name", name)]), cx);
+            window.push_notification(
+                t_fmt(
+                    L10nKey::AppForkNoCommand,
+                    &[("name", &crate::terminal::view::one_line(name))],
+                ),
+                cx,
+            );
             return None;
         }
         if remote.is_some() {
-            window.push_notification(t_fmt(L10nKey::AppForkLocalOnly, &[("name", name)]), cx);
+            window.push_notification(
+                t_fmt(
+                    L10nKey::AppForkLocalOnly,
+                    &[("name", &crate::terminal::view::one_line(name))],
+                ),
+                cx,
+            );
             return None;
         }
         let session = session.unwrap_or_default();
         let Some(id) = session.session_id.as_deref() else {
-            window.push_notification(t_fmt(L10nKey::AppForkNoSessionId, &[("name", name)]), cx);
+            window.push_notification(
+                t_fmt(
+                    L10nKey::AppForkNoSessionId,
+                    &[("name", &crate::terminal::view::one_line(name))],
+                ),
+                cx,
+            );
             return None;
         };
         let Some(cmd) = agent.fork_command(id, session.launch_argv.as_deref()) else {
             window.push_notification(
-                t_fmt(L10nKey::AppForkSessionIdNotToken, &[("name", name)]),
+                t_fmt(
+                    L10nKey::AppForkSessionIdNotToken,
+                    &[("name", &crate::terminal::view::one_line(name))],
+                ),
                 cx,
             );
             return None;
         };
         if session.status == AgentStatus::Working {
-            window.push_notification(t_fmt(L10nKey::AppForkMidTurn, &[("name", name)]), cx);
+            window.push_notification(
+                t_fmt(
+                    L10nKey::AppForkMidTurn,
+                    &[("name", &crate::terminal::view::one_line(name))],
+                ),
+                cx,
+            );
         }
         Some(cmd)
     }

@@ -1031,7 +1031,7 @@ impl Tty7App {
                         t_fmt(
                             L10nKey::LinkFileOpenFailed,
                             &[
-                                ("path", &path.display().to_string()),
+                                ("path", &one_line(&path.display().to_string())),
                                 ("error", &crate::ui::host_ops::explain_io(&e)),
                             ],
                         ),
@@ -1042,7 +1042,7 @@ impl Tty7App {
                 window.push_notification(
                     t_fmt(
                         L10nKey::LinkDirOutsideTree,
-                        &[("path", &path.display().to_string())],
+                        &[("path", &one_line(&path.display().to_string()))],
                     ),
                     cx,
                 );

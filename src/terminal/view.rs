@@ -3074,7 +3074,7 @@ impl TerminalView {
         window.push_notification(
             crate::ui::i18n::t_fmt(
                 crate::ui::i18n::L10nKey::SftpImagePasteUploadFailed,
-                &[("host", host), ("error", reason)],
+                &[("host", &one_line(host)), ("error", reason)],
             ),
             cx,
         );
@@ -3100,7 +3100,10 @@ impl TerminalView {
         window.push_notification(
             crate::ui::i18n::t_fmt(
                 crate::ui::i18n::L10nKey::LinkFileOpenFailed,
-                &[("path", path.as_str()), ("error", reason.as_str())],
+                &[
+                    ("path", &one_line(path.as_str())),
+                    ("error", reason.as_str()),
+                ],
             ),
             cx,
         );

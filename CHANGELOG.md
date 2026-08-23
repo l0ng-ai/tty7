@@ -160,7 +160,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could append text of its own to the question authorising the action. Every
   name a dialog did not compose is now folded onto one line, the rule the file
   tree, the SFTP list and the sidebar already followed when drawing the same
-  names.
+  names. Toasts fold the same names — a branch, a machine, or the path out of a
+  terminal hyperlink, which is whatever the program writing to your terminal
+  chose to emit. An error message in a toast is left alone, because there the
+  message is the content rather than a fragment of a sentence of ours, and git
+  and ssh write real multi-line errors.
 - **A tab created and closed again before the window has reconciled no longer
   leaves its shell running.** This was listed here as a known issue: with a
   window open, `tab new` immediately followed by `tab close` stranded a live

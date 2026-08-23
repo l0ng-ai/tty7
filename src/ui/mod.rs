@@ -106,7 +106,7 @@ mod tests {
         assert!(keep.is_cancel(), "the cancel is marked, not guessed");
     }
 
-    /// Every name a confirmation dialog did not compose is folded onto one
+    /// Every name a dialog or a toast did not compose is folded onto one
     /// line before it goes in.
     ///
     /// `terminal::view::one_line` says the rule out loud — "anything that
@@ -126,13 +126,28 @@ mod tests {
     /// `{name}`, `{path}`, `{branch}` and the rest are always someone else's
     /// bytes, while `{verb}` and `{n}` are ours.
     #[test]
-    fn a_dialog_folds_every_name_it_did_not_compose() {
+    fn a_dialog_or_toast_folds_every_name_it_did_not_compose() {
         /// Substitution keys whose value is never text this app wrote.
-        const THEIRS: [&str; 9] = [
-            "name", "path", "branch", "machine", "host", "file", "subject", "author", "error",
+        ///
+        /// A dialog's `{error}` is checked too. A toast's is not: there the
+        /// message *is* the content rather than a fragment inside a sentence
+        /// of ours, and git and ssh write genuinely multi-line errors whose
+        /// second line is the useful one. A dialog embeds it mid-question.
+        const NAMES: [&str; 8] = [
+            "name", "path", "branch", "machine", "host", "file", "subject", "author",
+        ];
+        let surfaces: [(&str, &[&str]); 2] = [
+            (
+                ".prompt(",
+                &[
+                    "name", "path", "branch", "machine", "host", "file", "subject", "author",
+                    "error",
+                ],
+            ),
+            ("push_notification(", &NAMES),
         ];
 
-        fn walk(dir: &std::path::Path, found: &mut Vec<String>) {
+        fn walk(dir: &std::path::Path, surfaces: &[(&str, &[&str]); 2], found: &mut Vec<String>) {
             let mut entries: Vec<_> = std::fs::read_dir(dir)
                 .expect("the ui sources are readable")
                 .filter_map(Result::ok)
@@ -141,22 +156,24 @@ mod tests {
             entries.sort();
             for path in entries {
                 if path.is_dir() {
-                    walk(&path, found);
+                    walk(&path, surfaces, found);
                     continue;
                 }
                 if path.extension().is_none_or(|e| e != "rs") {
                     continue;
                 }
                 let src = std::fs::read_to_string(&path).expect("a source file reads");
-                for (n, region) in prompt_regions(&src) {
-                    for key in THEIRS {
-                        for value in substitutions(&region, key) {
-                            if !value.contains("one_line(") {
-                                found.push(format!(
-                                    "{}:{} — {{{key}}} is {value}",
-                                    path.display(),
-                                    n
-                                ));
+                for (call, keys) in *surfaces {
+                    for (n, region) in call_regions(&src, call) {
+                        for key in keys.iter().copied() {
+                            for value in substitutions(&region, key) {
+                                if !value.contains("one_line(") {
+                                    found.push(format!(
+                                        "{}:{} — {{{key}}} is {value}",
+                                        path.display(),
+                                        n
+                                    ));
+                                }
                             }
                         }
                     }
@@ -164,13 +181,13 @@ mod tests {
             }
         }
 
-        /// Each `prompt(` call in `src`, as (1-based line, argument text).
-        fn prompt_regions(src: &str) -> Vec<(usize, String)> {
+        /// Each `call` site in `src`, as (1-based line, argument text).
+        fn call_regions(src: &str, call: &str) -> Vec<(usize, String)> {
             let mut out = Vec::new();
             let bytes = src.as_bytes();
             let mut at = 0;
-            while let Some(hit) = src[at..].find(".prompt(") {
-                let open = at + hit + ".prompt(".len();
+            while let Some(hit) = src[at..].find(call) {
+                let open = at + hit + call.len();
                 let mut depth = 1usize;
                 let mut end = open;
                 while end < bytes.len() && depth > 0 {
@@ -216,7 +233,7 @@ mod tests {
         let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         assert!(ui.is_dir(), "the sources moved: {ui:?}");
         let mut found = Vec::new();
-        walk(&ui, &mut found);
+        walk(&ui, &surfaces, &mut found);
         assert!(
             found.is_empty(),
             "these dialogs interpolate a name nobody folded, so the name gets \
