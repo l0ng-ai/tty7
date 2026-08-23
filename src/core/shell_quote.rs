@@ -43,6 +43,17 @@ fn is_bare(c: char) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Quoting {
     /// cmd.exe: `"..."`, and a Windows path cannot hold a `"` to escape.
+    ///
+    /// A `%` is a different matter: it is legal in a Windows filename, and cmd
+    /// expands `%NAME%` *inside* double quotes, before it parses them. So a
+    /// file actually called `%USERPROFILE%.txt` pastes as a command line
+    /// naming some other path entirely. cmd offers no escape for this on an
+    /// interactive line — `%%` is a batch-file rule, and `^` is not read
+    /// inside quotes — so it is a limitation rather than an oversight, and
+    /// `a_percent_in_a_name_is_the_one_thing_cmd_cannot_be_told_to_hold`
+    /// records exactly how far the quoting gets. It costs the wrong path, not
+    /// a command: `%` substitutes an environment variable and can do nothing
+    /// else.
     Cmd,
     /// PowerShell and pwsh: `'...'`, with an embedded `'` written `''`.
     PowerShell,
@@ -324,5 +335,70 @@ mod tests {
         assert!(!posix_escapes_for(Some("powershell.exe")));
         assert!(!posix_escapes_for(Some("pwsh")));
         assert_eq!(posix_escapes_for(None), !cfg!(windows));
+    }
+
+    /// What each dialect makes of a name that argues with it.
+    ///
+    /// cmd had no quoting test at all — only `unquote_word` and `quoting_for`
+    /// — so what it does with an awkward name was written down nowhere.
+    #[test]
+    fn every_dialect_quotes_a_name_that_argues_with_it() {
+        // A space is the ordinary reason to quote, and all three manage it.
+        assert_eq!(quote_as("My Documents", Quoting::Cmd), "\"My Documents\"");
+        assert_eq!(
+            quote_as("My Documents", Quoting::PowerShell),
+            "'My Documents'"
+        );
+        assert_eq!(quote_as("My Documents", Quoting::Posix), "'My Documents'");
+
+        // The quote character itself, which is the one each dialect has its
+        // own answer for. A Windows path cannot contain one, so cmd is not
+        // asked the question.
+        assert_eq!(quote_as("it's", Quoting::PowerShell), "'it''s'");
+        assert_eq!(quote_as("it's", Quoting::Posix), r"'it'\''s'");
+
+        // Characters a POSIX shell would act on are inert inside single
+        // quotes, which is the whole point of choosing them.
+        for hostile in ["a b; rm -rf ~", "$(id)", "`id`", "a|b", "x&y", "*"] {
+            let quoted = quote_as(hostile, Quoting::Posix);
+            assert!(
+                quoted.starts_with('\'') && quoted.ends_with('\''),
+                "{hostile:?} came back unquoted as {quoted:?}"
+            );
+        }
+
+        // And nothing hostile slips through `is_bare` unquoted.
+        for bare in ["plain", "a-b_c.d", "~", "path/to/file", "1+1"] {
+            assert_eq!(quote_as(bare, Quoting::Posix), bare, "{bare:?} was quoted");
+        }
+    }
+
+    /// A `%` in a name is the one thing cmd cannot be told to hold literally.
+    ///
+    /// Legal in a Windows filename, and expanded by cmd inside double quotes
+    /// before they are parsed, with no escape available on an interactive
+    /// line. Pinned rather than fixed: what it costs is the wrong path, since
+    /// `%` substitutes an environment variable and can do nothing else. If a
+    /// later cmd ever grows an escape, this test is where to change the
+    /// answer.
+    #[test]
+    fn a_percent_in_a_name_is_the_one_thing_cmd_cannot_be_told_to_hold() {
+        assert_eq!(
+            quote_as("%USERPROFILE%.txt", Quoting::Cmd),
+            "\"%USERPROFILE%.txt\"",
+            "the quoting is all cmd has; the expansion happens anyway"
+        );
+        // The other two dialects do hold it, so this is cmd's alone.
+        assert_eq!(
+            quote_as("%USERPROFILE%.txt", Quoting::PowerShell),
+            "'%USERPROFILE%.txt'"
+        );
+        assert_eq!(
+            quote_as("%USERPROFILE%.txt", Quoting::Posix),
+            "'%USERPROFILE%.txt'"
+        );
+        // And it is quoted at all only because `is_bare` excludes `%`; were it
+        // bare, the name would go through with no quoting whatsoever.
+        assert!(!"%".chars().all(is_bare), "`%` must never count as bare");
     }
 }
