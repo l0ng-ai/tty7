@@ -1197,6 +1197,12 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Escape abandons an inline edit, as it does in every other box the app
+    /// opens: the SFTP forms, the switcher, the branch inputs, the graph
+    /// search. This one had `PressEnter` and `Blur` and nothing else, so
+    /// changing your mind mid-rename meant clicking somewhere else to blur it
+    /// — and Return, the other key already under your hands, commits the
+    /// rename rather than abandoning it.
     fn file_tree_cancel_edit(&mut self, cx: &mut Context<Self>) {
         self.file_tree.editing = None;
         self.file_tree.editing_subs.clear();
@@ -1799,7 +1805,12 @@ impl Tty7App {
 
         let label: AnyElement = if renaming {
             let input = self.file_tree.editing.as_ref().unwrap().input().clone();
-            Input::new(&input).xsmall().into_any_element()
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(Input::new(&input).xsmall())
+                .on_key_down(cx.listener(escape_cancels_the_edit))
+                .into_any_element()
         } else {
             div()
                 .flex_1()
@@ -1926,6 +1937,7 @@ impl Tty7App {
                         .pr_1()
                         .py_0p5()
                         .child(Input::new(&input).xsmall())
+                        .on_key_down(cx.listener(escape_cancels_the_edit))
                         .into_any_element(),
                 );
             }
@@ -2271,6 +2283,22 @@ fn event_can_change_a_row(path: &Path, show_hidden: bool) -> bool {
         || !path
             .file_name()
             .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+}
+
+/// Escape, on either of the two rows an inline edit can be drawn in.
+///
+/// A free function rather than a closure at each site, so the rename row and
+/// the new-file row cannot drift apart on which keys they answer.
+fn escape_cancels_the_edit(
+    app: &mut Tty7App,
+    ev: &gpui::KeyDownEvent,
+    _window: &mut Window,
+    cx: &mut Context<Tty7App>,
+) {
+    if ev.keystroke.key == "escape" {
+        app.file_tree_cancel_edit(cx);
+        cx.stop_propagation();
+    }
 }
 
 #[cfg(test)]
@@ -3739,5 +3767,96 @@ mod drop_gpui_tests {
         );
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&from);
+    }
+
+    /// Escape abandons an inline rename, and abandoning it renames nothing.
+    ///
+    /// The edit answered `PressEnter` and `Blur` and no other key, so the way
+    /// out of a rename you had changed your mind about was to click somewhere
+    /// else. Return — the other key already under your hands, and the one that
+    /// every *other* box in the app pairs with Escape — commits it instead.
+    #[gpui::test]
+    fn escape_abandons_a_rename_without_performing_it(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("rename-escape");
+        std::fs::write(root.join("keep.txt"), "body").unwrap();
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+
+        let target = root.join("keep.txt");
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_tree_begin_edit(TreeEditKind::Rename, &target, false, window, cx);
+        });
+        app.update_in(&mut vcx, |app, window, cx| {
+            let input = app
+                .file_tree
+                .editing
+                .as_ref()
+                .expect("the rename box is open")
+                .input()
+                .clone();
+            input.update(cx, |st, cx| st.set_value("renamed.txt", window, cx));
+        });
+        vcx.run_until_parked();
+
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+
+        app.update_in(&mut vcx, |app, _window, _cx| {
+            assert!(
+                app.file_tree.editing.is_none(),
+                "escape left the rename box open"
+            );
+        });
+        assert!(
+            root.join("keep.txt").exists(),
+            "escape renamed the file it was meant to abandon"
+        );
+        assert!(
+            !root.join("renamed.txt").exists(),
+            "the typed name reached disk after escape"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same key on the other row an edit can be drawn in.
+    ///
+    /// A new file is a different element from a rename — its own row, appended
+    /// under the directory rather than replacing a name in place — so it wires
+    /// the handler separately and can lose it separately.
+    #[gpui::test]
+    fn escape_abandons_a_new_file_without_creating_it(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("newfile-escape");
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_tree_begin_edit(TreeEditKind::NewFile, &root, true, window, cx);
+        });
+        app.update_in(&mut vcx, |app, window, cx| {
+            let input = app
+                .file_tree
+                .editing
+                .as_ref()
+                .expect("the new-file box is open")
+                .input()
+                .clone();
+            input.update(cx, |st, cx| st.set_value("never.txt", window, cx));
+        });
+        vcx.run_until_parked();
+
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+
+        app.update_in(&mut vcx, |app, _window, _cx| {
+            assert!(
+                app.file_tree.editing.is_none(),
+                "escape left the new-file box open"
+            );
+        });
+        assert!(
+            !root.join("never.txt").exists(),
+            "escape created the file it was meant to abandon"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -153,6 +153,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Escape now abandons an inline edit in the file tree. Renaming a file, or
+  naming a new file or folder, answered Return and nothing else: changing your
+  mind meant clicking somewhere else to blur the box, and Return — the other
+  key already under your hands — commits the rename rather than abandoning it.
+  Every other box the app opens (the SFTP forms, the switcher, the branch
+  inputs, the commit graph's search) already paired the two keys.
 - Confirmation dialogs no longer let a filename write its own lines of the
   question. A name carrying a newline — off a cloned repository, an extracted
   archive or a remote SFTP listing — used to be interpolated raw into the
