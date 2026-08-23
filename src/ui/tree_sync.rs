@@ -1689,19 +1689,25 @@ fn park_dropped(
 /// In ordinary use that is always true and this costs one set comparison. The
 /// pull is paid for only once something looks stranded, which is the case where
 /// a shell is otherwise left running for the rest of the session.
-fn settle_census(cx: &mut App, client_ws: WorkspaceId) {
-    let census: std::collections::HashSet<u64> = cx
-        .default_global::<TreeSync>()
+/// Every pane this window is answerable for: the ones it parked, and the ones
+/// it has spawned and registered but not yet placed in the tree.
+///
+/// One definition rather than two. `settle_census` reads it to decide whether
+/// the tree is worth pulling; `sweep_parked` reads it to decide which panes to
+/// end. Built separately they can drift, and drifting means either ending a
+/// pane the census never weighed or pulling for one the sweep will not judge —
+/// so the set that answers "is this window still holding anything" has to be
+/// the set that answers "what is left to end".
+fn census_of(cx: &mut App, client_ws: WorkspaceId) -> std::collections::HashSet<u64> {
+    cx.default_global::<TreeSync>()
         .windows
         .get(&client_ws)
-        .map(|s| {
-            s.parked
-                .iter()
-                .chain(s.spawned.iter())
-                .copied()
-                .collect::<std::collections::HashSet<u64>>()
-        })
-        .unwrap_or_default();
+        .map(|s| s.parked.iter().chain(s.spawned.iter()).copied().collect())
+        .unwrap_or_default()
+}
+
+fn settle_census(cx: &mut App, client_ws: WorkspaceId) {
+    let census = census_of(cx, client_ws);
     if census.is_empty() {
         return;
     }
@@ -1747,20 +1753,7 @@ fn settle_census(cx: &mut App, client_ws: WorkspaceId) {
 /// at all nothing is swept and the parked set is kept for the next pull — "I
 /// could not look" is not a reason to end a shell.
 fn sweep_parked(cx: &mut App, client_ws: WorkspaceId, tree: &std::collections::HashSet<u64>) {
-    let parked: Vec<u64> = cx
-        .default_global::<TreeSync>()
-        .windows
-        .get(&client_ws)
-        .map(|s| {
-            s.parked
-                .iter()
-                .chain(s.spawned.iter())
-                .copied()
-                .collect::<std::collections::HashSet<u64>>()
-                .into_iter()
-                .collect()
-        })
-        .unwrap_or_default();
+    let parked: Vec<u64> = census_of(cx, client_ws).into_iter().collect();
     if parked.is_empty() {
         return;
     }
@@ -3278,6 +3271,34 @@ mod tests {
             assert!(
                 !cx.default_global::<TreeSync>().windows.contains_key(&other),
                 "a pane with no workspace files nothing anywhere"
+            );
+
+            // Through `census_of`, which is what actually decides. Reading
+            // `spawned` straight off the state proves it was filled in and
+            // nothing more: dropping the `spawned` half of the census left
+            // every assertion above passing, while a pane spawned and not yet
+            // in the tree went back to being invisible to the sweep — the
+            // whole of the leak this set exists to close.
+            let counted = census_of(cx, ws);
+            for pane in [7, 9] {
+                assert!(
+                    counted.contains(&pane),
+                    "pane {pane} was recorded but the census does not weigh it: {counted:?}"
+                );
+            }
+
+            // And a parked pane is in it too, so neither half can be dropped
+            // without this failing.
+            cx.default_global::<TreeSync>()
+                .windows
+                .entry(ws)
+                .or_default()
+                .parked
+                .insert(21);
+            let counted = census_of(cx, ws);
+            assert!(
+                counted.contains(&21) && counted.contains(&7),
+                "the census is the parked panes and the spawned ones together: {counted:?}"
             );
         });
     }
