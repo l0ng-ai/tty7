@@ -2115,6 +2115,73 @@ pub(crate) fn workspace_is_preempted(cx: &gpui::App, workspace: WorkspaceId) -> 
 mod tests {
     use super::*;
 
+    /// A link still being made survives its profile being deleted.
+    ///
+    /// `link_alive_or_connecting` says why: the connection holds an
+    /// authenticated spec, not a profile reference, so forgetting the entry
+    /// "would release the link under any window still attached to it" (#485).
+    /// Both halves matter and only one was held — dropping the
+    /// `LinkState::Connecting` arm left the suite green while a profile
+    /// deleted mid-connect pulled the link out from under a window that was
+    /// in the middle of getting it.
+    ///
+    /// Neither half can be reached by driving the app from here: opening a
+    /// remote link is GUI-only, and `tty7 machine connect` says it is not
+    /// implemented. The test is the whole safety net.
+    #[gpui::test]
+    fn a_link_still_connecting_is_not_forgotten_with_its_profile(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let host = HostId::from_connection_key("a-machine-under-test");
+
+            // Nothing recorded at all: there is no link to keep.
+            assert!(
+                !link_alive_or_connecting(cx, host),
+                "a machine with no entry has nothing to preserve"
+            );
+
+            let put = |cx: &mut gpui::App, state: LinkState, attempting: bool| {
+                let link = cx
+                    .default_global::<RemoteLinks>()
+                    .machines
+                    .entry(host)
+                    .or_insert(MachineLink {
+                        state: LinkState::Reconnecting,
+                        backoff: Backoff::default(),
+                        next_attempt: None,
+                        attempting: false,
+                        last_error: None,
+                        attach_sent: Default::default(),
+                    });
+                link.state = state;
+                link.attempting = attempting;
+            };
+
+            // Mid-attempt, by either spelling. `attempting` is the flag the
+            // pump sets; `Connecting` is the state the UI reads, and they do
+            // not always move together.
+            put(cx, LinkState::Reconnecting, true);
+            assert!(
+                link_alive_or_connecting(cx, host),
+                "an attempt in flight holds the entry"
+            );
+
+            put(cx, LinkState::Connecting, false);
+            assert!(
+                link_alive_or_connecting(cx, host),
+                "a link being made holds it too — this is the half that was \
+                 unheld, and losing it releases the link under a window that \
+                 is still connecting"
+            );
+
+            // Settled and not attempting: nothing to protect.
+            put(cx, LinkState::Failed("no route".into()), false);
+            assert!(
+                !link_alive_or_connecting(cx, host),
+                "a failed link with no attempt in flight is forgettable"
+            );
+        });
+    }
+
     #[gpui::test]
     fn taking_back_marks_the_workspace_for_a_whole_rebuild(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
