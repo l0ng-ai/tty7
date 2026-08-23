@@ -1730,6 +1730,56 @@ mod tests {
     /// handing every other reader something one of its readers had already
     /// decided was not drawable.
     ///
+    /// A `machine.json` an older build wrote still loads.
+    ///
+    /// This file is the whole of a user's layout across sessions, and a parse
+    /// failure is not a degraded read — `load_machine` quarantines the file and
+    /// starts empty, so every workspace they had is gone from the app. That
+    /// makes each `#[serde(default)]` on a non-`Option` field here
+    /// load-bearing: serde fills a missing `Option` on its own, but a missing
+    /// `Vec`, `String`, number or `bool` fails the document.
+    ///
+    /// Written as the shapes older builds actually wrote — a machine with no
+    /// workspaces key at all, a workspace before it had tabs, a pane record
+    /// that was only an id, an attachment before it named a host. Removing any
+    /// of the defaults involved fails here; seven of them were held by nothing.
+    #[test]
+    fn a_machine_file_from_an_older_build_still_loads() {
+        let m: Machine = serde_json::from_str("{}").expect("an empty document is an empty machine");
+        assert!(m.workspaces.is_empty() && m.panes.is_empty());
+
+        let ws: Workspace =
+            serde_json::from_str(r#"{"id":"019622ff-0000-7000-8000-000000000001"}"#)
+                .expect("a workspace that predates tabs still loads");
+        assert!(ws.tabs.is_empty());
+        assert_eq!(ws.active_tab, None);
+
+        let rec: PaneRecord =
+            serde_json::from_str(r#"{"id":7}"#).expect("a pane record that was only an id");
+        assert_eq!(rec.id, 7);
+        assert_eq!(rec.title, "");
+        assert!(!rec.live);
+
+        let ap: Appearance =
+            serde_json::from_str("{}").expect("an appearance from before it carried a theme");
+        assert!(!ap.dark);
+
+        let at: Attachment =
+            serde_json::from_str("{}").expect("an attachment from before it named a host");
+        assert_eq!(at.hostname, "");
+        assert_eq!(at.since, 0);
+
+        // And the whole thing nested, which is how it actually arrives.
+        let whole: Machine = serde_json::from_str(
+            r#"{"workspaces":[{"id":"019622ff-0000-7000-8000-000000000002",
+                 "tabs":[{"root":{"Leaf":{"pane":1}}}]}],"panes":[{"id":1}]}"#,
+        )
+        .expect("a document written before the later fields existed");
+        assert_eq!(whole.workspaces.len(), 1);
+        assert_eq!(whole.workspaces[0].tabs.len(), 1);
+        assert_eq!(whole.panes[0].id, 1);
+    }
+
     /// All three name-setting paths share this funnel, so the check covers
     /// creating a workspace, renaming one, and renaming a tab together.
     #[test]
