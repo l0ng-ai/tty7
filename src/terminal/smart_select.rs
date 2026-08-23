@@ -883,6 +883,12 @@ mod tests {
             "awk '{ if ($1 > 100 && $2 < 5) print }'",
             "WHERE a < 10 AND b > 20",
             "empty <> pair",
+            // Both of the above put a space on each side, so either half of
+            // the rule alone throws them out and neither half is ever the one
+            // being asked. These two put a space on one side only, so each
+            // half has a line that only it can refuse.
+            "if a < b, x>y",
+            "echo <a >b",
         ] {
             let chars: Vec<char> = text.chars().collect();
             for (i, &c) in chars.iter().enumerate() {
