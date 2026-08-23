@@ -7890,6 +7890,44 @@ mod tests {
         assert_eq!(argv, vec!["herdr", "/tmp/foo.rs"]);
     }
 
+    /// A path with a space in it is one argument, not two.
+    ///
+    /// The template is split into tokens *first* and `{path}` substituted
+    /// inside a token, which is what keeps `/Users/me/My Notes/a.rs` together.
+    /// Substituting first and splitting after reads like the same thing and is
+    /// not: the editor would be handed `/Users/me/My` and `Notes/a.rs` and
+    /// open neither. Nothing pinned the order, and paths with spaces are the
+    /// common case on macOS — `Application Support`, `My Documents`.
+    #[test]
+    fn a_path_with_spaces_stays_one_argument() {
+        let spacey = Path::new("/Users/me/My Notes/a file.rs");
+
+        let argv = expand_file_command_template("herdr edit {path}", spacey, None, None);
+        assert_eq!(
+            argv,
+            vec!["herdr", "edit", "/Users/me/My Notes/a file.rs"],
+            "the path was split on its own spaces"
+        );
+
+        // And inside a compound token, where the glue would be lost too.
+        let argv = expand_file_command_template(
+            "code --goto {path}:{line}:{column}",
+            spacey,
+            Some(42),
+            Some(7),
+        );
+        assert_eq!(
+            argv,
+            vec!["code", "--goto", "/Users/me/My Notes/a file.rs:42:7"],
+            "the line and column parted company with the path"
+        );
+
+        // A template may legitimately carry several spaces of its own; those
+        // are still separators. Only the substituted value is protected.
+        let argv = expand_file_command_template("a  b   {path}", spacey, None, None);
+        assert_eq!(argv, vec!["a", "b", "/Users/me/My Notes/a file.rs"]);
+    }
+
     /// #542's contract: a failed open is an `Err` the click site can toast,
     /// not a line in a logfile nobody is watching.
     #[test]
