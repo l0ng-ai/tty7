@@ -153,6 +153,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The bootstrap tty7 runs on a remote machine now creates its own scratch
+  directory instead of adopting one. The startup files a remote shell sources
+  were written into `${TMPDIR:-/tmp}/tty7-zdotdir-$$`, created with `mkdir -p`,
+  which succeeds on a directory that is already there. On a shared server
+  another account can read that pid and take the name first, and then rewrite
+  those files between tty7 writing them and the shell reading them. The
+  directory is now created exclusively at mode 700; if the name is taken
+  nothing is written and the login falls through to a plain login shell.
 - A shell's scratch directory is now created by tty7 alone, closed to other
   accounts. The startup files a pane's shell sources — the redirectors
   `ZDOTDIR` points zsh at, and bash's and nu's equivalents — were written into

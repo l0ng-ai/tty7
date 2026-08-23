@@ -1448,6 +1448,29 @@ pub mod remote {
         format!("'{}'", s.replace('\\', r"\\").replace('\'', r"\'"))
     }
 
+    /// Open `$__tty7_d` as a directory this login made, or leave the block
+    /// unentered.
+    ///
+    /// The far end sources what goes in here, and the name is
+    /// `<prefix>-$$` — the remote shell's pid, which on a shared server every
+    /// other account can read out of `/proc` and get to first. `mkdir -p`
+    /// succeeds on a directory that is already there, so the startup files
+    /// went into whatever held the name, and its owner could rewrite them
+    /// before the shell read them.
+    ///
+    /// `mkdir` without `-p` fails when the path exists, and `-m 700` puts the
+    /// mode on the creating syscall rather than a chmod after it. The caller
+    /// closes the `if`; everything it writes is inside, so a name already
+    /// taken means the files are never written, the `[ -s ... ]` guards that
+    /// already exist see nothing, and the login falls through to the plain
+    /// `exec <shell> -l` those guards were written for.
+    fn open_scratch_dir(prefix: &str) -> String {
+        format!(
+            "__tty7_d=${{TMPDIR:-/tmp}}/{prefix}-$$\n\
+             if command mkdir -m 700 \"$__tty7_d\" 2>/dev/null; then\n"
+        )
+    }
+
     fn write_file(out: &mut String, name: &str, body: &str) {
         out.push_str(&format!(
             "command cat > \"$__tty7_d/{name}\" <<'{HEREDOC}'\n{}\n{HEREDOC}\n",
@@ -1457,8 +1480,7 @@ pub mod remote {
 
     fn zsh_bootstrap(shell_path: &str) -> String {
         let mut out = String::new();
-        out.push_str("__tty7_d=${TMPDIR:-/tmp}/tty7-zdotdir-$$\n");
-        out.push_str("command mkdir -p \"$__tty7_d\" 2>/dev/null\n");
+        out.push_str(&open_scratch_dir("tty7-zdotdir"));
 
         let mut guard = String::new();
         for (name, contents) in zsh_redirectors() {
@@ -1473,6 +1495,7 @@ pub mod remote {
         out.push_str(&format!(
             "{guard}export ZDOTDIR=\"$__tty7_d\" TTY7_RM_DIR=\"$__tty7_d\"\n"
         ));
+        out.push_str("fi\n");
         out.push_str(&format!("exec {} -l\n", shell_quote(shell_path)));
         out
     }
@@ -1480,8 +1503,7 @@ pub mod remote {
     fn bash_bootstrap(shell_path: &str) -> String {
         let quoted = shell_quote(shell_path);
         let mut out = String::new();
-        out.push_str("__tty7_d=${TMPDIR:-/tmp}/tty7-bashrc-$$\n");
-        out.push_str("command mkdir -p \"$__tty7_d\" 2>/dev/null\n");
+        out.push_str(&open_scratch_dir("tty7-bashrc"));
         write_file(
             &mut out,
             "bashrc",
@@ -1490,6 +1512,7 @@ pub mod remote {
         out.push_str("if [ -s \"$__tty7_d/bashrc\" ]; then\n");
         out.push_str("export TTY7_RM_DIR=\"$__tty7_d\"\n");
         out.push_str(&format!("exec {quoted} --rcfile \"$__tty7_d/bashrc\" -i\n"));
+        out.push_str("fi\n");
         out.push_str("fi\n");
         out.push_str(&format!("exec {quoted} -l\n"));
         out
@@ -1538,6 +1561,54 @@ fi
     mod tests {
         use super::super::{BASH_INTEGRATION, ZSH_INTEGRATION};
         use super::*;
+
+        /// The remote bootstrap makes its scratch directory or writes nothing.
+        ///
+        /// The far end sources what goes in there, and the name is the remote
+        /// shell's `$$` — which on a shared server every other account can
+        /// read and get to first. `mkdir -p` took whatever held the name, so
+        /// the startup files were written into a directory somebody else owned
+        /// and could rewrite before the shell read it.
+        ///
+        /// Run against a planted directory, the fixed script leaves `ZDOTDIR`
+        /// empty and the plant untouched; the `mkdir -p` version exported the
+        /// planted path. Verified by hand that way — what is pinned here is
+        /// the shape that made the difference.
+        #[test]
+        fn a_remote_bootstrap_creates_its_scratch_dir_rather_than_adopting_one() {
+            for (shell, path) in [
+                (RemoteShell::Zsh, "/bin/zsh"),
+                (RemoteShell::Bash, "/bin/bash"),
+            ] {
+                let script = bootstrap_command(shell, path);
+                assert!(
+                    script.contains("if command mkdir -m 700 \"$__tty7_d\" 2>/dev/null; then"),
+                    "{shell:?} does not create its own scratch directory:\n{script}"
+                );
+                assert!(
+                    !script.contains("mkdir -p"),
+                    "{shell:?} still adopts a directory that is already there:\n{script}"
+                );
+                // Everything written has to sit inside that `if`, or a taken
+                // name means writing to `$__tty7_d` while it is somebody
+                // else's — or, with the variable cleared, to `/`.
+                let opened = script.find("; then").expect("the guard is there");
+                let closed = script.rfind("\nfi\n").expect("the guard is closed");
+                let writes = script.match_indices("command cat > ");
+                for (at, _) in writes {
+                    assert!(
+                        at > opened && at < closed,
+                        "{shell:?} writes a startup file outside the guard:\n{script}"
+                    );
+                }
+                // And the fallback the guard drops into is still a plain login
+                // shell, which is what makes refusing a taken name safe.
+                assert!(
+                    script.trim_end().ends_with(&format!("exec '{path}' -l")),
+                    "{shell:?} has no plain login shell to fall back to:\n{script}"
+                );
+            }
+        }
 
         #[test]
         fn probe_reads_the_line_after_the_marker() {
