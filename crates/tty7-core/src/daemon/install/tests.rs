@@ -711,6 +711,37 @@ fn a_present_but_unexecutable_binary_is_reinstalled() {
     assert_eq!(remote.file(BINARY).unwrap().mode, 0o755);
 }
 
+/// The mode half of "usable" has a test above; this is the other half. A
+/// directory carries the executable bit as a matter of course — 0755 is what
+/// `mkdir` gives you — so mode alone says yes to one, and the installer would
+/// skip the install and hand `ensure_daemon` a path it can never exec. The
+/// remote would fail to come up with no explanation and no second attempt,
+/// because as far as the installer is concerned the binary is already there.
+///
+/// A directory at that path is not exotic: an interrupted install, an `scp -r`
+/// aimed one level too high, or a hand-made `~/.local/share/tty7` layout all
+/// leave one.
+#[test]
+fn a_directory_where_the_binary_belongs_is_not_a_binary() {
+    let remote = FakeRemote::new();
+    remote.preinstall(BINARY, 0o755);
+    remote.files.lock().unwrap().get_mut(BINARY).unwrap().is_dir = true;
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let report = installer(&remote, &release, &user, "me@dir-in-the-way:22")
+        .run()
+        .unwrap();
+
+    assert!(
+        report.installed,
+        "a directory is not an installed server, whatever its mode says"
+    );
+    let put = remote.file(BINARY).unwrap();
+    assert!(!put.is_dir, "the install replaced it with a file");
+    assert_eq!(put.mode, 0o755);
+}
+
 #[test]
 fn an_unsupported_machine_is_refused_before_any_work() {
     // A machine we publish nothing for on a system we do, on both systems we
