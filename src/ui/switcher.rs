@@ -201,6 +201,25 @@ pub(crate) struct OrphanPane {
 
 /// Every pane id the local machine's workspaces hold — what the registry
 /// listing is measured against to find the orphans (#596).
+/// Every pane something can vouch for: the local machine tree, plus whatever
+/// any open window is showing.
+///
+/// The tree alone is not enough, and the reason is written out in
+/// `tree_sync::hang_up_detached`: a pane a window has spawned and registered
+/// but not yet filed is held by nothing in the tree at that instant, and a
+/// mirror can also simply be behind. Naming such a pane an orphan puts a live
+/// terminal on a list under a button that kills it.
+///
+/// A window that will not answer subtracts nothing. That keeps this list at
+/// worst what it has always been, never shorter than the truth — it is the
+/// recovery tool for exactly the case where things have gone wrong, so it must
+/// not empty itself when a window is busy.
+fn vouched_for_pane_ids(cx: &mut App) -> HashSet<u64> {
+    let mut held = held_local_pane_ids(cx);
+    held.extend(crate::ui::tree_sync::shown_pane_ids(cx).into_iter().flatten());
+    held
+}
+
 fn held_local_pane_ids(cx: &App) -> HashSet<u64> {
     crate::ui::machine_mirror::MachineMirrors::machine(cx, crate::core::session::HostId::LOCAL)
         .map(|machine| {
@@ -484,8 +503,11 @@ impl Tty7App {
                     return;
                 }
             };
+            // Asked before the entity is held: `shown_pane_ids` upgrades every
+            // window, and upgrading the one already borrowed is the conflict
+            // gpui answers by dropping the update.
+            let held = cx.update(vouched_for_pane_ids);
             let _ = this.update(cx, |this, cx| {
-                let held = held_local_pane_ids(cx);
                 if let Some(sw) = this.switcher.as_mut() {
                     sw.orphans = orphan_panes_of(listed, &held);
                 }
@@ -514,8 +536,11 @@ impl Tty7App {
                     return;
                 }
             };
+            // Asked before the entity is held: `shown_pane_ids` upgrades every
+            // window, and upgrading the one already borrowed is the conflict
+            // gpui answers by dropping the update.
+            let held = cx.update(vouched_for_pane_ids);
             let _ = this.update(cx, |this, cx| {
-                let held = held_local_pane_ids(cx);
                 if let Some(sw) = this.switcher.as_mut() {
                     sw.orphans = orphan_panes_of(listed, &held);
                 }
@@ -3397,6 +3422,60 @@ mod tests {
             link: Link::Offline,
             ..group(rows)
         }
+    }
+
+    /// A pane a window is showing is never offered for closing.
+    ///
+    /// The list is built from the local machine *mirror*, which is behind
+    /// whenever an operation is in flight — a pane the window has just spawned
+    /// and not yet filed is held by nothing there, and a client is left out of
+    /// the deltas its own ops raise (#612). `tree_sync` has always refused to
+    /// end a pane a window is showing for exactly that reason; this list sat
+    /// under a button that does the same thing and asked only the mirror.
+    ///
+    /// Driven through `vouched_for_pane_ids`' contract rather than a window,
+    /// since what the caller passes is the whole of the decision.
+    #[gpui::test]
+    fn a_pane_a_window_shows_is_never_listed_as_an_orphan(cx: &mut gpui::TestAppContext) {
+        use crate::ui::app::test_window::harness_with_tabs;
+        use tty7_core::daemon::protocol::PaneInfo;
+
+        cx.update(crate::ui::windows::WindowRegistry::init);
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        app.update_in(&mut vcx, |app, window, cx| {
+            let (ws, weak) = (app.workspace, cx.weak_entity());
+            crate::ui::windows::WindowRegistry::register(cx, ws, window.window_handle(), weak);
+        });
+
+        // Whatever the harness put on screen is live and must not be offered.
+        let shown = cx.update(crate::ui::tree_sync::shown_pane_ids).unwrap_or_default();
+        assert!(!shown.is_empty(), "the harness window is showing panes");
+
+        let listed: Vec<PaneInfo> = shown
+            .iter()
+            .map(|&pane_id| PaneInfo {
+                pane_id,
+                cwd: None,
+                title: "zsh".to_string(),
+                osc_title: None,
+                alive: true,
+                owner: None,
+            })
+            .collect();
+
+        // The mirror is empty — the case this exists for.
+        let held_by_mirror: HashSet<u64> = HashSet::new();
+        assert_eq!(
+            orphan_panes_of(listed.clone(), &held_by_mirror).len(),
+            listed.len(),
+            "against the mirror alone every live pane looks stranded"
+        );
+
+        let vouched = cx.update(vouched_for_pane_ids);
+        assert!(
+            orphan_panes_of(listed, &vouched).is_empty(),
+            "but nothing a window is showing may be offered for closing"
+        );
     }
 
     #[test]

@@ -1560,7 +1560,7 @@ fn finish_prime(
 /// A slot still connecting counts by the pane it is reattaching to. That is the
 /// one worth protecting: the daemon has registered it, so it can be named as
 /// detached, while the window has nothing on screen for it yet.
-fn shown_pane_ids(cx: &mut App) -> Option<std::collections::HashSet<u64>> {
+pub(crate) fn shown_pane_ids(cx: &mut App) -> Option<std::collections::HashSet<u64>> {
     let mut shown = std::collections::HashSet::new();
     for (_, weak) in crate::ui::windows::WindowRegistry::open_windows(cx) {
         let app = weak.upgrade()?;
