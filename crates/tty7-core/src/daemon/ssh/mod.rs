@@ -1144,23 +1144,33 @@ mod tests {
         manager.evict_connection(conn.key());
     }
 
+    /// GSSAPI against a real sshd, for a machine that has a Kerberos ticket.
+    ///
+    /// Opted into by name rather than run with its siblings. The other three
+    /// live tests fall back to `localhost`, `$USER` and `~/.ssh/id_ed25519`,
+    /// so `cargo test --lib live_ -- --ignored` is a thing to run on any
+    /// developer machine — and this one used to fail there, panicking on a
+    /// bare `TTY7_LIVE_SSH_HOST` for want of an environment that cannot be
+    /// assumed. A skip that says why is the honest answer to "no Kerberos
+    /// here"; a failure claims something is broken.
+    ///
+    /// Set `TTY7_LIVE_GSSAPI=1` on a host with a ticket. Everything else comes
+    /// from `live_key_spec`, so the target is the same one the other three use
+    /// and the same overrides steer it.
     #[test]
     #[ignore = "requires a live SSH server and local GSSAPI credentials"]
     fn live_gssapi_connects_and_opens_a_channel() {
-        let host = std::env::var("TTY7_LIVE_SSH_HOST").expect("TTY7_LIVE_SSH_HOST");
-        let user = std::env::var("TTY7_LIVE_SSH_USER").expect("TTY7_LIVE_SSH_USER");
-        let port = std::env::var("TTY7_LIVE_SSH_PORT")
-            .ok()
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(22);
-
-        let mut spec = base_spec();
-        spec.host = host;
-        spec.user = user;
-        spec.port = port;
+        if std::env::var_os("TTY7_LIVE_GSSAPI").is_none() {
+            eprintln!(
+                "skipping the GSSAPI test: set TTY7_LIVE_GSSAPI=1 on a host \
+                 that holds a Kerberos ticket"
+            );
+            return;
+        }
+        let _turn = live_ssh_turn();
+        let mut spec = live_key_spec();
         spec.auth_mode = SshAuthMode::Gssapi;
-        spec.connect_timeout_s = Some(10);
-        spec.verify_host_keys = false;
+        spec.identity_files.clear();
 
         let manager = SshManager::global();
         let broker = PromptBroker::new(Box::new(|_| true));
