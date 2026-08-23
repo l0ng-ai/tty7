@@ -2322,6 +2322,52 @@ mod tests {
         assert_eq!(info.title, "");
     }
 
+    /// The wire spelling of every simple enum variant, pinned.
+    ///
+    /// These strings are derived from the Rust variant names by `rename_all`,
+    /// so a rename in a refactor changes what goes on the wire without
+    /// changing a single string in the source. The dialect number guards a
+    /// variant being *added* — `a_new_wire_variant_has_to_move_the_dialect_
+    /// number` in `control.rs` — and nothing guarded one being renamed.
+    ///
+    /// Written as the tag an older peer sends, decoded here: that is the
+    /// direction that breaks people. A newer build that no longer recognises
+    /// `"dir"` does not degrade, it fails the frame, and every directory in a
+    /// remote listing disappears.
+    ///
+    /// The data-carrying enums (`SftpOp`, `SftpOpResult`, `WorkspaceOp`,
+    /// `SshProxy`, `ForwardStatus`) are not here: their payloads move with
+    /// them, so a rename is a wider change than a string. This covers the ones
+    /// where the tag is the whole message.
+    #[test]
+    fn the_wire_spelling_of_every_simple_enum_variant_is_pinned() {
+        fn decodes<T: serde::de::DeserializeOwned + std::fmt::Debug>(what: &str, tags: &[&str]) {
+            for tag in tags {
+                let json = format!("\"{tag}\"");
+                serde_json::from_str::<T>(&json).unwrap_or_else(|e| {
+                    panic!("{what} no longer accepts {json}, which an older peer sends: {e}")
+                });
+            }
+        }
+
+        decodes::<RemoteKind>("RemoteKind", &["ssh", "native-ssh", "wsl"]);
+        decodes::<SshAuthMode>(
+            "SshAuthMode",
+            &[
+                "auto",
+                "gssapi",
+                "password",
+                "public-key",
+                "agent",
+                "keyboard-interactive",
+            ],
+        );
+        decodes::<SshForwardKind>("SshForwardKind", &["local", "remote", "dynamic"]);
+        decodes::<SftpEntryKind>("SftpEntryKind", &["file", "dir", "symlink"]);
+        decodes::<SftpTransferKind>("SftpTransferKind", &["upload", "download"]);
+        decodes::<SftpJobState>("SftpJobState", &["running", "done", "error", "cancelled"]);
+    }
+
     /// The wire structs an older peer sends short still decode.
     ///
     /// `#[serde(default)]` on a non-`Option` field is load-bearing: serde
