@@ -3309,4 +3309,42 @@ mod tests {
             );
         });
     }
+
+    /// A download whose size the server never sent does not invent one.
+    ///
+    /// `install_phase_caption` is shared by the switcher's bar and the strip's
+    /// so a user watching both is not told two different things — which makes
+    /// a wrong caption wrong in two places at once. A `None` total rendered
+    /// through the with-total string reads "12 MB / 12 MB" while the transfer
+    /// is still running: it claims the download is finished, and the bar
+    /// beside it disagrees.
+    #[test]
+    fn a_download_with_no_known_total_says_so() {
+        use crate::daemon::install::InstallPhase;
+
+        let unknown = install_phase_caption(InstallPhase::Downloading {
+            done: 12_000_000,
+            total: None,
+        });
+        assert!(
+            !unknown.contains('/'),
+            "a size nobody sent must not appear as a fraction: {unknown}"
+        );
+
+        let known = install_phase_caption(InstallPhase::Downloading {
+            done: 6_000_000,
+            total: Some(12_000_000),
+        });
+        assert!(
+            known.contains('/'),
+            "a size the server did send is shown as a fraction: {known}"
+        );
+        assert_ne!(known, unknown, "the two phases do not read the same");
+
+        // An upload always knows its total; restarting has no fraction at all.
+        let copying = install_phase_caption(InstallPhase::Uploading { done: 1, total: 2 });
+        assert!(copying.contains('/'), "{copying}");
+        let restarting = install_phase_caption(InstallPhase::Restarting);
+        assert!(!restarting.contains('/'), "{restarting}");
+    }
 }
