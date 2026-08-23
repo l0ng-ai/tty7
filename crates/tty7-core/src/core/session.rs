@@ -568,6 +568,46 @@ mod tests {
         ))
     }
 
+    /// The session shapes an older build wrote still load.
+    ///
+    /// `Session` carries `#[serde(default)]` on the struct, so a missing field
+    /// there falls back. `SessionPane` and `RemoteTarget` are enums and
+    /// `RouteSnapshot` is a plain struct — none of them inherits that, so the
+    /// field defaults on those are what stands between an older
+    /// `session.json` and a window that opens without the layout it saved.
+    ///
+    /// Removing any of the four fails here; nothing held them before.
+    #[test]
+    fn a_session_written_by_an_older_build_still_loads() {
+        // A split written before it recorded a ratio.
+        let pane: SessionPane = serde_json::from_str(
+            r#"{"Split":{"axis":"Horizontal","a":{"Leaf":{}},"b":{"Leaf":{}}}}"#,
+        )
+        .expect("a split that predates its ratio still loads");
+        match pane {
+            SessionPane::Split { ratio, .. } => {
+                assert!(ratio > 0.0 && ratio < 1.0, "and lands on a usable one")
+            }
+            other => panic!("expected a split, got {other:?}"),
+        }
+
+        // A direct SSH target written before it recorded a user or a port.
+        let target: RemoteTarget = serde_json::from_str(r#"{"kind":"direct","host":"h"}"#)
+            .expect("a direct target that predates user and port still loads");
+        match target {
+            RemoteTarget::Direct { user, host, port } => {
+                assert_eq!((user.as_str(), host.as_str(), port), ("", "h", 22));
+            }
+            other => panic!("expected a direct target, got {other:?}"),
+        }
+
+        // The route cached beside a window, from before it named a user.
+        let route: RouteSnapshot = serde_json::from_str(r#"{"name":"n","host":"h"}"#)
+            .expect("a route snapshot that predates user and port still loads");
+        assert_eq!(route.user, "");
+        assert_eq!(route.port, 22);
+    }
+
     #[test]
     fn views_saved_before_the_snapshot_existed_still_load() {
         // #485 added `RemoteRef.via`; a views file written before it has no
