@@ -351,10 +351,21 @@ impl GitOp {
                 start,
                 checkout,
             } => {
+                // `--` before the name on the `branch` forms, and not on the
+                // `checkout` one. `checkout -b` takes the next argument as the
+                // value of `-b` whatever it looks like, so a name of `--list`
+                // already comes back as "not a valid branch name"; `git branch
+                // --list` instead *lists* branches, exits 0, and creates
+                // nothing — which this layer reads as success. The commit
+                // graph's "branch at this commit" builds exactly that form.
+                //
+                // For `branch`, `--` ends option parsing and a start point may
+                // still follow it. For `checkout` it would mean "paths follow"
+                // and is a different instruction altogether.
                 let mut out = if *checkout {
                     argv(&["checkout", "-b", name])
                 } else {
-                    argv(&["branch", name])
+                    argv(&["branch", "--", name])
                 };
                 if let Some(start) = start {
                     out.push(start.clone());
@@ -362,7 +373,12 @@ impl GitOp {
                 vec![out]
             }
             GitOp::DeleteBranch { name, force } => {
-                vec![argv(&["branch", if *force { "-D" } else { "-d" }, name])]
+                vec![argv(&[
+                    "branch",
+                    if *force { "-D" } else { "-d" },
+                    "--",
+                    name,
+                ])]
             }
             GitOp::CherryPick {
                 rev,
@@ -1207,7 +1223,7 @@ mod tests {
                 checkout: false,
             }
             .commands(&born()),
-            vec![vec!["branch", "feature", "origin/main"]],
+            vec![vec!["branch", "--", "feature", "origin/main"]],
         );
         assert_eq!(
             GitOp::DeleteBranch {
@@ -1215,7 +1231,7 @@ mod tests {
                 force: false,
             }
             .commands(&born()),
-            vec![vec!["branch", "-d", "feature"]],
+            vec![vec!["branch", "-d", "--", "feature"]],
         );
         assert_eq!(
             GitOp::DeleteBranch {
@@ -1223,8 +1239,70 @@ mod tests {
                 force: true,
             }
             .commands(&born()),
-            vec![vec!["branch", "-D", "feature"]],
+            vec![vec!["branch", "-D", "--", "feature"]],
         );
+    }
+
+    /// A branch name that looks like an option is a name, not an option.
+    ///
+    /// The commit graph's "branch at this commit" builds `CreateBranch` with
+    /// `checkout: false`, so the name reaches `git branch` in a position where
+    /// git parses options. Measured against real git: `git branch --list x`
+    /// *lists* branches, exits 0 and creates nothing — and an exit of 0 is what
+    /// `run_op` reads as success, so the panel would report a branch that does
+    /// not exist. With `--` ahead of it, git answers "'--list' is not a valid
+    /// branch name", which is the truth and an error the user can act on.
+    ///
+    /// `checkout -b` needs no such guard and is deliberately left without one:
+    /// `-b` takes the next argument as its value whatever it looks like, so
+    /// that form already rejects the name. For `checkout`, `--` would mean
+    /// "paths follow" — a different instruction, which is why the two branches
+    /// of this op end up spelled differently.
+    #[test]
+    fn a_branch_name_that_looks_like_an_option_is_still_a_name() {
+        let dash_names = ["--list", "-D", "-foo", "--help"];
+        for name in dash_names {
+            let create = GitOp::CreateBranch {
+                name: name.into(),
+                start: None,
+                checkout: false,
+            }
+            .commands(&born());
+            assert_eq!(
+                create,
+                vec![vec!["branch", "--", name]],
+                "{name} has to reach git as a name"
+            );
+            // The name has to be what *follows* the separator. Searching for
+            // the name instead would find the force flag when the two look
+            // alike — `["branch", "-D", "--", "-D"]` is correct, and an
+            // assertion that hunts for the first `-D` calls it broken.
+            let after_separator = |argv: &Vec<String>| -> String {
+                let sep = argv
+                    .iter()
+                    .position(|a| a == "--")
+                    .unwrap_or_else(|| panic!("no separator in {argv:?}"));
+                argv.get(sep + 1)
+                    .unwrap_or_else(|| panic!("nothing after the separator in {argv:?}"))
+                    .clone()
+            };
+            assert_eq!(after_separator(&create[0]), name);
+
+            for force in [false, true] {
+                let delete = GitOp::DeleteBranch {
+                    name: name.into(),
+                    force,
+                }
+                .commands(&born());
+                assert_eq!(
+                    after_separator(&delete[0]),
+                    name,
+                    "a delete of {name:?} (force={force}) must name it after \
+                     the separator: {:?}",
+                    delete[0]
+                );
+            }
+        }
     }
 
     #[test]

@@ -153,6 +153,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Naming a branch something that looks like a git option now fails with a
+  message instead of quietly doing nothing. "Branch at this commit" in the
+  commit graph creates without switching, which reaches `git branch <name>` — a
+  position where git parses options, so a name of `--list` made git list
+  branches, exit 0 and create nothing, which tty7 read as success. The name is
+  now passed after `--`, and git answers that it is not a valid branch name.
 - A Git command run where there is no repository now says so instead of doing
   nothing. The panel's tiles and the Git menu grey themselves out, but every
   Git action is bindable and every one is listed in the command palette
