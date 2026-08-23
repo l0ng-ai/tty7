@@ -299,6 +299,85 @@ mod tests {
         )
     }
 
+    /// A list laid out with the given heights, and where each item starts.
+    fn strip(heights: &[f32], gap: f32, from: usize) -> (Reorder, Vec<f32>) {
+        let mut y = 0.0f32;
+        let mut origins = Vec::new();
+        let rects: Vec<_> = heights
+            .iter()
+            .map(|&h| {
+                origins.push(y);
+                let b = Bounds {
+                    origin: point(px(0.), px(y)),
+                    size: size(px(200.), px(h)),
+                };
+                y += h + gap;
+                b
+            })
+            .collect();
+        (
+            Reorder::new(
+                Surface::Strip,
+                from,
+                rects,
+                Axis::Vertical,
+                px(gap),
+                point(px(100.), px(1.)),
+            ),
+            origins,
+        )
+    }
+
+    /// What a drag preview is *for*: while the pointer is at `target`, the
+    /// strip has to look exactly like the list already reordered. Every other
+    /// test here samples that with a few numbers read off a particular layout,
+    /// which pins the arithmetic without ever stating what it is arithmetic
+    /// for — and the interesting case, chips of different widths, is where
+    /// reading numbers off by hand stops being convincing.
+    ///
+    /// So: build the reordered list, lay it out from scratch, and require the
+    /// displaced positions to be that layout. Eight shapes — even and uneven,
+    /// two to six chips — across three gaps and every (from, target) pair.
+    #[test]
+    fn a_dragged_slot_lays_the_strip_out_as_the_reordered_list() {
+        let shapes: [&[f32]; 8] = [
+            &[30., 30.],
+            &[30., 30., 30.],
+            &[30., 30., 30., 30.],
+            &[30., 30., 30., 30., 30.],
+            &[30., 30., 30., 30., 30., 30.],
+            &[10., 40., 25.],
+            &[50., 10., 30., 20.],
+            &[12., 12., 60., 8., 33.],
+        ];
+        for heights in shapes {
+            let n = heights.len();
+            for gap in [0.0f32, 2.0, 7.5] {
+                for from in 0..n {
+                    let (r, origins) = strip(heights, gap, from);
+                    for target in 0..n {
+                        // Lay the reordered list out from nothing.
+                        let mut want = vec![0f32; n];
+                        let mut y = 0.0f32;
+                        for &original in &r.order(target) {
+                            want[original] = y;
+                            y += heights[original] + gap;
+                        }
+                        for slot in 0..n {
+                            let got = origins[slot] + f32::from(r.displacement(slot, target));
+                            assert!(
+                                (got - want[slot]).abs() < 0.01,
+                                "{heights:?} gap {gap}: dragging {from} to {target} puts slot \
+                                 {slot} at {got}, but the reordered list has it at {}",
+                                want[slot]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn target_follows_the_pointer_across_neighbours() {
         let r = column(4, 30., 2., 0);
