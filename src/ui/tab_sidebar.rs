@@ -1,3 +1,4 @@
+use crate::terminal::view::one_line;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Axis, Bounds, Context, Div, FontWeight, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Stateful, Window, canvas,
@@ -479,7 +480,13 @@ impl Tty7App {
                             Some((leaf.effective_cwd()?, leaf.display_home(cx)))
                         })
                         .map(|(cwd, home)| {
-                            let text = cwd.display().to_string();
+                            // A directory is bytes to the kernel, so this is a
+                            // name nobody composed — `mkdir $'"'"'a\nb'"'"'` is a cwd
+                            // the sidebar has to draw. Folded here rather than
+                            // where it is read, because the unfolded path is
+                            // what the pane and the file tree work with. The
+                            // rule is `terminal::view::one_line`'"'"'s.
+                            let text = one_line(&cwd.display().to_string());
                             let full = SharedString::from(
                                 abbreviate_home(&text, home.as_deref()).into_owned(),
                             );
@@ -1430,11 +1437,14 @@ fn group_names(roots: &[&PathBuf]) -> Vec<String> {
             .zip(&depth)
             .enumerate()
             .map(|(i, (c, &d))| {
-                if c.is_empty() {
+                // Same reason as the row subtitle: these are directory names,
+                // and a section header that grows a line paints over the rows
+                // under it.
+                one_line(&if c.is_empty() {
                     roots[i].display().to_string()
                 } else {
                     c[c.len().saturating_sub(d)..].join("/")
-                }
+                })
             })
             .collect();
         let mut grew = false;
@@ -1528,6 +1538,37 @@ mod tests {
                 Some(Some(p("/w/repo")))
             );
         }
+    }
+
+    /// A directory whose name carries a newline still heads one row.
+    ///
+    /// A directory is bytes to the kernel, so `mkdir $'a\nb'` is a group the
+    /// sidebar has to draw, and gpui breaks a label on `\n` whatever its
+    /// wrapping says — the header grows and paints over the rows beneath it.
+    /// The file tree folds filenames at the point of drawing for exactly this
+    /// reason; the sidebar drew its section names straight.
+    #[test]
+    fn a_group_named_with_a_control_character_still_heads_one_row() {
+        let nasty = p("/w/pro
+ject");
+        let sections = sidebar_sections(&[Some(nasty.clone()), Some(p("/w/plain"))]);
+
+        let named: Vec<String> = sections.into_iter().filter_map(|s| s.name).collect();
+        assert!(
+            named.iter().any(|n| n.contains('↵')),
+            "the newline is not folded to a stand-in: {named:?}"
+        );
+        assert!(
+            !named.iter().any(|n| n.contains('\n')),
+            "a raw newline survived into a section name: {named:?}"
+        );
+        // The key is untouched — it is a path, and grouping compares it.
+        assert!(
+            sidebar_sections(&[Some(nasty.clone())])
+                .into_iter()
+                .all(|s| s.key.as_deref() == Some(nasty.as_path())),
+            "folding must not reach the key the tabs are grouped by"
+        );
     }
 
     #[test]
