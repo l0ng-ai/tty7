@@ -1118,6 +1118,64 @@ mod tests {
     use super::*;
     use crate::core::git::test_support::{PINS, pin_repo_config};
 
+    /// The calendar the timestamps rest on, walked a day at a time.
+    ///
+    /// `days_from_civil` and `days_in_month` are pure arithmetic that nothing
+    /// called in a test, and every date this crate prints goes through them.
+    /// Hinnant's algorithm is correct as written; what it is easy to do is
+    /// transcribe one constant wrong, and a wrong `146097` or `719468` puts
+    /// every commit date out by a fixed amount that reads as plausible.
+    ///
+    /// Walking is the check that needs no second implementation to trust: step
+    /// one day at a time with `days_in_month`, count as you go, and require
+    /// `days_from_civil` to agree at every step. The two can only agree across
+    /// two centuries if both are right — a leap rule wrong in either drifts
+    /// them apart within four years and never recovers.
+    #[test]
+    fn the_civil_calendar_and_the_day_count_agree_for_two_centuries() {
+        // The anchors first, so a walk that is merely self-consistent cannot
+        // pass: these are the epoch, the century leap year that trips the
+        // naive rule, and a recent leap day.
+        assert_eq!(days_from_civil(1970, 1, 1), 0, "the epoch is day zero");
+        assert_eq!(days_from_civil(1969, 12, 31), -1, "and the day before it");
+        assert_eq!(days_in_month(2000, 2), 29, "2000 is a leap year: divisible by 400");
+        assert_eq!(days_in_month(1900, 2), 28, "1900 is not: divisible by 100, not 400");
+        assert_eq!(days_in_month(2024, 2), 29);
+        assert_eq!(days_in_month(2023, 2), 28);
+
+        let (mut y, mut m, mut d) = (1900i64, 1u32, 1u32);
+        let mut counted = days_from_civil(1900, 1, 1);
+        let mut leap_days = 0usize;
+        while y < 2100 {
+            assert_eq!(
+                days_from_civil(y, m, d),
+                counted,
+                "the two disagree at {y:04}-{m:02}-{d:02}"
+            );
+            if m == 2 && d == 29 {
+                leap_days += 1;
+            }
+            let last = days_in_month(y, m);
+            assert!((28..=31).contains(&last), "{y:04}-{m:02} has {last} days");
+            d += 1;
+            counted += 1;
+            if d > last {
+                d = 1;
+                m += 1;
+            }
+            if m > 12 {
+                m = 1;
+                y += 1;
+            }
+        }
+        // 1900 and 2000 are the two century years in range; only 2000 is a
+        // leap year, so 200 years hold 49 + 1 = 48 ordinary leap years plus
+        // 2000 itself.
+        assert_eq!(leap_days, 49, "two centuries hold 49 leap days here");
+        assert_eq!(days_in_month(2024, 13), 0, "a month out of range has no days");
+        assert_eq!(days_in_month(2024, 0), 0);
+    }
+
     fn commit(sha: &str, parents: &[&str]) -> (Oid, SmallVec<[Oid; 2]>) {
         (
             sha.to_string(),
