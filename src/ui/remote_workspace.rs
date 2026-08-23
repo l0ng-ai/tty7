@@ -3411,4 +3411,91 @@ mod tests {
             );
         });
     }
+
+    /// The strip's one button, and the state it must not offer a retry for.
+    ///
+    /// This function exists because of a bug its own comment records: the
+    /// label and the action used to be decided separately, so a
+    /// `ServerMismatch` — the one state a retry cannot fix — wore a Retry Now
+    /// button and looped on it forever. Nothing tested it. Making every state
+    /// return `Retry`, dropping the `hosts_our_server` check, or giving a
+    /// state with no label a button anyway all left the suite green.
+    #[gpui::test]
+    fn the_strip_offers_a_retry_only_where_retrying_can_work(cx: &mut gpui::TestAppContext) {
+        use crate::core::session::{WindowView, WindowViews, WorkspaceStore};
+        use crate::ui::app::test_window::harness_with_tabs;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let ws = app.read_with(cx, |app, _| app.workspace);
+
+        let bind = |cx: &mut gpui::App, target: RemoteTarget| {
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![WindowView {
+                        id: ws,
+                        host: Some(RemoteRef::new(target, WorkspaceId::new())),
+                        ..Default::default()
+                    }],
+                    active: None,
+                },
+            );
+        };
+
+        // A machine whose server is ours to install: the mismatch offers the
+        // install, never a retry.
+        cx.update(|cx| {
+            bind(
+                cx,
+                RemoteTarget::Alias {
+                    alias: "build-box".into(),
+                },
+            )
+        });
+        app.update_in(&mut vcx, |app, _window, cx| {
+            let mismatch = RemoteStatus::ServerMismatch("dialect".into());
+            let (_, action) = app
+                .remote_strip_action(&mismatch, cx)
+                .expect("a machine we can install on gets a button");
+            assert!(
+                matches!(action, StripAction::UpdateServer { .. }),
+                "a retry here can only fail the same way"
+            );
+
+            // Everything else that has a label retries.
+            let (_, action) = app
+                .remote_strip_action(&RemoteStatus::Disconnected, cx)
+                .expect("disconnected has a button");
+            assert!(matches!(action, StripAction::Retry));
+
+            // States with nothing worth pressing have no button at all.
+            assert!(
+                app.remote_strip_action(&RemoteStatus::Attached, cx)
+                    .is_none()
+            );
+            assert!(
+                app.remote_strip_action(&RemoteStatus::RouteLost, cx)
+                    .is_none()
+            );
+        });
+
+        // A peer somebody else runs is not ours to update: the explanation
+        // stays, the button goes.
+        cx.update(|cx| {
+            bind(
+                cx,
+                RemoteTarget::LocalStdio {
+                    program: "some-server".into(),
+                    args: Vec::new(),
+                },
+            )
+        });
+        app.update_in(&mut vcx, |app, _window, cx| {
+            let mismatch = RemoteStatus::ServerMismatch("dialect".into());
+            assert!(
+                app.remote_strip_action(&mismatch, cx).is_none(),
+                "a server that is not ours to install offers no button"
+            );
+        });
+    }
 }
