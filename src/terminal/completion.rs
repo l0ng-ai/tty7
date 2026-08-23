@@ -65,7 +65,7 @@ const BUILTINS: &[&str] = &[
     "true", "false", "printf", "let", "declare", "typeset", "shift", "trap", "wait", "umask",
 ];
 
-const MAX_CANDIDATES: usize = 400;
+pub(super) const MAX_CANDIDATES: usize = 400;
 
 const DIR_ONLY_COMMANDS: &[&str] = &["cd", "pushd", "popd", "rmdir"];
 
@@ -771,6 +771,27 @@ impl CompletionSession {
         };
     }
 
+    /// The shared prefix, when it is safe to type it in for the user.
+    ///
+    /// `None` once the candidate list has hit [`MAX_CANDIDATES`]. A list at
+    /// the cap may be a slice of a longer one, and a directory hands its
+    /// entries over in no order at all — so the prefix these four hundred
+    /// happen to share need not be the prefix every match shares. Typing it in
+    /// would push whatever was cut off out of reach: given five hundred
+    /// `data-NNNN.csv` beside one `data.json`, `data` + Tab could insert
+    /// `data-0` and leave the user deleting what Tab just wrote to reach a
+    /// file that was there all along.
+    ///
+    /// A list that is exactly at the cap and complete loses the courtesy too.
+    /// That is the side to be wrong on: the cost is one Tab that types
+    /// nothing, against a Tab that types something untrue.
+    pub(super) fn insertable_prefix(&self) -> Option<String> {
+        if self.all.len() >= MAX_CANDIDATES {
+            return None;
+        }
+        self.common_prefix()
+    }
+
     pub(super) fn common_prefix(&self) -> Option<String> {
         let mut texts = self.filtered.iter().map(|&i| self.all[i].text.as_str());
         let mut lcp: Vec<char> = texts.next()?.chars().collect();
@@ -1179,6 +1200,45 @@ mod tests {
         assert_eq!(s.common_prefix().unwrap(), "ap");
         assert!(s.refilter("app"));
         assert_eq!(s.common_prefix().unwrap(), "appl");
+        assert_eq!(
+            s.insertable_prefix().unwrap(),
+            "appl",
+            "a complete list is safe to type in"
+        );
+    }
+
+    /// The prefix Tab types in has to be the one *every* match shares, and a
+    /// list at the cap cannot say what every match shares: `complete_path`
+    /// stops reading the directory there, and a directory comes back in no
+    /// order at all, so what was cut off is arbitrary.
+    ///
+    /// Five hundred `data-NNNN.csv` beside one `data.json` is the shape of it.
+    /// Take the four hundred the scan happened to reach and they all share
+    /// `data-0`; type that in and `data.json` is gone from the line, with
+    /// nothing on screen to say a candidate was dropped.
+    #[test]
+    fn a_prefix_is_not_typed_in_from_a_list_that_was_cut_short() {
+        let names: Vec<String> = (0..MAX_CANDIDATES)
+            .map(|i| format!("data-{i:04}.csv"))
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let s = session(&refs);
+
+        assert_eq!(
+            s.common_prefix().unwrap(),
+            "data-0",
+            "these four hundred really do share it"
+        );
+        assert_eq!(
+            s.insertable_prefix(),
+            None,
+            "but they are all there is room for, so they cannot speak for the rest"
+        );
+
+        // One short of the cap is a list that reached the end of the directory,
+        // and it keeps the courtesy.
+        let s = session(&refs[..MAX_CANDIDATES - 1]);
+        assert_eq!(s.insertable_prefix().unwrap(), "data-0");
     }
 
     fn temp_tree(tag: &str, entries: &[(&str, bool)]) -> crate::testutil::TempRoot {

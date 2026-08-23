@@ -4408,7 +4408,7 @@ impl TerminalView {
         let shell = self.shell_program();
         let s = CompletionSession::new(word_start, word.clone(), cands, pending_generators);
         if !has_pending
-            && let Some(lcp) = s.common_prefix()
+            && let Some(lcp) = s.insertable_prefix()
             && lcp.chars().count() > word.chars().count()
             && quote_for_shell(&lcp, shell.as_deref()) == lcp
         {
