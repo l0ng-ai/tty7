@@ -986,7 +986,10 @@ fn pane_ls_all(backend: &mut dyn Backend) -> Result<Outcome> {
             json!({
                 "pane": info.pane_id,
                 "workspace": holder(info.pane_id).map(|ws| ws.to_string()),
-                "orphan": holder(info.pane_id).is_none(),
+                // The same test the count below and `--orphans` make. A row
+                // flagged orphaned that the reaper then spares is a row a
+                // script acts on and a person cannot explain.
+                "orphan": is_stray(info, |pane| holder(pane).is_some()),
                 "owner": info.owner,
                 "title": info.title,
                 "cwd": info.cwd,
@@ -4856,6 +4859,59 @@ mod tests {
         }));
         backend.replies.push_back(ReplyOk::Routes(Vec::new()));
         backend
+    }
+
+    /// Every place that says "orphan" means the same panes.
+    ///
+    /// `pane ls --all` flags each row, counts them in a footer, and names
+    /// `--orphans` as the way to end them; `doctor` counts them too. A row
+    /// flagged orphaned that the reaper then spares is a row a script acts on
+    /// and a person cannot explain — and that is exactly what a window
+    /// adopting a pane during a restore looks like.
+    #[test]
+    fn every_orphan_answer_names_the_same_panes() {
+        let registry = || {
+            vec![
+                pane_info(1, None),
+                attached_pane_info(77, Some("tty7-app")),
+                pane_info(78, Some("tty7-app")),
+            ]
+        };
+
+        let mut backend = mock();
+        backend.registry = registry();
+        let listed = json_of(run_cli(
+            &["tty7", "pane", "ls", "--all"],
+            &Context::default(),
+            &mut backend,
+        ));
+        let flagged: Vec<u64> = listed["panes"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter(|p| p["orphan"] == serde_json::json!(true))
+            .map(|p| p["pane"].as_u64().expect("an id"))
+            .collect();
+        assert_eq!(flagged, vec![78], "only the pane nobody is watching is flagged");
+        assert_eq!(
+            listed["orphans"].as_u64(),
+            Some(flagged.len() as u64),
+            "and the footer counts the rows it flagged"
+        );
+
+        let mut backend = mock();
+        backend.registry = registry();
+        let reaped: Vec<u64> = json_of(run_cli(
+            &["tty7", "pane", "close", "--orphans"],
+            &Context::default(),
+            &mut backend,
+        ))["closed"]
+            .as_array()
+            .expect("a list")
+            .iter()
+            .map(|p| p.as_u64().expect("an id"))
+            .collect();
+        assert_eq!(reaped, flagged, "and the reaper takes exactly those rows");
     }
 
     /// The doctor's row names the set its own advice would act on.

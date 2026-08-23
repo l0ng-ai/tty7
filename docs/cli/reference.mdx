@@ -419,16 +419,21 @@ a stand-in.
 | `pane ls --all` | The server's whole pane registry, including orphans | `{"panes":[…],"orphans":N}` |
 | `pane split …` | Identical to top-level `split` | `{"pane"}` |
 | `pane close [%PANE…]` | Close panes; their shells are hung up | `{"closed":[…]}` |
-| `pane close --orphans` | Close every pane no workspace holds | `{"closed":[…]}` |
+| `pane close --orphans` | Close every pane no workspace holds and nobody is watching | `{"closed":[…]}` |
 
 `--all` is the one that shows leaks. Each entry is
 `{"pane","workspace","orphan","owner","title","cwd","live"}`: `owner` is the id
 of the workspace that may attach to the pane (absent when none may), and
-`orphan: true` means no workspace holds it. An interrupted `run` leaves orphans
-here, as does a `ws rm` that reported panes it could not hang up.
+`orphan: true` means no workspace holds it *and* no client is attached to it.
+Both halves matter: a window restoring a layout spawns each pane, attaches to
+it, and only then files it into the tree, so for that moment the tree holds
+nothing for a pane that is very much wanted. An interrupted `run` leaves
+orphans here, as does a `ws rm` that reported panes it could not hang up.
 
 `--orphans` is the reaper for exactly those. It closes what `pane ls --all`
-lists as orphaned and nothing else — panes a workspace holds are untouched —
+lists as orphaned and nothing else — panes a workspace holds are untouched, and
+so are panes a window is attached to, which is what keeps it from taking a
+session that is still being restored —
 and reports an empty list rather than an error when there is nothing to clean
 up, so a script does not have to guard it. A pane that cannot be closed does
 not abandon the rest of the batch: the rest are still attempted, the complaint
