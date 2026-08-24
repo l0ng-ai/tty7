@@ -9392,6 +9392,61 @@ pub(crate) mod test_window {
     }
 }
 
+#[cfg(test)]
+mod cursor_blink_gpui_tests {
+    use super::test_window::harness;
+    use crate::core::config::Config;
+    use crate::terminal::view::quiet_test_pane;
+    use crate::ui::pane::{Pane, PaneSlot};
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn only_the_focused_pane_advances_its_blink_phase(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.cursor_blink = true;
+            cx.set_global(cfg);
+        });
+
+        let (left, right, _streams) = app.update_in(&mut vcx, |app, window, cx| {
+            let (left, left_stream) = quiet_test_pane(1, window, cx);
+            let (right, right_stream) = quiet_test_pane(2, window, cx);
+            app.tabs.push(super::Tab::new(Pane::split_node(
+                gpui::Axis::Horizontal,
+                0.5,
+                Pane::leaf(PaneSlot::Ready(left.clone())),
+                Pane::leaf(PaneSlot::Ready(right.clone())),
+            )));
+            app.active = 0;
+            let left_focus = left.read(cx).focus_handle.clone();
+            left_focus.focus(window, cx);
+            cx.notify();
+            (left, right, (left_stream, right_stream))
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |_, window, cx| {
+            assert!(left.read(cx).focus_handle.is_focused(window));
+            assert!(!right.read(cx).focus_handle.is_focused(window));
+            assert!(left.read(cx).cursor_visible);
+            assert!(right.read(cx).cursor_visible);
+        });
+
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(530));
+        vcx.background_executor.run_until_parked();
+
+        app.update(&mut vcx, |_, cx| {
+            assert!(!left.read(cx).cursor_visible, "the focused cursor blinks");
+            assert!(
+                right.read(cx).cursor_visible,
+                "the unfocused cursor must keep a steady phase"
+            );
+        });
+    }
+}
+
 #[cfg(all(test, unix))]
 mod ssh_rebuild_gpui_tests {
     use super::test_window::harness_with_pane;

@@ -37,6 +37,31 @@ use crate::ui::i18n::{L10nKey, t, t_fmt};
 const GRID_PAD_X: f32 = 8.;
 const GRID_PAD_Y: f32 = 4.;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputCaretPaint {
+    Outline,
+    Bar,
+    Block,
+    Underline,
+}
+
+fn input_caret_paint(
+    focused: bool,
+    blink_on: bool,
+    style: crate::core::config::CursorStyle,
+) -> Option<InputCaretPaint> {
+    use crate::core::config::CursorStyle;
+
+    if !focused {
+        return Some(InputCaretPaint::Outline);
+    }
+    blink_on.then_some(match style {
+        CursorStyle::Bar => InputCaretPaint::Bar,
+        CursorStyle::Block => InputCaretPaint::Block,
+        CursorStyle::Underline => InputCaretPaint::Underline,
+    })
+}
+
 /// Which panes are on screen right now, readable without touching the entity
 /// map. The chrome (tab strip, sidebar, switcher) reads every pane entity
 /// while the window draws, so gpui tracks them all and `notify()` from a
@@ -1166,8 +1191,14 @@ impl TerminalView {
                     .timer(std::time::Duration::from_millis(530))
                     .await;
                 if this
-                    .update(cx, |view, cx| {
-                        if view.focused {
+                    .update_in(cx, |view, window, cx| {
+                        // A pane can be focused once while it is being built, before
+                        // its leaf is attached to the window. Moving focus away in
+                        // that interval does not deliver the leaf a blur callback,
+                        // so `view.focused` may still describe that construction-time
+                        // focus. The window's handle is authoritative here, just as
+                        // it is in the cursor paint path.
+                        if view.focus_handle.is_focused(window) {
                             if cx.global::<Config>().cursor_blink {
                                 view.cursor_visible = !view.cursor_visible;
                                 cx.notify();
@@ -5484,7 +5515,7 @@ impl TerminalView {
         );
     }
 
-    fn render_input_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_input_bar(&self, focused: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (crow, ccol) = self.cursor_cell().unwrap_or((0, 0));
         let cx_left = px(GRID_PAD_X) + self.cell_width * (ccol as f32);
         let shift = self.input_scroll_rows();
@@ -5548,22 +5579,30 @@ impl TerminalView {
             }
         }
 
-        let cursor_on = self.cursor_visible;
         let cursor_style = cx.global::<Config>().cursor_style;
-        let block_cursor = cursor_style == crate::core::config::CursorStyle::Block;
+        let cursor_paint = input_caret_paint(focused, self.cursor_visible, cursor_style);
+        let cursor_on = cursor_paint.is_some();
+        let block_cursor = cursor_paint == Some(InputCaretPaint::Block);
         // A block caret is drawn as reverse video on the cell it covers, not as
         // a translucent tint over it — the way every other terminal draws one,
         // and the only way the caret keeps the contrast the theme gave it.
         let caret_ink = crate::ui::presets::caret_ink(caret_col, theme.background, fg);
         let caret_bar = move || {
-            use crate::core::config::CursorStyle;
-            let base = div().absolute().left_0().bg(caret_col);
-            match cursor_style {
-                CursorStyle::Bar => base.top(caret_top).w(px(1.5)).h(caret_h),
-                CursorStyle::Block => base.top(px(0.)).w_full().h(lh),
-                CursorStyle::Underline => {
+            let base = div().absolute().left_0();
+            match cursor_paint.expect("caret is only rendered when it has a paint style") {
+                // An inactive terminal keeps a steady hollow block, independent
+                // of the configured focused-caret shape and current blink phase.
+                InputCaretPaint::Outline => base
+                    .top(px(0.))
+                    .w_full()
+                    .h(lh)
+                    .border_1()
+                    .border_color(caret_col),
+                InputCaretPaint::Block => base.top(px(0.)).w_full().h(lh).bg(caret_col),
+                InputCaretPaint::Bar => base.top(caret_top).w(px(1.5)).h(caret_h).bg(caret_col),
+                InputCaretPaint::Underline => {
                     let uh = px(2.);
-                    base.top(lh - uh).w_full().h(uh)
+                    base.top(lh - uh).w_full().h(uh).bg(caret_col)
                 }
             }
         };
@@ -6111,7 +6150,10 @@ impl Render for TerminalView {
             .as_ref()
             .map(|s| self.render_search_bar(s, window, cx));
 
-        let input_bar = self.input_active().then(|| self.render_input_bar(cx));
+        let focused = self.focus_handle.is_focused(window);
+        let input_bar = self
+            .input_active()
+            .then(|| self.render_input_bar(focused, cx));
         let completion_menu = self
             .input_active()
             .then(|| self.render_completion_menu(cx))
@@ -6991,6 +7033,41 @@ fn drag_scroll_step(overshoot: f32) -> i32 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_unfocused_input_caret_is_always_a_steady_outline() {
+        use super::{InputCaretPaint, input_caret_paint};
+        use crate::core::config::CursorStyle;
+
+        for blink_on in [false, true] {
+            for style in [CursorStyle::Bar, CursorStyle::Block, CursorStyle::Underline] {
+                assert_eq!(
+                    input_caret_paint(false, blink_on, style),
+                    Some(InputCaretPaint::Outline),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_focused_input_caret_keeps_its_configured_shape_and_blink_phase() {
+        use super::{InputCaretPaint, input_caret_paint};
+        use crate::core::config::CursorStyle;
+
+        assert_eq!(input_caret_paint(true, false, CursorStyle::Block), None);
+        assert_eq!(
+            input_caret_paint(true, true, CursorStyle::Bar),
+            Some(InputCaretPaint::Bar),
+        );
+        assert_eq!(
+            input_caret_paint(true, true, CursorStyle::Block),
+            Some(InputCaretPaint::Block),
+        );
+        assert_eq!(
+            input_caret_paint(true, true, CursorStyle::Underline),
+            Some(InputCaretPaint::Underline),
+        );
+    }
 
     #[test]
     fn a_busy_command_name_undoes_the_shell_escaping() {
@@ -8542,15 +8619,24 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) fn quiet_test_pane(
     pane_id: u64,
     window: &mut Window,
     cx: &mut gpui::App,
-) -> (gpui::Entity<TerminalView>, std::os::unix::net::UnixStream) {
+) -> (gpui::Entity<TerminalView>, crate::daemon::transport::Stream) {
+    #[cfg(unix)]
     let (client_side, daemon_side) = std::os::unix::net::UnixStream::pair().unwrap();
+    #[cfg(windows)]
+    let (client_side, daemon_side) = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client_side = std::net::TcpStream::connect(addr).unwrap();
+        let (daemon_side, _) = listener.accept().unwrap();
+        (client_side, daemon_side)
+    };
     let terminal = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24))
-        .expect("socketpair-backed terminal");
+        .expect("quiet test terminal");
     let view = cx.new(|cx| TerminalView::with_terminal(terminal, pane_id, window, cx));
     (view, daemon_side)
 }
