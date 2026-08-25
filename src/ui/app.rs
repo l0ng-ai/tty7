@@ -1571,6 +1571,14 @@ impl Tty7App {
         let claimed = WorkspaceStore::claim(cx, id);
         crate::ui::windows::WindowRegistry::rebind(cx, previous, claimed);
         crate::ui::remote_workspace::RemoteLinks::supervise(cx, claimed);
+        // Forgotten on the way in as well as on the way out. `adopt_workspace`
+        // puts the empty session up before the pull below orders the real one,
+        // and it saves what it put up: a window showing nothing, syncing
+        // against whatever this workspace was left Primed and informed with
+        // the last time it was visited, which is a Full diff that closes every
+        // tab on the machine (#716). Arriving speaks for nothing until a pull
+        // says otherwise.
+        crate::ui::tree_sync::forget(cx, claimed);
         self.adopt_workspace(claimed, Session::default(), window, cx);
         // This method runs under the app's own update lease, so the tabs the
         // pull must see are the ones just adopted here — reading the app back

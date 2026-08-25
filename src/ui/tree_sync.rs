@@ -3764,6 +3764,84 @@ mod tests {
         });
     }
 
+    /// #716: switching into a workspace put its empty session up and saved
+    /// it — a window showing nothing, syncing at Full scope against the
+    /// mirror and licence the last visit left behind, which closes every tab
+    /// on the machine before the pull that would have populated the window
+    /// has even been ordered. Arriving must speak for nothing.
+    ///
+    /// The licence is what the assertion holds. The closes it authorises are
+    /// queued and pumped inside `adopt_workspace`, and the hydrate ordered
+    /// straight after clears the queue, so by the time a test can look the
+    /// ops are gone either way — while `informed` outliving the arrival is
+    /// both durable and the thing that made them possible.
+    #[gpui::test]
+    fn arriving_at_a_workspace_does_not_prune_what_is_already_in_it(cx: &mut gpui::TestAppContext) {
+        let (app, mut vcx, _pane_stream) = crate::ui::app::test_window::harness_with_pane(cx);
+        let theirs = (TabId::new(), TabId::new());
+        app.update_in(&mut vcx, |app, window, cx| {
+            crate::ui::windows::WindowRegistry::init(cx);
+            let here = crate::core::session::WindowView::default();
+            let there = crate::core::session::WindowView::default();
+            let (here_id, there_id) = (here.id, there.id);
+            WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![here, there],
+                    active: Some(here_id),
+                },
+            );
+            app.workspace = here_id;
+
+            // The workspace being switched to, as an earlier visit left it:
+            // primed with the tabs it holds, and licensed to prune them.
+            {
+                let state = cx
+                    .default_global::<TreeSync>()
+                    .windows
+                    .entry(there_id)
+                    .or_default();
+                state.sync = SyncPhase::Primed(WsMirror {
+                    tabs: vec![
+                        TreeTab {
+                            id: theirs.0,
+                            name: None,
+                            sidebar_group: None,
+                            root: PaneNode::Leaf { pane: 11 },
+                        },
+                        TreeTab {
+                            id: theirs.1,
+                            name: None,
+                            sidebar_group: None,
+                            root: PaneNode::Leaf { pane: 12 },
+                        },
+                    ],
+                    active: Some(theirs.0),
+                });
+                state.informed = true;
+                // Keeps whatever the switch queues where the test can read it.
+                state.inflight = true;
+            }
+
+            app.switch_workspace(Some(there_id), window, cx);
+
+            let state = &cx.default_global::<TreeSync>().windows[&there_id];
+            assert!(
+                !state.informed,
+                "a window that has just arrived speaks for nothing in the workspace \
+                 until its own pull lands — least of all that it is empty"
+            );
+            assert!(
+                !state
+                    .queue
+                    .iter()
+                    .any(|op| matches!(op, ControlRequest::TabClose { .. })),
+                "and it closes nothing it never showed: {:?}",
+                state.queue
+            );
+        });
+    }
+
     #[test]
     fn a_ratio_delta_is_clamped_to_the_servers_band_not_a_narrower_one() {
         let mut pane = Pane::split_node(gpui::Axis::Horizontal, 0.5, Pane::Empty, Pane::Empty);
