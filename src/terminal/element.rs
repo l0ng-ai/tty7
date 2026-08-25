@@ -1038,10 +1038,20 @@ fn ink_extent(
 }
 
 /// Whether the cell after a segment is free for its glyph to lean into.
+///
+/// A blank still owns its cell if it paints anything there: a background, a
+/// selection, or a rule of its own. An underlined or hovered blank becomes a
+/// `Run` of its own and is painted after the segment beside it, so lending it
+/// out would drag a stroke straight across the borrowed glyph.
 fn has_room_after(row: &[RenderCell], start: usize, cells: usize) -> bool {
     match row.get(start + cells) {
         None => true,
-        Some(next) => is_blank(next) && !next.draw_bg && !next.selected,
+        Some(next) => {
+            is_blank(next)
+                && !next.draw_bg
+                && !next.selected
+                && !GlyphStyle::of(next).draws_on_blanks()
+        }
     }
 }
 
@@ -2373,6 +2383,18 @@ mod tests {
         row[2].draw_bg = false;
         row[2].selected = true;
         assert!(!has_room_after(&row, 1, 1));
+        row[2].selected = false;
+
+        // Nor is a blank that carries a rule of its own: it is painted after
+        // the segment next to it, so the stroke would land on the glyph.
+        row[2].underline = UnderlineKind::Single;
+        assert!(!has_room_after(&row, 1, 1), "an underlined blank");
+        row[2].underline = UnderlineKind::None;
+        row[2].strikeout = true;
+        assert!(!has_room_after(&row, 1, 1), "a struck-through blank");
+        row[2].strikeout = false;
+        row[2].link_hover = true;
+        assert!(!has_room_after(&row, 1, 1), "a hovered link's blank");
     }
 
     #[test]
