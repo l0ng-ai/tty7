@@ -222,7 +222,9 @@ fn stage(panes: &[Carried], next_pane_id: u64) -> std::io::Result<std::fs::File>
     let mut records = Vec::with_capacity(panes.len());
     let mut data = Vec::new();
     for pane in panes {
-        let encoded = crate::daemon::scrollback::encode(&pane.ring);
+        // The title travels in the record's own `osc_title` field, not in the
+        // ring blob.
+        let encoded = crate::daemon::scrollback::encode(&pane.ring, None);
         records.push(PaneRecord {
             id: pane.id,
             owner: pane.owner.clone(),
@@ -353,6 +355,7 @@ pub fn adopt(fd: RawFd) -> Option<Adopted> {
         let ring = raw
             .get(cursor..end)
             .and_then(crate::daemon::scrollback::decode)
+            .map(|(segments, _)| segments)
             .unwrap_or_default();
         cursor = end;
         panes.push(Carried {

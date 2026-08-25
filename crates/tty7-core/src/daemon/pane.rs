@@ -1243,6 +1243,29 @@ impl portable_pty::ChildKiller for AdoptedKiller {
 pub struct Restore {
     pub segments: Vec<crate::daemon::scrollback::Segment>,
     pub banner: Option<String>,
+    /// The pane's last OSC title, carried beside the bytes rather than in them:
+    /// the OSC that set it was usually emitted screens ago and trimmed out of
+    /// the capped snapshot, so replaying the segments alone brings the screen
+    /// back under the default name.
+    pub title: Option<String>,
+}
+
+/// The OSC that puts a restored pane's title back.
+///
+/// BEL-terminated rather than ST so the sequence contains no ESC of its own,
+/// and the title is stripped of control bytes — a BEL or ESC inside it would
+/// end the sequence early and leak the rest into the terminal as input.
+pub fn retitle(title: &str) -> Vec<u8> {
+    let mut out = b"\x1b]0;".to_vec();
+    out.extend(
+        title
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>()
+            .as_bytes(),
+    );
+    out.push(0x07);
+    out
 }
 
 /// The bytes that separate restored output from the new shell's own.
@@ -1335,13 +1358,16 @@ impl DaemonPane {
         let reader_handle = pair.master.try_clone_reader()?;
         let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
 
-        let ring = match restore {
+        let (ring, restored_title) = match restore {
             Some(restore) => {
                 let mut ring = ReplayRing::seeded(restore.segments, size);
+                if let Some(title) = restore.title.as_deref() {
+                    ring.append(&retitle(title));
+                }
                 ring.append(&restore_preamble(restore.banner.as_deref()));
-                ring
+                (ring, restore.title)
             }
-            None => ReplayRing::new(size),
+            None => (ReplayRing::new(size), None),
         };
 
         Ok(Self::over_pty(
@@ -1361,7 +1387,7 @@ impl DaemonPane {
                 observers: Vec::new(),
                 observer_seq: 0,
                 cwd: spawn.initial_cwd,
-                osc_title: None,
+                osc_title: restored_title,
                 shell: ShellState::default(),
                 shell_spec: spawn.shell.clone(),
                 remote: spawn.remote.clone(),
@@ -2067,11 +2093,13 @@ impl DaemonPane {
         self.state.lock().unwrap().ring.appended
     }
 
-    pub fn scrollback_snapshot(&self) -> (Vec<crate::daemon::scrollback::Segment>, u64) {
+    pub fn scrollback_snapshot(
+        &self,
+    ) -> (Vec<crate::daemon::scrollback::Segment>, Option<String>, u64) {
         let st = self.state.lock().unwrap();
         let mut segments = st.ring.snapshot();
         crate::daemon::scrollback::trim_to(&mut segments, crate::daemon::scrollback::SNAPSHOT_CAP);
-        (segments, st.ring.appended)
+        (segments, st.osc_title.clone(), st.ring.appended)
     }
 
     pub fn kill(&self) {
@@ -3653,6 +3681,26 @@ mod tests {
                  the user asked to have back stays where they can see it"
             );
         }
+    }
+
+    #[test]
+    fn a_restored_pane_reannounces_its_title() {
+        let bytes = retitle("✳ fixing the switcher");
+        assert_eq!(
+            bytes, b"\x1b]0;\xe2\x9c\xb3 fixing the switcher\x07",
+            "the OSC that set the title was trimmed out of the snapshot long ago; \
+             the restore has to say it again or the tab comes back as the default name"
+        );
+    }
+
+    #[test]
+    fn a_stored_title_cannot_smuggle_control_bytes_into_the_stream() {
+        let bytes = retitle("evil\x07\x1b]0;title\x1b\\rest");
+        assert_eq!(
+            bytes, b"\x1b]0;evil]0;title\\rest\x07",
+            "a BEL or ESC inside the title would terminate the OSC early and leak \
+             the rest as input to the terminal"
+        );
     }
 
     #[test]

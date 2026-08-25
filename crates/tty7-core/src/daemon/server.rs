@@ -201,8 +201,8 @@ fn spawn_snapshot_keeper(registry: Arc<Registry>) {
                     if marks.get(&pane.id) == Some(&pane.scrollback_mark()) {
                         continue;
                     }
-                    let (segments, mark) = pane.scrollback_snapshot();
-                    crate::daemon::scrollback::save(pane.id, &segments);
+                    let (segments, title, mark) = pane.scrollback_snapshot();
+                    crate::daemon::scrollback::save(pane.id, &segments, title.as_deref());
                     marks.insert(pane.id, mark);
                 }
                 let restorable = restorable_pane_ids(&registry);
@@ -224,8 +224,8 @@ fn spawn_snapshot_keeper(registry: Arc<Registry>) {
 /// [`SNAPSHOT_INTERVAL`](crate::daemon::scrollback::SNAPSHOT_INTERVAL) stale.
 fn store_scrollback_now(registry: &Registry) {
     for pane in registry.all() {
-        let (segments, _) = pane.scrollback_snapshot();
-        crate::daemon::scrollback::save(pane.id, &segments);
+        let (segments, title, _) = pane.scrollback_snapshot();
+        crate::daemon::scrollback::save(pane.id, &segments, title.as_deref());
     }
 }
 
@@ -238,7 +238,7 @@ fn store_scrollback_now(registry: &Registry) {
 fn restored_screen(
     request: crate::daemon::protocol::RestoreFrom,
 ) -> Option<crate::daemon::pane::Restore> {
-    let segments = crate::daemon::scrollback::load(request.pane_id)?;
+    let (segments, title) = crate::daemon::scrollback::load(request.pane_id)?;
     // Dropped either way — this is the one request that will ever be made about
     // this pane, so nothing is served by keeping the file past it. What the
     // emptiness check decides is whether a *restore* happened, not whether the
@@ -255,6 +255,7 @@ fn restored_screen(
     Some(crate::daemon::pane::Restore {
         segments,
         banner: request.banner,
+        title,
     })
 }
 

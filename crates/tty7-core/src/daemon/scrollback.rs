@@ -91,7 +91,7 @@ pub fn trim_to(segments: &mut Vec<Segment>, cap: usize) {
     }
 }
 
-pub fn encode(segments: &[Segment]) -> Vec<u8> {
+pub fn encode(segments: &[Segment], title: Option<&str>) -> Vec<u8> {
     let mut out = Vec::with_capacity(
         MAGIC.len() + 4 + segments.iter().map(|s| s.bytes.len() + 12).sum::<usize>(),
     );
@@ -105,6 +105,13 @@ pub fn encode(segments: &[Segment]) -> Vec<u8> {
         out.extend_from_slice(&(seg.bytes.len() as u32).to_le_bytes());
         out.extend_from_slice(&seg.bytes);
     }
+    // Trailing, so a file with no title is byte-identical to the old format:
+    // the old reader stopped after the segments and never checked for a tail,
+    // which is also what lets it skip a tail it does not know about.
+    if let Some(title) = title {
+        out.extend_from_slice(&(title.len() as u32).to_le_bytes());
+        out.extend_from_slice(title.as_bytes());
+    }
     out
 }
 
@@ -115,7 +122,7 @@ pub fn encode(segments: &[Segment]) -> Vec<u8> {
 /// half-written file from an older scheme, both land as a short read. There is
 /// nothing to salvage and nothing at stake in refusing: the pane comes back
 /// blank, which is what it did before this module existed.
-pub fn decode(raw: &[u8]) -> Option<Vec<Segment>> {
+pub fn decode(raw: &[u8]) -> Option<(Vec<Segment>, Option<String>)> {
     let mut cur = raw.strip_prefix(MAGIC.as_slice())?;
     let count = u32::from_le_bytes(take(&mut cur, 4)?.try_into().ok()?) as usize;
     let mut segments = Vec::with_capacity(count.min(1024));
@@ -136,7 +143,13 @@ pub fn decode(raw: &[u8]) -> Option<Vec<Segment>> {
             bytes,
         });
     }
-    Some(segments)
+    // A file from before titles were stored ends here; a damaged tail costs
+    // only the title, never the screen.
+    let title = (|| {
+        let len = u32::from_le_bytes(take(&mut cur, 4)?.try_into().ok()?) as usize;
+        String::from_utf8(take(&mut cur, len)?.to_vec()).ok()
+    })();
+    Some((segments, title))
 }
 
 fn take<'a>(cur: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
@@ -161,7 +174,7 @@ fn path_for(pane_id: u64) -> Option<PathBuf> {
 /// Renamed into place so a reader never sees a half-written file, and mode 0600
 /// from creation rather than after the fact — a window in which someone else's
 /// terminal output is world-readable is not one worth leaving open.
-pub fn save(pane_id: u64, segments: &[Segment]) {
+pub fn save(pane_id: u64, segments: &[Segment], title: Option<&str>) {
     let Some(path) = path_for(pane_id) else {
         return;
     };
@@ -173,7 +186,7 @@ pub fn save(pane_id: u64, segments: &[Segment]) {
         return;
     }
     let temp = parent.join(format!("{pane_id}.{}.tmp", std::process::id()));
-    if let Err(e) = write_private(&temp, &encode(segments)) {
+    if let Err(e) = write_private(&temp, &encode(segments, title)) {
         log::debug!("could not stage pane {pane_id}'s scrollback: {e}");
         let _ = std::fs::remove_file(&temp);
         return;
@@ -204,10 +217,10 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }
 
-pub fn load(pane_id: u64) -> Option<Vec<Segment>> {
+pub fn load(pane_id: u64) -> Option<(Vec<Segment>, Option<String>)> {
     let raw = std::fs::read(path_for(pane_id)?).ok()?;
     match decode(&raw) {
-        Some(segments) => Some(segments),
+        Some(snapshot) => Some(snapshot),
         None => {
             log::debug!("pane {pane_id}'s stored scrollback is not readable by this build");
             None
@@ -272,7 +285,9 @@ mod tests {
     #[test]
     fn segments_survive_the_round_trip_with_their_geometry() {
         let segments = vec![seg(80, b"before the resize"), seg(120, b"after it")];
-        let decoded = decode(&encode(&segments)).expect("what we wrote is readable");
+        let decoded = decode(&encode(&segments, None))
+            .map(|(s, _)| s)
+            .expect("what we wrote is readable");
         assert_eq!(
             decoded, segments,
             "a replayed snapshot has to say which size each run of bytes was written at, \
@@ -282,7 +297,7 @@ mod tests {
 
     #[test]
     fn a_truncated_or_foreign_file_decodes_to_nothing() {
-        let raw = encode(&[seg(80, b"hello")]);
+        let raw = encode(&[seg(80, b"hello")], None);
         assert!(
             decode(&raw[..raw.len() - 2]).is_none(),
             "a short read must not be mistaken for a shorter snapshot"
@@ -336,9 +351,11 @@ mod tests {
     fn a_stored_screen_comes_back_and_can_be_dropped() {
         pin_config_dir();
         let pane = 90_001;
-        save(pane, &[seg(80, b"what the pane had on it")]);
+        save(pane, &[seg(80, b"what the pane had on it")], None);
         assert_eq!(
-            load(pane).expect("a saved screen is readable"),
+            load(pane)
+                .map(|(s, _)| s)
+                .expect("a saved screen is readable"),
             vec![seg(80, b"what the pane had on it")],
         );
         forget(pane);
@@ -352,10 +369,10 @@ mod tests {
     fn saving_twice_replaces_rather_than_appends() {
         pin_config_dir();
         let pane = 90_002;
-        save(pane, &[seg(80, b"first")]);
-        save(pane, &[seg(80, b"second")]);
+        save(pane, &[seg(80, b"first")], None);
+        save(pane, &[seg(80, b"second")], None);
         assert_eq!(
-            load(pane).expect("still readable"),
+            load(pane).map(|(s, _)| s).expect("still readable"),
             vec![seg(80, b"second")],
             "each write is the pane's current screen, not another slice of history"
         );
@@ -366,8 +383,8 @@ mod tests {
     fn the_sweep_keeps_only_panes_something_can_still_ask_for() {
         pin_config_dir();
         let (kept, dropped) = (90_003, 90_004);
-        save(kept, &[seg(80, b"in a workspace")]);
-        save(dropped, &[seg(80, b"in no workspace")]);
+        save(kept, &[seg(80, b"in a workspace")], None);
+        save(dropped, &[seg(80, b"in no workspace")], None);
         sweep(&HashSet::from([kept]));
         assert!(
             load(kept).is_some(),
@@ -386,7 +403,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         pin_config_dir();
         let pane = 90_005;
-        save(pane, &[seg(80, b"a token someone echoed")]);
+        save(pane, &[seg(80, b"a token someone echoed")], None);
         let mode = std::fs::metadata(path_for(pane).expect("a path under the config dir"))
             .expect("the file exists")
             .permissions()
@@ -400,9 +417,36 @@ mod tests {
     }
 
     #[test]
+    fn the_title_rides_the_snapshot() {
+        let segments = vec![seg(80, b"a screenful")];
+        let (decoded, title) = decode(&encode(&segments, Some("✳ fixing the switcher")))
+            .expect("what we wrote is readable");
+        assert_eq!(decoded, segments);
+        assert_eq!(
+            title.as_deref(),
+            Some("✳ fixing the switcher"),
+            "the OSC bytes that set the title were trimmed out of the ring long ago; \
+             the snapshot has to carry the title itself or a restored pane comes back \
+             under the default name"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_without_a_title_still_decodes() {
+        // A file written before titles were stored ends right after its
+        // segments; it must read back whole, just untitled.
+        let segments = vec![seg(80, b"an old file")];
+        let (decoded, title) = decode(&encode(&segments, None)).expect("still a valid snapshot");
+        assert_eq!(decoded, segments);
+        assert_eq!(title, None);
+    }
+
+    #[test]
     fn an_empty_snapshot_round_trips() {
         assert_eq!(
-            decode(&encode(&[])).expect("still a valid snapshot"),
+            decode(&encode(&[], None))
+                .map(|(s, _)| s)
+                .expect("still a valid snapshot"),
             Vec::new(),
             "a pane that has printed nothing is not a corrupt file"
         );
