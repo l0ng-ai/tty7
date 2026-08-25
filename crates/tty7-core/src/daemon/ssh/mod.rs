@@ -9,6 +9,9 @@ mod auth;
 mod connect;
 mod handler;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use connect::ProcessStream;
 
 pub use broker::PromptBroker;
@@ -447,7 +450,12 @@ impl SshManager {
                     }
                     None => log::debug!("ssh {key:?}: no remote shell integration"),
                 }
-                self.probes.lock().unwrap().insert(key, probed.clone());
+                // A probe the link would not carry says nothing about the
+                // shell. Remembered, its nothing would keep integration off
+                // this host for the rest of the run, fresh links included.
+                if probed.is_some() || conn.is_alive() {
+                    self.probes.lock().unwrap().insert(key, probed.clone());
+                }
                 probed
             }
         };
@@ -603,7 +611,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_OUTPUT_LIMIT: usize = 8 * 1024;
 
 async fn probe_remote_shell(conn: &SshConnection) -> Option<(remote::RemoteShell, String)> {
-    let mut channel = conn.open_session_channel().await.ok()?;
+    let mut channel = conn.open_command_channel().await.ok()?;
     channel.exec(true, remote::PROBE_COMMAND).await.ok()?;
 
     let mut out: Vec<u8> = Vec::new();
@@ -627,7 +635,7 @@ async fn probe_remote_shell(conn: &SshConnection) -> Option<(remote::RemoteShell
 }
 
 async fn probe_remote_env(conn: &SshConnection) -> Option<remote_link::RemoteEnv> {
-    let mut channel = conn.open_session_channel().await.ok()?;
+    let mut channel = conn.open_command_channel().await.ok()?;
     channel
         .exec(true, remote_link::REMOTE_ENV_PROBE)
         .await
@@ -671,35 +679,49 @@ fn sane_terminal_modes() -> Vec<(Pty, u32)> {
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::{Exec, FakeSshd, base_spec};
     use super::*;
     use crate::daemon::protocol::{SshAuthMode, SshProxy};
 
-    fn base_spec() -> NativeSshSpec {
-        NativeSshSpec {
-            host: "h".into(),
-            port: 22,
-            user: "u".into(),
-            auth_mode: SshAuthMode::Auto,
-            identity_files: vec![],
-            agent_forward: false,
-            password: None,
-            key_passphrases: None,
-            proxy: SshProxy::None,
-            jump: None,
-            forwards: vec![],
-            keepalive_interval_s: None,
-            keepalive_count_max: None,
-            connect_timeout_s: None,
-            algorithms: Default::default(),
-            x11: false,
-            term: "xterm-256color".into(),
-            verify_host_keys: true,
-            skip_banner: false,
-            shell_integration: true,
-            login_script: vec![],
-            display_name: None,
-            profile_id: None,
+    /// A manager of its own, so nothing here touches the global cache. Its
+    /// runtime hosts the fake server and the connection under test.
+    fn manager() -> SshManager {
+        SshManager {
+            runtime: tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build test runtime"),
+            conns: Mutex::new(HashMap::new()),
+            forwards: SshForwardRegistry::default(),
+            probes: Mutex::new(HashMap::new()),
         }
+    }
+
+    #[test]
+    fn a_probe_the_link_would_not_carry_is_not_remembered() {
+        let mgr = manager();
+        mgr.runtime.block_on(async {
+            let sshd = FakeSshd::connect(Exec::Hangs, Some(0)).await;
+            assert!(mgr.remote_bootstrap(&sshd.conn).await.is_none());
+            assert!(!sshd.conn.is_alive(), "a refused session retires the link");
+            assert!(
+                !mgr.probes.lock().unwrap().contains_key(sshd.conn.key()),
+                "the next session, on a fresh link, must ask again"
+            );
+        });
+    }
+
+    #[test]
+    fn a_probe_answered_with_no_integration_is_remembered() {
+        let mgr = manager();
+        mgr.runtime.block_on(async {
+            let sshd = FakeSshd::connect(Exec::Exits, None).await;
+            assert!(mgr.remote_bootstrap(&sshd.conn).await.is_none());
+            assert!(sshd.conn.is_alive());
+            assert!(mgr.probes.lock().unwrap().contains_key(sshd.conn.key()));
+            sshd.wait_for_closed(1).await;
+            assert_eq!(sshd.opened(), 1);
+        });
     }
 
     #[test]

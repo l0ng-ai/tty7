@@ -155,8 +155,10 @@ fn is_not_found(msg: &str) -> bool {
 }
 
 async fn exec(conn: &Arc<SshConnection>, cmd: &str) -> Result<ExecOutput, String> {
+    // The timeouts in `run` and `spawn_detached` drop this future mid-drain
+    // when the remote does not finish; the channel closes on that drop too.
     let mut channel = conn
-        .open_session_channel()
+        .open_command_channel()
         .await
         .map_err(|e| format!("could not open a command channel: {e}"))?;
     channel
@@ -187,6 +189,7 @@ async fn exec(conn: &Arc<SshConnection>, cmd: &str) -> Result<ExecOutput, String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::ssh::test_support::{Exec, FakeSshd};
 
     #[test]
     fn missing_files_are_recognised_across_server_wordings() {
@@ -212,5 +215,64 @@ mod tests {
         ] {
             assert!(!is_not_found(msg), "{msg:?} is a failure, not an absence");
         }
+    }
+
+    /// `run`'s timeout drops `exec` mid-drain. The server never closes a
+    /// command that never finishes, so unless the drop closes the channel it
+    /// stays open on the far side for as long as the connection lives.
+    #[tokio::test]
+    async fn a_command_that_hangs_has_its_channel_closed_when_the_timeout_drops_it() {
+        let sshd = FakeSshd::connect(Exec::Hangs, None).await;
+        let outcome =
+            tokio::time::timeout(Duration::from_millis(100), exec(&sshd.conn, "sleep 1d")).await;
+        assert!(outcome.is_err(), "the fake never finishes a command");
+        sshd.wait_for_closed(1).await;
+        assert_eq!(sshd.opened(), 1);
+    }
+
+    /// sshd's stock `MaxSessions` is ten, and the reporter's eleventh
+    /// unclosed channel was the one refused. Two past the limit, each
+    /// abandoned to the timeout, and every open must still get a session.
+    #[tokio::test]
+    async fn abandoned_commands_never_pile_up_to_the_session_limit() {
+        let sshd = FakeSshd::connect(Exec::Hangs, Some(10)).await;
+        for n in 1..=12 {
+            let _ = tokio::time::timeout(Duration::from_millis(100), exec(&sshd.conn, "sleep 1d"))
+                .await;
+            sshd.wait_for_closed(n).await;
+        }
+        assert_eq!(sshd.refused(), 0, "every open got a session");
+        assert_eq!(sshd.opened(), 12);
+        assert_eq!(sshd.closed(), 12, "one close per channel, no more");
+    }
+
+    #[tokio::test]
+    async fn commands_that_finish_leave_nothing_open_either() {
+        let sshd = FakeSshd::connect(Exec::Exits, Some(10)).await;
+        for _ in 0..12 {
+            let out = exec(&sshd.conn, "true").await.expect("the command runs");
+            assert_eq!(out.status, Some(0));
+            assert_eq!(out.stdout, "ok\n");
+        }
+        sshd.wait_for_closed(12).await;
+        assert_eq!(sshd.refused(), 0);
+        assert_eq!(sshd.opened(), 12);
+        assert_eq!(sshd.closed(), 12, "the server's own close is answered once");
+    }
+
+    #[tokio::test]
+    async fn a_refused_command_channel_retires_the_connection() {
+        let sshd = FakeSshd::connect(Exec::Hangs, Some(0)).await;
+        let err = exec(&sshd.conn, "true")
+            .await
+            .expect_err("nothing may open");
+        assert!(
+            err.starts_with("could not open a command channel: "),
+            "{err}"
+        );
+        assert!(
+            !sshd.conn.is_alive(),
+            "Try Again must dial afresh, not retry the spent link"
+        );
     }
 }
