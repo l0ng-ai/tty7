@@ -233,13 +233,6 @@ pub(crate) fn orphan_panes_of(
         .collect()
 }
 
-/// What to print where an orphan names its owner. The owner it carries is a
-/// `WorkspaceId` — 36 characters of UUID that say nothing on screen and, left
-/// whole, push the row's Close button clean out of the card. So: name the
-/// workspace when this machine still has one, and otherwise keep the first 8
-/// characters, which is what `tty7 pane ls --all` prints and enough to line
-/// the two listings up. An owner that is no workspace id at all is an older
-/// client's own label (`tty7-cli`) and already reads fine.
 /// The name this machine shows for the workspace an orphan still claims —
 /// `None` once that workspace is gone, which is the ordinary case for a pane
 /// nobody holds.
@@ -256,6 +249,13 @@ fn workspace_name_of(owner: &str, cx: &App) -> Option<String> {
     ))
 }
 
+/// What to print where an orphan names its owner. The owner it carries is a
+/// `WorkspaceId` — 36 characters of UUID that say nothing on screen and, left
+/// whole, push the row's Close button clean out of the card. So: name the
+/// workspace when this machine still has one, and otherwise keep the first 8
+/// characters, which is what `tty7 pane ls --all` prints and enough to line
+/// the two listings up. An owner that is no workspace id at all is an older
+/// client's own label (`tty7-cli`) and already reads fine.
 fn owner_label(owner: &str, workspace_name: Option<String>) -> String {
     workspace_name.unwrap_or_else(|| match owner.parse::<WorkspaceId>() {
         Ok(_) => owner.chars().take(8).collect(),
