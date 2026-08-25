@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::path::{Path, PathBuf};
 
 use crate::core::config::{Config, SidebarGrouping};
+use crate::terminal::git_diff::DiffSource;
 use crate::terminal::git_status::GitStatusCache;
 use crate::ui::app::{TITLE_BAR_HEIGHT, Tty7App};
 use crate::ui::hints::tab_badge_label;
@@ -434,7 +435,31 @@ impl Tty7App {
                                         MouseButton::Left,
                                         cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                                             cx.stop_propagation();
-                                            this.toggle_diff_overlay(host, cwd.clone(), window, cx);
+                                            // Swallowing the press also swallows the
+                                            // row's click, the only thing that
+                                            // activates a tab — so this row has to
+                                            // activate itself, or the overlay lands
+                                            // in whichever tab was already on
+                                            // screen, carrying this row's repo (#706).
+                                            let toggles = counts_click_toggles(this.active, i);
+                                            this.activate(i, window, cx);
+                                            if toggles {
+                                                this.toggle_diff_overlay(
+                                                    host,
+                                                    cwd.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            } else {
+                                                this.open_diff_overlay(
+                                                    host,
+                                                    cwd.clone(),
+                                                    DiffSource::Head,
+                                                    None,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
                                         }),
                                     )
                             });
@@ -1455,12 +1480,36 @@ pub(crate) fn diff_click_cwd<T>(cfg: &Config, target: Option<T>) -> Option<T> {
     cfg.sidebar_diff_preview.then_some(target).flatten()
 }
 
+/// Whether a click on row `row`'s counts toggles the overlay, `active` being
+/// the tab on screen.
+///
+/// The click always activates its own row. On the tab already showing, it
+/// toggles, as it always has — the second click on the same counts closes what
+/// the first opened. On any other row it opens: switching to a tab to see its
+/// diff must not close the diff that tab already had open, which a toggle
+/// would do whenever the same repo was up there.
+pub(crate) fn counts_click_toggles(active: usize, row: usize) -> bool {
+    row == active
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    #[test]
+    fn the_counts_click_toggles_only_on_the_tab_already_showing() {
+        assert!(
+            counts_click_toggles(1, 1),
+            "the active row's counts close what they opened"
+        );
+        // #706: clicking another row's counts must switch to it and open its
+        // diff, never toggle against whatever that tab already had up.
+        assert!(!counts_click_toggles(0, 1));
+        assert!(!counts_click_toggles(1, 0));
     }
 
     #[test]
