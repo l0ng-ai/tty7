@@ -291,7 +291,6 @@ pub struct TerminalView {
     pub(super) scroll_handle: TerminalScrollHandle,
     pub search: Option<SearchState>,
     pub cursor_visible: bool,
-    pub focused: bool,
     pub(super) search_focused: bool,
     pub(super) search_case_sensitive: bool,
     pub(super) search_regex: bool,
@@ -1168,7 +1167,6 @@ impl TerminalView {
 
         let focus_subs = vec![
             cx.on_focus_in(&focus_handle, window, |view, _window, cx| {
-                view.focused = true;
                 view.cursor_visible = true;
                 if view.keep_unread_on_focus {
                     view.keep_unread_on_focus = false;
@@ -1179,7 +1177,6 @@ impl TerminalView {
                 cx.notify();
             }),
             cx.on_blur(&focus_handle, window, |view, _window, cx| {
-                view.focused = false;
                 view.report_focus_change(false);
                 cx.notify();
             }),
@@ -1195,9 +1192,9 @@ impl TerminalView {
                         // A pane can be focused once while it is being built, before
                         // its leaf is attached to the window. Moving focus away in
                         // that interval does not deliver the leaf a blur callback,
-                        // so `view.focused` may still describe that construction-time
-                        // focus. The window's handle is authoritative here, just as
-                        // it is in the cursor paint path.
+                        // so no flag a callback maintains can be trusted to say
+                        // which pane the reader is on. The window's handle is
+                        // authoritative here, just as it is in the paint path.
                         if view.focus_handle.is_focused(window) {
                             if cx.global::<Config>().cursor_blink {
                                 view.cursor_visible = !view.cursor_visible;
@@ -1306,7 +1303,6 @@ impl TerminalView {
             scroll_handle: TerminalScrollHandle::default(),
             search: None,
             cursor_visible: true,
-            focused: true,
             dim: 1.,
             search_focused: false,
             search_case_sensitive: false,
@@ -3240,7 +3236,7 @@ impl TerminalView {
             _ => {}
         }
 
-        let turn_finished = self.poll_agent_status(notify_allowed, cx);
+        let turn_finished = self.poll_agent_status(notify_allowed, window, cx);
 
         let session = self.terminal.agent_session();
         let tool_activity = match session.as_ref().map(|s| s.activity) {
@@ -3450,7 +3446,12 @@ impl TerminalView {
         );
     }
 
-    fn poll_agent_status(&mut self, notify_allowed: bool, cx: &mut Context<Self>) -> bool {
+    fn poll_agent_status(
+        &mut self,
+        notify_allowed: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         use crate::core::cli_agent::AgentStatus;
 
         let session = self.terminal.agent_session();
@@ -3479,7 +3480,13 @@ impl TerminalView {
 
         match status {
             Some(AgentStatus::Done) if prev != Some(AgentStatus::Done) => {
-                self.agent_result_unread = !self.focused;
+                // Whether the reader saw the result is a question about the
+                // window's live focus, not about the last focus callback this
+                // pane happened to receive. A pane focused while it was being
+                // built, before its leaf was attached, never gets the blur that
+                // would clear `self.focused` — trusting the cached flag there
+                // drops the badge on the one pane the reader is not looking at.
+                self.agent_result_unread = !self.focus_handle.is_focused(window);
                 self.keep_unread_on_focus = false;
             }
             Some(AgentStatus::Done) => {}
@@ -8857,7 +8864,9 @@ mod gpui_tests {
         }
 
         window
-            .update(cx, |view, _, cx| view.poll_agent_status(false, cx))
+            .update(cx, |view, window, cx| {
+                view.poll_agent_status(false, window, cx)
+            })
             .unwrap();
         cx.run_until_parked();
         assert_eq!(
@@ -8867,7 +8876,9 @@ mod gpui_tests {
         );
 
         window
-            .update(cx, |view, _, cx| view.poll_agent_status(false, cx))
+            .update(cx, |view, window, cx| {
+                view.poll_agent_status(false, window, cx)
+            })
             .unwrap();
         cx.run_until_parked();
         assert_eq!(
@@ -8875,6 +8886,109 @@ mod gpui_tests {
             1,
             "an unchanged session must not re-save on every poll"
         );
+    }
+
+    /// Report a session in `status` on `daemon` and wait for `pane` to see it.
+    fn report_agent_status(
+        status: crate::core::cli_agent::AgentStatus,
+        pane: &gpui::Entity<TerminalView>,
+        cx: &mut TestAppContext,
+        daemon: &mut UnixStream,
+    ) {
+        use crate::core::cli_agent::AgentSessionState;
+
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status,
+            message: None,
+            session_id: Some("sid-abc".into()),
+            launch_argv: Some(vec!["claude".into()]),
+            rich: true,
+            cwd: None,
+            activity: 0,
+        }))
+        .encode(daemon)
+        .unwrap();
+        for _ in 0..200 {
+            if cx.update(|cx| pane.read(cx).terminal.agent_session().map(|s| s.status))
+                == Some(status)
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the agent status never reached the pane");
+    }
+
+    /// The badge answers "did the reader see this?", so it has to read the
+    /// window's live focus rather than anything a focus callback left behind.
+    ///
+    /// A second pane built into the same window is the case that goes wrong:
+    /// it holds no focus and was never told it lost any, so a flag a callback
+    /// maintains says whatever it was born saying — and the badge lands on
+    /// exactly the pane nobody is looking at.
+    #[gpui::test]
+    fn a_finished_turn_on_an_unfocused_pane_is_unread(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        crate::core::config::pin_test_config_dir();
+        let (window, _root_daemon) = harness(cx);
+        let (pane, mut daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(2, window, cx))
+            .unwrap();
+        // Building a pane takes the window's focus (`with_terminal`), and the
+        // reader's next click hands it back. The new pane is not in the element
+        // tree, so nothing delivers it the blur that goes with losing it.
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |_, window, cx| {
+                assert!(
+                    !pane.read(cx).focus_handle.is_focused(window),
+                    "the focus went back to the pane the reader is on"
+                );
+            })
+            .unwrap();
+
+        report_agent_status(AgentStatus::Done, &pane, cx, &mut daemon);
+        window
+            .update(cx, |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.poll_agent_status(false, window, cx);
+                    assert!(pane.agent_result_unread(), "nobody was looking at the pane");
+                });
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_finished_turn_on_the_focused_pane_is_already_read(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        let pane = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        report_agent_status(AgentStatus::Done, &pane, cx, &mut daemon);
+        window
+            .update(cx, |view, window, cx| {
+                assert!(view.focus_handle.is_focused(window));
+                view.poll_agent_status(false, window, cx);
+                assert!(
+                    !view.agent_result_unread(),
+                    "the reader watched the turn finish"
+                );
+            })
+            .unwrap();
     }
 
     /// An agent that moves into a git worktree does not `chdir` — the process
