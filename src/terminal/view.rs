@@ -232,8 +232,14 @@ pub struct TerminalView {
     /// What the pane is called before anything running in it says otherwise —
     /// and what it goes back to when the program resets the title or the
     /// session ends. "tty7" for a local shell; for an SSH pane it is the host
-    /// it dialled, so a window full of them is still readable (#438).
+    /// it dialled, so a window full of them is still readable (#438); for a
+    /// workspace pane it is the workspace's name, set in `set_workspace`.
     pub(super) default_title: String,
+    /// The link supervisor asked this pane's machine for a relink and was
+    /// refused — the pane is gone at the far end, and asking again can only
+    /// repeat the answer. Cleared when a relink is adopted anyway (the manual
+    /// reconnect path), which is the one thing that changes the question.
+    relink_abandoned: bool,
     pub marked_text: String,
     last_mouse_cell: Option<(usize, usize)>,
     last_hover_cell: Option<(usize, usize)>,
@@ -1308,6 +1314,7 @@ impl TerminalView {
             title: DEFAULT_TITLE.to_string(),
             pending_title: None,
             default_title: DEFAULT_TITLE.to_string(),
+            relink_abandoned: false,
             marked_text: String::new(),
             last_mouse_cell: None,
             report_mouse,
@@ -1490,6 +1497,15 @@ impl TerminalView {
         self.host_id = workspace
             .as_ref()
             .map_or(crate::ui::host_ops::HostId::LOCAL, |w| w.target.host_id());
+        // The pane answers to its workspace's name from here on: untitled tabs
+        // show it, and a dead link's "— disconnected" suffix hangs off it
+        // instead of the bare app name.
+        if let Some(label) = workspace.as_ref().and_then(|w| w.label.clone()) {
+            if self.title == self.default_title {
+                self.title = label.clone();
+            }
+            self.default_title = label;
+        }
         self.workspace = workspace;
     }
 
@@ -1516,6 +1532,7 @@ impl TerminalView {
     pub fn adopt_relink(
         &mut self,
         stream: crate::daemon::transport::Stream,
+        buffered: Vec<u8>,
         route: &crate::terminal::PaneRoute,
         size: TermSize,
         cell_w: u16,
@@ -1523,7 +1540,8 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
         self.terminal
-            .adopt_relink(stream, route, size, cell_w, cell_h)?;
+            .adopt_relink(stream, buffered, route, size, cell_w, cell_h)?;
+        self.relink_abandoned = false;
         self.title = self.default_title.clone();
         cx.notify();
         Ok(())
@@ -1673,6 +1691,24 @@ impl TerminalView {
 
     pub fn ssh_disconnected(&self) -> bool {
         self.ssh_spec.is_some() && self.terminal.exited
+    }
+
+    /// Whether this pane is a workspace pane whose link died under it — the
+    /// far-end session should still be alive, so the link supervisor keeps
+    /// asking for it back. A child that exited is over, not disconnected, and
+    /// a pane whose machine already refused the relink is past asking.
+    pub fn wants_relink(&self) -> bool {
+        self.workspace.is_some()
+            && self.terminal.exited
+            && !self.terminal.child_exited()
+            && !self.relink_abandoned
+    }
+
+    /// Records that this pane's machine refused to give the pane back — it is
+    /// gone at the far end — so the link supervisor stops asking. The pane
+    /// keeps its disconnected face; only the retrying stops.
+    pub fn abandon_relink(&mut self) {
+        self.relink_abandoned = true;
     }
 
     /// Takes a title the program set, and gives it to the tab only once it has
@@ -7103,6 +7139,7 @@ mod tests {
                     .unwrap(),
                 )
             }),
+            label: None,
             resize_echo: false,
         }
     }
@@ -8257,6 +8294,7 @@ mod tests {
             workspace: WorkspaceId::new(),
             target: target.clone(),
             spec: None,
+            label: None,
             resize_echo: false,
         };
 
@@ -8273,6 +8311,7 @@ mod tests {
             workspace: WorkspaceId::new(),
             target,
             spec: None,
+            label: None,
             resize_echo: false,
         };
         assert_eq!(sibling.target.host_id(), remote);
@@ -11209,6 +11248,7 @@ mod gpui_tests {
                 )
                 .unwrap(),
             )),
+            label: None,
             resize_echo: false,
         }));
         id
@@ -11447,6 +11487,47 @@ mod gpui_tests {
             .unwrap();
     }
 
+    /// A workspace pane answers to its workspace's name: untitled tabs show
+    /// it, and a dead link's suffix hangs off it — not off the bare app name,
+    /// which read "tty7 — disconnected" no matter whose link died.
+    #[gpui::test]
+    fn a_workspace_pane_answers_to_its_workspaces_name(cx: &mut TestAppContext) {
+        use crate::core::session::{RemoteTarget, WorkspaceId};
+        use crate::terminal::PaneWorkspace;
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.set_workspace(Some(PaneWorkspace {
+                    workspace: WorkspaceId::new(),
+                    target: RemoteTarget::direct("me", "build-box", 22),
+                    spec: None,
+                    label: Some("hummingbot".into()),
+                    resize_echo: false,
+                }));
+                assert_eq!(view.title, "hummingbot", "an untitled tab shows the name");
+                view.handle_event(AlacEvent::Exit, cx);
+                assert_eq!(view.title, "hummingbot — disconnected");
+            })
+            .unwrap();
+    }
+
+    /// What the link supervisor's relink sweep keys off: a workspace pane
+    /// whose link died asks to come back, until its machine refuses.
+    #[gpui::test]
+    fn only_a_dead_workspace_pane_wants_a_relink(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                bind_to_a_disconnected_remote_workspace(view, cx);
+                assert!(!view.wants_relink(), "a live pane asks for nothing");
+                view.handle_event(AlacEvent::Exit, cx);
+                assert!(view.wants_relink());
+                view.abandon_relink();
+                assert!(!view.wants_relink(), "a refusal is final");
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn an_exited_local_pane_still_swallows_every_key(cx: &mut TestAppContext) {
         let (window, _daemon) = harness(cx);
@@ -11523,6 +11604,7 @@ mod gpui_tests {
             .update(cx, |view, _, cx| {
                 view.adopt_relink(
                     new_client,
+                    Vec::new(),
                     &crate::terminal::PaneRoute::Local,
                     TermSize::new(100, 30),
                     8,

@@ -29,5 +29,5 @@ mod typeahead;
 pub mod view;
 
 pub(crate) use remote::notify_desktop;
-pub use remote::{PaneRoute, PaneWorkspace, RemoteTerminal, attach_unanswered};
+pub use remote::{PaneRoute, PaneWorkspace, RemoteTerminal, attach_refused, attach_unanswered};
 pub use size::TermSize;

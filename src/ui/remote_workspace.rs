@@ -1106,10 +1106,20 @@ pub(crate) fn pane_workspace_for(
         host.host_id(),
         crate::daemon::protocol::FEATURE_RESIZE_ECHO,
     );
+    // The workspace's own name where it has one, the machine's otherwise —
+    // what the pane's tab falls back to when nothing has titled it, and what
+    // a dead link's "— disconnected" suffix hangs off.
+    let label = WorkspaceStore::all(cx)
+        .get(workspace)
+        .and_then(|w| w.label.clone())
+        .or_else(|| Some(remote_connect::route_label(cx, &host)))
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty());
     let pane = crate::terminal::PaneWorkspace {
         workspace,
         target: host.target,
         spec,
+        label,
         resize_echo,
     };
     if let Ok(header) = pane.route_header() {
@@ -1137,6 +1147,23 @@ struct MachineLink {
     /// link that is up right now, whether or not the far end took it. Scoped
     /// to one link on purpose: a new link has heard nothing from us.
     attach_sent: std::collections::HashSet<WorkspaceId>,
+}
+
+/// The retry clock for one workspace's dead panes, kept while its machine's
+/// control link is up. A pane whose stream dies alone — its exec channel
+/// closed under it, siblings untouched — is invisible to the machine-level
+/// reconnect, which only watches the control connection; this is the state
+/// that keeps asking for such a pane back. Batched per workspace on purpose:
+/// panes usually die together, and one clock per workspace means one dial per
+/// try instead of a storm of them.
+#[derive(Default)]
+struct PaneRetry {
+    backoff: Backoff,
+    next_attempt: Option<Instant>,
+    /// A batch of relinks is on the wire; the pump leaves the entry alone
+    /// until it reports back, or one slow attempt would be joined by a new
+    /// one every 250 ms tick.
+    inflight: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1169,6 +1196,9 @@ pub(crate) enum MachineStatus {
 #[derive(Default)]
 pub(crate) struct RemoteLinks {
     machines: std::collections::HashMap<HostId, MachineLink>,
+    /// Dead panes being asked for again, one clock per workspace — see
+    /// [`PaneRetry`].
+    pane_retries: std::collections::HashMap<WorkspaceId, PaneRetry>,
     preempted: std::collections::HashMap<WorkspaceId, String>,
     /// Workspaces whose takeover the user has asked to undo, each still
     /// carrying the name of the client that displaced it — an attach that
@@ -1373,6 +1403,7 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
         let links = cx.default_global::<RemoteLinks>();
         let forgotten = links.machines.len();
         links.machines.clear();
+        links.pane_retries.clear();
         links.preempted.clear();
         links.reclaiming.clear();
         links.attaching.clear();
@@ -1415,6 +1446,10 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
             // workspace wants to be claimed for this client before we start
             // rebuilding its tabs and their panes on the machine.
             pump_attachments(cx, host);
+            // A pane whose stream died while this link stayed up: the
+            // machine-level reconnect never fires for it, so the pump itself
+            // asks for it back.
+            pump_pane_relinks(cx, host);
             if became {
                 changed = true;
                 log::info!("link to {target} is attached");
@@ -1883,6 +1918,9 @@ fn finish_attempt(
                     relink_panes(cx, id);
                     crate::ui::tree_sync::hydrate_window_from_tree(cx, id);
                 }
+                // Whatever a pane's retry clock said about the old link is
+                // stale on the new one; the pump re-collects survivors fresh.
+                cx.default_global::<RemoteLinks>().pane_retries.remove(&id);
                 refresh_window_shells(cx, id);
             }
             RemoteLinks::mark(cx, host, |link| {
@@ -1954,10 +1992,10 @@ fn relink_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
                 })
                 .await;
             match opened {
-                Ok(stream) => {
+                Ok((stream, buffered)) => {
                     view.update(cx, |view, cx| {
                         if let Err(e) =
-                            view.adopt_relink(stream, &adopting, size, cell_w, cell_h, cx)
+                            view.adopt_relink(stream, buffered, &adopting, size, cell_w, cell_h, cx)
                         {
                             log::warn!("pane {pane_id} re-attached but could not be adopted: {e}");
                         }
@@ -1968,6 +2006,148 @@ fn relink_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
         })
         .detach();
     }
+}
+
+/// Finds panes whose links died while their machine's control link stayed up,
+/// and asks for them back on a per-workspace backoff. Runs from the pump's
+/// `live` branch, so a machine that is unreachable never gets here — its
+/// panes come back through `relink_panes` when the machine-level reconnect
+/// lands.
+fn pump_pane_relinks(cx: &mut gpui::App, host: HostId) {
+    let now = Instant::now();
+    for (id, _) in workspaces_on(cx, host) {
+        // Released panes are gone on purpose (preempted, or a Take Back on
+        // the wire); an attach still in flight will rebuild them itself.
+        let paused = {
+            let links = cx.default_global::<RemoteLinks>();
+            links.preempted.contains_key(&id)
+                || links.reclaiming.contains_key(&id)
+                || links.attaching.contains(&id)
+        };
+        if paused {
+            continue;
+        }
+        let dead: Vec<_> = panes_of(cx, id)
+            .into_iter()
+            .filter(|view| view.read(cx).wants_relink())
+            .collect();
+        if dead.is_empty() {
+            cx.default_global::<RemoteLinks>().pane_retries.remove(&id);
+            continue;
+        }
+        let due = {
+            let retry = cx
+                .default_global::<RemoteLinks>()
+                .pane_retries
+                .entry(id)
+                .or_default();
+            match (retry.inflight, retry.next_attempt) {
+                (true, _) => false,
+                // First sighting: ask right away. The backoff only starts
+                // once an attempt has actually come back wrong.
+                (false, None) => true,
+                (false, Some(at)) => at <= now,
+            }
+        };
+        if due {
+            relink_dead_panes(cx, id, dead);
+        }
+    }
+}
+
+/// One batch of relinks for one workspace's dead panes. Every pane dials
+/// concurrently; the batch reports back as a whole, and one transient failure
+/// puts the whole workspace on the next backoff step. A refusal is final for
+/// that pane — the machine said the pane is gone — so it is marked abandoned
+/// instead of counted against the clock.
+fn relink_dead_panes(
+    cx: &mut gpui::App,
+    workspace: WorkspaceId,
+    panes: Vec<gpui::Entity<crate::terminal::view::TerminalView>>,
+) {
+    let route = pane_route_for(cx, workspace);
+    if route.header().is_none() {
+        // Local can't happen for a workspace with a host; Unroutable means
+        // the route stopped resolving, which is the machine supervisor's
+        // problem — count it as a miss and let the clock run.
+        note_pane_relink_outcome(cx, workspace, panes.len());
+        return;
+    }
+    {
+        let retry = cx
+            .default_global::<RemoteLinks>()
+            .pane_retries
+            .entry(workspace)
+            .or_default();
+        retry.inflight = true;
+        log::info!(
+            "asking for {} dead pane(s) of workspace {workspace} back (attempt {})",
+            panes.len(),
+            retry.backoff.attempt() + 1
+        );
+    }
+    let plans: Vec<_> = panes
+        .iter()
+        .map(|view| (view.clone(), view.read(cx).relink_plan()))
+        .collect();
+    cx.spawn(async move |cx| {
+        let attempts: Vec<_> = plans
+            .into_iter()
+            .map(|(view, (pane_id, size, cell_w, cell_h))| {
+                let opening = route.clone();
+                let opened = cx.background_executor().spawn(async move {
+                    crate::terminal::RemoteTerminal::open_relink(
+                        &opening, pane_id, size, cell_w, cell_h,
+                    )
+                });
+                (view, opened, pane_id, size, cell_w, cell_h)
+            })
+            .collect();
+        let mut misses = 0usize;
+        for (view, opened, pane_id, size, cell_w, cell_h) in attempts {
+            match opened.await {
+                Ok((stream, buffered)) => {
+                    let adopted = view.update(cx, |view, cx| {
+                        view.adopt_relink(stream, buffered, &route, size, cell_w, cell_h, cx)
+                    });
+                    match adopted {
+                        Ok(()) => log::info!("pane {pane_id} came back on its own"),
+                        Err(e) => {
+                            misses += 1;
+                            log::warn!("pane {pane_id} re-attached but could not be adopted: {e}");
+                        }
+                    }
+                }
+                Err(e) if crate::terminal::attach_refused(&e) => {
+                    view.update(cx, |view, _| view.abandon_relink());
+                    log::warn!("pane {pane_id} is gone on its machine ({e}); not asking again");
+                }
+                Err(e) => {
+                    misses += 1;
+                    log::warn!("could not relink pane {pane_id}: {e}");
+                }
+            }
+        }
+        cx.update(|cx| note_pane_relink_outcome(cx, workspace, misses));
+    })
+    .detach();
+}
+
+/// Lands a batch's verdict on the workspace's retry clock: all found their
+/// way back (or are past asking) and the entry retires; any miss advances the
+/// backoff and books the next try.
+fn note_pane_relink_outcome(cx: &mut gpui::App, workspace: WorkspaceId, misses: usize) {
+    let links = cx.default_global::<RemoteLinks>();
+    if misses == 0 {
+        links.pane_retries.remove(&workspace);
+        return;
+    }
+    let Some(retry) = links.pane_retries.get_mut(&workspace) else {
+        return;
+    };
+    retry.inflight = false;
+    let delay = retry.backoff.advance();
+    retry.next_attempt = Some(Instant::now() + delay);
 }
 
 fn server_restarted(cx: &mut gpui::App, host: HostId, peer: &RemoteHost) -> bool {
@@ -2088,6 +2268,38 @@ pub(crate) fn workspace_is_preempted(cx: &gpui::App, workspace: WorkspaceId) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The per-workspace relink clock: a miss puts the workspace on the next
+    /// backoff step, panes all found their way back retires the entry — so a
+    /// pane that cannot come back is asked for on a widening interval, and a
+    /// recovered workspace costs the pump nothing.
+    #[gpui::test]
+    fn a_pane_retry_backs_off_on_misses_and_retires_on_success(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let ws = WorkspaceId::new();
+            cx.default_global::<RemoteLinks>()
+                .pane_retries
+                .entry(ws)
+                .or_default()
+                .inflight = true;
+
+            note_pane_relink_outcome(cx, ws, 2);
+            let links = cx.default_global::<RemoteLinks>();
+            let retry = links.pane_retries.get(&ws).expect("a miss keeps the clock");
+            assert!(!retry.inflight, "the batch reported back");
+            assert_eq!(retry.backoff.attempt(), 1);
+            assert!(retry.next_attempt.is_some(), "the next try is booked");
+
+            note_pane_relink_outcome(cx, ws, 0);
+            assert!(
+                cx.default_global::<RemoteLinks>()
+                    .pane_retries
+                    .get(&ws)
+                    .is_none(),
+                "every pane back means no clock left to run"
+            );
+        });
+    }
 
     #[gpui::test]
     fn taking_back_marks_the_workspace_for_a_whole_rebuild(cx: &mut gpui::TestAppContext) {

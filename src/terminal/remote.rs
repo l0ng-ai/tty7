@@ -88,6 +88,12 @@ pub struct PaneWorkspace {
     pub workspace: crate::core::session::WorkspaceId,
     pub target: crate::core::session::RemoteTarget,
     pub spec: Option<Box<NativeSshSpec>>,
+    /// The name the workspace answers to — its own label, or its machine's
+    /// when it has none. A pane keeps answering to this name when its link
+    /// dies (#438 gave SSH panes their host here; without this, a workspace
+    /// pane fell back to the bare app name and the tab read "tty7 —
+    /// disconnected").
+    pub label: Option<String>,
     /// Whether the daemon serving this workspace's panes echoes a `Size` frame
     /// when it applies a resize — read off the host's control hello by whoever
     /// built this value, because this module may not ask the network itself.
@@ -444,25 +450,33 @@ impl RemoteTerminal {
         Ok(term)
     }
 
+    /// Opens the daemon connection a relink will adopt, and waits for the
+    /// daemon's verdict on the `Attach`. Bytes read past the verdict are
+    /// returned so the adopted reader loses none of the replay. Waiting here
+    /// is what makes a relink's failure classifiable: fire-and-forget handed
+    /// a "no such pane" refusal to the reader thread, which could only die
+    /// with it — indistinguishable from the link dropping again.
     pub fn open_relink(
         route: &PaneRoute,
         pane_id: u64,
         size: TermSize,
         cell_w: u16,
         cell_h: u16,
-    ) -> anyhow::Result<Stream> {
+    ) -> anyhow::Result<(Stream, Vec<u8>)> {
         let mut stream = connect_routed(route)?;
         ClientMsg::Attach {
             pane_id,
             size: win_size(size, cell_w, cell_h),
         }
         .encode(&mut stream)?;
-        Ok(stream)
+        let buffered = attach_reply_prefix(&mut stream, pane_id, attach_reply_wait(route))?;
+        Ok((stream, buffered))
     }
 
     pub fn adopt_relink(
         &mut self,
         stream: Stream,
+        buffered: Vec<u8>,
         route: &PaneRoute,
         size: TermSize,
         cell_w: u16,
@@ -490,7 +504,7 @@ impl RemoteTerminal {
             self.term.clone(),
             self.proxy.clone(),
             read_half,
-            Vec::new(),
+            buffered,
             quit.clone(),
             ReaderSignals {
                 cwd: self.cwd.clone(),
@@ -714,12 +728,18 @@ impl RemoteTerminal {
                 let mut tr_adv_t = std::time::Duration::ZERO;
                 let mut tr_frames: u32 = 0;
 
-                let teardown = || {
+                let teardown = |reason: Option<&str>| {
                     // A retired reader exits silently: the pane is being
                     // relinked or released, not dying — marking it exited
                     // would wrongly kill the freshly adopted link.
                     if quit.load(Ordering::SeqCst) {
                         return;
+                    }
+                    // Said out loud because every way a link dies looks the
+                    // same from the window — a pane suddenly "disconnected" —
+                    // and this line is the only record of which way it was.
+                    if let Some(reason) = reason {
+                        log::warn!("a pane's link died: {reason}");
                     }
                     term.lock().exit();
                     exited_flag.store(true, Ordering::SeqCst);
@@ -837,15 +857,15 @@ impl RemoteTerminal {
                         let frame = match crate::daemon::protocol::take_frame(&mut pending) {
                             Ok(Some(frame)) => frame,
                             Ok(None) => break,
-                            Err(_) => {
-                                teardown();
+                            Err(e) => {
+                                teardown(Some(&format!("unframeable bytes on the link: {e}")));
                                 break 'main;
                             }
                         };
                         let msg = match DaemonMsg::from_frame(frame.0, frame.1) {
                             Ok(msg) => msg,
-                            Err(_) => {
-                                teardown();
+                            Err(e) => {
+                                teardown(Some(&format!("undecodable frame on the link: {e}")));
                                 break 'main;
                             }
                         };
@@ -1034,7 +1054,8 @@ impl RemoteTerminal {
                             DaemonMsg::Exited { .. } => {
                                 flush_batch!();
                                 child_exited.store(true, Ordering::SeqCst);
-                                teardown();
+                                // Routine — the child ended — so no log line.
+                                teardown(None);
                                 break 'main;
                             }
                             _ => {}
@@ -1087,7 +1108,7 @@ impl RemoteTerminal {
                     let tr0 = trace.then(std::time::Instant::now);
                     match stream.read(&mut scratch) {
                         Ok(0) => {
-                            teardown();
+                            teardown(Some("the far end closed it (EOF)"));
                             break;
                         }
                         Ok(n) => {
@@ -1104,8 +1125,8 @@ impl RemoteTerminal {
                                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                             ) => {}
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                        Err(_) => {
-                            teardown();
+                        Err(e) => {
+                            teardown(Some(&format!("read failed: {e}")));
                             break;
                         }
                     }
@@ -1763,6 +1784,30 @@ pub fn attach_unanswered(err: &anyhow::Error) -> bool {
         .any(|cause| cause.downcast_ref::<AttachUnanswered>().is_some())
 }
 
+/// An `Attach` the daemon answered with an `Error` frame — it heard us and
+/// said no, which for a relink means the pane is gone on its machine. Typed so
+/// a retry loop can tell this apart from the failures worth retrying: silence
+/// and transport trouble pass, a refusal repeats identically forever.
+#[derive(Debug)]
+struct AttachRefused {
+    message: String,
+}
+
+impl std::fmt::Display for AttachRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "daemon refused Attach: {}", self.message)
+    }
+}
+
+impl std::error::Error for AttachRefused {}
+
+/// Whether `err` is an `Attach` the daemon explicitly refused. Retrying one of
+/// these can only produce the same refusal.
+pub fn attach_refused(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<AttachRefused>().is_some())
+}
+
 /// Reads far enough into the daemon's answer to an `Attach` to classify it, and
 /// hands back every byte read so the reader thread loses none of the replay.
 ///
@@ -1815,7 +1860,7 @@ fn attach_reply_prefix(
     }
     let message = read_error_frame(stream, &mut buffered, wait)
         .unwrap_or_else(|| format!("no such pane {pane_id}"));
-    Err(anyhow::anyhow!("daemon refused Attach: {message}"))
+    Err(anyhow::Error::new(AttachRefused { message }))
 }
 
 fn read_error_frame(
@@ -2453,8 +2498,15 @@ mod windows_tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut term = term;
-            term.adopt_relink(new_client, &PaneRoute::Local, TermSize::new(80, 24), 8, 16)
-                .unwrap();
+            term.adopt_relink(
+                new_client,
+                Vec::new(),
+                &PaneRoute::Local,
+                TermSize::new(80, 24),
+                8,
+                16,
+            )
+            .unwrap();
             let _ = tx.send(term);
         });
         let term = rx
@@ -2622,6 +2674,7 @@ mod tests {
                 )
                 .unwrap(),
             )),
+            label: None,
             resize_echo: false,
         }
     }
@@ -2667,6 +2720,7 @@ mod tests {
                 distro: "Ubuntu-22.04".into(),
             },
             spec: None,
+            label: None,
             resize_echo: false,
         };
         let route = PaneRoute::for_workspace(Some(&ws));
@@ -2684,6 +2738,7 @@ mod tests {
                 args: vec!["--stdio".into()],
             },
             spec: None,
+            label: None,
             resize_echo: false,
         };
         let route = PaneRoute::for_workspace(Some(&ws));
@@ -2706,6 +2761,7 @@ mod tests {
                 alias: "build-box".into(),
             },
             spec: None,
+            label: None,
             resize_echo: false,
         };
         let route = PaneRoute::for_workspace(Some(&ws));
@@ -2939,6 +2995,41 @@ mod tests {
         daemon_side.flush().unwrap();
         let refused = attach_reply_prefix(&mut client_side, 7, wait).expect_err("refused");
         assert!(!attach_unanswered(&refused));
+    }
+
+    /// The relink retry loop keys off this split: a refusal means the pane is
+    /// gone on its machine and asking again can only repeat the answer, while
+    /// silence and a hangup are transport trouble worth another try.
+    #[test]
+    fn a_refused_attach_is_final_and_every_other_failure_is_not() {
+        let wait = std::time::Duration::from_millis(200);
+
+        let (mut client_side, mut daemon_side) = UnixStream::pair().unwrap();
+        DaemonMsg::Error("no such pane 7".into())
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+        let refused = attach_reply_prefix(&mut client_side, 7, wait).expect_err("refused");
+        assert!(attach_refused(&refused));
+        assert!(
+            format!("{refused:#}").contains("no such pane 7"),
+            "the daemon's own words survive: {refused:#}"
+        );
+
+        let (mut client_side, _held_open) = UnixStream::pair().unwrap();
+        let silent = attach_reply_prefix(&mut client_side, 7, wait).expect_err("silent");
+        assert!(
+            !attach_refused(&silent),
+            "silence is not a verdict on the pane"
+        );
+
+        let (mut client_side, daemon_side) = UnixStream::pair().unwrap();
+        drop(daemon_side);
+        let hungup = attach_reply_prefix(&mut client_side, 7, wait).expect_err("hung up");
+        assert!(
+            !attach_refused(&hungup),
+            "a hangup is not a verdict on the pane"
+        );
     }
 
     /// The other side of the rule above: the frame a quiet pane does send is
