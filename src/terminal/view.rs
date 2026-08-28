@@ -240,6 +240,13 @@ pub struct TerminalView {
     /// repeat the answer. Cleared when a relink is adopted anyway (the manual
     /// reconnect path), which is the one thing that changes the question.
     relink_abandoned: bool,
+    /// A relink for this pane is already on the wire. Both askers set it —
+    /// the machine-level reconnect and the pump's own sweep — because the
+    /// daemon keeps exactly one subscriber per pane and a second `Attach`
+    /// kicks the first. Without this the pump would join a dial still in
+    /// flight every 250 ms, and a dial can sit for fifteen seconds waiting
+    /// for the far end's verdict.
+    relink_inflight: bool,
     pub marked_text: String,
     last_mouse_cell: Option<(usize, usize)>,
     last_hover_cell: Option<(usize, usize)>,
@@ -1315,6 +1322,7 @@ impl TerminalView {
             pending_title: None,
             default_title: DEFAULT_TITLE.to_string(),
             relink_abandoned: false,
+            relink_inflight: false,
             marked_text: String::new(),
             last_mouse_cell: None,
             report_mouse,
@@ -1542,6 +1550,7 @@ impl TerminalView {
         self.terminal
             .adopt_relink(stream, buffered, route, size, cell_w, cell_h)?;
         self.relink_abandoned = false;
+        self.relink_inflight = false;
         self.title = self.default_title.clone();
         cx.notify();
         Ok(())
@@ -1702,6 +1711,21 @@ impl TerminalView {
             && self.terminal.exited
             && !self.terminal.child_exited()
             && !self.relink_abandoned
+            && !self.relink_inflight
+    }
+
+    /// Claims this pane for one relink attempt. Every path that dials for a
+    /// pane calls this first, so the other paths leave it alone until the
+    /// attempt reports back through `relink_settled` or `adopt_relink`.
+    pub fn mark_relinking(&mut self) {
+        self.relink_inflight = true;
+    }
+
+    /// Releases the claim `mark_relinking` took, for the attempts that end
+    /// without a stream to adopt. A pane freed this way is up for asking
+    /// again on the next sweep.
+    pub fn relink_settled(&mut self) {
+        self.relink_inflight = false;
     }
 
     /// Records that this pane's machine refused to give the pane back — it is
@@ -1709,6 +1733,7 @@ impl TerminalView {
     /// keeps its disconnected face; only the retrying stops.
     pub fn abandon_relink(&mut self) {
         self.relink_abandoned = true;
+        self.relink_inflight = false;
     }
 
     /// Takes a title the program set, and gives it to the tab only once it has
@@ -11524,6 +11549,30 @@ mod gpui_tests {
                 assert!(view.wants_relink());
                 view.abandon_relink();
                 assert!(!view.wants_relink(), "a refusal is final");
+            })
+            .unwrap();
+    }
+
+    /// The daemon keeps one subscriber per pane, so a second `Attach` for a
+    /// pane already being dialled for kicks the first off. A pane claimed for
+    /// an attempt therefore asks for nothing until that attempt reports back —
+    /// otherwise the pump, which sweeps every 250 ms, would join a dial that
+    /// can sit fifteen seconds waiting for the far end's verdict.
+    #[gpui::test]
+    fn a_pane_already_being_dialled_for_asks_for_nothing(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                bind_to_a_disconnected_remote_workspace(view, cx);
+                view.handle_event(AlacEvent::Exit, cx);
+                assert!(view.wants_relink());
+                view.mark_relinking();
+                assert!(!view.wants_relink(), "the attempt on the wire owns it");
+                view.relink_settled();
+                assert!(
+                    view.wants_relink(),
+                    "an attempt that came back wrong frees it"
+                );
             })
             .unwrap();
     }

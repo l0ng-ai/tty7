@@ -1978,7 +1978,14 @@ fn relink_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
     }
     log::info!("relinking {} pane(s) of workspace {workspace}", panes.len());
     for view in panes {
-        let (pane_id, size, cell_w, cell_h) = view.read(cx).relink_plan();
+        // Claimed before the dial so the pump's sweep, which runs every
+        // 250 ms and sees these panes as dead until they adopt, does not fire
+        // a second `Attach` for the same pane and kick this one off the
+        // daemon's single subscriber slot.
+        let (pane_id, size, cell_w, cell_h) = view.update(cx, |view, _| {
+            view.mark_relinking();
+            view.relink_plan()
+        });
         let opening = route.clone();
         let adopting = route.clone();
         cx.spawn(async move |cx| {
@@ -1997,11 +2004,15 @@ fn relink_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
                         if let Err(e) =
                             view.adopt_relink(stream, buffered, &adopting, size, cell_w, cell_h, cx)
                         {
+                            view.relink_settled();
                             log::warn!("pane {pane_id} re-attached but could not be adopted: {e}");
                         }
                     });
                 }
-                Err(e) => log::warn!("could not relink pane {pane_id}: {e}"),
+                Err(e) => {
+                    view.update(cx, |view, _| view.relink_settled());
+                    log::warn!("could not relink pane {pane_id}: {e}");
+                }
             }
         })
         .detach();
@@ -2032,7 +2043,13 @@ fn pump_pane_relinks(cx: &mut gpui::App, host: HostId) {
             .filter(|view| view.read(cx).wants_relink())
             .collect();
         if dead.is_empty() {
-            cx.default_global::<RemoteLinks>().pane_retries.remove(&id);
+            // A batch on the wire owns the clock until it reports back — its
+            // panes read as claimed, not dead, and dropping the entry here
+            // would throw away the backoff the batch is about to advance.
+            let links = cx.default_global::<RemoteLinks>();
+            if !links.pane_retries.get(&id).is_some_and(|r| r.inflight) {
+                links.pane_retries.remove(&id);
+            }
             continue;
         }
         let due = {
@@ -2086,9 +2103,18 @@ fn relink_dead_panes(
             retry.backoff.attempt() + 1
         );
     }
+    // Claimed pane by pane as well as workspace by workspace: the machine
+    // supervisor's own `relink_panes` reads the same flag, and two `Attach`es
+    // for one pane_id do not queue — the daemon's second one kicks the first.
     let plans: Vec<_> = panes
         .iter()
-        .map(|view| (view.clone(), view.read(cx).relink_plan()))
+        .map(|view| {
+            let plan = view.update(cx, |view, _| {
+                view.mark_relinking();
+                view.relink_plan()
+            });
+            (view.clone(), plan)
+        })
         .collect();
     cx.spawn(async move |cx| {
         let attempts: Vec<_> = plans
@@ -2114,6 +2140,7 @@ fn relink_dead_panes(
                         Ok(()) => log::info!("pane {pane_id} came back on its own"),
                         Err(e) => {
                             misses += 1;
+                            view.update(cx, |view, _| view.relink_settled());
                             log::warn!("pane {pane_id} re-attached but could not be adopted: {e}");
                         }
                     }
@@ -2124,6 +2151,7 @@ fn relink_dead_panes(
                 }
                 Err(e) => {
                     misses += 1;
+                    view.update(cx, |view, _| view.relink_settled());
                     log::warn!("could not relink pane {pane_id}: {e}");
                 }
             }
