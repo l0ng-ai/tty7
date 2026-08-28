@@ -1021,7 +1021,7 @@ impl Tty7App {
     }
 
     /// The agent's conversation, one row per turn, each a way back to where
-    /// that turn started in the scrollback.
+    /// that turn started in the scrollback — when there is one to go back to.
     ///
     /// It sits under the session facts rather than in a tab of its own: this is
     /// something *this pane* is, like its shell and its cwd, and the tab strip
@@ -1042,15 +1042,18 @@ impl Tty7App {
         if turns.is_empty() {
             return None;
         }
+        // A full-screen program owns the whole drawing surface, so there is no
+        // scrollback under it to land in — while one is up every jump is a
+        // no-op, whatever anchor the turn is carrying. An agent that renders
+        // that way (Claude Code's `/tui fullscreen`, Codex) puts every row in
+        // this section here.
+        let alt_now = leaf.read(cx).on_alt_screen();
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let count = turns.len().to_string();
         let mut list = v_flex().px(px(CONTENT_INSET - 4.)).py(px(1.)).gap(px(1.));
         for turn in turns {
             let id = turn.id;
-            // Only a turn that was drawn into the scrollback has somewhere to
-            // go: one that began on the alt screen is history the pane never
-            // kept, so its row reads as a label and not as a link.
-            let jumpable = turn.row.is_some();
+            let jumpable = turn_is_jumpable(turn.row, alt_now);
             let dot = {
                 let d = div().flex_none().size(px(7.)).rounded_full();
                 if turn.done {
@@ -1078,6 +1081,18 @@ impl Tty7App {
                                     view.scroll_to_agent_turn(&turn, cx);
                                 });
                             }))
+                    })
+                    // A row that goes nowhere says why on hover. Muted text is
+                    // the whole of what it says otherwise, and grey reads as
+                    // "less important" long before it reads as "not a link".
+                    .when(!jumpable, |this| {
+                        let tip = t(match alt_now {
+                            true => L10nKey::PanelTurnAltScreenNow,
+                            false => L10nKey::PanelTurnNoScrollback,
+                        });
+                        this.tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(tip).build(window, cx)
+                        })
                     })
                     .child(dot)
                     .child(
@@ -1488,9 +1503,19 @@ fn compact_path(path: &std::path::Path, home: Option<&std::path::Path>) -> Strin
     crate::ui::path_display::abbreviate_home(&path.to_string_lossy(), home).into_owned()
 }
 
+/// Whether a turn's row is a link back into the scrollback, or only a label.
+///
+/// Both halves have to hold, and they are the same two conditions
+/// [`TerminalView::scroll_to_agent_turn`](crate::terminal::view::TerminalView)
+/// refuses on — deliberately, because a row that draws as a link and then does
+/// nothing is worse than one that never offered. Keep the two in step.
+fn turn_is_jumpable(row: Option<i64>, alt_now: bool) -> bool {
+    row.is_some() && !alt_now
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{InfoRow, InfoValue, split_path_leaf};
+    use super::{InfoRow, InfoValue, split_path_leaf, turn_is_jumpable};
 
     fn diff(added: u32, removed: u32, open: bool) -> InfoRow {
         InfoRow {
@@ -1531,6 +1556,25 @@ mod tests {
             }
             .interactive(),
             "so is Reveal, even with nothing else on the row"
+        );
+    }
+
+    #[test]
+    fn a_turn_offers_the_jump_only_where_the_jump_would_land() {
+        assert!(
+            turn_is_jumpable(Some(42), false),
+            "a turn anchored in the scrollback of a pane on the normal screen"
+        );
+        assert!(
+            !turn_is_jumpable(None, false),
+            "a turn that began on the alt screen was never written down"
+        );
+        // The one this pair exists for: the anchor survives the switch into a
+        // full-screen renderer, and the row it points at does not. Before, the
+        // row kept its pointer and its hover fill and swallowed every click.
+        assert!(
+            !turn_is_jumpable(Some(42), true),
+            "and an anchor is no use while a full-screen program owns the pane"
         );
     }
 

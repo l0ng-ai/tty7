@@ -3787,7 +3787,7 @@ impl TerminalView {
         !self.prompt_editor || self.shell_vi_prompt() || self.handoff_active()
     }
 
-    fn on_alt_screen(&self) -> bool {
+    pub(crate) fn on_alt_screen(&self) -> bool {
         self.terminal
             .term
             .lock()
