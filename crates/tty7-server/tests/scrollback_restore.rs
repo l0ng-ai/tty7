@@ -182,6 +182,7 @@ impl Instance {
                 pane_id: dead,
                 banner: Some("the shell below is new".to_string()),
             }),
+            allow_remote_clipboard_write: false,
         }
         .encode(&mut stream)
         .expect("send Spawn");

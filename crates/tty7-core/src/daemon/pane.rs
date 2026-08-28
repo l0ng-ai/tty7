@@ -9,6 +9,10 @@ use std::time::Duration;
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::core::clipboard::{
+    ClipboardSniffer, Event as ClipboardEvent, Segment as ClipboardSegment,
+    Sniffed as ClipboardSniffed,
+};
 use crate::core::kitty_graphics::{GraphicsSniffer, Segment, Sniffed};
 use crate::core::osc::OscTokenizer;
 use crate::daemon::protocol::{
@@ -673,6 +677,7 @@ struct PaneState {
     ring: ReplayRing,
     subscriber: Option<Sender<DaemonMsg>>,
     subscriber_epoch: u64,
+    allow_remote_clipboard_write: bool,
     observers: Vec<Observer>,
     observer_seq: u64,
     cwd: Option<PathBuf>,
@@ -788,6 +793,17 @@ fn fan_out_output(st: &mut PaneState, bytes: &[u8], frames: Vec<GraphicsFrame>, 
             }
             // Ungated, and `notify` already holds observers to their budget.
             GraphicsFrame::Delete(sel) => notify(st, DaemonMsg::DeleteImage(sel)),
+            // Clipboard writes are side effects for the controlling GUI only.
+            // Observers must never overwrite their own machine's clipboard just
+            // because they are watching this pane.
+            GraphicsFrame::ClipboardWrite(frame) => {
+                let len = frame.len();
+                if let Some(sub) = &st.subscriber
+                    && sub.send(DaemonMsg::ClipboardWrite(frame)).is_ok()
+                {
+                    gate.add(len);
+                }
+            }
         }
     }
 }
@@ -974,6 +990,7 @@ enum GraphicsFrame {
     Output(Vec<u8>),
     Image(Vec<u8>),
     Delete(Vec<u8>),
+    ClipboardWrite(Vec<u8>),
 }
 
 /// Queue an encoded image frame for the subscriber, dropping any frame larger
@@ -987,6 +1004,50 @@ enum GraphicsFrame {
 fn push_image_frame(frames: &mut Vec<GraphicsFrame>, frame: Vec<u8>) {
     if frame.len() <= MAX_FRAME {
         frames.push(GraphicsFrame::Image(frame));
+    }
+}
+
+fn process_graphics_output(
+    sniffed: Sniffed<'_>,
+    ordered: bool,
+    pass: &mut Vec<u8>,
+    frames: &mut Vec<GraphicsFrame>,
+    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+) {
+    match sniffed {
+        Sniffed::Plain(bytes) => {
+            pass.extend_from_slice(bytes);
+            if ordered && !bytes.is_empty() {
+                frames.push(GraphicsFrame::Output(bytes.to_vec()));
+            }
+        }
+        Sniffed::Segments(segments) => {
+            for segment in segments {
+                match segment {
+                    Segment::Output(bytes) => {
+                        pass.extend_from_slice(&bytes);
+                        frames.push(GraphicsFrame::Output(bytes));
+                    }
+                    Segment::Query(reply) => {
+                        if let Ok(mut writer) = writer.lock() {
+                            let _ = writer.write_all(&reply);
+                            let _ = writer.flush();
+                        }
+                    }
+                    Segment::Image(image) => {
+                        push_image_frame(frames, image.encode_frame());
+                    }
+                    Segment::ImageFromMedium(transfer) => {
+                        if let Some(image) = transfer.resolve() {
+                            push_image_frame(frames, image.encode_frame());
+                        }
+                    }
+                    Segment::Delete(delete) => {
+                        frames.push(GraphicsFrame::Delete(delete.encode()));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1335,6 +1396,7 @@ impl DaemonPane {
         owner: Option<String>,
         workspace: Option<String>,
         restore: Option<Restore>,
+        allow_remote_clipboard_write: bool,
         on_dead: impl FnOnce() + Send + 'static,
     ) -> anyhow::Result<Arc<Self>> {
         let pty_size = pty_size(size);
@@ -1384,6 +1446,7 @@ impl DaemonPane {
                 ring,
                 subscriber: None,
                 subscriber_epoch: 0,
+                allow_remote_clipboard_write,
                 observers: Vec::new(),
                 observer_seq: 0,
                 cwd: spawn.initial_cwd,
@@ -1598,6 +1661,7 @@ impl DaemonPane {
                 ring,
                 subscriber: None,
                 subscriber_epoch: 0,
+                allow_remote_clipboard_write: false,
                 observers: Vec::new(),
                 observer_seq: 0,
                 cwd: carried.cwd,
@@ -1627,6 +1691,7 @@ impl DaemonPane {
         spec: Box<NativeSshSpec>,
         on_dead: impl FnOnce() + Send + 'static,
     ) -> anyhow::Result<Arc<Self>> {
+        let allow_remote_clipboard_write = spec.remote_clipboard_write;
         let bridge = crate::daemon::ssh::session::make_bridge();
         let reader_handle: Box<dyn Read + Send> = Box::new(bridge.reader);
         let writer: Arc<Mutex<Box<dyn Write + Send>>> =
@@ -1650,6 +1715,7 @@ impl DaemonPane {
             ring: ReplayRing::new(size),
             subscriber: None,
             subscriber_epoch: 0,
+            allow_remote_clipboard_write,
             observers: Vec::new(),
             observer_seq: 0,
             // A native ssh pane is not running a shell of this machine's; what
@@ -1761,6 +1827,7 @@ impl DaemonPane {
             .spawn(move || {
                 crate::core::threads::promote_to_user_interactive();
                 let mut sniffer = OscSniffer::new();
+                let mut clipboard = ClipboardSniffer::default();
                 // Kitty graphics interception (issue #213): lifts image
                 // sequences out of the stream *before* the ring/subscriber see
                 // them, so the base64 pixels never enter replay and the client's
@@ -1816,13 +1883,21 @@ impl DaemonPane {
                                 tr_bytes += n as u64;
                             }
                             let raw = &buf[..n];
-                            // Kitty graphics: strip any image sequences out of the
-                            // stream before anything else sees them. On the common
-                            // no-graphics chunk this borrows `raw` unchanged; only a
-                            // chunk that actually carries `\x1b_G…` allocates. Query
-                            // replies are written straight back to the PTY here, and
-                            // any images/deletes are forwarded to the subscriber
-                            // out-of-band below — none of it enters the replay ring.
+                            let (controller, allowed) = state
+                                .lock()
+                                .map(|st| {
+                                    (
+                                        st.subscriber.as_ref().map(|_| st.subscriber_epoch),
+                                        st.allow_remote_clipboard_write,
+                                    )
+                                })
+                                .unwrap_or((None, false));
+                            clipboard.set_controller(controller, allowed);
+                            // Strip OSC 5522 clipboard writes and Kitty graphics
+                            // before anything else sees them. On the common path the
+                            // original slice is borrowed unchanged; protocol payloads
+                            // are decoded into out-of-band frames and never enter the
+                            // replay ring.
                             //
                             // `frames` is the ordered list of out-of-band frames to
                             // forward *in stream position*: a kitty image anchors to
@@ -1833,44 +1908,58 @@ impl DaemonPane {
                             // whole chunk is sent as one `Output`; only a chunk with
                             // graphics splits into interleaved frames.
                             let mut frames: Vec<GraphicsFrame> = Vec::new();
-                            let passthrough: std::borrow::Cow<[u8]> = match graphics.sniff(raw) {
-                                Sniffed::Plain(b) => std::borrow::Cow::Borrowed(b),
-                                Sniffed::Segments(segs) => {
+                            let passthrough: std::borrow::Cow<[u8]> = match clipboard.sniff(raw) {
+                                ClipboardSniffed::Plain(b) => match graphics.sniff(b) {
+                                    Sniffed::Plain(b) => std::borrow::Cow::Borrowed(b),
+                                    sniffed @ Sniffed::Segments(_) => {
+                                        let mut pass = Vec::new();
+                                        process_graphics_output(
+                                            sniffed,
+                                            false,
+                                            &mut pass,
+                                            &mut frames,
+                                            &writer,
+                                        );
+                                        std::borrow::Cow::Owned(pass)
+                                    }
+                                },
+                                ClipboardSniffed::Segments(segs) => {
                                     let mut pass = Vec::new();
                                     for seg in segs {
                                         match seg {
-                                            Segment::Output(b) => {
-                                                pass.extend_from_slice(&b);
-                                                frames.push(GraphicsFrame::Output(b));
+                                            ClipboardSegment::Output(b) => {
+                                                let sniffed = graphics.sniff(&b);
+                                                process_graphics_output(
+                                                    sniffed,
+                                                    true,
+                                                    &mut pass,
+                                                    &mut frames,
+                                                    &writer,
+                                                );
                                             }
-                                            Segment::Query(reply) => {
+                                            ClipboardSegment::Event(ClipboardEvent::Reply(
+                                                reply,
+                                            )) => {
                                                 if let Ok(mut w) = writer.lock() {
                                                     let _ = w.write_all(&reply);
                                                     let _ = w.flush();
                                                 }
                                             }
-                                            Segment::Image(img) => {
-                                                push_image_frame(&mut frames, img.encode_frame());
-                                            }
-                                            Segment::ImageFromMedium(transfer) => {
-                                                // File/shm handoff on a local pane:
-                                                // read (and unlink) the object here,
-                                                // then forward the raw pixels exactly
-                                                // like an inline image. This is the
-                                                // fast path that skips the client-side
-                                                // inflate the compressed-inline `t=d`
-                                                // fallback would force. A failed read
-                                                // just drops the frame — the sender
-                                                // reclaims its own object.
-                                                if let Some(img) = transfer.resolve() {
-                                                    push_image_frame(
-                                                        &mut frames,
-                                                        img.encode_frame(),
+                                            ClipboardSegment::Event(ClipboardEvent::Write(
+                                                write,
+                                            )) => {
+                                                if controller.is_some() {
+                                                    frames.push(GraphicsFrame::ClipboardWrite(
+                                                        write.encode_frame(),
+                                                    ));
+                                                } else if let Ok(mut w) = writer.lock() {
+                                                    let reply = crate::core::clipboard::response(
+                                                        write.id.as_deref(),
+                                                        "EBUSY",
                                                     );
+                                                    let _ = w.write_all(&reply);
+                                                    let _ = w.flush();
                                                 }
-                                            }
-                                            Segment::Delete(d) => {
-                                                frames.push(GraphicsFrame::Delete(d.encode()));
                                             }
                                         }
                                     }
@@ -1973,8 +2062,17 @@ impl DaemonPane {
     }
 
     pub fn attach(&self, subscriber: Sender<DaemonMsg>) -> u64 {
+        self.attach_with_permissions(subscriber, false)
+    }
+
+    pub fn attach_with_permissions(
+        &self,
+        subscriber: Sender<DaemonMsg>,
+        allow_remote_clipboard_write: bool,
+    ) -> u64 {
         let mut st = self.state.lock().unwrap();
-        let epoch = attach_subscriber(&mut st, subscriber);
+        let epoch =
+            attach_subscriber_with_permissions(&mut st, subscriber, allow_remote_clipboard_write);
         self.gate.reset();
         epoch
     }
@@ -1983,6 +2081,7 @@ impl DaemonPane {
         let mut st = self.state.lock().unwrap();
         if st.subscriber_epoch == epoch {
             st.subscriber = None;
+            st.allow_remote_clipboard_write = false;
             self.gate.reset();
         }
         !st.alive && st.subscriber.is_none()
@@ -2475,8 +2574,18 @@ fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>) {
     }
 }
 
+#[cfg(test)]
 fn attach_subscriber(st: &mut PaneState, subscriber: Sender<DaemonMsg>) -> u64 {
+    attach_subscriber_with_permissions(st, subscriber, false)
+}
+
+fn attach_subscriber_with_permissions(
+    st: &mut PaneState,
+    subscriber: Sender<DaemonMsg>,
+    allow_remote_clipboard_write: bool,
+) -> u64 {
     st.subscriber_epoch += 1;
+    st.allow_remote_clipboard_write = allow_remote_clipboard_write;
     replay_state(st, &subscriber);
     st.subscriber = Some(subscriber);
     st.subscriber_epoch
@@ -3167,6 +3276,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             || {},
         )
         .expect("spawn pane");
@@ -4224,6 +4334,7 @@ mod tests {
             ring: ReplayRing::new(ws(80, 24)),
             subscriber: None,
             subscriber_epoch: 0,
+            allow_remote_clipboard_write: false,
             observers: Vec::new(),
             observer_seq: 0,
             shell_spec: None,
@@ -5263,6 +5374,138 @@ mod tests {
             other => panic!("expected Image frame, got {other:?}"),
         }
         assert!(matches!(sub_rx.try_recv(), Ok(DaemonMsg::Output(b)) if b == b"after"));
+    }
+
+    #[test]
+    fn reader_strips_allowed_clipboard_images_and_only_notifies_the_controller() {
+        use base64::Engine as _;
+
+        let state = Arc::new(Mutex::new(test_state(true)));
+        let (controller_tx, controller_rx) = mpsc::channel();
+        let (observer_tx, observer_rx) = mpsc::channel();
+        {
+            let mut st = state.lock().unwrap();
+            attach_subscriber_with_permissions(&mut st, controller_tx, true);
+            observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()));
+        }
+        drain(&controller_rx);
+        drain(&observer_rx);
+
+        let mime = base64::engine::general_purpose::STANDARD.encode("image/png");
+        let data = base64::engine::general_purpose::STANDARD.encode(b"png-data");
+        let stream = format!(
+            "before\x1b]5522;type=write:id=req-1\x1b\\\
+             \x1b]5522;type=wdata:mime={mime};{data}\x1b\\\
+             \x1b]5522;type=wdata\x1b\\after"
+        );
+        DaemonPane::spawn_reader(
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(OutputGate::new()),
+            Box::new(std::io::Cursor::new(stream.into_bytes())),
+            null_writer(),
+            || false,
+            ForegroundProbes {
+                remote: Box::new(|| None),
+                agent: Box::new(|| None),
+                cwd: Box::new(|| None),
+            },
+            Arc::new(DeathReporter::new(|| {})),
+        )
+        .join()
+        .unwrap();
+
+        assert_eq!(state.lock().unwrap().ring.flatten(), b"beforeafter");
+        assert!(matches!(
+            controller_rx.try_recv(),
+            Ok(DaemonMsg::Output(bytes)) if bytes == b"before"
+        ));
+        let frame = match controller_rx.try_recv().unwrap() {
+            DaemonMsg::ClipboardWrite(frame) => frame,
+            other => panic!("expected ClipboardWrite, got {other:?}"),
+        };
+        let write = crate::core::clipboard::ClipboardWrite::decode_frame(frame).unwrap();
+        assert_eq!(write.mime, "image/png");
+        assert_eq!(write.data, b"png-data");
+        assert_eq!(write.id.as_deref(), Some("req-1"));
+        assert!(matches!(
+            controller_rx.try_recv(),
+            Ok(DaemonMsg::Output(bytes)) if bytes == b"after"
+        ));
+
+        assert!(matches!(
+            observer_rx.try_recv(),
+            Ok(DaemonMsg::Output(bytes)) if bytes == b"before"
+        ));
+        assert!(matches!(
+            observer_rx.try_recv(),
+            Ok(DaemonMsg::Output(bytes)) if bytes == b"after"
+        ));
+        assert!(
+            !observer_rx
+                .try_iter()
+                .any(|msg| matches!(msg, DaemonMsg::ClipboardWrite(_))),
+            "an observer must never receive a clipboard side effect"
+        );
+    }
+
+    #[test]
+    fn reader_rejects_clipboard_images_when_permission_is_off() {
+        use base64::Engine as _;
+
+        let state = Arc::new(Mutex::new(test_state(true)));
+        let (controller_tx, controller_rx) = mpsc::channel();
+        attach_subscriber(&mut state.lock().unwrap(), controller_tx);
+        drain(&controller_rx);
+
+        #[derive(Clone)]
+        struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedBuf {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(SharedBuf(sink.clone()))));
+        let mime = base64::engine::general_purpose::STANDARD.encode("image/png");
+        let data = base64::engine::general_purpose::STANDARD.encode(b"png-data");
+        let stream = format!(
+            "\x1b]5522;type=write:id=nope\x1b\\\
+             \x1b]5522;type=wdata:mime={mime};{data}\x1b\\\
+             \x1b]5522;type=wdata\x1b\\"
+        );
+        DaemonPane::spawn_reader(
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(OutputGate::new()),
+            Box::new(std::io::Cursor::new(stream.into_bytes())),
+            writer,
+            || false,
+            ForegroundProbes {
+                remote: Box::new(|| None),
+                agent: Box::new(|| None),
+                cwd: Box::new(|| None),
+            },
+            Arc::new(DeathReporter::new(|| {})),
+        )
+        .join()
+        .unwrap();
+
+        assert!(state.lock().unwrap().ring.flatten().is_empty());
+        assert!(
+            !controller_rx
+                .try_iter()
+                .any(|msg| matches!(msg, DaemonMsg::ClipboardWrite(_)))
+        );
+        assert_eq!(
+            *sink.lock().unwrap(),
+            crate::core::clipboard::response(Some("nope"), "EPERM")
+        );
     }
 
     /// A kitty delete (`a=d`) is lifted out and forwarded as a `DeleteImage`

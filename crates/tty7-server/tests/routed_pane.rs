@@ -111,6 +111,7 @@ fn a_routed_pane_spawns_takes_input_and_survives_a_reconnect() {
         owner: None,
         workspace: None,
         restore: None,
+        allow_remote_clipboard_write: false,
     }
     .encode(&mut sock)
     .unwrap();
@@ -133,6 +134,7 @@ fn a_routed_pane_spawns_takes_input_and_survives_a_reconnect() {
     ClientMsg::Attach {
         pane_id,
         size: win(),
+        allow_remote_clipboard_write: false,
     }
     .encode(&mut back)
     .unwrap();
@@ -203,6 +205,7 @@ fn a_routed_kill_reaches_the_pane_it_names() {
         owner: None,
         workspace: None,
         restore: None,
+        allow_remote_clipboard_write: false,
     }
     .encode(&mut sock)
     .unwrap();

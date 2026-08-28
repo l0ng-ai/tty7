@@ -35,6 +35,10 @@ pub struct SshProfile {
     pub skip_banner: bool,
     #[serde(default = "default_true")]
     pub shell_integration: bool,
+    /// Permit programs on this host to write image data to the local system
+    /// clipboard with OSC 5522. Off by default because terminal output is
+    /// otherwise enough to replace data outside the terminal.
+    pub remote_clipboard_write: bool,
     pub login_scripts: Vec<String>,
     pub x11: bool,
 
@@ -66,6 +70,7 @@ impl Default for SshProfile {
             warn_on_close: None,
             skip_banner: false,
             shell_integration: true,
+            remote_clipboard_write: false,
             login_scripts: Vec::new(),
             x11: false,
             algorithms: Algorithms::default(),
@@ -542,6 +547,7 @@ mod tests {
         assert_eq!(p.port, 22);
         assert_eq!(p.auth, AuthMode::Auto);
         assert!(p.credential_ref.is_none());
+        assert!(!p.remote_clipboard_write);
 
         let p: SshProfile =
             serde_json::from_str(r#"{"name":"old","host":"h","use_system_ssh":true}"#).unwrap();
@@ -567,6 +573,7 @@ mod tests {
         original.socks_proxy = Some(HostPort::new("proxy", 1080));
         original.algorithms.kex = vec!["curve25519-sha256".to_string()];
         original.credential_ref = Some(CredentialRef::password("deploy", "10.0.0.9", 2222));
+        original.remote_clipboard_write = true;
 
         let json = serde_json::to_string(&original).unwrap();
         let back: SshProfile = serde_json::from_str(&json).unwrap();

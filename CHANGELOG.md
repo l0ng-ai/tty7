@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Remote programs can copy images to the local clipboard over SSH.** A saved
+  host can opt into OSC 5522 clipboard writes under **Advanced → Security →
+  Remote clipboard images**. PNG, JPEG, GIF and WebP transfers are decoded out
+  of band, capped at 16 MiB, validated before they reach the system clipboard,
+  and never enter scrollback or replay after reconnecting. The permission is
+  off by default; clipboard reads and SVG writes remain unsupported.
+
 - **Documents dock beside the terminal** (#625). Opening a file, toggling the
   code panel or opening a diff no longer covers the workspace: the document
   takes a column to the right of the terminal — half the space between the

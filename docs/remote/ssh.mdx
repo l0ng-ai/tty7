@@ -87,9 +87,94 @@ Behind **Advanced** on a profile, grouped:
 | **Algorithms** | KEX algorithms, ciphers, MACs, host-key algorithms, compression |
 | **Connection** | Keepalive interval and count, connect timeout, X11 forwarding |
 | **Session** | Shell integration, login scripts, skip banner |
+| **Security** | Host-key verification, remote clipboard image writes |
 
 Everything blank means "the library default", so you only fill in what you
 actually need to override.
+
+## Copying a remote image to this machine
+
+Programs on an SSH host can write PNG, JPEG, GIF, or WebP images to the system
+clipboard on the machine running tty7 with the OSC 5522 clipboard protocol.
+Enable **Advanced → Security → Remote clipboard images** for that saved host
+first. It is off by default because any program that writes terminal output
+would otherwise be able to replace the clipboard.
+
+This Python script can be installed on the remote host as
+`tty7-copy-image`:
+
+```python
+#!/usr/bin/env python3
+import base64
+import os
+import pathlib
+import re
+import select
+import secrets
+import sys
+import termios
+import time
+import tty
+
+path = pathlib.Path(sys.argv[1])
+mime = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}.get(path.suffix.lower())
+if mime is None:
+    raise SystemExit("supported formats: png, jpg, jpeg, gif, webp")
+
+data = path.read_bytes()
+if len(data) > 16 * 1024 * 1024:
+    raise SystemExit("image exceeds tty7's 16 MiB clipboard limit")
+
+osc, st = b"\x1b]5522;", b"\x1b\\"
+encoded_mime = base64.b64encode(mime.encode())
+request_id = secrets.token_hex(8)
+out = sys.stdout.buffer
+fd = sys.stdin.fileno()
+old = termios.tcgetattr(fd)
+status = None
+try:
+    tty.setraw(fd)
+    rid = request_id.encode()
+    out.write(osc + b"type=write:id=" + rid + st)
+    for offset in range(0, len(data), 4096):
+        chunk = base64.b64encode(data[offset:offset + 4096])
+        out.write(
+            osc + b"type=wdata:id=" + rid + b":mime=" + encoded_mime + b";" + chunk + st
+        )
+    out.write(osc + b"type=wdata:id=" + rid + st)
+    out.flush()
+
+    reply = bytearray()
+    pattern = re.compile(
+        rb"\x1b\]5522;type=write:status=([A-Z]+):id=" + rid + rb"\x1b\\"
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([fd], [], [], deadline - time.monotonic())
+        if not ready:
+            break
+        reply.extend(os.read(fd, 4096))
+        match = pattern.search(reply)
+        if match:
+            status = match.group(1).decode()
+            break
+finally:
+    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+if status != "DONE":
+    raise SystemExit(f"clipboard write failed: {status or 'timeout'}")
+```
+
+Run `tty7-copy-image screenshot.png`. A compliant sender may include an OSC
+5522 request id and wait for tty7's `DONE`, `EPERM`, `EINVAL`, or `ENOSYS`
+response. Clipboard control packets are not retained in scrollback and are not
+replayed after reconnecting.
 
 ## Authentication prompts
 

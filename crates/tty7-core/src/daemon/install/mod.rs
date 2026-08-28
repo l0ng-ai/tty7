@@ -1092,7 +1092,7 @@ impl<'a> Installer<'a> {
 /// server started some other way would be invisible to it. It is still the
 /// better of the two answers available there. Linux's `comm` is not an answer
 /// at all — the name truncated to 15 characters, one short of
-/// `tty7-server-c7p5` — which is why the fallback stays a fallback and `/proc`
+/// `tty7-server-c7p6` — which is why the fallback stays a fallback and `/proc`
 /// keeps first refusal.
 ///
 /// Neither arm reaches past the connecting user: `readlink` on another user's

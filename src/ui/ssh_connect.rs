@@ -395,6 +395,7 @@ fn build_spec_inner(
         verify_host_keys: profile.verify_host_keys.unwrap_or(global_verify_host_keys),
         skip_banner: profile.skip_banner,
         shell_integration: profile.shell_integration,
+        remote_clipboard_write: profile.remote_clipboard_write,
         login_script: profile.login_scripts.clone(),
         // What the pane calls itself before the remote shell says anything.
         // A nameless profile — every host imported from `~/.ssh/config` is
@@ -443,6 +444,7 @@ pub(crate) fn profile_from_live_spec(spec: &NativeSshSpec) -> SshProfile {
     profile.connect_timeout_s = spec.connect_timeout_s;
     profile.skip_banner = spec.skip_banner;
     profile.shell_integration = spec.shell_integration;
+    profile.remote_clipboard_write = spec.remote_clipboard_write;
     profile.login_scripts = spec.login_script.clone();
     profile.x11 = spec.x11;
     profile.algorithms = Algorithms {
@@ -692,6 +694,7 @@ mod tests {
         p.agent_forward = true;
         p.x11 = true;
         p.skip_banner = true;
+        p.remote_clipboard_write = true;
         p.socks_proxy = Some(HostPort::new("127.0.0.1", 1080));
         p.keepalive_interval_s = Some(30);
         p.connect_timeout_s = Some(9);
@@ -712,7 +715,7 @@ mod tests {
         assert_eq!(back.user, p.user);
         assert_eq!(back.auth, p.auth);
         assert_eq!(back.identity_files, p.identity_files);
-        assert!(back.agent_forward && back.x11 && back.skip_banner);
+        assert!(back.agent_forward && back.x11 && back.skip_banner && back.remote_clipboard_write);
         assert_eq!(back.socks_proxy, p.socks_proxy);
         assert_eq!(back.keepalive_interval_s, p.keepalive_interval_s);
         assert_eq!(back.connect_timeout_s, p.connect_timeout_s);

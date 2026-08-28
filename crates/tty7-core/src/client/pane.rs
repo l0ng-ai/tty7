@@ -192,6 +192,7 @@ impl PaneSession {
             // put a workspace back the way its user left it. Nothing that
             // scripts panes through this library has a screen to put back.
             restore: None,
+            allow_remote_clipboard_write: false,
         }
         .encode(&mut stream)?;
         let mut session = PaneSession::over(stream, 0)?;
@@ -224,7 +225,12 @@ impl PaneSession {
         size: WinSize,
         reply_wait: Duration,
     ) -> io::Result<PaneSession> {
-        ClientMsg::Attach { pane_id, size }.encode(&mut stream)?;
+        ClientMsg::Attach {
+            pane_id,
+            size,
+            allow_remote_clipboard_write: false,
+        }
+        .encode(&mut stream)?;
         PaneSession::checked(stream, "Attach", pane_id, reply_wait)
     }
 

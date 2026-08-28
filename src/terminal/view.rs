@@ -232,6 +232,8 @@ pub struct TerminalView {
     /// been prepared for this pane. `None` means "not prepared yet", never
     /// "preparation failed" — see [`staging_cache`].
     remote_clipboard_dir: Option<String>,
+    remote_clipboard_write_in_flight: Option<u64>,
+    remote_clipboard_write_generation: u64,
     pub focus_handle: FocusHandle,
     /// See [`displayed_registry`]. Shared with the registry so the app can
     /// flip it during a draw without an entity access.
@@ -765,6 +767,13 @@ fn remote_paste_spec<'a>(
     ssh_spec
 }
 
+fn allows_remote_clipboard_write(
+    workspace: Option<&crate::terminal::PaneWorkspace>,
+    ssh_spec: Option<&crate::daemon::protocol::NativeSshSpec>,
+) -> bool {
+    remote_paste_spec(workspace, ssh_spec).is_some_and(|spec| spec.remote_clipboard_write)
+}
+
 /// Whether a pane stages the clipboard image to a file instead of forwarding
 /// SYN and letting the agent read the clipboard itself.
 ///
@@ -970,6 +979,34 @@ fn transcode_to_png(bytes: &[u8], format: gpui::ImageFormat) -> Option<Vec<u8>> 
         .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
         .ok()?;
     Some(out)
+}
+
+fn validate_remote_clipboard_image(
+    write: tty7_core::core::clipboard::ClipboardWrite,
+) -> Result<(gpui::Image, Option<String>), String> {
+    let (gpui_format, image_format) = match write.mime.as_str() {
+        "image/png" => (gpui::ImageFormat::Png, image::ImageFormat::Png),
+        "image/jpeg" | "image/jpg" => (gpui::ImageFormat::Jpeg, image::ImageFormat::Jpeg),
+        "image/gif" => (gpui::ImageFormat::Gif, image::ImageFormat::Gif),
+        "image/webp" => (gpui::ImageFormat::Webp, image::ImageFormat::WebP),
+        _ => return Err("unsupported image MIME type".into()),
+    };
+    if image::guess_format(&write.data).ok() != Some(image_format) {
+        return Err("image signature does not match its MIME type".into());
+    }
+
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(&write.data), image_format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(256 << 20);
+    reader.limits(limits);
+    reader
+        .decode()
+        .map_err(|e| format!("invalid or oversized image: {e}"))?;
+
+    Ok((gpui::Image::from_bytes(gpui_format, write.data), write.id))
 }
 
 fn fallback_chain(family: &str, configured: &[String]) -> Vec<String> {
@@ -1282,6 +1319,8 @@ impl TerminalView {
             restored: false,
             ssh_spec: None,
             remote_clipboard_dir: None,
+            remote_clipboard_write_in_flight: None,
+            remote_clipboard_write_generation: 0,
             focus_handle,
             displayed,
             font,
@@ -1526,6 +1565,9 @@ impl TerminalView {
         cell_h: u16,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
+        self.remote_clipboard_write_generation =
+            self.remote_clipboard_write_generation.wrapping_add(1);
+        self.remote_clipboard_write_in_flight = None;
         self.terminal
             .adopt_relink(stream, buffered, route, size, cell_w, cell_h)?;
         self.relink_abandoned = false;
@@ -1806,9 +1848,62 @@ impl TerminalView {
         }
     }
 
+    fn poll_remote_clipboard_write(&mut self, cx: &mut Context<Self>) {
+        if self.remote_clipboard_write_in_flight.is_some() {
+            return;
+        }
+        let write = loop {
+            let Some(write) = self.terminal.pop_clipboard_write() else {
+                return;
+            };
+            if allows_remote_clipboard_write(self.workspace.as_ref(), self.ssh_spec.as_deref()) {
+                break write;
+            }
+            self.terminal.finish_clipboard_write();
+            self.terminal.write(tty7_core::core::clipboard::response(
+                write.id.as_deref(),
+                "EPERM",
+            ));
+        };
+
+        let generation = self.remote_clipboard_write_generation;
+        self.remote_clipboard_write_in_flight = Some(generation);
+        let request_id = write.id.clone();
+        cx.spawn(async move |view, cx| {
+            let validated = cx
+                .background_spawn(async move { validate_remote_clipboard_image(write) })
+                .await;
+            view.update(cx, |view, cx| {
+                if view.remote_clipboard_write_in_flight != Some(generation) {
+                    return;
+                }
+                view.remote_clipboard_write_in_flight = None;
+                view.terminal.finish_clipboard_write();
+                match validated {
+                    Ok((image, id)) => {
+                        cx.write_to_clipboard(ClipboardItem::new_image(&image));
+                        view.terminal
+                            .write(tty7_core::core::clipboard::response(id.as_deref(), "DONE"));
+                    }
+                    Err(reason) => {
+                        log::warn!("refusing remote clipboard image: {reason}");
+                        view.terminal.write(tty7_core::core::clipboard::response(
+                            request_id.as_deref(),
+                            "EINVAL",
+                        ));
+                    }
+                }
+                view.poll_remote_clipboard_write(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn handle_event(&mut self, ev: AlacEvent, cx: &mut Context<Self>) {
         self.terminal.poll_exited();
         self.sync_typeahead_owner();
+        self.poll_remote_clipboard_write(cx);
         if self.terminal.has_pending_auth() {
             cx.emit(AuthPromptReady);
         }
@@ -7574,6 +7669,29 @@ mod tests {
     }
 
     #[test]
+    fn remote_clipboard_images_must_match_their_declared_mime() {
+        let pixel = image::RgbaImage::from_pixel(1, 1, image::Rgba([4, 5, 6, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(pixel)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        let valid = tty7_core::core::clipboard::ClipboardWrite {
+            mime: "image/png".into(),
+            data: png.clone(),
+            id: None,
+        };
+        assert!(super::validate_remote_clipboard_image(valid).is_ok());
+
+        let mismatched = tty7_core::core::clipboard::ClipboardWrite {
+            mime: "image/jpeg".into(),
+            data: png,
+            id: None,
+        };
+        assert!(super::validate_remote_clipboard_image(mismatched).is_err());
+    }
+
+    #[test]
     fn a_wsl_pane_gets_the_automount_path_not_the_windows_one() {
         // The staged file really is on the pane's own disk — only its name
         // differs — so this is a rewrite, not an upload.
@@ -9646,6 +9764,109 @@ mod gpui_tests {
                 Err(e) => panic!("client socket failed before Input: {e}"),
             }
         }
+    }
+
+    #[gpui::test]
+    fn allowed_remote_clipboard_image_reaches_the_system_clipboard(cx: &mut TestAppContext) {
+        use gpui::ClipboardEntry;
+
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                let mut spec: crate::daemon::protocol::NativeSshSpec = serde_json::from_str(
+                    r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
+                )
+                .unwrap();
+                spec.remote_clipboard_write = true;
+                view.ssh_spec = Some(Box::new(spec));
+            })
+            .unwrap();
+
+        let pixel = image::RgbaImage::from_pixel(1, 1, image::Rgba([4, 5, 6, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(pixel)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let write = tty7_core::core::clipboard::ClipboardWrite {
+            mime: "image/png".into(),
+            data: png.clone(),
+            id: Some("copy-1".into()),
+        };
+        DaemonMsg::ClipboardWrite(write.encode_frame())
+            .encode(&mut daemon)
+            .unwrap();
+
+        for _ in 0..400 {
+            cx.run_until_parked();
+            let copied = cx.update(|cx| {
+                cx.read_from_clipboard().and_then(|item| {
+                    item.entries().iter().find_map(|entry| match entry {
+                        ClipboardEntry::Image(image) => Some(image.bytes.clone()),
+                        _ => None,
+                    })
+                })
+            });
+            if copied.as_deref() == Some(png.as_slice()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let copied = cx.update(|cx| cx.read_from_clipboard());
+        assert!(copied.is_some_and(|item| {
+            item.entries()
+                .iter()
+                .any(|entry| matches!(entry, ClipboardEntry::Image(image) if image.bytes == png))
+        }));
+        assert_eq!(
+            next_input(&mut daemon),
+            tty7_core::core::clipboard::response(Some("copy-1"), "DONE")
+        );
+    }
+
+    #[gpui::test]
+    fn disabled_remote_clipboard_image_is_rejected_without_overwriting(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                view.ssh_spec = Some(Box::new(
+                    serde_json::from_str(
+                        r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
+                    )
+                    .unwrap(),
+                ));
+            })
+            .unwrap();
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("keep me".into())));
+
+        let write = tty7_core::core::clipboard::ClipboardWrite {
+            mime: "image/png".into(),
+            data: vec![1, 2, 3],
+            id: Some("copy-2".into()),
+        };
+        DaemonMsg::ClipboardWrite(write.encode_frame())
+            .encode(&mut daemon)
+            .unwrap();
+        let mut reply = None;
+        for _ in 0..100 {
+            cx.run_until_parked();
+            reply = next_input_until_timeout(&mut daemon);
+            if reply.is_some() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            reply,
+            Some(tty7_core::core::clipboard::response(
+                Some("copy-2"),
+                "EPERM"
+            ))
+        );
+        assert_eq!(
+            cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()))
+                .as_deref(),
+            Some("keep me")
+        );
     }
 
     #[gpui::test]

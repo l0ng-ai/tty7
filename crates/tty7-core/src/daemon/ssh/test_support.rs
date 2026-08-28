@@ -219,6 +219,7 @@ pub(crate) fn base_spec() -> NativeSshSpec {
         verify_host_keys: true,
         skip_banner: false,
         shell_integration: true,
+        remote_clipboard_write: false,
         login_script: vec![],
         display_name: None,
         profile_id: None,

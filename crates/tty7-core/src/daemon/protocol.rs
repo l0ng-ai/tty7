@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 pub const FEATURE_PANE_OWNER: &str = "pane-owner";
 
@@ -521,6 +521,8 @@ pub struct NativeSshSpec {
     #[serde(default = "default_true")]
     pub shell_integration: bool,
     #[serde(default)]
+    pub remote_clipboard_write: bool,
+    #[serde(default)]
     pub login_script: Vec<String>,
 
     #[serde(default)]
@@ -597,6 +599,7 @@ impl std::fmt::Debug for NativeSshSpec {
             .field("verify_host_keys", &self.verify_host_keys)
             .field("skip_banner", &self.skip_banner)
             .field("shell_integration", &self.shell_integration)
+            .field("remote_clipboard_write", &self.remote_clipboard_write)
             .field("login_script", &self.login_script)
             .field("display_name", &self.display_name)
             .field("profile_id", &self.profile_id)
@@ -730,10 +733,12 @@ pub enum ClientMsg {
         owner: Option<String>,
         workspace: Option<String>,
         restore: Option<RestoreFrom>,
+        allow_remote_clipboard_write: bool,
     },
     Attach {
         pane_id: u64,
         size: WinSize,
+        allow_remote_clipboard_write: bool,
     },
     Observe {
         pane_id: u64,
@@ -831,6 +836,9 @@ pub enum DaemonMsg {
     /// ([`crate::core::kitty_graphics::ImageDelete::encode`]) telling the client
     /// which stored image(s)/placement(s) to drop.
     DeleteImage(Vec<u8>),
+    /// A completed OSC 5522 clipboard write. The daemon strips the control
+    /// sequence from replay; the GUI decides whether it may touch the clipboard.
+    ClipboardWrite(Vec<u8>),
     Cwd(PathBuf),
     Prompt {
         active: bool,
@@ -933,6 +941,7 @@ mod kind {
     /// `DeleteImage` — a kitty graphics `a=d` delete lifted out of the stream
     /// (issue #213). Compact binary selector, like `IMAGE`.
     pub const DELETE_IMAGE: u8 = 61;
+    pub const CLIPBOARD_WRITE: u8 = 62;
 }
 
 pub fn write_frame<W: Write>(w: &mut W, kind: u8, payload: &[u8]) -> io::Result<()> {
@@ -1016,6 +1025,8 @@ struct OwnedSpawn {
     workspace: Option<String>,
     #[serde(default)]
     restore: Option<RestoreFrom>,
+    #[serde(default)]
+    allow_remote_clipboard_write: bool,
 }
 
 /// "This pane replaces one that died with the daemon."
@@ -1049,6 +1060,7 @@ impl ClientMsg {
                 owner: None,
                 workspace: None,
                 restore: None,
+                allow_remote_clipboard_write: false,
             } => write_frame(w, kind::SPAWN, &to_json(&(cwd, size))?),
             ClientMsg::Spawn {
                 cwd,
@@ -1057,6 +1069,7 @@ impl ClientMsg {
                 owner: None,
                 workspace: None,
                 restore: None,
+                allow_remote_clipboard_write: false,
             } => write_frame(w, kind::SPAWN_SHELL, &to_json(&(cwd, size, shell))?),
             ClientMsg::Spawn {
                 cwd,
@@ -1065,6 +1078,7 @@ impl ClientMsg {
                 owner,
                 workspace,
                 restore,
+                allow_remote_clipboard_write,
             } => write_frame(
                 w,
                 kind::SPAWN_OWNED,
@@ -1075,11 +1089,18 @@ impl ClientMsg {
                     owner: owner.clone(),
                     workspace: workspace.clone(),
                     restore: restore.clone(),
+                    allow_remote_clipboard_write: *allow_remote_clipboard_write,
                 })?,
             ),
-            ClientMsg::Attach { pane_id, size } => {
-                write_frame(w, kind::ATTACH, &to_json(&(pane_id, size))?)
-            }
+            ClientMsg::Attach {
+                pane_id,
+                size,
+                allow_remote_clipboard_write,
+            } => write_frame(
+                w,
+                kind::ATTACH,
+                &to_json(&(pane_id, size, allow_remote_clipboard_write))?,
+            ),
             ClientMsg::Observe { pane_id, size } => {
                 write_frame(w, kind::OBSERVE, &to_json(&(pane_id, size))?)
             }
@@ -1152,6 +1173,7 @@ impl ClientMsg {
                     owner: None,
                     workspace: None,
                     restore: None,
+                    allow_remote_clipboard_write: false,
                 }
             }
             kind::SPAWN_SHELL => {
@@ -1163,6 +1185,7 @@ impl ClientMsg {
                     owner: None,
                     workspace: None,
                     restore: None,
+                    allow_remote_clipboard_write: false,
                 }
             }
             kind::SPAWN_OWNED => {
@@ -1173,6 +1196,7 @@ impl ClientMsg {
                     owner,
                     workspace,
                     restore,
+                    allow_remote_clipboard_write,
                 } = from_json(&payload)?;
                 ClientMsg::Spawn {
                     cwd,
@@ -1181,11 +1205,16 @@ impl ClientMsg {
                     owner,
                     workspace,
                     restore,
+                    allow_remote_clipboard_write,
                 }
             }
             kind::ATTACH => {
-                let (pane_id, size) = from_json(&payload)?;
-                ClientMsg::Attach { pane_id, size }
+                let (pane_id, size, allow_remote_clipboard_write) = from_json(&payload)?;
+                ClientMsg::Attach {
+                    pane_id,
+                    size,
+                    allow_remote_clipboard_write,
+                }
             }
             kind::OBSERVE => {
                 let (pane_id, size) = from_json(&payload)?;
@@ -1281,6 +1310,7 @@ impl DaemonMsg {
             DaemonMsg::Output(bytes) => write_frame(w, kind::OUTPUT, bytes),
             DaemonMsg::Image(frame) => write_frame(w, kind::IMAGE, frame),
             DaemonMsg::DeleteImage(sel) => write_frame(w, kind::DELETE_IMAGE, sel),
+            DaemonMsg::ClipboardWrite(frame) => write_frame(w, kind::CLIPBOARD_WRITE, frame),
             DaemonMsg::Cwd(path) => write_frame(w, kind::CWD, &to_json(path)?),
             DaemonMsg::Prompt {
                 active,
@@ -1337,6 +1367,7 @@ impl DaemonMsg {
             kind::OUTPUT => DaemonMsg::Output(payload),
             kind::IMAGE => DaemonMsg::Image(payload),
             kind::DELETE_IMAGE => DaemonMsg::DeleteImage(payload),
+            kind::CLIPBOARD_WRITE => DaemonMsg::ClipboardWrite(payload),
             kind::CWD => DaemonMsg::Cwd(from_json(&payload)?),
             kind::PROMPT => {
                 let (active, at_prompt, last_exit) = from_json(&payload)?;
@@ -1419,6 +1450,7 @@ mod tests {
                 owner: None,
                 workspace: None,
                 restore: None,
+                allow_remote_clipboard_write: false,
             },
             ClientMsg::Resize(SIZE),
             ClientMsg::Input(vec![b'l', b's', b'\r']),
@@ -1428,6 +1460,7 @@ mod tests {
             DaemonMsg::Spawned { pane_id: 9 },
             DaemonMsg::Snapshot(vec![0x1b, b'[', b'2', b'J']),
             DaemonMsg::Output(b"hello\r\n".to_vec()),
+            DaemonMsg::ClipboardWrite(vec![1, 2, 3, 4]),
             DaemonMsg::Prompt {
                 active: true,
                 at_prompt: true,
@@ -1474,6 +1507,7 @@ mod tests {
                 owner: None,
                 workspace: None,
                 restore: None,
+                allow_remote_clipboard_write: false,
             },
             ClientMsg::Spawn {
                 cwd: None,
@@ -1482,6 +1516,7 @@ mod tests {
                 owner: None,
                 workspace: None,
                 restore: None,
+                allow_remote_clipboard_write: false,
             },
             ClientMsg::Spawn {
                 cwd: Some(PathBuf::from("/tmp/x")),
@@ -1494,6 +1529,7 @@ mod tests {
                 owner: None,
                 workspace: None,
                 restore: None,
+                allow_remote_clipboard_write: false,
             },
             ClientMsg::Spawn {
                 cwd: Some(PathBuf::from("/tmp/x")),
@@ -1502,6 +1538,7 @@ mod tests {
                 owner: Some("bda10e44-02de-44a0-8412-ec1cda2b5f5b".into()),
                 workspace: None,
                 restore: None,
+                allow_remote_clipboard_write: false,
             },
             ClientMsg::Spawn {
                 cwd: Some(PathBuf::from("/tmp/x")),
@@ -1510,6 +1547,7 @@ mod tests {
                 owner: None,
                 workspace: Some("ws-main".into()),
                 restore: None,
+                allow_remote_clipboard_write: true,
             },
             ClientMsg::Observe {
                 pane_id: 42,
@@ -1518,6 +1556,7 @@ mod tests {
             ClientMsg::Attach {
                 pane_id: 42,
                 size: SIZE,
+                allow_remote_clipboard_write: true,
             },
             ClientMsg::Input(vec![0x1b, b'[', b'A', 0, 255]),
             ClientMsg::SendInput {
@@ -1831,6 +1870,7 @@ mod tests {
             owner: None,
             workspace: None,
             restore: None,
+            allow_remote_clipboard_write: false,
         };
         let mut buf = Vec::new();
         msg.encode(&mut buf).unwrap();
@@ -1851,6 +1891,7 @@ mod tests {
                 owner: None,
                 workspace: None,
                 restore: None,
+                allow_remote_clipboard_write: false,
             }
         );
     }
@@ -1869,6 +1910,7 @@ mod tests {
             owner: None,
             workspace: None,
             restore: None,
+            allow_remote_clipboard_write: false,
         };
         let mut buf = Vec::new();
         msg.encode(&mut buf).unwrap();
@@ -1884,6 +1926,7 @@ mod tests {
                 owner: None,
                 workspace: None,
                 restore: None,
+                allow_remote_clipboard_write: false,
             }
         );
     }
@@ -1901,6 +1944,7 @@ mod tests {
             owner: Some("bda10e44-02de-44a0-8412-ec1cda2b5f5b".into()),
             workspace: Some("ws-7".into()),
             restore: None,
+            allow_remote_clipboard_write: true,
         };
         let mut buf = Vec::new();
         msg.encode(&mut buf).unwrap();
@@ -1931,6 +1975,7 @@ mod tests {
                 owner: None,
                 workspace: None,
                 restore: None,
+                allow_remote_clipboard_write: false,
             }
         );
     }
@@ -1944,6 +1989,7 @@ mod tests {
             owner: None,
             workspace: Some("ws-main".into()),
             restore: None,
+            allow_remote_clipboard_write: true,
         };
         let mut buf = Vec::new();
         msg.encode(&mut buf).unwrap();
@@ -2137,6 +2183,7 @@ mod tests {
                 verify_host_keys: true,
                 skip_banner: false,
                 shell_integration: true,
+                remote_clipboard_write: false,
                 login_script: vec![],
                 display_name: None,
                 profile_id: None,
@@ -2161,6 +2208,7 @@ mod tests {
             verify_host_keys: true,
             skip_banner: false,
             shell_integration: true,
+            remote_clipboard_write: true,
             login_script: vec!["tmux attach".into()],
             display_name: Some("prod-web".into()),
             profile_id: Some("uuid-1".into()),
@@ -2458,7 +2506,7 @@ mod tests {
     #[test]
     fn the_local_daemon_does_not_claim_the_control_dialect() {
         let v = DaemonVersion::current();
-        assert_eq!(v.protocol, 5);
+        assert_eq!(v.protocol, 6);
         assert!(
             !v.has_feature(crate::daemon::control::feature::CONTROL),
             "the session daemon must not advertise a dialect it cannot serve"

@@ -299,6 +299,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsGroupConnection => "Connection",
         L10nKey::SettingsGroupSession => "Session",
         L10nKey::SettingsGroupSecurity => "Security",
+        L10nKey::SettingsRemoteClipboardWrite => "Remote clipboard images",
+        L10nKey::SettingsRemoteClipboardWriteDesc => {
+            "Allow programs on this host to replace the local clipboard with images over OSC 5522."
+        }
         L10nKey::SettingsIdentityFiles => "Identity files",
         L10nKey::SettingsIdentityFilesDesc => "Private-key paths, one per line (%h/%r expand).",
         L10nKey::SettingsAgentForwarding => "Agent forwarding",

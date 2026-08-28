@@ -91,6 +91,8 @@ struct ReaderSignals {
     /// anchored to the grid for the paint path to blit. Shared with the reader,
     /// which places/deletes them as `DaemonMsg::Image`/`DeleteImage` frames land.
     images: crate::terminal::images::ImageStore,
+    clipboard_writes: Arc<Mutex<VecDeque<tty7_core::core::clipboard::ClipboardWrite>>>,
+    clipboard_write_busy: Arc<AtomicBool>,
     /// Where each agent turn started, anchored to the grid the same way — see
     /// [`crate::terminal::agent_marks`]. The daemon reads the same events for
     /// the status dot, but only the client holds the rows they point into.
@@ -184,6 +186,16 @@ impl PaneRoute {
 
     pub fn is_local(&self) -> bool {
         matches!(self, PaneRoute::Local)
+    }
+
+    fn allow_remote_clipboard_write(&self) -> bool {
+        match self {
+            PaneRoute::Remote { header, .. } => match &header.target {
+                crate::daemon::router::RouteTarget::Ssh(spec) => spec.remote_clipboard_write,
+                _ => false,
+            },
+            PaneRoute::Local | PaneRoute::Unroutable(_) => false,
+        }
     }
 }
 
@@ -512,6 +524,8 @@ pub struct RemoteTerminal {
     /// frames, read by the paint path — only the client holds the grid the
     /// anchors are relative to, so the store lives here rather than in the daemon.
     images: crate::terminal::images::ImageStore,
+    clipboard_writes: Arc<Mutex<VecDeque<tty7_core::core::clipboard::ClipboardWrite>>>,
+    clipboard_write_busy: Arc<AtomicBool>,
     /// The conversation's shape, for the outline in the Info panel: one entry
     /// per agent turn, anchored to the scrollback row it began on.
     turns: AgentTurns,
@@ -532,7 +546,7 @@ pub struct RemoteTerminal {
 /// CLI running in it can use workspace-scoped verbs with no argument.
 ///
 /// This is the same id as `owner`, but decided separately: `owner` is also
-/// gated on FEATURE_PANE_OWNER, while the workspace field rides the c4p5 spawn
+/// gated on FEATURE_PANE_OWNER, while the workspace field rides the owned spawn
 /// kind and needs no feature probe. Local routes only — a remote server keeps
 /// its own machine tree, and this id names a workspace in ours.
 fn spawn_workspace(owner: Option<&str>, route: &PaneRoute) -> Option<String> {
@@ -663,6 +677,7 @@ impl RemoteTerminal {
             owner,
             workspace,
             restore,
+            allow_remote_clipboard_write: route.allow_remote_clipboard_write(),
         }
         .encode(&mut stream)?;
         let pane_id = match spawn_reply(&mut stream, attach_reply_wait(route), "Spawn")? {
@@ -711,7 +726,12 @@ impl RemoteTerminal {
         let mut stream = connect_routed(route)?;
         let win = win_size(size, cell_w, cell_h);
 
-        ClientMsg::Attach { pane_id, size: win }.encode(&mut stream)?;
+        ClientMsg::Attach {
+            pane_id,
+            size: win,
+            allow_remote_clipboard_write: route.allow_remote_clipboard_write(),
+        }
+        .encode(&mut stream)?;
         let buffered = match attach_reply_prefix(&mut stream, pane_id, attach_reply_wait(route)) {
             Ok(buffered) => buffered,
             Err(e) if route.is_local() && attach_unanswered(&e) => {
@@ -764,6 +784,7 @@ impl RemoteTerminal {
         ClientMsg::Attach {
             pane_id,
             size: win_size(size, cell_w, cell_h),
+            allow_remote_clipboard_write: route.allow_remote_clipboard_write(),
         }
         .encode(&mut stream)?;
         let buffered = attach_reply_prefix(&mut stream, pane_id, attach_reply_wait(route))?;
@@ -781,6 +802,10 @@ impl RemoteTerminal {
     ) -> anyhow::Result<()> {
         self.stop_reader();
         while self.events.try_recv().is_ok() {}
+        if let Ok(mut pending) = self.clipboard_writes.lock() {
+            pending.clear();
+        }
+        self.clipboard_write_busy.store(false, Ordering::Release);
 
         let read_half = stream.try_clone()?;
 
@@ -821,6 +846,8 @@ impl RemoteTerminal {
                 auth: self.auth_prompts.clone(),
                 phase: self.ssh_phase.clone(),
                 images: self.images.clone(),
+                clipboard_writes: self.clipboard_writes.clone(),
+                clipboard_write_busy: self.clipboard_write_busy.clone(),
                 turns: self.turns.clone(),
             },
         );
@@ -873,6 +900,8 @@ impl RemoteTerminal {
             Arc::new(Mutex::new(VecDeque::new()));
         let ssh_phase: Arc<Mutex<Option<SshPhase>>> = Arc::new(Mutex::new(None));
         let images = crate::terminal::images::ImageStore::new();
+        let clipboard_writes = Arc::new(Mutex::new(VecDeque::new()));
+        let clipboard_write_busy = Arc::new(AtomicBool::new(false));
         let turns = AgentTurns::new();
 
         let reader_quit = Arc::new(AtomicBool::new(false));
@@ -896,6 +925,8 @@ impl RemoteTerminal {
                 auth: auth_prompts.clone(),
                 phase: ssh_phase.clone(),
                 images: images.clone(),
+                clipboard_writes: clipboard_writes.clone(),
+                clipboard_write_busy: clipboard_write_busy.clone(),
                 turns: turns.clone(),
             },
         );
@@ -930,6 +961,8 @@ impl RemoteTerminal {
             agent,
             agent_session,
             images,
+            clipboard_writes,
+            clipboard_write_busy,
             turns,
             route: PaneRoute::Local,
             proxy,
@@ -1013,6 +1046,8 @@ impl RemoteTerminal {
                     auth,
                     phase,
                     images,
+                    clipboard_writes,
+                    clipboard_write_busy,
                     turns,
                 } = signals;
                 crate::core::threads::promote_to_user_interactive();
@@ -1329,6 +1364,40 @@ impl RemoteTerminal {
                                     proxy.send_event(AlacEvent::Wakeup);
                                 }
                             }
+                            DaemonMsg::ClipboardWrite(frame) => {
+                                flush_batch!();
+                                if let Some(write) =
+                                    tty7_core::core::clipboard::ClipboardWrite::decode_frame(frame)
+                                {
+                                    if clipboard_write_busy
+                                        .compare_exchange(
+                                            false,
+                                            true,
+                                            Ordering::AcqRel,
+                                            Ordering::Acquire,
+                                        )
+                                        .is_ok()
+                                    {
+                                        if let Ok(mut pending) = clipboard_writes.lock() {
+                                            pending.push_back(write);
+                                            proxy.send_event(AlacEvent::Wakeup);
+                                        } else {
+                                            clipboard_write_busy.store(false, Ordering::Release);
+                                        }
+                                    } else {
+                                        let reply = tty7_core::core::clipboard::response(
+                                            write.id.as_deref(),
+                                            "EBUSY",
+                                        );
+                                        proxy.send_event(AlacEvent::PtyWrite(
+                                            String::from_utf8(reply)
+                                                .expect("OSC 5522 replies are ASCII"),
+                                        ));
+                                    }
+                                } else {
+                                    clipboard_write_busy.store(false, Ordering::Release);
+                                }
+                            }
                             DaemonMsg::Cwd(path) => {
                                 flush_batch!();
                                 if let Ok(mut guard) = cwd.lock() {
@@ -1603,6 +1672,17 @@ impl RemoteTerminal {
     /// and deletes images as out-of-band frames arrive from the daemon.
     pub fn images(&self) -> crate::terminal::images::ImageStore {
         self.images.clone()
+    }
+
+    pub fn pop_clipboard_write(&self) -> Option<tty7_core::core::clipboard::ClipboardWrite> {
+        self.clipboard_writes
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.pop_front())
+    }
+
+    pub fn finish_clipboard_write(&self) {
+        self.clipboard_write_busy.store(false, Ordering::Release);
     }
 
     pub fn agent_session(&self) -> Option<AgentSessionState> {

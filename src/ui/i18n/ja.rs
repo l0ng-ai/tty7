@@ -304,6 +304,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsGroupConnection => "接続",
         L10nKey::SettingsGroupSession => "セッション",
         L10nKey::SettingsGroupSecurity => "セキュリティ",
+        L10nKey::SettingsRemoteClipboardWrite => "リモートのクリップボード画像",
+        L10nKey::SettingsRemoteClipboardWriteDesc => {
+            "このホスト上のプログラムが OSC 5522 でローカルクリップボードを画像に置き換えることを許可します"
+        }
         L10nKey::SettingsIdentityFiles => "秘密鍵ファイル",
         L10nKey::SettingsIdentityFilesDesc => "秘密鍵のパス（1 行に 1 つ。%h/%r は展開されます）",
         L10nKey::SettingsAgentForwarding => "エージェント転送",

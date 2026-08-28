@@ -701,6 +701,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             owner,
             workspace,
             restore,
+            allow_remote_clipboard_write,
         } => {
             let id = registry.alloc_id();
             if let Some(dead) = restore.as_ref().map(|r| r.pane_id) {
@@ -721,28 +722,45 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                         .ok();
                 }
             };
-            let pane =
-                match DaemonPane::spawn(id, cwd, size, shell, owner, workspace, restore, on_dead) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let mut w = write_stream;
-                        // The daemon's own error is already a sentence; a second
-                        // "spawn failed:" in front of it only pads the one the
-                        // window ends up showing.
-                        let _ = DaemonMsg::Error(format!("{e}")).encode(&mut w);
-                        return Err(e);
-                    }
-                };
+            let pane = match DaemonPane::spawn(
+                id,
+                cwd,
+                size,
+                shell,
+                owner,
+                workspace,
+                restore,
+                allow_remote_clipboard_write,
+                on_dead,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    let mut w = write_stream;
+                    // The daemon's own error is already a sentence; a second
+                    // "spawn failed:" in front of it only pads the one the
+                    // window ends up showing.
+                    let _ = DaemonMsg::Error(format!("{e}")).encode(&mut w);
+                    return Err(e);
+                }
+            };
             registry.insert(pane.clone());
 
             {
                 let mut w = &write_stream;
                 DaemonMsg::Spawned { pane_id: id }.encode(&mut w)?;
             }
-            stream_pane(pane, id, read_stream, write_stream, registry)
+            stream_pane(
+                pane,
+                id,
+                read_stream,
+                write_stream,
+                registry,
+                allow_remote_clipboard_write,
+            )
         }
 
         ClientMsg::SpawnNativeSsh { cwd: _, size, spec } => {
+            let allow_remote_clipboard_write = spec.remote_clipboard_write;
             let id = registry.alloc_id();
             let on_dead = {
                 let registry = registry.clone();
@@ -769,13 +787,29 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                 let mut w = &write_stream;
                 DaemonMsg::Spawned { pane_id: id }.encode(&mut w)?;
             }
-            stream_pane(pane, id, read_stream, write_stream, registry)
+            stream_pane(
+                pane,
+                id,
+                read_stream,
+                write_stream,
+                registry,
+                allow_remote_clipboard_write,
+            )
         }
 
-        ClientMsg::Attach { pane_id, size: _ } => match registry.get(pane_id) {
-            Some(pane) => {
-                stream_pane_with_attach(pane, pane_id, read_stream, write_stream, registry)
-            }
+        ClientMsg::Attach {
+            pane_id,
+            size: _,
+            allow_remote_clipboard_write,
+        } => match registry.get(pane_id) {
+            Some(pane) => stream_pane_with_attach(
+                pane,
+                pane_id,
+                read_stream,
+                write_stream,
+                registry,
+                allow_remote_clipboard_write,
+            ),
             None => {
                 let mut w = write_stream;
                 DaemonMsg::Error(format!("no such pane {pane_id}")).encode(&mut w)?;
@@ -1041,9 +1075,10 @@ fn stream_pane_with_attach(
     read_stream: Stream,
     write_stream: Stream,
     registry: Arc<Registry>,
+    allow_remote_clipboard_write: bool,
 ) -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel::<DaemonMsg>();
-    let epoch = pane.attach(tx);
+    let epoch = pane.attach_with_permissions(tx, allow_remote_clipboard_write);
     run_stream(pane, id, epoch, rx, read_stream, write_stream, registry)
 }
 
@@ -1053,9 +1088,10 @@ fn stream_pane(
     read_stream: Stream,
     write_stream: Stream,
     registry: Arc<Registry>,
+    allow_remote_clipboard_write: bool,
 ) -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel::<DaemonMsg>();
-    let epoch = pane.attach(tx);
+    let epoch = pane.attach_with_permissions(tx, allow_remote_clipboard_write);
     run_stream(pane, id, epoch, rx, read_stream, write_stream, registry)
 }
 
@@ -1219,6 +1255,7 @@ fn spawn_writer(
                     // credits, so they must debit it too or the reader stays
                     // throttled against bytes that already left the queue.
                     DaemonMsg::Image(b) => b.len(),
+                    DaemonMsg::ClipboardWrite(b) => b.len(),
                     _ => 0,
                 };
                 let write_ok = msg.encode(&mut write_stream).is_ok();
@@ -1387,6 +1424,7 @@ mod tests {
             ClientMsg::Attach {
                 pane_id: 999,
                 size: SIZE,
+                allow_remote_clipboard_write: false,
             }
             .encode(&mut client)
             .unwrap();

@@ -266,6 +266,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsGroupConnection => "连接",
         L10nKey::SettingsGroupSession => "会话",
         L10nKey::SettingsGroupSecurity => "安全",
+        L10nKey::SettingsRemoteClipboardWrite => "远端剪贴板图片",
+        L10nKey::SettingsRemoteClipboardWriteDesc => {
+            "允许此主机上的程序通过 OSC 5522 用图片覆盖本机剪贴板。"
+        }
         L10nKey::SettingsIdentityFiles => "身份文件",
         L10nKey::SettingsIdentityFilesDesc => "私钥路径，每行一个（支持 %h/%r 展开）。",
         L10nKey::SettingsAgentForwarding => "ssh-agent 转发",

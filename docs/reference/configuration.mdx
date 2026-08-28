@@ -165,6 +165,12 @@ angle brackets, and a tab:
 | `verify_host_keys` | bool | `true` | |
 | `ssh_warn_on_close` | bool | `false` | Confirm before closing a live connection. |
 
+Each object in `ssh_profiles` can also set:
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `remote_clipboard_write` | bool | `false` | Allow programs on that SSH host to write PNG, JPEG, GIF, or WebP images to this machine's clipboard with OSC 5522. |
+
 ## Updates and network
 
 | Key | Type | Default | |
