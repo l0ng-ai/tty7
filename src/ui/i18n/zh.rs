@@ -88,6 +88,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUiFontSizeDesc => {
             "终端以外所有地方的文字大小——标签页、面板、设置。非 Retina 显示器上可以调大。"
         }
+        L10nKey::SettingsUiFontFamily => "界面字体族",
+        L10nKey::SettingsUiFontFamilyDesc => {
+            "用于标签页、侧栏、弹窗和设置的字体；默认使用系统 UI 字体。"
+        }
         L10nKey::SettingsLineHeight => "行高",
         L10nKey::SettingsLineHeightDesc => "行间距为字号的倍数。",
         L10nKey::SettingsFontFamily => "字体族",
@@ -746,6 +750,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchKeybindingsTitle => "按键绑定",
         L10nKey::SettingsSearchLineHeightKeywords => {
             "行高 行间距 行距 typography line height spacing leading"
+        }
+        L10nKey::SettingsSearchUiFontFamilyKeywords => {
+            "界面 字体族 UI 字体 标签页 侧栏 interface font family ui typeface"
         }
         L10nKey::SettingsSearchNewTabPositionKeywords => {
             "新标签页位置 标签页 顺序 末尾 当前之后 new tab position tabs order end after current"

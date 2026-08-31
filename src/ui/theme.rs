@@ -580,6 +580,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     let active = theme.active_palette(config.theme_legible_palette);
 
     let backdrop = config.window_backdrop;
+    let ui_font_family = config.ui_font_family.clone();
 
     if let Some(window) = window.as_deref_mut() {
         let appearance = resolved_background_appearance(backdrop, blur);
@@ -603,6 +604,11 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     cx.set_global(presets::ActiveLanes(theme.lanes()));
 
     let t = Theme::global_mut(cx);
+    if let Some(family) = &ui_font_family {
+        if !family.trim().is_empty() {
+            t.font_family = family.clone().into();
+        }
+    }
     let mut base: Hsla = rgb(m.background).into();
     if let Some(o) = opacity {
         base.a = o;
