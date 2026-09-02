@@ -1644,6 +1644,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherStatusReconnecting => "reconnecting…",
         L10nKey::SwitcherStatusTakenOver => "taken over",
         L10nKey::SettingsFontDefault => "Default (match primary)",
+        L10nKey::SettingsUiFontDefault => "Default (system UI font)",
         L10nKey::ForwardDescriptionPlaceholder => "what it's for",
         L10nKey::SettingsShellDefaultLoginShell => "your login shell",
         L10nKey::SettingsShellDetected => "Shells tty7 found",

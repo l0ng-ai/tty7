@@ -5270,11 +5270,11 @@ impl Tty7App {
             font_names.push(family.clone());
             font_names.sort_unstable();
         }
-        if let Some(ref ui_font) = ui_font_family {
-            if !font_names.contains(ui_font) {
-                font_names.push(ui_font.clone());
-                font_names.sort_unstable();
-            }
+        if let Some(ui_font) = &ui_font_family
+            && !font_names.contains(ui_font)
+        {
+            font_names.push(ui_font.clone());
+            font_names.sort_unstable();
         }
         let selected_font_index = font_names
             .iter()
@@ -5290,11 +5290,12 @@ impl Tty7App {
             .searchable(true)
         });
         let build_alt_font_select = |value: &Option<String>,
+                                     default_label: &str,
                                      names: &[String],
                                      window: &mut Window,
                                      cx: &mut Context<Self>| {
             let mut rows = Vec::with_capacity(names.len() + 1);
-            rows.push(crate::ui::settings::font_default_label().to_string());
+            rows.push(default_label.to_string());
             rows.extend(names.iter().cloned());
             let selected = value
                 .as_ref()
@@ -5310,9 +5311,18 @@ impl Tty7App {
                 .searchable(true)
             })
         };
-        let font_bold_select = build_alt_font_select(&font_bold, &font_names, window, cx);
-        let font_italic_select = build_alt_font_select(&font_italic, &font_names, window, cx);
-        let ui_font_select = build_alt_font_select(&ui_font_family, &font_names, window, cx);
+        let alt_default = crate::ui::settings::font_default_label();
+        let font_bold_select =
+            build_alt_font_select(&font_bold, alt_default, &font_names, window, cx);
+        let font_italic_select =
+            build_alt_font_select(&font_italic, alt_default, &font_names, window, cx);
+        let ui_font_select = build_alt_font_select(
+            &ui_font_family,
+            crate::ui::settings::ui_font_default_label(),
+            &font_names,
+            window,
+            cx,
+        );
         subs.push(cx.subscribe_in(
             &font_select,
             window,
@@ -5851,7 +5861,7 @@ impl Tty7App {
     }
 
     fn commit_ui_font_family(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let family = (name != crate::ui::settings::font_default_label()).then_some(name);
+        let family = (name != crate::ui::settings::ui_font_default_label()).then_some(name);
         let cfg = cx.global_mut::<Config>();
         if cfg.ui_font_family == family {
             return;
@@ -9702,6 +9712,49 @@ mod keybinding_gpui_tests {
             app.active_settings().map(|s| s.recording.is_some())
         });
         assert_eq!(recording, Some(false));
+    }
+}
+
+#[cfg(test)]
+mod ui_font_gpui_tests {
+    use super::test_window::harness;
+    use crate::core::config::Config;
+    use crate::ui::settings::ui_font_default_label;
+    use gpui::TestAppContext;
+    use gpui_component::Theme;
+
+    /// Picking a face and picking Default back are the same rule read in both
+    /// directions. Only one of them used to be spelled: the chrome took the
+    /// pick, but clearing it wrote `None` to `config.json` and left the window
+    /// in the old face until the next launch — a saved setting that looked
+    /// like it had applied instantly and had not.
+    #[gpui::test]
+    fn clearing_the_interface_font_puts_the_stock_face_back(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        let stock = vcx.update(|_, cx| Theme::global(cx).font_family.clone());
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.commit_ui_font_family("Courier".to_string(), window, cx);
+        });
+        vcx.update(|_, cx| {
+            assert_eq!(
+                cx.global::<Config>().ui_font_family.as_deref(),
+                Some("Courier")
+            );
+            assert_eq!(Theme::global(cx).font_family.as_ref(), "Courier");
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.commit_ui_font_family(ui_font_default_label().to_string(), window, cx);
+        });
+        vcx.update(|_, cx| {
+            assert_eq!(cx.global::<Config>().ui_font_family, None);
+            assert_eq!(
+                Theme::global(cx).font_family,
+                stock,
+                "Default has to hand the interface back to the system face"
+            );
+        });
     }
 }
 

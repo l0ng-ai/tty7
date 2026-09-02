@@ -541,6 +541,19 @@ fn take_appearance_change(
     applied.0.insert(id, appearance) != Some(appearance)
 }
 
+/// The interface face gpui-component started out with, read once before
+/// anything overrode it.
+///
+/// [`Theme::change`] only rewrites `font_family` when the theme config names
+/// one, and none of ours does — so a face written into the theme below stays
+/// written for the life of the process. Keeping the stock value here is what
+/// lets **Interface font family → Default** put the system face back on the
+/// spot; without it the setting would save `None`, leave the window looking
+/// exactly as it did, and only come true at the next launch.
+struct StockUiFont(gpui::SharedString);
+
+impl gpui::Global for StockUiFont {}
+
 pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     let follow = cx.global::<Config>().theme_follow_system;
     if follow {
@@ -603,12 +616,20 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // and each entry costs a contrast bisection on three surfaces.
     cx.set_global(presets::ActiveLanes(theme.lanes()));
 
-    let t = Theme::global_mut(cx);
-    if let Some(family) = &ui_font_family {
-        if !family.trim().is_empty() {
-            t.font_family = family.clone().into();
-        }
+    if !cx.has_global::<StockUiFont>() {
+        let stock = Theme::global(cx).font_family.clone();
+        cx.set_global(StockUiFont(stock));
     }
+    let stock = cx.global::<StockUiFont>().0.clone();
+
+    let t = Theme::global_mut(cx);
+    // Assigned in both directions, never only when set: this is the one place
+    // that decides the chrome's face, so it has to say "back to stock" as
+    // plainly as it says "use Inter".
+    t.font_family = match ui_font_family {
+        Some(family) if !family.trim().is_empty() => family.into(),
+        _ => stock,
+    };
     let mut base: Hsla = rgb(m.background).into();
     if let Some(o) = opacity {
         base.a = o;

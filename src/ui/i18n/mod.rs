@@ -1327,6 +1327,7 @@ l10n_keys! {
     SwitcherStatusReconnecting,
     SwitcherStatusTakenOver,
     SettingsFontDefault,
+    SettingsUiFontDefault,
     ForwardDescriptionPlaceholder,
     SettingsShellDefaultLoginShell,
     SettingsShellDetected,

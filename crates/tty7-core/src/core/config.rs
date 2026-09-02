@@ -129,7 +129,13 @@ pub struct Config {
     /// the chrome was drawn at, so an existing config renders unchanged.
     #[serde(default = "default_ui_font_size")]
     pub ui_font_size: f32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The face the chrome is drawn in; `None` is the system UI font.
+    ///
+    /// Only the chrome — the terminal grid keeps `font_family`. The
+    /// struct-level `serde(default)` fills it in for a config written before
+    /// the setting existed, and like every other optional key it is written
+    /// out as `null` rather than dropped, so the file still lists what can be
+    /// set by hand.
     pub ui_font_family: Option<String>,
     pub theme: String,
     pub theme_preset: String,

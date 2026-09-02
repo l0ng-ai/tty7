@@ -1063,6 +1063,15 @@ pub(crate) fn font_default_label() -> &'static str {
     t(L10nKey::SettingsFontDefault)
 }
 
+/// The same first row for the interface face, spelled for what it actually
+/// does. The bold and italic dropdowns fall back to the *terminal's* primary
+/// family, which is what their label promises; the interface falls back to the
+/// system UI font instead, so it cannot borrow that label without telling the
+/// reader the chrome will come out in Hack.
+pub(crate) fn ui_font_default_label() -> &'static str {
+    t(L10nKey::SettingsUiFontDefault)
+}
+
 #[cfg(target_os = "macos")]
 const LINK_MODIFIER_LABEL: &str = "⌘";
 #[cfg(not(target_os = "macos"))]

@@ -1558,6 +1558,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherStatusReconnecting => "正在重连…",
         L10nKey::SwitcherStatusTakenOver => "已被接管",
         L10nKey::SettingsFontDefault => "默认（匹配主字体）",
+        L10nKey::SettingsUiFontDefault => "默认（系统界面字体）",
         L10nKey::ForwardDescriptionPlaceholder => "用途说明",
         L10nKey::SettingsShellDefaultLoginShell => "你的登录 shell",
         L10nKey::SettingsShellDetected => "tty7 检测到的 shell",

@@ -1715,6 +1715,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherStatusReconnecting => "再接続中…",
         L10nKey::SwitcherStatusTakenOver => "他のクライアントが使用中",
         L10nKey::SettingsFontDefault => "デフォルト（メインに合わせる）",
+        L10nKey::SettingsUiFontDefault => "デフォルト（システム UI フォント）",
         L10nKey::ForwardDescriptionPlaceholder => "用途",
         L10nKey::SettingsShellDefaultLoginShell => "あなたのログインシェル",
         L10nKey::SettingsShellDetected => "tty7 が見つけたシェル",
