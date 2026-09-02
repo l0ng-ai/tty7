@@ -678,6 +678,14 @@ struct PaneState {
     subscriber: Option<Sender<DaemonMsg>>,
     subscriber_epoch: u64,
     allow_remote_clipboard_write: bool,
+    /// A native ssh pane's answer belongs to the profile that dialled the
+    /// host, and the client attaching to it never sees that spec: a window
+    /// reopening onto a pane it outlived attaches by id and sends `false`
+    /// because it has nothing better to send. Pinning the spec's answer keeps
+    /// the permission in one place. `None` means "no spec of our own", which
+    /// is every pane on a remote `tty7-server` — there the controlling client
+    /// is the only one holding the profile's answer, so its word is taken.
+    clipboard_write_from_spec: Option<bool>,
     observers: Vec<Observer>,
     observer_seq: u64,
     cwd: Option<PathBuf>,
@@ -1447,6 +1455,7 @@ impl DaemonPane {
                 subscriber: None,
                 subscriber_epoch: 0,
                 allow_remote_clipboard_write,
+                clipboard_write_from_spec: None,
                 observers: Vec::new(),
                 observer_seq: 0,
                 cwd: spawn.initial_cwd,
@@ -1662,6 +1671,7 @@ impl DaemonPane {
                 subscriber: None,
                 subscriber_epoch: 0,
                 allow_remote_clipboard_write: false,
+                clipboard_write_from_spec: None,
                 observers: Vec::new(),
                 observer_seq: 0,
                 cwd: carried.cwd,
@@ -1716,6 +1726,7 @@ impl DaemonPane {
             subscriber: None,
             subscriber_epoch: 0,
             allow_remote_clipboard_write,
+            clipboard_write_from_spec: Some(allow_remote_clipboard_write),
             observers: Vec::new(),
             observer_seq: 0,
             // A native ssh pane is not running a shell of this machine's; what
@@ -2081,7 +2092,7 @@ impl DaemonPane {
         let mut st = self.state.lock().unwrap();
         if st.subscriber_epoch == epoch {
             st.subscriber = None;
-            st.allow_remote_clipboard_write = false;
+            set_clipboard_permission(&mut st, false);
             self.gate.reset();
         }
         !st.alive && st.subscriber.is_none()
@@ -2579,13 +2590,20 @@ fn attach_subscriber(st: &mut PaneState, subscriber: Sender<DaemonMsg>) -> u64 {
     attach_subscriber_with_permissions(st, subscriber, false)
 }
 
+/// The one place a pane's clipboard permission is decided. A pane that carries
+/// its own spec keeps that spec's answer whatever the controller claims; every
+/// other pane is exactly as permitted as the client controlling it says.
+fn set_clipboard_permission(st: &mut PaneState, controller_says: bool) {
+    st.allow_remote_clipboard_write = st.clipboard_write_from_spec.unwrap_or(controller_says);
+}
+
 fn attach_subscriber_with_permissions(
     st: &mut PaneState,
     subscriber: Sender<DaemonMsg>,
     allow_remote_clipboard_write: bool,
 ) -> u64 {
     st.subscriber_epoch += 1;
-    st.allow_remote_clipboard_write = allow_remote_clipboard_write;
+    set_clipboard_permission(st, allow_remote_clipboard_write);
     replay_state(st, &subscriber);
     st.subscriber = Some(subscriber);
     st.subscriber_epoch
@@ -4335,6 +4353,7 @@ mod tests {
             subscriber: None,
             subscriber_epoch: 0,
             allow_remote_clipboard_write: false,
+            clipboard_write_from_spec: None,
             observers: Vec::new(),
             observer_seq: 0,
             shell_spec: None,
@@ -5374,6 +5393,39 @@ mod tests {
             other => panic!("expected Image frame, got {other:?}"),
         }
         assert!(matches!(sub_rx.try_recv(), Ok(DaemonMsg::Output(b)) if b == b"after"));
+    }
+
+    /// A window that reopens onto a native ssh pane it outlived attaches by
+    /// pane id: it never sees the profile that dialled the host, so it sends
+    /// `allow_remote_clipboard_write: false` because that is all it has. The
+    /// spec's answer has to survive that, or the permission the user granted
+    /// is revoked on the first re-attach and every later copy comes back
+    /// `EPERM` with the switch still showing "on".
+    #[test]
+    fn a_spec_granted_clipboard_permission_survives_a_re_attach() {
+        let mut st = test_state(true);
+        st.clipboard_write_from_spec = Some(true);
+        let (tx, _rx) = mpsc::channel();
+        attach_subscriber_with_permissions(&mut st, tx, false);
+        assert!(st.allow_remote_clipboard_write);
+
+        // And a profile that says no is not something an attaching client can
+        // talk its way past either.
+        let mut st = test_state(true);
+        st.clipboard_write_from_spec = Some(false);
+        let (tx, _rx) = mpsc::channel();
+        attach_subscriber_with_permissions(&mut st, tx, true);
+        assert!(!st.allow_remote_clipboard_write);
+
+        // A pane with no spec of its own — everything on a remote
+        // `tty7-server` — is exactly as permitted as its controller says.
+        let mut st = test_state(true);
+        let (tx, _rx) = mpsc::channel();
+        attach_subscriber_with_permissions(&mut st, tx, true);
+        assert!(st.allow_remote_clipboard_write);
+        let (tx, _rx) = mpsc::channel();
+        attach_subscriber_with_permissions(&mut st, tx, false);
+        assert!(!st.allow_remote_clipboard_write);
     }
 
     #[test]

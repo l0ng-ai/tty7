@@ -81,7 +81,7 @@ struct Parser {
 impl Parser {
     fn feed(&mut self, payload: &[u8]) -> Option<Event> {
         if payload == b"probe" {
-            return Some(Event::Reply(b"\x1b[?5522;2$y".to_vec()));
+            return Some(Event::Reply(capability_reply(self.allowed)));
         }
         if payload == b"invalid" {
             return self.fail("EINVAL");
@@ -200,7 +200,24 @@ impl Parser {
     fn fail(&mut self, status: &str) -> Option<Event> {
         let state = self.write.as_mut()?;
         state.failed = true;
+        // Nothing reads a failed transfer's bytes again, and the state itself
+        // lives on until the next `type=write` or a change of controller. A
+        // sender that fails its last chunk on purpose would otherwise leave
+        // `MAX_CLIPBOARD_BYTES` of its own image parked in every pane it can
+        // reach, for as long as it likes.
+        state.data = Vec::new();
         Some(Event::Reply(response(state.id.as_deref(), status)))
+    }
+}
+
+/// The DECRPM answer to `CSI ? 5522 $ p`: 1 for a mode that is set, 2 for one
+/// this terminal knows but has switched off. A terminal that never heard of
+/// OSC 5522 answers 0, so a sender can still tell "not supported" from "not
+/// permitted here" — which it cannot do if the answer never moves.
+fn capability_reply(allowed: bool) -> Vec<u8> {
+    match allowed {
+        true => b"\x1b[?5522;1$y".to_vec(),
+        false => b"\x1b[?5522;2$y".to_vec(),
     }
 }
 
@@ -583,13 +600,15 @@ mod tests {
         ]);
         assert_eq!(events, vec![Event::Reply(response(None, "EINVAL"))]);
 
-        let mut parser = Parser::default();
-        parser.allowed = true;
-        parser.write = Some(WriteState {
-            mime: Some("image/png".into()),
-            data: vec![0; MAX_CLIPBOARD_BYTES],
-            ..WriteState::default()
-        });
+        let mut parser = Parser {
+            allowed: true,
+            write: Some(WriteState {
+                mime: Some("image/png".into()),
+                data: vec![0; MAX_CLIPBOARD_BYTES],
+                ..WriteState::default()
+            }),
+            ..Parser::default()
+        };
         assert_eq!(
             parser.feed_data(
                 vec![("type", "wdata"), ("mime", mime.as_str())],
@@ -663,7 +682,58 @@ mod tests {
     fn capability_probe_is_stripped_and_answered_across_reads() {
         let (output, events) = collect(&[b"a\x1b[?55", b"22$p", b"b"]);
         assert_eq!(output, b"ab");
-        assert_eq!(events, vec![Event::Reply(b"\x1b[?5522;2$y".to_vec())]);
+        assert_eq!(events, vec![Event::Reply(capability_reply(true))]);
+    }
+
+    /// The probe has to answer the permission actually in force. A sender that
+    /// reads DECRPM sees 2 — "this terminal knows the mode and it is off" — for
+    /// a host the user never opted in, and stops there instead of pushing an
+    /// image nobody will take.
+    #[test]
+    fn the_probe_reports_a_host_that_is_not_permitted_as_off() {
+        let mut sniffer = ClipboardSniffer::default();
+        sniffer.set_controller(Some(1), false);
+        let events = match sniffer.sniff(b"\x1b[?5522$p") {
+            Sniffed::Segments(parts) => parts,
+            Sniffed::Plain(_) => panic!("the probe must be intercepted"),
+        };
+        assert_eq!(
+            events,
+            vec![Segment::Event(Event::Reply(capability_reply(false)))]
+        );
+        assert_ne!(capability_reply(true), capability_reply(false));
+    }
+
+    /// A transfer that fails half way stops being somewhere to park an image:
+    /// the reply goes out and the bytes go with it.
+    #[test]
+    fn a_failed_transfer_releases_what_it_had_buffered() {
+        let png = BASE64.encode("image/png");
+        let gif = BASE64.encode("image/gif");
+        let mut sniffer = ClipboardSniffer::default();
+        sniffer.set_controller(Some(1), true);
+        let _ = sniffer.sniff(&osc("type=write:id=half", ""));
+        let _ = sniffer.sniff(&osc(
+            &format!("type=wdata:mime={png}"),
+            &BASE64.encode(b"png-bytes"),
+        ));
+        assert!(!sniffer.parser.write.as_ref().unwrap().data.is_empty());
+
+        let events = match sniffer.sniff(&osc(
+            &format!("type=wdata:mime={gif}"),
+            &BASE64.encode(b"gif"),
+        )) {
+            Sniffed::Segments(parts) => parts,
+            Sniffed::Plain(_) => panic!("OSC 5522 must be intercepted"),
+        };
+        assert_eq!(
+            events,
+            vec![Segment::Event(Event::Reply(response(
+                Some("half"),
+                "EINVAL"
+            )))]
+        );
+        assert!(sniffer.parser.write.as_ref().unwrap().data.is_empty());
     }
 
     #[test]

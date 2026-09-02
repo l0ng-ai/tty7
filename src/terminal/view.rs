@@ -767,11 +767,21 @@ fn remote_paste_spec<'a>(
     ssh_spec
 }
 
+/// Whether this pane may hand a remote program's image to the system clipboard.
+///
+/// The daemon is the gate. It holds the `NativeSshSpec` that dialled the host
+/// and answers a write the profile forbids with `EPERM` before a byte of image
+/// reaches this process; a pane it never granted the permission to sends no
+/// `ClipboardWrite` at all. This is a second opinion, and it can only give one
+/// when the pane kept a copy of that spec. A pane restored by attaching to its
+/// id did not keep one — reading that absence as "forbidden" is what put the
+/// permission to sleep on the first restart after the user granted it. So:
+/// refuse what this side can see is forbidden, and defer otherwise.
 fn allows_remote_clipboard_write(
     workspace: Option<&crate::terminal::PaneWorkspace>,
     ssh_spec: Option<&crate::daemon::protocol::NativeSshSpec>,
 ) -> bool {
-    remote_paste_spec(workspace, ssh_spec).is_some_and(|spec| spec.remote_clipboard_write)
+    remote_paste_spec(workspace, ssh_spec).is_none_or(|spec| spec.remote_clipboard_write)
 }
 
 /// Whether a pane stages the clipboard image to a file instead of forwarding
@@ -7666,6 +7676,21 @@ mod tests {
             stages_clipboard_image(false),
             cfg!(not(target_os = "macos"))
         );
+    }
+
+    /// A pane restored by attaching to its id carries no copy of the spec that
+    /// dialled the host. The daemon still has one, and still refuses a write
+    /// the profile forbids — so a missing copy here is not a verdict.
+    #[test]
+    fn a_pane_without_its_own_spec_defers_to_the_daemons_verdict() {
+        let mut spec: crate::daemon::protocol::NativeSshSpec = serde_json::from_str(
+            r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
+        )
+        .unwrap();
+        assert!(!super::allows_remote_clipboard_write(None, Some(&spec)));
+        spec.remote_clipboard_write = true;
+        assert!(super::allows_remote_clipboard_write(None, Some(&spec)));
+        assert!(super::allows_remote_clipboard_write(None, None));
     }
 
     #[test]
