@@ -60,8 +60,26 @@ pub fn take_mismatched_daemon() -> Option<DaemonMismatch> {
 /// link that comes back refused, say — record it here so the next window still
 /// offers the restart rather than opening empty with no explanation.
 pub fn note_daemon_mismatch(mismatch: DaemonMismatch) {
+    settle_daemon_mismatch(Some(mismatch));
+}
+
+/// Record what a fresh probe found, overturning whatever the last one left.
+///
+/// The difference from [`note_daemon_mismatch`] is the `None`, and that is the
+/// whole point of having it: a probe that finds the daemon ours is evidence,
+/// and the record has to be able to *lose* a mismatch as much as gain one.
+///
+/// Until it could, the record only ever accumulated. The GUI arms the prompt
+/// from [`ensure_running`], which is the first thing every control-link
+/// reconnect attempt runs, and a mismatched daemon is one no connect succeeds
+/// against — so the link backed off and retried, arming the prompt again each
+/// time round, including in the seconds the user spent reading the dialog it
+/// had already opened. Restarting the daemon then fixed the daemon and not the
+/// record, and the next window built took that last arming and asked a second
+/// time about a server that no longer existed.
+fn settle_daemon_mismatch(found: Option<DaemonMismatch>) {
     if let Ok(mut slot) = MISMATCHED_DAEMON.lock() {
-        *slot = Some(mismatch);
+        *slot = found;
     }
 }
 
@@ -190,6 +208,51 @@ fn daemon_process_alive(_pid: u32) -> bool {
     true
 }
 
+/// What one version probe means, apart from the sockets it took to get it.
+struct ProbeVerdict {
+    /// The daemon to remember for feature checks, where it named a version.
+    version: Option<DaemonVersion>,
+    /// What the restart prompt should be holding afterwards. `None` is a
+    /// verdict too — it wipes what an earlier probe recorded.
+    mismatch: Option<DaemonMismatch>,
+}
+
+/// Read a probe's answer.
+///
+/// `None` means the daemon never answered, which is not a mismatch to put to
+/// anyone: there is nothing to describe and nothing to decide. The caller
+/// treats the endpoint as stale and reaps it.
+///
+/// The dialect is asked for through a closure because asking costs a second
+/// connect, and it is only worth spending once the pane protocol has agreed —
+/// a daemon that already fails on protocol is going to be restarted whatever
+/// the other socket says.
+fn judge_probe(
+    probe: VersionProbe,
+    control_dialect: impl FnOnce() -> Option<DialectRefusal>,
+) -> Option<ProbeVerdict> {
+    match probe {
+        // Agreeing here is only half the handshake: the control dialect is
+        // versioned apart and moves on its own, so a daemon from before a
+        // dialect bump passes this check and then refuses every machine-tree
+        // call. Ask the other socket before calling the daemon ours, or the
+        // window opens with no tabs and nothing to explain why.
+        VersionProbe::Speaks(v) if v.protocol == PROTOCOL_VERSION => Some(ProbeVerdict {
+            version: Some(v),
+            mismatch: control_dialect().map(DaemonMismatch::Dialect),
+        }),
+        VersionProbe::Speaks(v) => Some(ProbeVerdict {
+            version: Some(v.clone()),
+            mismatch: Some(DaemonMismatch::Protocol(Some(v))),
+        }),
+        VersionProbe::Legacy => Some(ProbeVerdict {
+            version: None,
+            mismatch: Some(DaemonMismatch::Protocol(None)),
+        }),
+        VersionProbe::Unresponsive => None,
+    }
+}
+
 pub fn ensure_running() -> anyhow::Result<()> {
     // A dead recorded daemon is the cheap, certain signal that the endpoint
     // files are stale: skip the connect entirely and let the cleanup below
@@ -198,56 +261,49 @@ pub fn ensure_running() -> anyhow::Result<()> {
     let mut stale = recorded_daemon_is_dead();
     if !stale {
         if let Ok(mut stream) = transport::connect() {
-            match query_daemon_version(&mut stream) {
-                VersionProbe::Speaks(v) if v.protocol == PROTOCOL_VERSION => {
-                    if !v.build.is_empty() && v.build != env!("CARGO_PKG_VERSION") {
-                        log::info!(
-                            "daemon build {} differs from this build {}; keeping it so its panes \
-                             survive the upgrade — Settings offers the restart",
+            match judge_probe(query_daemon_version(&mut stream), control_dialect_refusal) {
+                Some(verdict) => {
+                    match &verdict.mismatch {
+                        Some(DaemonMismatch::Protocol(Some(v))) => log::warn!(
+                            "daemon (build {}) speaks protocol {}, this build needs {}; \
+                             keeping it and deferring to the user",
                             v.build,
-                            env!("CARGO_PKG_VERSION")
-                        );
-                    }
-                    note_local_daemon(Some(v));
-                    // Agreeing here is only half the handshake: the control dialect
-                    // is versioned apart and moves on its own, so a daemon from
-                    // before a dialect bump passes this check and then refuses
-                    // every machine-tree call. Ask the other socket before calling
-                    // the daemon ours, or the window opens with no tabs and nothing
-                    // to explain why.
-                    if let Some(refusal) = control_dialect_refusal() {
-                        log::warn!(
+                            v.protocol,
+                            PROTOCOL_VERSION
+                        ),
+                        Some(DaemonMismatch::Protocol(None)) => log::warn!(
+                            "daemon predates protocol versioning; keeping it and deferring \
+                             to the user"
+                        ),
+                        Some(DaemonMismatch::Dialect(refusal)) => log::warn!(
                             "daemon (build {}) speaks control v{}, this build speaks v{}; \
                              its machine tree is out of reach until it restarts",
                             refusal.peer_build,
                             refusal.peer,
                             refusal.ours
-                        );
-                        note_daemon_mismatch(DaemonMismatch::Dialect(refusal));
+                        ),
+                        None => {
+                            if let Some(v) = &verdict.version
+                                && !v.build.is_empty()
+                                && v.build != env!("CARGO_PKG_VERSION")
+                            {
+                                log::info!(
+                                    "daemon build {} differs from this build {}; keeping it so \
+                                     its panes survive the upgrade — Settings offers the restart",
+                                    v.build,
+                                    env!("CARGO_PKG_VERSION")
+                                );
+                            }
+                        }
                     }
+                    note_local_daemon(verdict.version);
+                    // Settled, not merely noted: this probe is the current word
+                    // on the daemon, so a clean one has to clear what a
+                    // mismatched one left behind. See `settle_daemon_mismatch`.
+                    settle_daemon_mismatch(verdict.mismatch);
                     return Ok(());
                 }
-                VersionProbe::Speaks(v) => {
-                    log::warn!(
-                        "daemon (build {}) speaks protocol {}, this build needs {}; \
-                     keeping it and deferring to the user",
-                        v.build,
-                        v.protocol,
-                        PROTOCOL_VERSION
-                    );
-                    note_local_daemon(Some(v.clone()));
-                    note_daemon_mismatch(DaemonMismatch::Protocol(Some(v)));
-                    return Ok(());
-                }
-                VersionProbe::Legacy => {
-                    log::warn!(
-                        "daemon predates protocol versioning; keeping it and deferring to the user"
-                    );
-                    note_local_daemon(None);
-                    note_daemon_mismatch(DaemonMismatch::Protocol(None));
-                    return Ok(());
-                }
-                VersionProbe::Unresponsive => {
+                None => {
                     log::info!("daemon did not answer the version handshake; restarting it");
                     note_local_daemon(None);
                     drop(stream);
@@ -492,6 +548,59 @@ pub fn restart() -> anyhow::Result<()> {
     ensure_running()
 }
 
+/// What the daemon listening again after a handoff turned out to be.
+enum HandoffReturn {
+    /// This build: the exec took.
+    Replaced(DaemonVersion),
+    /// It answers, but it is still the image we asked to go away.
+    CarriedOn(DaemonVersion),
+    /// It does not answer the version handshake at all, so there is no telling
+    /// what came back.
+    Mute,
+}
+
+/// Land what the handoff returned: the daemon to remember for feature checks,
+/// and what the restart prompt is left holding.
+///
+/// A replacement clears the record, and that is the step this function exists
+/// to make testable. The daemon the user was asked about is gone, so the reason
+/// to ask is gone with it — but the control link re-arms the prompt on every
+/// failed reconnect, and against a mismatched daemon every reconnect fails. By
+/// the time the dialog is answered the record has usually been set again behind
+/// it. Left standing, that arming outlives the restart it asked for, and the
+/// next window built asks all over again about a server that is already gone.
+///
+/// The reconnect that follows would eventually settle the record clean by
+/// itself, through `ensure_running`. Doing it here closes the gap in between,
+/// which is exactly wide enough for a window to open in.
+fn land_handoff_return(outcome: HandoffReturn) -> anyhow::Result<()> {
+    match outcome {
+        HandoffReturn::Replaced(v) => {
+            note_local_daemon(Some(v));
+            settle_daemon_mismatch(None);
+            Ok(())
+        }
+        HandoffReturn::CarriedOn(v) => {
+            note_local_daemon(Some(v));
+            anyhow::bail!("the daemon is still running its old build")
+        }
+        HandoffReturn::Mute => {
+            note_local_daemon(None);
+            anyhow::bail!("the daemon that came back does not answer the version handshake")
+        }
+    }
+}
+
+fn judge_handoff_return(probe: VersionProbe) -> HandoffReturn {
+    match probe {
+        VersionProbe::Speaks(v) if v.build == env!("CARGO_PKG_VERSION") => {
+            HandoffReturn::Replaced(v)
+        }
+        VersionProbe::Speaks(v) => HandoffReturn::CarriedOn(v),
+        VersionProbe::Legacy | VersionProbe::Unresponsive => HandoffReturn::Mute,
+    }
+}
+
 /// Ask the running daemon to become this build without stopping.
 ///
 /// It keeps its pid, its ptys and everything running on them; what it loses is
@@ -534,22 +643,7 @@ pub fn hand_off() -> anyhow::Result<()> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
         if let Ok(mut stream) = transport::connect() {
-            match query_daemon_version(&mut stream) {
-                VersionProbe::Speaks(v) => {
-                    let carried_on = v.build != env!("CARGO_PKG_VERSION");
-                    note_local_daemon(Some(v));
-                    if carried_on {
-                        anyhow::bail!("the daemon is still running its old build");
-                    }
-                    return Ok(());
-                }
-                _ => {
-                    note_local_daemon(None);
-                    anyhow::bail!(
-                        "the daemon that came back does not answer the version handshake"
-                    );
-                }
-            }
+            return land_handoff_return(judge_handoff_return(query_daemon_version(&mut stream)));
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
@@ -1694,5 +1788,217 @@ mod tests {
             ErrorKind::NotFound | ErrorKind::ConnectionRefused
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod mismatch_record_tests {
+    use super::*;
+    use crate::daemon::control::DialectRefusal;
+
+    fn answering(protocol: u32, build: &str) -> VersionProbe {
+        VersionProbe::Speaks(DaemonVersion {
+            protocol,
+            build: build.to_string(),
+            features: Vec::new(),
+            instance: "test-instance".to_string(),
+        })
+    }
+
+    fn agrees() -> Option<DialectRefusal> {
+        None
+    }
+
+    fn refuses() -> Option<DialectRefusal> {
+        Some(DialectRefusal {
+            peer_build: "26.8.4-nightly.202608251825".to_string(),
+            peer: 7,
+            ours: 8,
+        })
+    }
+
+    /// The record says what the daemon running *now* is, so a clean probe has
+    /// to be able to overturn it — not merely decline to add to it.
+    ///
+    /// The prompt is armed from `ensure_running`, and `ensure_running` is the
+    /// first thing every control-link reconnect attempt does. A mismatched
+    /// daemon fails that connect, so the link backs off and retries, arming the
+    /// prompt again each time round — including in the seconds the user spends
+    /// reading the dialog it already opened. Restart the daemon and it is fine,
+    /// but that last arming outlived the restart, and the next window built
+    /// took it and asked a second time about a server that no longer exists.
+    #[test]
+    fn a_probe_that_finds_the_daemon_ours_overturns_an_earlier_mismatch() {
+        let verdict = judge_probe(answering(PROTOCOL_VERSION, "1.0.0"), agrees)
+            .expect("a daemon that answers the handshake is not a stale endpoint");
+        assert!(
+            verdict.mismatch.is_none(),
+            "a daemon that agrees on both versions must wipe the record, not leave \
+             an earlier probe's verdict standing"
+        );
+    }
+
+    /// The half of the handshake that lives on the other socket. Panes work,
+    /// every machine-tree call is refused, and the window opens with no tabs.
+    #[test]
+    fn a_refused_control_dialect_is_a_mismatch_even_when_the_protocol_agrees() {
+        let verdict = judge_probe(answering(PROTOCOL_VERSION, "old"), refuses)
+            .expect("the daemon answered; it is not stale");
+        assert!(
+            matches!(verdict.mismatch, Some(DaemonMismatch::Dialect(r)) if r.peer == 7),
+            "the dialect refusal has to reach the prompt, carrying the peer's number"
+        );
+    }
+
+    /// A build that differs is not by itself a mismatch: its panes still speak
+    /// this protocol, and killing them to even up a version string is the
+    /// upgrade that costs the user their session for nothing.
+    #[test]
+    fn a_different_build_on_the_agreed_protocol_is_not_a_mismatch() {
+        let verdict = judge_probe(
+            answering(PROTOCOL_VERSION, "26.8.4-nightly.202608251825"),
+            agrees,
+        )
+        .expect("the daemon answered; it is not stale");
+        assert!(
+            verdict.mismatch.is_none(),
+            "only the version numbers decide; a build string that differs is left alone"
+        );
+    }
+
+    #[test]
+    fn a_disagreeing_pane_protocol_is_a_mismatch() {
+        let verdict = judge_probe(answering(PROTOCOL_VERSION + 1, "newer"), agrees)
+            .expect("the daemon answered; it is not stale");
+        assert!(
+            matches!(&verdict.mismatch, Some(DaemonMismatch::Protocol(Some(v))) if v.protocol == PROTOCOL_VERSION + 1),
+            "the prompt needs the peer's protocol number to say what it found"
+        );
+        assert!(
+            verdict.version.is_some(),
+            "a mismatched daemon is still the daemon to remember for feature checks"
+        );
+    }
+
+    #[test]
+    fn a_daemon_from_before_versioning_is_a_mismatch_with_nothing_to_report() {
+        let verdict = judge_probe(VersionProbe::Legacy, agrees)
+            .expect("it answered, just not with a version");
+        assert!(matches!(
+            verdict.mismatch,
+            Some(DaemonMismatch::Protocol(None))
+        ));
+        assert!(
+            verdict.version.is_none(),
+            "there is no version to remember from a daemon that reports none"
+        );
+    }
+
+    /// Not a mismatch — nothing to put to the user. The endpoint is stale and
+    /// the caller reaps it.
+    #[test]
+    fn a_daemon_that_does_not_answer_is_stale_rather_than_mismatched() {
+        assert!(judge_probe(VersionProbe::Unresponsive, agrees).is_none());
+    }
+
+    /// The dialect costs a second connect, so it is only worth asking once the
+    /// pane protocol has agreed — on a protocol mismatch the restart is already
+    /// decided.
+    #[test]
+    fn the_control_dialect_is_only_asked_once_the_pane_protocol_agrees() {
+        let asked = std::cell::Cell::new(false);
+        let _ = judge_probe(answering(PROTOCOL_VERSION + 1, "newer"), || {
+            asked.set(true);
+            None
+        });
+        assert!(
+            !asked.get(),
+            "a daemon already known to be mismatched must not be probed a second time"
+        );
+    }
+
+    #[test]
+    fn a_handoff_that_returns_this_build_is_a_replacement() {
+        let outcome = judge_handoff_return(answering(PROTOCOL_VERSION, env!("CARGO_PKG_VERSION")));
+        assert!(matches!(outcome, HandoffReturn::Replaced(_)));
+    }
+
+    /// The exec did not take. Same process, same old image — and the caller
+    /// reports the failure rather than pretending the upgrade happened.
+    #[test]
+    fn a_handoff_that_returns_the_old_build_is_not_a_replacement() {
+        let outcome =
+            judge_handoff_return(answering(PROTOCOL_VERSION, "26.8.4-nightly.202608251825"));
+        assert!(matches!(outcome, HandoffReturn::CarriedOn(_)));
+    }
+
+    #[test]
+    fn a_handoff_that_returns_something_mute_is_neither() {
+        assert!(matches!(
+            judge_handoff_return(VersionProbe::Legacy),
+            HandoffReturn::Mute
+        ));
+        assert!(matches!(
+            judge_handoff_return(VersionProbe::Unresponsive),
+            HandoffReturn::Mute
+        ));
+    }
+
+    /// The verdict actually reaching the global record, which is the step the
+    /// pure judgement above cannot cover.
+    ///
+    /// One test for the whole sequence on purpose: the record is process-global
+    /// and Rust runs tests in this binary side by side, so splitting these into
+    /// separate `#[test]`s would let them overwrite each other's state.
+    #[test]
+    fn a_clean_verdict_wipes_what_an_earlier_one_recorded() {
+        settle_daemon_mismatch(Some(DaemonMismatch::Protocol(None)));
+        assert!(
+            take_mismatched_daemon().is_some(),
+            "a recorded mismatch is there for the next window to take"
+        );
+
+        settle_daemon_mismatch(Some(DaemonMismatch::Protocol(None)));
+        settle_daemon_mismatch(None);
+        assert!(
+            take_mismatched_daemon().is_none(),
+            "a clean probe after a mismatched one must leave nothing for a window to \
+             prompt about — this is the second, bogus dialog"
+        );
+
+        // The restart the user actually asked for. The record here is the one
+        // the reconnect loop set again while the dialog was on screen; landing
+        // the handoff has to take it away, or it outlives the daemon it
+        // describes and the next window opened prompts about a dead server.
+        note_daemon_mismatch(DaemonMismatch::Protocol(None));
+        land_handoff_return(HandoffReturn::Replaced(DaemonVersion {
+            protocol: PROTOCOL_VERSION,
+            build: env!("CARGO_PKG_VERSION").to_string(),
+            features: Vec::new(),
+            instance: "replacement".to_string(),
+        }))
+        .expect("a daemon that came back as this build is a successful handoff");
+        assert!(
+            take_mismatched_daemon().is_none(),
+            "the daemon the prompt described has been replaced; nothing is left to ask"
+        );
+
+        // A handoff that did not take leaves the daemon exactly as it was, so
+        // the record describing it stays — the user still needs the offer.
+        note_daemon_mismatch(DaemonMismatch::Protocol(None));
+        assert!(
+            land_handoff_return(HandoffReturn::CarriedOn(DaemonVersion {
+                protocol: PROTOCOL_VERSION,
+                build: "26.8.4-nightly.202608251825".to_string(),
+                features: Vec::new(),
+                instance: "survivor".to_string(),
+            }))
+            .is_err(),
+            "a daemon still on its old build is a handoff that failed"
+        );
+        assert!(
+            take_mismatched_daemon().is_some(),
+            "the mismatched daemon is still running, so the prompt still has something to say"
+        );
     }
 }
