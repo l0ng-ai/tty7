@@ -1627,25 +1627,7 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
             return;
         }
     };
-    // A server that predates projects answers these with an error, and an
-    // error here resynchronizes — which would put the window in a loop over a
-    // feature it cannot have. Dropping them leaves it exactly the sidebar that
-    // server has always served, and the projects stay live in this window
-    // until something re-pulls the tree.
-    let serves_projects = client
-        .hello()
-        .has_feature(tty7_core::daemon::control::feature::PROJECTS);
-    let batch: Vec<ControlRequest> = state
-        .queue
-        .drain(..)
-        .filter(|op| {
-            let keep = serves_projects || !is_project_op(op);
-            if !keep {
-                log::debug!("dropping {op:?}: this server does not serve projects");
-            }
-            keep
-        })
-        .collect();
+    let batch: Vec<ControlRequest> = state.queue.drain(..).collect();
     state.inflight = true;
     cx.spawn(async move |cx| {
         let result = cx
@@ -1673,18 +1655,6 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
         });
     })
     .detach();
-}
-
-fn is_project_op(op: &ControlRequest) -> bool {
-    matches!(
-        op,
-        ControlRequest::TabSetProject { .. }
-            | ControlRequest::ProjectCreate { .. }
-            | ControlRequest::ProjectRename { .. }
-            | ControlRequest::ProjectSetRoot { .. }
-            | ControlRequest::ProjectMove { .. }
-            | ControlRequest::ProjectDelete { .. }
-    )
 }
 
 fn desync(cx: &mut App, client_ws: WorkspaceId, why: &str) {

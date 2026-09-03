@@ -34,7 +34,17 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 /// refusing to kill a server it has nothing to replace with — can be exercised
 /// against the v6 servers already deployed. A number is the only way to reach
 /// that path, and a mismatch nobody can reproduce is a mismatch nobody can fix.
-pub const CONTROL_VERSION: u32 = 7;
+///
+/// v8 adds the six project verbs (`TabSetProject`, `ProjectCreate`, `Rename`,
+/// `SetRoot`, `Move`, `Delete`) and the six `LayoutDelta` variants that ride
+/// back on `ControlEvent::Layout`. This first shipped behind a `projects`
+/// feature string instead, which was the v6 mistake in a new shape: a feature
+/// can gate what a client *sends*, so a v7 server never saw a verb it could not
+/// read, but nothing gates what a server *pushes* — a v7 client meeting a v8
+/// server that had grown a project took the delta, failed to decode the frame,
+/// and lost the link exactly as described above. Only the number can turn that
+/// pairing away at the handshake, which is why it is the number's job.
+pub const CONTROL_VERSION: u32 = 8;
 
 const DIALECT_MARKER: &str = "speaks control v";
 
@@ -116,12 +126,6 @@ pub mod feature {
     pub const CONTROL: &str = "control";
     pub const HOST_RPC: &str = "host-rpc";
     pub const MACHINE_TREE: &str = "machine-tree";
-    /// The workspace tree carries declared projects, and the server answers
-    /// the requests that edit them. A server without this still serves the
-    /// tree — it just ignores the `projects` array and knows none of the
-    /// verbs, so a client that sent them anyway would get an error back and
-    /// resynchronize in a loop.
-    pub const PROJECTS: &str = "projects";
     pub const STDIO_BRIDGE: &str = "stdio-bridge";
 }
 

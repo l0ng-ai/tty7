@@ -370,7 +370,6 @@ fn handshake<R: Read>(
     ];
     if services.machine.is_some() {
         features.push(feature::MACHINE_TREE.to_string());
-        features.push(feature::PROJECTS.to_string());
     }
     // The pane daemon's features ride along, same as `protocol_version` above:
     // a pane connection answers exactly one message, so a client that wanted

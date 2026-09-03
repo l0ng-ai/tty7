@@ -30,10 +30,6 @@ pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.;
 
 const GRAB_HANDLE_W: f32 = 48.;
 
-/// The hover group the whole rail belongs to, so the two add buttons can wait
-/// until the pointer is somewhere in the sidebar before showing themselves.
-const SIDEBAR_GROUP: &str = "tab-sidebar";
-
 const ROW_GAP: f32 = 2.;
 
 /// The row chrome the text budget has to be measured around. These are the
@@ -1313,7 +1309,6 @@ impl Tty7App {
             });
 
         div()
-            .group(SIDEBAR_GROUP)
             .relative()
             .flex_shrink_0()
             .w(px(width))
@@ -1469,11 +1464,15 @@ impl Tty7App {
             .text_color(cx.theme().muted_foreground)
             .child(fold_chevron(folded, 11.))
             .child(div().flex_1().min_w_0().truncate().child(label))
+            // Its own heading's hover, not the whole rail's: pointing anywhere
+            // in the sidebar used to fade both `+` in at once, which offered a
+            // button on a row the pointer was nowhere near. A control appears
+            // where the pointer is.
             .child(
                 div()
                     .flex_shrink_0()
                     .opacity(0.)
-                    .group_hover(SIDEBAR_GROUP, |s| s.opacity(1.))
+                    .group_hover(SharedString::from(id), |s| s.opacity(1.))
                     .child(add),
             )
             .cursor_pointer()
