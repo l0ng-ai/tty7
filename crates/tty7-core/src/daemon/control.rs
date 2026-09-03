@@ -116,6 +116,12 @@ pub mod feature {
     pub const CONTROL: &str = "control";
     pub const HOST_RPC: &str = "host-rpc";
     pub const MACHINE_TREE: &str = "machine-tree";
+    /// The workspace tree carries declared projects, and the server answers
+    /// the requests that edit them. A server without this still serves the
+    /// tree — it just ignores the `projects` array and knows none of the
+    /// verbs, so a client that sent them anyway would get an error back and
+    /// resynchronize in a loop.
+    pub const PROJECTS: &str = "projects";
     pub const STDIO_BRIDGE: &str = "stdio-bridge";
 }
 
@@ -123,7 +129,9 @@ pub use crate::host::{Entry, MTime, Meta, Output, SearchHit};
 
 pub use crate::core::shells::{DetectedShell, ShellInventory};
 
-pub use crate::core::machine::{Axis, LayoutDelta, Machine, PaneSeed, Side, Tab, TabId};
+pub use crate::core::machine::{
+    Axis, LayoutDelta, Machine, PaneSeed, Project, ProjectId, Side, Tab, TabId,
+};
 pub use crate::core::session::WorkspaceId;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -268,6 +276,35 @@ pub enum ControlRequest {
         tab: TabId,
         group: Option<String>,
     },
+    TabSetProject {
+        workspace: WorkspaceId,
+        tab: TabId,
+        project: Option<ProjectId>,
+    },
+    ProjectCreate {
+        workspace: WorkspaceId,
+        at: Option<u64>,
+        project: Project,
+    },
+    ProjectRename {
+        workspace: WorkspaceId,
+        project: ProjectId,
+        name: Option<String>,
+    },
+    ProjectSetRoot {
+        workspace: WorkspaceId,
+        project: ProjectId,
+        root: String,
+    },
+    ProjectMove {
+        workspace: WorkspaceId,
+        project: ProjectId,
+        to: u64,
+    },
+    ProjectDelete {
+        workspace: WorkspaceId,
+        project: ProjectId,
+    },
     PaneSplit {
         workspace: WorkspaceId,
         pane: u64,
@@ -365,6 +402,12 @@ impl ControlRequest {
             | TabRename { .. }
             | TabMove { .. }
             | TabSetGroup { .. }
+            | TabSetProject { .. }
+            | ProjectCreate { .. }
+            | ProjectRename { .. }
+            | ProjectSetRoot { .. }
+            | ProjectMove { .. }
+            | ProjectDelete { .. }
             | PaneSplit { .. }
             | PaneClose { .. }
             | PaneSetRatio { .. }

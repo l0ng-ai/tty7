@@ -846,6 +846,24 @@ pub(crate) fn select_workspace_action(index: usize) -> Option<Box<dyn gpui::Acti
     })
 }
 
+/// What a tab's context menu is built from, read out of the app in one go so
+/// the borrow ends before the menu starts being assembled — a submenu is built
+/// through the same `cx` the app was read from.
+struct Facts {
+    tab_count: usize,
+    cwd: Option<String>,
+    agent_here: bool,
+    agent_done: bool,
+    in_repo: bool,
+    agent_session: Option<(
+        gpui::Entity<crate::terminal::view::TerminalView>,
+        crate::ui::app::TabAgentSession,
+    )>,
+    projects: Vec<(tty7_core::core::machine::ProjectId, String)>,
+    filed_under: Option<tty7_core::core::machine::ProjectId>,
+    has_folder: bool,
+}
+
 impl Tty7App {
     pub(crate) const AVATAR_PX: f32 = 20.0;
 
@@ -1313,6 +1331,31 @@ impl Tty7App {
             })
     }
 
+    /// The new-tab button as the rail's TABS heading wears it: the same
+    /// dropdown, sized to sit in an 11px header rather than in the title bar.
+    pub(crate) fn new_tab_heading_button(
+        &self,
+        id: &'static str,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let app = cx.entity().downgrade();
+        hit_target(
+            Button::new(id)
+                .icon(Icon::new(IconName::Plus))
+                .ghost()
+                .xsmall(),
+        )
+        .tooltip(chord_hint(t(L10nKey::AppMenuNewTab), "NewTab", cx))
+        .dropdown_menu(move |menu, window, cx| {
+            let Some(this) = app.upgrade() else {
+                return menu;
+            };
+            this.read(cx)
+                .new_tab_menu_rows(app.clone(), cx)
+                .build(menu, window)
+        })
+    }
+
     /// What the menu offers, read off the app as the menu opens — the builder
     /// runs on the popup's own entity, so the rows carry a weak handle back.
     fn new_tab_menu_rows(&self, app: gpui::WeakEntity<Self>, cx: &App) -> NewTabMenu {
@@ -1329,20 +1372,98 @@ impl Tty7App {
         }
     }
 
+    /// What a project header offers. Everything here is a deliberate act on
+    /// the project itself — nothing about it is ever inferred, which is the
+    /// whole difference between this block of rows and the derived ones below
+    /// it in the rail.
+    pub(crate) fn project_context_menu(
+        menu: PopupMenu,
+        project: tty7_core::core::machine::ProjectId,
+        app: &gpui::WeakEntity<Self>,
+        _window: &mut Window,
+        cx: &mut Context<PopupMenu>,
+    ) -> PopupMenu {
+        let Some(entity) = app.upgrade() else {
+            return menu;
+        };
+        // The folder panel browses the machine this window runs on, so a
+        // remote workspace is offered everything here except that.
+        let local = !entity.read(cx).workspace_is_remote(cx);
+        menu.min_w(px(200.))
+            .item(PopupMenuItem::new(t(L10nKey::ProjectNewTab)).on_click({
+                let app = app.clone();
+                move |_, window, cx| {
+                    let _ = app.update(cx, |this, cx| this.new_tab_in_project(project, window, cx));
+                }
+            }))
+            .separator()
+            .item(PopupMenuItem::new(t(L10nKey::ProjectRename)).on_click({
+                let app = app.clone();
+                move |_, window, cx| {
+                    let _ = app.update(cx, |this, cx| {
+                        this.start_project_rename(project, window, cx)
+                    });
+                }
+            }))
+            .item(
+                PopupMenuItem::new(t(L10nKey::ProjectSetFolder))
+                    .disabled(!local)
+                    .on_click({
+                        let app = app.clone();
+                        move |_, _window, cx| {
+                            let _ = app.update(cx, |this, cx| this.pick_project_root(project, cx));
+                        }
+                    }),
+            )
+            .separator()
+            .item(PopupMenuItem::new(t(L10nKey::ProjectDelete)).on_click({
+                let app = app.clone();
+                move |_, _window, cx| {
+                    let _ = app.update(cx, |this, cx| this.delete_project(project, cx));
+                }
+            }))
+    }
+
     pub(crate) fn tab_context_menu(
         menu: PopupMenu,
         index: usize,
         below_wording: bool,
         app: &gpui::WeakEntity<Self>,
-        window: &Window,
-        cx: &App,
+        window: &mut Window,
+        cx: &mut Context<PopupMenu>,
     ) -> PopupMenu {
         let Some(entity) = app.upgrade() else {
             return menu;
         };
-        let this = entity.read(cx);
-        let tab_count = this.tabs.len();
-        let cwd = this.tab_cwd_text(index, window, cx);
+        // Everything the rows are built from is read out of the app up front
+        // and the borrow released: a submenu is built through `cx` itself, and
+        // holding a read of the app across that call is a borrow conflict.
+        let Facts {
+            tab_count,
+            cwd,
+            agent_here,
+            agent_done,
+            in_repo,
+            agent_session,
+            projects,
+            filed_under,
+            has_folder,
+        } = {
+            let this = entity.read(cx);
+            let tab = this.tabs.get(index);
+            Facts {
+                tab_count: this.tabs.len(),
+                cwd: this.tab_cwd_text(index, window, cx),
+                agent_here: tab.is_some_and(|t| t.agent(cx).is_some()),
+                agent_done: tab.and_then(|t| t.agent_status(cx))
+                    == Some(crate::core::cli_agent::AgentStatus::Done),
+                in_repo: this.tab_is_in_repo(index, window, cx),
+                agent_session: this.tab_agent_session(index, window, cx),
+                projects: this.named_projects(),
+                filed_under: tab.and_then(|t| t.project.get()),
+                has_folder: this.tab_project_root(index, window, cx).is_some(),
+            }
+        };
         let has_cwd = cwd.is_some();
         let mut menu = menu.min_w(px(200.));
 
@@ -1363,14 +1484,55 @@ impl Tty7App {
                 }),
         );
 
-        let tab = this.tabs.get(index);
-        if tab.is_some_and(|t| t.agent(cx).is_some()) {
-            let done = tab.and_then(|t| t.agent_status(cx))
-                == Some(crate::core::cli_agent::AgentStatus::Done);
+        // Where this tab is filed. Only a user action ever writes it, so
+        // these are the only way in and out of a project.
+        if !projects.is_empty() {
+            let app = app.clone();
+            menu = menu.submenu(
+                t(L10nKey::TabProjectAddTo),
+                window,
+                cx,
+                move |mut sub, _w, _cx| {
+                    for (id, name) in &projects {
+                        let (id, app) = (*id, app.clone());
+                        sub = sub.item(
+                            PopupMenuItem::new(SharedString::from(name.clone()))
+                                .disabled(filed_under == Some(id))
+                                .on_click(move |_, _window, cx| {
+                                    let _ = app.update(cx, |this, cx| {
+                                        this.set_tab_project(index, Some(id), cx)
+                                    });
+                                }),
+                        );
+                    }
+                    sub
+                },
+            );
+        }
+        if filed_under.is_some() {
+            menu = menu.item(PopupMenuItem::new(t(L10nKey::TabProjectRemove)).on_click({
+                let app = app.clone();
+                move |_, _window, cx| {
+                    let _ = app.update(cx, |this, cx| this.set_tab_project(index, None, cx));
+                }
+            }));
+        }
+        menu = menu.item(
+            PopupMenuItem::new(t(L10nKey::TabProjectFromFolder))
+                .disabled(!has_folder)
+                .on_click({
+                    let app = app.clone();
+                    move |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| this.project_from_tab(index, window, cx));
+                    }
+                }),
+        );
+
+        if agent_here {
             menu = menu.item(
                 PopupMenuItem::new(t(L10nKey::TabContextMarkUnread))
                     .action(Box::new(MarkTabUnread))
-                    .disabled(!done)
+                    .disabled(!agent_done)
                     .on_click({
                         let app = app.clone();
                         move |_, _window, cx| {
@@ -1380,7 +1542,6 @@ impl Tty7App {
             );
         }
 
-        let in_repo = this.tab_is_in_repo(index, window, cx);
         if in_repo {
             menu = menu.separator().item(
                 PopupMenuItem::new(t(L10nKey::AppMenuNewWorktreeTab))
@@ -1395,7 +1556,6 @@ impl Tty7App {
             );
         }
 
-        let agent_session = this.tab_agent_session(index, window, cx);
         if let Some((source, session)) = &agent_session
             && let Some(label) = session.fork_label
         {

@@ -6,17 +6,20 @@ pub fn two_workspace_machine() -> Machine {
         id: WorkspaceId::new(),
         name: Some("api".into()),
         last_active: 0,
+        projects: Vec::new(),
         tabs: vec![
             Tab {
                 id: TabId::new(),
                 name: Some("build".into()),
                 sidebar_group: None,
+                project: None,
                 root: PaneNode::Leaf { pane: 1 },
             },
             Tab {
                 id: TabId::new(),
                 name: None,
                 sidebar_group: None,
+                project: None,
                 root: PaneNode::Split {
                     axis: Axis::Horizontal,
                     ratio: 0.5,
@@ -32,10 +35,12 @@ pub fn two_workspace_machine() -> Machine {
         id: WorkspaceId::new(),
         name: Some("web".into()),
         last_active: 0,
+        projects: Vec::new(),
         tabs: vec![Tab {
             id: TabId::new(),
             name: None,
             sidebar_group: None,
+            project: None,
             root: PaneNode::Leaf { pane: 5 },
         }],
         active_tab: None,

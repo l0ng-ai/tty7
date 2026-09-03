@@ -20,6 +20,8 @@ pub const MAX_WORKSPACES: usize = 1024;
 
 pub const MAX_PANES: usize = 16 * 1024;
 
+pub const MAX_PROJECTS: usize = 512;
+
 #[cfg(not(test))]
 pub const FACT_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -45,6 +47,61 @@ impl Default for TabId {
 impl std::fmt::Display for TabId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProjectId(uuid::Uuid);
+
+impl ProjectId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl Default for ProjectId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for ProjectId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A directory someone declared a project, held on the workspace it belongs to.
+///
+/// The sidebar's repo groups are derived: their identity *is* a path, they
+/// appear when a tab lands in one and vanish with its last tab. A project is
+/// the opposite of all three — it has an id of its own, it is created by an
+/// explicit act, and it outlives having no tabs in it. That is what lets it
+/// carry a name that has nothing to do with where it lives, and survive the
+/// directory being renamed or moved.
+///
+/// `name` is `None` until someone names it, and reads as a title derived from
+/// `root` the same way a group header does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Project {
+    #[serde(default)]
+    pub id: ProjectId,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// A path on the machine that serves this workspace, as a string for the
+    /// same reason `Tab::sidebar_group` is one: it is written on one machine
+    /// and read on another, and a `PathBuf` does not survive that crossing.
+    pub root: String,
+}
+
+impl Project {
+    pub fn at(root: impl Into<String>) -> Project {
+        Project {
+            id: ProjectId::new(),
+            name: None,
+            root: root.into(),
+        }
     }
 }
 
@@ -102,6 +159,12 @@ pub struct Workspace {
     pub name: Option<String>,
     #[serde(default)]
     pub last_active: u64,
+    /// The projects declared in this workspace, in the order the sidebar shows
+    /// them. Empty on every workspace that predates them, and on every one
+    /// nobody has declared anything in — which is why the derived grouping
+    /// underneath stays exactly as it was.
+    #[serde(default)]
+    pub projects: Vec<Project>,
     #[serde(default)]
     pub tabs: Vec<Tab>,
     #[serde(default)]
@@ -120,6 +183,7 @@ impl Default for Workspace {
             id: WorkspaceId::new(),
             name: None,
             last_active: unix_now(),
+            projects: Vec::new(),
             tabs: Vec::new(),
             active_tab: None,
             attachment: None,
@@ -135,6 +199,16 @@ pub struct Tab {
     pub name: Option<String>,
     #[serde(default)]
     pub sidebar_group: Option<String>,
+    /// The project this tab was explicitly filed under, if any.
+    ///
+    /// Only a user action writes this — nothing probes a cwd to fill it in.
+    /// Automatic filing is what `sidebar_group` above already does, one
+    /// section further down the sidebar, and a tab pulled out of a project
+    /// lands right back in the group that probe puts it in. That is why
+    /// `None` is enough to say "not in a project" and no third state is
+    /// needed to say "and don't put it back".
+    #[serde(default)]
+    pub project: Option<ProjectId>,
     pub root: PaneNode,
 }
 
@@ -144,6 +218,7 @@ impl Tab {
             id: TabId::new(),
             name: None,
             sidebar_group: None,
+            project: None,
             root: PaneNode::Leaf { pane },
         }
     }
@@ -407,6 +482,34 @@ pub enum LayoutDelta {
     TabRegrouped {
         tab: TabId,
         group: Option<String>,
+    },
+    ProjectCreated {
+        at: usize,
+        project: Project,
+    },
+    ProjectRenamed {
+        project: ProjectId,
+        name: Option<String>,
+    },
+    ProjectRerooted {
+        project: ProjectId,
+        root: String,
+    },
+    ProjectMoved {
+        project: ProjectId,
+        to: usize,
+    },
+    /// The project is gone, and with it every tab's membership in it. One
+    /// delta rather than a delete plus a `TabProjectChanged` per member: a
+    /// reader that applies this has to clear those references anyway, and a
+    /// reader that missed the follow-ups would be left pointing at a project
+    /// that no longer exists.
+    ProjectDeleted {
+        project: ProjectId,
+    },
+    TabProjectChanged {
+        tab: TabId,
+        project: Option<ProjectId>,
     },
     TabRestructured {
         tab: Tab,
@@ -738,6 +841,157 @@ impl MachineStore {
             Ok((
                 (),
                 vec![(workspace, LayoutDelta::TabRegrouped { tab, group })],
+            ))
+        })
+    }
+
+    pub fn project_create(
+        &self,
+        workspace: WorkspaceId,
+        at: Option<usize>,
+        project: Project,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<Project> {
+        self.mutate(origin, |m| {
+            if m.workspaces
+                .iter()
+                .any(|w| w.projects.iter().any(|p| p.id == project.id))
+            {
+                return Err(refuse(format!("project {} already exists", project.id)));
+            }
+            let ws = find_workspace(m, workspace)?;
+            if ws.projects.len() >= MAX_PROJECTS {
+                return Err(refuse(format!(
+                    "this workspace already holds {MAX_PROJECTS} projects"
+                )));
+            }
+            let at = at.unwrap_or(ws.projects.len()).min(ws.projects.len());
+            ws.projects.insert(at, project.clone());
+            Ok((
+                project.clone(),
+                vec![(workspace, LayoutDelta::ProjectCreated { at, project })],
+            ))
+        })
+    }
+
+    pub fn project_rename(
+        &self,
+        workspace: WorkspaceId,
+        project: ProjectId,
+        name: Option<String>,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            let p = find_project(m, workspace, project)?;
+            p.name = name.clone();
+            Ok((
+                (),
+                vec![(workspace, LayoutDelta::ProjectRenamed { project, name })],
+            ))
+        })
+    }
+
+    /// Points a project at another directory. The name survives, which is the
+    /// whole reason a project is not its path: a worktree that moved is the
+    /// same project afterwards.
+    pub fn project_set_root(
+        &self,
+        workspace: WorkspaceId,
+        project: ProjectId,
+        root: String,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            let p = find_project(m, workspace, project)?;
+            p.root = root.clone();
+            Ok((
+                (),
+                vec![(workspace, LayoutDelta::ProjectRerooted { project, root })],
+            ))
+        })
+    }
+
+    pub fn project_move(
+        &self,
+        workspace: WorkspaceId,
+        project: ProjectId,
+        to: usize,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, workspace)?;
+            let from = ws
+                .projects
+                .iter()
+                .position(|p| p.id == project)
+                .ok_or_else(|| {
+                    not_found(format!("workspace {workspace} has no project {project}"))
+                })?;
+            let moved = ws.projects.remove(from);
+            let to = to.min(ws.projects.len());
+            ws.projects.insert(to, moved);
+            Ok((
+                (),
+                vec![(workspace, LayoutDelta::ProjectMoved { project, to })],
+            ))
+        })
+    }
+
+    /// Deletes a project and lets its tabs go. The tabs themselves stay open —
+    /// deleting a project says the grouping is over, not the work.
+    pub fn project_delete(
+        &self,
+        workspace: WorkspaceId,
+        project: ProjectId,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, workspace)?;
+            let at = ws
+                .projects
+                .iter()
+                .position(|p| p.id == project)
+                .ok_or_else(|| {
+                    not_found(format!("workspace {workspace} has no project {project}"))
+                })?;
+            ws.projects.remove(at);
+            for tab in &mut ws.tabs {
+                if tab.project == Some(project) {
+                    tab.project = None;
+                }
+            }
+            Ok((
+                (),
+                vec![(workspace, LayoutDelta::ProjectDeleted { project })],
+            ))
+        })
+    }
+
+    pub fn tab_set_project(
+        &self,
+        workspace: WorkspaceId,
+        tab: TabId,
+        project: Option<ProjectId>,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, workspace)?;
+            if let Some(project) = project
+                && !ws.projects.iter().any(|p| p.id == project)
+            {
+                return Err(not_found(format!(
+                    "workspace {workspace} has no project {project}"
+                )));
+            }
+            let t = ws
+                .tabs
+                .iter_mut()
+                .find(|t| t.id == tab)
+                .ok_or_else(|| not_found(format!("workspace {workspace} has no tab {tab}")))?;
+            t.project = project;
+            Ok((
+                (),
+                vec![(workspace, LayoutDelta::TabProjectChanged { tab, project })],
             ))
         })
     }
@@ -1149,6 +1403,18 @@ fn find_tab(m: &mut Machine, workspace: WorkspaceId, tab: TabId) -> io::Result<&
         .iter_mut()
         .find(|t| t.id == tab)
         .ok_or_else(|| not_found(format!("workspace {workspace} has no tab {tab}")))
+}
+
+fn find_project(
+    m: &mut Machine,
+    workspace: WorkspaceId,
+    project: ProjectId,
+) -> io::Result<&mut Project> {
+    let ws = find_workspace(m, workspace)?;
+    ws.projects
+        .iter_mut()
+        .find(|p| p.id == project)
+        .ok_or_else(|| not_found(format!("workspace {workspace} has no project {project}")))
 }
 
 fn heal_active_tab(ws: &mut Workspace, removed: usize) -> Option<TabId> {
@@ -1960,6 +2226,117 @@ mod tests {
         assert_eq!(workspace.tabs[1].name.as_deref(), Some("build"));
         assert_eq!(
             workspace.tabs[1].sidebar_group.as_deref(),
+            Some("/repo/tty7")
+        );
+    }
+
+    #[test]
+    fn a_project_outlives_its_tabs_and_keeps_its_name_when_it_moves() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        let project = store
+            .project_create(ws, None, Project::at("/repo/tty7"), None)
+            .unwrap();
+        store
+            .project_rename(ws, project.id, Some("套利研究".into()), None)
+            .unwrap();
+        store
+            .tab_set_project(ws, tab.id, Some(project.id), None)
+            .unwrap();
+
+        // The worktree moved. The project is not its path, so the name stays.
+        store
+            .project_set_root(ws, project.id, "/repo/026/tty7".into(), None)
+            .unwrap();
+        let held = store.workspace(ws).unwrap();
+        assert_eq!(held.projects[0].name.as_deref(), Some("套利研究"));
+        assert_eq!(held.projects[0].root, "/repo/026/tty7");
+        assert_eq!(held.tabs[0].project, Some(project.id));
+
+        // The last tab in it closes; the project is still there, empty.
+        store.tab_close(ws, tab.id, None).unwrap();
+        let held = store.workspace(ws).unwrap();
+        assert!(held.tabs.is_empty());
+        assert_eq!(
+            held.projects.len(),
+            1,
+            "a project is declared, so it does not vanish with its last tab"
+        );
+    }
+
+    #[test]
+    fn deleting_a_project_lets_its_tabs_go_without_closing_them() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        let project = store
+            .project_create(ws, None, Project::at("/repo/tty7"), None)
+            .unwrap();
+        store
+            .tab_set_project(ws, tab.id, Some(project.id), None)
+            .unwrap();
+
+        let (_sub, heard) = recorded(&store);
+        store.project_delete(ws, project.id, None).unwrap();
+        let held = store.workspace(ws).unwrap();
+        assert!(held.projects.is_empty());
+        assert_eq!(held.tabs.len(), 1, "the work stays; only the grouping ends");
+        assert_eq!(held.tabs[0].project, None);
+        assert!(
+            matches!(
+                heard.lock().unwrap().as_slice(),
+                [(_, LayoutDelta::ProjectDeleted { .. })]
+            ),
+            "one delta says both halves of it: a reader has to clear the \
+             references anyway, and follow-ups it missed would leave it \
+             pointing at a project that is gone"
+        );
+    }
+
+    #[test]
+    fn a_tab_cannot_be_filed_under_a_project_that_does_not_exist() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        let stranger = ProjectId::new();
+        let refused = store.tab_set_project(ws, tab.id, Some(stranger), None);
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(store.workspace(ws).unwrap().tabs[0].project, None);
+    }
+
+    #[test]
+    fn projects_reorder_and_refuse_a_duplicate_id() {
+        let (store, _dir, ws, _tab) = store_with_tab();
+        let a = store
+            .project_create(ws, None, Project::at("/w/a"), None)
+            .unwrap();
+        let b = store
+            .project_create(ws, None, Project::at("/w/b"), None)
+            .unwrap();
+        store.project_move(ws, b.id, 0, None).unwrap();
+        assert_eq!(
+            store
+                .workspace(ws)
+                .unwrap()
+                .projects
+                .iter()
+                .map(|p| p.root.clone())
+                .collect::<Vec<_>>(),
+            vec!["/w/b", "/w/a"]
+        );
+
+        let twice = store.project_create(ws, None, a.clone(), None);
+        assert_eq!(twice.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// A workspace written before projects existed reads back with none, and a
+    /// tab written before them belongs to none — which is the whole of the
+    /// migration.
+    #[test]
+    fn a_tree_that_predates_projects_reads_back_unchanged() {
+        let json = r#"{"workspaces":[{"id":"00000000-0000-4000-8000-000000000001",
+            "tabs":[{"id":"00000000-0000-4000-8000-000000000002",
+            "sidebar_group":"/repo/tty7","root":{"Leaf":{"pane":1}}}]}],"panes":[]}"#;
+        let machine: Machine = serde_json::from_str(json).unwrap();
+        assert!(machine.workspaces[0].projects.is_empty());
+        assert_eq!(machine.workspaces[0].tabs[0].project, None);
+        assert_eq!(
+            machine.workspaces[0].tabs[0].sidebar_group.as_deref(),
             Some("/repo/tty7")
         );
     }

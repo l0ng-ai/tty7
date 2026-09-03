@@ -52,6 +52,8 @@ pub struct SessionTab {
     pub pane: SessionPane,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_group: Option<std::path::PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<crate::core::machine::ProjectId>,
     #[serde(skip)]
     pub tree_id: Option<crate::core::machine::TabId>,
 }
@@ -61,6 +63,10 @@ pub struct SessionTab {
 pub struct Session {
     pub active: usize,
     pub tabs: Vec<SessionTab>,
+    /// The workspace's declared projects, carried so a window restored from a
+    /// session alone — no machine to pull a tree from — still shows them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<crate::core::machine::Project>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

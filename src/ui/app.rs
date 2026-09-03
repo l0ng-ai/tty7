@@ -425,6 +425,10 @@ pub struct Tab {
     pub(crate) diff_overlay: Option<crate::ui::diff_overlay::DiffOverlayState>,
     pub(crate) code: Option<Box<crate::ui::code_editor::TabCode>>,
     pub(crate) sidebar_group: std::cell::RefCell<Option<std::path::PathBuf>>,
+    /// The project this tab was filed under, or `None` for a tab the derived
+    /// grouping below the projects section still owns. Only a user action
+    /// writes it — see `Tab::project` on the machine tree.
+    pub(crate) project: std::cell::Cell<Option<tty7_core::core::machine::ProjectId>>,
     pub(crate) overlay_top: OverlayTop,
     /// Whether this tab's document fills the workspace or docks beside the
     /// terminal, once the tab has been told. `None` follows `document_layout`
@@ -461,6 +465,7 @@ impl Tab {
             overlay_top: OverlayTop::default(),
             document_layout: None,
             sidebar_group: std::cell::RefCell::new(None),
+            project: std::cell::Cell::new(None),
             tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
             last_used: std::cell::Cell::new(0),
         }
@@ -479,6 +484,7 @@ impl Tab {
             sidebar_group: std::cell::RefCell::new(
                 tree.sidebar_group.clone().map(std::path::PathBuf::from),
             ),
+            project: std::cell::Cell::new(tree.project),
             tree_id: std::cell::Cell::new(tree.id),
             last_used: std::cell::Cell::new(0),
         }
@@ -730,6 +736,13 @@ pub struct Tty7App {
     pub(crate) right_panel_visible: bool,
     pub(crate) right_panel_tab: RightPanelTab,
     pub(crate) sidebar_collapsed: bool,
+    /// The rail blocks that are folded shut. See [`crate::ui::tab_sidebar::SidebarFold`].
+    pub(crate) sidebar_folded:
+        RefCell<std::collections::HashSet<crate::ui::tab_sidebar::SidebarFold>>,
+    /// The projects declared in this workspace, in sidebar order. The window's
+    /// own copy of `Workspace::projects` — `tree_sync` pushes edits made here
+    /// up to the machine and writes deltas from elsewhere back down.
+    pub(crate) projects: Vec<tty7_core::core::machine::Project>,
     pub(crate) sidebar_scroll: gpui::ScrollHandle,
     pub(crate) reorder: Rc<RefCell<Option<crate::ui::reorder::Reorder>>>,
     /// The pane the pointer is over, so only that one offers its drag handle.
@@ -776,6 +789,7 @@ pub struct Tty7App {
     window_bounds: Bounds<Pixels>,
     pub(crate) workspace: WorkspaceId,
     pub(crate) workspace_rename: Option<WorkspaceRename>,
+    pub(crate) project_rename: Option<crate::ui::projects::ProjectRename>,
     window_title: std::cell::RefCell<String>,
     pub(crate) connect: Option<crate::ui::remote_workspace::ConnectFlow>,
     pub(crate) switcher: Option<crate::ui::switcher::Switcher>,
@@ -1199,6 +1213,10 @@ impl Tty7App {
         apply_theme(Some(window), cx);
         set_menus(cx);
         let mut startup_error: Option<gpui::SharedString> = None;
+        let projects = session
+            .as_ref()
+            .map(|s| s.projects.clone())
+            .unwrap_or_default();
         let (tabs, active) = match session {
             None => match new_terminal(
                 pane_ws.clone(),
@@ -1257,6 +1275,7 @@ impl Tty7App {
         let mut app = Self {
             tabs,
             active,
+            projects,
             tab_use_seq: std::cell::Cell::new(0),
             pending_tab: None,
             font_size,
@@ -1324,6 +1343,7 @@ impl Tty7App {
             right_panel_visible,
             right_panel_tab,
             sidebar_collapsed,
+            sidebar_folded: RefCell::new(std::collections::HashSet::new()),
             sidebar_scroll: gpui::ScrollHandle::new(),
             reorder: Rc::new(RefCell::new(None)),
             pane_hover: Rc::new(Cell::new(None)),
@@ -1343,6 +1363,7 @@ impl Tty7App {
             window_bounds: window_bounds_to_remember(window),
             workspace,
             workspace_rename: None,
+            project_rename: None,
             window_title: std::cell::RefCell::new(String::new()),
             connect: None,
             switcher: None,
@@ -1600,6 +1621,10 @@ impl Tty7App {
         self.refresh_shells(cx);
         let font_size = self.font_size;
         let pane_ws = self.window_workspace(cx);
+        // Replaced, not merged: this is how a window changes which workspace
+        // it is showing, and the projects it was showing belong to the one it
+        // is leaving.
+        self.projects = session.projects.clone();
         let (tabs, active, dropped) = tabs_from_session(
             pane_ws.as_ref(),
             self.workspace,
@@ -1654,6 +1679,7 @@ impl Tty7App {
                 overlay_top: OverlayTop::default(),
                 document_layout: None,
                 sidebar_group: std::cell::RefCell::new(st.sidebar_group),
+                project: std::cell::Cell::new(st.project),
                 tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
                 last_used: std::cell::Cell::new(0),
             },
@@ -3241,7 +3267,19 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.new_tab_with_cwd(Some(cwd), None, window, cx);
+        self.new_tab_with_cwd(Some(cwd), None, None, window, cx);
+    }
+
+    /// A new tab in `cwd`, filed under `project` from the moment it exists so
+    /// it never flickers through the derived grouping on its way there.
+    pub(crate) fn new_tab_at_in(
+        &mut self,
+        cwd: std::path::PathBuf,
+        project: Option<tty7_core::core::machine::ProjectId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.new_tab_with_cwd(Some(cwd), None, project, window, cx);
     }
 
     pub(crate) fn new_tab_with_shell(
@@ -3255,7 +3293,7 @@ impl Tty7App {
                 .focused_or_first(window, cx)
                 .and_then(|leaf| leaf.read(cx).spawnable_cwd())
         });
-        self.new_tab_with_cwd(cwd, shell, window, cx);
+        self.new_tab_with_cwd(cwd, shell, None, window, cx);
     }
 
     /// A shell taken out of the new-tab menu, wherever the ⌥ key said to put
@@ -3279,6 +3317,7 @@ impl Tty7App {
         &mut self,
         cwd: Option<std::path::PathBuf>,
         shell: Option<ShellSpec>,
+        project: Option<tty7_core::core::machine::ProjectId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3317,6 +3356,7 @@ impl Tty7App {
         if let Some(group) = group {
             *new_tab.sidebar_group.borrow_mut() = group;
         }
+        new_tab.project.set(project);
         self.tabs.insert(insert_at, new_tab);
         self.active = insert_at;
         self.focus_active(window, cx);
@@ -7720,6 +7760,7 @@ fn tab_to_session(tab: &Tab, cx: &App) -> SessionTab {
         name: tab.name.clone(),
         pane: pane_to_session(&tab.pane, cx),
         sidebar_group: tab.sidebar_group.borrow().clone(),
+        project: tab.project.get(),
         tree_id: None,
     }
 }
@@ -7921,6 +7962,7 @@ fn tabs_from_session(
             overlay_top: OverlayTop::default(),
             document_layout: None,
             sidebar_group: std::cell::RefCell::new(st.sidebar_group.clone()),
+            project: std::cell::Cell::new(st.project),
             tree_id: std::cell::Cell::new(
                 st.tree_id
                     .unwrap_or_else(tty7_core::core::machine::TabId::new),
@@ -9540,6 +9582,7 @@ mod ssh_rebuild_gpui_tests {
                 id: app.tabs[0].tree_id.get(),
                 name: None,
                 sidebar_group: None,
+                project: None,
                 root: PaneNode::Leaf { pane: 1 },
             };
             app.apply_layout_delta(

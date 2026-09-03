@@ -5,8 +5,8 @@ use std::sync::Arc;
 use gpui::{App, Global};
 use gpui_component::WindowExt as _;
 use tty7_core::core::machine::{
-    AgentFacts, Axis as TreeAxis, LayoutDelta, Machine, PaneNode, PaneRecord, PaneSeed, Side,
-    Tab as TreeTab, TabId, Workspace,
+    AgentFacts, Axis as TreeAxis, LayoutDelta, Machine, PaneNode, PaneRecord, PaneSeed, Project,
+    ProjectId, Side, Tab as TreeTab, TabId, Workspace,
 };
 use tty7_core::daemon::control::{ControlClient, ControlRequest, ReplyOk};
 use tty7_core::host::HostId;
@@ -63,6 +63,7 @@ pub(crate) struct DesiredTab {
     pub id: TabId,
     pub name: Option<String>,
     pub group: Option<String>,
+    pub project: Option<ProjectId>,
     pub root: DesiredNode,
 }
 
@@ -137,6 +138,7 @@ pub(crate) fn desired_tabs(
                 .borrow()
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
+            project: tab.project.get(),
             root,
         });
     }
@@ -258,6 +260,7 @@ fn seeded_records(desired: &[DesiredTab], live: impl Fn(u64) -> bool) -> Vec<Pan
 pub(crate) struct WsMirror {
     pub tabs: Vec<TreeTab>,
     pub active: Option<TabId>,
+    pub projects: Vec<Project>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -270,11 +273,16 @@ pub(crate) fn diff(
     workspace: WorkspaceId,
     mirror: &mut WsMirror,
     desired: &[DesiredTab],
+    desired_projects: &[Project],
     desired_active: Option<TabId>,
     scope: SyncScope,
     held: &[TabId],
 ) -> Vec<ControlRequest> {
     let mut ops = Vec::new();
+
+    // Projects first, in both directions: a tab may only name one that
+    // already exists, and one may only be deleted once no tab names it.
+    reconcile_projects(workspace, mirror, desired_projects, scope, &mut ops);
 
     if scope == SyncScope::Full {
         migrate_panes(workspace, mirror, desired, &mut ops);
@@ -313,6 +321,10 @@ pub(crate) fn diff(
             SyncScope::Additive => mirror.tabs.len(),
         };
         create_tab(workspace, mirror, at, want, &mut ops);
+    }
+
+    if scope == SyncScope::Full {
+        retire_projects(workspace, mirror, desired_projects, &mut ops);
     }
 
     if scope == SyncScope::Additive || !held.is_empty() {
@@ -365,6 +377,99 @@ pub(crate) fn diff(
 /// that finds nothing left to do ends the pass, which is also what happens
 /// when a move cannot be spelled this way at all — the passes below then treat
 /// it as the reshape it is.
+/// Brings the machine's project list to the one the window is showing.
+///
+/// Creates and edits run before the tab pass so a tab can be filed straight
+/// away; deletions run after it, in `retire_projects`, because a project the
+/// machine still has members for cannot go until they have been let out.
+fn reconcile_projects(
+    workspace: WorkspaceId,
+    mirror: &mut WsMirror,
+    desired: &[Project],
+    scope: SyncScope,
+    ops: &mut Vec<ControlRequest>,
+) {
+    for (index, want) in desired.iter().enumerate() {
+        match mirror.projects.iter().position(|p| p.id == want.id) {
+            Some(at) => {
+                if mirror.projects[at].name != want.name {
+                    mirror.projects[at].name = want.name.clone();
+                    ops.push(ControlRequest::ProjectRename {
+                        workspace,
+                        project: want.id,
+                        name: want.name.clone(),
+                    });
+                }
+                if mirror.projects[at].root != want.root {
+                    mirror.projects[at].root = want.root.clone();
+                    ops.push(ControlRequest::ProjectSetRoot {
+                        workspace,
+                        project: want.id,
+                        root: want.root.clone(),
+                    });
+                }
+            }
+            None => {
+                let at = index.min(mirror.projects.len());
+                mirror.projects.insert(at, want.clone());
+                ops.push(ControlRequest::ProjectCreate {
+                    workspace,
+                    at: Some(at as u64),
+                    project: want.clone(),
+                });
+            }
+        }
+    }
+    if scope != SyncScope::Full {
+        return;
+    }
+    for (index, want) in desired.iter().enumerate() {
+        let at = mirror
+            .projects
+            .iter()
+            .position(|p| p.id == want.id)
+            .expect("every desired project exists after the pass above");
+        if at != index {
+            let moved = mirror.projects.remove(at);
+            mirror.projects.insert(index, moved);
+            ops.push(ControlRequest::ProjectMove {
+                workspace,
+                project: want.id,
+                to: index as u64,
+            });
+        }
+    }
+}
+
+/// Deletes the projects the window no longer shows. Runs after the tab pass:
+/// every tab that named one has been let out of it by then, so the machine
+/// never has to guess what a deletion does to its members.
+fn retire_projects(
+    workspace: WorkspaceId,
+    mirror: &mut WsMirror,
+    desired: &[Project],
+    ops: &mut Vec<ControlRequest>,
+) {
+    let mut index = 0;
+    while index < mirror.projects.len() {
+        let id = mirror.projects[index].id;
+        if desired.iter().any(|p| p.id == id) {
+            index += 1;
+            continue;
+        }
+        mirror.projects.remove(index);
+        for tab in &mut mirror.tabs {
+            if tab.project == Some(id) {
+                tab.project = None;
+            }
+        }
+        ops.push(ControlRequest::ProjectDelete {
+            workspace,
+            project: id,
+        });
+    }
+}
+
 fn migrate_panes(
     workspace: WorkspaceId,
     mirror: &mut WsMirror,
@@ -507,12 +612,20 @@ fn create_tab(
             group: want.group.clone(),
         });
     }
+    if want.project.is_some() {
+        ops.push(ControlRequest::TabSetProject {
+            workspace,
+            tab: want.id,
+            project: want.project,
+        });
+    }
     mirror.tabs.insert(
         index.min(mirror.tabs.len()),
         TreeTab {
             id: want.id,
             name: want.name.clone(),
             sidebar_group: want.group.clone(),
+            project: want.project,
             root,
         },
     );
@@ -566,6 +679,14 @@ fn reconcile_tab(
                 workspace,
                 tab: want.id,
                 group: want.group.clone(),
+            });
+        }
+        if tab.project != want.project {
+            tab.project = want.project;
+            ops.push(ControlRequest::TabSetProject {
+                workspace,
+                tab: want.id,
+                project: want.project,
             });
         }
     }
@@ -1000,13 +1121,25 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
                 .not_rebuilt
                 .retain(|id| mirror.tabs.iter().any(|t| t.id == *id));
             held.extend(state.not_rebuilt.iter().copied());
-            let ops = diff(machine_ws, mirror, &desired, desired_active, scope, &held);
+            let ops = diff(
+                machine_ws,
+                mirror,
+                &desired,
+                &app.projects,
+                desired_active,
+                scope,
+                &held,
+            );
             if !ops.is_empty() {
                 let (tabs, active) = (mirror.tabs.clone(), mirror.active);
+                let projects = mirror.projects.clone();
                 state.queue.extend(ops);
                 let host = WorkspaceStore::host_of(cx, client_ws);
                 crate::ui::machine_mirror::MachineMirrors::note_synced_workspace(
                     cx, host, machine_ws, tabs, active,
+                );
+                crate::ui::machine_mirror::MachineMirrors::note_synced_projects(
+                    cx, host, machine_ws, projects,
                 );
                 let open: Vec<u64> = app
                     .tabs
@@ -1382,6 +1515,7 @@ fn primed(ws: Workspace) -> (WsMirror, Option<String>) {
         WsMirror {
             tabs: ws.tabs,
             active: ws.active_tab,
+            projects: ws.projects,
         },
         ws.name,
     )
@@ -1407,7 +1541,12 @@ fn finish_prime(
             // The machine answered, which is the only thing the retry was
             // waiting to find out, so the next failure starts its backoff over.
             state.rehydrate_attempts = 0;
-            let landed = (mirror.tabs.clone(), mirror.active, name);
+            let landed = (
+                mirror.tabs.clone(),
+                mirror.active,
+                name,
+                mirror.projects.clone(),
+            );
             state.sync = SyncPhase::Primed(mirror);
             landed
         }
@@ -1429,14 +1568,23 @@ fn finish_prime(
     // name — it is left out of the deltas its own create raises (#604).
     let name = settle_chosen_name(cx, client_ws, landed.2);
     crate::ui::machine_mirror::MachineMirrors::note_workspace_name(cx, host, machine_ws, name);
+    let app = cx
+        .has_global::<crate::ui::windows::WindowRegistry>()
+        .then(|| crate::ui::windows::WindowRegistry::app_for(cx, client_ws))
+        .flatten()
+        .and_then(|app| app.upgrade());
+    let Some(app) = app else {
+        return;
+    };
+    // Before anything is pushed, and whether or not there was an edit waiting.
+    // A prime keeps the window's own layout, so the diff that follows speaks
+    // for its projects too — and a window that never learned the machine's
+    // would read a workspace holding a project with no tabs in it as a project
+    // the user had deleted, and delete it.
+    app.update(cx, |app, _| adopt_projects(app, &landed.3));
     if !was_dirty {
         return;
     }
-    let Some(app) =
-        crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|app| app.upgrade())
-    else {
-        return;
-    };
     app.update(cx, |app, cx| sync_window(app, cx));
 }
 
@@ -1462,7 +1610,25 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
             return;
         }
     };
-    let batch: Vec<ControlRequest> = state.queue.drain(..).collect();
+    // A server that predates projects answers these with an error, and an
+    // error here resynchronizes — which would put the window in a loop over a
+    // feature it cannot have. Dropping them leaves it exactly the sidebar that
+    // server has always served, and the projects stay live in this window
+    // until something re-pulls the tree.
+    let serves_projects = client
+        .hello()
+        .has_feature(tty7_core::daemon::control::feature::PROJECTS);
+    let batch: Vec<ControlRequest> = state
+        .queue
+        .drain(..)
+        .filter(|op| {
+            let keep = serves_projects || !is_project_op(op);
+            if !keep {
+                log::debug!("dropping {op:?}: this server does not serve projects");
+            }
+            keep
+        })
+        .collect();
     state.inflight = true;
     cx.spawn(async move |cx| {
         let result = cx
@@ -1492,6 +1658,18 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
     .detach();
 }
 
+fn is_project_op(op: &ControlRequest) -> bool {
+    matches!(
+        op,
+        ControlRequest::TabSetProject { .. }
+            | ControlRequest::ProjectCreate { .. }
+            | ControlRequest::ProjectRename { .. }
+            | ControlRequest::ProjectSetRoot { .. }
+            | ControlRequest::ProjectMove { .. }
+            | ControlRequest::ProjectDelete { .. }
+    )
+}
+
 fn desync(cx: &mut App, client_ws: WorkspaceId, why: &str) {
     log::info!("resynchronizing workspace {client_ws} with its machine ({why})");
     let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
@@ -1518,6 +1696,7 @@ pub(crate) fn session_from_tree(
             name: tab.name.clone(),
             tree_id: Some(tab.id),
             sidebar_group: tab.sidebar_group.clone().map(std::path::PathBuf::from),
+            project: tab.project,
             pane: session_pane_from_node(&tab.root, panes),
         })
         .collect();
@@ -1525,7 +1704,11 @@ pub(crate) fn session_from_tree(
         .active_tab
         .and_then(|id| ws.tabs.iter().position(|t| t.id == id))
         .unwrap_or(0);
-    Session { active, tabs }
+    Session {
+        active,
+        tabs,
+        projects: ws.projects.clone(),
+    }
 }
 
 fn session_pane_from_node(node: &PaneNode, panes: &[PaneRecord]) -> SessionPane {
@@ -1978,6 +2161,7 @@ fn layout_of(
     let mirror = WsMirror {
         tabs: ws.tabs.clone(),
         active: ws.active_tab,
+        projects: ws.projects.clone(),
     };
     let session = session_from_tree(ws, &machine.panes);
     Ok((machine, mirror, session))
@@ -2044,6 +2228,7 @@ fn settle_hydration(
     let name = settle_chosen_name(cx, client_ws, answered);
     crate::ui::machine_mirror::MachineMirrors::note_workspace_name(cx, host, machine_ws, name);
     let machine_was_empty = mirror.tabs.is_empty();
+    let pulled_projects = mirror.projects.clone();
     let was_dirty = {
         let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
             return false;
@@ -2063,6 +2248,12 @@ fn settle_hydration(
     else {
         return false;
     };
+    // The two branches below leave the window's layout alone, so its projects
+    // are left alone too — with whatever the tree had folded in, because a
+    // project with no tabs in it is a project the tab list cannot speak for.
+    // The rebuild further down needs none of this: it installs the tree's
+    // projects wholesale along with the tree's tabs.
+    app.update(cx, |app, _| adopt_projects(app, &pulled_projects));
     if adopt == Adopt::IfEmpty && !app.read(cx).tabs.is_empty() {
         // A full window over an empty tree has to write itself back, whether
         // or not an edit was waiting: the machine is missing tabs this window
@@ -2113,6 +2304,23 @@ fn settle_hydration(
     let showing = tabs_on_screen(cx, client_ws);
     settle_rebuild(cx, client_ws, wanted, &wanted_ids, &showing);
     true
+}
+
+/// Folds the machine's projects into the window's, keyed by id and led by the
+/// machine's order.
+///
+/// A union rather than a replacement because this runs where the window keeps
+/// its own layout: a project it declared while the machine was unreachable is
+/// still the user's, and the next `sync_window` is what puts it there.
+fn adopt_projects(app: &mut Tty7App, pulled: &[Project]) {
+    let mut merged = pulled.to_vec();
+    for own in &app.projects {
+        match merged.iter_mut().find(|p| p.id == own.id) {
+            Some(_) => {}
+            None => merged.push(own.clone()),
+        }
+    }
+    app.projects = merged;
 }
 
 /// What a rebuild leaves the window entitled to say, from how many tabs the
@@ -2330,6 +2538,53 @@ fn apply_to_mirror(mirror: &mut WsMirror, delta: &LayoutDelta) -> bool {
             t.sidebar_group = group.clone();
             true
         }
+        LayoutDelta::TabProjectChanged { tab, project } => {
+            let Some(t) = mirror.tabs.iter_mut().find(|t| t.id == *tab) else {
+                return false;
+            };
+            t.project = *project;
+            true
+        }
+        LayoutDelta::ProjectCreated { at, project } => {
+            mirror.projects.retain(|p| p.id != project.id);
+            let at = (*at).min(mirror.projects.len());
+            mirror.projects.insert(at, project.clone());
+            true
+        }
+        LayoutDelta::ProjectRenamed { project, name } => {
+            let Some(p) = mirror.projects.iter_mut().find(|p| p.id == *project) else {
+                return false;
+            };
+            p.name = name.clone();
+            true
+        }
+        LayoutDelta::ProjectRerooted { project, root } => {
+            let Some(p) = mirror.projects.iter_mut().find(|p| p.id == *project) else {
+                return false;
+            };
+            p.root = root.clone();
+            true
+        }
+        LayoutDelta::ProjectMoved { project, to } => {
+            let Some(from) = mirror.projects.iter().position(|p| p.id == *project) else {
+                return false;
+            };
+            let moved = mirror.projects.remove(from);
+            mirror
+                .projects
+                .insert((*to).min(mirror.projects.len()), moved);
+            true
+        }
+        LayoutDelta::ProjectDeleted { project } => {
+            let before = mirror.projects.len();
+            mirror.projects.retain(|p| p.id != *project);
+            for tab in &mut mirror.tabs {
+                if tab.project == Some(*project) {
+                    tab.project = None;
+                }
+            }
+            mirror.projects.len() != before
+        }
         LayoutDelta::TabMoved { tab, to } => {
             let Some(from) = mirror.tabs.iter().position(|t| t.id == *tab) else {
                 return false;
@@ -2480,6 +2735,46 @@ impl Tty7App {
                 }
                 true
             }
+            LayoutDelta::TabProjectChanged { tab, project } => {
+                if let Some(index) = index_of(&self.tabs, *tab) {
+                    self.tabs[index].project.set(*project);
+                }
+                true
+            }
+            LayoutDelta::ProjectCreated { at, project } => {
+                self.projects.retain(|p| p.id != project.id);
+                let at = (*at).min(self.projects.len());
+                self.projects.insert(at, project.clone());
+                true
+            }
+            LayoutDelta::ProjectRenamed { project, name } => {
+                if let Some(p) = self.projects.iter_mut().find(|p| p.id == *project) {
+                    p.name = name.clone();
+                }
+                true
+            }
+            LayoutDelta::ProjectRerooted { project, root } => {
+                if let Some(p) = self.projects.iter_mut().find(|p| p.id == *project) {
+                    p.root = root.clone();
+                }
+                true
+            }
+            LayoutDelta::ProjectMoved { project, to } => {
+                if let Some(from) = self.projects.iter().position(|p| p.id == *project) {
+                    let moved = self.projects.remove(from);
+                    self.projects.insert((*to).min(self.projects.len()), moved);
+                }
+                true
+            }
+            LayoutDelta::ProjectDeleted { project } => {
+                self.projects.retain(|p| p.id != *project);
+                for tab in &self.tabs {
+                    if tab.project.get() == Some(*project) {
+                        tab.project.set(None);
+                    }
+                }
+                true
+            }
             LayoutDelta::TabMoved { tab, to } => {
                 if let Some(from) = index_of(&self.tabs, *tab) {
                     let active_id = self.tabs.get(self.active).map(|t| t.tree_id.get());
@@ -2580,6 +2875,7 @@ impl Tty7App {
         gui.pane = pane;
         gui.name = tab.name.clone();
         *gui.sidebar_group.borrow_mut() = tab.sidebar_group.clone().map(std::path::PathBuf::from);
+        gui.project.set(tab.project);
         self.maximized = None;
         true
     }
@@ -3081,12 +3377,18 @@ mod tests {
                 dirty: false,
                 priming: false,
             };
-            let primed_with =
-                |tabs: Vec<TreeTab>| SyncPhase::Primed(WsMirror { tabs, active: None });
+            let primed_with = |tabs: Vec<TreeTab>| {
+                SyncPhase::Primed(WsMirror {
+                    tabs,
+                    active: None,
+                    projects: Vec::new(),
+                })
+            };
             let a_tab = || TreeTab {
                 id: TabId::new(),
                 name: None,
                 sidebar_group: None,
+                project: None,
                 root: PaneNode::Leaf { pane: 1 },
             };
 
@@ -3156,6 +3458,7 @@ mod tests {
                 // already drained the way `save_session` drains it on the way
                 // out of a window that has no tabs left.
                 state.sync = SyncPhase::Primed(WsMirror {
+                    projects: Vec::new(),
                     tabs: vec![],
                     active: None,
                 });
@@ -3585,6 +3888,7 @@ mod tests {
                     .unwrap();
                 state.rehydrate = None;
                 state.sync = SyncPhase::Primed(WsMirror {
+                    projects: Vec::new(),
                     tabs: vec![TreeTab::leaf(1), TreeTab::leaf(2)],
                     active: None,
                 });
@@ -3712,17 +4016,20 @@ mod tests {
                     .entry(ws)
                     .or_default();
                 state.sync = SyncPhase::Primed(WsMirror {
+                    projects: Vec::new(),
                     tabs: vec![
                         TreeTab {
                             id: put_up,
                             name: None,
                             sidebar_group: None,
+                            project: None,
                             root: PaneNode::Leaf { pane: 1 },
                         },
                         TreeTab {
                             id: failed,
                             name: None,
                             sidebar_group: None,
+                            project: None,
                             root: PaneNode::Leaf { pane: 2 },
                         },
                     ],
@@ -3803,17 +4110,20 @@ mod tests {
                     .entry(there_id)
                     .or_default();
                 state.sync = SyncPhase::Primed(WsMirror {
+                    projects: Vec::new(),
                     tabs: vec![
                         TreeTab {
                             id: theirs.0,
                             name: None,
                             sidebar_group: None,
+                            project: None,
                             root: PaneNode::Leaf { pane: 11 },
                         },
                         TreeTab {
                             id: theirs.1,
                             name: None,
                             sidebar_group: None,
+                            project: None,
                             root: PaneNode::Leaf { pane: 12 },
                         },
                     ],
@@ -3887,6 +4197,7 @@ mod tests {
                 state.epoch
             };
             let advanced = WsMirror {
+                projects: Vec::new(),
                 tabs: vec![TreeTab::leaf(7)],
                 active: None,
             };
@@ -3943,6 +4254,7 @@ mod tests {
             id,
             name: None,
             group: None,
+            project: None,
             root,
         }
     }
@@ -3977,6 +4289,136 @@ mod tests {
         }
     }
 
+    /// A project has to exist on the machine before a tab may name it, and it
+    /// may only be deleted once no tab does — so the two edits bracket the tab
+    /// pass rather than sitting beside it.
+    #[test]
+    fn a_project_is_created_before_its_tabs_and_deleted_after_them() {
+        let ws = WorkspaceId::new();
+        let id = TabId::new();
+        let project = Project::at("/repo/tty7");
+        let mut mirror = WsMirror::default();
+        let mut want = tab(id, leaf(7));
+        want.project = Some(project.id);
+
+        let ops = diff(
+            ws,
+            &mut mirror,
+            &[want.clone()],
+            std::slice::from_ref(&project),
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
+        assert_eq!(
+            ops,
+            vec![
+                ControlRequest::ProjectCreate {
+                    workspace: ws,
+                    at: Some(0),
+                    project: project.clone(),
+                },
+                ControlRequest::TabCreate {
+                    workspace: ws,
+                    at: Some(0),
+                    pane: seed(7),
+                    tab: Some(id),
+                },
+                ControlRequest::TabSetProject {
+                    workspace: ws,
+                    tab: id,
+                    project: Some(project.id),
+                },
+            ]
+        );
+        assert_eq!(mirror.projects, vec![project.clone()]);
+        assert_eq!(mirror.tabs[0].project, Some(project.id));
+
+        // The project is deleted while its tab stays open: the tab leaves it
+        // first, and only then does the project go.
+        let loose = tab(id, leaf(7));
+        let ops = diff(
+            ws,
+            &mut mirror,
+            &[loose],
+            &[],
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
+        assert_eq!(
+            ops,
+            vec![
+                ControlRequest::TabSetProject {
+                    workspace: ws,
+                    tab: id,
+                    project: None,
+                },
+                ControlRequest::ProjectDelete {
+                    workspace: ws,
+                    project: project.id,
+                },
+            ]
+        );
+        assert!(mirror.projects.is_empty());
+        assert_eq!(mirror.tabs.len(), 1, "the tab is not closed with it");
+    }
+
+    /// An additive sync speaks only for the tabs it is showing, so it never
+    /// deletes a project it happens not to know about.
+    #[test]
+    fn an_additive_sync_adds_projects_but_removes_none() {
+        let ws = WorkspaceId::new();
+        let known = Project::at("/w/known");
+        let mut mirror = WsMirror {
+            projects: vec![known.clone()],
+            ..WsMirror::default()
+        };
+        let ops = diff(ws, &mut mirror, &[], &[], None, SyncScope::Additive, &[]);
+        assert!(ops.is_empty());
+        assert_eq!(mirror.projects, vec![known]);
+    }
+
+    #[test]
+    fn renaming_and_moving_a_project_are_edits_not_a_rebuild() {
+        let ws = WorkspaceId::new();
+        let project = Project::at("/repo/tty7");
+        let mut mirror = WsMirror {
+            projects: vec![project.clone()],
+            ..WsMirror::default()
+        };
+        let renamed = Project {
+            name: Some("套利研究".into()),
+            root: "/repo/026/tty7".into(),
+            ..project.clone()
+        };
+        let ops = diff(
+            ws,
+            &mut mirror,
+            &[],
+            std::slice::from_ref(&renamed),
+            None,
+            SyncScope::Full,
+            &[],
+        );
+        assert_eq!(
+            ops,
+            vec![
+                ControlRequest::ProjectRename {
+                    workspace: ws,
+                    project: project.id,
+                    name: Some("套利研究".into()),
+                },
+                ControlRequest::ProjectSetRoot {
+                    workspace: ws,
+                    project: project.id,
+                    root: "/repo/026/tty7".into(),
+                },
+            ]
+        );
+        assert_eq!(mirror.projects, vec![renamed]);
+    }
+
     #[test]
     fn opening_the_first_tab_emits_a_create_carrying_the_client_identity() {
         let ws = WorkspaceId::new();
@@ -3984,7 +4426,15 @@ mod tests {
         let mut mirror = WsMirror::default();
         let desired = vec![tab(id, leaf(7))];
 
-        let ops = diff(ws, &mut mirror, &desired, Some(id), SyncScope::Full, &[]);
+        let ops = diff(
+            ws,
+            &mut mirror,
+            &desired,
+            &[],
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
         assert_eq!(
             ops,
             vec![ControlRequest::TabCreate {
@@ -4005,10 +4455,10 @@ mod tests {
         let id = TabId::new();
         let mut mirror = WsMirror::default();
         let one = vec![tab(id, leaf(1))];
-        diff(ws, &mut mirror, &one, Some(id), SyncScope::Full, &[]);
+        diff(ws, &mut mirror, &one, &[], Some(id), SyncScope::Full, &[]);
 
         let two = vec![tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))];
-        let ops = diff(ws, &mut mirror, &two, Some(id), SyncScope::Full, &[]);
+        let ops = diff(ws, &mut mirror, &two, &[], Some(id), SyncScope::Full, &[]);
         assert_eq!(
             ops,
             vec![ControlRequest::PaneSplit {
@@ -4032,13 +4482,14 @@ mod tests {
             ws,
             &mut mirror,
             &[tab(id, leaf(1))],
+            &[],
             Some(id),
             SyncScope::Full,
             &[],
         );
 
         let want = vec![tab(id, split(TreeAxis::Horizontal, 0.4, leaf(2), leaf(1)))];
-        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full, &[]);
+        let ops = diff(ws, &mut mirror, &want, &[], Some(id), SyncScope::Full, &[]);
         assert_eq!(
             ops,
             vec![ControlRequest::PaneSplit {
@@ -4062,13 +4513,14 @@ mod tests {
             ws,
             &mut mirror,
             &[tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))],
+            &[],
             Some(id),
             SyncScope::Full,
             &[],
         );
 
         let want = vec![tab(id, leaf(1))];
-        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full, &[]);
+        let ops = diff(ws, &mut mirror, &want, &[], Some(id), SyncScope::Full, &[]);
         assert_eq!(
             ops,
             vec![ControlRequest::PaneClose {
@@ -4092,14 +4544,22 @@ mod tests {
             id,
             grid(split(TreeAxis::Horizontal, 0.5, leaf(1), leaf(2)), leaf(3)),
         )];
-        diff(ws, &mut mirror, &before, Some(id), SyncScope::Full, &[]);
+        diff(
+            ws,
+            &mut mirror,
+            &before,
+            &[],
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
 
         // 1 dropped below 3, which leaves 2 holding the top row alone.
         let after = vec![tab(
             id,
             grid(leaf(2), split(TreeAxis::Vertical, 0.5, leaf(3), leaf(1))),
         )];
-        let ops = diff(ws, &mut mirror, &after, Some(id), SyncScope::Full, &[]);
+        let ops = diff(ws, &mut mirror, &after, &[], Some(id), SyncScope::Full, &[]);
         assert_eq!(
             ops,
             vec![ControlRequest::PaneMove {
@@ -4123,7 +4583,15 @@ mod tests {
             tab(host, leaf(1)),
             tab(guest, split(TreeAxis::Horizontal, 0.5, leaf(2), leaf(3))),
         ];
-        diff(ws, &mut mirror, &before, Some(host), SyncScope::Full, &[]);
+        diff(
+            ws,
+            &mut mirror,
+            &before,
+            &[],
+            Some(host),
+            SyncScope::Full,
+            &[],
+        );
 
         // The guest tab dropped on the right of pane 1, arriving as the column
         // of two it already was.
@@ -4136,7 +4604,15 @@ mod tests {
                 split(TreeAxis::Vertical, 0.5, leaf(2), leaf(3)),
             ),
         )];
-        let ops = diff(ws, &mut mirror, &after, Some(host), SyncScope::Full, &[]);
+        let ops = diff(
+            ws,
+            &mut mirror,
+            &after,
+            &[],
+            Some(host),
+            SyncScope::Full,
+            &[],
+        );
         assert_eq!(
             ops,
             vec![
@@ -4171,7 +4647,15 @@ mod tests {
             tab(host, split(TreeAxis::Horizontal, 0.5, leaf(1), leaf(2))),
             tab(guest, leaf(3)),
         ];
-        diff(ws, &mut mirror, &before, Some(host), SyncScope::Full, &[]);
+        diff(
+            ws,
+            &mut mirror,
+            &before,
+            &[],
+            Some(host),
+            SyncScope::Full,
+            &[],
+        );
 
         // Dropped against the host's outer edge, so the newcomer sits above the
         // whole two-pane layout rather than beside one of its panes. No single
@@ -4187,7 +4671,15 @@ mod tests {
                 split(TreeAxis::Horizontal, 0.5, leaf(1), leaf(2)),
             ),
         )];
-        diff(ws, &mut mirror, &after, Some(host), SyncScope::Full, &[]);
+        diff(
+            ws,
+            &mut mirror,
+            &after,
+            &[],
+            Some(host),
+            SyncScope::Full,
+            &[],
+        );
         assert_converged(&mirror, &after);
     }
 
@@ -4200,12 +4692,28 @@ mod tests {
             held,
             split(TreeAxis::Horizontal, 0.5, leaf(1), leaf(2)),
         )];
-        diff(ws, &mut mirror, &before, Some(held), SyncScope::Full, &[]);
+        diff(
+            ws,
+            &mut mirror,
+            &before,
+            &[],
+            Some(held),
+            SyncScope::Full,
+            &[],
+        );
 
         // Pane 2 dropped on the strip ahead of the tab it came from, so the tab
         // it becomes is desired *first*.
         let after = vec![tab(fresh, leaf(2)), tab(held, leaf(1))];
-        let ops = diff(ws, &mut mirror, &after, Some(fresh), SyncScope::Full, &[]);
+        let ops = diff(
+            ws,
+            &mut mirror,
+            &after,
+            &[],
+            Some(fresh),
+            SyncScope::Full,
+            &[],
+        );
         assert_eq!(
             ops,
             vec![
@@ -4240,7 +4748,15 @@ mod tests {
                 leaf(3),
             ),
         )];
-        diff(ws, &mut mirror, &before, Some(id), SyncScope::Full, &[]);
+        diff(
+            ws,
+            &mut mirror,
+            &before,
+            &[],
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
 
         let after = vec![tab(
             id,
@@ -4251,7 +4767,7 @@ mod tests {
                 split(TreeAxis::Vertical, 0.25, leaf(3), leaf(1)),
             ),
         )];
-        let ops = diff(ws, &mut mirror, &after, Some(id), SyncScope::Full, &[]);
+        let ops = diff(ws, &mut mirror, &after, &[], Some(id), SyncScope::Full, &[]);
         assert_eq!(
             ops,
             vec![
@@ -4288,7 +4804,15 @@ mod tests {
                 split(TreeAxis::Horizontal, 0.5, leaf(3), leaf(4)),
             ),
         )];
-        diff(ws, &mut mirror, &before, Some(id), SyncScope::Full, &[]);
+        diff(
+            ws,
+            &mut mirror,
+            &before,
+            &[],
+            Some(id),
+            SyncScope::Full,
+            &[],
+        );
 
         // 1 and 4 trade corners: two panes moved, which no one op describes.
         let after = vec![tab(
@@ -4300,7 +4824,7 @@ mod tests {
                 split(TreeAxis::Horizontal, 0.5, leaf(3), leaf(1)),
             ),
         )];
-        let ops = diff(ws, &mut mirror, &after, Some(id), SyncScope::Full, &[]);
+        let ops = diff(ws, &mut mirror, &after, &[], Some(id), SyncScope::Full, &[]);
         assert!(
             matches!(ops.first(), Some(ControlRequest::TabClose { .. })),
             "expected the rebuild fallback, got {ops:?}"
@@ -4317,13 +4841,14 @@ mod tests {
             ws,
             &mut mirror,
             &[tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))],
+            &[],
             Some(id),
             SyncScope::Full,
             &[],
         );
 
         let want = vec![tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(9)))];
-        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full, &[]);
+        let ops = diff(ws, &mut mirror, &want, &[], Some(id), SyncScope::Full, &[]);
         assert_eq!(
             ops,
             vec![ControlRequest::PaneReplace {
@@ -4352,13 +4877,14 @@ mod tests {
             ws,
             &mut mirror,
             &[tab(id, nested(0.5))],
+            &[],
             Some(id),
             SyncScope::Full,
             &[],
         );
 
         let want = vec![tab(id, nested(0.7))];
-        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full, &[]);
+        let ops = diff(ws, &mut mirror, &want, &[], Some(id), SyncScope::Full, &[]);
         assert_eq!(
             ops,
             vec![ControlRequest::PaneSetRatio {
@@ -4380,13 +4906,14 @@ mod tests {
             ws,
             &mut mirror,
             &[tab(a, leaf(1)), tab(b, leaf(2))],
+            &[],
             Some(b),
             SyncScope::Full,
             &[],
         );
 
         let want = vec![tab(a, leaf(1))];
-        let ops = diff(ws, &mut mirror, &want, None, SyncScope::Full, &[]);
+        let ops = diff(ws, &mut mirror, &want, &[], None, SyncScope::Full, &[]);
         assert_eq!(
             ops,
             vec![ControlRequest::TabClose {
@@ -4405,10 +4932,10 @@ mod tests {
         let (a, b, c) = (TabId::new(), TabId::new(), TabId::new());
         let mut mirror = WsMirror::default();
         let before = [tab(a, leaf(1)), tab(b, leaf(2)), tab(c, leaf(3))];
-        diff(ws, &mut mirror, &before, Some(c), SyncScope::Full, &[]);
+        diff(ws, &mut mirror, &before, &[], Some(c), SyncScope::Full, &[]);
 
         let want = vec![tab(c, leaf(3)), tab(a, leaf(1)), tab(b, leaf(2))];
-        let ops = diff(ws, &mut mirror, &want, Some(c), SyncScope::Full, &[]);
+        let ops = diff(ws, &mut mirror, &want, &[], Some(c), SyncScope::Full, &[]);
         assert_eq!(
             ops,
             vec![ControlRequest::TabMove {
@@ -4429,6 +4956,7 @@ mod tests {
             ws,
             &mut mirror,
             &[tab(id, leaf(1))],
+            &[],
             Some(id),
             SyncScope::Full,
             &[],
@@ -4438,7 +4966,7 @@ mod tests {
         named.name = Some("build".into());
         named.group = Some("/repo".into());
         let want = vec![named];
-        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full, &[]);
+        let ops = diff(ws, &mut mirror, &want, &[], Some(id), SyncScope::Full, &[]);
         assert_eq!(
             ops,
             vec![
@@ -4463,9 +4991,9 @@ mod tests {
         let (a, b) = (TabId::new(), TabId::new());
         let mut mirror = WsMirror::default();
         let both = [tab(a, leaf(1)), tab(b, leaf(2))];
-        diff(ws, &mut mirror, &both, Some(b), SyncScope::Full, &[]);
+        diff(ws, &mut mirror, &both, &[], Some(b), SyncScope::Full, &[]);
 
-        let ops = diff(ws, &mut mirror, &both, Some(a), SyncScope::Full, &[]);
+        let ops = diff(ws, &mut mirror, &both, &[], Some(a), SyncScope::Full, &[]);
         assert_eq!(
             ops,
             vec![ControlRequest::WorkspaceSetActiveTab {
@@ -4490,7 +5018,7 @@ mod tests {
                 split(TreeAxis::Vertical, 0.7, leaf(3), leaf(4)),
             ),
         )];
-        let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full, &[]);
+        let ops = diff(ws, &mut mirror, &want, &[], Some(id), SyncScope::Full, &[]);
         assert_eq!(
             ops,
             vec![
@@ -4535,9 +5063,9 @@ mod tests {
         let id = TabId::new();
         let mut mirror = WsMirror::default();
         let want = vec![tab(id, split(TreeAxis::Vertical, 0.5, leaf(1), leaf(2)))];
-        diff(ws, &mut mirror, &want, Some(id), SyncScope::Full, &[]);
+        diff(ws, &mut mirror, &want, &[], Some(id), SyncScope::Full, &[]);
         assert_eq!(
-            diff(ws, &mut mirror, &want, Some(id), SyncScope::Full, &[]),
+            diff(ws, &mut mirror, &want, &[], Some(id), SyncScope::Full, &[]),
             Vec::new()
         );
     }
@@ -4551,12 +5079,13 @@ mod tests {
             ws,
             &mut mirror,
             &[tab(id, leaf(1))],
+            &[],
             Some(id),
             SyncScope::Full,
             &[],
         );
 
-        let ops = diff(ws, &mut mirror, &[], None, SyncScope::Full, &[id]);
+        let ops = diff(ws, &mut mirror, &[], &[], None, SyncScope::Full, &[id]);
         assert_eq!(ops, Vec::new());
         assert_eq!(mirror.tabs.len(), 1, "the daemon tab survives the wait");
     }
@@ -4570,6 +5099,7 @@ mod tests {
             ws,
             &mut mirror,
             &[tab(a, leaf(1)), tab(b, leaf(2))],
+            &[],
             Some(b),
             SyncScope::Full,
             &[],
@@ -4580,6 +5110,7 @@ mod tests {
             ws,
             &mut mirror,
             &[tab(fresh, leaf(9))],
+            &[],
             Some(fresh),
             SyncScope::Additive,
             &[],
@@ -4607,6 +5138,7 @@ mod tests {
             id,
             name: None,
             sidebar_group: None,
+            project: None,
             root: PaneNode::Leaf { pane: 1 },
         };
         assert!(apply_to_mirror(
@@ -4627,6 +5159,7 @@ mod tests {
                     id,
                     name: None,
                     sidebar_group: None,
+                    project: None,
                     root: PaneNode::Split {
                         axis: TreeAxis::Vertical,
                         ratio: 0.5,
@@ -4651,6 +5184,7 @@ mod tests {
             ws,
             &mut writer,
             &[tab(id, leaf(1))],
+            &[],
             Some(id),
             SyncScope::Full,
             &[],
@@ -4660,6 +5194,7 @@ mod tests {
             ws,
             &mut writer,
             &final_state,
+            &[],
             Some(id),
             SyncScope::Full,
             &[],
@@ -4693,6 +5228,7 @@ mod tests {
         let tab_id = TabId::new();
         let ws = tty7_core::core::machine::Workspace {
             tabs: vec![TreeTab {
+                project: None,
                 id: tab_id,
                 name: Some("build".into()),
                 sidebar_group: Some("/repo".into()),
@@ -4791,6 +5327,7 @@ mod tests {
                 id: tab_id,
                 name: None,
                 sidebar_group: None,
+                project: None,
                 root: PaneNode::Leaf { pane: 7 },
             }],
             active_tab: Some(tab_id),
@@ -4820,6 +5357,7 @@ mod tests {
                 id: TabId::new(),
                 name: None,
                 sidebar_group: None,
+                project: None,
                 root: PaneNode::Leaf { pane: 1 },
             }],
             active_tab: Some(TabId::new()),
@@ -4837,13 +5375,14 @@ mod tests {
             ws,
             &mut mirror,
             &[tab(a, leaf(1)), tab(b, leaf(2))],
+            &[],
             Some(b),
             SyncScope::Full,
             &[],
         );
 
         let want = vec![tab(a, leaf(2)), tab(b, leaf(2))];
-        let ops = diff(ws, &mut mirror, &want, Some(b), SyncScope::Full, &[]);
+        let ops = diff(ws, &mut mirror, &want, &[], Some(b), SyncScope::Full, &[]);
         assert!(
             !ops.iter()
                 .any(|op| matches!(op, ControlRequest::PaneReplace { .. })),

@@ -12,6 +12,8 @@ use std::rc::Rc;
 
 use std::path::{Path, PathBuf};
 
+use tty7_core::core::machine::ProjectId;
+
 use crate::core::config::{Config, SidebarGrouping};
 use crate::terminal::git_status::GitStatusCache;
 use crate::ui::app::{TITLE_BAR_HEIGHT, Tty7App};
@@ -27,6 +29,10 @@ use crate::ui::tab_strip::{
 pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.;
 
 const GRAB_HANDLE_W: f32 = 48.;
+
+/// The hover group the whole rail belongs to, so the two add buttons can wait
+/// until the pointer is somewhere in the sidebar before showing themselves.
+const SIDEBAR_GROUP: &str = "tab-sidebar";
 
 const ROW_GAP: f32 = 2.;
 
@@ -161,7 +167,8 @@ impl Tty7App {
             .gap_0p5();
 
         let keys: Rc<Vec<Option<PathBuf>>> = Rc::new(self.sidebar_group_keys(cx));
-        let sections = sidebar_sections(&keys);
+        let members: Vec<Option<ProjectId>> = self.tabs.iter().map(|t| t.project.get()).collect();
+        let sections = Rc::new(sidebar_sections(&keys, &members, &self.named_projects()));
 
         // ⌘N runs ActivateTabN, which goes through `activate_visual` — the
         // Nth row as the sidebar lays it out, not the Nth tab in `self.tabs`.
@@ -226,8 +233,13 @@ impl Tty7App {
         };
         let rem = window.rem_size().as_f32();
         let rendered = |ix: &usize| !visible_by_section[*ix].is_empty();
+        // A project is on screen because someone declared it, not because a
+        // tab landed in it, so an empty one still draws its header — that row
+        // is where its first tab comes from. Under a live search it drops out
+        // like anything else that matched nothing.
+        let project_rendered = |ix: &usize| query.is_empty() || !visible_by_section[*ix].is_empty();
         let repo_slots: Vec<usize> = (0..sections.len())
-            .filter(|&ix| sections[ix].key.is_some())
+            .filter(|&ix| sections[ix].key.repo().is_some())
             .filter(rendered)
             .collect();
         let repo_groups = repo_slots.len();
@@ -235,14 +247,11 @@ impl Tty7App {
             Rc::new(RefCell::new(vec![Bounds::default(); repo_groups]));
         let group_preview =
             reorder::preview(&self.reorder, &Surface::SidebarGroups, repo_groups, pointer);
-        let repo_roots: Vec<PathBuf> = repo_slots
-            .iter()
-            .filter_map(|&ix| sections[ix].key.clone())
-            .collect();
         let slot_display: Vec<usize> = match &group_preview {
             Some(p) => {
-                if let (Some(from), Some(to)) = (repo_roots.get(p.from), repo_roots.get(p.target))
-                    && let Some(order) = regrouped_order(&keys, from, to)
+                if let (Some(&from), Some(&to)) = (repo_slots.get(p.from), repo_slots.get(p.target))
+                    && let Some(order) =
+                        regrouped_order(&sections, &sections[from].key, &sections[to].key)
                 {
                     reorder::set_pending(&self.reorder, &Surface::SidebarGroups, order);
                 }
@@ -250,22 +259,72 @@ impl Tty7App {
             }
             None => (0..repo_groups).collect(),
         };
-        let mut blocks: Vec<(Option<usize>, usize)> = slot_display
-            .into_iter()
-            .map(|slot| (Some(slot), repo_slots[slot]))
+        let mut blocks: Vec<(Option<usize>, usize)> = (0..sections.len())
+            .filter(|&ix| sections[ix].key.project().is_some())
+            .filter(project_rendered)
+            .map(|ix| (None, ix))
             .collect();
         blocks.extend(
+            slot_display
+                .into_iter()
+                .map(|slot| (Some(slot), repo_slots[slot])),
+        );
+        blocks.extend(
             (0..sections.len())
-                .filter(|&ix| sections[ix].key.is_none())
+                .filter(|&ix| sections[ix].key == SectionKey::Scratch)
                 .filter(rendered)
                 .map(|ix| (None, ix)),
         );
 
-        for (group_slot, group_ix) in blocks {
+        let projects_shown = blocks
+            .iter()
+            .filter(|(_, ix)| sections[*ix].key.project().is_some())
+            .count();
+        // The two headings are what say which half of the rail you are
+        // looking at: above the second one everything was declared, below it
+        // everything was derived. Both are drawn whether or not anything is
+        // under them — an empty PROJECTS is the invitation to declare one, and
+        // TABS carries the new-tab button.
+        //
+        // A live search hides them — the query is asking about tabs, and
+        // chrome that always matches would keep "nothing matches" from ever
+        // showing.
+        let headings = query.is_empty();
+        let projects_folded = self.is_folded(&SidebarFold::Projects);
+        let tabs_folded = self.is_folded(&SidebarFold::Tabs);
+        if headings {
+            list = list.child(self.projects_heading(cx));
+        }
+
+        let block_count = blocks.len();
+        for (block_at, (group_slot, group_ix)) in blocks.into_iter().enumerate() {
+            let declared = block_at < projects_shown;
+            if headings && block_at == projects_shown {
+                list = list.child(self.tabs_heading(projects_shown > 0 && !projects_folded, cx));
+            }
+            // A folded heading keeps its own half off the rail entirely,
+            // headers and all. Only a heading can do that; folding one block
+            // leaves its header behind, because that header is the way back.
+            if headings && (declared && projects_folded || !declared && tabs_folded) {
+                continue;
+            }
             let section = &sections[group_ix];
             let group_key = section.key.clone();
+            let project = group_key.project();
+            let folded = self.is_folded(&SidebarFold::Section(group_key.clone()));
+            // A folded block draws its header and nothing else, so the rows
+            // are never built — and never write a rectangle a pane could be
+            // dropped onto, which is what `sidebar_slots` being blanked every
+            // frame is for.
+            if folded && section.tabs.is_empty() && project.is_none() {
+                continue;
+            }
             let mut rows: Vec<ContextMenu<Stateful<Div>>> = Vec::new();
-            let visible = visible_by_section[group_ix].clone();
+            let visible = if folded {
+                Vec::new()
+            } else {
+                visible_by_section[group_ix].clone()
+            };
             let visible_tabs: Vec<usize> = visible.clone();
             let row_slots: Rc<RefCell<Vec<Bounds<Pixels>>>> =
                 Rc::new(RefCell::new(vec![Bounds::default(); visible.len()]));
@@ -797,14 +856,14 @@ impl Tty7App {
                 }));
             }
 
-            if rows.is_empty() {
+            if rows.is_empty() && project.is_none() && !folded {
                 continue;
             }
 
             let row_display: Vec<usize> = match &row_preview {
                 Some(p) => {
                     if let Some(order) =
-                        reordered_rows(&keys, &group_key, &visible_tabs, p.from, p.target)
+                        reordered_rows(&sections, &group_key, &visible_tabs, p.from, p.target)
                     {
                         reorder::set_pending(
                             &self.reorder,
@@ -816,7 +875,11 @@ impl Tty7App {
                 }
                 None => (0..rows.len()).collect(),
             };
-            let row_count = rows.len();
+            let row_count = if folded {
+                visible_by_section[group_ix].len()
+            } else {
+                rows.len()
+            };
             let mut rows: Vec<Option<ContextMenu<Stateful<Div>>>> =
                 rows.into_iter().map(Some).collect();
             let rows: Vec<AnyElement> = row_display
@@ -852,19 +915,46 @@ impl Tty7App {
                         .into_any_element(),
                 })
                 .collect();
-            let header = section.name.clone().map(|name| {
-                let label: SharedString = name.to_uppercase().into();
-                h_flex()
+            // The header a project is being renamed under is a text box, so
+            // the name is edited where it is read rather than in a dialog
+            // somewhere else.
+            let renaming = project.and_then(|id| {
+                self.project_rename
+                    .as_ref()
+                    .filter(|r| r.project == id)
+                    .map(|r| r.input.clone())
+            });
+            let header: Option<AnyElement> = section.name.clone().map(|name| {
+                // Left in the case it came in. These names are directories
+                // (`tty7`, `025/1inch`) and translated words, and capitalising
+                // them made a Latin one shout while a Chinese one — where
+                // there is no case to raise — stayed exactly as it was: one
+                // style, two different readings. Sentence case also puts a
+                // block header a clear step below the heading above it, which
+                // is the whole of the hierarchy in this rail.
+                let label: SharedString = name.into();
+                let head = h_flex()
                     .id(("sidebar-group", group_ix))
+                    .group(SharedString::from(format!("sidebar-head-{group_ix}")))
                     .w_full()
                     .items_center()
-                    .gap_1p5()
-                    .pl_2()
+                    .gap_1()
+                    .pl_1p5()
                     .pr_1p5()
                     .pt_1p5()
                     .pb_0p5()
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
+                    .text_size(px(12.))
+                    .text_color(cx.theme().sidebar_foreground)
+                    .cursor_pointer()
+                    .on_click({
+                        let key = group_key.clone();
+                        cx.listener(move |this, _, _window, cx| {
+                            cx.stop_propagation();
+                            this.toggle_fold(SidebarFold::Section(key.clone()));
+                            cx.notify();
+                        })
+                    })
+                    .child(fold_chevron(folded, 12.))
                     .when_some(group_slot, |header, slot| {
                         crate::ui::reorder::cursor_grab(header).on_drag(DragGroup, {
                             let state = self.reorder.clone();
@@ -883,20 +973,99 @@ impl Tty7App {
                             }
                         })
                     })
-                    .child(
-                        div()
+                    .when(project.is_some(), |head| {
+                        head.child(
+                            Icon::empty()
+                                .path("icons/folder.svg")
+                                .size(px(12.))
+                                .flex_shrink_0()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                    })
+                    .child(match renaming {
+                        Some(input) => div()
+                            .flex_1()
+                            .min_w_0()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(Input::new(&input).appearance(false).xsmall())
+                            .into_any_element(),
+                        None => div()
                             .flex_shrink(1.)
                             .min_w_0()
                             .truncate()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(label),
-                    )
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(label)
+                            .into_any_element(),
+                    })
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_color(cx.theme().muted_foreground.opacity(0.7))
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
                             .child(row_count.to_string()),
                     )
+                    .when_some(project, |head, id| {
+                        head.child(div().flex_1()).child(
+                            div()
+                                .flex_shrink_0()
+                                .opacity(0.)
+                                .group_hover(
+                                    SharedString::from(format!("sidebar-head-{group_ix}")),
+                                    |s| s.opacity(1.),
+                                )
+                                .child(
+                                    crate::ui::tab_strip::hit_target(
+                                        Button::new(("project-new-tab", group_ix))
+                                            .icon(IconName::Plus)
+                                            .ghost()
+                                            .xsmall(),
+                                    )
+                                    .tooltip(t(L10nKey::ProjectNewTab))
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.new_tab_in_project(id, window, cx);
+                                        },
+                                    )),
+                                ),
+                        )
+                    });
+                match project {
+                    Some(id) => {
+                        let menu_app = cx.entity().downgrade();
+                        head.context_menu(move |menu, window, cx| {
+                            Tty7App::project_context_menu(menu, id, &menu_app, window, cx)
+                        })
+                        .into_any_element()
+                    }
+                    None => head.into_any_element(),
+                }
+            });
+
+            // A project with nothing in it says so, and the line that says it
+            // is also the way to put something in it.
+            let empty_hint = (project.is_some() && rows.is_empty() && !folded).then(|| {
+                let id = project.expect("checked just above");
+                h_flex()
+                    .id(("project-empty", group_ix))
+                    .w_full()
+                    .items_center()
+                    .gap_1p5()
+                    .pl_2()
+                    .pr_2()
+                    .py_1()
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground.opacity(0.8))
+                    .hover(|s| s.bg(gpui::rgb(sf.hover)))
+                    .child(Icon::new(IconName::Plus).size(px(11.)).flex_shrink_0())
+                    .child(div().truncate().child(t(L10nKey::ProjectEmpty)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.new_tab_in_project(id, window, cx);
+                    }))
+                    .into_any_element()
             });
 
             let block = v_flex()
@@ -910,6 +1079,7 @@ impl Tty7App {
                 )
                 .children(header)
                 .children(rows)
+                .children(empty_hint)
                 .when_some(group_slot, |block, slot| {
                     block.child(
                         canvas(
@@ -928,7 +1098,9 @@ impl Tty7App {
                     )
                 });
 
-            any_rows = true;
+            // What the search found, not what was drawn: a block folded shut
+            // still matched, and "nothing matches" would be a lie.
+            any_rows |= !visible_by_section[group_ix].is_empty();
             list = list.child(match (&group_preview, group_slot) {
                 (Some(p), Some(slot)) if p.from == slot => {
                     deferred(block.relative().top(p.held)).into_any_element()
@@ -949,6 +1121,13 @@ impl Tty7App {
                 }
                 _ => block.into_any_element(),
             });
+        }
+
+        // The derived half can be empty — every tab filed under a project —
+        // and its heading still has to be there: it is the boundary between
+        // the two halves, and it carries the new-tab button.
+        if headings && block_count == projects_shown {
+            list = list.child(self.tabs_heading(projects_shown > 0 && !projects_folded, cx));
         }
 
         if !any_rows && !query.is_empty() {
@@ -983,12 +1162,8 @@ impl Tty7App {
                 )
                 .child(div().flex_1().min_w(px(GRAB_HANDLE_W)))
             })
-            .child(
-                div()
-                    .occlude()
-                    .flex_shrink_0()
-                    .child(self.new_tab_button("sidebar-add", cx)),
-            )
+            // No new-tab button here: it lives on the TABS heading, beside
+            // the half of the rail it adds to.
             .child(
                 div().occlude().flex_shrink_0().child(
                     crate::ui::tab_strip::chrome_tile(
@@ -1140,6 +1315,7 @@ impl Tty7App {
             });
 
         div()
+            .group(SIDEBAR_GROUP)
             .relative()
             .flex_shrink_0()
             .w(px(width))
@@ -1227,6 +1403,125 @@ impl Tty7App {
             .then_some(info)
     }
 
+    /// Each project's id beside the name its header reads — an explicit name
+    /// when it has one, otherwise the folder title with the same collision
+    /// walk-up a repo group header does.
+    pub(crate) fn named_projects(&self) -> Vec<(ProjectId, String)> {
+        self.projects
+            .iter()
+            .map(|p| p.id)
+            .zip(crate::ui::projects::project_names(&self.projects))
+            .collect()
+    }
+
+    pub(crate) fn is_folded(&self, what: &SidebarFold) -> bool {
+        self.sidebar_folded.borrow().contains(what)
+    }
+
+    pub(crate) fn toggle_fold(&self, what: SidebarFold) {
+        let mut folded = self.sidebar_folded.borrow_mut();
+        if !folded.remove(&what) {
+            folded.insert(what);
+        }
+    }
+
+    /// One of the rail's two top-level headings — the only thing that says
+    /// which half of the sidebar you are looking at: above the second one
+    /// everything was declared, below it everything was derived.
+    ///
+    /// Deliberately the quietest text in the rail, and the only text in it set
+    /// in capitals. That pair is what makes it read as chrome rather than as
+    /// one more block header: a heading that shared the block headers' size,
+    /// case and weight — which is what this was at first — left eight rows
+    /// that all looked alike and no way to tell what was inside what.
+    ///
+    /// The two halves are told apart by the space above the second heading
+    /// and nothing else. A hairline there was tried and looked like what it
+    /// was — a rule drawn edge to edge across a 200px rail, sitting right
+    /// under whatever the block above ended with. Every sidebar on this
+    /// platform separates its sections with whitespace and a quiet label;
+    /// none of them draws a line.
+    ///
+    /// `leading_gap` is the caller's answer to "is there anything up there to
+    /// be separated from". Whitespace between two headings with nothing
+    /// between them is not a separator, it is a hole.
+    fn rail_heading<A: IntoElement>(
+        &self,
+        id: &'static str,
+        label: SharedString,
+        fold: SidebarFold,
+        leading_gap: bool,
+        add: A,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<A> {
+        let folded = self.is_folded(&fold);
+        h_flex()
+            .id(id)
+            .group(SharedString::from(id))
+            .w_full()
+            .items_center()
+            .gap_1()
+            .pl_1()
+            .pr_1p5()
+            .pb_1()
+            .when(leading_gap, |h| h.mt_2())
+            .pt_1p5()
+            .text_size(px(11.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(cx.theme().muted_foreground)
+            .child(fold_chevron(folded, 11.))
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .opacity(0.)
+                    .group_hover(SIDEBAR_GROUP, |s| s.opacity(1.))
+                    .child(add),
+            )
+            .cursor_pointer()
+            .hover(|s| s.text_color(cx.theme().sidebar_foreground))
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                cx.stop_propagation();
+                this.toggle_fold(fold.clone());
+                cx.notify();
+            }))
+    }
+
+    fn projects_heading(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let add = crate::ui::tab_strip::hit_target(
+            Button::new("sidebar-project-add")
+                .icon(IconName::Plus)
+                .ghost()
+                .xsmall(),
+        )
+        .tooltip(t(L10nKey::ProjectNewTooltip))
+        .on_click(cx.listener(|this, _, window, cx| {
+            cx.stop_propagation();
+            this.new_project(window, cx);
+        }));
+        self.rail_heading(
+            "sidebar-projects-heading",
+            SharedString::from(t(L10nKey::SidebarProjectsHeading).to_uppercase()),
+            SidebarFold::Projects,
+            // The first thing in the list; the gap above it is the list's own
+            // top padding.
+            false,
+            add,
+            cx,
+        )
+    }
+
+    fn tabs_heading(&self, leading_gap: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        self.rail_heading(
+            "sidebar-tabs-heading",
+            SharedString::from(t(L10nKey::SidebarTabsHeading).to_uppercase()),
+            SidebarFold::Tabs,
+            leading_gap,
+            self.new_tab_heading_button("sidebar-add", cx),
+            cx,
+        )
+    }
+
     fn sidebar_group_keys(&self, cx: &gpui::App) -> Vec<Option<PathBuf>> {
         let grouping = cx.global::<Config>().sidebar_grouping;
         self.tabs
@@ -1250,15 +1545,20 @@ impl Tty7App {
             .collect()
     }
 
+    /// The tabs the rail is showing, in the order it shows them — which is
+    /// what ⌘N counts and what a row's badge names.
+    ///
+    /// Rows inside a folded block are not on screen, so they are not in the
+    /// count: leaving them in would number the visible rows ⌘1, ⌘4, ⌘5, and
+    /// ⌘2 would open something nobody can see.
     fn visual_tab_order(&self, cx: &gpui::App) -> Vec<usize> {
         if cx.global::<Config>().tab_bar_position != crate::core::config::TabBarPosition::Left {
             return (0..self.tabs.len()).collect();
         }
         let keys = self.sidebar_group_keys(cx);
-        sidebar_sections(&keys)
-            .into_iter()
-            .flat_map(|s| s.tabs)
-            .collect()
+        let members: Vec<Option<ProjectId>> = self.tabs.iter().map(|t| t.project.get()).collect();
+        let sections = sidebar_sections(&keys, &members, &self.named_projects());
+        on_screen(&sections, &self.sidebar_folded.borrow())
     }
 
     pub(crate) fn activate_visual(
@@ -1316,53 +1616,170 @@ fn resolved_group(
     })
 }
 
+/// What a block of rows in the sidebar is grouped by.
+///
+/// Two of these are derived from where the tabs happen to be — a repo the
+/// probe found, or nothing it could place — and one is declared. They share a
+/// type because a row belongs to exactly one block whichever kind it is, and
+/// everything that reads the sidebar's shape (⌘N order, in-block reordering,
+/// which rows a drag may shuffle) wants that one answer.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum SectionKey {
+    /// A project someone declared, by its id.
+    Project(ProjectId),
+    /// A repo home the probe derived from a tab's cwd.
+    Repo(PathBuf),
+    /// The tabs the probe could not place.
+    Scratch,
+}
+
+impl SectionKey {
+    fn repo(&self) -> Option<&PathBuf> {
+        match self {
+            SectionKey::Repo(root) => Some(root),
+            _ => None,
+        }
+    }
+
+    fn project(&self) -> Option<ProjectId> {
+        match self {
+            SectionKey::Project(id) => Some(*id),
+            _ => None,
+        }
+    }
+}
+
+/// The tabs `sections` actually puts on screen, in row order, with every
+/// folded block left out — the order ⌘N counts.
+fn on_screen(sections: &[Section], folded: &std::collections::HashSet<SidebarFold>) -> Vec<usize> {
+    sections
+        .iter()
+        .filter(|s| {
+            let half = match s.key {
+                SectionKey::Project(_) => SidebarFold::Projects,
+                _ => SidebarFold::Tabs,
+            };
+            !folded.contains(&half) && !folded.contains(&SidebarFold::Section(s.key.clone()))
+        })
+        .flat_map(|s| s.tabs.clone())
+        .collect()
+}
+
+/// The twist that says whether a block is open, drawn where a disclosure
+/// triangle goes — pointing down when what is under it is showing.
+fn fold_chevron(folded: bool, size: f32) -> impl IntoElement {
+    Icon::new(if folded {
+        IconName::ChevronRight
+    } else {
+        IconName::ChevronDown
+    })
+    .size(px(size))
+    .flex_shrink_0()
+}
+
+/// Something in the rail that folds shut, named by the header you click.
+///
+/// Held in memory rather than in the config: re-opening a block is one click,
+/// and the alternative is a map keyed by repo path — the orphaned-key problem
+/// this whole feature was written to get away from.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum SidebarFold {
+    /// The PROJECTS heading, and with it every project under it.
+    Projects,
+    /// The TABS heading, and with it the whole derived grouping.
+    Tabs,
+    /// One block, header left showing.
+    Section(SectionKey),
+}
+
 #[derive(Debug, PartialEq)]
 struct Section {
-    key: Option<PathBuf>,
+    key: SectionKey,
     name: Option<String>,
     tabs: Vec<usize>,
 }
 
-fn sidebar_sections(keys: &[Option<PathBuf>]) -> Vec<Section> {
+/// The sidebar's blocks, top to bottom: every declared project in the order
+/// the workspace holds them, then the derived grouping over whatever tabs no
+/// project has claimed.
+///
+/// The second half is the whole of today's sidebar, unchanged — the only
+/// difference is the tabs it is fed. `projects` carries each project's id
+/// beside the name its header reads, resolved by the caller so this can be
+/// tested without one.
+fn sidebar_sections(
+    keys: &[Option<PathBuf>],
+    members: &[Option<ProjectId>],
+    projects: &[(ProjectId, String)],
+) -> Vec<Section> {
+    let member_of = |i: usize| members.get(i).copied().flatten();
+    let mut out: Vec<Section> = projects
+        .iter()
+        .map(|(id, name)| Section {
+            key: SectionKey::Project(*id),
+            name: Some(name.clone()),
+            tabs: (0..keys.len())
+                .filter(|&i| member_of(i) == Some(*id))
+                .collect(),
+        })
+        .collect();
+    let loose: Vec<usize> = (0..keys.len())
+        .filter(|&i| member_of(i).is_none())
+        .collect();
+
     let mut group_order: Vec<&PathBuf> = Vec::new();
-    for k in keys.iter().flatten() {
+    for k in loose.iter().filter_map(|&i| keys[i].as_ref()) {
         if !group_order.iter().any(|g| *g == k) {
             group_order.push(k);
         }
     }
     if group_order.is_empty() {
-        return vec![Section {
-            key: None,
+        if loose.is_empty() && !out.is_empty() {
+            return out;
+        }
+        out.push(Section {
+            key: SectionKey::Scratch,
+            // The only derived block there is, so it wears no header of its
+            // own: its rows sit directly under TABS, which is what a
+            // workspace with no repos has always looked like. A name would
+            // only be a second heading saying the same thing.
             name: None,
-            tabs: (0..keys.len()).collect(),
-        }];
+            tabs: loose,
+        });
+        return out;
     }
     let names = group_names(&group_order);
-    let mut sections: Vec<Section> = group_order
-        .iter()
-        .zip(names)
-        .map(|(root, name)| Section {
-            key: Some((*root).clone()),
+    out.extend(group_order.iter().zip(names).map(|(root, name)| {
+        Section {
+            key: SectionKey::Repo((*root).clone()),
             name: Some(name),
-            tabs: (0..keys.len())
+            tabs: loose
+                .iter()
+                .copied()
                 .filter(|&i| keys[i].as_ref() == Some(*root))
                 .collect(),
-        })
+        }
+    }));
+    let scratch: Vec<usize> = loose
+        .iter()
+        .copied()
+        .filter(|&i| keys[i].is_none())
         .collect();
-    let scratch: Vec<usize> = (0..keys.len()).filter(|&i| keys[i].is_none()).collect();
     if !scratch.is_empty() {
-        sections.push(Section {
-            key: None,
+        out.push(Section {
+            key: SectionKey::Scratch,
             name: Some(t(L10nKey::SidebarScratchGroup).to_string()),
             tabs: scratch,
         });
     }
-    sections
+    out
 }
 
+/// The whole tab order with one row moved within its own block. Rows filtered
+/// out by the search are not in `visible` and are left where they are.
 fn reordered_rows(
-    keys: &[Option<PathBuf>],
-    group: &Option<PathBuf>,
+    sections: &[Section],
+    key: &SectionKey,
     visible: &[usize],
     from: usize,
     to: usize,
@@ -1371,46 +1788,44 @@ fn reordered_rows(
     if moved == anchor {
         return None;
     }
-    let mut members: Vec<usize> = (0..keys.len()).filter(|&i| keys[i] == *group).collect();
+    let mut members = sections.iter().find(|s| s.key == *key)?.tabs.clone();
     members.retain(|&i| i != moved);
     let at = members.iter().position(|&i| i == anchor)? + usize::from(to > from);
     members.insert(at, moved);
 
-    let mut out: Vec<usize> = Vec::with_capacity(keys.len());
-    for g in sidebar_sections(keys).iter().map(|s| &s.key) {
-        if g == group {
-            out.extend_from_slice(&members);
-        } else {
-            out.extend((0..keys.len()).filter(|&i| keys[i] == *g));
-        }
-    }
-    Some(out)
+    Some(
+        sections
+            .iter()
+            .flat_map(|s| {
+                if s.key == *key {
+                    members.clone()
+                } else {
+                    s.tabs.clone()
+                }
+            })
+            .collect(),
+    )
 }
 
-fn regrouped_order(keys: &[Option<PathBuf>], from: &Path, to: &Path) -> Option<Vec<usize>> {
+/// The whole tab order with one block moved into another block's slot.
+fn regrouped_order(sections: &[Section], from: &SectionKey, to: &SectionKey) -> Option<Vec<usize>> {
     if from == to {
         return None;
     }
-    let mut order: Vec<&PathBuf> = Vec::new();
-    for k in keys.iter().flatten() {
-        if !order.iter().any(|g| *g == k) {
-            order.push(k);
-        }
-    }
-    let fi = order.iter().position(|g| g.as_path() == from)?;
-    let ti = order.iter().position(|g| g.as_path() == to)?;
+    let fi = sections.iter().position(|s| s.key == *from)?;
+    let ti = sections.iter().position(|s| s.key == *to)?;
+    let mut order: Vec<usize> = (0..sections.len()).collect();
     let moved = order.remove(fi);
     order.insert(ti, moved);
-
-    let mut out: Vec<usize> = Vec::with_capacity(keys.len());
-    for g in &order {
-        out.extend((0..keys.len()).filter(|&i| keys[i].as_ref() == Some(*g)));
-    }
-    out.extend((0..keys.len()).filter(|&i| keys[i].is_none()));
-    Some(out)
+    Some(
+        order
+            .into_iter()
+            .flat_map(|i| sections[i].tabs.clone())
+            .collect(),
+    )
 }
 
-fn group_names(roots: &[&PathBuf]) -> Vec<String> {
+pub(crate) fn group_names(roots: &[&PathBuf]) -> Vec<String> {
     let comps: Vec<Vec<String>> = roots
         .iter()
         .map(|r| {
@@ -1527,6 +1942,20 @@ mod tests {
         }
     }
 
+    /// The two-argument shape every test below is written against: no
+    /// projects declared, so nothing is filed under one.
+    fn loose(n: usize) -> Vec<Option<ProjectId>> {
+        vec![None; n]
+    }
+
+    fn sections_of(keys: &[Option<PathBuf>]) -> Vec<Section> {
+        sidebar_sections(keys, &loose(keys.len()), &[])
+    }
+
+    fn flatten(sections: &[Section]) -> Vec<usize> {
+        sections.iter().flat_map(|s| s.tabs.clone()).collect()
+    }
+
     #[test]
     fn sections_order_groups_by_first_appearance_scratch_last() {
         let keys = vec![
@@ -1535,24 +1964,137 @@ mod tests {
             Some(p("/w/alpha")),
             Some(p("/w/beta")),
         ];
-        let sections = sidebar_sections(&keys);
-        let shape: Vec<(Option<PathBuf>, Option<String>, Vec<usize>)> = sections
+        let shape: Vec<(SectionKey, Option<String>, Vec<usize>)> = sections_of(&keys)
             .into_iter()
             .map(|s| (s.key, s.name, s.tabs))
             .collect();
         assert_eq!(
             shape,
             vec![
-                (Some(p("/w/beta")), Some("beta".into()), vec![0, 3]),
-                (Some(p("/w/alpha")), Some("alpha".into()), vec![2]),
-                (None, Some("Scratch".into()), vec![1]),
+                (
+                    SectionKey::Repo(p("/w/beta")),
+                    Some("beta".into()),
+                    vec![0, 3]
+                ),
+                (
+                    SectionKey::Repo(p("/w/alpha")),
+                    Some("alpha".into()),
+                    vec![2]
+                ),
+                (SectionKey::Scratch, Some("Scratch".into()), vec![1]),
             ]
         );
 
-        let flat = sidebar_sections(&[None, None]);
+        let flat = sections_of(&[None, None]);
         assert_eq!(flat.len(), 1);
-        assert_eq!(flat[0].name, None);
+        assert_eq!(
+            flat[0].name, None,
+            "one block and nothing above it: no header"
+        );
         assert_eq!(flat[0].tabs, vec![0, 1]);
+    }
+
+    /// The whole point of the additive shape: the derived half is fed only the
+    /// tabs no project claimed, and is otherwise exactly what it was.
+    #[test]
+    fn a_project_takes_its_tabs_out_of_the_derived_grouping() {
+        let arb = ProjectId::new();
+        let keys = vec![
+            Some(p("/w/beta")),
+            Some(p("/w/alpha")),
+            Some(p("/w/beta")),
+            None,
+        ];
+        // Tab 0 is filed under the project; the other tab in /w/beta is not.
+        let members = vec![Some(arb), None, None, None];
+        let sections = sidebar_sections(&keys, &members, &[(arb, "套利研究".into())]);
+        let shape: Vec<(SectionKey, Option<String>, Vec<usize>)> = sections
+            .into_iter()
+            .map(|s| (s.key, s.name, s.tabs))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (SectionKey::Project(arb), Some("套利研究".into()), vec![0]),
+                (
+                    SectionKey::Repo(p("/w/alpha")),
+                    Some("alpha".into()),
+                    vec![1]
+                ),
+                (SectionKey::Repo(p("/w/beta")), Some("beta".into()), vec![2]),
+                (SectionKey::Scratch, Some("Scratch".into()), vec![3]),
+            ],
+            "the repo group keeps the tab the project did not take, and \
+             /w/alpha now leads because first appearance is read over the \
+             tabs that are left"
+        );
+    }
+
+    /// A project stays when the last tab in it closes — that is the whole
+    /// difference between it and a group.
+    #[test]
+    fn a_project_with_no_tabs_is_still_a_section() {
+        let empty = ProjectId::new();
+        let sections = sidebar_sections(&[None], &[None], &[(empty, "做市实验".into())]);
+        assert_eq!(sections[0].key, SectionKey::Project(empty));
+        assert!(sections[0].tabs.is_empty());
+        assert_eq!(
+            sections[1].name, None,
+            "the only derived block wears no header: its rows sit under TABS"
+        );
+    }
+
+    #[test]
+    fn every_tab_in_a_project_leaves_no_block_below() {
+        let only = ProjectId::new();
+        let sections = sidebar_sections(
+            &[None, None],
+            &[Some(only), Some(only)],
+            &[(only, "p".into())],
+        );
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].tabs, vec![0, 1]);
+    }
+
+    fn folds(of: &[SidebarFold]) -> std::collections::HashSet<SidebarFold> {
+        of.iter().cloned().collect()
+    }
+
+    /// Folding is what is on screen, and ⌘N counts what is on screen. A row
+    /// inside a folded block is not a row, so it takes no number — otherwise
+    /// the visible rows would badge ⌘1, ⌘4, ⌘5 and ⌘2 would open something
+    /// nobody can see.
+    #[test]
+    fn a_folded_block_takes_its_rows_out_of_the_chord_order() {
+        let arb = ProjectId::new();
+        let keys = vec![None, Some(p("/w/beta")), Some(p("/w/alpha")), None];
+        let members = vec![Some(arb), None, None, None];
+        let sections = sidebar_sections(&keys, &members, &[(arb, "arb".into())]);
+        assert_eq!(on_screen(&sections, &folds(&[])), vec![0, 1, 2, 3]);
+        assert_eq!(
+            on_screen(
+                &sections,
+                &folds(&[SidebarFold::Section(SectionKey::Repo(p("/w/beta")))])
+            ),
+            vec![0, 2, 3]
+        );
+        assert_eq!(
+            on_screen(&sections, &folds(&[SidebarFold::Projects])),
+            vec![1, 2, 3],
+            "folding a heading takes its whole half, headers and all"
+        );
+        assert_eq!(
+            on_screen(&sections, &folds(&[SidebarFold::Tabs])),
+            vec![0],
+            "and the derived half is one heading, however many blocks it holds"
+        );
+        assert!(
+            on_screen(
+                &sections,
+                &folds(&[SidebarFold::Projects, SidebarFold::Tabs])
+            )
+            .is_empty()
+        );
     }
 
     /// The badge on a row and the tab ⌘N opens are two readings of one order,
@@ -1568,10 +2110,7 @@ mod tests {
             Some(p("/w/beta")),
         ];
         // What `visual_tab_order` returns for a left tab bar.
-        let order: Vec<usize> = sidebar_sections(&keys)
-            .into_iter()
-            .flat_map(|s| s.tabs)
-            .collect();
+        let order = flatten(&sections_of(&keys));
         assert_eq!(order, vec![0, 3, 2, 1]);
 
         let mut badge_pos = vec![0usize; keys.len()];
@@ -1597,24 +2136,38 @@ mod tests {
             Some(p("/w/alpha")),
             None,
         ];
-        let alpha = Some(p("/w/alpha"));
+        let sections = sections_of(&keys);
+        let alpha = SectionKey::Repo(p("/w/alpha"));
         assert_eq!(
-            reordered_rows(&keys, &alpha, &[0, 2], 0, 1),
+            reordered_rows(&sections, &alpha, &[0, 2], 0, 1),
             Some(vec![2, 0, 1, 3])
         );
         assert_eq!(
-            reordered_rows(&keys, &alpha, &[0, 2], 1, 0),
+            reordered_rows(&sections, &alpha, &[0, 2], 1, 0),
             Some(vec![2, 0, 1, 3])
         );
-        assert_eq!(reordered_rows(&keys, &alpha, &[0, 2], 1, 1), None);
+        assert_eq!(reordered_rows(&sections, &alpha, &[0, 2], 1, 1), None);
+    }
+
+    /// Rows inside a project reorder the same way rows inside a group do.
+    #[test]
+    fn reordered_rows_works_inside_a_project_too() {
+        let arb = ProjectId::new();
+        let keys = vec![None, Some(p("/w/beta")), None];
+        let members = vec![Some(arb), None, Some(arb)];
+        let sections = sidebar_sections(&keys, &members, &[(arb, "arb".into())]);
+        assert_eq!(
+            reordered_rows(&sections, &SectionKey::Project(arb), &[0, 2], 0, 1),
+            Some(vec![2, 0, 1])
+        );
     }
 
     #[test]
     fn reordered_rows_leaves_filtered_out_rows_alone() {
         let keys = vec![Some(p("/w/a")), Some(p("/w/a")), Some(p("/w/a"))];
-        let a = Some(p("/w/a"));
+        let sections = sections_of(&keys);
         assert_eq!(
-            reordered_rows(&keys, &a, &[0, 2], 0, 1),
+            reordered_rows(&sections, &SectionKey::Repo(p("/w/a")), &[0, 2], 0, 1),
             Some(vec![1, 2, 0])
         );
     }
@@ -1628,12 +2181,14 @@ mod tests {
             Some(p("/w/alpha")),
             Some(p("/w/gamma")),
         ];
+        let sections = sections_of(&keys);
+        let g = |path: &str| SectionKey::Repo(p(path));
         assert_eq!(
-            regrouped_order(&keys, &p("/w/gamma"), &p("/w/alpha")),
+            regrouped_order(&sections, &g("/w/gamma"), &g("/w/alpha")),
             Some(vec![4, 0, 3, 2, 1])
         );
         assert_eq!(
-            regrouped_order(&keys, &p("/w/alpha"), &p("/w/gamma")),
+            regrouped_order(&sections, &g("/w/alpha"), &g("/w/gamma")),
             Some(vec![2, 4, 0, 3, 1])
         );
     }
@@ -1641,9 +2196,20 @@ mod tests {
     #[test]
     fn regrouped_order_ignores_self_and_unknown_roots() {
         let keys = vec![Some(p("/w/alpha")), Some(p("/w/beta"))];
-        assert_eq!(regrouped_order(&keys, &p("/w/alpha"), &p("/w/alpha")), None);
-        assert_eq!(regrouped_order(&keys, &p("/w/gone"), &p("/w/beta")), None);
-        assert_eq!(regrouped_order(&keys, &p("/w/alpha"), &p("/w/gone")), None);
+        let sections = sections_of(&keys);
+        let g = |path: &str| SectionKey::Repo(p(path));
+        assert_eq!(
+            regrouped_order(&sections, &g("/w/alpha"), &g("/w/alpha")),
+            None
+        );
+        assert_eq!(
+            regrouped_order(&sections, &g("/w/gone"), &g("/w/beta")),
+            None
+        );
+        assert_eq!(
+            regrouped_order(&sections, &g("/w/alpha"), &g("/w/gone")),
+            None
+        );
     }
 
     #[test]

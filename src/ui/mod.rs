@@ -25,6 +25,7 @@ pub mod pending_pane;
 pub mod perf;
 pub mod prefill;
 pub mod presets;
+pub mod projects;
 pub mod remote_connect;
 pub mod remote_workspace;
 pub mod reorder;

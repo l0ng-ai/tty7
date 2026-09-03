@@ -170,6 +170,22 @@ impl MachineMirrors {
         });
     }
 
+    /// The projects a window just pushed, recorded for the same reason the
+    /// tabs above are: the deltas that carried them are not sent back to the
+    /// window that raised them, so this mirror would never hear about them.
+    pub fn note_synced_projects(
+        cx: &mut App,
+        host: HostId,
+        machine_ws: WorkspaceId,
+        projects: Vec<tty7_core::core::machine::Project>,
+    ) {
+        Self::write(cx, host, move |machine| {
+            if let Some(ws) = machine.workspaces.iter_mut().find(|w| w.id == machine_ws) {
+                ws.projects = projects.clone();
+            }
+        });
+    }
+
     /// Records for the panes this window itself seeded into the machine.
     ///
     /// A window is left out of the deltas its own ops raise, and `TabCreated`
@@ -305,6 +321,51 @@ fn apply(machine: &mut Machine, workspace: WorkspaceId, delta: &LayoutDelta) -> 
             };
             t.sidebar_group = group.clone();
             true
+        }
+        LayoutDelta::TabProjectChanged { tab, project } => {
+            let Some(t) = ws.tabs.iter_mut().find(|t| t.id == *tab) else {
+                return false;
+            };
+            t.project = *project;
+            true
+        }
+        LayoutDelta::ProjectCreated { at, project } => {
+            ws.projects.retain(|p| p.id != project.id);
+            let at = (*at).min(ws.projects.len());
+            ws.projects.insert(at, project.clone());
+            true
+        }
+        LayoutDelta::ProjectRenamed { project, name } => {
+            let Some(p) = ws.projects.iter_mut().find(|p| p.id == *project) else {
+                return false;
+            };
+            p.name = name.clone();
+            true
+        }
+        LayoutDelta::ProjectRerooted { project, root } => {
+            let Some(p) = ws.projects.iter_mut().find(|p| p.id == *project) else {
+                return false;
+            };
+            p.root = root.clone();
+            true
+        }
+        LayoutDelta::ProjectMoved { project, to } => {
+            let Some(from) = ws.projects.iter().position(|p| p.id == *project) else {
+                return false;
+            };
+            let moved = ws.projects.remove(from);
+            ws.projects.insert((*to).min(ws.projects.len()), moved);
+            true
+        }
+        LayoutDelta::ProjectDeleted { project } => {
+            let before = ws.projects.len();
+            ws.projects.retain(|p| p.id != *project);
+            for tab in &mut ws.tabs {
+                if tab.project == Some(*project) {
+                    tab.project = None;
+                }
+            }
+            ws.projects.len() != before
         }
         LayoutDelta::TabMoved { tab, to } => {
             let Some(from) = ws.tabs.iter().position(|t| t.id == *tab) else {
@@ -919,6 +980,7 @@ mod tests {
             id: tab_id,
             name: None,
             sidebar_group: None,
+            project: None,
             root: PaneNode::Split {
                 axis: Axis::Vertical,
                 ratio: 0.5,
