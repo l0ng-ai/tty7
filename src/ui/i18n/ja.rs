@@ -1852,7 +1852,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarScratchGroup => "スクラッチ",
         L10nKey::SidebarProjectsHeading => "プロジェクト",
         L10nKey::SidebarTabsHeading => "タブ",
-        L10nKey::ProjectNew => "新規プロジェクト…",
         L10nKey::ProjectNewTooltip => "フォルダをプロジェクトにする",
         L10nKey::ProjectRename => "プロジェクト名を変更…",
         L10nKey::ProjectSetFolder => "フォルダを変更…",
@@ -1863,6 +1862,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabProjectRemove => "プロジェクトから外す",
         L10nKey::TabProjectFromFolder => "このフォルダで新規プロジェクト",
         L10nKey::ProjectNoFolder => "このタブにはプロジェクトにできるフォルダがありません",
+        L10nKey::ProjectLimitReached => {
+            "このワークスペースには既に {max} 個のプロジェクトがあります"
+        }
         L10nKey::TabContextCloseTab => "タブを閉じる",
         L10nKey::TabContextCloseTabsBelow => "下のタブを閉じる",
         L10nKey::AppAgentHooksOpFailed => "失敗: {error}",

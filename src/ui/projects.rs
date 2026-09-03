@@ -15,11 +15,11 @@ use std::path::PathBuf;
 use gpui::{Context, Entity, Subscription, Window};
 use gpui_component::WindowExt as _;
 use gpui_component::input::{InputEvent, InputState};
-use tty7_core::core::machine::{Project, ProjectId};
+use tty7_core::core::machine::{MAX_PROJECTS, Project, ProjectId};
 
 use crate::core::session::WorkspaceStore;
 use crate::ui::app::Tty7App;
-use crate::ui::i18n::{L10nKey, t};
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 
 /// A project header that has turned into a text box.
 pub(crate) struct ProjectRename {
@@ -50,20 +50,33 @@ impl Tty7App {
             .and_then(|leaf| leaf.read(cx).spawnable_cwd())
     }
 
-    pub(crate) fn declare_project(&mut self, root: PathBuf, cx: &mut Context<Self>) -> ProjectId {
+    /// Declares `root` a project, or hands back the one already on it.
+    ///
+    /// `None` means the workspace is full. The machine refuses past
+    /// [`MAX_PROJECTS`] too, and a refusal there resynchronizes — which would
+    /// re-push the project this window kept and be refused again, so the limit
+    /// has to be held on this side of the wire as well.
+    pub(crate) fn declare_project(
+        &mut self,
+        root: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Option<ProjectId> {
         let root = root.to_string_lossy().into_owned();
         // One project per directory: declaring the same folder twice would put
         // two headers on screen that mean the same thing, and the second one
         // could never be told apart from the first.
         if let Some(existing) = self.projects.iter().find(|p| p.root == root) {
-            return existing.id;
+            return Some(existing.id);
+        }
+        if self.projects.len() >= MAX_PROJECTS {
+            return None;
         }
         let project = Project::at(root);
         let id = project.id;
         self.projects.push(project);
         self.save_session(cx);
         cx.notify();
-        id
+        Some(id)
     }
 
     /// The `+` on the projects heading: pick a folder and declare it.
@@ -77,9 +90,30 @@ impl Tty7App {
             self.project_from_tab(self.active, window, cx);
             return;
         }
+        // Checked before the panel opens rather than after it closes: being
+        // told the workspace is full is one thing, being told it after picking
+        // a folder is another.
+        if !self.room_for_a_project(window, cx) {
+            return;
+        }
         self.pick_folder(cx, |this, path, cx| {
             this.declare_project(path, cx);
         });
+    }
+
+    /// Whether another project fits, saying so on the way out if not.
+    fn room_for_a_project(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.projects.len() < MAX_PROJECTS {
+            return true;
+        }
+        window.push_notification(
+            t_fmt(
+                L10nKey::ProjectLimitReached,
+                &[("max", &MAX_PROJECTS.to_string())],
+            ),
+            cx,
+        );
+        false
     }
 
     pub(crate) fn pick_project_root(&mut self, project: ProjectId, cx: &mut Context<Self>) {
@@ -129,6 +163,17 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         let root = root.to_string_lossy().into_owned();
+        // The same one-project-per-directory rule `declare_project` holds on
+        // the way in. Pointing one project at another's folder would reach the
+        // state that rule exists to keep out — two headers that mean the same
+        // thing — by the back door.
+        if self
+            .projects
+            .iter()
+            .any(|p| p.id != project && p.root == root)
+        {
+            return;
+        }
         let Some(p) = self.projects.iter_mut().find(|p| p.id == project) else {
             return;
         };
@@ -186,7 +231,17 @@ impl Tty7App {
             window.push_notification(t(L10nKey::ProjectNoFolder), cx);
             return;
         };
-        let id = self.declare_project(root, cx);
+        if !self
+            .projects
+            .iter()
+            .any(|p| p.root == root.to_string_lossy())
+            && !self.room_for_a_project(window, cx)
+        {
+            return;
+        }
+        let Some(id) = self.declare_project(root, cx) else {
+            return;
+        };
         self.set_tab_project(index, Some(id), cx);
         self.start_project_rename(id, window, cx);
     }
@@ -209,6 +264,17 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A box already open on another project is committed, not dropped.
+        // Dropping it would take the subscription with it, so the typing that
+        // was sitting in it would never reach `commit_project_rename` — the
+        // rename would be silently thrown away by opening a second one.
+        if self
+            .project_rename
+            .as_ref()
+            .is_some_and(|r| r.project != project)
+        {
+            self.commit_project_rename(window, cx);
+        }
         let Some(p) = self.project(project) else {
             return;
         };

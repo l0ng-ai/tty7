@@ -282,7 +282,7 @@ pub(crate) fn diff(
 
     // Projects first, in both directions: a tab may only name one that
     // already exists, and one may only be deleted once no tab names it.
-    reconcile_projects(workspace, mirror, desired_projects, scope, &mut ops);
+    reconcile_projects(workspace, mirror, desired_projects, &mut ops);
 
     if scope == SyncScope::Full {
         migrate_panes(workspace, mirror, desired, &mut ops);
@@ -325,6 +325,7 @@ pub(crate) fn diff(
 
     if scope == SyncScope::Full {
         retire_projects(workspace, mirror, desired_projects, &mut ops);
+        reorder_projects(workspace, mirror, desired_projects, &mut ops);
     }
 
     if scope == SyncScope::Additive || !held.is_empty() {
@@ -362,21 +363,6 @@ pub(crate) fn diff(
     ops
 }
 
-/// Carries panes across to the tab that now wants them, before anything else
-/// gets a chance to read their old tab as one to close.
-///
-/// This is a tab dragged into another tab's layout: every pane it brought
-/// keeps running and changes tab, and the tab it came from goes away once it
-/// has nothing left. Told as `PaneMove`, which is the one op that can say that
-/// — closing the old tab and building the new one would say instead that a
-/// tab's worth of panes went away and a tab's worth arrived.
-///
-/// One move per round, because each move changes where the next one can go:
-/// a pane may only land beside a pane its destination already holds, so a
-/// two-pane tab crosses as its first pane and then the rest beside it. A round
-/// that finds nothing left to do ends the pass, which is also what happens
-/// when a move cannot be spelled this way at all — the passes below then treat
-/// it as the reshape it is.
 /// Brings the machine's project list to the one the window is showing.
 ///
 /// Creates and edits run before the tab pass so a tab can be filed straight
@@ -386,7 +372,6 @@ fn reconcile_projects(
     workspace: WorkspaceId,
     mirror: &mut WsMirror,
     desired: &[Project],
-    scope: SyncScope,
     ops: &mut Vec<ControlRequest>,
 ) {
     for (index, want) in desired.iter().enumerate() {
@@ -420,15 +405,28 @@ fn reconcile_projects(
             }
         }
     }
-    if scope != SyncScope::Full {
-        return;
-    }
+}
+
+/// Puts the machine's projects in the order the window shows them.
+///
+/// Runs after `retire_projects`, not beside the creates above: `to` is an index
+/// into the machine's whole list, so a project that is about to be deleted but
+/// is still in it would push every index along and spell a move for a project
+/// that is already where it belongs. Ordering answers to nothing else — no tab
+/// references a position — so it is free to go last, once the list holds
+/// exactly what it should.
+fn reorder_projects(
+    workspace: WorkspaceId,
+    mirror: &mut WsMirror,
+    desired: &[Project],
+    ops: &mut Vec<ControlRequest>,
+) {
     for (index, want) in desired.iter().enumerate() {
         let at = mirror
             .projects
             .iter()
             .position(|p| p.id == want.id)
-            .expect("every desired project exists after the pass above");
+            .expect("every desired project exists after the passes above");
         if at != index {
             let moved = mirror.projects.remove(at);
             mirror.projects.insert(index, moved);
@@ -470,6 +468,21 @@ fn retire_projects(
     }
 }
 
+/// Carries panes across to the tab that now wants them, before anything else
+/// gets a chance to read their old tab as one to close.
+///
+/// This is a tab dragged into another tab's layout: every pane it brought
+/// keeps running and changes tab, and the tab it came from goes away once it
+/// has nothing left. Told as `PaneMove`, which is the one op that can say that
+/// — closing the old tab and building the new one would say instead that a
+/// tab's worth of panes went away and a tab's worth arrived.
+///
+/// One move per round, because each move changes where the next one can go:
+/// a pane may only land beside a pane its destination already holds, so a
+/// two-pane tab crosses as its first pane and then the rest beside it. A round
+/// that finds nothing left to do ends the pass, which is also what happens
+/// when a move cannot be spelled this way at all — the passes below then treat
+/// it as the reshape it is.
 fn migrate_panes(
     workspace: WorkspaceId,
     mirror: &mut WsMirror,
@@ -1581,7 +1594,11 @@ fn finish_prime(
     // for its projects too — and a window that never learned the machine's
     // would read a workspace holding a project with no tabs in it as a project
     // the user had deleted, and delete it.
-    app.update(cx, |app, _| adopt_projects(app, &landed.3));
+    app.update(cx, |app, cx| {
+        if adopt_projects(app, &landed.3) {
+            cx.notify();
+        }
+    });
     if !was_dirty {
         return;
     }
@@ -2253,7 +2270,11 @@ fn settle_hydration(
     // project with no tabs in it is a project the tab list cannot speak for.
     // The rebuild further down needs none of this: it installs the tree's
     // projects wholesale along with the tree's tabs.
-    app.update(cx, |app, _| adopt_projects(app, &pulled_projects));
+    app.update(cx, |app, cx| {
+        if adopt_projects(app, &pulled_projects) {
+            cx.notify();
+        }
+    });
     if adopt == Adopt::IfEmpty && !app.read(cx).tabs.is_empty() {
         // A full window over an empty tree has to write itself back, whether
         // or not an edit was waiting: the machine is missing tabs this window
@@ -2312,15 +2333,21 @@ fn settle_hydration(
 /// A union rather than a replacement because this runs where the window keeps
 /// its own layout: a project it declared while the machine was unreachable is
 /// still the user's, and the next `sync_window` is what puts it there.
-fn adopt_projects(app: &mut Tty7App, pulled: &[Project]) {
+/// Answers whether the window's list actually changed, so the caller can skip
+/// a repaint on the common case where the pull said nothing new.
+#[must_use]
+fn adopt_projects(app: &mut Tty7App, pulled: &[Project]) -> bool {
     let mut merged = pulled.to_vec();
     for own in &app.projects {
-        match merged.iter_mut().find(|p| p.id == own.id) {
-            Some(_) => {}
-            None => merged.push(own.clone()),
+        if !merged.iter().any(|p| p.id == own.id) {
+            merged.push(own.clone());
         }
     }
+    if merged == app.projects {
+        return false;
+    }
     app.projects = merged;
+    true
 }
 
 /// What a rebuild leaves the window entitled to say, from how many tabs the
@@ -4377,6 +4404,68 @@ mod tests {
         let ops = diff(ws, &mut mirror, &[], &[], None, SyncScope::Additive, &[]);
         assert!(ops.is_empty());
         assert_eq!(mirror.projects, vec![known]);
+    }
+
+    /// Ordering runs after the deletions, so a project on its way out does not
+    /// push the survivors along and spell a move for one already in place.
+    #[test]
+    fn deleting_a_project_above_another_does_not_move_the_one_below() {
+        let ws = WorkspaceId::new();
+        let doomed = Project::at("/w/doomed");
+        let keeper = Project::at("/w/keeper");
+        let mut mirror = WsMirror {
+            projects: vec![doomed.clone(), keeper.clone()],
+            ..WsMirror::default()
+        };
+
+        let ops = diff(
+            ws,
+            &mut mirror,
+            &[],
+            std::slice::from_ref(&keeper),
+            None,
+            SyncScope::Full,
+            &[],
+        );
+        assert_eq!(
+            ops,
+            vec![ControlRequest::ProjectDelete {
+                workspace: ws,
+                project: doomed.id,
+            }],
+            "the delete is the whole of it — no ProjectMove for the survivor"
+        );
+        assert_eq!(mirror.projects, vec![keeper]);
+    }
+
+    /// Reordering on its own is still an edit, not a rebuild.
+    #[test]
+    fn reordering_projects_is_one_move_each() {
+        let ws = WorkspaceId::new();
+        let (a, b) = (Project::at("/w/a"), Project::at("/w/b"));
+        let mut mirror = WsMirror {
+            projects: vec![a.clone(), b.clone()],
+            ..WsMirror::default()
+        };
+
+        let ops = diff(
+            ws,
+            &mut mirror,
+            &[],
+            &[b.clone(), a.clone()],
+            None,
+            SyncScope::Full,
+            &[],
+        );
+        assert_eq!(
+            ops,
+            vec![ControlRequest::ProjectMove {
+                workspace: ws,
+                project: b.id,
+                to: 0,
+            }]
+        );
+        assert_eq!(mirror.projects, vec![b, a]);
     }
 
     #[test]

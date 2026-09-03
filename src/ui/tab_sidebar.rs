@@ -175,13 +175,8 @@ impl Tty7App {
         // The badge has to be read off the same order or it names a chord that
         // opens a different tab, so take it from `visual_tab_order` rather than
         // flattening `sections` a second time here.
-        let badge_pos: Vec<usize> = {
-            let mut pos = vec![0usize; self.tabs.len()];
-            for (n, i) in self.visual_tab_order(cx).into_iter().enumerate() {
-                pos[i] = n;
-            }
-            pos
-        };
+        //
+        let badge_pos = badge_positions(&self.visual_tab_order(cx), self.tabs.len());
 
         // The row shows an elided title and a branch; the filter used to read
         // only the elided title, so typing the branch you can see, or the part
@@ -298,27 +293,27 @@ impl Tty7App {
 
         let block_count = blocks.len();
         for (block_at, (group_slot, group_ix)) in blocks.into_iter().enumerate() {
-            let declared = block_at < projects_shown;
             if headings && block_at == projects_shown {
                 list = list.child(self.tabs_heading(projects_shown > 0 && !projects_folded, cx));
-            }
-            // A folded heading keeps its own half off the rail entirely,
-            // headers and all. Only a heading can do that; folding one block
-            // leaves its header behind, because that header is the way back.
-            if headings && (declared && projects_folded || !declared && tabs_folded) {
-                continue;
             }
             let section = &sections[group_ix];
             let group_key = section.key.clone();
             let project = group_key.project();
+            // A folded heading keeps its own half off the rail entirely,
+            // headers and all. Only a heading can do that; folding one block
+            // leaves its header behind, because that header is the way back.
+            let half_folded = match project {
+                Some(_) => projects_folded,
+                None => tabs_folded,
+            };
+            if headings && half_folded {
+                continue;
+            }
             let folded = self.is_folded(&SidebarFold::Section(group_key.clone()));
             // A folded block draws its header and nothing else, so the rows
             // are never built — and never write a rectangle a pane could be
             // dropped onto, which is what `sidebar_slots` being blanked every
             // frame is for.
-            if folded && section.tabs.is_empty() && project.is_none() {
-                continue;
-            }
             let mut rows: Vec<ContextMenu<Stateful<Div>>> = Vec::new();
             let visible = if folded {
                 Vec::new()
@@ -350,7 +345,10 @@ impl Tty7App {
                         Some((view.host_id(), cwd))
                     }),
                 );
-                let badge_extra = if show_badges && badge_pos < 9 {
+                // The number this row actually wears, or `None` for no badge:
+                // hints turned off, past ⌘9, or a row the chord order left out.
+                let badge_n = badge_pos.filter(|_| show_badges).filter(|&n| n < 9);
+                let badge_extra = if badge_n.is_some() {
                     row_metrics::BADGE + row_metrics::GAP
                 } else {
                     0.
@@ -783,7 +781,7 @@ impl Tty7App {
                         cx,
                     ))
                     .child(label_region)
-                    .when(show_badges && badge_pos < 9, |row| {
+                    .when_some(badge_n, |row, n| {
                         row.child(
                             div()
                                 .flex_shrink_0()
@@ -798,10 +796,10 @@ impl Tty7App {
                                 } else {
                                     cx.theme().muted_foreground
                                 })
-                                .child(tab_badge_label(badge_pos)),
+                                .child(tab_badge_label(n)),
                         )
                     })
-                    .when(!(show_badges && badge_pos < 9), |row| {
+                    .when(badge_n.is_none(), |row| {
                         let backing: gpui::Hsla = if is_active {
                             gpui::rgb(sf.selected).into()
                         } else {
@@ -1665,6 +1663,25 @@ fn on_screen(sections: &[Section], folded: &std::collections::HashSet<SidebarFol
         .collect()
 }
 
+/// The chord number each tab wears, indexed the way `self.tabs` is, read off
+/// the same [`on_screen`] order `activate_visual` walks — a badge taken from
+/// anywhere else names a chord that opens a different tab.
+///
+/// `None` for a tab that order left out, rather than a `0` that reads as ⌘1.
+/// The rail can draw a row that order does not count: a live search deliberately
+/// ignores a folded heading, so it shows rows the chord order has taken out. A
+/// row with no number is the only honest thing to draw there — the alternative
+/// is every one of those rows claiming ⌘1 while ⌘1 opens something else.
+fn badge_positions(order: &[usize], tabs: usize) -> Vec<Option<usize>> {
+    let mut pos = vec![None; tabs];
+    for (n, &i) in order.iter().enumerate() {
+        if let Some(slot) = pos.get_mut(i) {
+            *slot = Some(n);
+        }
+    }
+    pos
+}
+
 /// The twist that says whether a block is open, drawn where a disclosure
 /// triangle goes — pointing down when what is under it is showing.
 fn fold_chevron(folded: bool, size: f32) -> impl IntoElement {
@@ -2113,19 +2130,39 @@ mod tests {
         let order = flatten(&sections_of(&keys));
         assert_eq!(order, vec![0, 3, 2, 1]);
 
-        let mut badge_pos = vec![0usize; keys.len()];
-        for (n, i) in order.iter().copied().enumerate() {
-            badge_pos[i] = n;
-        }
+        let badge_pos = badge_positions(&order, keys.len());
         for (row, tab) in order.iter().copied().enumerate() {
             // ActivateTabN → activate_visual(N - 1) → order[N - 1].
-            let chord = tab_badge_label(badge_pos[tab]);
-            let opens = order[badge_pos[tab]];
+            let n = badge_pos[tab].expect("every tab in the order is badged");
+            let chord = tab_badge_label(n);
+            let opens = order[n];
             assert_eq!(
                 opens, tab,
                 "row {row} badges ⌘{chord}, which opens tab {opens}"
             );
         }
+    }
+
+    /// A live search draws rows a folded heading has taken out of the chord
+    /// order — that is deliberate, the query is asking about tabs. So the two
+    /// disagree, and the badge has to say "no number" rather than fall back to
+    /// a `0` that reads as ⌘1 while ⌘1 opens something else entirely.
+    #[test]
+    fn a_row_the_chord_order_left_out_wears_no_badge() {
+        let arb = ProjectId::new();
+        let keys = vec![None, Some(p("/w/beta")), None];
+        let members = vec![Some(arb), None, Some(arb)];
+        let sections = sidebar_sections(&keys, &members, &[(arb, "arb".into())]);
+
+        let order = on_screen(&sections, &folds(&[SidebarFold::Projects]));
+        assert_eq!(order, vec![1], "the folded half is out of the order");
+
+        let badge_pos = badge_positions(&order, keys.len());
+        assert_eq!(badge_pos, vec![None, Some(0), None]);
+        assert!(
+            badge_pos[0].is_none() && badge_pos[2].is_none(),
+            "a project row a search still draws must not claim ⌘1"
+        );
     }
 
     #[test]
