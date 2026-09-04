@@ -399,9 +399,23 @@ pub fn ensure_running() -> anyhow::Result<()> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
         if let Ok(mut stream) = transport::connect() {
-            match query_daemon_version(&mut stream) {
-                VersionProbe::Speaks(v) => note_local_daemon(Some(v)),
-                _ => note_local_daemon(None),
+            // Judged by the same rules as a daemon found already running, and
+            // for the same reason. `restart()` is `stop()` + this function, so
+            // on that path the branch above never runs and this is the only
+            // place a verdict can land. Without one the mismatch the user just
+            // clicked Restart about outlives the daemon it described, and a
+            // window opened before the control link's next probe asks all over
+            // again about a server that is already gone — the gap
+            // `land_handoff_return` closes on the other path.
+            //
+            // The dialect really can be asked this early: `run_daemon` spawns
+            // the control listener before it binds the pane endpoint, so a
+            // daemon answering this connect is already answering that one.
+            match judge_probe(query_daemon_version(&mut stream), control_dialect_answer) {
+                Some(verdict) => land_probe(verdict),
+                // It listens but will not say what it is. Nothing to remember
+                // and nothing to put to the user.
+                None => note_local_daemon(None),
             }
             return Ok(());
         }
@@ -2086,6 +2100,24 @@ mod mismatch_record_tests {
         assert!(
             take_mismatched_daemon().is_none(),
             "the daemon the prompt described has been replaced; nothing is left to ask"
+        );
+
+        // The other restart, the one for a daemon too old to hand off: `stop()`
+        // and a fresh spawn, landed through the same verdict the
+        // already-running branch uses. Nothing else on that path touches the
+        // record, so without this the prompt the user just answered comes back
+        // about the daemon they killed.
+        note_daemon_mismatch(DaemonMismatch::Protocol(None));
+        land_probe(
+            judge_probe(
+                answering(PROTOCOL_VERSION, env!("CARGO_PKG_VERSION")),
+                agrees,
+            )
+            .expect("the freshly spawned daemon answered its own handshake"),
+        );
+        assert!(
+            take_mismatched_daemon().is_none(),
+            "the daemon the prompt described was stopped and replaced; nothing is left to ask"
         );
 
         // A handoff that did not take leaves the daemon exactly as it was, so
