@@ -51,6 +51,7 @@ pub struct Neutrals {
     pub background: u32,
     pub foreground: u32,
     pub border: u32,
+    pub divider: u32,
     pub secondary: u32,
     pub muted: u32,
     pub muted_foreground: u32,
@@ -153,18 +154,35 @@ impl Theme {
         let fg = legible_foreground(bg, self.foreground);
         let sidebar = mix(bg, fg, 0.03);
         let popover = mix(bg, fg, 0.05);
-        // One hairline value divides all three neutral fills — it is handed to
-        // `sidebar_border` too, and popover chrome draws with it. Floor it on
-        // each of them, not only on the window.
-        let border = [bg, sidebar, popover]
-            .into_iter()
-            .fold(mix(bg, fg, 0.16), |hairline, surface| {
-                at_least(hairline, fg, surface, BORDER_FLOOR)
-            });
+        // Two weights, one derivation. Which one a line gets is decided by
+        // whether it is the *only* thing separating what it sits between:
+        //
+        // - `border` closes an outline around a surface that floats on top of
+        //   other content (menu, tooltip, dialog, card) and rules a header off
+        //   from the rows under it. Nothing else says where the edge is, so it
+        //   has to be visible.
+        // - `divider` runs between two panes that already carry their own
+        //   fills — the sidebar against the terminal, the right panel against
+        //   the workspace. There the line is the second signal, not the first,
+        //   and painting it at full weight is what makes a workspace read as
+        //   boxes bolted together rather than one surface.
+        //
+        // Both are floored on all three neutral fills, not only on the window:
+        // the same value has to be worth something wherever it is painted.
+        let hairline = |seed: f32, floor: f32| {
+            [bg, sidebar, popover]
+                .into_iter()
+                .fold(mix(bg, fg, seed), |ink, surface| {
+                    at_least(ink, fg, surface, floor)
+                })
+        };
+        let border = hairline(0.16, BORDER_FLOOR);
+        let divider = hairline(0.16, DIVIDER_FLOOR);
         Neutrals {
             background: bg,
             foreground: fg,
             border,
+            divider,
             secondary: mix(bg, fg, 0.09),
             muted: mix(bg, fg, 0.06),
             muted_foreground: dim(fg, bg, state::TEXT_RESTING),
@@ -561,6 +579,14 @@ const TEXT_FLOOR: f32 = 4.5;
 /// where the flat blend disappears entirely, so a divider is worth the same
 /// amount in every theme.
 const BORDER_FLOOR: f32 = 1.5;
+
+/// The same idea one step down, for a line that is not carrying the separation
+/// on its own.
+///
+/// Worth stating because the seed blend cannot say it: `mix(bg, fg, 0.16)`
+/// clears neither floor in any builtin theme, so both values are decided
+/// entirely here. Lowering the seed changes nothing; this constant is the knob.
+const DIVIDER_FLOOR: f32 = 1.2;
 
 /// Keep an authored blend when it already clears `target` on the surface it is
 /// painted on, and walk it back toward `toward` only when it does not.
@@ -1947,27 +1973,46 @@ mod tests {
     fn hairlines_are_worth_the_same_in_every_theme() {
         for t in builtins() {
             let m = t.neutrals();
-            for (name, surface) in [
-                ("background", m.background),
-                ("sidebar", m.sidebar),
-                ("popover", m.popover),
+            for (tier, ink, floor) in [
+                ("border", m.border, BORDER_FLOOR),
+                ("divider", m.divider, DIVIDER_FLOOR),
             ] {
-                let ratio = contrast(m.border, surface);
-                assert!(
-                    ratio >= BORDER_FLOOR - 0.01,
-                    "{}: border {:#08x} is only {ratio:.2}:1 on the {name}",
-                    t.id,
-                    m.border
-                );
-                // A floor, not a target — a hairline that shouts is worse than
-                // one that whispers.
-                assert!(
-                    ratio <= 2.2,
-                    "{}: border {:#08x} is {ratio:.2}:1 on the {name} and reads as a frame",
-                    t.id,
-                    m.border
-                );
+                for (name, surface) in [
+                    ("background", m.background),
+                    ("sidebar", m.sidebar),
+                    ("popover", m.popover),
+                ] {
+                    let ratio = contrast(ink, surface);
+                    assert!(
+                        ratio >= floor - 0.01,
+                        "{}: {tier} {ink:#08x} is only {ratio:.2}:1 on the {name}",
+                        t.id
+                    );
+                    // A floor, not a target — a hairline that shouts is worse
+                    // than one that whispers.
+                    assert!(
+                        ratio <= 2.2,
+                        "{}: {tier} {ink:#08x} is {ratio:.2}:1 on the {name} and reads as a frame",
+                        t.id
+                    );
+                }
             }
+        }
+    }
+
+    /// The two tiers have to stay apart, or the split is decoration. A divider
+    /// that lands on the same value as the border is the state this replaced.
+    #[test]
+    fn a_divider_is_lighter_than_a_border_in_every_theme() {
+        for t in builtins() {
+            let m = t.neutrals();
+            assert!(
+                contrast(m.divider, m.sidebar) < contrast(m.border, m.sidebar),
+                "{}: divider {:#08x} is not lighter than border {:#08x}",
+                t.id,
+                m.divider,
+                m.border
+            );
         }
     }
 

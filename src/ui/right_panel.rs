@@ -519,8 +519,11 @@ impl Tty7App {
                 (None, true) => tile_trailing_inset_sm(),
                 (None, false) => CONTENT_INSET,
             }))
+            // `border`, not `sidebar_border`: this rules the tab row off from
+            // the content below it, with the same fill on both sides, so the
+            // line is the only thing saying where one ends.
             .when(tabs.is_some(), |this| {
-                this.border_b_1().border_color(cx.theme().sidebar_border)
+                this.border_b_1().border_color(cx.theme().border)
             })
             .child(
                 h_flex()

@@ -815,7 +815,9 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // see `workspace_surface_color`.
     t.sidebar = sidebar_bg.into();
     t.tokens.sidebar = sidebar_bg.into();
-    t.sidebar_border = rgb(m.border).into();
+    // The lighter tier: every `sidebar_border` site is a pane meeting another
+    // pane, and both already carry their own fill. See `Neutrals`.
+    t.sidebar_border = rgb(m.divider).into();
     t.sidebar_foreground = rgb(surfaces.sidebar.text_resting).into();
     t.sidebar_accent = sidebar_sel.into();
     t.tokens.sidebar_accent = Hsla::from(sidebar_sel).into();
