@@ -1,6 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::core::config;
@@ -81,6 +82,37 @@ fn settle_daemon_mismatch(found: Option<DaemonMismatch>) {
     if let Ok(mut slot) = MISMATCHED_DAEMON.lock() {
         *slot = found;
     }
+}
+
+/// Which daemon the records above are allowed to be about.
+///
+/// A probe is not one instant: it connects, asks two sockets, and only then
+/// writes down what it found. In between, this build can stop the daemon, hand
+/// it off, or spawn a new one — and the verdict landing afterwards describes a
+/// process that no longer exists. Against a mismatched daemon that is not a
+/// remote possibility but the normal case, because the control link retries on
+/// a backoff and every one of those retries runs a probe: `land_handoff_return`
+/// clears the record, and a probe that connected before the exec re-arms the
+/// prompt about the daemon the user just replaced.
+///
+/// So the counter moves whenever this build deliberately changes which process
+/// serves, a verdict carries the value it was taken under, and a landing whose
+/// value is stale is dropped rather than written.
+///
+/// It does not order two probes against the *same* daemon — the last one wins,
+/// which is what a record of "what is running now" should do.
+static DAEMON_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// The stamp for a verdict about to be gathered. Read it before the probe's
+/// first connect: reading it afterwards would defeat the point.
+fn daemon_generation() -> u64 {
+    DAEMON_GENERATION.load(Ordering::SeqCst)
+}
+
+/// This build is about to change which process is the daemon. Everything a
+/// probe already in flight is going to report describes the outgoing one.
+fn daemon_generation_moved() {
+    DAEMON_GENERATION.fetch_add(1, Ordering::SeqCst);
 }
 
 static LOCAL_DAEMON: std::sync::Mutex<Option<DaemonVersion>> = std::sync::Mutex::new(None);
@@ -285,7 +317,17 @@ fn judge_probe(
 
 /// Write a probe's verdict down: the daemon to remember for feature checks, and
 /// what the restart prompt is left holding.
-fn land_probe(verdict: ProbeVerdict) {
+///
+/// `generation` is the stamp taken before the probe started. A verdict whose
+/// stamp is stale is about a daemon this build has since replaced, and writing
+/// it would re-arm the prompt about a process that is already gone.
+fn land_probe(generation: u64, verdict: ProbeVerdict) {
+    if generation != daemon_generation() {
+        log::debug!(
+            "dropping a version verdict taken before the daemon was replaced underneath it"
+        );
+        return;
+    }
     let ProbeVerdict { version, mismatch } = verdict;
     match &mismatch {
         MismatchVerdict::Found(DaemonMismatch::Protocol(Some(v))) => log::warn!(
@@ -337,10 +379,13 @@ pub fn ensure_running() -> anyhow::Result<()> {
     // otherwise keep paying the OS's refusal delay on the dead port.
     let mut stale = recorded_daemon_is_dead();
     if !stale {
+        // Stamped before the connect, so a daemon replaced while the two
+        // handshakes are in flight takes this verdict down with it.
+        let generation = daemon_generation();
         if let Ok(mut stream) = transport::connect() {
             match judge_probe(query_daemon_version(&mut stream), control_dialect_answer) {
                 Some(verdict) => {
-                    land_probe(verdict);
+                    land_probe(generation, verdict);
                     return Ok(());
                 }
                 None => {
@@ -396,6 +441,8 @@ pub fn ensure_running() -> anyhow::Result<()> {
 
     spawn_detached()?;
 
+    // After the spawn, because the spawn is itself a generation move.
+    let generation = daemon_generation();
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
         if let Ok(mut stream) = transport::connect() {
@@ -412,7 +459,7 @@ pub fn ensure_running() -> anyhow::Result<()> {
             // the control listener before it binds the pane endpoint, so a
             // daemon answering this connect is already answering that one.
             match judge_probe(query_daemon_version(&mut stream), control_dialect_answer) {
-                Some(verdict) => land_probe(verdict),
+                Some(verdict) => land_probe(generation, verdict),
                 // It listens but will not say what it is. Nothing to remember
                 // and nothing to put to the user.
                 None => note_local_daemon(None),
@@ -439,6 +486,8 @@ pub fn ensure_running() -> anyhow::Result<()> {
 /// A healthy server is the caller's to detect first — everything here acts on
 /// the premise that nobody answered.
 pub fn reap_stranded() {
+    daemon_generation_moved();
+
     // A seat holder mid-handoff or mid-startup — claimed, not yet listening —
     // looks exactly like a stranded one from out here, and it may be carrying
     // every live session across an exec. Give it a moment to open its
@@ -659,7 +708,10 @@ enum HandoffReturn {
 /// The reconnect that follows would eventually settle the record clean by
 /// itself, through `ensure_running`. Doing it here closes the gap in between,
 /// which is exactly wide enough for a window to open in.
-fn land_handoff_return(outcome: HandoffReturn) -> anyhow::Result<()> {
+fn land_handoff_return(generation: u64, outcome: HandoffReturn) -> anyhow::Result<()> {
+    if generation != daemon_generation() {
+        anyhow::bail!("the daemon was replaced again while this handoff was landing");
+    }
     match outcome {
         HandoffReturn::Replaced(v) => {
             note_local_daemon(Some(v));
@@ -708,6 +760,12 @@ pub fn hand_off() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("could not locate own executable: {e}"))?;
 
     let mut stream = transport::connect()?;
+    // Past this point the daemon may be replaced at any moment, so every probe
+    // already in flight is describing the image being retired. Moving the
+    // generation here rather than after the exec is what makes those verdicts
+    // land before this one does harmless.
+    daemon_generation_moved();
+    let generation = daemon_generation();
     ClientMsg::Handoff { exe: exe.clone() }.encode(&mut stream)?;
     stream.flush()?;
 
@@ -729,7 +787,10 @@ pub fn hand_off() -> anyhow::Result<()> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
         if let Ok(mut stream) = transport::connect() {
-            return land_handoff_return(judge_handoff_return(query_daemon_version(&mut stream)));
+            return land_handoff_return(
+                generation,
+                judge_handoff_return(query_daemon_version(&mut stream)),
+            );
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
@@ -745,6 +806,8 @@ pub fn hand_off() -> anyhow::Result<()> {
 
 pub fn stop() {
     use std::io::Write as _;
+
+    daemon_generation_moved();
 
     // Read the pid before asking the daemon to die: the endpoint disappearing
     // is not the same event as the process releasing its image — the gap
@@ -1120,6 +1183,7 @@ fn wait_until_images_unlocked(dir: &Path, deadline: Instant) -> Result<(), Strin
 fn reap_recorded_daemon(_recorded: Option<u32>) {}
 
 fn spawn_detached() -> anyhow::Result<()> {
+    daemon_generation_moved();
     let exe = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("could not locate own executable: {e}"))?;
 
@@ -2090,12 +2154,15 @@ mod mismatch_record_tests {
         // the handoff has to take it away, or it outlives the daemon it
         // describes and the next window opened prompts about a dead server.
         note_daemon_mismatch(DaemonMismatch::Protocol(None));
-        land_handoff_return(HandoffReturn::Replaced(DaemonVersion {
-            protocol: PROTOCOL_VERSION,
-            build: env!("CARGO_PKG_VERSION").to_string(),
-            features: Vec::new(),
-            instance: "replacement".to_string(),
-        }))
+        land_handoff_return(
+            daemon_generation(),
+            HandoffReturn::Replaced(DaemonVersion {
+                protocol: PROTOCOL_VERSION,
+                build: env!("CARGO_PKG_VERSION").to_string(),
+                features: Vec::new(),
+                instance: "replacement".to_string(),
+            }),
+        )
         .expect("a daemon that came back as this build is a successful handoff");
         assert!(
             take_mismatched_daemon().is_none(),
@@ -2109,6 +2176,7 @@ mod mismatch_record_tests {
         // about the daemon they killed.
         note_daemon_mismatch(DaemonMismatch::Protocol(None));
         land_probe(
+            daemon_generation(),
             judge_probe(
                 answering(PROTOCOL_VERSION, env!("CARGO_PKG_VERSION")),
                 agrees,
@@ -2120,16 +2188,57 @@ mod mismatch_record_tests {
             "the daemon the prompt described was stopped and replaced; nothing is left to ask"
         );
 
+        // A verdict about a daemon that has since been replaced is not written
+        // at all. This is the reconnect that connected before the handoff and
+        // came back after it: without the stamp it re-arms the prompt about a
+        // process the user has already replaced, and the fix above closes only
+        // the gap it can see.
+        let taken_before = daemon_generation();
+        daemon_generation_moved();
+        land_probe(
+            taken_before,
+            judge_probe(
+                answering(PROTOCOL_VERSION + 1, "the daemon that was"),
+                agrees,
+            )
+            .expect("the outgoing daemon answered, late"),
+        );
+        assert!(
+            take_mismatched_daemon().is_none(),
+            "a verdict about a replaced daemon must not reach the prompt"
+        );
+
+        // And the same both ways round: a late *clean* verdict about a daemon
+        // that has since been replaced must not wipe what the current one left.
+        note_daemon_mismatch(DaemonMismatch::Protocol(None));
+        let taken_before = daemon_generation();
+        daemon_generation_moved();
+        land_probe(
+            taken_before,
+            judge_probe(
+                answering(PROTOCOL_VERSION, env!("CARGO_PKG_VERSION")),
+                agrees,
+            )
+            .expect("the outgoing daemon answered, late"),
+        );
+        assert!(
+            take_mismatched_daemon().is_some(),
+            "a stale clean verdict says nothing about the daemon running now"
+        );
+
         // A handoff that did not take leaves the daemon exactly as it was, so
         // the record describing it stays — the user still needs the offer.
         note_daemon_mismatch(DaemonMismatch::Protocol(None));
         assert!(
-            land_handoff_return(HandoffReturn::CarriedOn(DaemonVersion {
-                protocol: PROTOCOL_VERSION,
-                build: "26.8.4-nightly.202608251825".to_string(),
-                features: Vec::new(),
-                instance: "survivor".to_string(),
-            }))
+            land_handoff_return(
+                daemon_generation(),
+                HandoffReturn::CarriedOn(DaemonVersion {
+                    protocol: PROTOCOL_VERSION,
+                    build: "26.8.4-nightly.202608251825".to_string(),
+                    features: Vec::new(),
+                    instance: "survivor".to_string(),
+                })
+            )
             .is_err(),
             "a daemon still on its old build is a handoff that failed"
         );
