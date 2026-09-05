@@ -1,5 +1,9 @@
 #![allow(dead_code)]
 
+#[cfg(all(test, windows))]
+#[path = "live_remote_test.rs"]
+mod live_remote_test;
+
 use std::borrow::Cow;
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -501,6 +505,8 @@ pub struct RemoteTerminal {
     pub exited: bool,
     size: TermSize,
     synced_size: bool,
+    /// Backend semantics survive config reloads; the client's OS is not the PTY's OS.
+    conpty_output: bool,
     /// The `(cell_w, cell_h)` last sent to the daemon, in device pixels. Tracked
     /// alongside `size` so a display-scale change still reaches the child even
     /// when the grid dimensions are unchanged.
@@ -777,6 +783,10 @@ impl RemoteTerminal {
         let mut term =
             Self::from_stream_with_repair(stream, size, buffered, route.repair_parked_cursor())?;
         term.route = route.clone();
+        // Attach replays the old geometry; the server deliberately ignores its
+        // size field. Follow replay with the current viewport before accepting
+        // input, just as adopt_relink does, even before the first UI layout.
+        term.resize(size, cell_w, cell_h);
         Ok(term)
     }
 
@@ -824,9 +834,14 @@ impl RemoteTerminal {
 
         self.exited_flag.store(false, Ordering::SeqCst);
         self.exited = false;
+        self.conpty_output = route.repair_parked_cursor() && self.ssh_endpoint.is_none();
         {
             use alacritty_terminal::vte::ansi::Handler as _;
             let mut term = self.term.lock();
+            term.set_options(terminal_config_from_user(
+                &crate::core::config::Config::load(),
+                self.conpty_output,
+            ));
             term.reset_state();
         }
         // The grid was just reset, so every image anchor now points nowhere.
@@ -910,7 +925,7 @@ impl RemoteTerminal {
         };
 
         let user_config = crate::core::config::Config::load();
-        let config = terminal_config_from_user(&user_config);
+        let config = terminal_config_from_user(&user_config, repair_parked_cursor);
         let term = Term::new(config, &size, proxy.clone());
         let term = Arc::new(FairMutex::new(term));
 
@@ -966,6 +981,7 @@ impl RemoteTerminal {
         )?;
 
         Ok(Self {
+            conpty_output: repair_parked_cursor,
             term,
             events: rx,
             palette: super::palette::build(),
@@ -1036,7 +1052,7 @@ impl RemoteTerminal {
 
     pub fn apply_user_config(&self, user_config: &crate::core::config::Config) {
         let mut term = self.term.lock();
-        term.set_options(terminal_config_from_user(user_config));
+        term.set_options(terminal_config_from_user(user_config, self.conpty_output));
     }
 
     fn spawn_reader(
@@ -2207,9 +2223,8 @@ fn spawn_reply(
     }
 }
 
-/// An `Attach` that produced no bytes within its wait — nobody served the
-/// connection. Distinct from a refusal (`Error` frame) and from a hangup so
-/// the caller can say the true thing: the pane may well still exist.
+/// An `Attach` that produced no complete reply within its absolute deadline.
+/// A stalled or fragmented reply says nothing about whether the pane exists.
 #[derive(Debug)]
 struct AttachUnanswered {
     pane_id: u64,
@@ -2220,8 +2235,8 @@ impl std::fmt::Display for AttachUnanswered {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "the daemon did not answer Attach for pane {} within {:?} (an attached pane replays \
-             its screen at once, so nobody is serving this connection)",
+            "the daemon did not answer Attach for pane {} with a complete reply within {:?}; \
+             the pane may still be alive",
             self.pane_id, self.wait
         )
     }
@@ -2236,10 +2251,8 @@ pub fn attach_unanswered(err: &anyhow::Error) -> bool {
         .any(|cause| cause.downcast_ref::<AttachUnanswered>().is_some())
 }
 
-/// An `Attach` the daemon answered with an `Error` frame — it heard us and
-/// said no, which for a relink means the pane is gone on its machine. Typed so
-/// a retry loop can tell this apart from the failures worth retrying: silence
-/// and transport trouble pass, a refusal repeats identically forever.
+/// Only the daemon's explicit missing-pane verdict. Permission failures,
+/// stale credentials and incomplete replies say nothing about process liveness.
 #[derive(Debug)]
 struct AttachRefused {
     message: String,
@@ -2253,93 +2266,45 @@ impl std::fmt::Display for AttachRefused {
 
 impl std::error::Error for AttachRefused {}
 
-/// Whether `err` is an `Attach` the daemon explicitly refused. Retrying one of
-/// these can only produce the same refusal.
+/// Whether this exact pane was confirmed missing, rather than temporarily denied.
 pub fn attach_refused(err: &anyhow::Error) -> bool {
     err.chain()
         .any(|cause| cause.downcast_ref::<AttachRefused>().is_some())
 }
 
-/// Reads far enough into the daemon's answer to an `Attach` to classify it, and
-/// hands back every byte read so the reader thread loses none of the replay.
-///
-/// Silence is a verdict, not a quiet pane. A daemon that attached replays the
-/// pane's ring before it reads a byte of our input, and the ring always holds
-/// a segment, so the first frame on a good attach is a `Size` — a quiet pane
-/// still sends that. An `Attach` that produced nothing within `wait` is one
-/// nobody is serving: a daemon still mid-restart, a socket held open by a
-/// process that will never read it. Taken for success it gave the window a
-/// pane drawn as restored whose every keystroke went into that socket — no
-/// fresh shell, no restored-screen banner, no agent resume, and Ctrl-C did
-/// nothing (#673). Taken for the failure it is, the caller spawns fresh and
-/// asks for the old screen back.
+/// Reads one complete Attach reply within an absolute deadline and hands it
+/// back for replay. Even a quiet pane sends Size. Partial frames cannot claim
+/// success, and neither timeouts nor permission errors prove a pane is gone:
+/// remote restores retain their identity for retry in those cases.
 fn attach_reply_prefix(
     stream: &mut Stream,
     pane_id: u64,
     wait: std::time::Duration,
 ) -> anyhow::Result<Vec<u8>> {
-    use std::io::Read as _;
-
-    let _ = stream.set_read_timeout(Some(wait));
-    let mut buffered: Vec<u8> = Vec::new();
-    let mut scratch = [0u8; 4096];
-    let mut kind = None;
-    while kind.is_none() {
-        match stream.read(&mut scratch) {
-            Ok(0) => {
-                let _ = stream.set_read_timeout(None);
-                return Err(anyhow::anyhow!(
-                    "the daemon closed the connection without answering Attach for pane {pane_id}"
-                ));
-            }
-            Ok(n) => buffered.extend_from_slice(&scratch[..n]),
-            Err(e) if would_block(&e) => break,
-            Err(e) => {
-                let _ = stream.set_read_timeout(None);
-                return Err(anyhow::Error::new(e).context(format!(
-                    "reading the daemon's answer to Attach for pane {pane_id}"
-                )));
-            }
-        }
-        kind = crate::daemon::protocol::peek_frame_kind(&buffered);
-    }
-    let _ = stream.set_read_timeout(None);
-    if buffered.is_empty() {
-        return Err(anyhow::Error::new(AttachUnanswered { pane_id, wait }));
-    }
-    if !kind.is_some_and(crate::daemon::protocol::is_error_kind) {
-        return Ok(buffered);
-    }
-    let message = read_error_frame(stream, &mut buffered, wait)
-        .unwrap_or_else(|| format!("no such pane {pane_id}"));
-    Err(anyhow::Error::new(AttachRefused { message }))
-}
-
-fn read_error_frame(
-    stream: &mut Stream,
-    buffered: &mut Vec<u8>,
-    wait: std::time::Duration,
-) -> Option<String> {
-    use std::io::Read as _;
-
-    let _ = stream.set_read_timeout(Some(wait));
-    let mut scratch = [0u8; 1024];
-    let message = loop {
-        match crate::daemon::protocol::take_frame(buffered) {
-            Ok(Some(frame)) => match DaemonMsg::from_frame(frame.0, frame.1) {
-                Ok(DaemonMsg::Error(message)) => break Some(message),
-                _ => break None,
-            },
-            Ok(None) => match stream.read(&mut scratch) {
-                Ok(0) => break None,
-                Ok(n) => buffered.extend_from_slice(&scratch[..n]),
-                Err(_) => break None,
-            },
-            Err(_) => break None,
-        }
+    let reply = {
+        let mut io = crate::daemon::deadline::DeadlineIo::new(stream, wait)?;
+        DaemonMsg::read(&mut io)
     };
-    let _ = stream.set_read_timeout(None);
-    message
+    match reply {
+        Ok(DaemonMsg::Error(message)) if message == format!("no such pane {pane_id}") => {
+            Err(anyhow::Error::new(AttachRefused { message }))
+        }
+        Ok(DaemonMsg::Error(message)) => Err(anyhow::anyhow!("daemon denied Attach: {message}")),
+        Ok(reply @ (DaemonMsg::Size(_) | DaemonMsg::Snapshot(_))) => {
+            let mut buffered = Vec::new();
+            reply.encode(&mut buffered)?;
+            Ok(buffered)
+        }
+        Ok(_) => Err(anyhow::anyhow!(
+            "unexpected reply to Attach for pane {pane_id}"
+        )),
+        Err(error) if would_block(&error) => {
+            Err(anyhow::Error::new(AttachUnanswered { pane_id, wait }))
+        }
+        Err(error) => Err(anyhow::Error::new(error).context(format!(
+            "reading the daemon's answer to Attach for pane {pane_id}"
+        ))),
+    }
 }
 
 fn would_block(err: &std::io::Error) -> bool {
@@ -2849,21 +2814,15 @@ fn connect_routed(route: &PaneRoute) -> anyhow::Result<Stream> {
     Ok(stream)
 }
 
-fn terminal_config_from_user(user_config: &crate::core::config::Config) -> Config {
+fn terminal_config_from_user(user_config: &crate::core::config::Config, conpty: bool) -> Config {
     Config {
         scrolling_history: user_config.scrollback_limit,
         default_cursor_style: alacritty_cursor_style(user_config.cursor_style),
         semantic_escape_chars: user_config.word_separators.clone(),
         kitty_keyboard: true,
-        // Every pane on Windows is presented through ConPTY (a shell, wsl.exe,
-        // ssh.exe — conhost mediates them all), which repaints nothing after a
-        // resize and keeps addressing the screen against its own re-anchored
-        // layout: grow keeps rows/cursor pinned and opens blank rows below,
-        // shrink scrolls the last written row to the new bottom. The grid must
-        // resize the same way or every later absolute-CUP paint (PSReadLine
-        // redraws its prompt that way per keystroke) lands rows off, shredding
-        // the screen the first time a maximized pane draws anything.
-        conpty_resize: cfg!(windows),
+        // Only local Windows PTYs use conhost's row anchoring. Routed Linux
+        // servers and native SSH use Unix resize semantics, even on Windows.
+        conpty_resize: conpty,
         ..Config::default()
     }
 }
@@ -2872,6 +2831,86 @@ fn terminal_config_from_user(user_config: &crate::core::config::Config) -> Confi
 mod config_tests {
     use super::*;
     use std::io::Write as _;
+
+    fn pair() -> (Stream, Stream) {
+        #[cfg(windows)]
+        {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            (client, listener.accept().unwrap().0)
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::net::UnixStream::pair().unwrap()
+        }
+    }
+
+    #[test]
+    fn recovery_permission_errors_do_not_mean_the_original_pane_is_gone() {
+        for message in [
+            "workspace pane capability is stale",
+            "pane command in flight",
+            "no such pane 8",
+        ] {
+            let (mut client, mut server) = pair();
+            DaemonMsg::Error(message.into())
+                .encode(&mut server)
+                .unwrap();
+            let error = attach_reply_prefix(&mut client, 7, std::time::Duration::from_millis(60))
+                .unwrap_err();
+            assert!(
+                !attach_refused(&error),
+                "a live pane must remain retryable: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_incomplete_reply_is_neither_success_nor_proof_of_a_missing_pane() {
+        for bytes in [&[32, 0][..], &[32, 0, 0, 0, 8][..]] {
+            let (mut client, mut server) = pair();
+            server.write_all(bytes).unwrap();
+            let error = attach_reply_prefix(&mut client, 7, std::time::Duration::from_millis(60))
+                .unwrap_err();
+            assert!(
+                !attach_refused(&error),
+                "truncation cannot prove a pane was deleted"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_raw_pty_resize_matches_unix_grid_after_config_reload() {
+        crate::core::config::pin_test_config_dir();
+        let (stream, mut peer) = pair();
+        let pane = RemoteTerminal::from_stream_with_repair(
+            stream,
+            TermSize::new(80, 4),
+            Vec::new(),
+            false,
+        )
+        .unwrap();
+        DaemonMsg::Output(b"one\r\ntwo\r\nthree\r\nfour\r\nfive".to_vec())
+            .encode(&mut peer)
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while pane.term.lock().grid().cursor.point.column.0 < 4 {
+            assert!(std::time::Instant::now() < until);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        pane.apply_user_config(&crate::core::config::Config::default());
+        let mut expected = Term::new(Config::default(), &TermSize::new(80, 4), pane.proxy.clone());
+        let mut processor: ansi::Processor = ansi::Processor::new();
+        processor.advance(&mut expected, b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        expected.resize(TermSize::new(80, 8));
+        let mut actual = pane.term.lock();
+        actual.resize(TermSize::new(80, 8));
+        assert_eq!(
+            actual.grid().cursor.point,
+            expected.grid().cursor.point,
+            "a Windows client must not impose ConPTY row semantics on a Unix PTY"
+        );
+    }
 
     #[test]
     fn a_remote_pane_without_a_current_capability_cannot_dial_or_fall_back_to_management() {
@@ -2981,7 +3020,8 @@ mod config_tests {
     /// is exactly how it shipped disabled once (#415 follow-up).
     #[test]
     fn windows_panes_opt_into_conpty_resize_semantics() {
-        let config = terminal_config_from_user(&crate::core::config::Config::default());
+        let config =
+            terminal_config_from_user(&crate::core::config::Config::default(), cfg!(windows));
         assert_eq!(config.conpty_resize, cfg!(windows));
         #[cfg(windows)]
         assert!(config.conpty_resize);
@@ -3385,7 +3425,8 @@ mod tests {
 
     #[test]
     fn kitty_keyboard_negotiation_reports_the_requested_mode() {
-        let config = terminal_config_from_user(&crate::core::config::Config::default());
+        let config =
+            terminal_config_from_user(&crate::core::config::Config::default(), cfg!(windows));
         assert!(config.kitty_keyboard);
 
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();

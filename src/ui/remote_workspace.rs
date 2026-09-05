@@ -1895,6 +1895,15 @@ fn finish_reclaim(
         crate::ui::tree_sync::hydrate_window_from_tree(cx, workspace);
         refresh_window_shells(cx, workspace);
     }
+    if failure.is_none()
+        && let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, workspace)
+        && let Some(app) =
+            crate::ui::windows::WindowRegistry::app_for(cx, workspace).and_then(|a| a.upgrade())
+    {
+        let _ = handle.update(cx, |_, window, cx| {
+            app.update(cx, |app, cx| app.retry_restoring_panes(window, cx));
+        });
+    }
     cx.refresh_windows();
 }
 
@@ -2238,6 +2247,23 @@ fn finish_attempt(
     cx.refresh_windows();
 }
 
+fn pane_relink_route_is_current(
+    cx: &gpui::App,
+    workspace: WorkspaceId,
+    route: &crate::terminal::PaneRoute,
+) -> bool {
+    let crate::terminal::PaneRoute::Remote {
+        authorization: Some(expected),
+        ..
+    } = route
+    else {
+        return false;
+    };
+    let host = WorkspaceStore::host_of(cx, workspace);
+    remote_connect::HostLinks::pane_access(cx, host, workspace).as_ref() == Some(expected)
+        && !workspace_is_preempted(cx, workspace)
+}
+
 fn relink_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
     let panes = panes_of(cx, workspace);
     if panes.is_empty() {
@@ -2253,10 +2279,8 @@ fn relink_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
         // 250 ms and sees these panes as dead until they adopt, does not fire
         // a second `Attach` for the same pane and kick this one off the
         // daemon's single subscriber slot.
-        let (pane_id, size, cell_w, cell_h) = view.update(cx, |view, _| {
-            view.mark_relinking();
-            view.relink_plan()
-        });
+        let (generation, (pane_id, size, cell_w, cell_h)) =
+            view.update(cx, |view, _| (view.mark_relinking(), view.relink_plan()));
         let opening = route.clone();
         let adopting = route.clone();
         cx.spawn(async move |cx| {
@@ -2269,9 +2293,20 @@ fn relink_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
                     .map_err(|e| e.to_string())
                 })
                 .await;
+            if !cx.update(|cx| pane_relink_route_is_current(cx, workspace, &adopting)) {
+                view.update(cx, |view, _| {
+                    if view.relink_is_current(generation) {
+                        view.relink_settled();
+                    }
+                });
+                return;
+            }
             match opened {
                 Ok((stream, buffered)) => {
                     view.update(cx, |view, cx| {
+                        if !view.relink_is_current(generation) {
+                            return;
+                        }
                         if let Err(e) =
                             view.adopt_relink(stream, buffered, &adopting, size, cell_w, cell_h, cx)
                         {
@@ -2281,7 +2316,11 @@ fn relink_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
                     });
                 }
                 Err(e) => {
-                    view.update(cx, |view, _| view.relink_settled());
+                    view.update(cx, |view, _| {
+                        if view.relink_is_current(generation) {
+                            view.relink_settled();
+                        }
+                    });
                     log::warn!("could not relink pane {pane_id}: {e}");
                 }
             }
@@ -2385,29 +2424,38 @@ fn relink_dead_panes(
     let plans: Vec<_> = panes
         .iter()
         .map(|view| {
-            let plan = view.update(cx, |view, _| {
-                view.mark_relinking();
-                view.relink_plan()
-            });
+            let plan = view.update(cx, |view, _| (view.mark_relinking(), view.relink_plan()));
             (view.clone(), plan)
         })
         .collect();
     cx.spawn(async move |cx| {
         let attempts: Vec<_> = plans
             .into_iter()
-            .map(|(view, (pane_id, size, cell_w, cell_h))| {
+            .map(|(view, (generation, (pane_id, size, cell_w, cell_h)))| {
                 let opening = route.clone();
                 let opened = cx.background_executor().spawn(async move {
                     crate::terminal::RemoteTerminal::open_relink(
                         &opening, pane_id, size, cell_w, cell_h,
                     )
                 });
-                (view, opened, pane_id, size, cell_w, cell_h)
+                (view, opened, generation, pane_id, size, cell_w, cell_h)
             })
             .collect();
         let mut misses = 0usize;
-        for (view, opened, pane_id, size, cell_w, cell_h) in attempts {
-            match opened.await {
+        for (view, opened, generation, pane_id, size, cell_w, cell_h) in attempts {
+            let opened = opened.await;
+            if !cx.update(|cx| pane_relink_route_is_current(cx, workspace, &route)) {
+                view.update(cx, |view, _| {
+                    if view.relink_is_current(generation) {
+                        view.relink_settled();
+                    }
+                });
+                continue;
+            }
+            if !view.read_with(cx, |view, _| view.relink_is_current(generation)) {
+                continue;
+            }
+            match opened {
                 Ok((stream, buffered)) => {
                     let adopted = view.update(cx, |view, cx| {
                         view.adopt_relink(stream, buffered, &route, size, cell_w, cell_h, cx)
@@ -2432,7 +2480,11 @@ fn relink_dead_panes(
                 }
             }
         }
-        cx.update(|cx| note_pane_relink_outcome(cx, workspace, misses));
+        cx.update(|cx| {
+            if pane_relink_route_is_current(cx, workspace, &route) {
+                note_pane_relink_outcome(cx, workspace, misses);
+            }
+        });
     })
     .detach();
 }
@@ -3029,6 +3081,50 @@ mod tests {
             home: std::path::PathBuf::from("/tmp"),
             rows: Vec::new(),
         }
+    }
+
+    #[gpui::test]
+    fn a_pane_relink_only_lands_with_the_current_connected_workspace_lease(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let target = RemoteTarget::direct("test", "relink-lease.invalid", 22);
+            let host_id = target.host_id();
+            let remote_id = WorkspaceId::new();
+            let view = crate::core::session::WindowView::on_remote(RemoteRef::new(target.clone(), remote_id));
+            let workspace = view.id;
+            WorkspaceStore::install_for_test(cx, crate::core::session::WindowViews {
+                views: vec![view], active: None,
+            });
+            let connected = fake_connected(&target.connection_key());
+            let client = connected.host.client().clone();
+            remote_connect::HostLinks::insert(cx, connected.host, connected.home);
+            let auth = |token: &str| crate::daemon::protocol::PaneAuthorization {
+                workspace: remote_id,
+                token: serde_json::from_value(serde_json::json!(token)).unwrap(),
+            };
+            let old = auth("old-test-lease");
+            let new = auth("new-test-lease");
+            let mut route = crate::terminal::PaneRoute::Remote {
+                header: Box::new(crate::daemon::router::RouteHeader::ssh(serde_json::from_value(
+                    serde_json::json!({"host":"relink-lease.invalid","port":22,"user":"test","auth_mode":"auto"})
+                ).unwrap()).for_pane()),
+                authorization: Some(old.clone()), resize_echo: true,
+            };
+            remote_connect::HostLinks::grant_panes(cx, host_id, workspace, old);
+            assert!(pane_relink_route_is_current(cx, workspace, &route));
+            remote_connect::HostLinks::grant_panes(cx, host_id, workspace, new.clone());
+            assert!(!pane_relink_route_is_current(cx, workspace, &route));
+            if let crate::terminal::PaneRoute::Remote { authorization, .. } = &mut route {
+                *authorization = Some(new);
+            }
+            assert!(pane_relink_route_is_current(cx, workspace, &route));
+            cx.default_global::<RemoteLinks>().preempted.insert(workspace, "another client".into());
+            assert!(!pane_relink_route_is_current(cx, workspace, &route));
+            cx.default_global::<RemoteLinks>().preempted.remove(&workspace);
+            client.close();
+            assert!(!pane_relink_route_is_current(cx, workspace, &route));
+        });
     }
 
     #[gpui::test]

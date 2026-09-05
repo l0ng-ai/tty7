@@ -3,7 +3,7 @@
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
 
-pub(super) trait Socket: Read + Write {
+pub trait Socket: Read + Write {
     fn read_timeout(&self) -> io::Result<Option<Duration>>;
     fn write_timeout(&self) -> io::Result<Option<Duration>>;
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
@@ -33,7 +33,7 @@ socket!(std::net::TcpStream);
 #[cfg(unix)]
 socket!(std::os::unix::net::UnixStream);
 
-pub(super) struct DeadlineIo<'a, S: Socket> {
+pub struct DeadlineIo<'a, S: Socket> {
     socket: &'a mut S,
     deadline: Instant,
     read_timeout: Option<Duration>,
@@ -41,7 +41,7 @@ pub(super) struct DeadlineIo<'a, S: Socket> {
 }
 
 impl<'a, S: Socket> DeadlineIo<'a, S> {
-    pub(super) fn new(socket: &'a mut S, budget: Duration) -> io::Result<Self> {
+    pub fn new(socket: &'a mut S, budget: Duration) -> io::Result<Self> {
         Ok(Self {
             read_timeout: socket.read_timeout()?,
             write_timeout: socket.write_timeout()?,
