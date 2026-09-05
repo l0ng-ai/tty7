@@ -1160,11 +1160,15 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::WindowThisWorkspace => "this workspace",
         L10nKey::WindowConfirmTitle => "{verb} Workspace \"{name}\"?",
         L10nKey::WindowStopUnreachable => {
-            "Its machine could not be reached. Any shells still running there will be ended."
+            "Its machine could not be reached. Reconnect before stopping its shells."
         }
         L10nKey::WindowDeleteUnreachable => {
-            "Its machine could not be reached. Any shells still running there will be ended, and the layout forgotten."
+            "Its machine could not be reached. Reconnect before deleting it; its bookmark is kept until the machine confirms."
         }
+        L10nKey::WindowReconnectToStop => {
+            "Reconnect to this workspace before stopping or deleting it."
+        }
+        L10nKey::WindowOperationIncomplete => "Workspace operation did not complete",
         L10nKey::WindowStopShells => "{count} running shells will be ended.",
         L10nKey::WindowDeleteShells => {
             "{count} running shells will be ended and the layout forgotten."

@@ -19,6 +19,15 @@ import tempfile
 import time
 import uuid
 
+PANE_ACCESS = False
+
+
+def pane_connect(directory, access="manage"):
+    pane = connect(directory / "daemon.sock")
+    if PANE_ACCESS and access is not None:
+        frame(pane, 57, json.dumps(access).encode())
+    return pane
+
 
 def frame(sock, kind, payload=b""):
     sock.sendall(struct.pack("<IB", len(payload), kind) + payload)
@@ -83,29 +92,65 @@ def lease_smoke(directory, version):
     a = Control(directory, version, "test-laptop")
     b = Control(directory, version, "test-desktop")
     workspace = a.call({"workspace_create": {"name": "isolated-774", "workspace": None}})["ok"]["workspace_tree"]["id"]
-    first = a.call({"workspace_resume": {"id": workspace, "proof": None}})["ok"]["workspace_lease"]["proof"]
+    first_lease = a.call({"workspace_resume": {"id": workspace, "proof": None}})["ok"]["workspace_lease"]
+    first = first_lease["proof"]
+    if PANE_ACCESS:
+        old_access = {"workspace": {"workspace": workspace, "token": first_lease["pane_token"]}}
+        original, pane_id = spawn_pane(directory, "/bin/cat", [], old_access)
     assert "workspace_busy" in b.call({"workspace_resume": {"id": workspace, "proof": None}})["ok"]
-    current = b.call({"workspace_take_over": {"id": workspace}})["ok"]["workspace_lease"]["proof"]
+    current_lease = b.call({"workspace_take_over": {"id": workspace}})["ok"]["workspace_lease"]
+    current = current_lease["proof"]
     assert first != current
     denied = a.call({"workspace_rename": {"workspace": workspace, "name": "stale-write"}})
     assert denied["err"]["kind"] == "permission_denied", denied
     assert b.call({"workspace_rename": {"workspace": workspace, "name": "current-write"}}) == {"ok": "unit"}
+    if PANE_ACCESS:
+        # Takeover closes the old socket but preserves the original PTY.
+        try:
+            while True:
+                receive(original)
+        except (EOFError, ConnectionResetError):
+            original.close()
+        for kind, payload in [(2, [pane_id, SIZE, False]), (6, pane_id), (55, [pane_id, list(b"stale\n")])]:
+            with pane_connect(directory, old_access) as denied:
+                frame(denied, kind, json.dumps(payload).encode())
+                assert receive(denied)[0] == 8
+        with pane_connect(directory, None) as denied:
+            frame(denied, 6, json.dumps(pane_id).encode())
+            assert receive(denied)[0] == 8
+        current_access = {"workspace": {"workspace": workspace, "token": current_lease["pane_token"]}}
+        with pane_connect(directory, current_access) as attached:
+            frame(attached, 2, json.dumps([pane_id, SIZE, False]).encode())
+            assert receive(attached)[0] == 9
+            frame(attached, 3, b"TTY7-CURRENT-OWNER\n")
+            output = b"".join(payload for kind, payload in read_for(attached, 0.5) if kind in (2, 3))
+            assert b"TTY7-CURRENT-OWNER" in output
     b.close()
     assert "workspace_busy" in a.call({"workspace_resume": {"id": workspace, "proof": first}})["ok"]
     b = Control(directory, version, "test-desktop-reconnected")
     resumed = b.call({"workspace_resume": {"id": workspace, "proof": current}})
     assert resumed["ok"]["workspace_lease"]["proof"] == current
+    if PANE_ACCESS:
+        renewed = resumed["ok"]["workspace_lease"]["pane_token"]
+        assert renewed != current_lease["pane_token"]
+        with pane_connect(directory, current_access) as denied:
+            frame(denied, 6, json.dumps(pane_id).encode())
+            assert receive(denied)[0] == 8
+        with pane_connect(directory, {"workspace": {"workspace": workspace, "token": renewed}}) as kill:
+            frame(kill, 6, json.dumps(pane_id).encode())
+            kind, payload = receive(kill)
+            assert kind == 52 and json.loads(payload) == pane_id
     assert b.call({"workspace_tree": {"workspace": workspace}})["ok"]["workspace_tree"]["name"] == "current-write"
     a.close()
     b.close()
-    return {"resume_takeover_and_stale_layout": "passed"}
+    return {"resume_takeover_and_stale_layout": "passed", "pane_capability_fencing": "passed" if PANE_ACCESS else "not supported"}
 
 
 SIZE = {"cols": 120, "rows": 40, "cell_w": 8, "cell_h": 16}
 
 
-def spawn_pane(directory, program, args):
-    pane = connect(directory / "daemon.sock")
+def spawn_pane(directory, program, args, access="manage"):
+    pane = pane_connect(directory, access)
     frame(pane, 9, json.dumps([str(directory), SIZE, {"program": program, "args": args}]).encode())
     kind, payload = receive(pane)
     assert kind == 1, (kind, payload[:200])
@@ -149,7 +194,7 @@ def tui_smoke(directory):
         counter += 1
     frame(btop, 5)
     btop.close()
-    btop = connect(directory / "daemon.sock")
+    btop = pane_connect(directory)
     frame(btop, 2, json.dumps([pane_id, SIZE, False]).encode())
     replay = b"".join(payload for kind, payload in read_for(btop, 1) if kind == 2)
     frame(btop, 3, b"q")
@@ -185,7 +230,7 @@ def replay_overflow_smoke(directory):
     assert produced > 8 * 1024 * 1024
     frame(pane, 5)
     pane.close()
-    pane = connect(directory / "daemon.sock")
+    pane = pane_connect(directory)
     frame(pane, 2, json.dumps([pane_id, SIZE, False]).encode())
     replay = b"".join(payload for kind, payload in read_for(pane, 1) if kind == 2)
     frame(pane, 3, b"q\n")
@@ -198,6 +243,7 @@ def replay_overflow_smoke(directory):
 
 
 def main():
+    global PANE_ACCESS
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", required=True, type=Path)
     parser.add_argument("--artifacts", required=True, type=Path)
@@ -211,6 +257,7 @@ def main():
     assert len(str(directory / "control.sock")) < 104
     env = dict(os.environ, TTY7_CONFIG_DIR=str(directory), TTY7_DATA_DIR=str(directory / "data"), XDG_CONFIG_HOME=str(directory / "xdg"))
     protocol = json.loads(subprocess.check_output([str(server), "--protocol"], env=env))
+    PANE_ACCESS = protocol["protocol"] >= 7
     with (directory / "server.log").open("wb") as log:
         proc = subprocess.Popen([str(server), "--daemon", "--config-dir", str(directory)],
                                 env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
@@ -230,7 +277,7 @@ def main():
         finally:
             if proc.poll() is None:
                 try:
-                    with connect(directory / "daemon.sock") as pane:
+                    with pane_connect(directory) as pane:
                         frame(pane, 8)  # Shutdown, only on our private endpoint.
                     proc.wait(timeout=5)
                 except (OSError, subprocess.TimeoutExpired):

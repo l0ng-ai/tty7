@@ -764,6 +764,9 @@ pub fn hand_off() -> anyhow::Result<()> {
     // already in flight is describing the image being retired. Moving the
     // generation here rather than after the exec is what makes those verdicts
     // land before this one does harmless.
+    if local_daemon_supports(crate::daemon::protocol::FEATURE_PANE_ACCESS) {
+        ClientMsg::Access(crate::daemon::protocol::PaneAccess::Manage).encode(&mut stream)?;
+    }
     daemon_generation_moved();
     let generation = daemon_generation();
     ClientMsg::Handoff { exe: exe.clone() }.encode(&mut stream)?;
@@ -822,7 +825,19 @@ pub fn stop() {
         .filter(|&pid| pid > 4 && pid != std::process::id());
 
     let mut asked = false;
+    // Explicit maintenance may still target a pre-v7 daemon. Probe on a
+    // separate read-only socket, never downgrade workspace pane traffic.
+    let scoped = transport::connect().ok().is_some_and(|mut stream| {
+        matches!(query_daemon_version(&mut stream), VersionProbe::Speaks(version) if version.has_feature(crate::daemon::protocol::FEATURE_PANE_ACCESS))
+    });
     if let Ok(mut stream) = transport::connect() {
+        if scoped
+            && ClientMsg::Access(crate::daemon::protocol::PaneAccess::Manage)
+                .encode(&mut stream)
+                .is_err()
+        {
+            return;
+        }
         if ClientMsg::Shutdown.encode(&mut stream).is_ok() {
             let _ = stream.flush();
             asked = true;

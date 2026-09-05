@@ -9,9 +9,15 @@ use crate::daemon::protocol::{ClientMsg, DaemonMsg, DaemonVersion, RemoteKind};
 use crate::daemon::ssh::SshConnection;
 use crate::daemon::transport::{self, Stream};
 
+mod access;
+use access::Authority;
+
 struct Registry {
     panes: Mutex<HashMap<u64, Arc<DaemonPane>>>,
     next_id: AtomicU64,
+    attachments: Arc<crate::host::server::AttachRegistry>,
+    machine: std::sync::OnceLock<Arc<crate::core::machine::MachineStore>>,
+    bindings: Mutex<HashMap<u64, crate::core::session::WorkspaceId>>,
 }
 
 impl Registry {
@@ -19,6 +25,9 @@ impl Registry {
         Self {
             panes: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            attachments: Arc::default(),
+            machine: std::sync::OnceLock::new(),
+            bindings: Mutex::new(HashMap::new()),
         }
     }
 
@@ -65,6 +74,10 @@ impl Registry {
     }
 
     fn remove(&self, id: u64) -> Option<Arc<DaemonPane>> {
+        self.bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
         self.panes.lock().unwrap().remove(&id)
     }
 
@@ -333,6 +346,10 @@ pub fn run_daemon() -> anyhow::Result<()> {
     #[cfg(any(unix, windows))]
     {
         let mut services = control_services();
+        services.attachments = registry.attachments.clone();
+        if let Some(machine) = &services.machine {
+            let _ = registry.machine.set(machine.clone());
+        }
         services.panes = Some(registry.clone());
         match crate::host::server::spawn_control_listener_with(
             crate::host::local::LocalHost::shared(),
@@ -403,6 +420,10 @@ fn run_adopting(inheritance: crate::daemon::handoff::Inheritance) -> anyhow::Res
 
     {
         let mut services = control_services();
+        services.attachments = registry.attachments.clone();
+        if let Some(machine) = &services.machine {
+            let _ = registry.machine.set(machine.clone());
+        }
         services.panes = Some(registry.clone());
         match crate::host::server::spawn_control_listener_with(
             crate::host::local::LocalHost::shared(),
@@ -693,6 +714,33 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
     }
 
     let first = ClientMsg::from_frame(first_kind, first_payload)?;
+    macro_rules! require {
+        ($result:expr) => {
+            match $result {
+                Ok(value) => value,
+                Err(error) => {
+                    DaemonMsg::Error(error.to_string()).encode(&mut &write_stream)?;
+                    return Ok(());
+                }
+            }
+        };
+    }
+    let (authority, first) = if let ClientMsg::Access(access) = first {
+        let authority = require!(Authority::open(Some(access), &registry, &read_stream));
+        let timeout = read_stream.read_timeout()?;
+        read_stream.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
+        let request = ClientMsg::read(&mut read_stream);
+        read_stream.set_read_timeout(timeout)?;
+        (authority, require!(request))
+    } else {
+        (Authority::ReadOnly, first)
+    };
+    if matches!(
+        &first,
+        ClientMsg::SpawnNativeSsh { .. } | ClientMsg::Shutdown | ClientMsg::Handoff { .. }
+    ) {
+        require!(authority.require_management());
+    }
     match first {
         ClientMsg::Spawn {
             cwd,
@@ -703,6 +751,14 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             restore,
             allow_remote_clipboard_write,
         } => {
+            let permit = require!(authority.enter());
+            if let Some(restore) = &restore {
+                require!(authority.check_pane(&registry, restore.pane_id));
+            }
+            let (owner, workspace) = match authority.workspace() {
+                Some(workspace) => (Some(workspace.to_string()), Some(workspace.to_string())),
+                None => (owner, workspace),
+            };
             let id = registry.alloc_id();
             if let Some(dead) = restore.as_ref().map(|r| r.pane_id) {
                 // Before the spawn, because the spawn is what hands the shell
@@ -743,7 +799,9 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                     return Err(e);
                 }
             };
+            authority.bind_spawn(&registry, id);
             registry.insert(pane.clone());
+            drop(permit);
 
             {
                 let mut w = &write_stream;
@@ -756,6 +814,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                 write_stream,
                 registry,
                 allow_remote_clipboard_write,
+                authority,
             )
         }
 
@@ -794,6 +853,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                 write_stream,
                 registry,
                 allow_remote_clipboard_write,
+                authority,
             )
         }
 
@@ -809,6 +869,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                 write_stream,
                 registry,
                 allow_remote_clipboard_write,
+                authority,
             ),
             None => {
                 let mut w = write_stream;
@@ -868,7 +929,13 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
         }
 
         ClientMsg::Kill { pane_id } => {
+            let _permit = require!(authority.enter());
+            if registry.get(pane_id).is_some() {
+                require!(authority.check_pane(&registry, pane_id));
+            }
             kill_pane(&registry, pane_id);
+            let mut w = write_stream;
+            DaemonMsg::KillAck { pane_id }.encode(&mut w)?;
             Ok(())
         }
 
@@ -1024,6 +1091,8 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
         }
 
         ClientMsg::SendInput { pane_id, bytes } => {
+            let _permit = require!(authority.enter());
+            require!(authority.check_pane(&registry, pane_id));
             let mut w = write_stream;
             match registry.get(pane_id) {
                 Some(pane) if pane.alive() => {
@@ -1076,10 +1145,17 @@ fn stream_pane_with_attach(
     write_stream: Stream,
     registry: Arc<Registry>,
     allow_remote_clipboard_write: bool,
+    authority: Authority,
 ) -> anyhow::Result<()> {
-    let (tx, rx) = mpsc::channel::<DaemonMsg>();
-    let epoch = pane.attach_with_permissions(tx, allow_remote_clipboard_write);
-    run_stream(pane, id, epoch, rx, read_stream, write_stream, registry)
+    stream_pane(
+        pane,
+        id,
+        read_stream,
+        write_stream,
+        registry,
+        allow_remote_clipboard_write,
+        authority,
+    )
 }
 
 fn stream_pane(
@@ -1089,10 +1165,29 @@ fn stream_pane(
     write_stream: Stream,
     registry: Arc<Registry>,
     allow_remote_clipboard_write: bool,
+    authority: Authority,
 ) -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel::<DaemonMsg>();
-    let epoch = pane.attach_with_permissions(tx, allow_remote_clipboard_write);
-    run_stream(pane, id, epoch, rx, read_stream, write_stream, registry)
+    let epoch = match authority.enter().and_then(|_permit| {
+        authority.check_pane(&registry, id)?;
+        Ok(pane.attach_with_permissions(tx, allow_remote_clipboard_write))
+    }) {
+        Ok(epoch) => epoch,
+        Err(error) => {
+            DaemonMsg::Error(error.to_string()).encode(&mut &write_stream)?;
+            return Ok(());
+        }
+    };
+    run_stream(
+        pane,
+        id,
+        epoch,
+        rx,
+        read_stream,
+        write_stream,
+        registry,
+        authority,
+    )
 }
 
 fn stream_observer(
@@ -1140,6 +1235,7 @@ fn run_stream(
     mut read_stream: Stream,
     write_stream: Stream,
     registry: Arc<Registry>,
+    authority: Authority,
 ) -> anyhow::Result<()> {
     use std::io::Read as _;
 
@@ -1159,6 +1255,9 @@ fn run_stream(
                 Err(_) => break 'conn,
             };
             let Ok(msg) = ClientMsg::from_frame(kind, payload) else {
+                break 'conn;
+            };
+            let Ok(_permit) = authority.enter() else {
                 break 'conn;
             };
             match msg {
@@ -1457,12 +1556,18 @@ mod tests {
         }
 
         #[test]
-        fn kill_unknown_pane_closes_without_reply() {
+        fn kill_unknown_pane_acknowledges_idempotent_completion() {
             let (mut client, h) = serve();
+            ClientMsg::Access(crate::daemon::protocol::PaneAccess::Manage)
+                .encode(&mut client)
+                .unwrap();
             ClientMsg::Kill { pane_id: 123 }
                 .encode(&mut client)
                 .unwrap();
-            assert!(DaemonMsg::read(&mut client).is_err());
+            assert_eq!(
+                DaemonMsg::read(&mut client).unwrap(),
+                DaemonMsg::KillAck { pane_id: 123 }
+            );
             h.join().unwrap();
         }
 
@@ -1501,6 +1606,9 @@ mod tests {
                 let registry = registry.clone();
                 thread::spawn(move || handle_conn(server, registry).unwrap())
             };
+            ClientMsg::Access(crate::daemon::protocol::PaneAccess::Manage)
+                .encode(&mut client)
+                .unwrap();
             ClientMsg::Attach {
                 pane_id: own.id,
                 size: SIZE,

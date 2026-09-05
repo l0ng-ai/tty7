@@ -7476,6 +7476,7 @@ mod tests {
 
     fn ws(target: RemoteTarget, with_spec: bool) -> PaneWorkspace {
         PaneWorkspace {
+            authorization: None,
             workspace: WorkspaceId::new(),
             target,
             spec: with_spec.then(|| {
@@ -8821,6 +8822,7 @@ mod tests {
             alias: "build-box".into(),
         };
         let ws = PaneWorkspace {
+            authorization: None,
             workspace: WorkspaceId::new(),
             target: target.clone(),
             spec: None,
@@ -8838,6 +8840,7 @@ mod tests {
         );
 
         let sibling = PaneWorkspace {
+            authorization: None,
             workspace: WorkspaceId::new(),
             target,
             spec: None,
@@ -12150,6 +12153,7 @@ mod gpui_tests {
             },
         );
         view.set_workspace(Some(PaneWorkspace {
+            authorization: None,
             workspace: id,
             target: host.target,
             spec: Some(Box::new(
@@ -12408,6 +12412,7 @@ mod gpui_tests {
         window
             .update(cx, |view, _, cx| {
                 view.set_workspace(Some(PaneWorkspace {
+                    authorization: None,
                     workspace: WorkspaceId::new(),
                     target: RemoteTarget::direct("me", "build-box", 22),
                     spec: None,

@@ -82,6 +82,15 @@ struct GuiLive {
 }
 
 impl AttachRegistry {
+    pub(crate) fn pane_lease(
+        &self,
+        auth: &crate::daemon::protocol::PaneAuthorization,
+    ) -> io::Result<Arc<super::ownership::PaneLease>> {
+        self.ownership
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pane_lease(auth)
+    }
     fn handover(&self) -> std::sync::MutexGuard<'_, ()> {
         self.handover.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -442,7 +451,7 @@ fn acquire_workspace(
     let tree_id: WorkspaceId = workspace
         .parse()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid workspace id"))?;
-    let (displaced, evicted, proof) = {
+    let (displaced, evicted, proof, pane_token) = {
         let _handover = conn.attachments.handover();
         if conn.closed.load(Ordering::Acquire) {
             return Err(io::Error::new(
@@ -456,6 +465,14 @@ fn acquire_workspace(
             .ownership
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        if let AttachIntent::Resume(proof) = &intent
+            && let Err(by) = ownership.can_resume(tree_id, *proof)
+        {
+            return Ok(ReplyOk::WorkspaceBusy { by });
+        }
+        // No blocking PTY work while holding the host handover lock. If a
+        // command is still running, fail without changing either owner table.
+        ownership.revoke_panes(tree_id)?;
         let proof = match intent {
             AttachIntent::Resume(proof) => {
                 match ownership.resume(tree_id, proof, &conn.holder.hostname) {
@@ -465,12 +482,13 @@ fn acquire_workspace(
             }
             AttachIntent::TakeOver => ownership.take_over(tree_id, &conn.holder.hostname),
         };
+        let pane_token = ownership.renew_panes(tree_id);
         let attachment = Attachment::new(conn.holder.token.clone(), conn.holder.hostname.clone());
         let displaced = machine.attach(tree_id, attachment);
         let evicted = conn
             .attachments
             .claim(workspace, conn.id, &conn.holder, dedicated);
-        (displaced, evicted, proof)
+        (displaced, evicted, proof, pane_token)
     };
 
     if let Some(evicted) = evicted {
@@ -495,6 +513,7 @@ fn acquire_workspace(
 
     Ok(ReplyOk::WorkspaceLease {
         proof,
+        pane_token,
         took_over_from: displaced
             .filter(|a| takeover && a.token != conn.holder.token)
             .map(|a| a.hostname),
@@ -513,6 +532,11 @@ fn detach_workspace(conn: &Arc<Conn>, workspace: &str) -> io::Result<bool> {
     // that actually released the live seat may clear the machine's mirror;
     // a late Detach from its predecessor must not detach the resumed socket.
     if released && let (Some(machine), Ok(id)) = (&conn.machine, workspace.parse()) {
+        conn.attachments
+            .ownership
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .invalidate_panes(id);
         machine.detach(id, &conn.holder.token);
     }
     Ok(released)
@@ -798,10 +822,19 @@ fn run_request(
         ControlRequest::WorkspaceRemove { workspace } => {
             let store = conn.machine()?;
             let panes = {
-                let panes = store.workspace_delete(workspace, conn.machine_origin)?;
-                conn.attachments.forget_workspace(&workspace.to_string());
-                panes
+                // Do not delete/recreate a workspace while one of its old
+                // pane commands is still executing. Tree-only removal still
+                // does not implicitly kill the workspace's processes.
+                let ownership = conn
+                    .attachments
+                    .ownership
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                ownership.retire_panes_after(workspace, || {
+                    store.workspace_delete(workspace, conn.machine_origin)
+                })?
             };
+            conn.attachments.forget_workspace(&workspace.to_string());
             (ReplyOk::Panes(panes), Vec::new())
         }
         ControlRequest::WorkspaceTouch { workspace } => {
@@ -1059,6 +1092,11 @@ impl Conn {
         let released = self.attachments.release_conn(self.id);
         for workspace in released {
             if let (Some(machine), Some(id)) = (&self.machine, workspace.parse().ok()) {
+                self.attachments
+                    .ownership
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .invalidate_panes(id);
                 machine.detach(id, &self.holder.token);
             }
         }

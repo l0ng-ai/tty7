@@ -487,11 +487,40 @@ pub fn rows_from_machine(machine: &tty7_core::core::machine::Machine) -> Vec<Rem
 pub struct HostLinks {
     hosts: HashMap<HostId, Arc<RemoteHost>>,
     homes: HashMap<HostId, PathBuf>,
+    pane_access: HashMap<(HostId, WorkspaceId), crate::daemon::protocol::PaneAuthorization>,
 }
 
 impl Global for HostLinks {}
 
 impl HostLinks {
+    pub fn pane_access(
+        cx: &App,
+        host: HostId,
+        workspace: WorkspaceId,
+    ) -> Option<crate::daemon::protocol::PaneAuthorization> {
+        let links = cx.try_global::<HostLinks>()?;
+        if !links.hosts.get(&host)?.client().is_connected() {
+            return None;
+        }
+        links.pane_access.get(&(host, workspace)).cloned()
+    }
+
+    pub fn grant_panes(
+        cx: &mut App,
+        host: HostId,
+        workspace: WorkspaceId,
+        access: crate::daemon::protocol::PaneAuthorization,
+    ) {
+        cx.default_global::<HostLinks>()
+            .pane_access
+            .insert((host, workspace), access);
+    }
+
+    pub fn forget_panes(cx: &mut App, host: HostId, workspace: WorkspaceId) {
+        cx.default_global::<HostLinks>()
+            .pane_access
+            .remove(&(host, workspace));
+    }
     pub fn get(cx: &mut App, id: HostId) -> Option<Arc<RemoteHost>> {
         cx.default_global::<HostLinks>().hosts.get(&id).cloned()
     }
@@ -525,6 +554,7 @@ impl HostLinks {
         if let Some(previous) = previous
             && !Arc::ptr_eq(&previous, &host)
         {
+            table.pane_access.retain(|(host, _), _| *host != id);
             Self::retire(previous, cx);
         }
     }
@@ -532,6 +562,7 @@ impl HostLinks {
     pub fn remove(cx: &mut App, id: HostId) {
         let table = cx.default_global::<HostLinks>();
         let removed = table.hosts.remove(&id);
+        table.pane_access.retain(|(host, _), _| *host != id);
         table.homes.remove(&id);
         crate::ui::host_registry::HostRegistry::remove(cx, id);
         if let Some(host) = removed {

@@ -46,6 +46,9 @@ fn send_shutdown(endpoint: &Path) {
     use std::io::Write as _;
     let mut stream =
         std::os::unix::net::UnixStream::connect(endpoint).expect("connect to the daemon");
+    ClientMsg::Access(tty7_core::daemon::protocol::PaneAccess::Manage)
+        .encode(&mut stream)
+        .unwrap();
     ClientMsg::Shutdown
         .encode(&mut stream)
         .expect("send Shutdown");

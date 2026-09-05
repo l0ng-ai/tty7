@@ -107,7 +107,7 @@ impl RealBackend {
                 Some(target) => PaneClient::routed(target),
                 None => PaneClient::local(),
             };
-            self.panes = Some(client);
+            self.panes = Some(client.management());
         }
         Ok(self.panes.as_ref().expect("just filled"))
     }

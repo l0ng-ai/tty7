@@ -46,7 +46,8 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 /// pairing away at the handshake, which is why it is the number's job.
 /// v9 separates automatic resume from explicit takeover and returns an opaque
 /// resume proof. Older clients must not silently fall back to stealing a seat.
-pub const CONTROL_VERSION: u32 = 9;
+/// v10 returns a separate, revocable pane capability on every acquisition.
+pub const CONTROL_VERSION: u32 = 10;
 
 const DIALECT_MARKER: &str = "speaks control v";
 
@@ -567,6 +568,8 @@ pub enum ReplyOk {
     },
     WorkspaceLease {
         proof: WorkspaceProof,
+        /// Short-lived pane capability; rotated on every successful Resume.
+        pane_token: WorkspaceProof,
         took_over_from: Option<String>,
     },
     WorkspaceBusy {
@@ -1706,6 +1709,7 @@ mod tests {
         vec![
             ControlReply::Ok(ReplyOk::WorkspaceLease {
                 proof: WorkspaceProof::fresh(),
+                pane_token: WorkspaceProof::fresh(),
                 took_over_from: None,
             }),
             ControlReply::Ok(ReplyOk::WorkspaceBusy {
@@ -2017,6 +2021,7 @@ mod tests {
         };
         let reply = ReplyOk::WorkspaceLease {
             proof,
+            pane_token: WorkspaceProof::fresh(),
             took_over_from: None,
         };
         assert!(!format!("{request:?} {reply:?}").contains(secret.trim_matches('"')));

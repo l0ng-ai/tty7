@@ -527,7 +527,7 @@ impl Tty7App {
         cx.spawn(async move |this, cx| {
             let listed = cx
                 .background_spawn(async move {
-                    let client = tty7_core::client::PaneClient::local();
+                    let client = tty7_core::client::PaneClient::local().management();
                     client.kill(pane_id)?;
                     client.list()
                 })

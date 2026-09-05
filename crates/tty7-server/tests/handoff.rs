@@ -52,7 +52,7 @@ impl Daemon {
     }
 
     fn panes(&self) -> PaneClient {
-        PaneClient::at(self.dir.path().join("daemon.sock"))
+        PaneClient::at(self.dir.path().join("daemon.sock")).management()
     }
 
     /// The pid the daemon records for itself. An `exec` keeps it; stopping and

@@ -104,6 +104,7 @@ struct ReaderSignals {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneWorkspace {
     pub workspace: crate::core::session::WorkspaceId,
+    pub authorization: Option<crate::daemon::protocol::PaneAuthorization>,
     pub target: crate::core::session::RemoteTarget,
     pub spec: Option<Box<NativeSshSpec>>,
     /// The name the workspace answers to — its own label, or its machine's
@@ -155,6 +156,7 @@ pub enum PaneRoute {
     Local,
     Remote {
         header: Box<crate::daemon::router::RouteHeader>,
+        authorization: Option<crate::daemon::protocol::PaneAuthorization>,
         /// Whether the daemon at the far end of this route echoes a `Size`
         /// frame when it applies a resize, per its host's control hello (see
         /// [`PaneWorkspace::resize_echo`]). Riding on the route puts the
@@ -172,6 +174,7 @@ impl PaneRoute {
             Some(ws) => match ws.route_header() {
                 Ok(header) => PaneRoute::Remote {
                     header: Box::new(header),
+                    authorization: ws.authorization.clone(),
                     resize_echo: ws.resize_echo,
                 },
                 Err(e) => PaneRoute::Unroutable(e.to_string()),
@@ -1757,9 +1760,19 @@ impl RemoteTerminal {
     }
 
     pub fn kill_pane_on(route: &PaneRoute, pane_id: u64) {
-        if let Ok(mut stream) = connect_routed(route) {
-            let _ = ClientMsg::Kill { pane_id }.encode(&mut stream);
-            let _ = stream.shutdown(std::net::Shutdown::Write);
+        if let Err(error) = Self::try_kill_pane_on(route, pane_id) {
+            log::warn!("could not close pane {pane_id}: {error}");
+        }
+    }
+
+    pub(crate) fn try_kill_pane_on(route: &PaneRoute, pane_id: u64) -> anyhow::Result<()> {
+        let mut stream = connect_routed(route)?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
+        ClientMsg::Kill { pane_id }.encode(&mut stream)?;
+        match DaemonMsg::read(&mut stream)? {
+            DaemonMsg::KillAck { pane_id: killed } if killed == pane_id => Ok(()),
+            DaemonMsg::Error(message) => Err(anyhow::anyhow!(message)),
+            other => Err(anyhow::anyhow!("unexpected reply to Kill: {other:?}")),
         }
     }
 
@@ -1816,6 +1829,7 @@ impl RemoteTerminal {
         spec: Box<NativeSshSpec>,
     ) -> anyhow::Result<(Self, u64)> {
         let mut stream = connect()?;
+        ClientMsg::Access(crate::daemon::protocol::PaneAccess::Manage).encode(&mut stream)?;
         let win = win_size(size, cell_w, cell_h);
         let endpoint = (spec.host.clone(), spec.port);
         let user = spec.user.clone();
@@ -2791,7 +2805,19 @@ fn connect_routed(route: &PaneRoute) -> anyhow::Result<Stream> {
         return Err(anyhow::anyhow!("{reason}"));
     }
     let Some(header) = route.header() else {
-        return connect();
+        let mut stream = connect()?;
+        ClientMsg::Access(crate::daemon::protocol::PaneAccess::Manage).encode(&mut stream)?;
+        return Ok(stream);
+    };
+
+    let PaneRoute::Remote {
+        authorization: Some(authorization),
+        ..
+    } = route
+    else {
+        return Err(anyhow::anyhow!(
+            "workspace control is not ready; resume it before opening panes"
+        ));
     };
 
     tty7_core::host::guard_off_ui();
@@ -2811,6 +2837,10 @@ fn connect_routed(route: &PaneRoute) -> anyhow::Result<Stream> {
     let mut stream = connect()?;
     let ack = crate::daemon::router::negotiate(&mut stream, header)
         .map_err(|e| anyhow::anyhow!("route this pane to {}: {e}", header.describe()))?;
+    ClientMsg::Access(crate::daemon::protocol::PaneAccess::Workspace(
+        authorization.clone(),
+    ))
+    .encode(&mut stream)?;
     log::debug!(
         "pane routed to {} over {}",
         header.describe(),
@@ -2842,6 +2872,33 @@ fn terminal_config_from_user(user_config: &crate::core::config::Config) -> Confi
 mod config_tests {
     use super::*;
     use std::io::Write as _;
+
+    #[test]
+    fn a_remote_pane_without_a_current_capability_cannot_dial_or_fall_back_to_management() {
+        let mut workspace = PaneWorkspace {
+            authorization: None,
+            workspace: crate::core::session::WorkspaceId::new(),
+            target: crate::core::session::RemoteTarget::Wsl {
+                distro: "test-only".into(),
+            },
+            spec: None,
+            label: None,
+            resize_echo: false,
+        };
+        let route = PaneRoute::for_workspace(Some(&workspace));
+        let error = connect_routed(&route).unwrap_err().to_string();
+        assert!(error.contains("workspace control is not ready"), "{error}");
+        let access = crate::daemon::protocol::PaneAuthorization {
+            workspace: crate::core::session::WorkspaceId::new(),
+            token: serde_json::from_str("\"pane-secret\"").unwrap(),
+        };
+        workspace.authorization = Some(access.clone());
+        let route = PaneRoute::for_workspace(Some(&workspace));
+        assert!(
+            matches!(&route, PaneRoute::Remote { authorization: Some(found), .. } if found == &access)
+        );
+        assert!(!format!("{route:?}").contains("pane-secret"));
+    }
 
     #[test]
     fn a_raw_vim_command_line_keeps_the_colon_and_wq_on_the_same_row() {
@@ -2898,6 +2955,7 @@ mod config_tests {
             },
         ] {
             let ws = PaneWorkspace {
+                authorization: None,
                 workspace: crate::core::session::WorkspaceId::new(),
                 target,
                 spec: Some(Box::new(
@@ -3173,6 +3231,7 @@ mod tests {
 
     fn ssh_workspace() -> PaneWorkspace {
         PaneWorkspace {
+            authorization: None,
             workspace: crate::core::session::WorkspaceId::new(),
             target: crate::core::session::RemoteTarget::Direct {
                 user: "me".into(),
@@ -3226,6 +3285,7 @@ mod tests {
     #[test]
     fn a_wsl_workspace_routes_by_distro() {
         let ws = PaneWorkspace {
+            authorization: None,
             workspace: crate::core::session::WorkspaceId::new(),
             target: crate::core::session::RemoteTarget::Wsl {
                 distro: "Ubuntu-22.04".into(),
@@ -3243,6 +3303,7 @@ mod tests {
     #[test]
     fn a_local_stdio_workspace_routes_to_a_child_process_on_the_pane_dialect() {
         let ws = PaneWorkspace {
+            authorization: None,
             workspace: crate::core::session::WorkspaceId::new(),
             target: crate::core::session::RemoteTarget::LocalStdio {
                 program: "/tmp/tty7-server".into(),
@@ -3267,6 +3328,7 @@ mod tests {
     #[test]
     fn an_unroutable_workspace_is_not_treated_as_local() {
         let ws = PaneWorkspace {
+            authorization: None,
             workspace: crate::core::session::WorkspaceId::new(),
             target: crate::core::session::RemoteTarget::Alias {
                 alias: "build-box".into(),
@@ -4453,6 +4515,7 @@ mod tests {
         // answer rides the same gate through `local_daemon_supports`, so this
         // covers the deferral for both.
         term.route = PaneRoute::Remote {
+            authorization: None,
             header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
             resize_echo: true,
         };
@@ -4520,6 +4583,7 @@ mod tests {
         // What `for_workspace` builds when the host's hello named no echo —
         // an older server, or a link that was down when the route was made.
         term.route = PaneRoute::Remote {
+            authorization: None,
             header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
             resize_echo: false,
         };

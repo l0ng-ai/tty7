@@ -1109,10 +1109,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::WindowDelete => "删除",
         L10nKey::WindowThisWorkspace => "此工作区",
         L10nKey::WindowConfirmTitle => "{verb}工作区“{name}”？",
-        L10nKey::WindowStopUnreachable => "无法连接到其所在机器。仍在运行的 shell 将会被终止。",
+        L10nKey::WindowStopUnreachable => "无法连接到其所在机器。请重新连接后再停止其中的 shell。",
         L10nKey::WindowDeleteUnreachable => {
-            "无法连接到其所在机器。仍在运行的 shell 将会被终止，布局也将被清除。"
+            "无法连接到其所在机器。请重新连接后再删除；收到远端确认前会保留本地入口。"
         }
+        L10nKey::WindowReconnectToStop => "请重新连接此工作区后，再停止或删除它。",
+        L10nKey::WindowOperationIncomplete => "工作区操作未完成",
         L10nKey::WindowStopShells => "{count} 个正在运行的 shell 将会被终止。",
         L10nKey::WindowDeleteShells => "{count} 个正在运行的 shell 将会被终止，布局也将被清除。",
         L10nKey::DiffReading => "正在读取 diff…",

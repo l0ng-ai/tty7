@@ -878,6 +878,8 @@ l10n_keys! {
     WindowConfirmTitle,
     WindowStopUnreachable,
     WindowDeleteUnreachable,
+    WindowReconnectToStop,
+    WindowOperationIncomplete,
     WindowStopShells,
     WindowDeleteShells,
     DiffReading,

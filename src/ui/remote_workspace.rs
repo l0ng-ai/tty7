@@ -1211,6 +1211,7 @@ pub(crate) fn pane_workspace_for(
         .filter(|l| !l.is_empty());
     let pane = crate::terminal::PaneWorkspace {
         workspace,
+        authorization: remote_connect::HostLinks::pane_access(cx, host.host_id(), workspace),
         target: host.target,
         spec,
         label,
@@ -1765,7 +1766,25 @@ fn pump_attachments(cx: &mut gpui::App, host: HostId) {
                 if remote_connect::HostLinks::get(cx, host)
                     .is_some_and(|live| Arc::ptr_eq(live.client(), &expected))
                 {
-                    if let Ok(ReplyOk::WorkspaceLease { proof, .. }) = &outcome {
+                    if let Ok(ReplyOk::WorkspaceLease {
+                        proof, pane_token, ..
+                    }) = &outcome
+                        && cx.try_global::<RemoteLinks>().is_some_and(|links| {
+                            !links.preempted.contains_key(&workspace)
+                                || links.reclaiming.contains_key(&workspace)
+                        })
+                    {
+                        if let Ok(remote_workspace) = key.parse() {
+                            remote_connect::HostLinks::grant_panes(
+                                cx,
+                                host,
+                                workspace,
+                                crate::daemon::protocol::PaneAuthorization {
+                                    workspace: remote_workspace,
+                                    token: pane_token.clone(),
+                                },
+                            );
+                        }
                         proofs.remember(target, key, instance, proof.clone(), cx);
                     }
                     finish_reclaim(cx, host, workspace, outcome);
@@ -1783,6 +1802,7 @@ fn finish_reclaim(
     outcome: Result<ReplyOk, String>,
 ) {
     if let Ok(ReplyOk::WorkspaceBusy { by }) = &outcome {
+        remote_connect::HostLinks::forget_panes(cx, host, workspace);
         let links = cx.default_global::<RemoteLinks>();
         links.attaching.remove(&workspace);
         links.reclaiming.remove(&workspace);
@@ -1974,6 +1994,7 @@ pub(crate) fn drain_events(cx: &mut gpui::App) {
                     continue;
                 };
                 log::info!("workspace {id} was taken over by {by}");
+                remote_connect::HostLinks::forget_panes(cx, host, id);
                 cx.default_global::<RemoteLinks>()
                     .preempted
                     .insert(id, by.clone());
@@ -3021,19 +3042,36 @@ mod tests {
             let current = replacement.host.client().clone();
             let id = tty7_core::host::Host::id(&*replacement.host);
             remote_connect::HostLinks::insert(cx, first.host, first.home);
+            let workspace = WorkspaceId::new();
+            let access = crate::daemon::protocol::PaneAuthorization {
+                workspace: WorkspaceId::new(),
+                token: serde_json::from_str("\"test-pane-token\"").unwrap(),
+            };
+            remote_connect::HostLinks::grant_panes(cx, id, workspace, access.clone());
+            assert_eq!(
+                remote_connect::HostLinks::pane_access(cx, id, workspace),
+                Some(access.clone())
+            );
             remote_connect::HostLinks::insert(
                 cx,
                 replacement.host.clone(),
                 replacement.home.clone(),
             );
             assert!(!old.is_connected());
+            assert!(remote_connect::HostLinks::pane_access(cx, id, workspace).is_none());
             assert!(current.is_connected());
+            remote_connect::HostLinks::grant_panes(cx, id, workspace, access.clone());
             remote_connect::HostLinks::insert(cx, replacement.host, replacement.home);
+            assert_eq!(
+                remote_connect::HostLinks::pane_access(cx, id, workspace),
+                Some(access)
+            );
             assert!(
                 current.is_connected(),
                 "reinserting the same host is not replacement"
             );
             remote_connect::HostLinks::remove(cx, id);
+            assert!(remote_connect::HostLinks::pane_access(cx, id, workspace).is_none());
             assert!(!current.is_connected());
         });
     }

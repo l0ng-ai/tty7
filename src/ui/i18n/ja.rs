@@ -1228,11 +1228,15 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::WindowThisWorkspace => "このワークスペース",
         L10nKey::WindowConfirmTitle => "ワークスペース「{name}」を{verb}しますか？",
         L10nKey::WindowStopUnreachable => {
-            "そのマシンに到達できませんでした。そこでまだ実行中のシェルはすべて終了します"
+            "そのマシンに到達できませんでした。シェルを停止する前に再接続してください"
         }
         L10nKey::WindowDeleteUnreachable => {
-            "そのマシンに到達できませんでした。そこでまだ実行中のシェルはすべて終了し、レイアウトは消去されます"
+            "そのマシンに到達できませんでした。削除する前に再接続してください。マシンが確認するまでブックマークは保持されます"
         }
+        L10nKey::WindowReconnectToStop => {
+            "停止または削除する前に、このワークスペースに再接続してください"
+        }
+        L10nKey::WindowOperationIncomplete => "ワークスペースの操作が完了しませんでした",
         L10nKey::WindowStopShells => "{count} 個の実行中シェルが終了します",
         L10nKey::WindowDeleteShells => "{count} 個の実行中シェルが終了し、レイアウトが消去されます",
         L10nKey::DiffReading => "Diff を読み込み中…",

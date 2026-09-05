@@ -1,6 +1,6 @@
 pub mod conformance;
 pub mod local;
-mod ownership;
+pub(crate) mod ownership;
 pub mod remote;
 pub mod server;
 
