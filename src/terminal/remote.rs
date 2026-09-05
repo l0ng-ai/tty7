@@ -75,6 +75,8 @@ enum Cut {
 }
 
 struct ReaderSignals {
+    /// True only when output passes through the local Windows ConPTY.
+    repair_parked_cursor: bool,
     cwd: Arc<Mutex<Option<PathBuf>>>,
     shell: Arc<Mutex<ShellState>>,
     remote: Arc<Mutex<Option<RemoteContext>>>,
@@ -186,6 +188,12 @@ impl PaneRoute {
 
     pub fn is_local(&self) -> bool {
         matches!(self, PaneRoute::Local)
+    }
+
+    fn repair_parked_cursor(&self) -> bool {
+        // Routed servers run on Linux/macOS (WSL included), regardless of
+        // which platform renders their output. Their PTYs are raw.
+        cfg!(windows) && self.is_local()
     }
 
     fn allow_remote_clipboard_write(&self) -> bool {
@@ -692,7 +700,8 @@ impl RemoteTerminal {
             }
         };
 
-        let mut term = Self::from_stream(stream, size)?;
+        let mut term =
+            Self::from_stream_with_repair(stream, size, Vec::new(), route.repair_parked_cursor())?;
         term.route = route.clone();
         term.seed_cwd(spawned_in);
         Ok((term, pane_id))
@@ -762,7 +771,8 @@ impl RemoteTerminal {
             }
             Err(e) => return Err(e),
         };
-        let mut term = Self::from_stream_with(stream, size, buffered)?;
+        let mut term =
+            Self::from_stream_with_repair(stream, size, buffered, route.repair_parked_cursor())?;
         term.route = route.clone();
         Ok(term)
     }
@@ -833,6 +843,7 @@ impl RemoteTerminal {
             buffered,
             quit.clone(),
             ReaderSignals {
+                repair_parked_cursor: route.repair_parked_cursor() && self.ssh_endpoint.is_none(),
                 cwd: self.cwd.clone(),
                 shell: self.shell_state.clone(),
                 remote: self.remote_context.clone(),
@@ -871,6 +882,20 @@ impl RemoteTerminal {
         stream: Stream,
         size: TermSize,
         buffered: Vec<u8>,
+    ) -> anyhow::Result<Self> {
+        Self::from_stream_with_repair(
+            stream,
+            size,
+            buffered,
+            PaneRoute::Local.repair_parked_cursor(),
+        )
+    }
+
+    fn from_stream_with_repair(
+        stream: Stream,
+        size: TermSize,
+        buffered: Vec<u8>,
+        repair_parked_cursor: bool,
     ) -> anyhow::Result<Self> {
         let read_half = stream.try_clone()?;
         let write_half = stream;
@@ -912,6 +937,7 @@ impl RemoteTerminal {
             buffered,
             reader_quit.clone(),
             ReaderSignals {
+                repair_parked_cursor,
                 cwd: cwd.clone(),
                 shell: shell_state.clone(),
                 remote: remote_context.clone(),
@@ -1010,17 +1036,6 @@ impl RemoteTerminal {
         term.set_options(terminal_config_from_user(user_config));
     }
 
-    /// Whether this build puts back the cursor a repaint parked — see
-    /// [`crate::terminal::parked_cursor`].
-    ///
-    /// Only conhost parks one, so like `conpty_resize` the repair is Windows'
-    /// alone. On a raw pty the application owns the cursor and is free to end a
-    /// repaint on the text it just wrote and then echo the next keystroke
-    /// straight after it, with no positioning of its own: vim opens its command
-    /// line that way, and putting the cursor back on the cell the repaint hid it
-    /// on drops the `wq!` typed next onto the row being edited (#430).
-    const REPAIR_PARKED_CURSOR: bool = cfg!(windows);
-
     fn spawn_reader(
         term: Arc<FairMutex<Term<EventProxy>>>,
         proxy: EventProxy,
@@ -1033,6 +1048,7 @@ impl RemoteTerminal {
             .name("tty7-remote-reader".to_string())
             .spawn(move || {
                 let ReaderSignals {
+                    repair_parked_cursor,
                     cwd,
                     shell,
                     remote,
@@ -1115,7 +1131,7 @@ impl RemoteTerminal {
                                 // emulator to the cut, act on the state that
                                 // sequence left behind, carry on.
                                 let mut cuts: Vec<(usize, Cut)> = Vec::new();
-                                if Self::REPAIR_PARKED_CURSOR {
+                                if repair_parked_cursor {
                                     cursor_scan
                                         .feed(&out_batch, |off, c| cuts.push((off, Cut::Cursor(c))));
                                 }
@@ -1829,7 +1845,8 @@ impl RemoteTerminal {
             }
         };
 
-        let mut term = Self::from_stream(stream, size)?;
+        // Native SSH output does not pass through the local ConPTY.
+        let mut term = Self::from_stream_with_repair(stream, size, Vec::new(), false)?;
         term.ssh_endpoint = Some(endpoint);
         term.ssh_user = Some(user);
         term.auto_supplied_password = auto_supplied_password;
@@ -2824,6 +2841,81 @@ fn terminal_config_from_user(user_config: &crate::core::config::Config) -> Confi
 #[cfg(test)]
 mod config_tests {
     use super::*;
+    use std::io::Write as _;
+
+    #[test]
+    fn a_raw_vim_command_line_keeps_the_colon_and_wq_on_the_same_row() {
+        crate::core::config::pin_test_config_dir();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let tcp_client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (tcp_server, _) = listener.accept().unwrap();
+        #[cfg(windows)]
+        let (client, mut server) = (tcp_client, tcp_server);
+        #[cfg(unix)]
+        let (client, mut server) = {
+            drop((tcp_client, tcp_server));
+            std::os::unix::net::UnixStream::pair().unwrap()
+        };
+        let term = RemoteTerminal::from_stream_with_repair(
+            client,
+            TermSize::new(80, 24),
+            Vec::new(),
+            false,
+        )
+        .unwrap();
+        // The application hides at row 6, then paints its command line. It
+        // intentionally leaves the cursor there for the following keystrokes.
+        DaemonMsg::Output(b"\x1b[6;4H\x1b[?25l\x1b[24;1H:\x1b[K\x1b[?25hwq".to_vec())
+            .encode(&mut server)
+            .unwrap();
+        server.flush().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let grid = term.term.lock();
+            let row = &grid.grid()[alacritty_terminal::index::Line(23)];
+            if row[alacritty_terminal::index::Column(2)].c == 'q' {
+                assert_eq!(row[alacritty_terminal::index::Column(0)].c, ':');
+                assert_eq!(row[alacritty_terminal::index::Column(1)].c, 'w');
+                assert_eq!(grid.grid().cursor.point.line.0, 23);
+                break;
+            }
+            drop(grid);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Vim's wq did not stay on the command row"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn routed_raw_ptys_never_use_the_local_conpty_cursor_repair() {
+        use crate::core::session::RemoteTarget;
+        for target in [
+            RemoteTarget::direct("me", "build-box", 22),
+            RemoteTarget::Wsl {
+                distro: "Ubuntu".into(),
+            },
+        ] {
+            let ws = PaneWorkspace {
+                workspace: crate::core::session::WorkspaceId::new(),
+                target,
+                spec: Some(Box::new(
+                    serde_json::from_str(
+                        r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
+                    )
+                    .unwrap(),
+                )),
+                label: None,
+                resize_echo: false,
+            };
+            let route = PaneRoute::for_workspace(Some(&ws));
+            assert!(matches!(route, PaneRoute::Remote { .. }));
+            assert!(!route.repair_parked_cursor());
+        }
+        assert_eq!(PaneRoute::Local.repair_parked_cursor(), cfg!(windows));
+        assert!(!PaneRoute::Unroutable("unknown backend".into()).repair_parked_cursor());
+    }
 
     /// The whole conhost-semantics fix hangs on this one field: it defaults to
     /// off in `alacritty_terminal`, so dropping the line compiles clean, passes
@@ -4202,7 +4294,7 @@ mod tests {
         let got = cursor_after_conpty_frame(
             b"\x1b[?25l\x1b[20;2HX\x1b[K\x1b[m\x1b[22;42H\x1b[K\x1b[?25h",
         );
-        if RemoteTerminal::REPAIR_PARKED_CURSOR {
+        if PaneRoute::Local.repair_parked_cursor() {
             assert_eq!(
                 got,
                 (5, 3),
