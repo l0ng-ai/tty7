@@ -8942,6 +8942,11 @@ mod recovery_tests {
         use std::io::Read;
         for restored in [true, false] {
             let (client, mut daemon) = pair();
+            // macOS can reject setsockopt after the peer has disconnected.
+            // Establish the bound while both ends are still open.
+            daemon
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
             let terminal = RemoteTerminal::from_stream(client, TermSize::new(80, 24)).unwrap();
             let parts = ShellParts {
                 terminal,
@@ -8957,9 +8962,6 @@ mod recovery_tests {
                 killed.push(id);
             });
             assert_eq!(killed, if restored { vec![] } else { vec![7] });
-            daemon
-                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-                .unwrap();
             let mut sent = Vec::new();
             daemon.read_to_end(&mut sent).unwrap();
             let mut sent = std::io::Cursor::new(sent);
