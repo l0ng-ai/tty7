@@ -92,7 +92,7 @@ fn link_from(
     has_link: bool,
 ) -> Link {
     match connect {
-        Some(ConnectFlow::Connecting { choice }) if &choice.target == target => {
+        Some(ConnectFlow::Connecting { choice, .. }) if &choice.target == target => {
             return Link::Connecting;
         }
         Some(ConnectFlow::Failed { choice, .. }) if &choice.target == target => {
@@ -3365,6 +3365,7 @@ mod tests {
         let build = RemoteTarget::direct("me", "build-box", 22);
         let gpu = RemoteTarget::direct("me", "gpu-lab", 22);
         let flow = ConnectFlow::Connecting {
+            attempt: uuid::Uuid::new_v4(),
             choice: HostChoice {
                 target: gpu,
                 label: "gpu-lab".into(),

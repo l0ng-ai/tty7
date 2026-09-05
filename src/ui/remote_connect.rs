@@ -960,6 +960,9 @@ mod tests {
 
     fn native_spec(user: &str, host: &str, port: u16) -> NativeSshSpec {
         let mut profile = crate::core::ssh_profile::SshProfile::new(host.to_string());
+        // `new` sets the display name, not the network host. Leaving it empty
+        // made independent tests overwrite the same me@:22 origin entry.
+        profile.host = host.to_string();
         profile.user = user.to_string();
         profile.port = port;
         crate::ui::ssh_connect::build_native_ssh_spec(
