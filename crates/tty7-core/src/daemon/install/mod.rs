@@ -868,12 +868,10 @@ impl<'a> Installer<'a> {
                 reason,
             })?;
 
-        self.ops
-            .chmod(&temp, BINARY_MODE)
-            .map_err(|reason| InstallError::Write {
-                path: temp.clone(),
-                reason,
-            })?;
+        if let Err(reason) = self.ops.chmod(&temp, BINARY_MODE) {
+            let _ = self.ops.remove_file(&temp);
+            return Err(InstallError::Write { path: temp, reason });
+        }
 
         let spoke = self.probe_protocol(&temp);
         if !spoke.as_ref().is_some_and(|s| s.serves(&self.dialect)) {
@@ -886,13 +884,15 @@ impl<'a> Installer<'a> {
         }
 
         if let Err(reason) = self.ops.rename(&temp, &paths.binary) {
-            let _ = self.ops.remove_file(&paths.binary);
-            self.ops
-                .rename(&temp, &paths.binary)
-                .map_err(|_| InstallError::Write {
-                    path: paths.binary.clone(),
-                    reason,
-                })?;
+            // Failure does not mean the destination blocked the rename: the
+            // source may be gone, or the connection may have died after the
+            // server committed it. Never unlink a published binary to retry.
+            // Only our unique staging file is ours to clean up.
+            let _ = self.ops.remove_file(&temp);
+            return Err(InstallError::Write {
+                path: paths.binary.clone(),
+                reason,
+            });
         }
 
         Ok((confirmed, bytes))
@@ -931,6 +931,7 @@ impl<'a> Installer<'a> {
             return Ok((false, self.check_running_build(paths)));
         }
 
+        install_progress().report(&self.host, InstallPhase::Restarting);
         self.launch_daemon(paths)?;
 
         let deadline = Instant::now() + self.startup_timeout;
@@ -1131,10 +1132,31 @@ fn launch_script(binary: &str, settle: Option<String>) -> String {
 
 fn unique_temp(shared: &str) -> String {
     let pid = std::process::id();
+    let attempt = uuid::Uuid::new_v4();
     match shared.strip_suffix(".tmp") {
-        Some(stem) => format!("{stem}.{pid}.tmp"),
-        None => format!("{shared}.{pid}"),
+        Some(stem) => format!("{stem}.{pid}.{attempt}.tmp"),
+        None => format!("{shared}.{pid}.{attempt}"),
     }
+}
+
+// All SSH preparation/maintenance entry points share this lock, including
+// connections re-created with the same key. It is intentionally not keyed by
+// the display label. Cross-client coordination needs a remote lock as well;
+// unique staging names and non-destructive publication remain necessary.
+fn install_lock(key: &str) -> Arc<Mutex<()>> {
+    static LOCKS: Mutex<Vec<(String, std::sync::Weak<Mutex<()>>)>> = Mutex::new(Vec::new());
+    let mut locks = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    locks.retain(|(_, lock)| lock.strong_count() > 0);
+    if let Some(lock) = locks
+        .iter()
+        .find(|(known, _)| known == key)
+        .and_then(|(_, lock)| lock.upgrade())
+    {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.push((key.to_string(), Arc::downgrade(&lock)));
+    lock
 }
 
 pub(crate) fn shell_quote(s: &str) -> String {
@@ -1151,6 +1173,8 @@ pub fn ensure_remote_server(conn: &Arc<SshConnection>) -> io::Result<String> {
 }
 
 pub fn ensure_remote_server_labeled(conn: &Arc<SshConnection>, host: &str) -> io::Result<String> {
+    let lock = install_lock(conn.key().as_str());
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     let ops = ssh_ops::SshRemoteOps::new(conn.clone());
     let fetch = default_fetcher();
     let confirm = install_confirm();
@@ -1179,6 +1203,8 @@ pub fn ensure_remote_server_labeled(conn: &Arc<SshConnection>, host: &str) -> io
 }
 
 pub fn restart_remote_daemon(conn: &Arc<SshConnection>) -> io::Result<()> {
+    let lock = install_lock(conn.key().as_str());
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     let host = connection_label(conn);
     let ops = ssh_ops::SshRemoteOps::new(conn.clone());
     let fetch = default_fetcher();
@@ -1188,6 +1214,8 @@ pub fn restart_remote_daemon(conn: &Arc<SshConnection>) -> io::Result<()> {
 }
 
 pub fn replace_remote_server(conn: &Arc<SshConnection>) -> io::Result<()> {
+    let lock = install_lock(conn.key().as_str());
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     let host = connection_label(conn);
     let ops = ssh_ops::SshRemoteOps::new(conn.clone());
     let fetch = default_fetcher();

@@ -13,10 +13,6 @@ const BIN_DIR: &str = "/home/me/.local/share/tty7/bin";
 const BINARY: &str = "/home/me/.local/share/tty7/bin/tty7-server-c3p4";
 const TEMP_BASE: &str = "/home/me/.local/share/tty7/bin/.tty7-server-c3p4.tmp";
 
-fn temp() -> String {
-    unique_temp(TEMP_BASE)
-}
-
 const SERVER_BYTES: &[u8] = b"\x7fELF...a static musl tty7-server, pretend it is 6 MB";
 
 #[derive(Clone, Debug)]
@@ -42,6 +38,7 @@ struct FakeRemote {
     journal: Mutex<Vec<Journal>>,
     uname: String,
     put_error: Option<String>,
+    rename_error: Option<String>,
     daemon_running: Mutex<bool>,
     running_exe: Mutex<Option<String>>,
     launch_works: bool,
@@ -69,6 +66,7 @@ impl FakeRemote {
             journal: Mutex::new(Vec::new()),
             uname: "Linux x86_64\n".to_string(),
             put_error: None,
+            rename_error: None,
             daemon_running: Mutex::new(false),
             running_exe: Mutex::new(None),
             launch_works: true,
@@ -139,6 +137,16 @@ impl FakeRemote {
 
     fn file(&self, path: &str) -> Option<FakeFile> {
         self.files.lock().unwrap().get(path).cloned()
+    }
+
+    fn staged(&self) -> String {
+        self.journal()
+            .into_iter()
+            .find_map(|entry| match entry {
+                Journal::Put { path, .. } => Some(path),
+                _ => None,
+            })
+            .expect("an upload was attempted")
     }
 
     fn writes(&self) -> Vec<Journal> {
@@ -291,6 +299,9 @@ impl RemoteOps for FakeRemote {
             from: from.into(),
             to: to.into(),
         });
+        if let Some(error) = &self.rename_error {
+            return Err(error.clone());
+        }
         let mut files = self.files.lock().unwrap();
         match files.remove(from) {
             Some(f) => {
@@ -451,7 +462,7 @@ fn first_install_runs_all_six_steps() {
     assert_eq!(installed.bytes, SERVER_BYTES, "the verified bytes landed");
     assert_eq!(installed.mode, 0o755, "and are executable");
     assert!(
-        remote.file(&temp()).is_none(),
+        remote.file(&remote.staged()).is_none(),
         "the temp name is consumed by the rename"
     );
 
@@ -476,6 +487,7 @@ fn the_final_path_is_only_ever_reached_by_renaming_a_ready_temp() {
         .unwrap();
 
     let writes = remote.writes();
+    let temp = remote.staged();
 
     assert!(
         !writes
@@ -486,17 +498,15 @@ fn the_final_path_is_only_ever_reached_by_renaming_a_ready_temp() {
 
     let put = writes
         .iter()
-        .position(|j| matches!(j, Journal::Put { path, .. } if path == &temp()))
+        .position(|j| matches!(j, Journal::Put { path, .. } if path == &temp))
         .expect("the bytes go to the temp path");
     let chmod = writes
         .iter()
-        .position(
-            |j| matches!(j, Journal::Chmod { path, mode } if path == &temp() && *mode == 0o755),
-        )
+        .position(|j| matches!(j, Journal::Chmod { path, mode } if path == &temp && *mode == 0o755))
         .expect("the temp is made executable");
     let rename = writes
         .iter()
-        .position(|j| matches!(j, Journal::Rename { from, to } if from == &temp() && to == BINARY))
+        .position(|j| matches!(j, Journal::Rename { from, to } if from == &temp && to == BINARY))
         .expect("the temp is renamed onto the binary");
 
     assert!(put < chmod, "bytes before mode: {writes:?}");
@@ -565,7 +575,12 @@ fn a_sha256_mismatch_aborts_before_touching_the_remote() {
         "nothing may be written after a failed verification: {:?}",
         remote.writes()
     );
-    assert!(remote.file(&temp()).is_none());
+    assert!(
+        !remote
+            .journal()
+            .iter()
+            .any(|j| matches!(j, Journal::Put { .. }))
+    );
     assert!(remote.file(BINARY).is_none());
     assert!(
         user.asked().is_empty(),
@@ -762,13 +777,13 @@ fn a_failed_write_names_the_path_and_does_not_fall_back() {
             ref path,
             ref reason,
         } => {
-            assert_eq!(path, &temp(), "the exact path that failed");
+            assert_eq!(path, &remote.staged(), "the exact path that failed");
             assert!(reason.contains("no space left"), "the server's own reason");
         }
         other => panic!("expected a write failure, got {other}"),
     }
     let message = err.to_string();
-    assert!(message.contains(&temp()), "{message}");
+    assert!(message.contains(&remote.staged()), "{message}");
     assert!(message.contains("no space left"), "{message}");
 
     let puts: Vec<_> = remote
@@ -1510,7 +1525,7 @@ fn every_report_carries_the_host() {
 }
 
 #[test]
-fn a_present_binary_reports_no_progress() {
+fn a_present_binary_reports_startup_without_transfer_progress() {
     let remote = FakeRemote::new().with_previous_install();
     let release = FakeRelease::new();
     let user = FakeUser::approving();
@@ -1522,11 +1537,7 @@ fn a_present_binary_reports_no_progress() {
     .expect("install");
 
     assert!(!report.installed, "nothing was written");
-    assert!(
-        reports.phases().is_empty(),
-        "nothing transferred, so nothing to show: {:?}",
-        reports.phases()
-    );
+    assert_eq!(reports.phases(), vec![InstallPhase::Restarting]);
 }
 
 #[test]
@@ -1804,7 +1815,7 @@ fn an_upload_that_speaks_the_wrong_dialect_is_not_published() {
         "nothing may sit at the published name"
     );
     assert!(
-        remote.file(&temp()).is_none(),
+        remote.file(&remote.staged()).is_none(),
         "and the staged file is cleaned up rather than left to be found"
     );
     assert!(
@@ -1901,7 +1912,7 @@ fn a_legacy_named_binary_is_probed_not_assumed() {
 
 #[test]
 fn the_staging_path_carries_the_pid() {
-    let staged = temp();
+    let staged = unique_temp(TEMP_BASE);
     assert_ne!(staged, TEMP_BASE);
     assert!(staged.contains(&std::process::id().to_string()), "{staged}");
     assert!(staged.ends_with(".tmp"), "still recognisable as staging");
@@ -1914,6 +1925,60 @@ fn the_staging_path_carries_the_pid() {
         BINARY.rsplit_once('/').unwrap().0,
         "same directory, so the publishing rename is still atomic"
     );
+}
+
+#[test]
+fn staging_names_are_unique_across_threads_in_the_same_process() {
+    let paths: std::collections::HashSet<_> = (0..32)
+        .map(|_| std::thread::spawn(|| unique_temp(TEMP_BASE)))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+    assert_eq!(paths.len(), 32);
+    assert_ne!(unique_temp("staging"), unique_temp("staging"));
+}
+
+#[test]
+fn failed_publication_preserves_the_existing_binary_and_original_error() {
+    let mut remote = FakeRemote::new().with_previous_install();
+    remote.rename_error = Some("source vanished before rename".into());
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+    let before = remote.file(BINARY).unwrap();
+    let paths = asset::remote_paths(HOME, CONTROL, PROTOCOL);
+
+    let error = installer(&remote, &release, &user, "publish-failure")
+        .install(ASSET_LINUX_X86_64, &paths)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("source vanished before rename"));
+    let after = remote.file(BINARY).expect("the original binary survives");
+    assert_eq!(after.bytes, before.bytes);
+    assert_eq!(after.mode, before.mode);
+    assert!(remote.file(&remote.staged()).is_none());
+    assert!(!remote.journal().contains(&Journal::Remove(BINARY.into())));
+    assert_eq!(
+        remote
+            .journal()
+            .iter()
+            .filter(|j| matches!(j, Journal::Rename { .. }))
+            .count(),
+        1,
+        "an ambiguous publication failure must not be retried destructively"
+    );
+}
+
+#[test]
+fn ssh_install_and_maintenance_share_a_lock_per_connection_key() {
+    let first = install_lock("install-lock-test-a");
+    let same = install_lock("install-lock-test-a");
+    let other = install_lock("install-lock-test-b");
+    assert!(Arc::ptr_eq(&first, &same));
+    assert!(!Arc::ptr_eq(&first, &other));
+    let _guard = first.lock().unwrap();
+    assert!(same.try_lock().is_err());
+    assert!(other.try_lock().is_ok());
 }
 
 #[test]
