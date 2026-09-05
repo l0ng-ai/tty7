@@ -1,4 +1,5 @@
 pub mod control;
+mod deadline;
 pub mod duplex;
 /// Upgrading the daemon in place, keeping the ptys and the shells on them.
 ///

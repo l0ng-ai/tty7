@@ -922,6 +922,7 @@ pub const KEEPALIVE_IDLE_BEFORE_PING: Duration = Duration::from_secs(30);
 pub const KEEPALIVE_DEAD_AFTER: Duration = Duration::from_secs(45);
 
 pub const CLOSE_GRACE: Duration = Duration::from_millis(500);
+const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ControlResponse {
@@ -967,6 +968,38 @@ struct ClientInner {
     link_down: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
 }
 
+fn read_hello_ok(r: &mut impl Read, hello: &ControlHello) -> io::Result<ControlHelloOk> {
+    let ok = match ControlServerMsg::read(r)? {
+        ControlServerMsg::HelloOk(ok) => ok,
+        other => {
+            return Err(invalid(format!(
+                "control peer answered the handshake with {other:?} instead of HELLO_OK"
+            )));
+        }
+    };
+    if ok.control_version != hello.control_version {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            dialect_refusal(&ok.build, ok.control_version, hello.control_version),
+        ));
+    }
+    Ok(ok)
+}
+
+fn socket_handshake(
+    sock: &mut impl super::deadline::Socket,
+    hello: &ControlHello,
+    budget: Duration,
+) -> io::Result<ControlHelloOk> {
+    // Authentication and installation have already finished before Hello.
+    // Bound the complete exchange, including trickled partial frames, and
+    // restore socket timeouts before starting the long-lived control reader.
+    let mut stream = super::deadline::DeadlineIo::new(sock, budget)?;
+    ControlClientMsg::Hello(hello.clone()).encode(&mut stream)?;
+    stream.flush()?;
+    read_hello_ok(&mut stream, hello)
+}
+
 impl ControlClient {
     pub fn connect<R, W>(
         r: R,
@@ -982,24 +1015,26 @@ impl ControlClient {
     }
 
     pub fn over_tcp(
-        sock: std::net::TcpStream,
+        mut sock: std::net::TcpStream,
         hello: &ControlHello,
         events: EventSink,
     ) -> io::Result<ControlClient> {
+        let ok = socket_handshake(&mut sock, hello, HELLO_TIMEOUT)?;
         let r = sock.try_clone()?;
         let closer: Arc<dyn LinkShutdown> = Arc::new(sock.try_clone()?);
-        Self::connect_with(r, sock, Some(closer), hello, events)
+        Self::after_handshake(r, sock, Some(closer), ok, events)
     }
 
     #[cfg(unix)]
     pub fn over_unix(
-        sock: std::os::unix::net::UnixStream,
+        mut sock: std::os::unix::net::UnixStream,
         hello: &ControlHello,
         events: EventSink,
     ) -> io::Result<ControlClient> {
+        let ok = socket_handshake(&mut sock, hello, HELLO_TIMEOUT)?;
         let r = sock.try_clone()?;
         let closer: Arc<dyn LinkShutdown> = Arc::new(sock.try_clone()?);
-        Self::connect_with(r, sock, Some(closer), hello, events)
+        Self::after_handshake(r, sock, Some(closer), ok, events)
     }
 
     pub fn connect_with<R, W>(
@@ -1016,21 +1051,21 @@ impl ControlClient {
         ControlClientMsg::Hello(hello.clone()).encode(&mut w)?;
         w.flush()?;
 
-        let ok = match ControlServerMsg::read(&mut r)? {
-            ControlServerMsg::HelloOk(ok) => ok,
-            other => {
-                return Err(invalid(format!(
-                    "control peer answered the handshake with {other:?} instead of HELLO_OK"
-                )));
-            }
-        };
-        if ok.control_version != hello.control_version {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                dialect_refusal(&ok.build, ok.control_version, hello.control_version),
-            ));
-        }
+        let ok = read_hello_ok(&mut r, hello)?;
+        Self::after_handshake(r, w, shutdown, ok, events)
+    }
 
+    fn after_handshake<R, W>(
+        r: R,
+        w: W,
+        shutdown: Option<Arc<dyn LinkShutdown>>,
+        ok: ControlHelloOk,
+        events: EventSink,
+    ) -> io::Result<ControlClient>
+    where
+        R: Read + Send + 'static,
+        W: Write + Send + 'static,
+    {
         let inner = Arc::new(ClientInner {
             writer: Mutex::new(Box::new(w)),
             next_req_id: AtomicU64::new(1),
@@ -1672,6 +1707,89 @@ mod tests {
             client_hostname: "laptop".into(),
             gui: false,
         }
+    }
+
+    #[test]
+    fn a_silent_control_hello_times_out_and_releases_the_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            ControlClientMsg::read(&mut socket).unwrap();
+            assert_eq!(
+                socket.read(&mut [0]).unwrap(),
+                0,
+                "failed caller closes its link"
+            );
+        });
+        let error = socket_handshake(&mut client, &hello(), Duration::from_millis(50)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(client.read_timeout().unwrap(), None);
+        assert_eq!(client.write_timeout().unwrap(), None);
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn partial_hello_bytes_do_not_extend_the_total_handshake_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            ControlClientMsg::read(&mut socket).unwrap();
+            let mut bytes = Vec::new();
+            ControlServerMsg::HelloOk(hello_ok())
+                .encode(&mut bytes)
+                .unwrap();
+            for byte in bytes {
+                if socket.write_all(&[byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let started = Instant::now();
+        let error = socket_handshake(&mut client, &hello(), Duration::from_millis(70)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_successful_hello_restores_the_socket_timeouts() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            ControlClientMsg::read(&mut socket).unwrap();
+            ControlServerMsg::HelloOk(hello_ok())
+                .encode(&mut socket)
+                .unwrap();
+        });
+        let ok = socket_handshake(&mut client, &hello(), Duration::from_secs(1)).unwrap();
+        assert_eq!(ok.control_version, CONTROL_VERSION);
+        assert_eq!(client.read_timeout().unwrap(), Some(Duration::from_secs(2)));
+        assert_eq!(
+            client.write_timeout().unwrap(),
+            Some(Duration::from_secs(3))
+        );
+        server.join().unwrap();
     }
 
     #[test]
