@@ -44,7 +44,9 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 /// server that had grown a project took the delta, failed to decode the frame,
 /// and lost the link exactly as described above. Only the number can turn that
 /// pairing away at the handshake, which is why it is the number's job.
-pub const CONTROL_VERSION: u32 = 8;
+/// v9 separates automatic resume from explicit takeover and returns an opaque
+/// resume proof. Older clients must not silently fall back to stealing a seat.
+pub const CONTROL_VERSION: u32 = 9;
 
 const DIALECT_MARKER: &str = "speaks control v";
 
@@ -138,6 +140,23 @@ pub use crate::core::machine::{
 };
 pub use crate::core::session::WorkspaceId;
 
+/// A bearer credential: serde carries it, diagnostics must not print it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WorkspaceProof(String);
+
+impl WorkspaceProof {
+    pub(crate) fn fresh() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+}
+
+impl std::fmt::Debug for WorkspaceProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkspaceProof(<redacted>)")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlRequest {
@@ -215,6 +234,21 @@ pub enum ControlRequest {
 
     WorkspaceAttach {
         id: String,
+    },
+    /// Automatic recovery, never permission to displace another owner.
+    WorkspaceResume {
+        id: String,
+        proof: Option<WorkspaceProof>,
+    },
+    /// Explicit user intent; invalidates the previous resume proof.
+    WorkspaceTakeOver {
+        id: String,
+    },
+    /// Explicit same-user CLI administration, not a GUI background write.
+    /// The owner-only endpoint / authenticated SSH account is the authority;
+    /// this protocol is not a sandbox against that account running commands.
+    ManageWorkspace {
+        request: Box<ControlRequest>,
     },
     WorkspaceDetach {
         id: String,
@@ -374,10 +408,71 @@ pub struct ServerStatus {
 }
 
 impl ControlRequest {
+    /// Machine-tree writes share the handover lock with ownership changes.
+    pub fn workspace_mutation(&self) -> Option<WorkspaceId> {
+        use ControlRequest::*;
+        match self {
+            WorkspaceRename { workspace, .. }
+            | WorkspaceRemove { workspace }
+            | WorkspaceTouch { workspace }
+            | WorkspaceSetActiveTab { workspace, .. }
+            | TabCreate { workspace, .. }
+            | TabClose { workspace, .. }
+            | TabRename { workspace, .. }
+            | TabMove { workspace, .. }
+            | TabSetGroup { workspace, .. }
+            | TabSetProject { workspace, .. }
+            | ProjectCreate { workspace, .. }
+            | ProjectRename { workspace, .. }
+            | ProjectSetRoot { workspace, .. }
+            | ProjectMove { workspace, .. }
+            | ProjectDelete { workspace, .. }
+            | PaneSplit { workspace, .. }
+            | PaneClose { workspace, .. }
+            | PaneSetRatio { workspace, .. }
+            | PaneMove { workspace, .. }
+            | PaneReplace { workspace, .. } => Some(*workspace),
+            // Exhaustive on purpose: a new request must explicitly choose
+            // whether it participates in the workspace tree write boundary.
+            Ping
+            | ReadDir { .. }
+            | Stat { .. }
+            | Exists { .. }
+            | Canonicalize { .. }
+            | ReadFile { .. }
+            | Search { .. }
+            | WriteFile { .. }
+            | CreateFileNew { .. }
+            | CreateDir { .. }
+            | Rename { .. }
+            | Remove { .. }
+            | RepoRoot { .. }
+            | Git { .. }
+            | GitStream { .. }
+            | Shells
+            | WatchOpen { .. }
+            | WatchSet { .. }
+            | WatchClose { .. }
+            | WorkspaceAttach { .. }
+            | WorkspaceResume { .. }
+            | WorkspaceTakeOver { .. }
+            | WorkspaceDetach { .. }
+            | ManageWorkspace { .. }
+            | GuiOpen { .. }
+            | MachineGet
+            | WorkspaceTree { .. }
+            | WorkspaceCreate { .. }
+            | AgentStates
+            | Routes
+            | Status => None,
+        }
+    }
+
     pub fn deadline(&self) -> Duration {
         use ControlRequest::*;
         match self {
             Ping => Duration::from_secs(5),
+            ManageWorkspace { .. } => Duration::from_secs(10),
             ReadDir { .. }
             | Stat { .. }
             | Exists { .. }
@@ -392,7 +487,10 @@ impl ControlRequest {
             }
             Git { .. } | GitStream { .. } | Search { .. } => Duration::from_secs(20),
             Shells => Duration::from_secs(20),
-            WorkspaceAttach { .. } | WorkspaceDetach { .. } => Duration::from_secs(10),
+            WorkspaceAttach { .. }
+            | WorkspaceResume { .. }
+            | WorkspaceTakeOver { .. }
+            | WorkspaceDetach { .. } => Duration::from_secs(10),
             GuiOpen { .. } => Duration::from_secs(5),
             MachineGet
             | WorkspaceTree { .. }
@@ -457,12 +555,23 @@ pub enum ReplyOk {
     Bool(bool),
     Path(String),
     OptPath(Option<String>),
-    FileMeta { meta: Meta },
+    FileMeta {
+        meta: Meta,
+    },
     Hits(Vec<SearchHit>),
     Output(Output),
     WatchId(u64),
     Shells(ShellInventory),
-    Attached { took_over_from: Option<String> },
+    Attached {
+        took_over_from: Option<String>,
+    },
+    WorkspaceLease {
+        proof: WorkspaceProof,
+        took_over_from: Option<String>,
+    },
+    WorkspaceBusy {
+        by: String,
+    },
     MachineTree(Box<Machine>),
     WorkspaceTree(Box<crate::core::machine::Workspace>),
     TabTree(Box<Tab>),
@@ -1191,7 +1300,9 @@ impl ControlClient {
         self.call(ControlRequest::Ping).map(|_| ())
     }
 
-    pub fn close(&self) {
+    /// Revoke this connection and wake socket I/O, without waiting for the
+    /// reader thread. UI owners can reap it with `close` on an executor.
+    pub fn request_close(&self) {
         self.inner
             .fail_all("control connection closed by this client");
         if let Some(closer) = &self.inner.shutdown
@@ -1199,7 +1310,10 @@ impl ControlClient {
         {
             log::trace!("control link shutdown reported {e}");
         }
+    }
 
+    pub fn close(&self) {
+        self.request_close();
         let Ok(mut slot) = self.reader.lock() else {
             return;
         };
@@ -1502,6 +1616,20 @@ mod tests {
 
     fn every_request() -> Vec<ControlRequest> {
         vec![
+            ControlRequest::ManageWorkspace {
+                request: Box::new(ControlRequest::WorkspaceTouch {
+                    workspace: WorkspaceId::new(),
+                }),
+            },
+            ControlRequest::WorkspaceResume {
+                id: "w".into(),
+                proof: None,
+            },
+            ControlRequest::WorkspaceResume {
+                id: "w".into(),
+                proof: Some(WorkspaceProof::fresh()),
+            },
+            ControlRequest::WorkspaceTakeOver { id: "w".into() },
             ControlRequest::Ping,
             ControlRequest::ReadDir {
                 dir: "/home/me/proj/src".into(),
@@ -1576,6 +1704,13 @@ mod tests {
 
     fn every_reply() -> Vec<ControlReply> {
         vec![
+            ControlReply::Ok(ReplyOk::WorkspaceLease {
+                proof: WorkspaceProof::fresh(),
+                took_over_from: None,
+            }),
+            ControlReply::Ok(ReplyOk::WorkspaceBusy {
+                by: "desktop".into(),
+            }),
             ControlReply::Ok(ReplyOk::Unit),
             ControlReply::Ok(ReplyOk::Pong),
             ControlReply::Ok(ReplyOk::Entries(vec![
@@ -1870,6 +2005,21 @@ mod tests {
             let got = ControlClientMsg::read(&mut Cursor::new(&buf)).unwrap();
             assert_eq!(&got, msg, "client message did not survive the round trip");
         }
+    }
+
+    #[test]
+    fn resume_credentials_are_redacted_in_protocol_diagnostics() {
+        let proof = WorkspaceProof::fresh();
+        let secret = serde_json::to_string(&proof).unwrap();
+        let request = ControlRequest::WorkspaceResume {
+            id: "w".into(),
+            proof: Some(proof.clone()),
+        };
+        let reply = ReplyOk::WorkspaceLease {
+            proof,
+            took_over_from: None,
+        };
+        assert!(!format!("{request:?} {reply:?}").contains(secret.trim_matches('"')));
     }
 
     #[test]
@@ -2384,6 +2534,29 @@ mod tests {
             (R::AgentStates, s(5)),
             (R::Routes, s(5)),
             (R::Status, s(5)),
+            (
+                R::ManageWorkspace {
+                    request: Box::new(R::WorkspaceTouch {
+                        workspace: WorkspaceId::new(),
+                    }),
+                },
+                s(10),
+            ),
+            (
+                R::WorkspaceResume {
+                    id: "w".into(),
+                    proof: None,
+                },
+                s(10),
+            ),
+            (
+                R::WorkspaceResume {
+                    id: "w".into(),
+                    proof: Some(WorkspaceProof::fresh()),
+                },
+                s(10),
+            ),
+            (R::WorkspaceTakeOver { id: "w".into() }, s(10)),
         ];
         assert_eq!(
             cases.len(),
@@ -2928,6 +3101,39 @@ mod tests {
         let sock = TcpStream::connect(addr).unwrap();
         let e = ControlClient::over_tcp(sock, &hello(), no_events()).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn requesting_close_does_not_wait_for_or_take_the_reader_thread() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let client = client_with_peer(
+            Box::new(move |_| {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }),
+            |mut sock| {
+                ControlServerMsg::Event(ControlEvent::WatchOverflow { id: 1 })
+                    .encode(&mut sock)
+                    .unwrap();
+                sock.flush().unwrap();
+                let _ = ControlClientMsg::read(&mut sock);
+            },
+        );
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        client.request_close();
+        assert!(!client.is_connected());
+        assert!(
+            client.reader.lock().unwrap().is_some(),
+            "joining is left to the background owner"
+        );
+        release_tx.send(()).unwrap();
+        client.close();
     }
 
     #[test]

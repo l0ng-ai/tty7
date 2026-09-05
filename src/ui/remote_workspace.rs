@@ -1731,6 +1731,25 @@ fn pump_attachments(cx: &mut gpui::App, host: HostId) {
         return;
     };
     for (workspace, key) in reclaims_due(cx, host) {
+        let target = bound_machines(cx)
+            .into_iter()
+            .find(|(id, _)| *id == host)
+            .map(|(_, target)| target.connection_key())
+            .unwrap_or_default();
+        let instance = link.client().hello().instance.clone();
+        let proofs = cx.default_global::<remote_connect::ResumeProofs>().clone();
+        let takeover = cx
+            .default_global::<RemoteLinks>()
+            .reclaiming
+            .contains_key(&workspace);
+        let request = if takeover {
+            ControlRequest::WorkspaceTakeOver { id: key.clone() }
+        } else {
+            ControlRequest::WorkspaceResume {
+                id: key.clone(),
+                proof: proofs.get(&target, &key, &instance),
+            }
+        };
         // Never on the UI thread: the request's deadline is ten seconds, and a
         // far end that has stopped answering would freeze every window.
         let client = Arc::clone(link.client());
@@ -1738,11 +1757,7 @@ fn pump_attachments(cx: &mut gpui::App, host: HostId) {
         cx.spawn(async move |cx| {
             let outcome = cx
                 .background_executor()
-                .spawn(async move {
-                    client
-                        .call(ControlRequest::WorkspaceAttach { id: key })
-                        .map_err(|e| e.to_string())
-                })
+                .spawn(async move { client.call(request).map_err(|e| e.to_string()) })
                 .await;
             cx.update(|cx| {
                 // A reply belongs to the connection that sent it, not a
@@ -1750,6 +1765,9 @@ fn pump_attachments(cx: &mut gpui::App, host: HostId) {
                 if remote_connect::HostLinks::get(cx, host)
                     .is_some_and(|live| Arc::ptr_eq(live.client(), &expected))
                 {
+                    if let Ok(ReplyOk::WorkspaceLease { proof, .. }) = &outcome {
+                        proofs.remember(target, key, instance, proof.clone(), cx);
+                    }
                     finish_reclaim(cx, host, workspace, outcome);
                 }
             });
@@ -1764,6 +1782,25 @@ fn finish_reclaim(
     workspace: WorkspaceId,
     outcome: Result<ReplyOk, String>,
 ) {
+    if let Ok(ReplyOk::WorkspaceBusy { by }) = &outcome {
+        let links = cx.default_global::<RemoteLinks>();
+        links.attaching.remove(&workspace);
+        links.reclaiming.remove(&workspace);
+        links.attach_retries.remove(&workspace);
+        links.preempted.insert(workspace, by.clone());
+        if let Some(machine) = links.machines.get_mut(&host) {
+            machine.attach_sent.remove(&workspace);
+        }
+        release_panes(cx, workspace);
+        crate::ui::tree_sync::on_preempted(cx, workspace);
+        cx.refresh_windows();
+        return;
+    }
+    let outcome = match outcome {
+        Ok(reply @ (ReplyOk::WorkspaceLease { .. } | ReplyOk::Attached { .. })) => Ok(reply),
+        Ok(_) => Err("unexpected reply to workspace attachment".to_string()),
+        Err(error) => Err(error),
+    };
     {
         let links = cx.default_global::<RemoteLinks>();
         if links.preempted.contains_key(&workspace) && !links.reclaiming.contains_key(&workspace) {
@@ -1790,11 +1827,16 @@ fn finish_reclaim(
     let failure = match outcome {
         Ok(ReplyOk::Attached {
             took_over_from: Some(who),
+        })
+        | Ok(ReplyOk::WorkspaceLease {
+            took_over_from: Some(who),
+            ..
         }) => {
             log::info!("workspace {workspace} taken back from {who}");
             None
         }
-        Ok(_) => None,
+        Ok(ReplyOk::WorkspaceLease { .. } | ReplyOk::Attached { .. }) => None,
+        Ok(_) => Some("unexpected reply to workspace attachment".to_string()),
         Err(e) => {
             log::warn!("could not attach to workspace {workspace}: {e}");
             Some(e)
@@ -2662,6 +2704,56 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_busy_resume_stops_automatic_reclaims_until_an_explicit_takeover(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            crate::core::config::pin_test_config_dir();
+            cx.set_global(crate::core::config::Config::default());
+            crate::ui::windows::WindowRegistry::init(cx);
+            let (host, target) = machine("busy-resume");
+            let mut view = crate::core::session::WindowView::on_remote(RemoteRef::new(
+                target,
+                WorkspaceId::new(),
+            ));
+            view.open = true;
+            let workspace = view.id;
+            WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![view],
+                    active: None,
+                },
+            );
+            RemoteLinks::mark(cx, host, |_| {});
+            assert_eq!(reclaims_due(cx, host).len(), 1);
+            finish_reclaim(
+                cx,
+                host,
+                workspace,
+                Ok(ReplyOk::WorkspaceBusy {
+                    by: "desktop".into(),
+                }),
+            );
+            assert!(reclaims_due(cx, host).is_empty());
+            let links = cx.default_global::<RemoteLinks>();
+            assert_eq!(
+                links.preempted.get(&workspace).map(String::as_str),
+                Some("desktop")
+            );
+            assert!(!links.attach_retries.contains_key(&workspace));
+            assert!(!links.machines[&host].attach_sent.contains(&workspace));
+            RemoteLinks::retry_now(cx, workspace);
+            assert_eq!(reclaims_due(cx, host).len(), 1);
+            assert!(
+                cx.default_global::<RemoteLinks>()
+                    .reclaiming
+                    .contains_key(&workspace)
+            );
+        });
+    }
+
+    #[gpui::test]
     fn closing_one_hosts_last_window_cancels_only_its_supervisor_attempt(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -2916,6 +3008,34 @@ mod tests {
             home: std::path::PathBuf::from("/tmp"),
             rows: Vec::new(),
         }
+    }
+
+    #[gpui::test]
+    fn replacing_and_removing_host_links_close_only_the_retired_socket(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let first = fake_connected("test:retired-control");
+            let old = first.host.client().clone();
+            let replacement = fake_connected("test:retired-control");
+            let current = replacement.host.client().clone();
+            let id = tty7_core::host::Host::id(&*replacement.host);
+            remote_connect::HostLinks::insert(cx, first.host, first.home);
+            remote_connect::HostLinks::insert(
+                cx,
+                replacement.host.clone(),
+                replacement.home.clone(),
+            );
+            assert!(!old.is_connected());
+            assert!(current.is_connected());
+            remote_connect::HostLinks::insert(cx, replacement.host, replacement.home);
+            assert!(
+                current.is_connected(),
+                "reinserting the same host is not replacement"
+            );
+            remote_connect::HostLinks::remove(cx, id);
+            assert!(!current.is_connected());
+        });
     }
 
     #[gpui::test]

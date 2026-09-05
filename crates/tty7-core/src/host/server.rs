@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -56,6 +56,7 @@ pub struct AttachRegistry {
     live: Mutex<Vec<Live>>,
     guis: Mutex<Vec<GuiLive>>,
     handover: Mutex<()>,
+    ownership: Mutex<super::ownership::Ownership>,
 }
 
 struct Live {
@@ -178,6 +179,12 @@ impl AttachRegistry {
 
     fn forget_workspace(&self, workspace: &str) {
         self.locked().retain(|l| l.workspace != workspace);
+        if let Ok(id) = workspace.parse() {
+            self.ownership
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .forget(id);
+        }
     }
 
     fn release(&self, workspace: &str, conn: u64) -> bool {
@@ -283,6 +290,7 @@ where
         next_watch: AtomicU64::new(1),
         git_streams: Arc::new(AtomicUsize::new(0)),
         pool: Pool::new(),
+        closed: AtomicBool::new(false),
         machine: services.machine.clone(),
         machine_origin: machine_sub.as_ref().map(machine::Subscription::id),
         attachments: Arc::clone(&services.attachments),
@@ -312,6 +320,7 @@ where
 
     let outcome = read_loop(&mut r, &conn);
 
+    conn.closed.store(true, Ordering::Release);
     conn.pool.close();
     conn.watches
         .lock()
@@ -410,23 +419,58 @@ fn attach_workspace(
     workspace: &str,
     dedicated: bool,
 ) -> io::Result<Option<String>> {
-    if conn.machine.is_none() {
-        return Err(io::Error::other(
-            "this server does not serve the machine tree",
-        ));
+    match acquire_workspace(conn, workspace, dedicated, AttachIntent::TakeOver)? {
+        ReplyOk::WorkspaceLease { took_over_from, .. } => Ok(took_over_from),
+        _ => unreachable!("explicit attachment cannot be busy"),
     }
-    let tree_id: Option<crate::core::session::WorkspaceId> = workspace.parse().ok();
-    let (displaced, evicted) = {
+}
+
+enum AttachIntent<'a> {
+    Resume(Option<&'a crate::daemon::control::WorkspaceProof>),
+    TakeOver,
+}
+
+/// The decision and both live attachment tables move under the same lock.
+fn acquire_workspace(
+    conn: &Arc<Conn>,
+    workspace: &str,
+    dedicated: bool,
+    intent: AttachIntent<'_>,
+) -> io::Result<ReplyOk> {
+    let takeover = matches!(intent, AttachIntent::TakeOver);
+    let machine = conn.machine()?;
+    let tree_id: WorkspaceId = workspace
+        .parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid workspace id"))?;
+    let (displaced, evicted, proof) = {
         let _handover = conn.attachments.handover();
-        let attachment = Attachment::new(conn.holder.token.clone(), conn.holder.hostname.clone());
-        let displaced = match (&conn.machine, tree_id) {
-            (Some(machine), Some(id)) => machine.attach(id, attachment),
-            _ => None,
+        if conn.closed.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "the acquiring connection has closed",
+            ));
+        }
+        machine.workspace(tree_id)?;
+        let mut ownership = conn
+            .attachments
+            .ownership
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let proof = match intent {
+            AttachIntent::Resume(proof) => {
+                match ownership.resume(tree_id, proof, &conn.holder.hostname) {
+                    Ok(proof) => proof,
+                    Err(by) => return Ok(ReplyOk::WorkspaceBusy { by }),
+                }
+            }
+            AttachIntent::TakeOver => ownership.take_over(tree_id, &conn.holder.hostname),
         };
+        let attachment = Attachment::new(conn.holder.token.clone(), conn.holder.hostname.clone());
+        let displaced = machine.attach(tree_id, attachment);
         let evicted = conn
             .attachments
             .claim(workspace, conn.id, &conn.holder, dedicated);
-        (displaced, evicted)
+        (displaced, evicted, proof)
     };
 
     if let Some(evicted) = evicted {
@@ -435,21 +479,26 @@ fn attach_workspace(
             conn.holder.hostname,
             evicted.hostname
         );
-        let notice = ControlEvent::Preempted {
-            workspace: workspace.to_string(),
-            by: conn.holder.hostname.clone(),
-        };
-        if let Err(e) = evicted.sink.send(&ControlServerMsg::Event(notice)) {
-            log::debug!("could not tell the displaced session about {workspace}: {e}");
+        if takeover {
+            let notice = ControlEvent::Preempted {
+                workspace: workspace.to_string(),
+                by: conn.holder.hostname.clone(),
+            };
+            if let Err(e) = evicted.sink.send(&ControlServerMsg::Event(notice)) {
+                log::debug!("could not tell the displaced session about {workspace}: {e}");
+            }
         }
         if evicted.dedicated {
             let _ = evicted.shutdown.shutdown_link();
         }
     }
 
-    Ok(displaced
-        .filter(|a| a.token != conn.holder.token)
-        .map(|a| a.hostname))
+    Ok(ReplyOk::WorkspaceLease {
+        proof,
+        took_over_from: displaced
+            .filter(|a| takeover && a.token != conn.holder.token)
+            .map(|a| a.hostname),
+    })
 }
 
 fn detach_workspace(conn: &Arc<Conn>, workspace: &str) -> io::Result<bool> {
@@ -460,11 +509,13 @@ fn detach_workspace(conn: &Arc<Conn>, workspace: &str) -> io::Result<bool> {
     }
     let _handover = conn.attachments.handover();
     let released = conn.attachments.release(workspace, conn.id);
-    let forgotten = match (&conn.machine, workspace.parse().ok()) {
-        (Some(machine), Some(id)) => machine.detach(id, &conn.holder.token),
-        _ => false,
-    };
-    Ok(released || forgotten)
+    // Tokens are stable across this client's reconnects. Only the connection
+    // that actually released the live seat may clear the machine's mirror;
+    // a late Detach from its predecessor must not detach the resumed socket.
+    if released && let (Some(machine), Ok(id)) = (&conn.machine, workspace.parse()) {
+        machine.detach(id, &conn.holder.token);
+    }
+    Ok(released)
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -568,10 +619,46 @@ fn run_request(
     req: ControlRequest,
     blob: Vec<u8>,
 ) -> io::Result<(ReplyOk, Vec<u8>)> {
+    let (req, management) = match req {
+        ControlRequest::ManageWorkspace { request } => {
+            if request.workspace_mutation().is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "management accepts only a direct workspace-tree mutation",
+                ));
+            }
+            (*request, true)
+        }
+        request => (request, false),
+    };
+    let _authority = if let Some(workspace) = req.workspace_mutation() {
+        let guard = conn.attachments.handover();
+        let owned = conn
+            .attachments
+            .ownership
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(workspace);
+        let controls = conn
+            .attachments
+            .locked()
+            .iter()
+            .any(|live| live.workspace == workspace.to_string() && live.conn == conn.id);
+        if conn.closed.load(Ordering::Acquire) || (owned && !controls && !management) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "this connection does not control the workspace; resume or explicitly take over first",
+            ));
+        }
+        Some(guard)
+    } else {
+        None
+    };
     let h: &dyn Host = &*conn.host;
     let p = |s: &str| PathBuf::from(s);
 
     Ok(match req {
+        ControlRequest::ManageWorkspace { .. } => unreachable!("validated above"),
         ControlRequest::Ping => (ReplyOk::Pong, Vec::new()),
 
         ControlRequest::ReadDir { dir, root } => {
@@ -670,6 +757,14 @@ fn run_request(
             },
             Vec::new(),
         ),
+        ControlRequest::WorkspaceResume { id, proof } => (
+            acquire_workspace(conn, &id, false, AttachIntent::Resume(proof.as_ref()))?,
+            Vec::new(),
+        ),
+        ControlRequest::WorkspaceTakeOver { id } => (
+            acquire_workspace(conn, &id, false, AttachIntent::TakeOver)?,
+            Vec::new(),
+        ),
         ControlRequest::WorkspaceDetach { id } => {
             detach_workspace(conn, &id)?;
             (ReplyOk::Unit, Vec::new())
@@ -703,7 +798,6 @@ fn run_request(
         ControlRequest::WorkspaceRemove { workspace } => {
             let store = conn.machine()?;
             let panes = {
-                let _handover = conn.attachments.handover();
                 let panes = store.workspace_delete(workspace, conn.machine_origin)?;
                 conn.attachments.forget_workspace(&workspace.to_string());
                 panes
@@ -944,6 +1038,7 @@ struct Conn {
     next_watch: AtomicU64,
     git_streams: Arc<AtomicUsize>,
     pool: Pool,
+    closed: AtomicBool,
     machine: Option<Arc<MachineStore>>,
     machine_origin: Option<machine::SubscriberId>,
     attachments: Arc<AttachRegistry>,
@@ -1757,6 +1852,240 @@ mod aggregate_tests {
             "the CLI dials whatever path Status names"
         );
         assert!(status.uptime_secs <= server_started().elapsed().as_secs());
+    }
+
+    #[test]
+    fn a_displaced_client_cannot_resume_after_the_new_controller_disconnects() {
+        let dir = tempfile::tempdir().unwrap();
+        let machine = MachineStore::open(dir.path().join(machine::MACHINE_FILE));
+        let workspace = machine.workspace_create(None, None, None).unwrap().id;
+        let services = Services::with_machine(machine);
+        let a = client_with(services.clone());
+        let ReplyOk::WorkspaceLease { proof: old, .. } = a
+            .call(ControlRequest::WorkspaceResume {
+                id: workspace.to_string(),
+                proof: None,
+            })
+            .unwrap()
+        else {
+            panic!("first claim must grant a proof");
+        };
+        a.close();
+        let a = client_with(services.clone());
+        assert!(matches!(
+            a.call(ControlRequest::WorkspaceResume {
+                id: workspace.to_string(),
+                proof: Some(old.clone()),
+            })
+            .unwrap(),
+            ReplyOk::WorkspaceLease { .. }
+        ));
+        let b = client_with(services.clone());
+        assert!(matches!(
+            b.call(ControlRequest::WorkspaceResume {
+                id: workspace.to_string(),
+                proof: None,
+            })
+            .unwrap(),
+            ReplyOk::WorkspaceBusy { .. }
+        ));
+        let ReplyOk::WorkspaceLease { proof: current, .. } = b
+            .call(ControlRequest::WorkspaceTakeOver {
+                id: workspace.to_string(),
+            })
+            .unwrap()
+        else {
+            panic!("explicit takeover must grant a proof");
+        };
+        assert_ne!(old, current);
+        assert_eq!(
+            a.call(ControlRequest::WorkspaceRename {
+                workspace,
+                name: Some("stale edit".into())
+            })
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        b.call(ControlRequest::WorkspaceRename {
+            workspace,
+            name: Some("current edit".into()),
+        })
+        .unwrap();
+        assert!(matches!(
+            a.call(ControlRequest::WorkspaceTree { workspace }).unwrap(),
+            ReplyOk::WorkspaceTree(_)
+        ));
+        b.close();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !services.attachments.is_empty() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(matches!(
+            a.call(ControlRequest::WorkspaceResume {
+                id: workspace.to_string(),
+                proof: Some(old),
+            })
+            .unwrap(),
+            ReplyOk::WorkspaceBusy { .. }
+        ));
+        assert!(services.attachments.is_empty());
+        let b = client_with(services);
+        assert!(matches!(
+            b.call(ControlRequest::WorkspaceResume {
+                id: workspace.to_string(),
+                proof: Some(current),
+            })
+            .unwrap(),
+            ReplyOk::WorkspaceLease { .. }
+        ));
+        a.close();
+        b.close();
+    }
+
+    #[test]
+    fn a_late_detach_cannot_clear_the_resumed_connection_with_the_same_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let machine = MachineStore::open(dir.path().join(machine::MACHINE_FILE));
+        let workspace = machine.workspace_create(None, None, None).unwrap().id;
+        let services = Services::with_machine(machine.clone());
+        let old = client_with(services.clone());
+        let ReplyOk::WorkspaceLease { proof, .. } = old
+            .call(ControlRequest::WorkspaceResume {
+                id: workspace.to_string(),
+                proof: None,
+            })
+            .unwrap()
+        else {
+            panic!("first resume must grant a proof");
+        };
+        let current = client_with(services.clone());
+        current
+            .call(ControlRequest::WorkspaceResume {
+                id: workspace.to_string(),
+                proof: Some(proof),
+            })
+            .unwrap();
+        assert_eq!(
+            old.call(ControlRequest::WorkspaceDetach {
+                id: workspace.to_string()
+            })
+            .unwrap(),
+            ReplyOk::Unit
+        );
+        assert!(machine.attachment(workspace).is_some());
+        assert_eq!(services.attachments.len(), 1);
+        assert_eq!(
+            current
+                .call(ControlRequest::WorkspaceDetach {
+                    id: workspace.to_string()
+                })
+                .unwrap(),
+            ReplyOk::Unit
+        );
+        assert!(machine.attachment(workspace).is_none());
+        assert!(services.attachments.is_empty());
+        old.close();
+        current.close();
+    }
+
+    #[test]
+    fn simultaneous_first_resumes_choose_exactly_one_controller() {
+        let dir = tempfile::tempdir().unwrap();
+        let machine = MachineStore::open(dir.path().join(machine::MACHINE_FILE));
+        let workspace = machine.workspace_create(None, None, None).unwrap().id;
+        let services = Services::with_machine(machine);
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let client = client_with(services.clone());
+                let gate = gate.clone();
+                std::thread::spawn(move || {
+                    gate.wait();
+                    let reply = client
+                        .call(ControlRequest::WorkspaceResume {
+                            id: workspace.to_string(),
+                            proof: None,
+                        })
+                        .unwrap();
+                    client.close();
+                    reply
+                })
+            })
+            .collect();
+        let replies: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        assert_eq!(
+            replies
+                .iter()
+                .filter(|r| matches!(r, ReplyOk::WorkspaceLease { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            replies
+                .iter()
+                .filter(|r| matches!(r, ReplyOk::WorkspaceBusy { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn unknown_workspaces_cannot_allocate_resume_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let services =
+            Services::with_machine(MachineStore::open(dir.path().join(machine::MACHINE_FILE)));
+        let client = client_with(services.clone());
+        assert!(
+            client
+                .call(ControlRequest::WorkspaceResume {
+                    id: WorkspaceId::new().to_string(),
+                    proof: None
+                })
+                .is_err()
+        );
+        assert!(services.attachments.is_empty());
+        client.close();
+    }
+
+    #[test]
+    fn same_user_management_is_explicit_and_cannot_wrap_arbitrary_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let machine = MachineStore::open(dir.path().join(machine::MACHINE_FILE));
+        let workspace = machine.workspace_create(None, None, None).unwrap().id;
+        let services = Services::with_machine(machine);
+        let gui = client_with(services.clone());
+        let admin = client_with(services);
+        gui.call(ControlRequest::WorkspaceResume {
+            id: workspace.to_string(),
+            proof: None,
+        })
+        .unwrap();
+        let change = ControlRequest::WorkspaceRename {
+            workspace,
+            name: Some("explicit administration".into()),
+        };
+        assert_eq!(
+            admin.call(change.clone()).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        admin
+            .call(ControlRequest::ManageWorkspace {
+                request: Box::new(change),
+            })
+            .unwrap();
+        assert_eq!(
+            admin
+                .call(ControlRequest::ManageWorkspace {
+                    request: Box::new(ControlRequest::Ping)
+                })
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        gui.close();
+        admin.close();
     }
 
     #[test]
@@ -3002,7 +3331,35 @@ mod tests {
     #[test]
     fn git_stream_delivers_the_same_lines_as_the_buffered_read() {
         let (mut client, _hello) = raw();
-        let here = env!("CARGO_MANIFEST_DIR");
+        let repository = tempfile::tempdir().unwrap();
+        let here = repository.path().to_str().unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec![
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "test fixture",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .current_dir(here)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         let args: Vec<String> = ["log", "--oneline", "-n", "30"]
             .iter()
             .map(|s| s.to_string())
@@ -3019,9 +3376,7 @@ mod tests {
             ControlReply::Ok(ReplyOk::Output(o)) => o,
             other => panic!("expected output, got {other:?}"),
         };
-        if buffered.status != Some(0) {
-            return;
-        }
+        assert_eq!(buffered.status, Some(0));
         let expected: Vec<String> = String::from_utf8_lossy(&buffered.stdout)
             .lines()
             .map(str::to_string)

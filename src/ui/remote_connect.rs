@@ -24,6 +24,8 @@ mod attempt;
 pub use attempt::ConnectAttempt;
 mod prompt;
 use prompt::PromptValidity;
+mod resume;
+pub use resume::ResumeProofs;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostChoice {
@@ -518,15 +520,32 @@ impl HostLinks {
         let id = host.id();
         crate::ui::host_registry::HostRegistry::insert(cx, Arc::clone(&host).into_shared());
         let table = cx.default_global::<HostLinks>();
-        table.hosts.insert(id, host);
+        let previous = table.hosts.insert(id, host.clone());
         table.homes.insert(id, home);
+        if let Some(previous) = previous
+            && !Arc::ptr_eq(&previous, &host)
+        {
+            Self::retire(previous, cx);
+        }
     }
 
     pub fn remove(cx: &mut App, id: HostId) {
         let table = cx.default_global::<HostLinks>();
-        table.hosts.remove(&id);
+        let removed = table.hosts.remove(&id);
         table.homes.remove(&id);
         crate::ui::host_registry::HostRegistry::remove(cx, id);
+        if let Some(host) = removed {
+            Self::retire(host, cx);
+        }
+    }
+
+    fn retire(host: Arc<RemoteHost>, cx: &App) {
+        // Invalidate immediately, but don't spend the reader's 500 ms close
+        // grace on the UI thread. Keep its owner alive through the reap.
+        host.client().request_close();
+        cx.background_executor()
+            .spawn(async move { host.client().close() })
+            .detach();
     }
 
     pub fn len(cx: &mut App) -> usize {
@@ -666,6 +685,7 @@ pub fn clear_install_progress(host: HostId) {
 }
 
 pub fn register(cx: &mut App) {
+    ResumeProofs::install(cx);
     crate::daemon::install::set_install_confirm(Arc::new(GuiInstallConfirm));
     crate::daemon::install::set_install_progress(Arc::new(GuiInstallProgress));
     crate::daemon::router::set_route_auth_responder(Arc::new(GuiRouteAuth));

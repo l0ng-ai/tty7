@@ -115,6 +115,13 @@ impl RealBackend {
 
 impl Backend for RealBackend {
     fn control(&mut self, req: ControlRequest) -> Result<ReplyOk> {
+        let req = if req.workspace_mutation().is_some() {
+            ControlRequest::ManageWorkspace {
+                request: Box::new(req),
+            }
+        } else {
+            req
+        };
         let reply = self.control_client()?.request(req)?;
         Ok(reply)
     }
