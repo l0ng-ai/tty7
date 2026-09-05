@@ -256,6 +256,18 @@ pub enum InstallDecision {
 pub trait InstallConfirm: Send + Sync {
     fn confirm(&self, request: &InstallRequest) -> InstallDecision;
 
+    fn confirm_cancellable(
+        &self,
+        request: &InstallRequest,
+        cancellation: &super::cancel::RouteCancellation,
+    ) -> InstallDecision {
+        if cancellation.is_active() {
+            self.confirm(request)
+        } else {
+            InstallDecision::Decline
+        }
+    }
+
     /// A routed caller that has gone away must not leave queued preparation
     /// or an unanswerable consent prompt running in a blocking worker.
     fn is_cancelled(&self) -> bool {

@@ -256,6 +256,19 @@ impl RouteReply {
 
 pub trait RouteAuthResponder: Send + Sync {
     fn respond(&self, machine: &RouteTarget, prompt: &AuthPromptKind) -> AuthResponse;
+
+    fn respond_cancellable(
+        &self,
+        machine: &RouteTarget,
+        prompt: &AuthPromptKind,
+        cancellation: &super::cancel::RouteCancellation,
+    ) -> AuthResponse {
+        if cancellation.is_active() {
+            self.respond(machine, prompt)
+        } else {
+            AuthResponse::Cancelled
+        }
+    }
 }
 
 pub struct CancelAuth;
@@ -289,13 +302,33 @@ pub fn negotiate<S>(stream: &mut S, header: &RouteHeader) -> io::Result<RouteAck
 where
     for<'a> &'a mut S: Read + Write,
 {
+    negotiate_cancellable(stream, header, &super::cancel::RouteCancellation::default())
+}
+
+/// The caller registers the socket with `cancellation` before entering here.
+/// Responders receive the same token, so a GUI question cannot keep a closed
+/// route's worker blocked waiting for an answer nobody needs any more.
+pub fn negotiate_cancellable<S>(
+    stream: &mut S,
+    header: &RouteHeader,
+    cancellation: &super::cancel::RouteCancellation,
+) -> io::Result<RouteAck>
+where
+    for<'a> &'a mut S: Read + Write,
+{
+    cancellation.check()?;
     header.write(&mut &mut *stream)?;
     loop {
+        cancellation.check()?;
         let (kind, payload) = protocol::read_frame(&mut &mut *stream)?;
+        cancellation.check()?;
         match kind {
             ROUTE_KIND => return RouteAck::from_payload(&payload),
             ROUTE_PROMPT_KIND => {
-                if let Some(reply) = answer(&header.target, RoutePrompt::decode(&payload)?) {
+                if let Some(reply) =
+                    answer(&header.target, RoutePrompt::decode(&payload)?, cancellation)
+                {
+                    cancellation.check()?;
                     reply.write(&mut &mut *stream)?;
                 }
             }
@@ -312,10 +345,15 @@ where
     }
 }
 
-fn answer(machine: &RouteTarget, prompt: RoutePrompt) -> Option<RouteReply> {
+fn answer(
+    machine: &RouteTarget,
+    prompt: RoutePrompt,
+    cancellation: &super::cancel::RouteCancellation,
+) -> Option<RouteReply> {
     match prompt {
         RoutePrompt::Auth { request_id, prompt } => {
-            let response = route_auth_responder().respond(machine, &prompt);
+            let response =
+                route_auth_responder().respond_cancellable(machine, &prompt, cancellation);
             Some(RouteReply::Auth {
                 request_id,
                 response,
@@ -325,8 +363,8 @@ fn answer(machine: &RouteTarget, prompt: RoutePrompt) -> Option<RouteReply> {
             request_id,
             request,
         } => {
-            let decision =
-                crate::daemon::install::install_confirm().confirm(&request.into_request());
+            let decision = crate::daemon::install::install_confirm()
+                .confirm_cancellable(&request.into_request(), cancellation);
             Some(RouteReply::Install {
                 request_id,
                 approve: decision == InstallDecision::Approve,
@@ -1019,6 +1057,46 @@ mod tests {
             size_bytes: 12_345_678,
             sha256: "abc123".into(),
         }
+    }
+
+    #[test]
+    fn cancelling_a_route_interrupts_blocked_negotiation_and_releases_its_socket() {
+        use super::super::cancel::RouteCancellation;
+        use std::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let cancellation = RouteCancellation::default();
+        cancellation
+            .register(Arc::new(client.try_clone().unwrap()))
+            .unwrap();
+        let (started, waiting) = std::sync::mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let (kind, _) = protocol::read_frame(&mut peer).unwrap();
+            assert_eq!(kind, ROUTE_KIND);
+            started.send(()).unwrap();
+            peer.read(&mut [0u8; 1])
+        });
+        let worker_cancel = cancellation.clone();
+        let (completed, done) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            completed
+                .send(
+                    negotiate_cancellable(
+                        &mut client,
+                        &RouteHeader::local_stdio("unused", &[]),
+                        &worker_cancel,
+                    )
+                    .is_err(),
+                )
+                .unwrap();
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        cancellation.cancel();
+        assert!(done.recv_timeout(Duration::from_secs(2)).unwrap());
+        assert_eq!(peer.join().unwrap().unwrap(), 0);
+        worker.join().unwrap();
     }
 
     #[test]
