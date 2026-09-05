@@ -860,6 +860,9 @@ struct NativeSshBackend {
 
 pub struct DaemonPane {
     pub id: u64,
+    /// Serializes controller changes with commands accepted from that stream.
+    /// Separate from `state`: a PTY write must not hold up output draining.
+    controller: Mutex<()>,
     owner: Option<String>,
     backend: PaneBackend,
     /// The input side (keyboard input / pasted text): the PTY writer, or the
@@ -1504,6 +1507,7 @@ impl DaemonPane {
 
         let pane = Arc::new(Self {
             id,
+            controller: Mutex::new(()),
             owner,
             backend: PaneBackend::Pty(PtyBackend {
                 master: master.clone(),
@@ -1757,6 +1761,7 @@ impl DaemonPane {
 
         let pane = Arc::new(Self {
             id,
+            controller: Mutex::new(()),
             owner: None,
             backend: PaneBackend::NativeSsh(NativeSshBackend {
                 handle: bridge.handle,
@@ -2081,7 +2086,12 @@ impl DaemonPane {
         subscriber: Sender<DaemonMsg>,
         allow_remote_clipboard_write: bool,
     ) -> u64 {
+        let _controller = self.controller.lock().unwrap();
         let mut st = self.state.lock().unwrap();
+        if self.shutting_down.load(Ordering::Acquire) {
+            let _ = subscriber.send(DaemonMsg::Error("this pane is closing".into()));
+            return st.subscriber_epoch;
+        }
         let epoch =
             attach_subscriber_with_permissions(&mut st, subscriber, allow_remote_clipboard_write);
         self.gate.reset();
@@ -2089,6 +2099,7 @@ impl DaemonPane {
     }
 
     pub fn detach(&self, epoch: u64) -> bool {
+        let _controller = self.controller.lock().unwrap();
         let mut st = self.state.lock().unwrap();
         if st.subscriber_epoch == epoch {
             st.subscriber = None;
@@ -2109,7 +2120,22 @@ impl DaemonPane {
     }
 
     pub fn controls(&self, epoch: u64) -> bool {
-        self.state.lock().unwrap().subscriber_epoch == epoch
+        let state = self.state.lock().unwrap();
+        !self.shutting_down.load(Ordering::Acquire)
+            && state.subscriber.is_some()
+            && state.subscriber_epoch == epoch
+    }
+
+    /// Validate and apply as one controller operation. Checking `controls`
+    /// before calling write/resize/kill separately races a new attachment.
+    /// An already admitted operation finishes before a new controller joins.
+    pub(crate) fn with_controller(&self, epoch: u64, apply: impl FnOnce(&Self)) -> bool {
+        let _controller = self.controller.lock().unwrap();
+        if !self.controls(epoch) {
+            return false;
+        }
+        apply(self);
+        true
     }
 
     pub fn agent_state(&self) -> Option<crate::daemon::control::PaneAgentState> {
@@ -3321,6 +3347,113 @@ mod tests {
             "a pane whose shell emits no OSC 7 must still report where it \
              actually is — this is what a new tab inherits (issue #187)"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_displaced_pane_controller_cannot_apply_any_more_commands() {
+        let pane = DaemonPane::spawn(
+            774001,
+            Some(std::env::temp_dir()),
+            ws(80, 24),
+            Some(ShellSpec {
+                program: "/bin/cat".into(),
+                args: Vec::new(),
+                args_are_tty7_defaults: false,
+            }),
+            None,
+            None,
+            None,
+            false,
+            || {},
+        )
+        .unwrap();
+        let (old_tx, _old_rx) = mpsc::channel();
+        let old = pane.attach(old_tx);
+        let (new_tx, _new_rx) = mpsc::channel();
+        let current = pane.attach(new_tx);
+        assert!(!pane.with_controller(old, |pane| pane.write_input(b"stale\n")));
+        assert!(!pane.with_controller(old, |pane| pane.resize(ws(10, 10))));
+        assert!(!pane.with_controller(old, |pane| pane.kill()));
+        assert!(pane.alive());
+        assert!(pane.with_controller(current, |pane| pane.resize(ws(100, 30))));
+        assert_eq!(
+            pane.state
+                .lock()
+                .unwrap()
+                .ring
+                .segments
+                .back()
+                .unwrap()
+                .size,
+            ws(100, 30)
+        );
+        pane.detach(current);
+        assert!(!pane.with_controller(current, |_| panic!("detached stream retained control")));
+        pane.kill();
+        let (closing_tx, closing_rx) = mpsc::channel();
+        let closing = pane.attach(closing_tx);
+        assert!(matches!(closing_rx.try_recv(), Ok(DaemonMsg::Error(_))));
+        assert!(
+            !pane.controls(closing),
+            "a closing pane cannot accept a new controller"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_admitted_command_finishes_before_a_new_controller_can_attach() {
+        let pane = DaemonPane::spawn(
+            774002,
+            Some(std::env::temp_dir()),
+            ws(80, 24),
+            Some(ShellSpec {
+                program: "/bin/cat".into(),
+                args: Vec::new(),
+                args_are_tty7_defaults: false,
+            }),
+            None,
+            None,
+            None,
+            false,
+            || {},
+        )
+        .unwrap();
+        let (old_tx, _old_rx) = mpsc::channel();
+        let old = pane.attach(old_tx);
+        let (admitted_tx, admitted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let command = {
+            let pane = pane.clone();
+            std::thread::spawn(move || {
+                pane.with_controller(old, |_| {
+                    admitted_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                })
+            })
+        };
+        admitted_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (attached_tx, attached_rx) = mpsc::channel();
+        let attach = {
+            let pane = pane.clone();
+            std::thread::spawn(move || {
+                let (tx, _rx) = mpsc::channel();
+                let current = pane.attach(tx);
+                attached_tx.send(current).unwrap();
+            })
+        };
+        assert!(
+            attached_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err()
+        );
+        release_tx.send(()).unwrap();
+        assert!(command.join().unwrap());
+        let current = attached_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        attach.join().unwrap();
+        assert!(current > old);
+        assert!(!pane.with_controller(old, |_| panic!("old command was admitted after attach")));
+        pane.kill();
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

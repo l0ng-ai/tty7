@@ -1163,28 +1163,32 @@ fn run_stream(
             };
             match msg {
                 ClientMsg::Input(bytes) => {
-                    if !pane.controls(epoch) {
+                    if !pane.with_controller(epoch, |pane| pane.write_input(&bytes)) {
                         break 'conn;
                     }
-                    pane.write_input(&bytes);
                 }
                 ClientMsg::Resize(size) => {
-                    if !pane.controls(epoch) {
+                    if !pane.with_controller(epoch, |pane| pane.resize(size)) {
                         break 'conn;
                     }
-                    pane.resize(size);
                 }
                 ClientMsg::AuthResponse {
                     request_id,
                     response,
-                } => pane.deliver_auth_response(request_id, response),
-                ClientMsg::Detach => break 'conn,
-                ClientMsg::Kill { pane_id } => {
-                    if pane_id == id {
-                        killed = true;
+                } => {
+                    if !pane.with_controller(epoch, |pane| {
+                        pane.deliver_auth_response(request_id, response)
+                    }) {
                         break 'conn;
                     }
-                    kill_pane(&registry, pane_id);
+                }
+                ClientMsg::Detach => break 'conn,
+                ClientMsg::Kill { pane_id } => {
+                    // A pane stream is scoped to its own pane, not a general
+                    // management socket. Kill must be checked AND applied
+                    // before detach, not deferred until after a new attach.
+                    killed = pane_id == id && pane.with_controller(epoch, |pane| pane.kill());
+                    break 'conn;
                 }
                 _ => {}
             }
@@ -1207,7 +1211,8 @@ fn run_stream(
     let _ = writer.join();
 
     if killed {
-        kill_pane(&registry, id);
+        registry.remove(id);
+        crate::daemon::scrollback::forget(id);
     } else if reclaimable {
         registry.remove(id);
     }
@@ -1459,6 +1464,64 @@ mod tests {
                 .unwrap();
             assert!(DaemonMsg::read(&mut client).is_err());
             h.join().unwrap();
+        }
+
+        #[test]
+        fn an_attached_stream_cannot_kill_an_unrelated_pane() {
+            use crate::daemon::pane::DaemonPane;
+            use crate::daemon::protocol::ShellSpec;
+            let registry = Arc::new(Registry::new());
+            let spawn = |id| {
+                let pane = DaemonPane::spawn(
+                    id,
+                    Some(std::env::temp_dir()),
+                    SIZE,
+                    Some(ShellSpec {
+                        program: "/bin/cat".into(),
+                        args: Vec::new(),
+                        args_are_tty7_defaults: false,
+                    }),
+                    None,
+                    None,
+                    None,
+                    false,
+                    || {},
+                )
+                .unwrap();
+                registry.insert(pane.clone());
+                pane
+            };
+            let own = spawn(774003);
+            let other = spawn(774004);
+            let (mut client, server) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let serving = {
+                let registry = registry.clone();
+                thread::spawn(move || handle_conn(server, registry).unwrap())
+            };
+            ClientMsg::Attach {
+                pane_id: own.id,
+                size: SIZE,
+                allow_remote_clipboard_write: false,
+            }
+            .encode(&mut client)
+            .unwrap();
+            assert!(matches!(
+                DaemonMsg::read(&mut client).unwrap(),
+                DaemonMsg::Size(_)
+            ));
+            ClientMsg::Kill { pane_id: other.id }
+                .encode(&mut client)
+                .unwrap();
+            while DaemonMsg::read(&mut client).is_ok() {}
+            drop(client);
+            serving.join().unwrap();
+            assert!(own.alive());
+            assert!(other.alive());
+            assert!(registry.get(other.id).is_some());
+            registry.drain_and_kill();
         }
 
         #[test]
