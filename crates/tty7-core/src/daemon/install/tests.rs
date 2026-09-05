@@ -48,6 +48,8 @@ struct FakeRemote {
     /// a login shell that could not read the script, which is the shape the
     /// no-`/proc` bug took on every Mac.
     stop_fails: bool,
+    maintenance_reply: Option<ExecOutput>,
+    health_reply: Option<ExecOutput>,
 }
 
 impl FakeRemote {
@@ -73,6 +75,8 @@ impl FakeRemote {
             speaks: Mutex::new(HashMap::new()),
             installed_speaks: Some(ours()),
             stop_fails: false,
+            maintenance_reply: None,
+            health_reply: None,
         }
     }
 
@@ -189,7 +193,10 @@ impl RemoteOps for FakeRemote {
             let exe = self.running_exe.lock().unwrap().clone().unwrap_or_default();
             return ok(&exe);
         }
-        if cmd == TERMINATE_RUNNING_COMMAND {
+        if cmd.contains(crate::daemon::maintenance::PREPARE_FLAG) {
+            if let Some(reply) = &self.maintenance_reply {
+                return Ok(reply.clone());
+            }
             if self.stop_fails {
                 return Ok(ExecOutput {
                     status: Some(127),
@@ -199,7 +206,22 @@ impl RemoteOps for FakeRemote {
             }
             *self.daemon_running.lock().unwrap() = false;
             *self.running_exe.lock().unwrap() = None;
-            return ok("");
+            return ok("{\"status\":\"stopped\"}");
+        }
+        if cmd.contains(crate::daemon::maintenance::HEALTH_FLAG) {
+            if let Some(reply) = &self.health_reply {
+                return Ok(reply.clone());
+            }
+            if !*self.daemon_running.lock().unwrap() {
+                return Err("no server is answering".into());
+            }
+            return ok(&crate::daemon::maintenance::Reply::Healthy {
+                control: CONTROL,
+                protocol: PROTOCOL,
+                build: VERSION.into(),
+                instance: "test-instance".into(),
+            }
+            .to_line());
         }
         if cmd.contains("--stdio --bridge") {
             let running = *self.daemon_running.lock().unwrap();
@@ -918,11 +940,68 @@ fn restart_replaces_the_running_daemon() {
     let journal = remote.journal();
     let killed = journal
         .iter()
-        .position(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND))
+        .position(|j| matches!(j, Journal::Exec(c) if c.contains(crate::daemon::maintenance::PREPARE_FLAG)))
         .expect("the old daemon is asked to stop");
     let launched = journal.iter().position(|j| *j == Journal::Launch).unwrap();
     assert!(killed < launched, "stop before start — one socket, not two");
     assert!(*remote.daemon_running.lock().unwrap());
+}
+
+#[test]
+fn unsafe_or_unacknowledged_maintenance_never_launches_or_uses_a_kill_fallback() {
+    for (status, stdout, stderr) in [
+        (1, "", "terminal panes are still running"),
+        (1, "", "old server has no idle shutdown"),
+        (0, "", ""),
+        (0, "not a structured acknowledgement", ""),
+    ] {
+        let mut remote = FakeRemote::new().with_previous_install().serving(BINARY);
+        remote.maintenance_reply = Some(ExecOutput {
+            status: Some(status),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        });
+        let release = FakeRelease::new();
+        let user = FakeUser::approving();
+        let result = installer(&remote, &release, &user, "busy-server").replace();
+        assert!(matches!(
+            result,
+            Err(InstallError::MaintenanceDeferred { .. })
+        ));
+        assert!(*remote.daemon_running.lock().unwrap());
+        assert!(!remote.journal().contains(&Journal::Launch));
+        assert!(remote.journal().iter().all(|entry| !matches!(entry, Journal::Exec(command) if command.contains("kill ") || command.contains("kill -"))));
+    }
+}
+
+#[test]
+fn a_socket_or_success_exit_is_not_a_matching_running_health_check() {
+    for reply in [
+        "",
+        "{\"status\":\"stopped\"}",
+        "{\"status\":\"healthy\",\"control\":999,\"protocol\":999,\"build\":\"wrong\",\"instance\":\"other\"}",
+    ] {
+        let mut remote = FakeRemote::new().with_previous_install().serving(BINARY);
+        remote.health_reply = Some(ExecOutput {
+            status: Some(0),
+            stdout: reply.into(),
+            stderr: String::new(),
+        });
+        let release = FakeRelease::new();
+        let user = FakeUser::approving();
+        let result = installer(&remote, &release, &user, "bad-health")
+            .with_timeouts(Duration::ZERO, Duration::from_millis(1))
+            .restart_daemon();
+        assert!(matches!(result, Err(InstallError::Launch { .. })));
+        assert_eq!(
+            remote
+                .journal()
+                .iter()
+                .filter(|entry| **entry == Journal::Launch)
+                .count(),
+            1
+        );
+    }
 }
 
 #[test]
@@ -949,7 +1028,7 @@ fn a_restart_with_nothing_to_start_leaves_the_running_daemon_alone() {
         !remote
             .journal()
             .iter()
-            .any(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND)),
+            .any(|j| matches!(j, Journal::Exec(c) if c.contains(crate::daemon::maintenance::PREPARE_FLAG))),
         "nothing was stopped: {:?}",
         remote.journal()
     );
@@ -982,7 +1061,7 @@ fn replacing_installs_the_matching_server_and_then_restarts_into_it() {
     let journal = remote.journal();
     let killed = journal
         .iter()
-        .position(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND))
+        .position(|j| matches!(j, Journal::Exec(c) if c.contains(crate::daemon::maintenance::PREPARE_FLAG)))
         .expect("the old daemon is asked to stop");
     let written = journal
         .iter()
@@ -1057,17 +1136,16 @@ fn the_launch_command_quotes_its_binary() {
 #[test]
 fn the_running_exe_probe_cannot_fail_the_command() {
     assert!(RUNNING_EXE_COMMAND.trim_end().ends_with("true"));
-    assert!(TERMINATE_RUNNING_COMMAND.trim_end().ends_with("true"));
-    assert!(TERMINATE_RUNNING_COMMAND.contains("*/tty7-server-*"));
+    assert!(!RUNNING_EXE_COMMAND.contains("kill"));
 }
 
-/// Both commands have to work on a machine with no `/proc`, which is every Mac
+/// The read-only probe has to work on a machine with no `/proc`, which is every Mac
 /// and every BSD, and the `/proc` glob has to stay inside the guard: zsh is the
 /// login shell over there, and a top-level glob that matches nothing takes the
 /// rest of the command line with it — including the trailing `true`.
 #[test]
 fn finding_the_running_server_survives_a_machine_without_proc() {
-    for cmd in [RUNNING_EXE_COMMAND, TERMINATE_RUNNING_COMMAND] {
+    for cmd in [RUNNING_EXE_COMMAND] {
         assert!(
             cmd.starts_with("if [ -d /proc ]; then"),
             "the glob has to be unreachable before the guard passes: {cmd}"
@@ -1090,12 +1168,11 @@ fn finding_the_running_server_survives_a_machine_without_proc() {
 /// error here is invisible in production, where the output is read as "no
 /// server is running" and the failure is a ten-second timeout.
 ///
-/// Parsed, not run: the terminate command would kill this developer's own
-/// server, and this test is not the place to find that out.
+/// Parsing covers both platform branches without relying on the test host.
 #[cfg(unix)]
 #[test]
 fn both_branches_of_the_probe_are_valid_shell() {
-    for cmd in [RUNNING_EXE_COMMAND, TERMINATE_RUNNING_COMMAND] {
+    for cmd in [RUNNING_EXE_COMMAND] {
         let out = std::process::Command::new("/bin/sh")
             .arg("-n")
             .arg("-c")
@@ -1117,9 +1194,7 @@ fn both_branches_of_the_probe_are_valid_shell() {
 /// this machine has, and hold it to an exit status: the old shape answered 1
 /// under zsh, having abandoned the command line before the trailing `true`.
 ///
-/// Only the probe. The terminate command differs from it by one word, and that
-/// word would end whatever server the developer running this happens to have
-/// up; the test above pins the two to the same shape.
+/// Only a read-only probe; maintenance no longer uses process-name signals.
 #[cfg(unix)]
 #[test]
 fn the_probe_runs_clean_in_every_shell_this_machine_has() {
@@ -1178,7 +1253,7 @@ fn the_ps_arm_is_a_ps_this_machine_accepts() {
 /// which reads as "the daemon refused to die" when the truth was that the
 /// command asking it to had fallen over before the `kill`.
 #[test]
-fn a_stop_that_failed_is_named_in_the_timeout() {
+fn a_stop_that_failed_preserves_the_reason_and_defers_maintenance() {
     let remote = FakeRemote::new()
         .with_previous_install()
         .refusing_to_stop()
@@ -1192,11 +1267,11 @@ fn a_stop_that_failed_is_named_in_the_timeout() {
         .restart_daemon()
         .expect_err("nothing stopped, so the restart cannot claim to have worked");
 
-    let InstallError::Launch { reason } = &failed else {
+    let InstallError::MaintenanceDeferred { reason } = &failed else {
         panic!("{failed:?}");
     };
     assert!(
-        reason.contains("did not stop") && reason.contains("no shell over here"),
+        reason.contains("no shell over here"),
         "the reason has to carry why the stop failed, not just that it did: {reason}"
     );
     assert!(
@@ -2078,7 +2153,7 @@ fn explicit_maintenance_finishes_starting_if_its_window_closes_after_the_stop() 
     let cancelled = CancelWhen(|| {
         remote
             .journal()
-            .contains(&Journal::Exec(TERMINATE_RUNNING_COMMAND.into()))
+            .iter().any(|j| matches!(j, Journal::Exec(c) if c.contains(crate::daemon::maintenance::PREPARE_FLAG)))
     });
     Installer::new(&remote, &release, &cancelled, "maintenance")
         .with_version(VERSION)

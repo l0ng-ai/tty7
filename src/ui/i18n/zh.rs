@@ -1192,12 +1192,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteProfileGone => "已删除的配置",
         L10nKey::RemoteRestartTitle => "重启“{machine}”上的 tty7 server？",
         L10nKey::RemoteRestartBody => {
-            "这会结束 {machine} 上的所有 shell，包括此窗口没显示的。工作区和布局会保留，并以全新的 shell 恢复。"
+            "仅在 {machine} 的 server 没有终端且支持安全维护时重启。仍有会话、正在创建终端或旧版本不支持安全检查时，会保留现状并延后重启。"
         }
         L10nKey::RemoteReplaceBody => {
-            "tty7 会在 {machine} 上安装匹配的 server 并启动它。\n\
-             \n\
-             {machine} 上运行的所有会话都会结束，包括此窗口未连接的会话。"
+            "tty7 会在 {machine} 上准备匹配的 server；仅在原 server 空闲并确认可以安全退出后切换。有会话或旧版本不支持安全检查时会延后更新，不强制终止会话。"
         }
         L10nKey::RemoteRestartFailedTitle => "“{machine}”上的 tty7 server 未被重启",
         L10nKey::RemoteRestartFailedBody => {
@@ -1228,7 +1226,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteInstallBytes => "字节",
         L10nKey::RemoteMismatchTitle => "更新“{machine}”上的 tty7 server？",
         L10nKey::RemoteMismatchDetail => {
-            "{machine} 上跑的是 server {running}，此客户端（{wanted}）不认它的协议。匹配的 server 已经装好了，但你的会话在正在跑的那个上面。\n\n{replace_server}\u{2003}换成 {wanted}，并结束它托管的所有会话。\n{cancel}\u{2003}保持 {machine} 现状。此窗口不会连接。"
+            "{machine} 上跑的是 server {running}，此客户端（{wanted}）不认它的协议。匹配的 server 已经装好了，现有会话仍由原 server 托管。\n\n{replace_server}\u{2003}仅在空闲且支持安全维护时切换为 {wanted}，否则延后更新并保留会话。\n{cancel}\u{2003}保持 {machine} 现状。此窗口不会连接。"
         }
         L10nKey::RemoteMismatchReplaceServer => "更新 server",
         L10nKey::RemoteMismatchDowngradeServer => "替换 server",

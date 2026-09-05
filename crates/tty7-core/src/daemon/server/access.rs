@@ -403,6 +403,12 @@ mod tests {
             Some(PaneAccess::Workspace(own.clone())),
             ClientMsg::Shutdown,
         );
+        let idle = || ClientMsg::ShutdownIfIdle {
+            expected_instance: crate::daemon::protocol::process_instance().into(),
+        };
+        fixture.refused(None, idle());
+        fixture.refused(Some(PaneAccess::Workspace(own.clone())), idle());
+        fixture.refused(Some(PaneAccess::Manage), idle());
         assert!(fixture.registry.get(pane).unwrap().alive());
         // Explicit administration by this same OS account is a separate API.
         let mut manage = fixture.open(

@@ -19,6 +19,8 @@ OPTIONS:
       --control-sock <p>    Use <p> as the control socket instead of the default
     --config-dir <dir>    Use <dir> for the socket, config and session files
     --protocol            Print the dialects this binary speaks, as JSON
+    --prepare-idle-restart Stop only an idle, matching daemon instance; never force
+    --check-running       Check both running endpoints with real protocol requests
     -V, --version         Print the version and exit
     -h, --help            Print this help and exit
 ";
@@ -53,6 +55,36 @@ fn main() -> ExitCode {
     }
 
     apply_config_dir_arg(&args);
+
+    if args.iter().any(|a| {
+        a == tty7_core::daemon::maintenance::PREPARE_FLAG
+            || a == tty7_core::daemon::maintenance::HEALTH_FLAG
+    }) {
+        let result = if args
+            .iter()
+            .any(|a| a == tty7_core::daemon::maintenance::PREPARE_FLAG)
+        {
+            let millis = flag_value(&args, "--wait-ms")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(10_000)
+                .clamp(1, 30_000);
+            tty7_core::daemon::maintenance::prepare_idle_restart(std::time::Duration::from_millis(
+                millis,
+            ))
+        } else {
+            tty7_core::daemon::maintenance::check_running()
+        };
+        return match result {
+            Ok(reply) => {
+                println!("{}", reply.to_line());
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("tty7-server: maintenance deferred: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     tty7_core::core::crash::install("server");
     tty7_core::core::logfile::install("server");

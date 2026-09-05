@@ -510,6 +510,9 @@ pub enum InstallError {
     Launch {
         reason: String,
     },
+    MaintenanceDeferred {
+        reason: String,
+    },
     /// Asked to restart a server this machine does not have. Nothing was
     /// stopped — see [`Installer::restart_daemon`].
     NoServerToRestart {
@@ -554,6 +557,10 @@ impl std::fmt::Display for InstallError {
                 write!(f, "could not write {path} on the remote machine: {reason}")
             }
             Self::Launch { reason } => write!(f, "the remote tty7-server did not start: {reason}"),
+            Self::MaintenanceDeferred { reason } => write!(
+                f,
+                "remote maintenance was deferred to preserve existing sessions: {reason}"
+            ),
             Self::NoServerToRestart { host, path } => write!(
                 f,
                 "{host} has no tty7-server at {path} for this build to start, so nothing was \
@@ -739,10 +746,8 @@ impl<'a> Installer<'a> {
         self
     }
 
-    /// How long [`Installer::cycle_daemon`] waits for the old server to go
-    /// away. Its own knob rather than a third argument to `with_timeouts`,
-    /// because the only caller that shortens it is the test that watches a
-    /// stop fail, and every other caller wants the shipped ten seconds.
+    /// How long the maintenance helper waits after the exact instance has
+    /// acknowledged an idle stop. Expiry never permits a forced termination.
     pub fn with_shutdown_timeout(mut self, shutdown: Duration) -> Self {
         self.shutdown_timeout = shutdown;
         self
@@ -1042,18 +1047,9 @@ impl<'a> Installer<'a> {
         Some(entry)
     }
 
-    /// Stop whatever tty7-server is running over there and start the one this
-    /// build speaks to.
-    ///
-    /// Which is not the same binary: the path is named after *our* dialect
-    /// (`tty7-server-c{control}p{protocol}`), while the kill matches any
-    /// `tty7-server-*` — see [`TERMINATE_RUNNING_COMMAND`]. When
-    /// the far end is a machine we have never installed onto — the other side
-    /// of a dialect bump, most of all — the two are different files and the
-    /// second one is not there. Restarting into it would end every session on
-    /// the machine, including other clients', and then have nothing to launch.
-    /// So look before killing: a machine with no matching server to start is
-    /// left exactly as it was, and told to install one first.
+    /// Start the matching candidate after an endpoint-scoped, idle-only stop.
+    /// Unsupported old servers and busy servers are left running. Having a
+    /// replacement binary is necessary, but never authorizes killing sessions.
     pub fn restart_daemon(&self) -> Result<(), InstallError> {
         self.check_cancelled()?;
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
@@ -1076,53 +1072,70 @@ impl<'a> Installer<'a> {
         self.check_cancelled()?;
         install_progress().report(&self.host, InstallPhase::Restarting);
 
-        // Keep why the stop failed, if it did. The command ends in `true`, so
-        // anything short of success means the far end never reached the kill at
-        // all — a login shell that choked on the script, a connection that went
-        // away. Throwing that away is half of what made the no-`/proc` bug cost
-        // a report instead of one glance at a log: the only thing anyone ever
-        // saw was the timeout below, and it blames a daemon for not stopping
-        // when nothing had asked it to.
-        let stop_failure = match self.ops.run(TERMINATE_RUNNING_COMMAND) {
-            Ok(out) if out.success() => None,
-            Ok(out) => Some(out.failure_reason()),
-            Err(reason) => Some(reason),
-        };
-        if let Some(reason) = &stop_failure {
-            log::warn!(
-                "remote {}: asking the running server to stop did not succeed: {reason}",
-                self.host,
-            );
+        let command = format!(
+            "{} {} --wait-ms {}",
+            shell_quote(&paths.binary),
+            super::maintenance::PREPARE_FLAG,
+            self.shutdown_timeout.as_millis()
+        );
+        let stopped = self
+            .ops
+            .run(&command)
+            .map_err(|reason| InstallError::MaintenanceDeferred { reason })?;
+        if !stopped.success() {
+            return Err(InstallError::MaintenanceDeferred {
+                reason: stopped.failure_reason(),
+            });
         }
-
-        let shutdown_timeout = self.shutdown_timeout;
-        let deadline = Instant::now() + shutdown_timeout;
-        while self.daemon_is_serving(paths)? {
-            if Instant::now() >= deadline {
-                return Err(InstallError::Launch {
-                    reason: match &stop_failure {
-                        Some(reason) => format!(
-                            "the running remote daemon did not stop within {shutdown_timeout:?}, \
-                             and the command asking it to stop failed: {reason}"
-                        ),
-                        None => format!(
-                            "the running remote daemon did not stop within {shutdown_timeout:?}"
-                        ),
-                    },
-                });
-            }
-            std::thread::sleep(self.poll_interval);
+        if super::maintenance::Reply::parse(&stopped.stdout)
+            != Some(super::maintenance::Reply::Stopped)
+        {
+            return Err(InstallError::MaintenanceDeferred { reason: "the candidate did not acknowledge a safe idle stop; no forced shutdown was attempted".into() });
         }
 
         self.launch_daemon(paths)?;
         let deadline = Instant::now() + self.startup_timeout;
         loop {
-            if self.daemon_is_serving(paths)? {
+            // Socket existence or an EOF bridge is not a health check. The
+            // candidate verifies Version, control Hello/Ping and one instance.
+            let command = format!(
+                "{} {}",
+                shell_quote(&paths.binary),
+                super::maintenance::HEALTH_FLAG
+            );
+            let result = self.ops.run(&command);
+            let failure = match result {
+                Ok(out) if out.success() => match super::maintenance::Reply::parse(&out.stdout) {
+                    Some(super::maintenance::Reply::Healthy {
+                        control,
+                        protocol,
+                        build,
+                        instance,
+                    }) if control == self.dialect.control
+                        && protocol == self.dialect.protocol
+                        && build == self.version
+                        && !instance.is_empty() =>
+                    {
+                        None
+                    }
+                    _ => Some(
+                        "the running endpoints did not prove the requested build and dialect"
+                            .to_string(),
+                    ),
+                },
+                Ok(out) => Some(out.failure_reason()),
+                Err(reason) => Some(reason),
+            };
+            if failure.is_none() {
                 return Ok(());
             }
             if Instant::now() >= deadline {
                 return Err(InstallError::Launch {
-                    reason: format!("{} was restarted but never started answering", paths.binary),
+                    reason: format!(
+                        "{} did not pass its running health check: {}",
+                        paths.binary,
+                        failure.unwrap()
+                    ),
                 });
             }
             std::thread::sleep(self.poll_interval);
@@ -1156,8 +1169,6 @@ impl<'a> Installer<'a> {
 /// was a silent no-op on every Mac. That is what left `restart_daemon` waiting
 /// out its ten seconds for a daemon nobody had asked to stop.
 const RUNNING_EXE_COMMAND: &str = r#"if [ -d /proc ]; then for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) || continue; case "$e" in */tty7-server-*) printf '%s' "${e% (deleted)}"; break;; esac; done; else ps -xwwo pid=,comm= 2>/dev/null | while read -r pid e; do case "$e" in */tty7-server-*) printf '%s' "$e"; break;; esac; done; fi; true"#;
-
-const TERMINATE_RUNNING_COMMAND: &str = r#"if [ -d /proc ]; then for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) || continue; case "$e" in */tty7-server-*) kill -TERM "${p#/proc/}" 2>/dev/null; break;; esac; done; else ps -xwwo pid=,comm= 2>/dev/null | while read -r pid e; do case "$e" in */tty7-server-*) kill -TERM "$pid" 2>/dev/null; break;; esac; done; fi; true"#;
 
 fn launch_command(binary: &str) -> String {
     let bin = shell_quote(binary);

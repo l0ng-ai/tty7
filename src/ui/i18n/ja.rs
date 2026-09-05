@@ -1322,10 +1322,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteProfileGone => "削除されたプロファイル",
         L10nKey::RemoteRestartTitle => "「{machine}」上の tty7 サーバーを再起動しますか？",
         L10nKey::RemoteRestartBody => {
-            "{machine} 上のシェルは、表示されていないものも含めてすべて終了します。ワークスペースとレイアウトは保持され、新しいシェルで開きます"
+            "{machine} のサーバーに端末がなく、安全な保守に対応している場合だけ再起動します。セッション実行中、端末作成中、または未対応の旧版の場合は、セッションを終了せず再起動を延期します"
         }
         L10nKey::RemoteReplaceBody => {
-            "tty7 は {machine} に対応するサーバーをインストールして起動します。\n\n{machine} で実行中のすべてのセッションが終了します。このウィンドウが接続していないセッションも含みます"
+            "tty7 は {machine} に対応するサーバーを準備します。元のサーバーが端末を持たず、安全に停止できると確認した場合だけ切り替えます。セッション実行中や未対応の旧版では更新を延期し、強制終了しません"
         }
         L10nKey::RemoteRestartFailedTitle => {
             "「{machine}」上の tty7 サーバーは再起動されませんでした"
@@ -1349,7 +1349,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteInstallBytes => "バイト",
         L10nKey::RemoteMismatchTitle => "「{machine}」上の tty7 サーバーを更新しますか？",
         L10nKey::RemoteMismatchDetail => {
-            "{machine} はサーバー {running} で動いていますが、このクライアント（{wanted}）はそのプロトコルを話せません。対応するサーバーはインストール済みですが、セッションは実行中のサーバー上にあります。\n\n{replace_server}\u{2003}{wanted} に置き換え、そのサーバー上のセッションをすべて終了します。\n{cancel}\u{2003}{machine} はそのままです。このウィンドウは接続しません"
+            "{machine} はサーバー {running} で動いていますが、このクライアント（{wanted}）はそのプロトコルを話せません。対応するサーバーは準備済みで、既存セッションは元のサーバー上にあります。\n\n{replace_server}\u{2003}端末がなく安全な保守に対応している場合だけ {wanted} に切り替えます。それ以外はセッションを保持して延期します。\n{cancel}\u{2003}{machine} はそのままです。このウィンドウは接続しません"
         }
         L10nKey::RemoteMismatchReplaceServer => "サーバーを更新",
         L10nKey::RemoteMismatchDowngradeServer => "サーバーを置き換え",

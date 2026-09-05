@@ -242,6 +242,41 @@ def replay_overflow_smoke(directory):
             "synthetic_replay_lost_mouse_mode": b"\x1b[?1000h" not in replay}
 
 
+def maintenance_smoke(directory, protocol, helper, proc, env):
+    def run(flag):
+        return subprocess.run([str(helper), flag, "--config-dir", str(directory)], env=env,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=25)
+
+    pane, pane_id = spawn_pane(directory, "/bin/cat", [])
+    read_for(pane, 0.1)
+    refused = run("--prepare-idle-restart")
+    assert refused.returncode != 0, "maintenance must refuse a live terminal"
+    assert proc.poll() is None, "refused maintenance stopped the isolated daemon"
+    frame(pane, 3, b"TTY7-MAINTENANCE-KEPT-ME\n")
+    output = b"".join(payload for kind, payload in read_for(pane, 0.2) if kind in (2, 3))
+    assert b"TTY7-MAINTENANCE-KEPT-ME" in output
+    if protocol["protocol"] >= 8:
+        with pane_connect(directory) as stale:
+            frame(stale, 58, json.dumps("wrong-instance").encode())
+            assert receive(stale)[0] == 8
+        health = run("--check-running")
+        assert health.returncode == 0, health.stderr
+        assert json.loads(health.stdout)["status"] == "healthy"
+    with pane_connect(directory) as kill:
+        frame(kill, 6, json.dumps(pane_id).encode())
+        if PANE_ACCESS:
+            assert receive(kill)[0] == 52
+    pane.close()
+    idle = run("--prepare-idle-restart")
+    if protocol["protocol"] < 8:
+        assert idle.returncode != 0 and proc.poll() is None, "an old daemon must never be forced to exit"
+        return {"maintenance_live_pane_preserved": True, "maintenance_legacy_deferred": True}
+    assert idle.returncode == 0, idle.stderr
+    assert json.loads(idle.stdout) == {"status": "stopped"}
+    assert proc.wait(timeout=5) == 0
+    return {"maintenance_live_pane_preserved": True, "maintenance_idle_shutdown": "passed", "maintenance_instance_fence": "passed"}
+
+
 def main():
     global PANE_ACCESS
     parser = argparse.ArgumentParser()
@@ -249,6 +284,7 @@ def main():
     parser.add_argument("--artifacts", required=True, type=Path)
     parser.add_argument("--tui", action="store_true", help="exercise isolated Vim and btop (up to 50 seconds)")
     parser.add_argument("--replay", action="store_true", help="diagnose replay truncation with a synthetic PTY producer")
+    parser.add_argument("--maintenance-helper", type=Path, help="exercise idle-only maintenance using this candidate, on the private daemon only")
     args = parser.parse_args()
     server = args.server.resolve(strict=True)
     artifacts = args.artifacts.resolve(strict=True)
@@ -273,6 +309,28 @@ def main():
                 results.update(tui_smoke(directory))
             if args.replay:
                 results.update(replay_overflow_smoke(directory))
+            if args.maintenance_helper:
+                results.update(maintenance_smoke(directory, protocol, args.maintenance_helper.resolve(strict=True), proc, env))
+                if proc.poll() == 0:
+                    # Restart only this private configuration after its safe
+                    # idle stop, then verify endpoints and the saved tree.
+                    proc = subprocess.Popen([str(server), "--daemon", "--config-dir", str(directory)],
+                                            env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                            start_new_session=True)
+                    deadline = time.monotonic() + 15
+                    while True:
+                        assert proc.poll() is None, "replacement test daemon exited"
+                        checked = subprocess.run([str(args.maintenance_helper.resolve()), "--check-running", "--config-dir", str(directory)],
+                                                 env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=25)
+                        if checked.returncode == 0:
+                            break
+                        assert time.monotonic() < deadline, checked.stderr
+                        time.sleep(0.05)
+                    control = Control(directory, protocol["control"], "after-idle-restart")
+                    tree = control.call("machine_get")["ok"]["machine_tree"]
+                    assert any(workspace["name"] == "current-write" for workspace in tree["workspaces"]), "idle restart lost the saved workspace"
+                    control.close()
+                    results["maintenance_idle_restart_and_saved_tree"] = "passed"
             print(json.dumps({"directory": str(directory), "pid": proc.pid, "protocol": protocol, **results}))
         finally:
             if proc.poll() is None:

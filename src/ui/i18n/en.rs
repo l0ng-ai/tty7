@@ -1258,13 +1258,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteProfileGone => "deleted profile",
         L10nKey::RemoteRestartTitle => "Restart tty7's server on \"{machine}\"?",
         L10nKey::RemoteRestartBody => {
-            "This ends every shell on {machine}, including ones this window is not showing. Workspaces and layouts are kept and come back with fresh shells."
+            "Restart only if {machine}'s server has no panes and supports safe maintenance. Existing sessions, a concurrent spawn, or an older server defer the restart without terminating sessions."
         }
         L10nKey::RemoteReplaceBody => {
-            "tty7 will install a matching server on {machine} and start it.\n\
-             \n\
-             Every session running on {machine} ends, including any this window is not \
-             connected to."
+            "tty7 will prepare a matching server on {machine}, then switch only after the original server confirms it is idle and can stop safely. Existing sessions or an unsupported old server defer the update; no sessions are forcibly terminated."
         }
         L10nKey::RemoteRestartFailedTitle => "tty7's server on \"{machine}\" was not restarted",
         L10nKey::RemoteRestartFailedBody => {
@@ -1296,7 +1293,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteInstallBytes => "bytes",
         L10nKey::RemoteMismatchTitle => "Update tty7's server on \"{machine}\"?",
         L10nKey::RemoteMismatchDetail => {
-            "{machine} runs server {running}, which this client ({wanted}) cannot speak. A matching server is installed there, but your sessions are on the one already running.\n\n{replace_server}\u{2003}replaces it with {wanted} and ends every session it is hosting.\n{cancel}\u{2003}leaves {machine} exactly as it is. This window will not connect."
+            "{machine} runs server {running}, which this client ({wanted}) cannot speak. A matching server is installed there; existing sessions remain on the original server.\n\n{replace_server}\u{2003}switches to {wanted} only if idle and safe maintenance is supported; otherwise it defers the update and keeps sessions.\n{cancel}\u{2003}leaves {machine} exactly as it is. This window will not connect."
         }
         L10nKey::RemoteMismatchReplaceServer => "Update Server",
         // Same button, opposite direction: the machine is ahead of this build,

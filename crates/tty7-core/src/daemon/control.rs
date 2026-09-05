@@ -91,8 +91,8 @@ pub fn parse_dialect_refusal(message: &str) -> Option<DialectRefusal> {
 }
 
 pub fn server_instance() -> &'static str {
-    static INSTANCE: OnceLock<String> = OnceLock::new();
-    INSTANCE.get_or_init(|| uuid::Uuid::new_v4().to_string())
+    // Both endpoints must identify the same process during health checks.
+    crate::daemon::protocol::process_instance()
 }
 
 pub fn server_started() -> Instant {

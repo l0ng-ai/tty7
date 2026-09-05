@@ -13,6 +13,7 @@ mod access;
 use access::Authority;
 
 struct Registry {
+    creation: std::sync::RwLock<()>,
     panes: Mutex<HashMap<u64, Arc<DaemonPane>>>,
     next_id: AtomicU64,
     attachments: Arc<crate::host::server::AttachRegistry>,
@@ -23,6 +24,7 @@ struct Registry {
 impl Registry {
     fn new() -> Self {
         Self {
+            creation: std::sync::RwLock::new(()),
             panes: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             attachments: Arc::default(),
@@ -33,6 +35,40 @@ impl Registry {
 
     fn alloc_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn begin_spawn(&self) -> std::io::Result<std::sync::RwLockReadGuard<'_, ()>> {
+        self.creation.try_read().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "daemon maintenance is in progress; retry spawning later",
+            )
+        })
+    }
+
+    fn idle_shutdown(
+        &self,
+        expected: &str,
+    ) -> std::io::Result<std::sync::RwLockWriteGuard<'_, ()>> {
+        if expected != crate::daemon::protocol::process_instance() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the daemon instance changed; maintenance was not applied",
+            ));
+        }
+        let guard = self.creation.try_write().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "a pane is being created; maintenance deferred",
+            )
+        })?;
+        if !self.panes.lock().unwrap().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "this daemon still has terminal panes; maintenance deferred without stopping them",
+            ));
+        }
+        Ok(guard)
     }
 
     /// Resume naming panes where the previous image left off.
@@ -443,9 +479,10 @@ fn run_adopting(inheritance: crate::daemon::handoff::Inheritance) -> anyhow::Res
 /// by then this program has been replaced by the one it was asked to become.
 #[cfg(unix)]
 fn hand_over(registry: &Registry, exe: &std::path::Path) -> anyhow::Error {
-    // Before anything is given up: the native-SSH panes below are hung up on
-    // the promise that this process is about to stop existing, and an exec
-    // that was never going to work must not collect on it. `execve` can still
+    let Ok(_creation) = registry.creation.try_write() else {
+        return anyhow::anyhow!("a pane is being created; handoff deferred");
+    };
+    // Before state is staged, reject ordinary invalid candidate paths. Exec can still
     // fail after this — a wrong architecture, a permission the metadata does
     // not show — but the everyday failures, a path that is not there or not a
     // program, are caught while everything is still intact.
@@ -464,12 +501,10 @@ fn hand_over(registry: &Registry, exe: &std::path::Path) -> anyhow::Error {
         match pane.carry() {
             Some(c) => carried.push(c),
             None => {
-                // A native-SSH pane's session is cipher state in this process's
-                // memory; the socket would cross and nothing able to speak on
-                // it would. Hanging it up here means the far end sees a close
-                // rather than a connection that has stopped answering.
-                log::info!("pane {} cannot cross a handoff; closing it", pane.id);
-                kill_pane(registry, pane.id);
+                return anyhow::anyhow!(
+                    "pane {} cannot cross a handoff; update deferred without closing it",
+                    pane.id
+                );
             }
         }
     }
@@ -737,7 +772,10 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
     };
     if matches!(
         &first,
-        ClientMsg::SpawnNativeSsh { .. } | ClientMsg::Shutdown | ClientMsg::Handoff { .. }
+        ClientMsg::SpawnNativeSsh { .. }
+            | ClientMsg::Shutdown
+            | ClientMsg::ShutdownIfIdle { .. }
+            | ClientMsg::Handoff { .. }
     ) {
         require!(authority.require_management());
     }
@@ -751,6 +789,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             restore,
             allow_remote_clipboard_write,
         } => {
+            let spawning = require!(registry.begin_spawn());
             let permit = require!(authority.enter());
             if let Some(restore) = &restore {
                 require!(authority.check_pane(&registry, restore.pane_id));
@@ -802,6 +841,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             authority.bind_spawn(&registry, id);
             registry.insert(pane.clone());
             drop(permit);
+            drop(spawning);
 
             {
                 let mut w = &write_stream;
@@ -819,6 +859,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
         }
 
         ClientMsg::SpawnNativeSsh { cwd: _, size, spec } => {
+            let spawning = require!(registry.begin_spawn());
             let allow_remote_clipboard_write = spec.remote_clipboard_write;
             let id = registry.alloc_id();
             let on_dead = {
@@ -842,6 +883,7 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                 }
             };
             registry.insert(pane.clone());
+            drop(spawning);
             {
                 let mut w = &write_stream;
                 DaemonMsg::Spawned { pane_id: id }.encode(&mut w)?;
@@ -902,6 +944,18 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             let mut w = write_stream;
             DaemonMsg::Version(DaemonVersion::current()).encode(&mut w)?;
             Ok(())
+        }
+
+        ClientMsg::ShutdownIfIdle { expected_instance } => {
+            let _idle = require!(registry.idle_shutdown(&expected_instance));
+            on_shutdown();
+            // Once committed, a lost response is not a reason to keep a
+            // half-shut-down daemon alive. The caller must verify, not kill.
+            let _ = DaemonMsg::ShutdownAck {
+                instance: expected_instance,
+            }
+            .encode(&mut &write_stream);
+            exit_now();
         }
 
         ClientMsg::Shutdown => {
@@ -1805,5 +1859,64 @@ mod tests {
             writer.join().unwrap();
             drop(client);
         }
+    }
+
+    #[test]
+    fn idle_shutdown_checks_instance_and_excludes_concurrent_creation() {
+        let registry = Registry::new();
+        let instance = crate::daemon::protocol::process_instance();
+        assert!(registry.idle_shutdown("stale-instance").is_err());
+        let spawn = registry.begin_spawn().unwrap();
+        assert!(registry.idle_shutdown(instance).is_err());
+        drop(spawn);
+        let idle = registry.idle_shutdown(instance).unwrap();
+        assert!(registry.begin_spawn().is_err());
+        assert!(registry.idle_shutdown(instance).is_err());
+        drop(idle);
+        assert!(registry.begin_spawn().is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_refuses_an_unmigratable_native_ssh_pane_without_closing_it() {
+        use std::os::unix::fs::PermissionsExt;
+        // A private peer that never sends a banner: no authentication, agent
+        // access, or real SSH account is involved in this regression.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let spec = serde_json::from_value(serde_json::json!({
+            "host": "127.0.0.1", "port": listener.local_addr().unwrap().port(),
+            "user": "test-only", "auth_mode": "auto"
+        }))
+        .unwrap();
+        let registry = Registry::new();
+        let pane = DaemonPane::spawn_native_ssh(
+            0x7746001,
+            crate::daemon::protocol::WinSize {
+                cols: 80,
+                rows: 24,
+                cell_w: 8,
+                cell_h: 16,
+            },
+            Box::new(spec),
+            || {},
+        )
+        .unwrap();
+        registry.insert(pane.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join("candidate");
+        // Valid executable permissions but a missing interpreter. Even the
+        // regressed implementation cannot successfully exec this test file.
+        std::fs::write(&candidate, b"#!/tty7-774-test-interpreter-does-not-exist\n").unwrap();
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let failure = hand_over(&registry, &candidate);
+        let retained = registry
+            .get(pane.id)
+            .is_some_and(|current| Arc::ptr_eq(&current, &pane));
+        pane.kill();
+        assert!(retained, "handoff must not remove an uncarryable pane");
+        assert!(
+            failure.to_string().contains("cannot cross a handoff"),
+            "{failure}"
+        );
     }
 }
