@@ -133,7 +133,9 @@ jobs:
       # pure headroom, so a trip means a hang, not a slow runner.
       - name: Test
         timeout-minutes: 20
-        run: cargo test --locked --target ${{ matrix.target }}
+        # Collect failures from every test binary in one run. Any failed test
+        # still fails this step; later integration suites remain visible too.
+        run: cargo test --locked --no-fail-fast --target ${{ matrix.target }}
 
       - name: Test desktop updater
         timeout-minutes: 10

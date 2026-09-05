@@ -293,6 +293,29 @@ mod tests {
     }
 
     #[test]
+    fn a_buffered_management_command_is_applied_after_its_sender_closes() {
+        let fixture = Fixture::new();
+        let workspace = fixture.workspace();
+        let control = fixture.control();
+        let (_, auth) = acquire(&control, workspace, None, false);
+        let (_stream, pane) = fixture.spawn(&auth);
+        let (mut client, server) = UnixStream::pair().unwrap();
+        ClientMsg::Access(PaneAccess::Manage)
+            .encode(&mut client)
+            .unwrap();
+        ClientMsg::Kill { pane_id: pane }
+            .encode(&mut client)
+            .unwrap();
+        // Do not race the reader: the sender is already gone before the
+        // server starts processing either buffered frame.
+        drop(client);
+        // Its acknowledgement can no longer be delivered, but the authorized
+        // command must have run (the same ordering as fire-and-forget Shutdown).
+        let _ = super::super::handle_conn(server, fixture.registry.clone());
+        assert!(fixture.registry.get(pane).is_none());
+    }
+
+    #[test]
     fn takeover_revokes_live_streams_and_all_old_capability_openings_without_killing_the_pty() {
         let fixture = Fixture::new();
         let workspace = fixture.workspace();

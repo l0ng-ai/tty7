@@ -761,10 +761,16 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
     }
     let (authority, first) = if let ClientMsg::Access(access) = first {
         let authority = require!(Authority::open(Some(access), &registry, &read_stream));
-        let timeout = read_stream.read_timeout()?;
-        read_stream.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
-        let request = ClientMsg::read(&mut read_stream);
-        read_stream.set_read_timeout(timeout)?;
+        let request = {
+            // One-shot management clients may close as soon as they send the
+            // command. Preserve that buffered request after hangup on macOS,
+            // while bounding the whole frame rather than each partial read.
+            let mut deadline = crate::daemon::deadline::DeadlineIo::new(
+                &mut read_stream,
+                std::time::Duration::from_secs(15),
+            )?;
+            ClientMsg::read(&mut deadline)
+        };
         (authority, require!(request))
     } else {
         (Authority::ReadOnly, first)
