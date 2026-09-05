@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -452,9 +452,18 @@ struct Relay {
     out: tokio::sync::mpsc::UnboundedSender<(u8, Vec<u8>)>,
     pending: Mutex<HashMap<u64, std::sync::mpsc::SyncSender<bool>>>,
     next_id: AtomicU64,
+    cancelled: AtomicBool,
 }
 
 impl Relay {
+    fn cancel(&self) {
+        // The flag and insertion use the same lock: a question cannot sneak
+        // into pending after cancellation has drained it.
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        self.cancelled.store(true, Ordering::Release);
+        pending.clear();
+    }
+
     fn fulfil(&self, request_id: u64, approve: bool) {
         if let Ok(mut pending) = self.pending.lock()
             && let Some(tx) = pending.remove(&request_id)
@@ -471,10 +480,17 @@ impl Relay {
 }
 
 impl InstallConfirm for Relay {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
     fn confirm(&self, request: &InstallRequest) -> InstallDecision {
         let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         if let Ok(mut pending) = self.pending.lock() {
+            if self.is_cancelled() {
+                return InstallDecision::Decline;
+            }
             pending.insert(request_id, tx);
         } else {
             return InstallDecision::Decline;
@@ -499,6 +515,20 @@ impl InstallConfirm for Relay {
                 InstallDecision::Decline
             }
         }
+    }
+}
+
+// Dropping spawn_blocking's JoinHandle does not stop its worker. Close the
+// relay explicitly when its local route disappears, waking consent waits.
+struct RouteLifetime {
+    relay: Arc<Relay>,
+    broker: Arc<PromptBroker>,
+}
+
+impl Drop for RouteLifetime {
+    fn drop(&mut self) {
+        self.relay.cancel();
+        self.broker.cancel();
     }
 }
 
@@ -531,6 +561,7 @@ async fn drive(local: Stream, header: &RouteHeader) -> io::Result<()> {
         out,
         pending: Mutex::new(HashMap::new()),
         next_id: AtomicU64::new(1),
+        cancelled: AtomicBool::new(false),
     });
     let setup = RouteSetup {
         broker: PromptBroker::new(Box::new(move |msg| match msg {
@@ -544,6 +575,10 @@ async fn drive(local: Stream, header: &RouteHeader) -> io::Result<()> {
         progress: relay.clone(),
         mismatches: Arc::new(Mutex::new(Vec::new())),
         channel: header.channel,
+    };
+    let _route_lifetime = RouteLifetime {
+        relay: relay.clone(),
+        broker: setup.broker.clone(),
     };
 
     let Some((mut link, conn, leftover)) = ({
@@ -1017,6 +1052,7 @@ mod tests {
             out,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            cancelled: AtomicBool::new(false),
         });
 
         let asking = {
@@ -1042,8 +1078,41 @@ mod tests {
             out,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            cancelled: AtomicBool::new(false),
         };
         assert_eq!(relay.confirm(&a_request()), InstallDecision::Decline);
+    }
+
+    #[test]
+    fn closing_a_route_wakes_consent_waiters_and_refuses_late_questions() {
+        let (out, mut outbox) = tokio::sync::mpsc::unbounded_channel();
+        let relay = Arc::new(Relay {
+            out,
+            pending: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            cancelled: AtomicBool::new(false),
+        });
+        let lifetime = RouteLifetime {
+            relay: relay.clone(),
+            broker: PromptBroker::new(Box::new(|_| true)),
+        };
+        let (done, finished) = std::sync::mpsc::channel();
+        let asking = relay.clone();
+        let worker = std::thread::spawn(move || {
+            done.send(asking.confirm(&a_request())).unwrap();
+        });
+        outbox.blocking_recv().expect("consent is being awaited");
+        drop(lifetime);
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(2)).unwrap(),
+            InstallDecision::Decline
+        );
+        worker.join().unwrap();
+        assert!(relay.is_cancelled());
+        assert!(relay.pending.lock().unwrap().is_empty());
+        relay.fulfil(1, true);
+        assert_eq!(relay.confirm(&a_request()), InstallDecision::Decline);
+        assert!(outbox.try_recv().is_err());
     }
 
     #[test]

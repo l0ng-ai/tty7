@@ -227,6 +227,7 @@ pub struct SshConnection {
     handle: tokio::sync::Mutex<russh::client::Handle<super::handler::ClientHandler>>,
     #[allow(dead_code)]
     key: ConnectionKey,
+    pub(crate) generation: uuid::Uuid,
     remote_forwards: RemoteForwardTable,
     alive: AtomicBool,
     remote_entry: tokio::sync::Mutex<Option<RemoteEntry>>,
@@ -241,6 +242,7 @@ impl SshConnection {
         Arc::new(Self {
             handle: tokio::sync::Mutex::new(handle),
             key,
+            generation: uuid::Uuid::new_v4(),
             remote_forwards,
             alive: AtomicBool::new(true),
             remote_entry: tokio::sync::Mutex::new(None),

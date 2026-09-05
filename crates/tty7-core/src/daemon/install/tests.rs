@@ -1976,9 +1976,167 @@ fn ssh_install_and_maintenance_share_a_lock_per_connection_key() {
     let other = install_lock("install-lock-test-b");
     assert!(Arc::ptr_eq(&first, &same));
     assert!(!Arc::ptr_eq(&first, &other));
-    let _guard = first.lock().unwrap();
-    assert!(same.try_lock().is_err());
-    assert!(other.try_lock().is_ok());
+    let weak = Arc::downgrade(&first);
+    drop(first);
+    drop(same);
+    assert!(
+        weak.upgrade().is_none(),
+        "a drained batch does not cache remote health forever"
+    );
+    let next = install_lock("install-lock-test-a");
+    assert!(!std::sync::Weak::ptr_eq(&weak, &Arc::downgrade(&next)));
+}
+
+struct CancelWhen<F>(F);
+
+impl<F: Fn() -> bool + Send + Sync> InstallConfirm for CancelWhen<F> {
+    fn confirm(&self, _: &InstallRequest) -> InstallDecision {
+        InstallDecision::Approve
+    }
+
+    fn is_cancelled(&self) -> bool {
+        (self.0)()
+    }
+}
+
+#[test]
+fn cancelled_preparation_and_maintenance_do_not_touch_the_remote() {
+    let remote = FakeRemote::new().with_previous_install().serving(BINARY);
+    let release = FakeRelease::new();
+    let cancelled = CancelWhen(|| true);
+    let installer = Installer::new(&remote, &release, &cancelled, "cancelled");
+    assert!(matches!(installer.run(), Err(InstallError::Cancelled)));
+    assert!(matches!(
+        installer.restart_daemon(),
+        Err(InstallError::Cancelled)
+    ));
+    assert!(matches!(installer.replace(), Err(InstallError::Cancelled)));
+    assert!(remote.journal().is_empty());
+    assert!(release.fetched().is_empty());
+    let error: io::Error = InstallError::Cancelled.into();
+    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+}
+
+#[test]
+fn cancellation_after_upload_cleans_staging_without_publishing_or_launching() {
+    let remote = FakeRemote::new().with_previous_install().serving(BINARY);
+    let release = FakeRelease::new();
+    let cancelled = CancelWhen(|| {
+        remote
+            .journal()
+            .iter()
+            .any(|j| matches!(j, Journal::Put { .. }))
+    });
+    let installer = Installer::new(&remote, &release, &cancelled, "cancelled-upload")
+        .with_version(VERSION)
+        .with_dialect(CONTROL, PROTOCOL);
+    let before = remote.file(BINARY).unwrap();
+    let result = installer.install(
+        ASSET_LINUX_X86_64,
+        &asset::remote_paths(HOME, CONTROL, PROTOCOL),
+    );
+    assert!(matches!(result, Err(InstallError::Cancelled)));
+    assert!(remote.file(&remote.staged()).is_none());
+    assert_eq!(remote.file(BINARY).unwrap().bytes, before.bytes);
+    assert!(*remote.daemon_running.lock().unwrap());
+    assert!(
+        !remote
+            .journal()
+            .iter()
+            .any(|j| matches!(j, Journal::Rename { .. } | Journal::Launch))
+    );
+}
+
+#[test]
+fn closing_the_consent_window_cannot_authorize_a_late_install() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct ClosedDuringConsent(AtomicBool);
+    impl InstallConfirm for ClosedDuringConsent {
+        fn confirm(&self, _: &InstallRequest) -> InstallDecision {
+            self.0.store(true, Ordering::Release);
+            InstallDecision::Approve
+        }
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::Acquire)
+        }
+    }
+    let remote = FakeRemote::new();
+    let release = FakeRelease::new();
+    let user = ClosedDuringConsent(AtomicBool::new(false));
+    let result = Installer::new(&remote, &release, &user, "closed-consent")
+        .with_version(VERSION)
+        .with_dialect(CONTROL, PROTOCOL)
+        .run();
+    assert!(matches!(result, Err(InstallError::Cancelled)));
+    assert!(remote.writes().is_empty());
+}
+
+#[test]
+fn explicit_maintenance_finishes_starting_if_its_window_closes_after_the_stop() {
+    let remote = FakeRemote::new().with_previous_install().serving(BINARY);
+    let release = FakeRelease::new();
+    let cancelled = CancelWhen(|| {
+        remote
+            .journal()
+            .contains(&Journal::Exec(TERMINATE_RUNNING_COMMAND.into()))
+    });
+    Installer::new(&remote, &release, &cancelled, "maintenance")
+        .with_version(VERSION)
+        .with_dialect(CONTROL, PROTOCOL)
+        .restart_daemon()
+        .unwrap();
+    assert!(remote.journal().contains(&Journal::Launch));
+    assert!(*remote.daemon_running.lock().unwrap());
+}
+
+#[test]
+fn a_parallel_restore_shares_the_whole_successful_installer_run() {
+    let remote = FakeRemote::new();
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+    let batch = coordinator::PreparationBatch::default();
+    let generation = uuid::Uuid::new_v4();
+    let barrier = std::sync::Barrier::new(10);
+    std::thread::scope(|scope| {
+        let jobs: Vec<_> = (0..10)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    batch
+                        .prepare(generation, &|| false, || {
+                            Ok(installer(&remote, &release, &user, "restore-batch").run()?)
+                        })
+                        .unwrap()
+                })
+            })
+            .collect();
+        for job in jobs {
+            assert_eq!(job.join().unwrap().paths.binary, BINARY);
+        }
+    });
+    let journal = remote.journal();
+    assert_eq!(user.asked().len(), 1);
+    assert_eq!(
+        journal
+            .iter()
+            .filter(|j| **j == Journal::Exec("uname -sm".into()))
+            .count(),
+        1
+    );
+    assert_eq!(
+        journal
+            .iter()
+            .filter(|j| matches!(j, Journal::Put { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        journal
+            .iter()
+            .filter(|j| matches!(j, Journal::Launch))
+            .count(),
+        1
+    );
 }
 
 #[test]

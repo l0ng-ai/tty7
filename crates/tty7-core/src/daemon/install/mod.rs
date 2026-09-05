@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 pub mod asset;
 pub mod checksums;
+mod coordinator;
 #[cfg(feature = "remote-install")]
 pub mod download;
 pub mod outcome;
@@ -254,6 +255,12 @@ pub enum InstallDecision {
 
 pub trait InstallConfirm: Send + Sync {
     fn confirm(&self, request: &InstallRequest) -> InstallDecision;
+
+    /// A routed caller that has gone away must not leave queued preparation
+    /// or an unanswerable consent prompt running in a blocking worker.
+    fn is_cancelled(&self) -> bool {
+        false
+    }
 }
 
 pub struct DenyInstall;
@@ -467,6 +474,7 @@ pub fn take_mismatched_remote_daemons() -> Vec<MismatchedRemoteDaemon> {
 
 #[derive(Debug)]
 pub enum InstallError {
+    Cancelled,
     Probe(String),
     Unsupported(UnsupportedTarget),
     NoHome(String),
@@ -506,6 +514,7 @@ pub enum InstallError {
 impl std::fmt::Display for InstallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Cancelled => write!(f, "remote preparation cancelled"),
             Self::Probe(reason) => write!(f, "could not identify the remote machine: {reason}"),
             Self::Unsupported(target) => write!(f, "{target}"),
             Self::NoHome(reason) => {
@@ -566,6 +575,7 @@ impl std::error::Error for InstallError {}
 impl From<InstallError> for io::Error {
     fn from(e: InstallError) -> io::Error {
         let kind = match &e {
+            InstallError::Cancelled => io::ErrorKind::Interrupted,
             InstallError::Unsupported(_)
             | InstallError::MissingBundled { .. }
             | InstallError::NoServerToRestart { .. }
@@ -604,6 +614,14 @@ pub struct Installer<'a> {
 }
 
 impl<'a> Installer<'a> {
+    fn check_cancelled(&self) -> Result<(), InstallError> {
+        if self.confirm.is_cancelled() {
+            Err(InstallError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn new(
         ops: &'a dyn RemoteOps,
         fetch: &'a dyn AssetFetcher,
@@ -661,6 +679,7 @@ impl<'a> Installer<'a> {
     }
 
     pub fn replace(&self) -> Result<(), InstallError> {
+        self.check_cancelled()?;
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
         let paths = self.paths_for(&home);
 
@@ -718,6 +737,7 @@ impl<'a> Installer<'a> {
     }
 
     pub fn run(&self) -> Result<InstallReport, InstallError> {
+        self.check_cancelled()?;
         let uname = self
             .ops
             .run("uname -sm")
@@ -820,10 +840,12 @@ impl<'a> Installer<'a> {
         asset: &'static str,
         paths: &RemotePaths,
     ) -> Result<(bool, Vec<u8>), InstallError> {
+        self.check_cancelled()?;
         let LoadedBinary {
             bytes,
             origin: asset_url,
         } = self.load_binary(asset)?;
+        self.check_cancelled()?;
         let asset_origin = asset_url.clone();
 
         let confirmed = if self.is_first_install(paths) {
@@ -837,6 +859,7 @@ impl<'a> Installer<'a> {
                 sha256: checksums::hex(&checksums::sha256(&bytes)),
             };
             if self.confirm.confirm(&request) == InstallDecision::Decline {
+                self.check_cancelled()?;
                 return Err(InstallError::Declined {
                     host: self.host.clone(),
                     path: paths.binary.clone(),
@@ -848,6 +871,7 @@ impl<'a> Installer<'a> {
         };
 
         for dir in &paths.dir_chain {
+            self.check_cancelled()?;
             self.ops.mkdir(dir).map_err(|reason| InstallError::Write {
                 path: dir.clone(),
                 reason,
@@ -855,45 +879,49 @@ impl<'a> Installer<'a> {
         }
         let _ = self.ops.chmod(&paths.bin_dir, DIR_MODE);
 
+        self.check_cancelled()?;
         let temp = unique_temp(&paths.temp);
 
         let sink = install_progress();
         let total = bytes.len() as u64;
-        self.ops
-            .put_with_progress(&temp, &bytes, &|done| {
-                sink.report(&self.host, InstallPhase::Uploading { done, total });
-            })
-            .map_err(|reason| InstallError::Write {
-                path: temp.clone(),
-                reason,
-            })?;
-
-        if let Err(reason) = self.ops.chmod(&temp, BINARY_MODE) {
+        let publish = (|| {
+            self.ops
+                .put_with_progress(&temp, &bytes, &|done| {
+                    sink.report(&self.host, InstallPhase::Uploading { done, total });
+                })
+                .map_err(|reason| InstallError::Write {
+                    path: temp.clone(),
+                    reason,
+                })?;
+            self.check_cancelled()?;
+            self.ops
+                .chmod(&temp, BINARY_MODE)
+                .map_err(|reason| InstallError::Write {
+                    path: temp.clone(),
+                    reason,
+                })?;
+            let spoke = self.probe_protocol(&temp);
+            self.check_cancelled()?;
+            if !spoke.as_ref().is_some_and(|s| s.serves(&self.dialect)) {
+                return Err(InstallError::DialectMismatch {
+                    origin: asset_origin,
+                    wanted: self.dialect.clone(),
+                    spoke,
+                });
+            }
+            self.ops
+                .rename(&temp, &paths.binary)
+                .map_err(|reason| InstallError::Write {
+                    path: paths.binary.clone(),
+                    reason,
+                })
+        })();
+        if publish.is_err() {
+            // Cancellation, partial upload and ambiguous publication failures
+            // all clean only our unique staging file, never the published one.
             let _ = self.ops.remove_file(&temp);
-            return Err(InstallError::Write { path: temp, reason });
         }
-
-        let spoke = self.probe_protocol(&temp);
-        if !spoke.as_ref().is_some_and(|s| s.serves(&self.dialect)) {
-            let _ = self.ops.remove_file(&temp);
-            return Err(InstallError::DialectMismatch {
-                origin: asset_origin,
-                wanted: self.dialect.clone(),
-                spoke,
-            });
-        }
-
-        if let Err(reason) = self.ops.rename(&temp, &paths.binary) {
-            // Failure does not mean the destination blocked the rename: the
-            // source may be gone, or the connection may have died after the
-            // server committed it. Never unlink a published binary to retry.
-            // Only our unique staging file is ours to clean up.
-            let _ = self.ops.remove_file(&temp);
-            return Err(InstallError::Write {
-                path: paths.binary.clone(),
-                reason,
-            });
-        }
+        publish?;
 
         Ok((confirmed, bytes))
     }
@@ -927,15 +955,18 @@ impl<'a> Installer<'a> {
         &self,
         paths: &RemotePaths,
     ) -> Result<(bool, Option<MismatchedRemoteDaemon>), InstallError> {
+        self.check_cancelled()?;
         if self.daemon_is_serving(paths)? {
             return Ok((false, self.check_running_build(paths)));
         }
 
+        self.check_cancelled()?;
         install_progress().report(&self.host, InstallPhase::Restarting);
         self.launch_daemon(paths)?;
 
         let deadline = Instant::now() + self.startup_timeout;
         loop {
+            self.check_cancelled()?;
             if self.daemon_is_serving(paths)? {
                 return Ok((true, self.check_running_build(paths)));
             }
@@ -1012,6 +1043,7 @@ impl<'a> Installer<'a> {
     /// So look before killing: a machine with no matching server to start is
     /// left exactly as it was, and told to install one first.
     pub fn restart_daemon(&self) -> Result<(), InstallError> {
+        self.check_cancelled()?;
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
         let paths = self.paths_for(&home);
         if !self.published_binary_serves_us(&paths)? {
@@ -1026,6 +1058,10 @@ impl<'a> Installer<'a> {
     /// The restart itself, for callers that have just put the binary there and
     /// do not need to be told again that it is there.
     fn cycle_daemon(&self, paths: &RemotePaths) -> Result<(), InstallError> {
+        // Cancellation is honoured before stopping anything. Once an explicit
+        // maintenance operation has stopped the daemon, finish the start even
+        // if its window closes; abandoning the machine halfway is not undo.
+        self.check_cancelled()?;
         install_progress().report(&self.host, InstallPhase::Restarting);
 
         // Keep why the stop failed, if it did. The command ends in `true`, so
@@ -1143,8 +1179,9 @@ fn unique_temp(shared: &str) -> String {
 // connections re-created with the same key. It is intentionally not keyed by
 // the display label. Cross-client coordination needs a remote lock as well;
 // unique staging names and non-destructive publication remain necessary.
-fn install_lock(key: &str) -> Arc<Mutex<()>> {
-    static LOCKS: Mutex<Vec<(String, std::sync::Weak<Mutex<()>>)>> = Mutex::new(Vec::new());
+fn install_lock(key: &str) -> Arc<coordinator::PreparationBatch<InstallReport>> {
+    type Batch = coordinator::PreparationBatch<InstallReport>;
+    static LOCKS: Mutex<Vec<(String, std::sync::Weak<Batch>)>> = Mutex::new(Vec::new());
     let mut locks = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
     locks.retain(|(_, lock)| lock.strong_count() > 0);
     if let Some(lock) = locks
@@ -1154,7 +1191,7 @@ fn install_lock(key: &str) -> Arc<Mutex<()>> {
     {
         return lock;
     }
-    let lock = Arc::new(Mutex::new(()));
+    let lock = Arc::new(Batch::default());
     locks.push((key.to_string(), Arc::downgrade(&lock)));
     lock
 }
@@ -1174,12 +1211,18 @@ pub fn ensure_remote_server(conn: &Arc<SshConnection>) -> io::Result<String> {
 
 pub fn ensure_remote_server_labeled(conn: &Arc<SshConnection>, host: &str) -> io::Result<String> {
     let lock = install_lock(conn.key().as_str());
-    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let ops = ssh_ops::SshRemoteOps::new(conn.clone());
-    let fetch = default_fetcher();
     let confirm = install_confirm();
-    let source = BundledOrRelease::discover(fetch.as_ref());
-    let report = Installer::with_source(&ops, &source, confirm.as_ref(), host).run()?;
+    let report = lock.prepare(conn.generation, &|| confirm.is_cancelled(), || {
+        let ops = ssh_ops::SshRemoteOps::new(conn.clone());
+        let fetch = default_fetcher();
+        let source = BundledOrRelease::discover(fetch.as_ref());
+        Ok(Installer::with_source(&ops, &source, confirm.as_ref(), host).run()?)
+    })?;
+    // A coalesced caller still owes the mismatch to its own route/window.
+    if let Some(mut mismatch) = report.mismatch.clone() {
+        mismatch.host = host.to_string();
+        record_mismatch(mismatch);
+    }
     log::info!(
         "remote {host}: {} at {} ({}{})",
         if report.installed {
@@ -1204,25 +1247,27 @@ pub fn ensure_remote_server_labeled(conn: &Arc<SshConnection>, host: &str) -> io
 
 pub fn restart_remote_daemon(conn: &Arc<SshConnection>) -> io::Result<()> {
     let lock = install_lock(conn.key().as_str());
-    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let host = connection_label(conn);
-    let ops = ssh_ops::SshRemoteOps::new(conn.clone());
-    let fetch = default_fetcher();
     let confirm = install_confirm();
-    Installer::new(&ops, fetch.as_ref(), confirm.as_ref(), host).restart_daemon()?;
-    Ok(())
+    lock.maintain(&|| confirm.is_cancelled(), || {
+        let host = connection_label(conn);
+        let ops = ssh_ops::SshRemoteOps::new(conn.clone());
+        let fetch = default_fetcher();
+        Installer::new(&ops, fetch.as_ref(), confirm.as_ref(), host).restart_daemon()?;
+        Ok(())
+    })
 }
 
 pub fn replace_remote_server(conn: &Arc<SshConnection>) -> io::Result<()> {
     let lock = install_lock(conn.key().as_str());
-    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let host = connection_label(conn);
-    let ops = ssh_ops::SshRemoteOps::new(conn.clone());
-    let fetch = default_fetcher();
     let confirm = install_confirm();
-    let source = BundledOrRelease::discover(fetch.as_ref());
-    Installer::with_source(&ops, &source, confirm.as_ref(), host).replace()?;
-    Ok(())
+    lock.maintain(&|| confirm.is_cancelled(), || {
+        let host = connection_label(conn);
+        let ops = ssh_ops::SshRemoteOps::new(conn.clone());
+        let fetch = default_fetcher();
+        let source = BundledOrRelease::discover(fetch.as_ref());
+        Installer::with_source(&ops, &source, confirm.as_ref(), host).replace()?;
+        Ok(())
+    })
 }
 
 #[cfg(feature = "remote-install")]
