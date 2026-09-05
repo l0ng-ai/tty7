@@ -181,6 +181,12 @@ impl Backend for RealBackend {
                     segments.push(CaptureSegment { size, bytes });
                     let _ = session.set_recv_timeout(Some(REPLAY_SETTLE));
                 }
+                Ok(DaemonMsg::TerminalCheckpoint(bytes)) => {
+                    let bytes =
+                        tty7_core::daemon::terminal_state::capture_ansi(&bytes, scrollback)?;
+                    segments.push(CaptureSegment { size, bytes });
+                    break;
+                }
                 Ok(DaemonMsg::Output(_)) | Ok(DaemonMsg::Exited { .. }) => break,
                 Ok(_) => {
                     let _ = session.set_recv_timeout(Some(REPLAY_SETTLE));
@@ -267,6 +273,11 @@ impl Backend for RealBackend {
             .ok_or_else(|| anyhow!("run_wait without a spawned command"))?;
         let code = loop {
             match session.recv() {
+                Ok(DaemonMsg::TerminalCheckpoint(bytes)) => {
+                    crate::stdio::out(&tty7_core::daemon::terminal_state::capture_ansi(
+                        &bytes, true,
+                    )?);
+                }
                 Ok(DaemonMsg::Output(bytes)) | Ok(DaemonMsg::Snapshot(bytes)) => {
                     // Not `stdout.write_all`: a caller who stopped reading
                     // (`tty7 run -- … | head`) must end the pipeline, not turn

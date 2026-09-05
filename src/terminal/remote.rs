@@ -1296,6 +1296,40 @@ impl RemoteTerminal {
                                 }
                                 proxy.send_event(AlacEvent::Wakeup);
                             }
+                            DaemonMsg::TerminalCheckpoint(bytes) => {
+                                flush_batch!();
+                                let state = match crate::daemon::terminal_state::decode(&bytes) {
+                                    Ok(state) => state,
+                                    Err(error) => {
+                                        teardown(Some(&format!("invalid terminal checkpoint: {error}")));
+                                        break 'main;
+                                    }
+                                };
+                                let title = state.title().map(str::to_owned);
+                                {
+                                    let mut term = term.lock();
+                                    if quit.load(Ordering::SeqCst) { return; }
+                                    if let Err(error) = state.apply(&mut *term, &mut processor) {
+                                        drop(term);
+                                        teardown(Some(&format!("cannot restore terminal checkpoint: {error}")));
+                                        break 'main;
+                                    }
+                                    proxy.send_event(match title {
+                                        Some(title) => AlacEvent::Title(title),
+                                        None => AlacEvent::ResetTitle,
+                                    });
+                                    // A checkpoint may carry a partially buffered
+                                    // synchronized update. Flush historical bytes
+                                    // silently, just like ordinary Snapshot replay.
+                                    proxy.replaying.store(true, Ordering::Relaxed);
+                                    processor.stop_sync(&mut *term);
+                                    proxy.replaying.store(false, Ordering::Relaxed);
+                                }
+                                cursor_scan.reset();
+                                parked_cursor.reset();
+                                turn_scan.reset();
+                                proxy.send_event(AlacEvent::Wakeup);
+                            }
                             DaemonMsg::Snapshot(bytes) => {
                                 flush_batch!();
                                 cursor_scan.reset();
@@ -2843,6 +2877,89 @@ mod config_tests {
         {
             std::os::unix::net::UnixStream::pair().unwrap()
         }
+    }
+
+    #[test]
+    fn checkpoint_reader_restores_state_before_live_bytes_without_replaying_effects() {
+        use crate::daemon::terminal_state::Mirror;
+        use alacritty_terminal::{
+            index::{Column, Line},
+            term::TermMode,
+        };
+        crate::core::config::pin_test_config_dir();
+        let (stream, mut peer) = pair();
+        let pane = RemoteTerminal::from_stream_with_repair(
+            stream,
+            TermSize::new(80, 24),
+            Vec::new(),
+            false,
+        )
+        .unwrap();
+        let mut mirror = Mirror::new(win_size(TermSize::new(80, 24), 0, 0), false);
+        mirror.advance(b"\x1b[?2026h\x1b[6n\x1b]52;c;aGk=\x07\x07original shell\x1b[?1049h\x1b[?1003;1006h\x1b[24;1H:\xe4\xb8");
+        DaemonMsg::TerminalCheckpoint(mirror.encode().unwrap())
+            .encode(&mut peer)
+            .unwrap();
+        DaemonMsg::Output(b"\xadwq".to_vec())
+            .encode(&mut peer)
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let term = pane.term.lock();
+            if term.grid()[Line(23)][Column(4)].c == 'q' {
+                assert!(
+                    term.mode()
+                        .contains(TermMode::ALT_SCREEN | TermMode::SGR_MOUSE)
+                );
+                assert_eq!(term.grid()[Line(23)][Column(1)].c, '中');
+                assert_eq!(term.grid().cursor.point.line, Line(23));
+                break;
+            }
+            drop(term);
+            assert!(
+                std::time::Instant::now() < until,
+                "checkpoint must precede incremental UTF-8 output"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        while let Ok(event) = pane.events.try_recv() {
+            assert!(!matches!(
+                event,
+                AlacEvent::PtyWrite(_)
+                    | AlacEvent::ClipboardStore(..)
+                    | AlacEvent::ClipboardLoad(..)
+                    | AlacEvent::ColorRequest(..)
+                    | AlacEvent::Bell
+            ));
+        }
+    }
+
+    #[test]
+    fn malformed_checkpoint_disconnects_the_reader_without_applying_state() {
+        crate::core::config::pin_test_config_dir();
+        let (stream, mut peer) = pair();
+        let pane = RemoteTerminal::from_stream_with_repair(
+            stream,
+            TermSize::new(80, 24),
+            Vec::new(),
+            false,
+        )
+        .unwrap();
+        DaemonMsg::TerminalCheckpoint(b"invalid compression".to_vec())
+            .encode(&mut peer)
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !pane.exited_flag.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < until);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            !pane
+                .term
+                .lock()
+                .mode()
+                .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+        );
     }
 
     #[test]

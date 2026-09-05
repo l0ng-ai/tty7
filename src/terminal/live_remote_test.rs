@@ -124,7 +124,7 @@ fn windows_native_ssh_restores_the_original_workspace_and_process() {
     crate::core::config::set_config_dir(local.path().join("config"));
     let mut local_daemon = private_local_daemon(local.path());
     wait_for("isolated Windows daemon", || transport::connect().is_ok());
-    let server = format!("{root}/server-recovery-c10p8");
+    let server = format!("{root}/server-startup-c10p9");
     let mut fixture = child(Command::new("ssh").args([
         "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes",
         &account, &format!("python3 '{root}/remote_774_fixture.py' --server '{server}' --artifacts '{root}'"),
@@ -348,20 +348,64 @@ fn windows_native_ssh_restores_the_original_workspace_and_process() {
         | TermMode::UTF8_MOUSE
         | TermMode::ALTERNATE_SCROLL;
     let before = *btop.term.lock().mode() & relevant;
+    // Observe the real btop byte stream without stealing its controller.
+    // The byte budget, not elapsed time, proves we crossed the old replay cap.
+    let mut observer = connect_routed(&route).unwrap();
+    ClientMsg::Observe {
+        pane_id: btop_id,
+        size: win_size(size, 8, 16),
+    }
+    .encode(&mut observer)
+    .unwrap();
+    observer
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(240);
+    let mut output_bytes = 0;
+    let mut reported = 0;
+    while output_bytes < 9 * 1024 * 1024 {
+        assert!(
+            Instant::now() < deadline,
+            "btop did not emit 9 MiB within the test budget: {output_bytes}"
+        );
+        match DaemonMsg::read(&mut observer) {
+            Ok(DaemonMsg::Snapshot(bytes) | DaemonMsg::Output(bytes)) => {
+                output_bytes += bytes.len()
+            }
+            Ok(DaemonMsg::Error(error)) => panic!("observing btop: {error}"),
+            Ok(DaemonMsg::Exited { .. }) => panic!("btop exited before the long-run check"),
+            Ok(_) => {}
+            Err(error) if would_block(&error) => {}
+            Err(error) => panic!("reading real btop output: {error}"),
+        }
+        if output_bytes / (1024 * 1024) > reported {
+            reported = output_bytes / (1024 * 1024);
+            eprintln!("real btop output: {reported} MiB");
+        }
+    }
+    drop(observer);
     next.client().close();
     drop(btop);
     let last = control(&header);
     let (_, route) = resume(&last, workspace, Some(proof), &header);
     let btop = RemoteTerminal::attach_on(&route, size, 8, 16, btop_id).unwrap();
     wait_for(
-        "btop short-run reconnect preserved screen/mouse routing modes",
+        "btop long-run reconnect preserved screen/mouse routing modes",
         || *btop.term.lock().mode() & relevant == before,
     );
-    eprintln!(
-        "btop: short-run new-client attach kept ALT_SCREEN and mouse modes (not the 8 MiB overflow case)"
-    );
+    eprintln!("btop: after {output_bytes} bytes, a new client restored ALT_SCREEN and mouse modes");
+    {
+        let mut term = btop.term.lock();
+        term.scroll_display(alacritty_terminal::grid::Scroll::Delta(5));
+        assert_eq!(
+            term.grid().display_offset(),
+            0,
+            "a restored btop cannot scroll into primary history"
+        );
+    }
     btop.write(b"q".to_vec());
     wait_for("test btop exited", || btop.child_exited());
+    assert!(!btop.term.lock().mode().contains(TermMode::ALT_SCREEN));
     drop(btop);
     last.client().close();
     // The remote fixture cleans its own process group even if an assertion fails.

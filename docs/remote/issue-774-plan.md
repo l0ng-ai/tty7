@@ -4,7 +4,7 @@
 
 Draft PR：https://github.com/l0ng-ai/tty7/pull/775
 
-状态：当前优先修复“断线后回到原来的工作”，不再优先扩展维护保护。已修复恢复失败误建 Shell、迟到附着误关原进程、旧凭据/旧代次结果落地，以及 Windows 处理远端 PTY 时的缩放配置；Windows 原生 SSH → Linux 实测覆盖原工作区/原进程恢复、实际传输中断和 Vim 未保存内容恢复、`:wq` 保存退出。当前协议仍为 c10p8。btop 长输出溢出后的完整终端恢复、原始启动事故的根因等仍未解决，PR 保持 Draft，不自动关闭 issue。具体结果、复验方法与剩余工作见第 10 节。
+状态：继续优先修复“断线后回到原来的工作”。本轮补齐超过 8 MiB 回放上限后的终端状态快照，并修复控制 socket 绑定失败后 daemon 仍占锁的半启动状态、启动错误丢失和仅凭桥接 EOF 判断就绪的问题。当前协议为 c10p9。Windows 原生 SSH → Linux 已实测原进程、Vim 未保存内容及长时间 btop 恢复；用户历史启动事故的确切原因仍不能追认。PR 保持 Draft，不自动关闭 issue。具体证据及剩余架构工作见第 10 节。
 
 ## 1. 目标与证据边界
 
@@ -363,7 +363,7 @@ UI 示例：“已连接服务器，正在恢复终端：7/10。2 个正在重�
 - 同一路径运行真实 Vim：未保存缓冲区经历 resize、断线和新终端附着后保留；先输入 `:` 再输入 `wq`，网格行 24 与光标一致；Enter 后通过远端文件读取核对保存字节。真实 btop 短时重连保留备用屏幕及鼠标模式；**未超过 8 MiB，不能算长时间异常滚动修复通过**。
 - 这是 Windows 实际终端读流/网格验收，不是 Windows GUI 像素、高 DPI、休眠或物理网络故障全矩阵验收。没有替换用户安装的客户端/正常运行的 server；原 server PID、启动时间、路径不变。
 
-复验：先 `cargo build -p tty7 --bin tty7-app --locked`，再交叉编译 `tty7-server`。在获授权的测试账户下创建 `/tmp/tty7-774-*` 私有目录，上传 server 为 `server-recovery-c10p8`，同时上传上述 Python 夹具并赋予候选执行权限。设置 `TTY7_REMOTE_TEST_ACCOUNT`（系统 SSH 已知的账户）、`TTY7_REMOTE_TEST_ROOT`（该私有目录）及 `TTY7_REMOTE_TEST_SPEC`（与账户对应、`verify_host_keys: true` 的 `NativeSshSpec` JSON），然后单独运行：
+复验当前版本：先 `cargo build -p tty7 --bin tty7-app --locked`，再交叉编译 `tty7-server`。在获授权的测试账户下创建 `/tmp/tty7-774-*` 私有目录，上传 server 为 `server-startup-c10p9`，同时上传上述 Python 夹具并赋予候选执行权限。设置 `TTY7_REMOTE_TEST_ACCOUNT`（系统 SSH 已知的账户）、`TTY7_REMOTE_TEST_ROOT`（该私有目录）及 `TTY7_REMOTE_TEST_SPEC`（与账户对应、`verify_host_keys: true` 的 `NativeSshSpec` JSON），然后单独运行：
 
 ```powershell
 cargo test -p tty7 --bin tty7-app --locked windows_native_ssh_restores -- --ignored --nocapture --test-threads=1
@@ -371,10 +371,25 @@ cargo test -p tty7 --bin tty7-app --locked windows_native_ssh_restores -- --igno
 
 该测试会固定进程内测试配置路径，必须单独运行。它创建独立配置、数据和 socket，只结束自己创建的进程；远端测试日志和 Vim 保存文件保留在私有目录中。不设置测试账户时不会自动访问任何服务器。
 
+### 本轮：长时间 TUI 状态与启动就绪（2026-09-05）
+
+- daemon 使用与 GUI 相同的 VT 实现持续维护状态。原始回放超过 8 MiB，或尺寸分段历史被合并后，发送 `Size → TerminalCheckpoint`；之后的输出与 resize 由同一 pane 锁排序，不再从半截控制序列猜测状态。
+- 快照包括主/备用网格、当前/保存光标、滚动区域、鼠标及键盘模式、字符集、制表位、颜色和栈，以及半截 UTF-8/CSI/OSC、REP 和同步输出解析器状态。接收前校验格式、压缩解码上限（64 MiB）、网格/光标/解析器索引；失败关闭当前链路，不关闭远端进程。GUI 保留本地配置和历史容量，同步输出的历史缓冲静默结束，不重复请求剪贴板或回答历史查询。
+- 控制协议仍为 c10，pane 协议升为 p9，新增 `terminal-checkpoint-v1` 能力。CLI capture 可导出快照，既有 Unix handoff 携带该状态；这不等于完成保会话升级。只读观察连接按实际快照字节计费，发送后正确扣减。
+- 原先控制监听失败只告警、继续运行并占单实例锁；现在首次启动遇到此错误直接失败退出。单实例锁自身不可用时也拒绝启动，不以无锁方式继续运行。已有会话的 handoff 路径不在此处改为强制退出。
+- 启动采用私有唯一日志（0600、排他创建），保留子进程退出码和 stderr。非零退出及时返回错误及日志路径，最多读取尾部 4096 字节。`--check-serving` 验证 pane Version、control Hello/Ping 和复查实例一致；兼容构建可复用，EOF 仅用于判断是否值得启动，不作为就绪证明。SSH 探测受剩余启动期限约束；其他连接/认证/上传阶段并未因此获得完整端到端期限。
+
+验证：Windows 核心 **1192 通过/3 忽略**、桌面 **1508 通过/3 忽略**、CLI **138 单元及 13 E2E 通过**；VTE 依赖单元 **54 通过**。Linux 选定 daemon **697 通过/2 忽略**、host **151 通过**、client **9 通过**。daemon 中新增的隔离启动测试另行显式运行通过：控制 socket 路径冲突约 **49 ms** 返回 `TTY7_STARTUP_EXIT=1` 和 `Address in use`，没有留下 pane socket；移开冲突后启动健康，再次连接复用实例。
+
+真实 Windows → 原生 SSH → Linux 路径运行 btop，按只读输出字节计数到 **9,437,358 字节** 后断开控制连接、创建新终端重附着，恢复 ALT_SCREEN 和鼠标模式；滚动偏移保持为 0，退出后恢复主屏幕。此前原工作区/原 pane/Shell PID、真实 SSH 传输重建和 Vim 未保存缓冲区、`:wq` 最后一行与文件字节检查也保留在同一测试中。测试只操作私有 daemon，不升级用户的 c7p6 server 或已安装客户端。
+
+复验启动故障：交叉编译 `cargo zigbuild -p tty7-core --tests -p tty7-server --locked --target x86_64-unknown-linux-musl`，将测试二进制及候选上传至获授权的 `/tmp/tty7-774-*` 私有目录；在远端设置 `TTY7_TEST_SERVER` 为候选绝对路径，单独运行测试二进制的 `real_startup_failure --ignored --nocapture`。夹具只对自己的私有 socket 请求退出，保留日志与冲突目录供检查。
+
+边界：持续镜像增加 daemon 的解析开销；服务端快照保留最近 1000 行历史和完整 VT 屏幕/解析器状态，不承诺无限历史、图像资源或 agent 对话索引的完整恢复。依赖源码按原有版本固定在 `vendor/` 并保留许可证，待 checkpoint API 上游化后再移回远程 pin。真实渲染网格与滚动状态断言不等于像素/高 DPI 视觉验收。启动故障注入证明该机制已修复，不等于证明用户历史事故必然由它引起。
+
 ### 尚未完成，不能算作已经解决
 
-- **下一优先级：btop 长输出的完整快照/有序增量恢复。** 已有确定性 9 MiB 输出复现，8 MiB 原始回放截断会丢失备用屏幕/鼠标入口。需要一致的终端状态，不能把短时 btop 通过或固定注入备用屏幕指令当作解决。
-- **连接就绪体验与原始启动事故。** 原 c7p6 端点当前只读桥接探测返回成功，历史“拷贝完成但控制 socket 15 秒未就绪”尚未复现/根因确认。待补主机、工作区、pane 分层就绪、实际恢复进度及完整错误链。
+- **历史事故与完整就绪 UI。** 长时间 btop 状态恢复及半启动占锁机制已修复；原 c7p6 历史“拷贝完成但控制 socket 15 秒未就绪”的确切现场原因仍未确认。主机、工作区、pane 分层就绪与实际恢复进度 UI 仍待后续。
 
 - 跨客户端远端安装锁、排他 staging 创建、完整保会话维护与回滚流程；第六批仅实现空闲维护保护，当前安装锁只协调本地同一连接 key，不保证不同别名/不同客户端之间互斥。
 - Hello 之前路由协商、认证和安装阶段的完整期限，以及底层调用和 pane 路由的统一取消；当前控制连接取消已接通，但不等于后台全部任务立即停止。
@@ -382,7 +397,7 @@ cargo test -p tty7 --bin tty7-app --locked windows_native_ssh_restores -- --igno
 - 布局版本约束、操作 ID/结果查询、事务性关闭/转移以及有界 PTY 输入调度；第五批已贯通 pane 授权，但不等于完整的并发操作与重试协议。
 - PTY 后端能力协商；当前光标补丁依据已知路由来源，不覆盖所有未知或嵌套后端。
 - 远端保会话 handoff 升级。
-- 启动日志留存、诊断导出、可展开错误详情，以及窄窗口/高 DPI 的实机视觉验收。
+- 启动日志轮转、诊断导出、可展开错误详情，以及窄窗口/高 DPI 的实机视觉验收；本轮已保留私有启动日志并在错误中返回其路径及尾部。
 - 用户原始远端启动事故、“云端状态丢失”的因果核验，以及 Windows→Linux/macOS 客户端的实机视觉与断网/休眠矩阵；第四批的 Linux 隔离测试不能替代这些验收。
 
 ### 前三批本地验证（Windows，历史记录）

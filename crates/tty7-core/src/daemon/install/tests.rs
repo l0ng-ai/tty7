@@ -3,6 +3,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use super::*;
+
+#[cfg(unix)]
+#[path = "live_startup_test.rs"]
+mod live_startup_test;
 use crate::daemon::install::asset::{ASSET_LINUX_X86_64, CHECKSUMS_ASSET};
 
 const VERSION: &str = "26.7.5";
@@ -50,6 +54,7 @@ struct FakeRemote {
     stop_fails: bool,
     maintenance_reply: Option<ExecOutput>,
     health_reply: Option<ExecOutput>,
+    startup_diagnostic: Option<String>,
 }
 
 impl FakeRemote {
@@ -77,6 +82,7 @@ impl FakeRemote {
             stop_fails: false,
             maintenance_reply: None,
             health_reply: None,
+            startup_diagnostic: None,
         }
     }
 
@@ -178,6 +184,9 @@ impl RemoteOps for FakeRemote {
         if cmd == "uname -sm" {
             return ok(&self.uname);
         }
+        if cmd.contains("TTY7_STARTUP_EXIT=") {
+            return ok(self.startup_diagnostic.as_deref().unwrap_or(""));
+        }
         if let Some(exe) = cmd.strip_suffix(&format!(" {PROTOCOL_FLAG}")) {
             let exe = exe.trim_matches('\'');
             return match self.speaks.lock().unwrap().get(exe) {
@@ -208,12 +217,27 @@ impl RemoteOps for FakeRemote {
             *self.running_exe.lock().unwrap() = None;
             return ok("{\"status\":\"stopped\"}");
         }
-        if cmd.contains(crate::daemon::maintenance::HEALTH_FLAG) {
+        if cmd.contains(crate::daemon::maintenance::HEALTH_FLAG)
+            || cmd.contains(crate::daemon::maintenance::SERVING_FLAG)
+        {
             if let Some(reply) = &self.health_reply {
                 return Ok(reply.clone());
             }
             if !*self.daemon_running.lock().unwrap() {
                 return Err("no server is answering".into());
+            }
+            if let Some(exe) = self.running_exe.lock().unwrap().as_ref() {
+                let speaks = self.speaks.lock().unwrap();
+                // Legacy fixtures with a dialect-named installed binary (or
+                // unavailable /proc identity) still model healthy endpoints.
+                if exe != BINARY
+                    && !exe.is_empty()
+                    && !speaks.get(exe).is_some_and(|spoken| {
+                        spoken.control == CONTROL && spoken.protocol == PROTOCOL
+                    })
+                {
+                    return Err("running dialect is unknown or mismatched".into());
+                }
             }
             return ok(&crate::daemon::maintenance::Reply::Healthy {
                 control: CONTROL,
@@ -857,8 +881,8 @@ fn a_daemon_is_launched_when_the_socket_answers_nothing() {
     assert!(
         journal[launched + 1..]
             .iter()
-            .any(|j| matches!(j, Journal::Exec(c) if c.contains("--stdio --bridge"))),
-        "and re-probed after, because a shell's exit status says nothing about the daemon"
+            .any(|j| matches!(j, Journal::Exec(c) if c.contains("--check-serving"))),
+        "and checked with real protocol replies after launch"
     );
 }
 
@@ -877,6 +901,53 @@ fn a_daemon_that_never_answers_is_an_error() {
         InstallError::Launch { ref reason } => assert!(reason.contains(BINARY), "{reason}"),
         other => panic!("expected a launch failure, got {other}"),
     }
+}
+
+#[test]
+fn eof_on_an_existing_control_socket_is_not_readiness() {
+    let mut remote = FakeRemote::new().with_previous_install().serving(BINARY);
+    remote.health_reply = Some(ExecOutput {
+        status: Some(0),
+        stdout: String::new(),
+        stderr: String::new(),
+    });
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+    let error = installer(&remote, &release, &user, "not-ready")
+        .run()
+        .unwrap_err();
+    assert!(error.to_string().contains("not ready"));
+    assert!(
+        !remote.journal().contains(&Journal::Launch),
+        "an existing failed endpoint does not authorize a replacement"
+    );
+}
+
+#[test]
+fn a_failed_daemon_launch_reports_its_exit_and_stderr_without_exhausting_retries() {
+    let mut remote = FakeRemote::new().with_previous_install();
+    remote.launch_works = false;
+    remote.startup_diagnostic =
+        Some("TTY7_STARTUP_EXIT=1\ncontrol listener unavailable: Permission denied\n".into());
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+    let error = installer(&remote, &release, &user, "broken-start")
+        .run()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Permission denied") && error.contains("TTY7_STARTUP_EXIT=1"),
+        "{error}"
+    );
+    assert!(error.contains("Startup log:"));
+    assert_eq!(
+        remote
+            .journal()
+            .iter()
+            .filter(|j| matches!(j, Journal::Exec(c) if c.contains("--check-serving")))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -1076,7 +1147,8 @@ fn replacing_installs_the_matching_server_and_then_restarts_into_it() {
 
 #[test]
 fn the_launch_command_detaches_and_closes_every_stream() {
-    let cmd = launch_command("/home/me/.local/share/tty7/bin/tty7-server-26.7.5");
+    let logs = StartupLog::new(BINARY);
+    let cmd = launch_command("/home/me/.local/share/tty7/bin/tty7-server-26.7.5", &logs);
     assert!(cmd.contains("setsid"), "{cmd}");
     assert!(
         cmd.contains("nohup"),
@@ -1084,7 +1156,11 @@ fn the_launch_command_detaches_and_closes_every_stream() {
     );
     assert!(cmd.contains("--daemon"), "{cmd}");
     assert!(cmd.contains("< /dev/null"), "{cmd}");
-    assert!(cmd.contains("> /dev/null 2>&1"), "{cmd}");
+    assert!(
+        cmd.contains(&format!(">> {} 2>&1", shell_quote(&logs.log))),
+        "{cmd}"
+    );
+    assert!(cmd.contains("umask 077") && cmd.contains("set -C"));
     assert!(
         cmd.trim_end().ends_with("fi"),
         "both branches background it: {cmd}"
@@ -1093,10 +1169,15 @@ fn the_launch_command_detaches_and_closes_every_stream() {
 
 #[test]
 fn a_launch_settle_follows_the_launch_and_never_replaces_it() {
-    let plain = launch_script(BINARY, None);
-    assert_eq!(plain, launch_command(BINARY), "no settle, no wrapping");
+    let logs = StartupLog::new(BINARY);
+    let plain = launch_script(BINARY, &logs, None);
+    assert_eq!(
+        plain,
+        launch_command(BINARY, &logs),
+        "no settle, no wrapping"
+    );
 
-    let settled = launch_script(BINARY, Some("sleep 1\n".to_string()));
+    let settled = launch_script(BINARY, &logs, Some("sleep 1\n".to_string()));
     assert!(
         settled.starts_with(&plain),
         "the launch survives: {settled}"
@@ -1129,8 +1210,12 @@ fn remote_paths_are_shell_quoted() {
 
 #[test]
 fn the_launch_command_quotes_its_binary() {
-    let cmd = launch_command("/home/me/a b/tty7-server-1.0.0");
-    assert!(cmd.contains("'/home/me/a b/tty7-server-1.0.0'"), "{cmd}");
+    let cmd = launch_command("/home/me/a b/tty7-server-1.0.0", &StartupLog::new(BINARY));
+    assert!(cmd.contains("/home/me/a b/tty7-server-1.0.0"), "{cmd}");
+    assert!(
+        cmd.contains("'\\''"),
+        "the executable is quoted inside the supervised shell: {cmd}"
+    );
 }
 
 #[test]

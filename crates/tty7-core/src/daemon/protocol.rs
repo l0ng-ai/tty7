@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// An ephemeral pane capability, not the durable workspace resume proof.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +25,7 @@ pub enum PaneAccess {
 pub const FEATURE_PANE_OWNER: &str = "pane-owner";
 pub const FEATURE_PANE_ACCESS: &str = "pane-access";
 pub const FEATURE_IDLE_SHUTDOWN: &str = "idle-shutdown";
+pub const FEATURE_TERMINAL_CHECKPOINT: &str = "terminal-checkpoint-v1";
 
 /// The daemon echoes a `DaemonMsg::Size` to the controlling subscriber, in
 /// stream order, when it applies a `ClientMsg::Resize`. A client that sees
@@ -64,6 +65,7 @@ impl DaemonVersion {
             FEATURE_PANE_OWNER.to_string(),
             FEATURE_PANE_ACCESS.to_string(),
             FEATURE_IDLE_SHUTDOWN.to_string(),
+            FEATURE_TERMINAL_CHECKPOINT.to_string(),
             FEATURE_RESIZE_ECHO.to_string(),
             FEATURE_RESTORE_SCROLLBACK.to_string(),
         ];
@@ -853,6 +855,9 @@ pub enum DaemonMsg {
     },
     Size(WinSize),
     Snapshot(Vec<u8>),
+    /// Validated, compressed VT state, not an ANSI byte replay. Ordered before
+    /// all subsequent Output/Size frames on this attachment.
+    TerminalCheckpoint(Vec<u8>),
     Output(Vec<u8>),
     /// A kitty graphics image lifted out of the PTY stream daemon-side (issue
     /// #213). Carried out-of-band as a compact binary frame
@@ -979,6 +984,7 @@ mod kind {
     /// (issue #213). Compact binary selector, like `IMAGE`.
     pub const DELETE_IMAGE: u8 = 61;
     pub const CLIPBOARD_WRITE: u8 = 62;
+    pub const TERMINAL_CHECKPOINT: u8 = 63;
 }
 
 pub fn write_frame<W: Write>(w: &mut W, kind: u8, payload: &[u8]) -> io::Result<()> {
@@ -1352,6 +1358,9 @@ impl DaemonMsg {
             DaemonMsg::Spawned { pane_id } => write_frame(w, kind::SPAWNED, &to_json(pane_id)?),
             DaemonMsg::Size(size) => write_frame(w, kind::SIZE, &to_json(size)?),
             DaemonMsg::Snapshot(bytes) => write_frame(w, kind::SNAPSHOT, bytes),
+            DaemonMsg::TerminalCheckpoint(bytes) => {
+                write_frame(w, kind::TERMINAL_CHECKPOINT, bytes)
+            }
             DaemonMsg::Output(bytes) => write_frame(w, kind::OUTPUT, bytes),
             DaemonMsg::Image(frame) => write_frame(w, kind::IMAGE, frame),
             DaemonMsg::DeleteImage(sel) => write_frame(w, kind::DELETE_IMAGE, sel),
@@ -1413,6 +1422,7 @@ impl DaemonMsg {
             },
             kind::SIZE => DaemonMsg::Size(from_json(&payload)?),
             kind::SNAPSHOT => DaemonMsg::Snapshot(payload),
+            kind::TERMINAL_CHECKPOINT => DaemonMsg::TerminalCheckpoint(payload),
             kind::OUTPUT => DaemonMsg::Output(payload),
             kind::IMAGE => DaemonMsg::Image(payload),
             kind::DELETE_IMAGE => DaemonMsg::DeleteImage(payload),
@@ -1748,6 +1758,7 @@ mod tests {
             DaemonMsg::Spawned { pane_id: 1 },
             DaemonMsg::Size(SIZE),
             DaemonMsg::Snapshot(vec![1, 2, 3, 0, 255]),
+            DaemonMsg::TerminalCheckpoint(vec![120, 1, 0, 255]),
             DaemonMsg::Output((0u8..=255).collect()),
             DaemonMsg::Cwd(PathBuf::from("/home/u/dev")),
             DaemonMsg::Prompt {
@@ -2573,7 +2584,8 @@ mod tests {
     #[test]
     fn the_local_daemon_does_not_claim_the_control_dialect() {
         let v = DaemonVersion::current();
-        assert_eq!(v.protocol, 8);
+        assert_eq!(v.protocol, PROTOCOL_VERSION);
+        assert!(v.has_feature(FEATURE_TERMINAL_CHECKPOINT));
         assert!(v.has_feature(FEATURE_PANE_ACCESS));
         assert!(v.has_feature(FEATURE_IDLE_SHUTDOWN));
         assert!(

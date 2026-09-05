@@ -48,13 +48,17 @@ impl RemoteOps for SshRemoteOps {
     }
 
     fn run(&self, cmd: &str) -> Result<ExecOutput, String> {
+        self.run_with_timeout(cmd, COMMAND_TIMEOUT)
+    }
+
+    fn run_with_timeout(&self, cmd: &str, budget: Duration) -> Result<ExecOutput, String> {
         let conn = self.conn.clone();
         let cmd = cmd.to_string();
         self.block_on(async move {
-            match tokio::time::timeout(COMMAND_TIMEOUT, exec(&conn, &cmd)).await {
+            match tokio::time::timeout(budget, exec(&conn, &cmd)).await {
                 Ok(result) => result,
                 Err(_) => Err(format!(
-                    "the remote did not finish `{cmd}` within {COMMAND_TIMEOUT:?}"
+                    "the remote did not finish `{cmd}` within {budget:?}"
                 )),
             }
         })

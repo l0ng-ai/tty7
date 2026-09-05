@@ -1292,6 +1292,19 @@ mod tests {
             if cmd.contains("uname -sm") {
                 return ok("Linux x86_64\n");
             }
+            if cmd.contains(crate::daemon::maintenance::SERVING_FLAG) {
+                return if *self.serving.lock().unwrap() {
+                    ok(&crate::daemon::maintenance::Reply::Healthy {
+                        control: crate::daemon::control::CONTROL_VERSION,
+                        protocol: crate::daemon::protocol::PROTOCOL_VERSION,
+                        build: env!("CARGO_PKG_VERSION").into(),
+                        instance: "test-instance".into(),
+                    }
+                    .to_line())
+                } else {
+                    Err("not serving".into())
+                };
+            }
             if cmd.contains("--stdio --bridge") {
                 return if *self.serving.lock().unwrap() {
                     ok("")

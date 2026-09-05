@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 pub const PREPARE_FLAG: &str = "--prepare-idle-restart";
 pub const HEALTH_FLAG: &str = "--check-running";
+pub const SERVING_FLAG: &str = "--check-serving";
 const IO_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,11 +187,23 @@ pub fn prepare_idle_restart(wait: Duration) -> io::Result<Reply> {
 }
 
 pub fn check_running() -> io::Result<Reply> {
+    check_health(true)
+}
+
+/// Normal connections accept a protocol-compatible build; maintenance verifies
+/// the exact candidate build. Both require real replies from the same instance.
+pub fn check_serving() -> io::Result<Reply> {
+    check_health(false)
+}
+
+fn check_health(exact_build: bool) -> io::Result<Reply> {
     use crate::daemon::control::{CONTROL_VERSION, ControlHello, ControlRequest, ReplyOk};
     let before = version()?.ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotConnected, "no pane server is answering")
     })?;
-    if before.protocol != PROTOCOL_VERSION || before.build != env!("CARGO_PKG_VERSION") {
+    if before.protocol != PROTOCOL_VERSION
+        || (exact_build && before.build != env!("CARGO_PKG_VERSION"))
+    {
         return Err(io::Error::other(
             "the running pane server does not match this candidate build/dialect",
         ));

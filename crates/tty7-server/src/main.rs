@@ -21,6 +21,7 @@ OPTIONS:
     --protocol            Print the dialects this binary speaks, as JSON
     --prepare-idle-restart Stop only an idle, matching daemon instance; never force
     --check-running       Check both running endpoints with real protocol requests
+    --check-serving       Check protocol-compatible endpoints, allowing another build
     -V, --version         Print the version and exit
     -h, --help            Print this help and exit
 ";
@@ -59,6 +60,7 @@ fn main() -> ExitCode {
     if args.iter().any(|a| {
         a == tty7_core::daemon::maintenance::PREPARE_FLAG
             || a == tty7_core::daemon::maintenance::HEALTH_FLAG
+            || a == tty7_core::daemon::maintenance::SERVING_FLAG
     }) {
         let result = if args
             .iter()
@@ -71,6 +73,25 @@ fn main() -> ExitCode {
             tty7_core::daemon::maintenance::prepare_idle_restart(std::time::Duration::from_millis(
                 millis,
             ))
+        } else if args
+            .iter()
+            .any(|a| a == tty7_core::daemon::maintenance::SERVING_FLAG)
+        {
+            let budget = flag_value(&args, "--wait-ms")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(5000)
+                .clamp(1, 15000);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(tty7_core::daemon::maintenance::check_serving());
+            });
+            rx.recv_timeout(std::time::Duration::from_millis(budget))
+                .unwrap_or_else(|_| {
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "daemon readiness handshake timed out",
+                    ))
+                })
         } else {
             tty7_core::daemon::maintenance::check_running()
         };

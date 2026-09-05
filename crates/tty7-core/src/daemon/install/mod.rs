@@ -63,6 +63,9 @@ pub struct RemoteStat {
 pub trait RemoteOps: Send + Sync {
     fn home_dir(&self) -> Result<String, String>;
     fn run(&self, cmd: &str) -> Result<ExecOutput, String>;
+    fn run_with_timeout(&self, cmd: &str, _budget: Duration) -> Result<ExecOutput, String> {
+        self.run(cmd)
+    }
     fn spawn_detached(&self, cmd: &str) -> Result<(), String>;
     fn launch_settle(&self, _binary: &str) -> Option<String> {
         None
@@ -974,28 +977,71 @@ impl<'a> Installer<'a> {
     ) -> Result<(bool, Option<MismatchedRemoteDaemon>), InstallError> {
         self.check_cancelled()?;
         if self.daemon_is_serving(paths)? {
-            return Ok((false, self.check_running_build(paths)));
+            let deadline = Instant::now() + self.startup_timeout;
+            let mut health = self.check_health(paths, false, self.startup_timeout);
+            if health.is_ok() {
+                return Ok((false, None));
+            }
+            let mismatch = self.check_running_build(paths);
+            if mismatch.is_some() {
+                return Ok((false, mismatch));
+            }
+            // Another connect may have started this instance milliseconds ago:
+            // binding the control socket alone is not its ready barrier.
+            while health.is_err() && Instant::now() < deadline {
+                self.check_cancelled()?;
+                std::thread::sleep(
+                    self.poll_interval
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+                health = self.check_health(
+                    paths,
+                    false,
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .max(Duration::from_millis(1)),
+                );
+            }
+            health.map_err(|reason| InstallError::Launch { reason: format!(
+                "an existing endpoint answered, but the daemon is not ready: {reason}; no replacement was started"
+            ) })?;
+            return Ok((false, None));
         }
 
         self.check_cancelled()?;
         install_progress().report(&self.host, InstallPhase::Restarting);
-        self.launch_daemon(paths)?;
-
+        let launch = self.launch_daemon(paths)?;
         let deadline = Instant::now() + self.startup_timeout;
         loop {
             self.check_cancelled()?;
-            if self.daemon_is_serving(paths)? {
-                return Ok((true, self.check_running_build(paths)));
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let health = self.check_health(
+                paths,
+                false,
+                remaining
+                    .min(Duration::from_secs(3))
+                    .max(Duration::from_millis(1)),
+            );
+            if health.is_ok() {
+                return Ok((true, None));
             }
-            if Instant::now() >= deadline {
+            let diagnostic =
+                launch.diagnostic(self.ops, deadline.saturating_duration_since(Instant::now()));
+            if diagnostic.exited_unsuccessfully || Instant::now() >= deadline {
                 return Err(InstallError::Launch {
                     reason: format!(
-                        "{} started but nothing was answering on the control socket after {:?}",
-                        paths.binary, self.startup_timeout
+                        "{} did not become ready: {}\n{}\nStartup log: {}",
+                        paths.binary,
+                        health.unwrap_err(),
+                        diagnostic.text,
+                        launch.log,
                     ),
                 });
             }
-            std::thread::sleep(self.poll_interval);
+            std::thread::sleep(
+                self.poll_interval
+                    .min(deadline.saturating_duration_since(Instant::now())),
+            );
         }
     }
 
@@ -1004,17 +1050,58 @@ impl<'a> Installer<'a> {
             "{} --stdio --bridge < /dev/null",
             shell_quote(&paths.binary)
         );
-        match self.ops.run(&cmd) {
+        match self.ops.run_with_timeout(&cmd, self.startup_timeout) {
             Ok(out) => Ok(out.success()),
             Err(reason) => Err(InstallError::Launch { reason }),
         }
     }
 
-    fn launch_daemon(&self, paths: &RemotePaths) -> Result<(), InstallError> {
+    fn launch_daemon(&self, paths: &RemotePaths) -> Result<StartupLog, InstallError> {
+        let launch = StartupLog::new(&paths.binary);
         let settle = self.ops.launch_settle(&paths.binary);
         self.ops
-            .spawn_detached(&launch_script(&paths.binary, settle))
-            .map_err(|reason| InstallError::Launch { reason })
+            .spawn_detached(&launch_script(&paths.binary, &launch, settle))
+            .map_err(|reason| InstallError::Launch { reason })?;
+        Ok(launch)
+    }
+
+    fn check_health(
+        &self,
+        paths: &RemotePaths,
+        exact_build: bool,
+        budget: Duration,
+    ) -> Result<(), String> {
+        let flag = if exact_build {
+            super::maintenance::HEALTH_FLAG
+        } else {
+            super::maintenance::SERVING_FLAG
+        };
+        let command = format!(
+            "{} {flag} --wait-ms {}",
+            shell_quote(&paths.binary),
+            budget.as_millis().max(1)
+        );
+        let out = self.ops.run_with_timeout(&command, budget)?;
+        if !out.success() {
+            return Err(out.failure_reason());
+        }
+        match super::maintenance::Reply::parse(&out.stdout) {
+            Some(super::maintenance::Reply::Healthy {
+                control,
+                protocol,
+                build,
+                instance,
+            }) if control == self.dialect.control
+                && protocol == self.dialect.protocol
+                && (!exact_build || build == self.version)
+                && !instance.is_empty() =>
+            {
+                Ok(())
+            }
+            _ => Err(
+                "the endpoints did not prove the requested dialect and one daemon instance".into(),
+            ),
+        }
     }
 
     fn check_running_build(&self, paths: &RemotePaths) -> Option<MismatchedRemoteDaemon> {
@@ -1170,19 +1257,64 @@ impl<'a> Installer<'a> {
 /// out its ten seconds for a daemon nobody had asked to stop.
 const RUNNING_EXE_COMMAND: &str = r#"if [ -d /proc ]; then for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) || continue; case "$e" in */tty7-server-*) printf '%s' "${e% (deleted)}"; break;; esac; done; else ps -xwwo pid=,comm= 2>/dev/null | while read -r pid e; do case "$e" in */tty7-server-*) printf '%s' "$e"; break;; esac; done; fi; true"#;
 
-fn launch_command(binary: &str) -> String {
-    let bin = shell_quote(binary);
+struct StartupLog {
+    log: String,
+    exit: String,
+}
+struct StartupDiagnostic {
+    exited_unsuccessfully: bool,
+    text: String,
+}
+
+impl StartupLog {
+    fn new(binary: &str) -> Self {
+        let log = format!("{binary}.startup.{}.log", uuid::Uuid::new_v4());
+        Self {
+            exit: format!("{log}.exit"),
+            log,
+        }
+    }
+    fn diagnostic(&self, ops: &dyn RemoteOps, budget: Duration) -> StartupDiagnostic {
+        let command = format!(
+            "if test -s {exit}; then printf 'TTY7_STARTUP_EXIT='; head -c 16 {exit}; fi; tail -c 4096 {log}",
+            exit = shell_quote(&self.exit),
+            log = shell_quote(&self.log)
+        );
+        let text = ops
+            .run_with_timeout(&command, budget.max(Duration::from_millis(1)))
+            .map(|out| out.stdout)
+            .unwrap_or_default();
+        let exit = text
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("TTY7_STARTUP_EXIT="))
+            .and_then(|code| code.parse::<i32>().ok());
+        StartupDiagnostic {
+            exited_unsuccessfully: exit.is_some_and(|code| code != 0),
+            text,
+        }
+    }
+}
+
+fn launch_command(binary: &str, launch: &StartupLog) -> String {
+    let log = shell_quote(&launch.log);
+    let status = shell_quote(&launch.exit);
+    let supervised = shell_quote(&format!(
+        "{} --daemon; result=$?; printf '%s\\n' \"$result\" > {status}; exit \"$result\"",
+        shell_quote(binary)
+    ));
     format!(
-        "if command -v setsid >/dev/null 2>&1; then \
-           setsid {bin} --daemon < /dev/null > /dev/null 2>&1 & \
+        "umask 077; (set -C; : > {log} && : > {status}) || exit 1; \
+         if command -v setsid >/dev/null 2>&1; then \
+           nohup setsid sh -c {supervised} < /dev/null >> {log} 2>&1 & \
          else \
-           nohup {bin} --daemon < /dev/null > /dev/null 2>&1 & \
+           nohup sh -c {supervised} < /dev/null >> {log} 2>&1 & \
          fi"
     )
 }
 
-fn launch_script(binary: &str, settle: Option<String>) -> String {
-    let launch = launch_command(binary);
+fn launch_script(binary: &str, logs: &StartupLog, settle: Option<String>) -> String {
+    let launch = launch_command(binary, logs);
     match settle {
         Some(settle) => format!("{launch}\n{settle}"),
         None => launch,

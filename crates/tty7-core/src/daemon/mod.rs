@@ -24,6 +24,7 @@ pub mod server;
 pub mod singleton;
 pub mod spawn;
 pub mod ssh;
+pub mod terminal_state;
 pub mod transport;
 
 pub(crate) const DETECTED_SHELL_ENV: &str = "TTY7_DETECTED_SHELL";

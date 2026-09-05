@@ -372,8 +372,7 @@ pub fn run_daemon() -> anyhow::Result<()> {
             return Ok(());
         }
         crate::daemon::singleton::Claim::Unavailable(why) => {
-            startup_note!("tty7-server: starting without the single-server lock ({why})");
-            None
+            anyhow::bail!("cannot acquire the single-server lock: {why}");
         }
     };
 
@@ -392,7 +391,7 @@ pub fn run_daemon() -> anyhow::Result<()> {
             services,
         ) {
             Ok(path) => startup_note!("tty7-server: control socket at {}", path.display()),
-            Err(e) => startup_note!("tty7-server: control listener unavailable: {e}"),
+            Err(e) => return Err(anyhow::anyhow!("control listener unavailable: {e}")),
         }
     }
     #[cfg(not(any(unix, windows)))]
@@ -1253,7 +1252,7 @@ fn stream_observer(
     let refusals = tx.clone();
     let gate = Arc::new(crate::daemon::pane::OutputGate::new());
     let observer_id = pane.observe(tx, gate.clone());
-    let writer = spawn_writer(rx, write_stream, gate);
+    let writer = spawn_writer_with_replay_charge(rx, write_stream, gate, true);
 
     observe_loop(&mut read_stream, &refusals);
 
@@ -1376,8 +1375,17 @@ const OUTPUT_COALESCE_CAP: usize = 256 * 1024;
 
 fn spawn_writer(
     rx: Receiver<DaemonMsg>,
+    write_stream: Stream,
+    gate: Arc<crate::daemon::pane::OutputGate>,
+) -> std::thread::JoinHandle<()> {
+    spawn_writer_with_replay_charge(rx, write_stream, gate, false)
+}
+
+fn spawn_writer_with_replay_charge(
+    rx: Receiver<DaemonMsg>,
     mut write_stream: Stream,
     gate: Arc<crate::daemon::pane::OutputGate>,
+    charge_replay: bool,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("tty7-daemon-writer".to_string())
@@ -1409,6 +1417,9 @@ fn spawn_writer(
                 };
                 let drained = match &msg {
                     DaemonMsg::Output(b) => b.len(),
+                    DaemonMsg::Snapshot(b) | DaemonMsg::TerminalCheckpoint(b) if charge_replay => {
+                        b.len()
+                    }
                     // Image frames are lifted from the same PTY read the gate
                     // credits, so they must debit it too or the reader stays
                     // throttled against bytes that already left the queue.
@@ -1543,7 +1554,10 @@ mod tests {
 
     #[cfg(unix)]
     mod conn {
-        use super::super::{OUTPUT_COALESCE_CAP, Registry, handle_conn, spawn_writer};
+        use super::super::{
+            OUTPUT_COALESCE_CAP, Registry, handle_conn, spawn_writer,
+            spawn_writer_with_replay_charge,
+        };
         use crate::daemon::protocol::{ClientMsg, DaemonMsg, WinSize};
         use std::os::unix::net::UnixStream;
         use std::sync::{Arc, mpsc};
@@ -1713,6 +1727,33 @@ mod tests {
 
             drop(tx);
             writer.join().unwrap();
+        }
+
+        #[test]
+        fn observer_writer_debits_both_replay_formats_without_charging_controller_replay() {
+            for observer in [false, true] {
+                let (tx, rx) = mpsc::channel();
+                let (mut client, server) = UnixStream::pair().unwrap();
+                let gate = Arc::new(crate::daemon::pane::OutputGate::new());
+                if observer {
+                    gate.add(5);
+                }
+                tx.send(DaemonMsg::Snapshot(vec![1, 2])).unwrap();
+                tx.send(DaemonMsg::TerminalCheckpoint(vec![3, 4, 5]))
+                    .unwrap();
+                drop(tx);
+                let writer = spawn_writer_with_replay_charge(rx, server, gate.clone(), observer);
+                assert!(matches!(
+                    DaemonMsg::read(&mut client).unwrap(),
+                    DaemonMsg::Snapshot(_)
+                ));
+                assert!(matches!(
+                    DaemonMsg::read(&mut client).unwrap(),
+                    DaemonMsg::TerminalCheckpoint(_)
+                ));
+                writer.join().unwrap();
+                assert_eq!(gate.queued_bytes(), 0);
+            }
         }
 
         #[test]
