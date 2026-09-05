@@ -951,7 +951,11 @@ fn reap_recorded_daemon(recorded: Option<u32>) {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn clear_daemon_records() {
     pidfile::remove();
-    crate::daemon::singleton::clear_record_if_free();
+    // On macOS a dying process can stop answering proc_pidinfo before its
+    // descriptors release the seat. A single nonblocking clear can therefore
+    // leave the old pid behind even after a confirmed reap. Retry briefly,
+    // always under the exclusive lock so a replacement's record stays intact.
+    crate::daemon::singleton::clear_record_after_exit(Duration::from_secs(1));
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

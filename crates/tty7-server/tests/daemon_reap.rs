@@ -20,6 +20,14 @@ use tty7_core::client::PaneClient;
 const READY_WITHIN: Duration = Duration::from_secs(30);
 const DEAD_WITHIN: Duration = Duration::from_secs(5);
 
+fn server_binary() -> PathBuf {
+    // Cross-compiled integration tests can run against an explicitly supplied
+    // candidate instead of the build machine's embedded executable path.
+    std::env::var_os("TTY7_TEST_SERVER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_tty7-server")))
+}
+
 /// The one config dir every test here shares, pinned into `tty7_core` on
 /// first use. `set_config_dir` is first-wins for the whole process, so a
 /// per-test directory would silently leave later tests reaping in the first
@@ -130,7 +138,7 @@ fn a_seat_holder_with_no_pidfile_is_still_found_and_reaped() {
     let dir = pinned_dir();
     clear_stale_files(dir);
 
-    let child = spawn_daemon_from(Path::new(env!("CARGO_BIN_EXE_tty7-server")), dir);
+    let child = spawn_daemon_from(&server_binary(), dir);
     let pid = child.id();
     await_ready(dir);
     assert_eq!(
@@ -157,7 +165,7 @@ fn a_seat_holder_with_no_pidfile_is_still_found_and_reaped() {
 
     // The user-visible acceptance: the next launch gets the seat instead of
     // standing down and timing out red.
-    let second = spawn_daemon_from(Path::new(env!("CARGO_BIN_EXE_tty7-server")), dir);
+    let second = spawn_daemon_from(&server_binary(), dir);
     let second_pid = second.id();
     await_ready(dir);
     let waiter = collect_on_exit(second);
@@ -175,7 +183,7 @@ fn reap_stranded_clears_a_seat_holder_with_no_pidfile() {
     let dir = pinned_dir();
     clear_stale_files(dir);
 
-    let child = spawn_daemon_from(Path::new(env!("CARGO_BIN_EXE_tty7-server")), dir);
+    let child = spawn_daemon_from(&server_binary(), dir);
     let pid = child.id();
     await_ready(dir);
     let waiter = collect_on_exit(child);
@@ -207,7 +215,7 @@ fn a_holder_that_answers_the_handshake_is_left_alone() {
     let dir = pinned_dir();
     clear_stale_files(dir);
 
-    let child = spawn_daemon_from(Path::new(env!("CARGO_BIN_EXE_tty7-server")), dir);
+    let child = spawn_daemon_from(&server_binary(), dir);
     let pid = child.id();
     await_ready(dir);
     let waiter = collect_on_exit(child);
@@ -238,7 +246,7 @@ fn a_connectable_holder_that_answers_nothing_is_still_reaped() {
     let dir = pinned_dir();
     clear_stale_files(dir);
 
-    let child = spawn_daemon_from(Path::new(env!("CARGO_BIN_EXE_tty7-server")), dir);
+    let child = spawn_daemon_from(&server_binary(), dir);
     let pid = child.id();
     await_ready(dir);
     let waiter = collect_on_exit(child);
@@ -279,7 +287,7 @@ fn a_daemon_running_from_a_deleted_executable_is_still_ours_to_reap() {
     let bin_dir = dir.join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let copied = bin_dir.join("tty7-server");
-    std::fs::copy(env!("CARGO_BIN_EXE_tty7-server"), &copied).unwrap();
+    std::fs::copy(server_binary(), &copied).unwrap();
 
     let child = spawn_daemon_from(&copied, dir);
     let pid = child.id();
