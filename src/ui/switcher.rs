@@ -3365,7 +3365,7 @@ mod tests {
         let build = RemoteTarget::direct("me", "build-box", 22);
         let gpu = RemoteTarget::direct("me", "gpu-lab", 22);
         let flow = ConnectFlow::Connecting {
-            attempt: uuid::Uuid::new_v4(),
+            attempt: crate::ui::remote_connect::ConnectAttempt::with_id(uuid::Uuid::new_v4()),
             choice: HostChoice {
                 target: gpu,
                 label: "gpu-lab".into(),

@@ -16,8 +16,14 @@ use crate::daemon::install::{
 use crate::daemon::protocol::{AuthPromptKind, AuthResponse, NativeSshSpec};
 use crate::daemon::router::RouteHeader;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use tty7_core::daemon::cancel::RouteCancellation;
 use tty7_core::host::remote::RemoteHost;
 use tty7_core::host::{Host as _, HostId};
+
+mod attempt;
+pub use attempt::ConnectAttempt;
+mod prompt;
+use prompt::PromptValidity;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostChoice {
@@ -319,7 +325,9 @@ pub fn connect_blocking(
     target: &RemoteTarget,
     header: RouteHeader,
     label: &str,
+    cancellation: &RouteCancellation,
 ) -> Result<Connected, String> {
+    cancellation.check().map_err(|e| e.to_string())?;
     note_origin(&header.target, target);
     crate::daemon::spawn::ensure_running().map_err(|e| {
         t_fmt(
@@ -328,6 +336,7 @@ pub fn connect_blocking(
         )
     })?;
 
+    cancellation.check().map_err(|e| e.to_string())?;
     let stream = crate::daemon::transport::connect().map_err(|e| {
         t_fmt(
             L10nKey::RemoteDaemonUnreachable,
@@ -336,14 +345,20 @@ pub fn connect_blocking(
     })?;
 
     let mut stream = stream;
-    crate::daemon::router::negotiate(&mut stream, &header).map_err(|e| {
-        t_fmt(
-            L10nKey::RemoteHostUnreachable,
-            &[("machine", label), ("error", &e.to_string())],
-        )
-    })?;
+    cancellation
+        .register(Arc::new(stream.try_clone().map_err(|e| e.to_string())?))
+        .map_err(|e| e.to_string())?;
+    crate::daemon::router::negotiate_cancellable(&mut stream, &header, cancellation).map_err(
+        |e| {
+            t_fmt(
+                L10nKey::RemoteHostUnreachable,
+                &[("machine", label), ("error", &e.to_string())],
+            )
+        },
+    )?;
 
     let hello = ControlHello::host_rpc(new_session_token(), client_hostname());
+    cancellation.check().map_err(|e| e.to_string())?;
     let host = handshake(stream, &target.connection_key(), &hello).map_err(|e| {
         t_fmt(
             L10nKey::RemoteHostNotTty7,
@@ -351,6 +366,7 @@ pub fn connect_blocking(
         )
     })?;
 
+    cancellation.check().map_err(|e| e.to_string())?;
     let rows = list_workspaces(&host).map_err(|e| {
         t_fmt(
             L10nKey::RemoteWorkspaceListFailed,
@@ -358,6 +374,7 @@ pub fn connect_blocking(
         )
     })?;
     let home = host.home();
+    cancellation.check().map_err(|e| e.to_string())?;
     refresh_agent_hooks_once(&host, &home);
     Ok(Connected { host, home, rows })
 }
@@ -566,11 +583,18 @@ const CONSENT_TIMEOUT: Duration = Duration::from_secs(180);
 pub struct PendingInstall {
     pub request: InstallRequest,
     reply: std::sync::mpsc::SyncSender<InstallDecision>,
+    validity: PromptValidity,
 }
 
 impl PendingInstall {
+    pub fn is_active(&self) -> bool {
+        self.validity.is_active()
+    }
+
     pub fn answer(self, decision: InstallDecision) {
-        let _ = self.reply.send(decision);
+        if self.is_active() {
+            let _ = self.reply.send(decision);
+        }
     }
 }
 
@@ -580,17 +604,32 @@ pub struct GuiInstallConfirm;
 
 impl InstallConfirm for GuiInstallConfirm {
     fn confirm(&self, request: &InstallRequest) -> InstallDecision {
+        self.confirm_cancellable(request, &RouteCancellation::default())
+    }
+
+    fn confirm_cancellable(
+        &self,
+        request: &InstallRequest,
+        cancellation: &RouteCancellation,
+    ) -> InstallDecision {
+        if !cancellation.is_active() {
+            return InstallDecision::Decline;
+        }
+        let validity = PromptValidity::new(cancellation.clone());
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         {
             let Ok(mut mailbox) = MAILBOX.lock() else {
                 return InstallDecision::Decline;
             };
+            mailbox.retain(PendingInstall::is_active);
             mailbox.push(PendingInstall {
                 request: request.clone(),
                 reply: tx,
+                validity: validity.clone(),
             });
         }
-        rx.recv_timeout(CONSENT_TIMEOUT)
+        validity
+            .wait(rx, CONSENT_TIMEOUT)
             .unwrap_or(InstallDecision::Decline)
     }
 }
@@ -634,7 +673,9 @@ pub fn register(cx: &mut App) {
 }
 
 pub fn take_pending_install() -> Option<PendingInstall> {
-    MAILBOX.lock().ok()?.pop()
+    let mut mailbox = MAILBOX.lock().ok()?;
+    mailbox.retain(PendingInstall::is_active);
+    mailbox.pop()
 }
 
 pub struct PendingAuth {
@@ -653,11 +694,42 @@ pub struct PendingAuth {
     /// password prompt arriving anyway means the server turned it down.
     pub auto_supplied_password: bool,
     reply: std::sync::mpsc::SyncSender<AuthResponse>,
+    validity: PromptValidity,
 }
 
 impl PendingAuth {
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        host: HostId,
+        cancellation: RouteCancellation,
+    ) -> (Self, std::sync::mpsc::Receiver<AuthResponse>) {
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        (
+            Self {
+                host,
+                prompt: AuthPromptKind::Password {
+                    user: "test".into(),
+                    host: "test.invalid".into(),
+                },
+                endpoint: None,
+                auto_supplied_password: false,
+                reply,
+                validity: PromptValidity::new(cancellation),
+            },
+            receiver,
+        )
+    }
+    pub fn id(&self) -> uuid::Uuid {
+        self.validity.id
+    }
+    pub fn is_active(&self) -> bool {
+        self.validity.is_active()
+    }
+
     pub fn answer(self, response: AuthResponse) {
-        let _ = self.reply.send(response);
+        if self.is_active() {
+            let _ = self.reply.send(response);
+        }
     }
 }
 
@@ -711,6 +783,19 @@ impl crate::daemon::router::RouteAuthResponder for GuiRouteAuth {
         machine: &crate::daemon::router::RouteTarget,
         prompt: &AuthPromptKind,
     ) -> AuthResponse {
+        self.respond_cancellable(machine, prompt, &RouteCancellation::default())
+    }
+
+    fn respond_cancellable(
+        &self,
+        machine: &crate::daemon::router::RouteTarget,
+        prompt: &AuthPromptKind,
+        cancellation: &RouteCancellation,
+    ) -> AuthResponse {
+        if !cancellation.is_active() {
+            return AuthResponse::Cancelled;
+        }
+        let validity = PromptValidity::new(cancellation.clone());
         let key = machine.origin_key();
         let host = origin_host(&key).unwrap_or_else(|| HostId::from_connection_key(&key));
         let (endpoint, auto_supplied_password) = match machine {
@@ -729,21 +814,26 @@ impl crate::daemon::router::RouteAuthResponder for GuiRouteAuth {
             let Ok(mut mailbox) = AUTH_MAILBOX.lock() else {
                 return AuthResponse::Cancelled;
             };
+            mailbox.retain(PendingAuth::is_active);
             mailbox.push(PendingAuth {
                 host,
                 prompt: prompt.clone(),
                 endpoint,
                 auto_supplied_password,
                 reply: tx,
+                validity: validity.clone(),
             });
         }
-        rx.recv_timeout(CONSENT_TIMEOUT)
+        validity
+            .wait(rx, CONSENT_TIMEOUT)
             .unwrap_or(AuthResponse::Cancelled)
     }
 }
 
 pub fn take_pending_auth() -> Option<PendingAuth> {
-    AUTH_MAILBOX.lock().ok()?.pop()
+    let mut mailbox = AUTH_MAILBOX.lock().ok()?;
+    mailbox.retain(PendingAuth::is_active);
+    mailbox.pop()
 }
 
 #[cfg(test)]
@@ -926,6 +1016,7 @@ mod tests {
         let pending = PendingInstall {
             request: request(),
             reply: tx,
+            validity: PromptValidity::default(),
         };
         drop(pending);
         assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
@@ -937,6 +1028,7 @@ mod tests {
         PendingInstall {
             request: request(),
             reply: tx,
+            validity: PromptValidity::default(),
         }
         .answer(InstallDecision::Approve);
         assert_eq!(rx.recv().unwrap(), InstallDecision::Approve);
@@ -944,6 +1036,7 @@ mod tests {
 
     #[test]
     fn the_gui_handler_parks_the_request_for_the_ui_to_answer() {
+        let _turn = claim_mailbox();
         while take_pending_install().is_some() {}
         let handle = std::thread::spawn(|| GuiInstallConfirm.confirm(&request()));
         let pending = loop {
@@ -956,6 +1049,37 @@ mod tests {
         assert!(take_pending_install().is_none(), "handed out twice");
         pending.answer(InstallDecision::Approve);
         assert_eq!(handle.join().unwrap(), InstallDecision::Approve);
+    }
+
+    #[test]
+    fn a_cancelled_install_question_returns_without_waiting_for_the_native_dialog() {
+        let _turn = claim_mailbox();
+        while take_pending_install().is_some() {}
+        let cancellation = RouteCancellation::default();
+        let worker_cancel = cancellation.clone();
+        let (completed, done) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            completed
+                .send(GuiInstallConfirm.confirm_cancellable(&request(), &worker_cancel))
+                .unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let pending = loop {
+            if let Some(pending) = take_pending_install() {
+                break pending;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        };
+        cancellation.cancel();
+        assert_eq!(
+            done.recv_timeout(Duration::from_secs(2)).unwrap(),
+            InstallDecision::Decline
+        );
+        assert!(!pending.is_active());
+        pending.answer(InstallDecision::Approve);
+        worker.join().unwrap();
+        assert!(take_pending_install().is_none());
     }
 
     fn native_spec(user: &str, host: &str, port: u16) -> NativeSshSpec {
@@ -1014,6 +1138,50 @@ mod tests {
             handle.join().unwrap(),
             AuthResponse::Secret("hunter2".into())
         );
+    }
+
+    #[test]
+    fn a_cancelled_auth_question_returns_while_its_sheet_is_still_open() {
+        use crate::daemon::router::RouteAuthResponder as _;
+        let _turn = claim_mailbox();
+        while take_pending_auth().is_some() {}
+        let cancellation = RouteCancellation::default();
+        let worker_cancel = cancellation.clone();
+        let route = crate::daemon::router::RouteTarget::Ssh(Box::new(native_spec(
+            "me",
+            "cancel-auth.invalid",
+            22,
+        )));
+        let (completed, done) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            completed
+                .send(GuiRouteAuth.respond_cancellable(
+                    &route,
+                    &AuthPromptKind::Password {
+                        user: "me".into(),
+                        host: "cancel-auth.invalid".into(),
+                    },
+                    &worker_cancel,
+                ))
+                .unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let pending = loop {
+            if let Some(pending) = take_pending_auth() {
+                break pending;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        };
+        cancellation.cancel();
+        assert_eq!(
+            done.recv_timeout(Duration::from_secs(2)).unwrap(),
+            AuthResponse::Cancelled
+        );
+        assert!(!pending.is_active());
+        pending.answer(AuthResponse::Secret("obsolete-test-answer".into()));
+        worker.join().unwrap();
+        assert!(take_pending_auth().is_none());
     }
 
     #[test]

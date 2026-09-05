@@ -409,6 +409,9 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> crate::ui::remote_workspace::SheetOutcome {
         use crate::ui::remote_workspace::SheetOutcome;
+        if !pending.is_active() {
+            return SheetOutcome::Lost;
+        }
         if self.ssh_prompt.model.is_some() {
             return SheetOutcome::GiveBack(pending);
         }
@@ -422,7 +425,7 @@ impl Tty7App {
             }
             pending.answer(AuthResponse::Cancelled);
             cx.notify();
-            return SheetOutcome::Raised;
+            return SheetOutcome::Lost;
         };
         let inputs = build_inputs(&model, window, cx);
         let mut subs = Vec::new();
@@ -450,12 +453,50 @@ impl Tty7App {
         self.ssh_prompt.remember = false;
         self.ssh_prompt._subs = subs;
         self.ssh_prompt.routed_host = Some(pending.host);
+        let prompt_id = pending.id();
         self.ssh_prompt.routed = Some(pending);
+        cx.spawn(async move |this, cx| {
+            loop {
+                let waiting = this
+                    .update_in(cx, |this, window, cx| {
+                        let Some(pending) = this.ssh_prompt.routed.as_ref() else {
+                            return false;
+                        };
+                        if pending.id() != prompt_id {
+                            return false;
+                        }
+                        if !pending.is_active() {
+                            this.dismiss_and_advance(window, cx);
+                            return false;
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !waiting {
+                    return;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+            }
+        })
+        .detach();
         cx.notify();
         SheetOutcome::Raised
     }
 
     pub(crate) fn submit_ssh_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .ssh_prompt
+            .routed
+            .as_ref()
+            .is_some_and(|pending| !pending.is_active())
+        {
+            // In particular, do not write a password from an obsolete sheet
+            // into the keychain before noticing that its route was cancelled.
+            self.dismiss_and_advance(window, cx);
+            return;
+        }
         let Some(model) = self.ssh_prompt.model.clone() else {
             return;
         };
@@ -533,6 +574,14 @@ impl Tty7App {
     pub(crate) fn trust_ssh_host_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.respond_active(host_key_unknown_decision(true), cx);
         self.dismiss_and_advance(window, cx);
+    }
+
+    pub(crate) fn routed_auth_host(&self) -> Option<tty7_core::host::HostId> {
+        self.ssh_prompt
+            .routed
+            .as_ref()
+            .filter(|pending| pending.is_active())
+            .map(|pending| pending.host)
     }
 
     pub(crate) fn toggle_ssh_remember(&mut self, cx: &mut Context<Self>) {

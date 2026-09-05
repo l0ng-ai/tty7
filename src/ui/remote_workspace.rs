@@ -12,12 +12,12 @@ use crate::daemon::control::{ControlEvent, ControlRequest, ReplyOk};
 use crate::daemon::install::InstallDecision;
 use crate::ui::app::Tty7App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow};
+use crate::ui::remote_connect::{self, ConnectAttempt, HostChoice, RemoteWorkspaceRow};
 
 pub enum ConnectFlow {
     Connecting {
         choice: HostChoice,
-        attempt: uuid::Uuid,
+        attempt: ConnectAttempt,
     },
     Failed {
         choice: HostChoice,
@@ -35,7 +35,7 @@ impl ConnectFlow {
     }
 
     fn is_attempt(&self, attempt: uuid::Uuid) -> bool {
-        matches!(self, Self::Connecting { attempt: active, .. } if *active == attempt)
+        matches!(self, Self::Connecting { attempt: active, .. } if active.id == attempt)
     }
 }
 
@@ -338,6 +338,13 @@ impl AuthSheetQueue {
         self.waiting.retain(|w| *w != who);
     }
 
+    fn retain_wanted(&mut self, wanted: &std::collections::HashSet<HostId>) {
+        self.waiting.retain(|host| wanted.contains(host));
+        if self.holder.is_some_and(|host| !wanted.contains(&host)) {
+            self.holder = self.waiting.pop_front();
+        }
+    }
+
     pub fn holder(&self) -> Option<HostId> {
         self.holder
     }
@@ -532,10 +539,17 @@ impl Tty7App {
         cx.default_global::<RemoteLinks>()
             .suspended
             .remove(&choice.target.host_id());
-        let attempt = uuid::Uuid::new_v4();
+        let connection = ConnectAttempt::new(choice.target.host_id(), cx);
+        let attempt = connection.id;
+        let cancellation = connection.cancellation();
+        let links = cx.default_global::<RemoteLinks>();
+        links.attempts.remove(&choice.target.host_id());
+        if let Some(link) = links.machines.get_mut(&choice.target.host_id()) {
+            link.attempting = false;
+        }
         self.connect = Some(ConnectFlow::Connecting {
             choice: choice.clone(),
-            attempt,
+            attempt: connection,
         });
         cx.notify();
 
@@ -545,7 +559,9 @@ impl Tty7App {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { remote_connect::connect_blocking(&target, header, &label) })
+                .spawn(async move {
+                    remote_connect::connect_blocking(&target, header, &label, &cancellation)
+                })
                 .await;
             // Retired here rather than in `finish_connect`, which bows out
             // early whenever `connect` has moved on — a disconnect from the
@@ -612,6 +628,14 @@ impl Tty7App {
         };
         match result {
             Ok(connected) => {
+                if let Some(ConnectFlow::Connecting { attempt, .. }) = &self.connect
+                    && !attempt.accept()
+                {
+                    connected.host.client().close();
+                    self.connect = None;
+                    cx.notify();
+                    return;
+                }
                 let home = connected.home.clone();
                 let rows = connected.rows.clone();
                 self.host_snapshots.insert(
@@ -694,6 +718,16 @@ impl Tty7App {
             if let Ok(connected) = result {
                 connected.host.client().close();
             }
+            return;
+        }
+        if let Some(ConnectFlow::Connecting { attempt, .. }) = &self.connect
+            && !attempt.is_active()
+        {
+            if let Ok(connected) = result {
+                connected.host.client().close();
+            }
+            self.connect = None;
+            cx.notify();
             return;
         }
         self.finish_connect(result, window, cx);
@@ -796,6 +830,9 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !pending.is_active() {
+            return;
+        }
         let title = remote_connect::install_title(&pending.request);
         let detail = remote_connect::install_detail(&pending.request);
         let answer = window.prompt(
@@ -1260,7 +1297,7 @@ pub(crate) enum MachineStatus {
 #[derive(Default)]
 pub(crate) struct RemoteLinks {
     machines: std::collections::HashMap<HostId, MachineLink>,
-    attempts: std::collections::HashMap<HostId, uuid::Uuid>,
+    attempts: std::collections::HashMap<HostId, ConnectAttempt>,
     attach_retries: std::collections::HashMap<WorkspaceId, AttachRetry>,
     needs_resync: std::collections::HashSet<WorkspaceId>,
     /// Dead panes being asked for again, one clock per workspace — see
@@ -1451,6 +1488,7 @@ impl RemoteLinks {
     }
 
     pub(crate) fn disconnect(cx: &mut gpui::App, host: HostId) {
+        ConnectAttempt::cancel_host(host, cx);
         cx.default_global::<RemoteLinks>().suspended.insert(host);
         cx.default_global::<RemoteLinks>().attempts.remove(&host);
         remote_connect::clear_install_progress(host);
@@ -1508,6 +1546,14 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
     }
 
     prune_suspended(&mut cx.default_global::<RemoteLinks>().suspended, &bound);
+    // A host losing its last window must retire its attempt even if another
+    // host keeps the supervisor pump running.
+    cx.default_global::<RemoteLinks>()
+        .attempts
+        .retain(|host, _| bound.iter().any(|(id, _)| id == host));
+    cx.default_global::<RemoteLinks>()
+        .machines
+        .retain(|host, _| bound.iter().any(|(id, _)| id == host));
     let suspended = cx.default_global::<RemoteLinks>().suspended.clone();
 
     let now = Instant::now();
@@ -1562,7 +1608,7 @@ fn pump_tick(cx: &mut gpui::App) -> bool {
             }
             continue;
         }
-        if attempting {
+        if attempting || ConnectAttempt::active_on(host, cx) {
             continue;
         }
 
@@ -1976,10 +2022,12 @@ fn launch_attempt(cx: &mut gpui::App, host: HostId, target: RemoteTarget) {
             return;
         }
     };
-    let attempt = uuid::Uuid::new_v4();
+    let connection = ConnectAttempt::new(host, cx);
+    let attempt = connection.id;
+    let cancellation = connection.cancellation();
     cx.default_global::<RemoteLinks>()
         .attempts
-        .insert(host, attempt);
+        .insert(host, connection);
     RemoteLinks::mark(cx, host, |link| link.attempting = true);
     let for_finish = target.clone();
     cx.spawn(async move |cx| {
@@ -1990,7 +2038,7 @@ fn launch_attempt(cx: &mut gpui::App, host: HostId, target: RemoteTarget) {
                 // Do not claim workspaces before the UI has accepted this
                 // attempt's generation. The attachment pump is the single
                 // path for both manual connections and automatic reconnects.
-                remote_connect::connect_blocking(&target, header, &label_for_task)
+                remote_connect::connect_blocking(&target, header, &label_for_task, &cancellation)
             })
             .await;
         cx.update(|cx| finish_current_attempt(cx, host, attempt, &for_finish, outcome));
@@ -2009,9 +2057,16 @@ fn finish_current_attempt(
     let links = cx.default_global::<RemoteLinks>();
     if !still_wanted
         || links.suspended.contains(&host)
-        || links.attempts.get(&host) != Some(&attempt)
+        || !links
+            .attempts
+            .get(&host)
+            .is_some_and(|active| active.id == attempt && active.is_active())
     {
-        if links.attempts.get(&host) == Some(&attempt) {
+        if links
+            .attempts
+            .get(&host)
+            .is_some_and(|active| active.id == attempt)
+        {
             links.attempts.remove(&host);
             if let Some(machine) = links.machines.get_mut(&host) {
                 machine.attempting = false;
@@ -2022,7 +2077,11 @@ fn finish_current_attempt(
         }
         return;
     }
-    links.attempts.remove(&host);
+    if let Some(active) = links.attempts.remove(&host)
+        && outcome.is_ok()
+    {
+        active.accept();
+    }
     finish_attempt(cx, host, target, outcome);
 }
 
@@ -2365,6 +2424,25 @@ pub(crate) fn pump_auth_sheets(cx: &mut gpui::App) {
         inbox.append(&mut parked);
     }
 
+    inbox.retain(remote_connect::PendingAuth::is_active);
+    let mut wanted: std::collections::HashSet<_> =
+        inbox.iter().map(|pending| pending.host).collect();
+    if cx
+        .try_global::<crate::ui::windows::WindowRegistry>()
+        .is_some()
+    {
+        for (_, app) in crate::ui::windows::WindowRegistry::open_windows(cx) {
+            if let Some(app) = app.upgrade()
+                && let Some(host) = app.read(cx).routed_auth_host()
+            {
+                wanted.insert(host);
+            }
+        }
+    }
+    cx.default_global::<RemoteLinks>()
+        .auth
+        .retain_wanted(&wanted);
+
     for pending in inbox {
         let host = pending.host;
         if !cx.default_global::<RemoteLinks>().auth.request(host) {
@@ -2390,8 +2468,33 @@ pub(crate) enum SheetOutcome {
 }
 
 fn raise_auth_sheet(cx: &mut gpui::App, pending: remote_connect::PendingAuth) -> SheetOutcome {
+    if cx
+        .try_global::<crate::ui::windows::WindowRegistry>()
+        .is_none()
+    {
+        return SheetOutcome::GiveBack(pending);
+    }
     let host = pending.host;
-    let Some((workspace, _)) = workspaces_on(cx, host).into_iter().next() else {
+    let workspace = workspaces_on(cx, host)
+        .into_iter()
+        .map(|(id, _)| id)
+        .next()
+        .or_else(|| {
+            crate::ui::windows::WindowRegistry::open_windows(cx)
+                .into_iter()
+                .find_map(|(id, app)| {
+                    let app = app.upgrade()?;
+                    match &app.read(cx).connect {
+                        Some(ConnectFlow::Connecting { choice, attempt })
+                            if choice.target.host_id() == host && attempt.is_active() =>
+                        {
+                            Some(id)
+                        }
+                        _ => None,
+                    }
+                })
+        });
+    let Some(workspace) = workspace else {
         return SheetOutcome::GiveBack(pending);
     };
     let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, workspace) else {
@@ -2450,6 +2553,185 @@ pub(crate) fn workspace_is_preempted(cx: &gpui::App, workspace: WorkspaceId) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn first_connection_can_raise_auth_in_its_local_window(cx: &mut gpui::TestAppContext) {
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::direct("test", "first-connection.invalid", 22);
+        let host = target.host_id();
+        let attempt = cx.update(|cx| ConnectAttempt::new(host, cx));
+        let cancellation = attempt.cancellation();
+        app.update_in(&mut vcx, |app, window, cx| {
+            crate::ui::windows::WindowRegistry::init(cx);
+            WorkspaceStore::install_for_test(cx, Default::default());
+            let weak = cx.entity().downgrade();
+            crate::ui::windows::WindowRegistry::register(
+                cx,
+                app.workspace,
+                window.window_handle(),
+                weak,
+            );
+            app.connect = Some(ConnectFlow::Connecting {
+                choice: HostChoice {
+                    target,
+                    label: "first".into(),
+                    detail: String::new(),
+                },
+                attempt,
+            });
+        });
+        let (pending, answer) = remote_connect::PendingAuth::for_test(host, cancellation.clone());
+        cx.update(|cx| {
+            assert!(
+                workspaces_on(cx, host).is_empty(),
+                "no remote workspace exists yet"
+            );
+            assert!(matches!(
+                raise_auth_sheet(cx, pending),
+                SheetOutcome::Raised
+            ));
+        });
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(app.routed_auth_host(), Some(host));
+            app.connect = None;
+            assert!(!cancellation.is_active());
+            app.submit_ssh_prompt(window, cx);
+            assert!(app.routed_auth_host().is_none());
+        });
+        assert!(
+            answer.recv_timeout(Duration::from_millis(50)).is_err(),
+            "a stale answer is never delivered"
+        );
+    }
+
+    #[gpui::test]
+    fn accepting_a_manual_result_hands_off_its_route_before_dropping_the_attempt(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct CloseClient(Arc<crate::daemon::control::ControlClient>);
+        impl crate::daemon::control::LinkShutdown for CloseClient {
+            fn shutdown_link(&self) -> std::io::Result<()> {
+                self.0.close();
+                Ok(())
+            }
+        }
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::direct("test", "accepted-result.invalid", 22);
+        let attempt = cx.update(|cx| ConnectAttempt::new(target.host_id(), cx));
+        let id = attempt.id;
+        let connected = fake_connected(&target.connection_key());
+        let client = connected.host.client().clone();
+        attempt
+            .cancellation()
+            .register(Arc::new(CloseClient(client.clone())))
+            .unwrap();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.connect = Some(ConnectFlow::Connecting {
+                choice: HostChoice {
+                    target,
+                    label: "accepted".into(),
+                    detail: String::new(),
+                },
+                attempt,
+            });
+            app.finish_connect_attempt(id, Ok(connected), window, cx);
+            assert!(app.connect.is_none());
+            assert!(
+                client.is_connected(),
+                "dropping an accepted attempt does not disconnect its host"
+            );
+        });
+        client.close();
+    }
+
+    #[test]
+    fn expired_auth_hosts_cannot_block_the_next_question() {
+        let (a, b, c) = (
+            host("test:queue-a"),
+            host("test:queue-b"),
+            host("test:queue-c"),
+        );
+        let mut queue = AuthSheetQueue::default();
+        assert!(queue.request(a));
+        assert!(!queue.request(b));
+        assert!(!queue.request(c));
+        queue.release(a);
+        queue.retain_wanted(&[c].into_iter().collect());
+        assert_eq!(queue.holder(), Some(c));
+        assert!(queue.request(c));
+    }
+
+    #[gpui::test]
+    fn closing_one_hosts_last_window_cancels_only_its_supervisor_attempt(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(crate::core::config::Config::default());
+            crate::ui::windows::WindowRegistry::init(cx);
+            let (closed, _) = resolvable_machine("closed-host");
+            let (open, target) = resolvable_machine("open-host");
+            let mut view = crate::core::session::WindowView::on_remote(RemoteRef::new(
+                target,
+                WorkspaceId::new(),
+            ));
+            view.open = true;
+            WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![view],
+                    active: None,
+                },
+            );
+            let closed_attempt = ConnectAttempt::new(closed, cx);
+            let closed_cancel = closed_attempt.cancellation();
+            let open_attempt = ConnectAttempt::new(open, cx);
+            let open_cancel = open_attempt.cancellation();
+            let links = cx.default_global::<RemoteLinks>();
+            links.attempts.insert(closed, closed_attempt);
+            links.attempts.insert(open, open_attempt);
+            RemoteLinks::mark(cx, closed, |link| link.attempting = true);
+            RemoteLinks::mark(cx, open, |link| link.attempting = true);
+
+            assert!(pump_tick(cx), "the other host still needs the supervisor");
+            assert!(!closed_cancel.is_active());
+            assert!(open_cancel.is_active());
+            let links = cx.default_global::<RemoteLinks>();
+            assert!(!links.attempts.contains_key(&closed));
+            assert!(!links.machines.contains_key(&closed));
+            assert!(links.attempts.contains_key(&open));
+        });
+    }
+
+    #[gpui::test]
+    fn a_manual_attempt_prevents_a_duplicate_automatic_reconnect(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::core::config::Config::default());
+            crate::ui::windows::WindowRegistry::init(cx);
+            let (host, target) = resolvable_machine("manual-in-progress");
+            let mut view = crate::core::session::WindowView::on_remote(RemoteRef::new(
+                target,
+                WorkspaceId::new(),
+            ));
+            view.open = true;
+            WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views: vec![view],
+                    active: None,
+                },
+            );
+            let manual = ConnectAttempt::new(host, cx);
+            RemoteLinks::mark(cx, host, |link| {
+                link.state = LinkState::Reconnecting;
+                link.next_attempt = Some(Instant::now() - Duration::from_secs(1));
+            });
+            assert!(pump_tick(cx));
+            assert!(manual.is_active());
+            let links = cx.default_global::<RemoteLinks>();
+            assert!(!links.attempts.contains_key(&host));
+            assert!(!links.machines[&host].attempting);
+        });
+    }
 
     /// The per-workspace relink clock: a miss puts the workspace on the next
     /// backoff step, panes all found their way back retires the entry — so a
@@ -2651,7 +2933,7 @@ mod tests {
         app.update_in(&mut vcx, |app, window, cx| {
             app.connect = Some(ConnectFlow::Connecting {
                 choice: choice.clone(),
-                attempt: current,
+                attempt: ConnectAttempt::with_id(current),
             });
             let connected = fake_connected("old-box");
             let client = connected.host.client().clone();
@@ -2682,7 +2964,7 @@ mod tests {
             let old = uuid::Uuid::new_v4();
             cx.default_global::<RemoteLinks>()
                 .attempts
-                .insert(host, old);
+                .insert(host, ConnectAttempt::with_id(old));
             RemoteLinks::disconnect(cx, host);
             let connected = fake_connected(&target.connection_key());
             let client = connected.host.client().clone();
@@ -2698,11 +2980,16 @@ mod tests {
             let current = uuid::Uuid::new_v4();
             let links = cx.default_global::<RemoteLinks>();
             links.suspended.remove(&host);
-            links.attempts.insert(host, current);
+            links
+                .attempts
+                .insert(host, ConnectAttempt::with_id(current));
             finish_current_attempt(cx, host, old, &target, Err("late failure".into()));
             assert_eq!(
-                cx.default_global::<RemoteLinks>().attempts.get(&host),
-                Some(&current)
+                cx.default_global::<RemoteLinks>()
+                    .attempts
+                    .get(&host)
+                    .map(|a| a.id),
+                Some(current)
             );
             assert!(
                 !cx.default_global::<RemoteLinks>()
@@ -2813,7 +3100,7 @@ mod tests {
             });
             app.connect = Some(ConnectFlow::Connecting {
                 choice: choice.clone(),
-                attempt: uuid::Uuid::new_v4(),
+                attempt: ConnectAttempt::with_id(uuid::Uuid::new_v4()),
             });
             app.finish_connect(Err(a_dialect_refusal()), window, cx);
         });
@@ -2859,7 +3146,7 @@ mod tests {
             });
             app.connect = Some(ConnectFlow::Connecting {
                 choice: choice.clone(),
-                attempt: uuid::Uuid::new_v4(),
+                attempt: ConnectAttempt::with_id(uuid::Uuid::new_v4()),
             });
             app.finish_connect(Err(a_dialect_refusal()), window, cx);
         });
@@ -2965,7 +3252,7 @@ mod tests {
         };
         let flow = ConnectFlow::Connecting {
             choice: choice.clone(),
-            attempt: uuid::Uuid::new_v4(),
+            attempt: ConnectAttempt::with_id(uuid::Uuid::new_v4()),
         };
         assert_eq!(flow.choice(), Some(&choice));
         let flow = ConnectFlow::Failed {
