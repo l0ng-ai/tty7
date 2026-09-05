@@ -6885,6 +6885,8 @@ impl Tty7App {
         };
         let bar = gpui_component::v_flex()
             .occlude()
+            .max_w(gpui::relative(0.95))
+            .min_w_0()
             .gap(px(6.))
             .px_3()
             .py_1p5()
@@ -6897,11 +6899,18 @@ impl Tty7App {
             .text_color(theme.muted_foreground)
             .child(
                 gpui_component::h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .child(gpui_component::Icon::new(gpui_component::IconName::Globe))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .overflow_hidden()
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.foreground)
                             .child(message),
@@ -6911,6 +6920,7 @@ impl Tty7App {
                         use gpui_component::button::ButtonVariants as _;
                         this.child(
                             gpui_component::button::Button::new("remote-status-action")
+                                .flex_shrink_0()
                                 .label(label)
                                 .primary()
                                 .small()
