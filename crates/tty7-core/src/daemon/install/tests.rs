@@ -45,6 +45,14 @@ struct FakeRemote {
     daemon_running: Mutex<bool>,
     running_exe: Mutex<Option<String>>,
     launch_works: bool,
+    /// What a launch leaves behind on the far end: whatever the daemon printed
+    /// on its way up, and — once the wrapper has watched it exit — the status
+    /// it ended on. A daemon still running has written no status yet.
+    startup_log: Mutex<String>,
+    startup_exit: Mutex<Option<String>>,
+    /// The nonce the launch in flight stamped its status with.
+    startup_nonce: Mutex<String>,
+    dies_with: Option<(String, String)>,
     speaks: Mutex<HashMap<String, RemoteProtocol>>,
     installed_speaks: Option<RemoteProtocol>,
     /// The stop command comes back as a failure and the daemon keeps serving —
@@ -72,6 +80,10 @@ impl FakeRemote {
             daemon_running: Mutex::new(false),
             running_exe: Mutex::new(None),
             launch_works: true,
+            startup_log: Mutex::new(String::new()),
+            startup_exit: Mutex::new(None),
+            startup_nonce: Mutex::new(String::new()),
+            dies_with: None,
             speaks: Mutex::new(HashMap::new()),
             installed_speaks: Some(ours()),
             stop_fails: false,
@@ -80,6 +92,30 @@ impl FakeRemote {
 
     fn refusing_to_stop(mut self) -> Self {
         self.stop_fails = true;
+        self
+    }
+
+    /// A daemon that starts, complains, and exits — the shape a machine whose
+    /// control socket cannot be bound actually takes.
+    fn dying_at_startup(mut self, status: &str, said: &str) -> Self {
+        self.launch_works = false;
+        self.dies_with = Some((status.to_string(), said.to_string()));
+        self
+    }
+
+    /// A daemon that finds another server already holding the lock and exits
+    /// cleanly. Nobody failed; this one simply is not the server.
+    fn standing_down(mut self, said: &str) -> Self {
+        self.launch_works = false;
+        self.dies_with = Some(("0".to_string(), said.to_string()));
+        self
+    }
+
+    /// A daemon that stays up and never answers. Nothing writes an exit
+    /// status, so the wait can only end at its deadline.
+    fn hanging_at_startup(mut self, said: &str) -> Self {
+        self.launch_works = false;
+        *self.startup_log.lock().unwrap() = said.to_string();
         self
     }
 
@@ -193,6 +229,21 @@ impl RemoteOps for FakeRemote {
             *self.running_exe.lock().unwrap() = None;
             return ok("");
         }
+        if let Some(path) = cmd
+            .strip_prefix("cat ")
+            .and_then(|rest| rest.strip_suffix(" 2>/dev/null"))
+            && path.trim_matches('\'').ends_with(".startup.exit")
+        {
+            return ok(&self
+                .startup_exit
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_default());
+        }
+        if cmd.starts_with("tail -c") && cmd.contains(".startup.log") {
+            return ok(&self.startup_log.lock().unwrap());
+        }
         if cmd.contains("--stdio --bridge") {
             let running = *self.daemon_running.lock().unwrap();
             return Ok(ExecOutput {
@@ -207,12 +258,27 @@ impl RemoteOps for FakeRemote {
         }
         if cmd.contains("--daemon") {
             self.journal.lock().unwrap().push(Journal::Launch);
+            // The wrapper truncates the status file before starting and stamps
+            // what it writes with this launch's nonce, so a launch in flight is
+            // always distinguishable from one that ended — and from the launch
+            // before it.
+            let nonce = cmd
+                .split_whitespace()
+                .find(|word| word.len() == 32 && word.chars().all(|c| c.is_ascii_hexdigit()))
+                .unwrap_or_default()
+                .to_string();
+            *self.startup_nonce.lock().unwrap() = nonce;
+            *self.startup_exit.lock().unwrap() = None;
             if self.launch_works {
                 *self.daemon_running.lock().unwrap() = true;
                 let mut exe = self.running_exe.lock().unwrap();
                 if exe.is_none() {
                     *exe = Some(BINARY.to_string());
                 }
+            } else if let Some((status, said)) = &self.dies_with {
+                let nonce = self.startup_nonce.lock().unwrap().clone();
+                *self.startup_log.lock().unwrap() = said.clone();
+                *self.startup_exit.lock().unwrap() = Some(format!("{nonce} {status}"));
             }
             return ok("");
         }
@@ -842,6 +908,133 @@ fn a_daemon_that_never_answers_is_an_error() {
     }
 }
 
+/// A daemon that exited will not start answering, so there is nothing to wait
+/// for. The old loop polled the full timeout anyway, and then reported the
+/// timeout — which reads as "the far end is slow" when the truth was that the
+/// server had already given up, with a reason, in the first fraction of a
+/// second.
+#[test]
+fn a_daemon_that_died_at_startup_fails_at_once_and_in_its_own_words() {
+    let remote = FakeRemote::new().dying_at_startup(
+        "1",
+        "tty7-server: control listener unavailable: Permission denied (os error 13)\n",
+    );
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let err = installer(&remote, &release, &user, "me@broken-box:22")
+        .run()
+        .unwrap_err();
+
+    let InstallError::Launch { reason } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(
+        reason.contains("exited with status 1"),
+        "the status the daemon ended on: {reason}"
+    );
+    assert!(
+        reason.contains("control listener unavailable"),
+        "and what it said before it did: {reason}"
+    );
+    assert!(
+        reason.contains(&format!("{BINARY}.startup.log")),
+        "and where the rest of it is: {reason}"
+    );
+
+    let probes = remote
+        .journal()
+        .into_iter()
+        .filter(|j| matches!(j, Journal::Exec(c) if c.contains("--stdio --bridge")))
+        .count();
+    assert!(
+        probes <= 2,
+        "one probe before the launch and one after it is the whole wait: {probes}"
+    );
+}
+
+/// A restart tells the old daemon to stop and the new one to start, and the old
+/// one's wrapper records its status only once it is fully gone — which is after
+/// its socket stopped answering, so it can land after the new launch truncated
+/// the file. Reading someone else's `143` as this launch's answer would fail a
+/// restart that is going perfectly well.
+#[test]
+fn a_status_from_the_launch_before_is_not_this_launch_s_answer() {
+    let remote = FakeRemote::new();
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    // The corpse of a previous launch, stamped with a nonce nobody asked for.
+    *remote.startup_exit.lock().unwrap() = Some("0123456789abcdef0123456789abcdef 143".into());
+
+    installer(&remote, &release, &user, "me@box:22")
+        .run()
+        .expect("the daemon this launch started came up, whatever the old one did");
+}
+
+/// `run_daemon` returns success when another server already holds the
+/// single-server lock, so a recorded status of 0 means "someone else is the
+/// server here" — good news arriving early, not a failure. Treating any status
+/// as terminal turned a transient probe miss into a hard error the old loop
+/// would have recovered from inside its fifteen seconds.
+#[test]
+fn a_daemon_that_stood_down_cleanly_is_not_a_failed_start() {
+    let remote = FakeRemote::new()
+        .standing_down("tty7-server: another server already serves this config dir; exiting\n");
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let err = installer(&remote, &release, &user, "me@box:22")
+        .run()
+        .unwrap_err();
+    let InstallError::Launch { reason } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(
+        reason.contains("still not answering"),
+        "it waited for the server that was supposed to be there, and said so \
+         when nothing turned up: {reason}"
+    );
+
+    let probes = remote
+        .journal()
+        .into_iter()
+        .filter(|j| matches!(j, Journal::Exec(c) if c.contains("--stdio --bridge")))
+        .count();
+    assert!(
+        probes > 3,
+        "and it kept probing rather than failing on the exit status: {probes}"
+    );
+}
+
+/// The other half: a daemon that is up and simply never binds the socket. It
+/// leaves no exit status, so this one does wait out the deadline — but it still
+/// has to say what the probe was told and where to read the rest.
+#[test]
+fn a_daemon_that_never_answers_names_the_probe_and_the_log() {
+    let remote = FakeRemote::new().hanging_at_startup("tty7-server: still opening the tree\n");
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let err = installer(&remote, &release, &user, "me@slow-box:22")
+        .run()
+        .unwrap_err();
+
+    let InstallError::Launch { reason } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(reason.contains("still not answering"), "{reason}");
+    assert!(
+        reason.contains("no control server"),
+        "the probe's own stderr, which used to be dropped for its exit code: {reason}"
+    );
+    assert!(reason.contains("still opening the tree"), "{reason}");
+}
+
 #[test]
 fn an_older_running_daemon_is_kept_and_reported() {
     let (remote, legacy) = FakeRemote::new().with_legacy_install("26.7.4");
@@ -982,7 +1175,8 @@ fn replacing_installs_the_matching_server_and_then_restarts_into_it() {
 
 #[test]
 fn the_launch_command_detaches_and_closes_every_stream() {
-    let cmd = launch_command("/home/me/.local/share/tty7/bin/tty7-server-26.7.5");
+    let binary = "/home/me/.local/share/tty7/bin/tty7-server-26.7.5";
+    let cmd = launch_command(binary, &StartupLog::for_binary(binary));
     assert!(cmd.contains("setsid"), "{cmd}");
     assert!(
         cmd.contains("nohup"),
@@ -990,19 +1184,61 @@ fn the_launch_command_detaches_and_closes_every_stream() {
     );
     assert!(cmd.contains("--daemon"), "{cmd}");
     assert!(cmd.contains("< /dev/null"), "{cmd}");
-    assert!(cmd.contains("> /dev/null 2>&1"), "{cmd}");
     assert!(
         cmd.trim_end().ends_with("fi"),
         "both branches background it: {cmd}"
     );
 }
 
+fn scoped_umask(binary: &str) -> String {
+    format!(
+        "(umask 077; rm -f '{binary}.startup.log' '{binary}.startup.exit'; \
+         : > '{binary}.startup.log'; : > '{binary}.startup.exit')"
+    )
+}
+
+/// The daemon's stdout and stderr used to go to `/dev/null`, and everything it
+/// says on the way up is a `startup_note!` on stderr. Discarding them is what
+/// left "nothing was answering after 15s" as the only thing a failed remote
+/// start could ever report.
+#[test]
+fn the_launch_command_keeps_what_the_daemon_says_and_how_it_ends() {
+    let binary = "/home/me/.local/share/tty7/bin/tty7-server-26.7.5";
+    let cmd = launch_command(binary, &StartupLog::for_binary(binary));
+    assert!(
+        !cmd.contains("> /dev/null 2>&1"),
+        "stderr is the diagnosis, not noise: {cmd}"
+    );
+    assert!(
+        cmd.contains(&format!("{binary}.startup.log")),
+        "output lands in a file this client can read back: {cmd}"
+    );
+    assert!(
+        cmd.contains(&format!("{binary}.startup.exit")),
+        "and so does the exit status: {cmd}"
+    );
+    assert!(
+        cmd.contains(&scoped_umask(binary)),
+        "both are created private, and the umask is scoped to that — bare, it \
+         would reach the daemon and every pane shell it forks: {cmd}"
+    );
+    assert!(
+        cmd.contains("|| out=/dev/null"),
+        "a home that cannot hold the files still gets its daemon started: {cmd}"
+    );
+}
+
 #[test]
 fn a_launch_settle_follows_the_launch_and_never_replaces_it() {
-    let plain = launch_script(BINARY, None);
-    assert_eq!(plain, launch_command(BINARY), "no settle, no wrapping");
+    let log = StartupLog::for_binary(BINARY);
+    let plain = launch_script(BINARY, &log, None);
+    assert_eq!(
+        plain,
+        launch_command(BINARY, &log),
+        "no settle, no wrapping"
+    );
 
-    let settled = launch_script(BINARY, Some("sleep 1\n".to_string()));
+    let settled = launch_script(BINARY, &log, Some("sleep 1\n".to_string()));
     assert!(
         settled.starts_with(&plain),
         "the launch survives: {settled}"
@@ -1035,8 +1271,13 @@ fn remote_paths_are_shell_quoted() {
 
 #[test]
 fn the_launch_command_quotes_its_binary() {
-    let cmd = launch_command("/home/me/a b/tty7-server-1.0.0");
+    let binary = "/home/me/a b/tty7-server-1.0.0";
+    let cmd = launch_command(binary, &StartupLog::for_binary(binary));
     assert!(cmd.contains("'/home/me/a b/tty7-server-1.0.0'"), "{cmd}");
+    assert!(
+        cmd.contains("'/home/me/a b/tty7-server-1.0.0.startup.log'"),
+        "and so are the paths derived from it: {cmd}"
+    );
 }
 
 #[test]
@@ -1526,6 +1767,36 @@ fn a_present_binary_reports_no_progress() {
         reports.phases().is_empty(),
         "nothing transferred, so nothing to show: {:?}",
         reports.phases()
+    );
+}
+
+/// The upload's caption used to be the last thing an install said, so the
+/// strip sat on "copying… 100%" through the whole startup wait — and when the
+/// wait failed, that stale caption is what the user was left looking at. The
+/// last word has to be the phase actually in progress.
+#[test]
+fn the_caption_moves_on_once_the_bytes_are_across() {
+    let remote = FakeRemote::new();
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+    let reports = Arc::new(Reports::default());
+
+    with_install_progress(reports.clone(), || {
+        installer(&remote, &release, &user, "me@build-box:22").run()
+    })
+    .expect("install");
+
+    let phases = reports.phases();
+    assert!(
+        phases
+            .iter()
+            .any(|p| matches!(p, InstallPhase::Uploading { .. })),
+        "the copy is still reported: {phases:?}"
+    );
+    assert_eq!(
+        phases.last(),
+        Some(&InstallPhase::Restarting),
+        "and the wait for the far end is what the caption ends on: {phases:?}"
     );
 }
 

@@ -175,7 +175,7 @@ pub(crate) fn install_phase_caption(phase: crate::daemon::install::InstallPhase)
     use crate::daemon::install::InstallPhase;
     use crate::ui::remote_connect::human_bytes;
     match phase {
-        InstallPhase::Restarting => t(L10nKey::SwitcherRestartingServer).to_string(),
+        InstallPhase::Restarting => t(L10nKey::SwitcherStartingServer).to_string(),
         InstallPhase::Downloading { done, total } => match total {
             Some(total) => t_fmt(
                 L10nKey::SwitcherDownloadingServerWithTotal,
@@ -208,12 +208,17 @@ pub(crate) fn install_progress_bar(
     phase: crate::daemon::install::InstallPhase,
     cx: &gpui::App,
 ) -> impl gpui::IntoElement + use<> {
-    use gpui::{ParentElement as _, Styled as _};
+    use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
     use gpui_component::ActiveTheme as _;
     let theme = cx.theme();
     gpui::div()
+        .debug_selector(|| "remote-install-bar".into())
         .w_full()
         .h(gpui::px(PROGRESS_H))
+        // The fill is a percentage of this track, and the track is rounded.
+        // Clipping to it means no fraction and no rounding can put a pixel of
+        // warning colour outside the groove it belongs in.
+        .overflow_hidden()
         .rounded_full()
         .bg(theme.border)
         .child(
@@ -223,6 +228,69 @@ pub(crate) fn install_progress_bar(
                 .rounded_full()
                 .bg(theme.warning),
         )
+}
+
+/// How wide a remote status card is when the window can spare the room.
+const STATUS_CARD_W: f32 = 560.0;
+
+/// How much of a narrow window a status card may take.
+const STATUS_CARD_MAX: f32 = 0.92;
+
+/// The frame both remote status strips share: home draws one under the logo, a
+/// window with tabs floats one over its panes. Same machine, same sentence, and
+/// — since a startup failure now carries the far end's own words — the same
+/// need to survive a message that is a paragraph rather than a phrase.
+///
+/// A definite width is the whole of it. Sized by its content instead, the card
+/// grew with the message: at 1440px, one startup failure laid it out 1978px
+/// wide, so the far half of the sentence and the retry button were off the
+/// screen. It also gives the progress bar's `w_full` something bounded to be a
+/// percentage of, which is what #774's first screenshot doubts — though a bar
+/// escaping its card never did reproduce here, before the change or after.
+pub(crate) fn status_card(cx: &gpui::App) -> gpui::Div {
+    use gpui::{InteractiveElement as _, Styled as _};
+    use gpui_component::ActiveTheme as _;
+    let theme = cx.theme();
+    gpui_component::v_flex()
+        .debug_selector(|| "remote-status-card".into())
+        .w(gpui::px(STATUS_CARD_W))
+        .max_w(gpui::relative(STATUS_CARD_MAX))
+        .min_w_0()
+        .gap(gpui::px(6.))
+        .px(gpui::px(12.))
+        .py(gpui::px(6.))
+        .rounded(gpui::px(10.))
+        .bg(theme.popover)
+        .border_1()
+        .border_color(theme.border)
+        .text_xs()
+        .text_color(theme.muted_foreground)
+}
+
+/// The row inside a status card: icon, message, and the one button. It wraps,
+/// so a long message pushes the button to a second line instead of off the
+/// window.
+pub(crate) fn status_row() -> gpui::Div {
+    use gpui::Styled as _;
+    gpui_component::h_flex()
+        .w_full()
+        .min_w_0()
+        .flex_wrap()
+        .items_center()
+        .gap_2()
+}
+
+/// The message half of that row. `flex_1` with `min_w_0` is what lets it be
+/// narrower than its longest word, which is what makes wrapping possible at
+/// all.
+pub(crate) fn status_message(message: String) -> gpui::Div {
+    use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+    gpui::div()
+        .debug_selector(|| "remote-status-message".into())
+        .flex_1()
+        .min_w_0()
+        .whitespace_normal()
+        .child(message)
 }
 
 /// What the remote strip's button is for, once the status has been read.
@@ -1832,6 +1900,14 @@ fn launch_attempt(cx: &mut gpui::App, host: HostId, target: RemoteTarget) {
         .collect();
 
     RemoteLinks::mark(cx, host, |link| link.attempting = true);
+    // Same bookkeeping the switcher's own connect does, and for the same
+    // reason — see `connect_to_host`. An entry left behind here is worse than
+    // a stale caption: the strip and the switcher both draw an install in
+    // flight *instead of* the failure and its button, so a machine that needed
+    // Update Server sat under a frozen bar at 100% with nothing to press,
+    // counting attempts, for the rest of the session. The automatic path is
+    // the one that reaches this state, because it is the one that retries.
+    remote_connect::clear_install_progress(host);
     let for_finish = target.clone();
     cx.spawn(async move |cx| {
         let label_for_task = label.clone();
@@ -1872,6 +1948,10 @@ fn finish_attempt(
     target: &RemoteTarget,
     outcome: Result<(remote_connect::Connected, Vec<String>), String>,
 ) {
+    // Nothing is being installed once the attempt is back, whichever way it
+    // went. Retiring it here is what lets the failure — and the button that
+    // answers it — reach the screen at all.
+    remote_connect::clear_install_progress(host);
     let label = remote_connect::target_label(cx, target);
     match outcome {
         Ok((connected, sent)) => {
@@ -2325,6 +2405,52 @@ mod tests {
                     .get(&ws)
                     .is_none(),
                 "every pane back means no clock left to run"
+            );
+        });
+    }
+
+    /// A reconnect that got as far as copying the server and then failed used
+    /// to leave its progress entry behind forever. That entry is not just a
+    /// stale caption: the strip and the switcher both draw an install in
+    /// flight *instead of* the failure and its button, so the machine sat
+    /// under a bar frozen at 100%, counting attempts, with nothing to press —
+    /// including the Update Server that would have fixed it.
+    #[gpui::test]
+    fn a_finished_attempt_retires_the_install_it_was_running(cx: &mut gpui::TestAppContext) {
+        use crate::daemon::install::InstallProgress as _;
+        cx.update(|cx| {
+            cx.set_global(crate::core::config::Config::default());
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews::default(),
+            );
+            let target = RemoteTarget::Alias {
+                alias: "build-box".into(),
+            };
+            let host = target.host_id();
+
+            remote_connect::GuiInstallProgress.report(
+                &target.connection_key(),
+                crate::daemon::install::InstallPhase::Uploading {
+                    done: 9_227_468,
+                    total: 9_227_468,
+                },
+            );
+            assert!(
+                remote_connect::install_progress_for(host).is_some(),
+                "the copy is on screen"
+            );
+
+            finish_attempt(
+                cx,
+                host,
+                &target,
+                Err("the remote tty7-server did not start".into()),
+            );
+
+            assert!(
+                remote_connect::install_progress_for(host).is_none(),
+                "and the attempt that was running it is over, so it comes off"
             );
         });
     }

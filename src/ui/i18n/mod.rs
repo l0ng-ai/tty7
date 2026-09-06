@@ -1078,7 +1078,7 @@ l10n_keys! {
     RemoteMismatchVersionFromExe,
     AppNoRunningCodingAgent,
     SwitcherThisComputer,
-    SwitcherRestartingServer,
+    SwitcherStartingServer,
     SwitcherDownloadingServerWithTotal,
     SwitcherDownloadingServerNoTotal,
     SwitcherCopyingServer,

@@ -301,8 +301,17 @@ pub fn install_confirm() -> Arc<dyn InstallConfirm> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstallPhase {
-    Downloading { done: u64, total: Option<u64> },
-    Uploading { done: u64, total: u64 },
+    Downloading {
+        done: u64,
+        total: Option<u64>,
+    },
+    Uploading {
+        done: u64,
+        total: u64,
+    },
+    /// The bytes are there and the far end is being waited on. Both a first
+    /// install and a restart end here, which is why its caption says starting
+    /// rather than restarting.
     Restarting,
 }
 
@@ -777,6 +786,18 @@ impl<'a> Installer<'a> {
                     let (confirmed, _) = self.install(asset, &paths)?;
                     report.installed = true;
                     report.confirmed = confirmed;
+                    // The upload's caption was the last thing reported, so the
+                    // strip sat on "copying… 100%" through the startup wait —
+                    // and when the wait failed, that is the frame the user was
+                    // left looking at.
+                    //
+                    // Reported here rather than in the wait itself: an
+                    // `ensure_daemon` with nothing to install has to stay
+                    // silent. A pane route quietly restarting a dead remote
+                    // daemon goes through that path, and nothing on it retires
+                    // a progress entry — one left there freezes the strip and
+                    // takes its button away for the rest of the session.
+                    install_progress().report(&self.host, InstallPhase::Restarting);
                 }
             }
         }
@@ -915,9 +936,21 @@ impl<'a> Installer<'a> {
         ReleaseDownload { fetch }.load_with_progress(&self.version, asset, &on_progress)
     }
 
+    /// Whether this machine has never had a tty7 server on it — the question
+    /// the consent prompt turns on.
+    ///
+    /// A launch leaves `tty7-server-c8p6.startup.log` and `.startup.exit`
+    /// beside the binary, and both begin the same way it does. Counting one as
+    /// a server would let someone who deleted the binary to uninstall tty7 get
+    /// a new one downloaded and written without ever being asked.
     fn is_first_install(&self, paths: &RemotePaths) -> bool {
+        let a_server = |name: &String| {
+            name.starts_with("tty7-server-")
+                && !name.ends_with(STARTUP_LOG_SUFFIX)
+                && !name.ends_with(STARTUP_EXIT_SUFFIX)
+        };
         match self.ops.list_dir(&paths.bin_dir) {
-            Ok(Some(entries)) => !entries.iter().any(|name| name.starts_with("tty7-server-")),
+            Ok(Some(entries)) => !entries.iter().any(a_server),
             Ok(None) => true,
             Err(_) => true,
         }
@@ -931,41 +964,71 @@ impl<'a> Installer<'a> {
             return Ok((false, self.check_running_build(paths)));
         }
 
-        self.launch_daemon(paths)?;
+        let log = self.launch_daemon(paths)?;
+        self.wait_for_launch(paths, &log)?;
+        Ok((true, self.check_running_build(paths)))
+    }
 
+    /// Wait out a daemon this call just launched, and say what happened if it
+    /// never answers.
+    ///
+    /// Two things used to be thrown away here, and between them they made every
+    /// remote startup failure read the same: the probe's exit status and stderr
+    /// (only `out.success()` survived) and the daemon's own output ([`launch_command`]
+    /// sent it to `/dev/null`). All anyone ever saw was "nothing was answering
+    /// after 15s", which names the symptom and not one cause.
+    fn wait_for_launch(&self, paths: &RemotePaths, log: &StartupLog) -> Result<(), InstallError> {
         let deadline = Instant::now() + self.startup_timeout;
         loop {
-            if self.daemon_is_serving(paths)? {
-                return Ok((true, self.check_running_build(paths)));
+            let probe = match self.control_probe(paths)? {
+                None => return Ok(()),
+                Some(reason) => reason,
+            };
+            // A process that has already *failed* will not start answering.
+            // Ask before sleeping again: waiting out the full timeout for a
+            // daemon that died in the first 200ms is fifteen seconds of
+            // nothing.
+            //
+            // A clean exit is not that. `run_daemon` returns success when
+            // another server already holds the single-server lock, so status 0
+            // means "someone else is the server here" — which is good news
+            // arriving early. Keep probing for that someone; only the deadline
+            // ends this.
+            let exit = log.exit_status(self.ops).filter(|status| status != "0");
+            if exit.is_none() && Instant::now() < deadline {
+                std::thread::sleep(self.poll_interval);
+                continue;
             }
-            if Instant::now() >= deadline {
-                return Err(InstallError::Launch {
-                    reason: format!(
-                        "{} started but nothing was answering on the control socket after {:?}",
-                        paths.binary, self.startup_timeout
-                    ),
-                });
-            }
-            std::thread::sleep(self.poll_interval);
+            return Err(InstallError::Launch {
+                reason: log.explain(self.ops, &paths.binary, &probe, exit, self.startup_timeout),
+            });
         }
     }
 
-    fn daemon_is_serving(&self, paths: &RemotePaths) -> Result<bool, InstallError> {
+    /// `None` when the control socket answered, `Some(why)` when it did not.
+    fn control_probe(&self, paths: &RemotePaths) -> Result<Option<String>, InstallError> {
         let cmd = format!(
             "{} --stdio --bridge < /dev/null",
             shell_quote(&paths.binary)
         );
         match self.ops.run(&cmd) {
-            Ok(out) => Ok(out.success()),
+            Ok(out) if out.success() => Ok(None),
+            Ok(out) => Ok(Some(out.failure_reason())),
             Err(reason) => Err(InstallError::Launch { reason }),
         }
     }
 
-    fn launch_daemon(&self, paths: &RemotePaths) -> Result<(), InstallError> {
+    fn daemon_is_serving(&self, paths: &RemotePaths) -> Result<bool, InstallError> {
+        Ok(self.control_probe(paths)?.is_none())
+    }
+
+    fn launch_daemon(&self, paths: &RemotePaths) -> Result<StartupLog, InstallError> {
+        let log = StartupLog::for_binary(&paths.binary);
         let settle = self.ops.launch_settle(&paths.binary);
         self.ops
-            .spawn_detached(&launch_script(&paths.binary, settle))
-            .map_err(|reason| InstallError::Launch { reason })
+            .spawn_detached(&launch_script(&paths.binary, &log, settle))
+            .map_err(|reason| InstallError::Launch { reason })?;
+        Ok(log)
     }
 
     fn check_running_build(&self, paths: &RemotePaths) -> Option<MismatchedRemoteDaemon> {
@@ -1065,19 +1128,8 @@ impl<'a> Installer<'a> {
             std::thread::sleep(self.poll_interval);
         }
 
-        self.launch_daemon(paths)?;
-        let deadline = Instant::now() + self.startup_timeout;
-        loop {
-            if self.daemon_is_serving(paths)? {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(InstallError::Launch {
-                    reason: format!("{} was restarted but never started answering", paths.binary),
-                });
-            }
-            std::thread::sleep(self.poll_interval);
-        }
+        let log = self.launch_daemon(paths)?;
+        self.wait_for_launch(paths, &log)
     }
 }
 
@@ -1110,19 +1162,163 @@ const RUNNING_EXE_COMMAND: &str = r#"if [ -d /proc ]; then for p in /proc/[0-9]*
 
 const TERMINATE_RUNNING_COMMAND: &str = r#"if [ -d /proc ]; then for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) || continue; case "$e" in */tty7-server-*) kill -TERM "${p#/proc/}" 2>/dev/null; break;; esac; done; else ps -xwwo pid=,comm= 2>/dev/null | while read -r pid e; do case "$e" in */tty7-server-*) kill -TERM "$pid" 2>/dev/null; break;; esac; done; fi; true"#;
 
-fn launch_command(binary: &str) -> String {
+/// The two files a launch writes beside the server binary. Named here because
+/// `is_first_install` reads the same directory and must not mistake one of
+/// these for an installed server.
+pub(crate) const STARTUP_LOG_SUFFIX: &str = ".startup.log";
+pub(crate) const STARTUP_EXIT_SUFFIX: &str = ".startup.exit";
+
+/// Where a launched daemon's output and exit status land on the far end.
+///
+/// One pair of files per binary, truncated at each launch rather than named
+/// uniquely per attempt: these exist to be read seconds later by the client
+/// that wrote them, and a unique name per launch would leave a file behind on
+/// every reconnect for nobody to ever delete.
+///
+/// What makes the fixed name safe is the nonce. A restart tells the old daemon
+/// to stop and the new one to start, and the old one's wrapper records its
+/// status only once the old process is fully gone — which is after its socket
+/// stopped answering, so it can land *after* the new launch truncated the file.
+/// Reading that as the new daemon's status would fail a restart that is going
+/// fine. The status is written with the nonce that asked for it, and a status
+/// carrying anyone else's is not an answer to this launch.
+pub(crate) struct StartupLog {
+    log: String,
+    exit: String,
+    nonce: String,
+}
+
+/// How much of the far end's startup log to fetch.
+const TAIL_BYTES: usize = 4096;
+
+/// How much of it reaches the error string. The whole tail goes to this
+/// client's log; a status strip gets the last few lines, which is where the
+/// reason always is.
+const TAIL_LINES: usize = 4;
+
+impl StartupLog {
+    pub(crate) fn for_binary(binary: &str) -> Self {
+        Self {
+            log: format!("{binary}{STARTUP_LOG_SUFFIX}"),
+            exit: format!("{binary}{STARTUP_EXIT_SUFFIX}"),
+            nonce: uuid::Uuid::new_v4().simple().to_string(),
+        }
+    }
+
+    /// The exit status the wrapper recorded for *this* launch, or `None` while
+    /// the daemon is still running. Only the wrapper writes this file, and only
+    /// once it has waited for the daemon, so a status carrying this launch's
+    /// nonce is the death certificate.
+    fn exit_status(&self, ops: &dyn RemoteOps) -> Option<String> {
+        let cmd = format!("cat {} 2>/dev/null", shell_quote(&self.exit));
+        let out = ops.run(&cmd).ok()?;
+        let (nonce, status) = out.stdout.trim().split_once(' ')?;
+        (nonce == self.nonce && !status.is_empty()).then(|| status.to_string())
+    }
+
+    fn tail(&self, ops: &dyn RemoteOps) -> String {
+        let cmd = format!(
+            "tail -c {TAIL_BYTES} {} 2>/dev/null",
+            shell_quote(&self.log)
+        );
+        ops.run(&cmd).map(|out| out.stdout).unwrap_or_default()
+    }
+
+    /// Why the daemon never answered, in a sentence a status strip can show.
+    ///
+    /// The full tail goes to this client's log; the message keeps the last few
+    /// lines of it, because the interesting one is always the last thing the
+    /// server managed to say before it gave up.
+    fn explain(
+        &self,
+        ops: &dyn RemoteOps,
+        binary: &str,
+        probe: &str,
+        exit: Option<String>,
+        waited: Duration,
+    ) -> String {
+        let tail = self.tail(ops);
+        if !tail.trim().is_empty() {
+            log::warn!("remote {binary} startup log ({}):\n{tail}", self.log);
+        }
+        let what = match &exit {
+            Some(status) => format!("{binary} exited with status {status} before it answered"),
+            None => format!("{binary} was still not answering after {waited:?}"),
+        };
+        let mut out = format!("{what} on the control socket");
+        if !probe.trim().is_empty() {
+            out.push_str(&format!("; last probe said: {}", probe.trim()));
+        }
+        let said: Vec<&str> = tail
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .rev()
+            .take(TAIL_LINES)
+            .collect();
+        if said.is_empty() {
+            out.push_str(&format!("; it logged nothing to {}", self.log));
+        } else {
+            let said: Vec<&str> = said.into_iter().rev().collect();
+            out.push_str(&format!(
+                "; it said: {} (full log at {})",
+                said.join(" / "),
+                self.log
+            ));
+        }
+        out
+    }
+}
+
+/// Start the daemon detached, keeping what it says and how it ends.
+///
+/// The output used to go to `/dev/null`, which is why a remote that refused to
+/// come up could only ever be reported as silence. Everything the server
+/// prints on the way up — the control socket it bound, the listener it could
+/// not bind, the other server already holding the single-server lock — is a
+/// `startup_note!` on stderr, and all of it was being discarded.
+fn launch_command(binary: &str, log: &StartupLog) -> String {
     let bin = shell_quote(binary);
+    let log_path = shell_quote(&log.log);
+    let exit_path = shell_quote(&log.exit);
+    let nonce = &log.nonce;
+    // The wrapper outlives the daemon by one line: it waits, then records the
+    // status, stamped with the nonce that asked for it.
+    let supervised = shell_quote(&format!(
+        "{bin} --daemon; s=$?; printf '%s %s' {nonce} \"$s\" > {exit_path}; exit \"$s\""
+    ));
+    // Three things this preamble has to get right, each of them a way to break
+    // a machine that used to work:
+    //
+    // - The `umask` is scoped to the subshell. Left bare it would apply to the
+    //   whole login shell, so the daemon would inherit it and so would every
+    //   pane shell it forks — and a `git clone` in a remote pane would produce
+    //   files nobody but the owner can read.
+    // - Both files are removed and re-created here, under that umask, and only
+    //   truncated by the wrapper. `>` on an existing file keeps whatever mode
+    //   that file already had, so truncating alone would let one left at 0644 —
+    //   by an older build, by anything — stay that way forever.
+    // - A home that is full, read-only, or not ours must not stop the daemon
+    //   from starting. If the files cannot be made, the redirect falls back to
+    //   `/dev/null` and the launch goes ahead without diagnostics, which is
+    //   exactly what it did before. The whole attempt sits inside a subshell so
+    //   that a redirection failure cannot take the login shell down with it —
+    //   on a POSIX shell a redirection error on the special builtin `:` ends a
+    //   non-interactive shell outright, and `|| true` never gets to run.
     format!(
-        "if command -v setsid >/dev/null 2>&1; then \
-           setsid {bin} --daemon < /dev/null > /dev/null 2>&1 & \
+        "out={log_path}; \
+         (umask 077; rm -f {log_path} {exit_path}; : > {log_path}; : > {exit_path}) 2>/dev/null \
+           || out=/dev/null; \
+         if command -v setsid >/dev/null 2>&1; then \
+           setsid sh -c {supervised} < /dev/null >> \"$out\" 2>&1 & \
          else \
-           nohup {bin} --daemon < /dev/null > /dev/null 2>&1 & \
+           nohup sh -c {supervised} < /dev/null >> \"$out\" 2>&1 & \
          fi"
     )
 }
 
-fn launch_script(binary: &str, settle: Option<String>) -> String {
-    let launch = launch_command(binary);
+fn launch_script(binary: &str, log: &StartupLog, settle: Option<String>) -> String {
+    let launch = launch_command(binary, log);
     match settle {
         Some(settle) => format!("{launch}\n{settle}"),
         None => launch,

@@ -1259,7 +1259,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "未找到运行中的编码 agent——请先在某个窗格中启动一个（claude、codex 等）。"
         }
         L10nKey::SwitcherThisComputer => "本机",
-        L10nKey::SwitcherRestartingServer => "正在重启 tty7 server…",
+        L10nKey::SwitcherStartingServer => "正在启动 tty7 server…",
         L10nKey::SwitcherDownloadingServerWithTotal => "正在下载 tty7 server… {done} / {total}",
         L10nKey::SwitcherDownloadingServerNoTotal => "正在下载 tty7 server… {done}",
         L10nKey::SwitcherCopyingServer => "正在复制 tty7 server… {done} / {total}",
