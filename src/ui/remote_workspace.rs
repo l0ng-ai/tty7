@@ -905,7 +905,14 @@ impl Tty7App {
     ) {
         let label = mismatch.host.clone();
         match remote_connect::mismatch_target(&mismatch) {
-            Some(target) => self.replace_remote_server(target, label, window, cx),
+            Some(target) => self.replace_remote_server(
+                target,
+                label,
+                L10nKey::RemoteMismatchReplaceServer,
+                Some(mismatch),
+                window,
+                cx,
+            ),
             None => {
                 let e = t_fmt(L10nKey::RemoteNoRouteToHost, &[("machine", &label)]);
                 self.report_remote_host_error(None, &label, &e, window, cx);
@@ -945,7 +952,6 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.clear_remote_host_error(&target);
         let header = match remote_connect::control_route(&target, cx) {
             Ok(header) => header.restart_server(),
             Err(e) => {
@@ -953,32 +959,8 @@ impl Tty7App {
                 return;
             }
         };
-        let host = header.target.origin_key();
-        let host_id = target.host_id();
-        let target_for_error = target.clone();
         log::info!("restarting tty7's server on {label} at the user's request");
-        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        self.watch_for_restart_consent(host_id, running.clone(), cx);
-        cx.spawn(async move |this, cx| {
-            let for_task = label.clone();
-            let outcome = cx
-                .background_executor()
-                .spawn(async move { remote_connect::restart_server_blocking(header, &for_task) })
-                .await;
-            running.store(false, std::sync::atomic::Ordering::Relaxed);
-            remote_connect::clear_install_progress(host_id);
-            let _ = this.update_in(cx, |this, window, cx| match outcome {
-                Ok(()) => {
-                    log::info!("{label} is now serving this client's build");
-                    this.server_replaced(&target_for_error, &label, &host, cx);
-                }
-                Err(e) => {
-                    log::warn!("could not restart tty7's server on {label}: {e}");
-                    this.report_remote_host_error(Some(&target_for_error), &label, &e, window, cx);
-                }
-            });
-        })
-        .detach();
+        self.run_server_maintenance(target, header, label, L10nKey::RestartServer, None, cx);
     }
 
     /// `action` is the word the thing that led here used on its own button —
@@ -1005,7 +987,7 @@ impl Tty7App {
                 return;
             }
             let _ = this.update_in(cx, |this, window, cx| {
-                this.replace_remote_server(target, label, window, cx);
+                this.replace_remote_server(target, label, action, None, window, cx);
             });
         })
         .detach();
@@ -1015,11 +997,12 @@ impl Tty7App {
         &mut self,
         target: RemoteTarget,
         label: String,
+        action: L10nKey,
+        mismatch: Option<crate::daemon::install::MismatchedRemoteDaemon>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.clear_remote_host_error(&target);
-        let route = match remote_connect::control_route(&target, cx) {
+        let header = match remote_connect::control_route(&target, cx) {
             Ok(header) => header.replace_server(),
             Err(e) => {
                 log::warn!("could not address {label} to replace its server: {e}");
@@ -1027,29 +1010,107 @@ impl Tty7App {
                 return;
             }
         };
-        let host = route.target.origin_key();
+        log::info!("replacing tty7's server on {label} at the user's request");
+        self.run_server_maintenance(target, header, label, action, mismatch, cx);
+    }
+
+    /// One attempt at moving a machine's server aside for this build, shared by
+    /// the menu's restart and the mismatch prompt's update. Both can meet a
+    /// server too old to understand the polite-restart request; that case is
+    /// escalated to the user rather than acted on, because stopping such a
+    /// server cuts every session it serves.
+    fn run_server_maintenance(
+        &mut self,
+        target: RemoteTarget,
+        header: crate::daemon::router::RouteHeader,
+        label: String,
+        action: L10nKey,
+        mismatch: Option<crate::daemon::install::MismatchedRemoteDaemon>,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_remote_host_error(&target);
+        let host = header.target.origin_key();
         let host_id = target.host_id();
         let target_for_error = target.clone();
-        log::info!("replacing tty7's server on {label} at the user's request");
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
         self.watch_for_restart_consent(host_id, running.clone(), cx);
         cx.spawn(async move |this, cx| {
             let for_task = label.clone();
+            let for_attempt = header.clone();
             let outcome = cx
                 .background_executor()
-                .spawn(async move { remote_connect::restart_server_blocking(route, &for_task) })
+                .spawn(
+                    async move { remote_connect::restart_server_blocking(for_attempt, &for_task) },
+                )
                 .await;
             running.store(false, std::sync::atomic::Ordering::Relaxed);
             remote_connect::clear_install_progress(host_id);
             let _ = this.update_in(cx, |this, window, cx| match outcome {
-                Ok(()) => {
+                Ok(remote_connect::ServerMaintenance::Done) => {
                     log::info!("{label} is now serving this client's build");
                     this.server_replaced(&target_for_error, &label, &host, cx);
                 }
+                Ok(remote_connect::ServerMaintenance::NeedsLegacyStopConsent) => {
+                    this.confirm_legacy_stop(
+                        target_for_error,
+                        header,
+                        label,
+                        action,
+                        mismatch,
+                        window,
+                        cx,
+                    );
+                }
                 Err(e) => {
-                    log::warn!("could not replace tty7's server on {label}: {e}");
+                    log::warn!("could not restart tty7's server on {label}: {e}");
                     this.report_remote_host_error(Some(&target_for_error), &label, &e, window, cx);
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// The running server answered the maintenance request with "I don't
+    /// understand it" — it predates the safe-handoff feature, so the update can
+    /// only stop it outright, cutting every session it serves. That is a
+    /// different promise from the one the user clicked ("switch only when
+    /// idle"), so it is asked as a new question, and keeping the old build is a
+    /// clean no-op rather than a failure.
+    fn confirm_legacy_stop(
+        &mut self,
+        target: RemoteTarget,
+        header: crate::daemon::router::RouteHeader,
+        label: String,
+        action: L10nKey,
+        mismatch: Option<crate::daemon::install::MismatchedRemoteDaemon>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &remote_connect::legacy_stop_title(&label),
+            Some(&remote_connect::legacy_stop_detail(
+                &label,
+                mismatch.as_ref(),
+                t(L10nKey::RemoteLegacyStopKeep),
+            )),
+            &remote_connect::legacy_stop_answers(action),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if !matches!(answer.await, Ok(0)) {
+                log::info!("leaving the old server on {label} alone at the user's request");
+                return;
+            }
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.run_server_maintenance(
+                    target,
+                    header.with_legacy_stop_consent(),
+                    label,
+                    action,
+                    mismatch,
+                    cx,
+                );
             });
         })
         .detach();

@@ -1331,8 +1331,15 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "「{machine}」上の tty7 サーバーは再起動されませんでした"
         }
         L10nKey::RemoteRestartFailedBody => {
-            "{error}\n\nそこで実行中のセッションは古いビルドのままです。セッションがなくなっている場合は、再接続時にこのビルドのサーバーが起動します"
+            "{error}\n\nそこで実行中のセッションは古いビルドのままです。古いサーバーはセッションが終わっても自動では終了しないため、古いサーバー プロセス自体が終了してから再接続すると、このビルドのサーバーが起動します"
         }
+        L10nKey::RemoteLegacyStopTitle => "「{machine}」の古いサーバーは停止するしかありません",
+        L10nKey::RemoteLegacyStopBody => {
+            "{machine} で動いているサーバーは古く、「アイドル時に再起動」の要求を理解できません。退かすには直接停止するしかありません。\n\n{versions}続行すると古いサーバーを停止し、そこで動いているすべてのセッションが切断されます。{machine} 上のデータには触れません。\n「{keep}」を選ぶと現状のまま、今回は何も変更しません。"
+        }
+        L10nKey::RemoteLegacyStopVersions => "稼働中: {running}\nインストール予定: {wanted}\n\n",
+        L10nKey::RemoteLegacyStopConfirm => "セッションを切断して{action}",
+        L10nKey::RemoteLegacyStopKeep => "旧サーバーを保持",
         L10nKey::RemoteHostUnreachable => "{machine} に到達できませんでした: {error}",
         L10nKey::RemoteInstallTitle => "「{machine}」に tty7 サーバーをインストールしますか？",
         L10nKey::RemoteInstallDetail => {

@@ -55,6 +55,9 @@ struct FakeRemote {
     maintenance_reply: Option<ExecOutput>,
     health_reply: Option<ExecOutput>,
     startup_diagnostic: Option<String>,
+    /// What the `--stop-recorded-server` probe answers; unset models the
+    /// recorded server verified and gone, set models any refusal.
+    stop_reply: Option<ExecOutput>,
 }
 
 impl FakeRemote {
@@ -83,6 +86,7 @@ impl FakeRemote {
             maintenance_reply: None,
             health_reply: None,
             startup_diagnostic: None,
+            stop_reply: None,
         }
     }
 
@@ -213,6 +217,15 @@ impl RemoteOps for FakeRemote {
                     stderr: "no shell over here would read that".into(),
                 });
             }
+            *self.daemon_running.lock().unwrap() = false;
+            *self.running_exe.lock().unwrap() = None;
+            return ok("{\"status\":\"stopped\"}");
+        }
+        if cmd.contains(crate::daemon::maintenance::STOP_RECORDED_FLAG) {
+            if let Some(reply) = &self.stop_reply {
+                return Ok(reply.clone());
+            }
+            // The candidate verified the recorded pid and the server left.
             *self.daemon_running.lock().unwrap() = false;
             *self.running_exe.lock().unwrap() = None;
             return ok("{\"status\":\"stopped\"}");
@@ -1043,6 +1056,148 @@ fn unsafe_or_unacknowledged_maintenance_never_launches_or_uses_a_kill_fallback()
         assert!(!remote.journal().contains(&Journal::Launch));
         assert!(remote.journal().iter().all(|entry| !matches!(entry, Journal::Exec(command) if command.contains("kill ") || command.contains("kill -"))));
     }
+}
+
+/// The structured line a current candidate prints when the running server
+/// predates safe-idle maintenance (its stderr carries the prose).
+fn legacy_deferral() -> ExecOutput {
+    ExecOutput {
+        status: Some(1),
+        stdout: crate::daemon::maintenance::Reply::Deferred {
+            kind: crate::daemon::maintenance::DeferredKind::Unsupported,
+            message: "the running server does not support safe idle restart".into(),
+        }
+        .to_line(),
+        stderr: "tty7-server: maintenance deferred: the running server does not support safe idle restart".into(),
+    }
+}
+
+fn ran_recorded_stop(journal: &[Journal]) -> bool {
+    journal.iter().any(ran_recorded_stop_at)
+}
+
+fn ran_recorded_stop_at(entry: &Journal) -> bool {
+    matches!(entry, Journal::Exec(c) if c.contains(crate::daemon::maintenance::STOP_RECORDED_FLAG))
+}
+
+#[test]
+fn a_legacy_server_defers_until_the_user_confirms_the_stop() {
+    let mut remote = FakeRemote::new().with_previous_install().serving(BINARY);
+    remote.maintenance_reply = Some(legacy_deferral());
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let err = installer(&remote, &release, &user, "me@legacy-box:22")
+        .replace()
+        .expect_err("a legacy server defers the update until the user says yes");
+    assert!(
+        matches!(err, InstallError::LegacyStopNeedsConsent { .. }),
+        "{err:?}"
+    );
+    assert!(
+        crate::daemon::install::legacy_stop_needs_consent(&err.to_string()),
+        "the marker survives the string boundary: {err}"
+    );
+    let journal = remote.journal();
+    assert!(
+        !ran_recorded_stop(&journal),
+        "nothing was stopped without consent: {journal:?}"
+    );
+    assert!(!journal.contains(&Journal::Launch));
+    assert!(*remote.daemon_running.lock().unwrap());
+}
+
+#[test]
+fn consent_turns_the_legacy_deferral_into_a_graceful_stop_then_a_start() {
+    let mut remote = FakeRemote::new().with_previous_install().serving(BINARY);
+    remote.maintenance_reply = Some(legacy_deferral());
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    installer(&remote, &release, &user, "me@legacy-box:22")
+        .with_legacy_stop_consent(true)
+        .replace()
+        .expect("consent lets the legacy server leave gracefully");
+
+    let journal = remote.journal();
+    let stopped = journal
+        .iter()
+        .position(ran_recorded_stop_at)
+        .expect("the recorded server is asked to exit");
+    let launched = journal.iter().position(|j| *j == Journal::Launch).unwrap();
+    assert!(
+        stopped < launched,
+        "stop before start — one socket, not two"
+    );
+    assert!(
+        *remote.daemon_running.lock().unwrap(),
+        "the new daemon is serving"
+    );
+}
+
+#[test]
+fn consent_never_turns_other_deferrals_into_a_signal() {
+    // A busy server (or any non-legacy deferral) stays a plain deferral even
+    // with consent: the yes is only for "the old server cannot answer the
+    // safe-idle question", never for "sessions are in the way".
+    let mut remote = FakeRemote::new().with_previous_install().serving(BINARY);
+    remote.maintenance_reply = Some(ExecOutput {
+        status: Some(1),
+        stdout: crate::daemon::maintenance::Reply::Deferred {
+            kind: crate::daemon::maintenance::DeferredKind::Other,
+            message: "terminal panes are still running".into(),
+        }
+        .to_line(),
+        stderr: "tty7-server: maintenance deferred: terminal panes are still running".into(),
+    });
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let err = installer(&remote, &release, &user, "busy-server")
+        .with_legacy_stop_consent(true)
+        .replace()
+        .expect_err("busy is not the legacy question");
+    assert!(
+        matches!(err, InstallError::MaintenanceDeferred { .. }),
+        "{err:?}"
+    );
+    let journal = remote.journal();
+    assert!(!ran_recorded_stop(&journal), "{journal:?}");
+    assert!(!journal.contains(&Journal::Launch));
+    assert!(*remote.daemon_running.lock().unwrap());
+}
+
+#[test]
+fn a_refused_legacy_stop_launches_nothing_and_keeps_the_old_server() {
+    let mut remote = FakeRemote::new().with_previous_install().serving(BINARY);
+    remote.maintenance_reply = Some(legacy_deferral());
+    remote.stop_reply = Some(ExecOutput {
+        status: Some(1),
+        stdout: crate::daemon::maintenance::Reply::Deferred {
+            kind: crate::daemon::maintenance::DeferredKind::Refused,
+            message: "the recorded server pid 4242 now runs /usr/bin/vim".into(),
+        }
+        .to_line(),
+        stderr: "tty7-server: maintenance deferred: refusing to signal a reused pid".into(),
+    });
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+
+    let err = installer(&remote, &release, &user, "me@legacy-box:22")
+        .with_legacy_stop_consent(true)
+        .replace()
+        .expect_err("a stop the candidate cannot verify defers the update");
+    assert!(
+        matches!(err, InstallError::MaintenanceDeferred { .. }),
+        "{err:?}"
+    );
+    let journal = remote.journal();
+    assert!(ran_recorded_stop(&journal), "the stop was attempted");
+    assert!(
+        !journal.contains(&Journal::Launch),
+        "but nothing launched after it: {journal:?}"
+    );
+    assert!(*remote.daemon_running.lock().unwrap());
 }
 
 #[test]

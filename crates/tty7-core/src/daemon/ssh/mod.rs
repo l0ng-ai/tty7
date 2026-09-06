@@ -376,10 +376,13 @@ impl SshManager {
         &self,
         spec: &NativeSshSpec,
         setup: &RouteSetup,
+        legacy_stop: bool,
     ) -> anyhow::Result<()> {
         let (conn, _reused) = self.open_connection(spec, &setup.broker).await?;
         setup
-            .blocking(move || crate::daemon::install::restart_remote_daemon(&conn))
+            .blocking(move || {
+                crate::daemon::install::restart_remote_daemon_consenting(&conn, legacy_stop)
+            })
             .await??;
         Ok(())
     }
@@ -388,10 +391,13 @@ impl SshManager {
         &self,
         spec: &NativeSshSpec,
         setup: &RouteSetup,
+        legacy_stop: bool,
     ) -> anyhow::Result<()> {
         let (conn, _reused) = self.open_connection(spec, &setup.broker).await?;
         setup
-            .blocking(move || crate::daemon::install::replace_remote_server(&conn))
+            .blocking(move || {
+                crate::daemon::install::replace_remote_server_consenting(&conn, legacy_stop)
+            })
             .await??;
         Ok(())
     }

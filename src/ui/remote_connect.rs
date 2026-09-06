@@ -899,8 +899,8 @@ pub fn mismatch_answers() -> [gpui::PromptButton; 2] {
     crate::ui::confirm_answers(t(L10nKey::RemoteMismatchReplaceServer), t(L10nKey::Cancel))
 }
 
-pub fn mismatch_detail(m: &MismatchedRemoteDaemon) -> String {
-    let running = match (&m.running_version, &m.running_exe) {
+fn mismatch_running(m: &MismatchedRemoteDaemon) -> String {
+    match (&m.running_version, &m.running_exe) {
         (Some(v), Some(exe)) => t_fmt(
             L10nKey::RemoteMismatchVersionFromExe,
             &[("version", v), ("exe", exe)],
@@ -908,7 +908,11 @@ pub fn mismatch_detail(m: &MismatchedRemoteDaemon) -> String {
         (Some(v), None) => v.clone(),
         (None, Some(exe)) => t_fmt(L10nKey::RemoteMismatchUnknownBuildFromExe, &[("exe", exe)]),
         (None, None) => t(L10nKey::RemoteMismatchUnknownBuild).to_string(),
-    };
+    }
+}
+
+pub fn mismatch_detail(m: &MismatchedRemoteDaemon) -> String {
+    let running = mismatch_running(m);
     t_fmt(
         L10nKey::RemoteMismatchDetail,
         &[
@@ -946,7 +950,21 @@ pub fn dialect_complaint(error: &str, machine: &str) -> Option<String> {
     ))
 }
 
-pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), String> {
+/// What came of asking a machine's server to make way for this build.
+pub enum ServerMaintenance {
+    /// The far end is serving (or about to serve) the binary this client speaks.
+    Done,
+    /// The running server predates the polite-restart request, so the only way
+    /// forward is to have the new binary stop it outright — which ends every
+    /// session it serves. Nothing has been signalled yet; the user has to say
+    /// that out loud before the attempt is retried with consent.
+    NeedsLegacyStopConsent,
+}
+
+pub fn restart_server_blocking(
+    header: RouteHeader,
+    label: &str,
+) -> Result<ServerMaintenance, String> {
     let action = header.action;
     crate::daemon::spawn::ensure_running().map_err(|e| {
         t_fmt(
@@ -960,16 +978,62 @@ pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), S
             &[("error", &e.to_string())],
         )
     })?;
-    let ack = crate::daemon::router::negotiate(&mut stream, &header).map_err(|e| {
-        t_fmt(
-            L10nKey::RemoteServerRestartFailed,
-            &[("machine", label), ("error", &e.to_string())],
-        )
-    })?;
+    let ack = match crate::daemon::router::negotiate(&mut stream, &header) {
+        Ok(ack) => ack,
+        Err(e) if crate::daemon::install::legacy_stop_needs_consent(&e.to_string()) => {
+            return Ok(ServerMaintenance::NeedsLegacyStopConsent);
+        }
+        Err(e) => {
+            return Err(t_fmt(
+                L10nKey::RemoteServerRestartFailed,
+                &[("machine", label), ("error", &e.to_string())],
+            ));
+        }
+    };
     if !ack.performed(action) {
         return Err(t_fmt(L10nKey::RemoteDaemonTooOld, &[("machine", label)]));
     }
-    Ok(())
+    Ok(ServerMaintenance::Done)
+}
+
+/// The stop-the-old-server question, asked only after the running server has
+/// already proved it cannot answer the polite-restart request. When the mismatch
+/// report that led here named the two builds, the detail names them again.
+pub fn legacy_stop_title(machine: &str) -> String {
+    t_fmt(L10nKey::RemoteLegacyStopTitle, &[("machine", machine)])
+}
+
+pub fn legacy_stop_detail(
+    machine: &str,
+    mismatch: Option<&MismatchedRemoteDaemon>,
+    keep: &str,
+) -> String {
+    let versions = mismatch
+        .map(|m| {
+            t_fmt(
+                L10nKey::RemoteLegacyStopVersions,
+                &[
+                    ("running", &mismatch_running(m)),
+                    ("wanted", &m.wanted_version),
+                ],
+            )
+        })
+        .unwrap_or_default();
+    t_fmt(
+        L10nKey::RemoteLegacyStopBody,
+        &[
+            ("machine", machine),
+            ("versions", &versions),
+            ("keep", keep),
+        ],
+    )
+}
+
+pub fn legacy_stop_answers(action: L10nKey) -> [gpui::PromptButton; 2] {
+    crate::ui::confirm_answers(
+        &t_fmt(L10nKey::RemoteLegacyStopConfirm, &[("action", t(action))]),
+        t(L10nKey::RemoteLegacyStopKeep),
+    )
 }
 
 #[cfg(test)]
@@ -1342,6 +1406,43 @@ mod tests {
                 "{label} is unexplained: {detail}"
             );
         }
+    }
+
+    #[test]
+    fn the_legacy_stop_prompt_names_the_machine_and_discloses_the_cut() {
+        crate::ui::i18n::set_locale("en");
+        let detail = legacy_stop_detail("me@legacy-box:22", None, t(L10nKey::RemoteLegacyStopKeep));
+        assert!(detail.contains("me@legacy-box:22"), "{detail}");
+        assert!(
+            detail.contains(t(L10nKey::RemoteLegacyStopKeep)),
+            "the safe answer is unexplained: {detail}"
+        );
+
+        let with_versions = legacy_stop_detail(
+            "me@legacy-box:22",
+            Some(&MismatchedRemoteDaemon {
+                host: "me@legacy-box:22".into(),
+                running_version: Some("0.8.0".into()),
+                running_exe: None,
+                wanted_version: "0.9.1".into(),
+            }),
+            t(L10nKey::RemoteLegacyStopKeep),
+        );
+        assert!(with_versions.contains("0.8.0"), "{with_versions}");
+        assert!(with_versions.contains("0.9.1"), "{with_versions}");
+    }
+
+    #[test]
+    fn the_legacy_stop_confirm_keeps_the_word_the_user_clicked() {
+        crate::ui::i18n::set_locale("en");
+        let [cut, keep] = legacy_stop_answers(L10nKey::RemoteMismatchReplaceServer);
+        let action = t(L10nKey::RemoteMismatchReplaceServer);
+        assert!(
+            cut.label().contains(action),
+            "the entry button said {action}, the consent must not rename it: {}",
+            cut.label()
+        );
+        assert!(keep.is_cancel(), "keeping the old build answers Escape");
     }
 
     #[test]

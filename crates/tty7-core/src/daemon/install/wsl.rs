@@ -672,6 +672,10 @@ pub fn ensure_wsl_server(distro: &str) -> io::Result<String> {
 }
 
 pub fn restart_wsl_daemon(distro: &str) -> io::Result<()> {
+    restart_wsl_daemon_consenting(distro, false)
+}
+
+pub fn restart_wsl_daemon_consenting(distro: &str, legacy_stop: bool) -> io::Result<()> {
     validate_distro(distro)?;
     let ops = WslRemoteOps::new(distro);
     let source = BundledServerBinary::discover();
@@ -683,7 +687,9 @@ pub fn restart_wsl_daemon(distro: &str) -> io::Result<()> {
     // restart fails halfway, the next pane must go and look rather than trust a
     // note written before the upheaval.
     forget_wsl_server(distro);
-    Installer::with_source(&ops, &source, confirm.as_ref(), host_label(distro)).restart_daemon()?;
+    Installer::with_source(&ops, &source, confirm.as_ref(), host_label(distro))
+        .with_legacy_stop_consent(legacy_stop)
+        .restart_daemon()?;
     Ok(())
 }
 
@@ -691,6 +697,10 @@ pub fn restart_wsl_daemon(distro: &str) -> io::Result<()> {
 /// build's. The bundled server is already on this computer, so unlike SSH there
 /// is nothing to download — the copy is the whole install.
 pub fn replace_wsl_server(distro: &str) -> io::Result<()> {
+    replace_wsl_server_consenting(distro, false)
+}
+
+pub fn replace_wsl_server_consenting(distro: &str, legacy_stop: bool) -> io::Result<()> {
     validate_distro(distro)?;
     let ops = WslRemoteOps::new(distro);
     let source = BundledServerBinary::discover();
@@ -698,7 +708,9 @@ pub fn replace_wsl_server(distro: &str) -> io::Result<()> {
     let lock = install_lock(distro);
     let _held = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     forget_wsl_server(distro);
-    Installer::with_source(&ops, &source, confirm.as_ref(), host_label(distro)).replace()?;
+    Installer::with_source(&ops, &source, confirm.as_ref(), host_label(distro))
+        .with_legacy_stop_consent(legacy_stop)
+        .replace()?;
     Ok(())
 }
 

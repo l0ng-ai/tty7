@@ -69,6 +69,7 @@ impl PaneClient {
                     server_command: None,
                     channel: RouteChannel::Pane,
                     action: RouteAction::Forward,
+                    legacy_stop_consent: false,
                 };
                 negotiate(&mut stream, &header)?;
                 Ok(stream)

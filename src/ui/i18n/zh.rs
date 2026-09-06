@@ -1201,8 +1201,20 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteRestartFailedBody => {
             "{error}\n\
              \n\
-             那里仍在运行的会话用的还是旧版本。如果它们已经结束，重新连接就会启动此版本的 server。"
+             那里仍在运行的会话用的还是旧版本。要等旧 server 进程本身退出——\
+             老版本不会因为会话结束就自行离开——重新连接才会启动此版本的 server。"
         }
+        L10nKey::RemoteLegacyStopTitle => "“{machine}”上的旧版 server 只能被停止",
+        L10nKey::RemoteLegacyStopBody => {
+            "{machine} 上正在运行的 server 版本太早，回答不了“空闲时自行重启”的请求——\
+             要换掉它，只能直接将它停止。\n\
+             \n\
+             {versions}继续会停止旧 server，它承载的所有会话随之断开；{machine} 上的数据不受影响。\n\
+             选择“{keep}”则维持现状，这次不做任何更改。"
+        }
+        L10nKey::RemoteLegacyStopVersions => "正在运行：{running}\n即将安装：{wanted}\n\n",
+        L10nKey::RemoteLegacyStopConfirm => "断开会话并{action}",
+        L10nKey::RemoteLegacyStopKeep => "保留旧版",
         L10nKey::RemoteHostUnreachable => "无法连接到 {machine}：{error}",
         L10nKey::RemoteInstallTitle => "在“{machine}”上安装 tty7 server？",
         L10nKey::RemoteInstallDetail => {

@@ -1267,9 +1267,24 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteRestartFailedBody => {
             "{error}\n\
              \n\
-             Sessions still running there are on the older build. If they are \
-             gone, reconnecting starts this build's server."
+             Sessions still running there are on the older build. Reconnecting starts \
+             this build's server only once the old server process itself has exited — \
+             old builds do not leave when their last session ends."
         }
+        L10nKey::RemoteLegacyStopTitle => "The old server on \"{machine}\" can only be stopped",
+        L10nKey::RemoteLegacyStopBody => {
+            "The server running on {machine} predates the polite-restart request, so the \
+             only way to move it aside is to stop it outright.\n\
+             \n\
+             {versions}Going ahead stops the old server, and every session it serves ends \
+             with it; nothing else on {machine} is touched.\n\
+             \"{keep}\" leaves everything exactly as it is."
+        }
+        L10nKey::RemoteLegacyStopVersions => {
+            "Running there: {running}\nThis build would install: {wanted}\n\n"
+        }
+        L10nKey::RemoteLegacyStopConfirm => "Disconnect Sessions and {action}",
+        L10nKey::RemoteLegacyStopKeep => "Keep the Old Server",
         L10nKey::RemoteHostUnreachable => "could not reach {machine}: {error}",
         L10nKey::RemoteInstallTitle => "Install tty7's server on \"{machine}\"?",
         L10nKey::RemoteInstallDetail => {

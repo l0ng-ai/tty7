@@ -66,6 +66,12 @@ pub struct RouteHeader {
     pub channel: RouteChannel,
     #[serde(default)]
     pub action: RouteAction,
+    /// The user's explicit yes to ending a legacy server's sessions so the
+    /// update can proceed. Defaults to false on the wire in both directions:
+    /// an old peer that never heard of the field declines to stop anything,
+    /// which is the only safe reading of an absent consent.
+    #[serde(default)]
+    pub legacy_stop_consent: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,6 +92,7 @@ impl RouteHeader {
             server_command: None,
             channel: RouteChannel::Control,
             action: RouteAction::Forward,
+            legacy_stop_consent: false,
         }
     }
 
@@ -104,6 +111,14 @@ impl RouteHeader {
         self
     }
 
+    /// Carry the user's explicit confirmation that a legacy server's sessions
+    /// may end so the update can proceed. Meaningful only beside
+    /// `restart_server`/`replace_server`; forwarded alone it changes nothing.
+    pub fn with_legacy_stop_consent(mut self) -> RouteHeader {
+        self.legacy_stop_consent = true;
+        self
+    }
+
     pub fn wsl(distro: impl Into<String>) -> RouteHeader {
         RouteHeader {
             target: RouteTarget::Wsl {
@@ -112,6 +127,7 @@ impl RouteHeader {
             server_command: None,
             channel: RouteChannel::Control,
             action: RouteAction::Forward,
+            legacy_stop_consent: false,
         }
     }
 
@@ -124,6 +140,7 @@ impl RouteHeader {
             server_command: None,
             channel: RouteChannel::Control,
             action: RouteAction::Forward,
+            legacy_stop_consent: false,
         }
     }
 
@@ -798,15 +815,16 @@ async fn restart_server(
     setup: &RouteSetup,
     action: RouteAction,
 ) -> anyhow::Result<()> {
+    let legacy_stop = header.legacy_stop_consent;
     match (&header.target, action) {
         (RouteTarget::Ssh(spec), RouteAction::ReplaceServer) => {
             SshManager::global()
-                .replace_remote_server(spec, setup)
+                .replace_remote_server(spec, setup, legacy_stop)
                 .await
         }
         (RouteTarget::Ssh(spec), _) => {
             SshManager::global()
-                .restart_remote_server(spec, setup)
+                .restart_remote_server(spec, setup, legacy_stop)
                 .await
         }
         // A distro's server is installed and launched from here too, so both
@@ -815,14 +833,18 @@ async fn restart_server(
         (RouteTarget::Wsl { distro }, RouteAction::ReplaceServer) => {
             let distro = distro.clone();
             setup
-                .blocking(move || crate::daemon::install::wsl::replace_wsl_server(&distro))
+                .blocking(move || {
+                    crate::daemon::install::wsl::replace_wsl_server_consenting(&distro, legacy_stop)
+                })
                 .await??;
             Ok(())
         }
         (RouteTarget::Wsl { distro }, _) => {
             let distro = distro.clone();
             setup
-                .blocking(move || crate::daemon::install::wsl::restart_wsl_daemon(&distro))
+                .blocking(move || {
+                    crate::daemon::install::wsl::restart_wsl_daemon_consenting(&distro, legacy_stop)
+                })
                 .await??;
             Ok(())
         }
@@ -950,6 +972,7 @@ mod tests {
                 server_command: Some("tty7-server --stdio".to_string()),
                 channel: RouteChannel::Control,
                 action: RouteAction::Forward,
+                legacy_stop_consent: false,
             },
         ] {
             let describe = header.describe();
@@ -1412,6 +1435,33 @@ mod tests {
         let back = RouteHeader::decode(legacy).unwrap();
         assert_eq!(back.action, RouteAction::Forward);
         assert_eq!(back.channel, RouteChannel::Pane, "and nothing else moved");
+    }
+
+    #[test]
+    fn the_legacy_stop_consent_defaults_to_refused_and_survives_the_wire() {
+        let header = RouteHeader::local_stdio("cat", &[]);
+        assert!(
+            !header.legacy_stop_consent,
+            "consent is never on unless the user just gave it"
+        );
+
+        let mut buf = Vec::new();
+        header
+            .restart_server()
+            .with_legacy_stop_consent()
+            .write(&mut buf)
+            .unwrap();
+        let (_, payload) = protocol::read_frame(&mut buf.as_slice()).unwrap();
+        assert!(
+            RouteHeader::decode(&payload).unwrap().legacy_stop_consent,
+            "a granted consent must reach the router"
+        );
+
+        let legacy = br#"{"target":{"wsl":{"distro":"Ubuntu"}},"action":"restart_server"}"#;
+        assert!(
+            !RouteHeader::decode(legacy).unwrap().legacy_stop_consent,
+            "an older client never carries consent"
+        );
     }
 
     #[test]

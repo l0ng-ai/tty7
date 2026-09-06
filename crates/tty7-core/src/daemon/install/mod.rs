@@ -516,6 +516,14 @@ pub enum InstallError {
     MaintenanceDeferred {
         reason: String,
     },
+    /// The running server predates safe-idle maintenance, so the update can
+    /// only proceed by stopping it — which ends its sessions, and no caller
+    /// brought the user's confirmation for that. The UI meets this error as a
+    /// string after the route boundary; the marker token is what it matches
+    /// to offer that confirmation, so the token is never reworded.
+    LegacyStopNeedsConsent {
+        host: String,
+    },
     /// Asked to restart a server this machine does not have. Nothing was
     /// stopped — see [`Installer::restart_daemon`].
     NoServerToRestart {
@@ -564,6 +572,13 @@ impl std::fmt::Display for InstallError {
                 f,
                 "remote maintenance was deferred to preserve existing sessions: {reason}"
             ),
+            Self::LegacyStopNeedsConsent { host } => write!(
+                f,
+                "the tty7-server running on {host} predates safe maintenance, so updating it \
+                 means stopping it — which ends its sessions and needs an explicit confirmation \
+                 [{}]",
+                Self::LEGACY_STOP_NEEDS_CONSENT
+            ),
             Self::NoServerToRestart { host, path } => write!(
                 f,
                 "{host} has no tty7-server at {path} for this build to start, so nothing was \
@@ -594,6 +609,20 @@ impl std::fmt::Display for InstallError {
 
 impl std::error::Error for InstallError {}
 
+impl InstallError {
+    /// Stable token inside the `LegacyStopNeedsConsent` message. The UI
+    /// receives the error as a string after the route boundary and keys its
+    /// localized consent prompt off this marker — never off the English.
+    pub const LEGACY_STOP_NEEDS_CONSENT: &str = "legacy-stop-needs-consent";
+}
+
+/// Whether an error string coming back from the install path is the
+/// legacy-stop consent question. Same idea as `control::parse_dialect_refusal`:
+/// the wire carries strings, the parser restores the branch point.
+pub fn legacy_stop_needs_consent(error: &str) -> bool {
+    error.contains(InstallError::LEGACY_STOP_NEEDS_CONSENT)
+}
+
 impl From<InstallError> for io::Error {
     fn from(e: InstallError) -> io::Error {
         let kind = match &e {
@@ -601,6 +630,7 @@ impl From<InstallError> for io::Error {
             InstallError::Unsupported(_)
             | InstallError::MissingBundled { .. }
             | InstallError::NoServerToRestart { .. }
+            | InstallError::LegacyStopNeedsConsent { .. }
             | InstallError::DialectMismatch { .. } => io::ErrorKind::Unsupported,
             InstallError::Declined { .. } => io::ErrorKind::PermissionDenied,
             InstallError::Checksum(_) => io::ErrorKind::InvalidData,
@@ -633,6 +663,7 @@ pub struct Installer<'a> {
     startup_timeout: Duration,
     shutdown_timeout: Duration,
     poll_interval: Duration,
+    legacy_stop_consent: bool,
 }
 
 impl<'a> Installer<'a> {
@@ -661,6 +692,7 @@ impl<'a> Installer<'a> {
             startup_timeout: REMOTE_STARTUP_TIMEOUT,
             shutdown_timeout: REMOTE_SHUTDOWN_TIMEOUT,
             poll_interval: REMOTE_POLL_INTERVAL,
+            legacy_stop_consent: false,
         }
     }
 
@@ -681,6 +713,7 @@ impl<'a> Installer<'a> {
             startup_timeout: REMOTE_STARTUP_TIMEOUT,
             shutdown_timeout: REMOTE_SHUTDOWN_TIMEOUT,
             poll_interval: REMOTE_POLL_INTERVAL,
+            legacy_stop_consent: false,
         }
     }
 
@@ -753,6 +786,14 @@ impl<'a> Installer<'a> {
     /// acknowledged an idle stop. Expiry never permits a forced termination.
     pub fn with_shutdown_timeout(mut self, shutdown: Duration) -> Self {
         self.shutdown_timeout = shutdown;
+        self
+    }
+
+    /// The user's explicit yes to stopping a server too old for safe-idle
+    /// maintenance, knowing its sessions end. Without it a legacy server
+    /// defers the update instead of losing work nobody agreed to lose.
+    pub fn with_legacy_stop_consent(mut self, consent: bool) -> Self {
+        self.legacy_stop_consent = consent;
         self
     }
 
@@ -1170,11 +1211,31 @@ impl<'a> Installer<'a> {
             .run(&command)
             .map_err(|reason| InstallError::MaintenanceDeferred { reason })?;
         if !stopped.success() {
-            return Err(InstallError::MaintenanceDeferred {
-                reason: stopped.failure_reason(),
-            });
-        }
-        if super::maintenance::Reply::parse(&stopped.stdout)
+            // A server too old to answer the safe-idle question can still
+            // leave gracefully — its SIGTERM handler has drained panes and
+            // stored scrollback since long before the feature gate. But that
+            // stop ends its sessions, so it runs only when the caller carries
+            // the user's explicit yes, and even then through the recorded
+            // pid's identity check, never a process-name match.
+            let legacy = matches!(
+                super::maintenance::Reply::parse(&stopped.stdout),
+                Some(super::maintenance::Reply::Deferred {
+                    kind: super::maintenance::DeferredKind::Unsupported,
+                    ..
+                })
+            );
+            if !legacy {
+                return Err(InstallError::MaintenanceDeferred {
+                    reason: stopped.failure_reason(),
+                });
+            }
+            if !self.legacy_stop_consent {
+                return Err(InstallError::LegacyStopNeedsConsent {
+                    host: self.host.clone(),
+                });
+            }
+            self.stop_recorded_daemon(paths)?;
+        } else if super::maintenance::Reply::parse(&stopped.stdout)
             != Some(super::maintenance::Reply::Stopped)
         {
             return Err(InstallError::MaintenanceDeferred { reason: "the candidate did not acknowledge a safe idle stop; no forced shutdown was attempted".into() });
@@ -1227,6 +1288,36 @@ impl<'a> Installer<'a> {
             }
             std::thread::sleep(self.poll_interval);
         }
+    }
+
+    /// Ask the pidfile-recorded server to exit, through the candidate
+    /// binary's own identity checks. Reaching here means the running server
+    /// predates safe-idle maintenance AND the caller carries the user's
+    /// explicit yes to ending its sessions; anything the candidate cannot
+    /// verify defers the whole update rather than signalling on doubt.
+    fn stop_recorded_daemon(&self, paths: &RemotePaths) -> Result<(), InstallError> {
+        let command = format!(
+            "{} {} --wait-ms {}",
+            shell_quote(&paths.binary),
+            super::maintenance::STOP_RECORDED_FLAG,
+            self.shutdown_timeout.as_millis()
+        );
+        let stopped = self
+            .ops
+            .run(&command)
+            .map_err(|reason| InstallError::MaintenanceDeferred { reason })?;
+        if !stopped.success()
+            || super::maintenance::Reply::parse(&stopped.stdout)
+                != Some(super::maintenance::Reply::Stopped)
+        {
+            return Err(InstallError::MaintenanceDeferred {
+                reason: format!(
+                    "the legacy server stop was not confirmed; nothing was forced: {}",
+                    stopped.failure_reason()
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -1401,18 +1492,34 @@ pub fn ensure_remote_server_labeled(conn: &Arc<SshConnection>, host: &str) -> io
 }
 
 pub fn restart_remote_daemon(conn: &Arc<SshConnection>) -> io::Result<()> {
+    restart_remote_daemon_consenting(conn, false)
+}
+
+pub fn restart_remote_daemon_consenting(
+    conn: &Arc<SshConnection>,
+    legacy_stop: bool,
+) -> io::Result<()> {
     let lock = install_lock(conn.key().as_str());
     let confirm = install_confirm();
     lock.maintain(&|| confirm.is_cancelled(), || {
         let host = connection_label(conn);
         let ops = ssh_ops::SshRemoteOps::new(conn.clone());
         let fetch = default_fetcher();
-        Installer::new(&ops, fetch.as_ref(), confirm.as_ref(), host).restart_daemon()?;
+        Installer::new(&ops, fetch.as_ref(), confirm.as_ref(), host)
+            .with_legacy_stop_consent(legacy_stop)
+            .restart_daemon()?;
         Ok(())
     })
 }
 
 pub fn replace_remote_server(conn: &Arc<SshConnection>) -> io::Result<()> {
+    replace_remote_server_consenting(conn, false)
+}
+
+pub fn replace_remote_server_consenting(
+    conn: &Arc<SshConnection>,
+    legacy_stop: bool,
+) -> io::Result<()> {
     let lock = install_lock(conn.key().as_str());
     let confirm = install_confirm();
     lock.maintain(&|| confirm.is_cancelled(), || {
@@ -1420,7 +1527,9 @@ pub fn replace_remote_server(conn: &Arc<SshConnection>) -> io::Result<()> {
         let ops = ssh_ops::SshRemoteOps::new(conn.clone());
         let fetch = default_fetcher();
         let source = BundledOrRelease::discover(fetch.as_ref());
-        Installer::with_source(&ops, &source, confirm.as_ref(), host).replace()?;
+        Installer::with_source(&ops, &source, confirm.as_ref(), host)
+            .with_legacy_stop_consent(legacy_stop)
+            .replace()?;
         Ok(())
     })
 }

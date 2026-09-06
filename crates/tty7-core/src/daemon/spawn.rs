@@ -1041,7 +1041,7 @@ fn signal_and_await_exit(pid: libc::pid_t, sig: libc::c_int, timeout: Duration) 
 /// the daemons it spawns, so a crashed daemon *is* a zombie of a long-lived
 /// GUI, not a rare state.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn process_alive(pid: libc::pid_t) -> bool {
+pub(crate) fn process_alive(pid: libc::pid_t) -> bool {
     let exists = unsafe { libc::kill(pid, 0) == 0 };
     exists && !is_zombie(pid)
 }
