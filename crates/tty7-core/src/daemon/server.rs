@@ -588,6 +588,14 @@ fn run_with(registry: Arc<Registry>) -> anyhow::Result<()> {
     // the dead port) and let the bind below overwrite the file. A live
     // recorded daemon still gets the connect — the singleton seat is held by
     // this process, so it can only be a foreign server worth refusing.
+    //
+    // Unix gets none of this on purpose. Its `bind` probes the socket path
+    // itself, refusing a live owner and reclaiming the file a dead daemon
+    // failed to unlink. Gating that on the pidfile here once inverted the
+    // cleanup: a dead recorded pid skipped the probe, `UnixListener::bind`
+    // never overwrites an existing path, and every later start failed on
+    // EADDRINUSE until someone removed the file by hand.
+    #[cfg(windows)]
     if transport::endpoint_exists() && !crate::daemon::spawn::recorded_daemon_is_dead() {
         match transport::connect() {
             Ok(_) => {
