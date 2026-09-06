@@ -1430,6 +1430,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdForkSessionSubtitle => "branch this agent session into a new tab",
         L10nKey::CmdMarkTabAsUnread => "Mark Tab as Unread",
         L10nKey::CmdClosePaneTab => "Close Pane / Tab",
+        L10nKey::CmdCloseWindow => "Close Window",
         L10nKey::CmdCloseOtherTabs => "Close Other Tabs",
         L10nKey::CmdCloseTabsToTheRight => "Close Tabs to the Right",
         L10nKey::CmdReopenClosedTab => "Reopen Closed Tab",
