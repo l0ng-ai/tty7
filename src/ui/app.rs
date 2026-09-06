@@ -6883,34 +6883,23 @@ impl Tty7App {
             ),
             None => message,
         };
-        let bar = gpui_component::v_flex()
+        let bar = crate::ui::remote_workspace::status_card(cx)
             .occlude()
-            .gap(px(6.))
-            .px_3()
-            .py_1p5()
-            .rounded_lg()
-            .bg(theme.popover)
-            .border_1()
-            .border_color(theme.border)
             .shadow_md()
-            .text_xs()
-            .text_color(theme.muted_foreground)
             .child(
-                gpui_component::h_flex()
-                    .items_center()
-                    .gap_2()
+                crate::ui::remote_workspace::status_row()
                     .child(gpui_component::Icon::new(gpui_component::IconName::Globe))
                     .child(
-                        div()
+                        crate::ui::remote_workspace::status_message(message)
                             .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.foreground)
-                            .child(message),
+                            .text_color(theme.foreground),
                     )
                     .when_some(action, |this, (label, action)| {
                         use gpui_component::Sizable as _;
                         use gpui_component::button::ButtonVariants as _;
                         this.child(
                             gpui_component::button::Button::new("remote-status-action")
+                                .flex_shrink_0()
                                 .label(label)
                                 .primary()
                                 .small()

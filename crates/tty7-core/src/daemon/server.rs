@@ -339,7 +339,31 @@ pub fn run_daemon() -> anyhow::Result<()> {
             services,
         ) {
             Ok(path) => startup_note!("tty7-server: control socket at {}", path.display()),
-            Err(e) => startup_note!("tty7-server: control listener unavailable: {e}"),
+            // Someone else already answers there. That is the ordinary local
+            // shape: the GUI hosts the control listener and this process was
+            // started only to own the panes. Carry on.
+            //
+            // Ask rather than read the errno. `bind_control_socket` clears an
+            // ordinary leftover socket itself, but a path it cannot clear — a
+            // directory in the way, a file owned by someone else — comes back
+            // `AddrInUse` in the same words a live server does.
+            Err(e) if crate::host::server::control_endpoint_answers() => {
+                startup_note!(
+                    "tty7-server: control listener unavailable ({e}); \
+                     another server is answering there, so serving panes only"
+                );
+            }
+            // Nothing is answering, and this process cannot answer either. Do
+            // not stay alive: a running daemon holds the single-server lock, so
+            // every later `--daemon` stands down at once and every client probe
+            // of the control socket fails, forever. That pair is exactly the
+            // "started but nothing was answering after 15s" a remote install
+            // reports — with the reason, right here, thrown away. Exiting
+            // releases the lock and hands the reason to whoever launched us.
+            Err(e) => {
+                startup_note!("tty7-server: control listener unavailable: {e}");
+                return Err(e.into());
+            }
         }
     }
     #[cfg(not(any(unix, windows)))]

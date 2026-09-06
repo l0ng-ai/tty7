@@ -1489,6 +1489,24 @@ mod sock {
         p.as_os_str().as_bytes().len() <= MAX_SOCKET_PATH_BYTES
     }
 
+    /// Whether a control server is answering at `path` right now.
+    ///
+    /// This, and not the errno a failed bind carries, is the question that
+    /// matters to a daemon whose listener would not open. [`bind_control_socket`]
+    /// does clear the ordinary leftover — it connects first and unlinks a socket
+    /// nobody is behind — but what it cannot clear it hands back as `AddrInUse`
+    /// all the same: a directory standing where the socket goes, a file owned by
+    /// another user. Those look exactly like a live server in the error, and
+    /// nothing is listening behind either. Only a connect that completes tells
+    /// them apart.
+    pub(crate) fn control_socket_answers(path: &Path) -> bool {
+        UnixStream::connect(path).is_ok()
+    }
+
+    pub fn control_endpoint_answers() -> bool {
+        control_socket_path().is_ok_and(|path| control_socket_answers(&path))
+    }
+
     pub fn bind_control_socket(path: &Path) -> io::Result<UnixListener> {
         let parent = path.parent().unwrap_or(Path::new("."));
         if !parent.exists() {
@@ -1580,8 +1598,8 @@ mod sock {
 pub(crate) use sock::socket_path_in;
 #[cfg(unix)]
 pub use sock::{
-    bind_control_socket, control_socket_path, serve_listener, serve_listener_with,
-    spawn_control_listener, spawn_control_listener_with,
+    bind_control_socket, control_endpoint_answers, control_socket_path, serve_listener,
+    serve_listener_with, spawn_control_listener, spawn_control_listener_with,
 };
 
 #[cfg(windows)]
@@ -1635,6 +1653,19 @@ mod wsock {
         spawn_control_listener_with(host, Services::none())
     }
 
+    /// See the unix arm: a bind that failed only means "serve panes only" when
+    /// something else is actually answering there.
+    ///
+    /// Gated on the pidfile the same way [`spawn_control_listener_with`] gates
+    /// its own probe, and for the same reason: a TCP connect that completes
+    /// proves only that *something* accepted on the recorded port, and a port a
+    /// dead daemon wrote can have been recycled by a stranger since. When the
+    /// daemon that wrote it is gone, nothing behind that port is ours.
+    pub fn control_endpoint_answers() -> bool {
+        !crate::daemon::spawn::recorded_daemon_is_dead()
+            && transport::connect_endpoint(CONTROL_PORT_FILE).is_ok()
+    }
+
     pub fn serve_listener_with(
         listener: TcpListener,
         token: transport::Token,
@@ -1678,8 +1709,8 @@ mod wsock {
 
 #[cfg(windows)]
 pub use wsock::{
-    CONTROL_PORT_FILE, connect_control, control_endpoint_path, remove_control_endpoint,
-    spawn_control_listener, spawn_control_listener_with,
+    CONTROL_PORT_FILE, connect_control, control_endpoint_answers, control_endpoint_path,
+    remove_control_endpoint, spawn_control_listener, spawn_control_listener_with,
 };
 
 #[cfg(test)]
@@ -2944,6 +2975,51 @@ mod tests {
 
         let err = sock::socket_path_in(&long, std::slice::from_ref(&long)).unwrap_err();
         assert!(err.to_string().contains(CONTROL_SOCK_ENV), "{err}");
+    }
+
+    /// `run_daemon` keeps serving panes past a control listener it could not
+    /// open only when something else is answering there, and the errno cannot
+    /// make that call. `bind_control_socket` clears the leftovers it can, but a
+    /// path it cannot clear still comes back `AddrInUse` — indistinguishable
+    /// from a live server, with nothing listening behind it. A daemon that read
+    /// the error as "someone else is serving" stayed alive holding the
+    /// single-server lock, answering nothing, forever.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_connect_tells_a_live_server_from_a_blocked_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let sock = dir.path().join("s.sock");
+        let listener = bind_control_socket(&sock).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                drop(stream);
+            }
+        });
+        assert_eq!(
+            bind_control_socket(&sock).unwrap_err().kind(),
+            io::ErrorKind::AddrInUse,
+            "a live server is in use"
+        );
+        assert!(
+            sock::control_socket_answers(&sock),
+            "and it answers, which is what makes it live"
+        );
+
+        // A directory where the socket goes. Nothing is listening, the connect
+        // fails so there is nothing to unlink, and `bind` refuses it in the
+        // same words it used for the live server above.
+        let blocked = dir.path().join("blocked.sock");
+        std::fs::create_dir(&blocked).unwrap();
+        assert_eq!(
+            bind_control_socket(&blocked).unwrap_err().kind(),
+            io::ErrorKind::AddrInUse,
+            "same error, and no server anywhere near it"
+        );
+        assert!(
+            !sock::control_socket_answers(&blocked),
+            "which is the difference the daemon has to act on"
+        );
     }
 
     #[test]

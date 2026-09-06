@@ -267,7 +267,6 @@ impl Tty7App {
             .is_none()
             .then(|| self.remote_strip_action(&status, cx))
             .flatten();
-        let theme = cx.theme();
         let message = match installing {
             Some(phase) => format!(
                 "{machine} — {}",
@@ -276,25 +275,15 @@ impl Tty7App {
             None => message,
         };
         Some(
-            v_flex()
-                .gap(px(6.))
-                .px(px(12.))
-                .py(px(6.))
-                .rounded(px(10.))
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.border)
-                .text_xs()
-                .text_color(theme.muted_foreground)
+            crate::ui::remote_workspace::status_card(cx)
                 .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
+                    crate::ui::remote_workspace::status_row()
                         .child(gpui_component::Icon::new(IconName::Globe))
-                        .child(message)
+                        .child(crate::ui::remote_workspace::status_message(message))
                         .when_some(action, |this, (label, action)| {
                             this.child(
                                 Button::new("home-remote-status-action")
+                                    .flex_shrink_0()
                                     .label(label)
                                     .ghost()
                                     .small()
@@ -311,6 +300,146 @@ impl Tty7App {
                     this.child(crate::ui::remote_workspace::install_progress_bar(phase, cx))
                 }),
         )
+    }
+}
+
+#[cfg(test)]
+mod strip_layout_tests {
+    use crate::core::session::{RemoteRef, RemoteTarget, WindowView, WindowViews, WorkspaceStore};
+    use crate::daemon::install::{InstallPhase, InstallProgress as _};
+    use crate::ui::remote_connect::HostChoice;
+    use crate::ui::remote_workspace::ConnectFlow;
+    use gpui::{TestAppContext, VisualTestContext, px, size};
+
+    fn box_at(port: u16) -> RemoteTarget {
+        RemoteTarget::Direct {
+            user: "hw".into(),
+            host: "build-box".into(),
+            port,
+        }
+    }
+
+    /// The home page on a remote workspace, sized to order, with the strip
+    /// showing either an install in flight or a failure to explain.
+    fn home_strip(
+        cx: &mut TestAppContext,
+        width: f32,
+        installing: Option<InstallPhase>,
+        failure: Option<&str>,
+    ) -> VisualTestContext {
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let workspace = app.read_with(&vcx, |app, _| app.workspace);
+        // A port per case: the install progress table is a process-wide static
+        // keyed by machine, and these tests share a process.
+        let target = box_at(if installing.is_some() { 22 } else { 2222 });
+        vcx.update(|_, cx| {
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views: vec![WindowView {
+                        id: workspace,
+                        host: Some(RemoteRef::new(target.clone(), workspace)),
+                        open: true,
+                        ..Default::default()
+                    }],
+                    active: Some(workspace),
+                },
+            );
+        });
+        if let Some(phase) = installing {
+            crate::ui::remote_connect::GuiInstallProgress.report(&target.connection_key(), phase);
+        }
+        if let Some(error) = failure {
+            app.update_in(&mut vcx, |app, _, _| {
+                app.connect = Some(ConnectFlow::Failed {
+                    choice: HostChoice {
+                        target: target.clone(),
+                        label: "build-box".into(),
+                        detail: String::new(),
+                    },
+                    error: error.to_string(),
+                });
+            });
+        }
+        vcx.simulate_resize(size(px(width), px(900.)));
+        app.update_in(&mut vcx, |_, _, cx| cx.notify());
+        vcx.run_until_parked();
+        vcx
+    }
+
+    /// #774's first screenshot shows a copy bar running from inside a
+    /// quarter-width card to the window's right edge. That escape does not
+    /// reproduce here — `w_full` resolved against the card in every window
+    /// width tried, before the fix as well as after — so this is a guard on the
+    /// property, not the reproduction of a failure. It holds by construction
+    /// now that the card has a width of its own; it did not before.
+    #[gpui::test]
+    fn the_copy_bar_stays_inside_the_home_strip(cx: &mut TestAppContext) {
+        let full = InstallPhase::Uploading {
+            done: 9_227_468,
+            total: 9_227_468,
+        };
+        for width in [1440.0, 900.0, 480.0] {
+            let mut vcx = home_strip(cx, width, Some(full), None);
+            let card = vcx
+                .debug_bounds("remote-status-card")
+                .expect("an install in flight draws the strip");
+            let bar = vcx.debug_bounds("remote-install-bar").expect("and its bar");
+            assert!(
+                bar.left() >= card.left() && bar.right() <= card.right(),
+                "at {width}px the bar {bar:?} left its card {card:?}"
+            );
+            assert!(
+                card.left() >= px(0.) && card.right() <= px(width),
+                "and the card stays in the window: {card:?}"
+            );
+        }
+    }
+
+    /// A startup failure now carries the far end's own words, so the strip's
+    /// message is a paragraph rather than a phrase. Laid out in one row it
+    /// stretched the card until both ran off the right of the window, taking
+    /// the retry button with them — #774's second and third screenshots.
+    #[gpui::test]
+    fn a_long_failure_wraps_instead_of_stretching_the_card(cx: &mut TestAppContext) {
+        let long = "the remote tty7-server did not start: \
+                    /home/hw/.local/share/tty7/bin/tty7-server-c8p6 exited with status 1 before \
+                    it answered on the control socket; last probe said: no control server at \
+                    /home/hw/.config/tty7/control.sock";
+
+        let mut short = home_strip(cx, 1440.0, None, Some("connection refused"));
+        let short_card = short
+            .debug_bounds("remote-status-card")
+            .expect("strip drawn");
+        let short_message = short
+            .debug_bounds("remote-status-message")
+            .expect("message drawn");
+
+        let mut wide = home_strip(cx, 1440.0, None, Some(long));
+        let long_card = wide
+            .debug_bounds("remote-status-card")
+            .expect("strip drawn");
+        let long_message = wide
+            .debug_bounds("remote-status-message")
+            .expect("message drawn");
+
+        assert_eq!(
+            short_card.size.width, long_card.size.width,
+            "the card's width is the card's, not the message's"
+        );
+        assert!(
+            long_card.right() <= px(1440.),
+            "and it stays in the window: {long_card:?}"
+        );
+        assert!(
+            long_message.size.height > short_message.size.height,
+            "a message that does not fit gets taller, not wider: \
+             {long_message:?} against {short_message:?}"
+        );
+        assert!(
+            long_message.right() <= long_card.right(),
+            "and never reaches past the card: {long_message:?} in {long_card:?}"
+        );
     }
 }
 
