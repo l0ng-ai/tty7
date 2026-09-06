@@ -22,6 +22,7 @@ pub enum CommandKind {
     RenameWorkspace,
     StopWorkspace,
     DeleteWorkspace,
+    CloseWindow,
     SplitRight,
     SplitDown,
     ClosePane,
@@ -124,6 +125,7 @@ impl CommandKind {
             RenameWorkspace => "rename-workspace",
             StopWorkspace => "stop-workspace",
             DeleteWorkspace => "delete-workspace",
+            CloseWindow => "close-window",
             SplitRight => "split-right",
             SplitDown => "split-down",
             ClosePane => "close-pane",
@@ -230,6 +232,7 @@ impl CommandKind {
             RenameWorkspace => "RenameWorkspace",
             StopWorkspace => "StopWorkspace",
             DeleteWorkspace => "DeleteWorkspace",
+            CloseWindow => "CloseWindow",
             SplitRight => "SplitRight",
             SplitDown => "SplitDown",
             ClosePane => "CloseActiveTab",
@@ -565,6 +568,7 @@ impl Command {
         ];
 
         let application = [
+            Command::localized(L10nKey::CmdCloseWindow, CloseWindow),
             Command::localized(L10nKey::CmdSettings, OpenSettings),
             Command::localized(L10nKey::CmdKeyboardShortcuts, ShowKeyboardShortcuts),
             Command::localized(L10nKey::CmdAboutTty7, About),

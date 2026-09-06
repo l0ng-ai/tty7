@@ -1487,6 +1487,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdForkSessionSubtitle => "このエージェントのセッションを新しいタブにフォーク",
         L10nKey::CmdMarkTabAsUnread => "タブを未読としてマーク",
         L10nKey::CmdClosePaneTab => "ペイン / タブを閉じる",
+        L10nKey::CmdCloseWindow => "ウィンドウを閉じる",
         L10nKey::CmdCloseOtherTabs => "他のタブを閉じる",
         L10nKey::CmdCloseTabsToTheRight => "右側のタブを閉じる",
         L10nKey::CmdReopenClosedTab => "閉じたタブをもう一度開く",

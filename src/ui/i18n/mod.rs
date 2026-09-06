@@ -1163,6 +1163,7 @@ l10n_keys! {
     CmdForkSessionSubtitle,
     CmdMarkTabAsUnread,
     CmdClosePaneTab,
+    CmdCloseWindow,
     CmdCloseOtherTabs,
     CmdCloseTabsToTheRight,
     CmdReopenClosedTab,

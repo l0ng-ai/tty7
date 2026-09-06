@@ -1416,29 +1416,8 @@ impl Tty7App {
 
         let weak_app = cx.weak_entity();
         window.on_window_should_close(cx, move |_window, cx| {
-            let last_window = crate::ui::windows::WindowRegistry::count(cx) <= 1;
             if let Some(app) = weak_app.upgrade() {
-                app.update(cx, |app, cx| app.detach_workspace(cx));
-            }
-            if last_window {
-                // With a tray icon, closing the last window retires to the
-                // tray: the daemon stays reachable (show / quit-and-stop)
-                // instead of being orphaned behind a dead icon. Without one
-                // the app quits — the only way it stays visible at all.
-                //
-                // The icon has to actually be up, not merely asked for: the
-                // backend can fail for the whole run (a Linux session with no
-                // StatusNotifier host), and retiring into an icon that never
-                // appeared leaves a process with no window and no tray — no
-                // way back in, and the daemon still held.
-                let retire_to_tray =
-                    cx.global::<Config>().show_tray_icon && crate::ui::tray::icon_is_up();
-                if !retire_to_tray {
-                    cx.spawn(async move |cx| {
-                        let _ = cx.update(|cx| cx.quit());
-                    })
-                    .detach();
-                }
+                app.update(cx, |app, cx| app.prepare_window_close(cx));
             }
             true
         });
@@ -1487,6 +1466,36 @@ impl Tty7App {
         crate::ui::windows::WindowRegistry::unregister(cx, self.workspace);
         crate::ui::tree_sync::forget(cx, self.workspace);
         crate::ui::windows::refresh_menu(cx);
+    }
+
+    fn prepare_window_close(&self, cx: &mut App) {
+        let last_window = crate::ui::windows::WindowRegistry::count(cx) <= 1;
+        self.detach_workspace(cx);
+        if last_window {
+            // With a tray icon, closing the last window retires to the
+            // tray: the daemon stays reachable (show / quit-and-stop)
+            // instead of being orphaned behind a dead icon. Without one
+            // the app quits — the only way it stays visible at all.
+            //
+            // The icon has to actually be up, not merely asked for: the
+            // backend can fail for the whole run (a Linux session with no
+            // StatusNotifier host), and retiring into an icon that never
+            // appeared leaves a process with no window and no tray — no
+            // way back in, and the daemon still held.
+            let retire_to_tray =
+                cx.global::<Config>().show_tray_icon && crate::ui::tray::icon_is_up();
+            if !retire_to_tray {
+                cx.spawn(async move |cx| {
+                    let _ = cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn close_window(&self, window: &mut Window, cx: &mut App) {
+        self.prepare_window_close(cx);
+        window.remove_window();
     }
 
     pub(crate) fn teardown_workspace_forwards(&self, cx: &gpui::App) {
@@ -4935,6 +4944,7 @@ impl Tty7App {
             OpenWorkspacePicker => self.open_switcher(window, cx),
             StopWorkspace => self.stop_workspace(self.workspace, window, cx),
             DeleteWorkspace => self.delete_workspace(self.workspace, window, cx),
+            CloseWindow => self.close_window(window, cx),
             SplitRight => self.split(Axis::Horizontal, window, cx),
             SplitDown => self.split(Axis::Vertical, window, cx),
             ClosePane => self.close_pane(window, cx),
@@ -7431,6 +7441,9 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &NewWorkspace, window, cx| {
                     this.open_workspace_form(window, cx);
                 }))
+                .on_action(
+                    cx.listener(|this, _: &CloseWindow, window, cx| this.close_window(window, cx)),
+                )
                 .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                     if !this.editor_close_active_if_focused(window, cx) {
                         this.close_pane(window, cx)

@@ -1348,6 +1348,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdForkSessionSubtitle => "将此 agent 会话 fork 到新标签页",
         L10nKey::CmdMarkTabAsUnread => "将标签页标记为未读",
         L10nKey::CmdClosePaneTab => "关闭窗格/标签页",
+        L10nKey::CmdCloseWindow => "关闭窗口",
         L10nKey::CmdCloseOtherTabs => "关闭其他标签页",
         L10nKey::CmdCloseTabsToTheRight => "关闭右侧标签页",
         L10nKey::CmdReopenClosedTab => "重新打开已关闭标签页",

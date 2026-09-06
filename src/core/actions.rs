@@ -18,6 +18,7 @@ actions!(
         SelectWorkspace7,
         SelectWorkspace8,
         SelectWorkspace9,
+        CloseWindow,
         CloseActiveTab,
         RenameTab,
         NewWorktreeTab,
