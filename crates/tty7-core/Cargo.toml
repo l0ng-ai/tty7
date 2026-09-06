@@ -16,7 +16,6 @@ anyhow.workspace = true
 log.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
-alacritty_terminal.workspace = true
 
 # SSH connection-manager data layer (`core::ssh_profile` / `core::keychain`) and
 # workspace identity (`core::session`). `uuid` mints stable ids (v4) and

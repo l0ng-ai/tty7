@@ -61,9 +61,6 @@ fn routed(dir: &Path, name: &str, config_dir: &Path) -> (UnixStream, std::thread
     let mut sock = UnixStream::connect(&path).unwrap();
     let ack = negotiate(&mut sock, &pane_header(config_dir)).expect("the route should be accepted");
     assert_eq!(ack.link.as_deref(), Some("local-stdio"));
-    ClientMsg::Access(tty7_core::daemon::protocol::PaneAccess::Manage)
-        .encode(&mut sock)
-        .unwrap();
     (sock, thread)
 }
 
@@ -94,8 +91,6 @@ fn shutdown(dir: &Path, config_dir: &Path) {
     if let Ok(mut sock) = UnixStream::connect(&path)
         && negotiate(&mut sock, &pane_header(config_dir)).is_ok()
     {
-        let _ =
-            ClientMsg::Access(tty7_core::daemon::protocol::PaneAccess::Manage).encode(&mut sock);
         let _ = ClientMsg::Shutdown.encode(&mut sock);
         let _ = sock.read(&mut [0u8; 64]);
     }

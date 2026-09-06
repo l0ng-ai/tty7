@@ -172,19 +172,6 @@ pub struct ShellParts {
     pub(crate) owner: Option<crate::core::session::WorkspaceId>,
 }
 
-impl ShellParts {
-    /// A late Attach only borrowed a process; only a late Spawn owns one to
-    /// clean up. Dropping either result releases its terminal connection.
-    pub(crate) fn discard_unclaimed(self, kill: impl FnOnce(crate::terminal::PaneRoute, u64)) {
-        if !self.restored {
-            kill(
-                crate::terminal::PaneRoute::for_workspace(self.workspace.as_ref()),
-                self.pane_id,
-            );
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 struct DragScroll {
     overshoot: f32,
@@ -288,7 +275,6 @@ pub struct TerminalView {
     /// flight every 250 ms, and a dial can sit for fifteen seconds waiting
     /// for the far end's verdict.
     relink_inflight: bool,
-    relink_generation: u64,
     pub marked_text: String,
     last_mouse_cell: Option<(usize, usize)>,
     last_hover_cell: Option<(usize, usize)>,
@@ -1060,11 +1046,6 @@ impl TerminalView {
         let attached = match restore_pane {
             Some(id) => match RemoteTerminal::attach_on(&route, TermSize::new(80, 24), 8, 17, id) {
                 Ok(terminal) => Some((terminal, id, None)),
-                Err(e) if !route.is_local() && !crate::terminal::attach_refused(&e) => {
-                    return Err(e.context(format!(
-                        "could not restore original remote pane {id}; keeping its identity for retry, no replacement shell was started"
-                    )));
-                }
                 Err(e) if crate::terminal::attach_unanswered(&e) => {
                     // Not "gone": nobody answered, which a daemon still coming
                     // up also does. Whoever finds an orphaned shell later
@@ -1372,7 +1353,6 @@ impl TerminalView {
             default_title: DEFAULT_TITLE.to_string(),
             relink_abandoned: false,
             relink_inflight: false,
-            relink_generation: 0,
             marked_text: String::new(),
             last_mouse_cell: None,
             report_mouse,
@@ -1610,8 +1590,6 @@ impl TerminalView {
     }
 
     pub fn detach_link(&mut self, cx: &mut Context<Self>) {
-        self.relink_generation = self.relink_generation.wrapping_add(1);
-        self.relink_inflight = false;
         self.terminal.detach_link();
         cx.notify();
     }
@@ -1826,14 +1804,8 @@ impl TerminalView {
     /// Claims this pane for one relink attempt. Every path that dials for a
     /// pane calls this first, so the other paths leave it alone until the
     /// attempt reports back through `relink_settled` or `adopt_relink`.
-    pub fn mark_relinking(&mut self) -> u64 {
-        self.relink_generation = self.relink_generation.wrapping_add(1);
+    pub fn mark_relinking(&mut self) {
         self.relink_inflight = true;
-        self.relink_generation
-    }
-
-    pub fn relink_is_current(&self, generation: u64) -> bool {
-        self.relink_inflight && self.relink_generation == generation
     }
 
     /// Releases the claim `mark_relinking` took, for the attempts that end
@@ -7504,7 +7476,6 @@ mod tests {
 
     fn ws(target: RemoteTarget, with_spec: bool) -> PaneWorkspace {
         PaneWorkspace {
-            authorization: None,
             workspace: WorkspaceId::new(),
             target,
             spec: with_spec.then(|| {
@@ -8850,7 +8821,6 @@ mod tests {
             alias: "build-box".into(),
         };
         let ws = PaneWorkspace {
-            authorization: None,
             workspace: WorkspaceId::new(),
             target: target.clone(),
             spec: None,
@@ -8868,7 +8838,6 @@ mod tests {
         );
 
         let sibling = PaneWorkspace {
-            authorization: None,
             workspace: WorkspaceId::new(),
             target,
             spec: None,
@@ -8917,122 +8886,6 @@ pub(crate) fn quiet_test_ssh_pane(
         ));
     });
     (view, stream)
-}
-
-#[cfg(test)]
-mod recovery_tests {
-    use super::*;
-
-    fn pair() -> (
-        crate::daemon::transport::Stream,
-        crate::daemon::transport::Stream,
-    ) {
-        #[cfg(unix)]
-        return std::os::unix::net::UnixStream::pair().unwrap();
-        #[cfg(windows)]
-        {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            (client, listener.accept().unwrap().0)
-        }
-    }
-
-    #[test]
-    fn a_late_attachment_disconnects_without_killing_the_original_process() {
-        use std::io::Read;
-        for restored in [true, false] {
-            let (client, mut daemon) = pair();
-            // macOS can reject setsockopt after the peer has disconnected.
-            // Establish the bound while both ends are still open.
-            daemon
-                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-                .unwrap();
-            let terminal = RemoteTerminal::from_stream(client, TermSize::new(80, 24)).unwrap();
-            let parts = ShellParts {
-                terminal,
-                pane_id: 7,
-                shell_spec: None,
-                workspace: None,
-                restored,
-                owner: None,
-            };
-            let mut killed = Vec::new();
-            parts.discard_unclaimed(|route, id| {
-                assert!(route.is_local());
-                killed.push(id);
-            });
-            assert_eq!(killed, if restored { vec![] } else { vec![7] });
-            let mut sent = Vec::new();
-            daemon.read_to_end(&mut sent).unwrap();
-            let mut sent = std::io::Cursor::new(sent);
-            assert!(matches!(
-                crate::daemon::protocol::ClientMsg::read(&mut sent).unwrap(),
-                crate::daemon::protocol::ClientMsg::Detach
-            ));
-            assert_eq!(
-                sent.position() as usize,
-                sent.get_ref().len(),
-                "dropping an unclaimed attachment sends Detach, never Kill"
-            );
-        }
-    }
-
-    #[gpui::test]
-    fn old_relink_results_lose_their_claim_on_retry_or_detach(cx: &mut gpui::TestAppContext) {
-        crate::core::config::pin_test_config_dir();
-        cx.executor().allow_parking();
-        cx.update(|cx| {
-            gpui_component::init(cx);
-            cx.set_global(Config::default());
-        });
-        let (client, _daemon) = pair();
-        let window = cx.add_window(|window, cx| {
-            let terminal = RemoteTerminal::from_stream(client, TermSize::new(80, 24)).unwrap();
-            TerminalView::with_terminal(terminal, 7, window, cx)
-        });
-        window
-            .update(cx, |view, _, cx| {
-                let old = view.mark_relinking();
-                let current = view.mark_relinking();
-                assert!(!view.relink_is_current(old));
-                assert!(view.relink_is_current(current));
-                view.detach_link(cx);
-                assert!(!view.relink_is_current(current));
-                let next = view.mark_relinking();
-                assert!(view.relink_is_current(next));
-                view.relink_settled();
-                assert!(!view.relink_is_current(next));
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn a_remote_restore_denial_does_not_fall_through_to_spawning_a_replacement() {
-        let workspace = crate::terminal::PaneWorkspace {
-            workspace: crate::core::session::WorkspaceId::new(),
-            authorization: None,
-            target: crate::core::session::RemoteTarget::direct("test", "test.invalid", 22),
-            spec: Some(Box::new(
-                serde_json::from_value(serde_json::json!({
-                    "host": "test.invalid", "port": 22, "user": "test", "auth_mode": "auto"
-                }))
-                .unwrap(),
-            )),
-            label: None,
-            resize_echo: true,
-        };
-        let result =
-            TerminalView::spawn_shell_terminal_in(Some(workspace), None, Some(7), None, None);
-        let Err(error) = result else {
-            panic!("missing lease cannot restore a pane")
-        };
-        assert!(error.to_string().contains("original remote pane 7"));
-        assert!(
-            error
-                .to_string()
-                .contains("no replacement shell was started")
-        );
-    }
 }
 
 #[cfg(all(test, unix))]
@@ -12297,7 +12150,6 @@ mod gpui_tests {
             },
         );
         view.set_workspace(Some(PaneWorkspace {
-            authorization: None,
             workspace: id,
             target: host.target,
             spec: Some(Box::new(
@@ -12556,7 +12408,6 @@ mod gpui_tests {
         window
             .update(cx, |view, _, cx| {
                 view.set_workspace(Some(PaneWorkspace {
-                    authorization: None,
                     workspace: WorkspaceId::new(),
                     target: RemoteTarget::direct("me", "build-box", 22),
                     spec: None,

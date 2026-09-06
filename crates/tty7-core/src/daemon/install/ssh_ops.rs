@@ -48,17 +48,13 @@ impl RemoteOps for SshRemoteOps {
     }
 
     fn run(&self, cmd: &str) -> Result<ExecOutput, String> {
-        self.run_with_timeout(cmd, COMMAND_TIMEOUT)
-    }
-
-    fn run_with_timeout(&self, cmd: &str, budget: Duration) -> Result<ExecOutput, String> {
         let conn = self.conn.clone();
         let cmd = cmd.to_string();
         self.block_on(async move {
-            match tokio::time::timeout(budget, exec(&conn, &cmd)).await {
+            match tokio::time::timeout(COMMAND_TIMEOUT, exec(&conn, &cmd)).await {
                 Ok(result) => result,
                 Err(_) => Err(format!(
-                    "the remote did not finish `{cmd}` within {budget:?}"
+                    "the remote did not finish `{cmd}` within {COMMAND_TIMEOUT:?}"
                 )),
             }
         })
@@ -69,7 +65,7 @@ impl RemoteOps for SshRemoteOps {
         let cmd = cmd.to_string();
         self.block_on(async move {
             match tokio::time::timeout(LAUNCH_TIMEOUT, exec(&conn, &cmd)).await {
-                Ok(Ok(out)) => command_succeeded(out),
+                Ok(Ok(_)) => Ok(()),
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err(format!(
                     "the remote did not accept the daemon launch within {LAUNCH_TIMEOUT:?}"
@@ -127,11 +123,11 @@ impl RemoteOps for SshRemoteOps {
     }
 
     fn rename(&self, from: &str, to: &str) -> Result<(), String> {
-        // SFTP v3 rename need not replace an existing destination. The server
-        // binary is staged in the same directory on Linux/macOS, so mv can
-        // publish it by rename without an unlink-then-rename gap. Do not fall
-        // back to removing the destination if the command fails.
-        command_succeeded(self.run(&publish_command(from, to))?)
+        self.sftp_op(SftpOp::Rename {
+            from: from.to_string(),
+            to: to.to_string(),
+        })
+        .map(|_| ())
     }
 
     fn remove_file(&self, path: &str) -> Result<(), String> {
@@ -148,24 +144,6 @@ impl RemoteOps for SshRemoteOps {
             Err(e) => Err(e),
         }
     }
-}
-
-fn command_succeeded(out: ExecOutput) -> Result<(), String> {
-    if out.success() {
-        Ok(())
-    } else {
-        Err(out.failure_reason())
-    }
-}
-
-fn publish_command(from: &str, to: &str) -> String {
-    let from = super::shell_quote(from);
-    let to = super::shell_quote(to);
-    // Refuse a directory instead of letting mv move the staging file into it.
-    format!(
-        "if [ -d {to} ]; then printf '%s\\n' 'server destination is a directory' >&2; \
-         exit 1; fi; mv -f {from} {to}"
-    )
 }
 
 fn is_not_found(msg: &str) -> bool {
@@ -212,36 +190,6 @@ async fn exec(conn: &Arc<SshConnection>, cmd: &str) -> Result<ExecOutput, String
 mod tests {
     use super::*;
     use crate::daemon::ssh::test_support::{Exec, FakeSshd};
-
-    #[test]
-    fn command_failure_is_not_mistaken_for_a_successful_launch() {
-        for status in [Some(1), Some(127), None] {
-            let out = ExecOutput {
-                status,
-                stdout: String::new(),
-                stderr: "launch failed\nmore detail".into(),
-            };
-            assert_eq!(command_succeeded(out).unwrap_err(), "launch failed");
-        }
-        assert!(
-            command_succeeded(ExecOutput {
-                status: Some(0),
-                stdout: String::new(),
-                stderr: String::new(),
-            })
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn publication_quotes_paths_and_never_unlinks_the_destination() {
-        let command = publish_command("/home/a user's/.tmp", "/home/a user's/server");
-        assert!(command.contains(&super::super::shell_quote("/home/a user's/.tmp")));
-        assert!(command.contains(&super::super::shell_quote("/home/a user's/server")));
-        assert!(command.contains("if [ -d "));
-        assert!(command.contains("mv -f "));
-        assert!(!command.contains("rm "));
-    }
 
     #[test]
     fn missing_files_are_recognised_across_server_wordings() {

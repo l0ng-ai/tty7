@@ -22,44 +22,29 @@ enum PaneEndpoint {
 #[derive(Clone, Debug, Default)]
 pub struct PaneClient {
     endpoint: PaneEndpoint,
-    access: Option<crate::daemon::protocol::PaneAccess>,
 }
 
 impl PaneClient {
     pub fn local() -> PaneClient {
         PaneClient {
             endpoint: PaneEndpoint::Local,
-            access: None,
         }
     }
 
     pub fn at(endpoint: impl Into<PathBuf>) -> PaneClient {
         PaneClient {
             endpoint: PaneEndpoint::At(endpoint.into()),
-            access: None,
         }
     }
 
     pub fn routed(target: RouteTarget) -> PaneClient {
         PaneClient {
             endpoint: PaneEndpoint::Routed(target),
-            access: None,
         }
     }
 
-    pub fn with_access(mut self, access: crate::daemon::protocol::PaneAccess) -> Self {
-        self.access = Some(access);
-        self
-    }
-
-    /// Explicit administration by the authenticated OS account. Remote GUI
-    /// connections must use a workspace capability instead.
-    pub fn management(self) -> Self {
-        self.with_access(crate::daemon::protocol::PaneAccess::Manage)
-    }
-
     fn open(&self) -> io::Result<transport::Stream> {
-        let mut stream = match &self.endpoint {
+        match &self.endpoint {
             PaneEndpoint::Local => transport::connect(),
             PaneEndpoint::At(path) => transport::connect_endpoint_at(path),
             PaneEndpoint::Routed(target) => {
@@ -69,16 +54,11 @@ impl PaneClient {
                     server_command: None,
                     channel: RouteChannel::Pane,
                     action: RouteAction::Forward,
-                    legacy_stop_consent: false,
                 };
                 negotiate(&mut stream, &header)?;
                 Ok(stream)
             }
-        }?;
-        if let Some(access) = &self.access {
-            ClientMsg::Access(access.clone()).encode(&mut stream)?;
         }
-        Ok(stream)
     }
 
     pub fn list(&self) -> io::Result<Vec<PaneInfo>> {
@@ -103,13 +83,7 @@ impl PaneClient {
 
     pub fn kill(&self, pane_id: u64) -> io::Result<()> {
         let mut stream = self.open()?;
-        stream.set_read_timeout(Some(OPEN_REPLY_WAIT))?;
-        ClientMsg::Kill { pane_id }.encode(&mut stream)?;
-        match DaemonMsg::read(&mut stream)? {
-            DaemonMsg::KillAck { pane_id: killed } if killed == pane_id => Ok(()),
-            DaemonMsg::Error(message) => Err(io::Error::other(message)),
-            other => Err(unexpected_reply("Kill", &other)),
-        }
+        ClientMsg::Kill { pane_id }.encode(&mut stream)
     }
 
     /// Ask the daemon to become `exe` without stopping, keeping every pane.

@@ -60,12 +60,6 @@ src/ui/ssh_prompt.rs|std::fs::read
 src/ui/ssh_connect.rs|std::fs::read
 src/ui/settings.rs|std::fs::read
 
-# Resume proofs are client credentials under config_path("remote-resume.json"),
-# never a workspace path. Only the private loader and config-dir creation are
-# exempt; other filesystem operations in this module remain checked.
-src/ui/remote_connect/resume.rs|std::fs::File::open
-src/ui/remote_connect/resume.rs|std::fs::create_dir_all
-
 # Shell history lives in the local user's home (`~/.zsh_history` &co.) and backs
 # this app's own history search. A remote pane's history is the remote shell's
 # business, read over the wire, not through here.

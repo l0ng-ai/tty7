@@ -48,15 +48,11 @@ impl Daemon {
     }
 
     fn binary() -> PathBuf {
-        // Cross-built tests may be copied to an explicitly authorized Unix
-        // test host; the compiled-in Cargo path then names the build machine.
-        std::env::var_os("TTY7_TEST_SERVER")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_tty7-server")))
+        PathBuf::from(env!("CARGO_BIN_EXE_tty7-server"))
     }
 
     fn panes(&self) -> PaneClient {
-        PaneClient::at(self.dir.path().join("daemon.sock")).management()
+        PaneClient::at(self.dir.path().join("daemon.sock"))
     }
 
     /// The pid the daemon records for itself. An `exec` keeps it; stopping and
@@ -126,37 +122,23 @@ fn windows_contain(haystack: &[u8], needle: &[u8]) -> bool {
 fn collect_until(session: &mut tty7_core::client::PaneSession, marker: &[u8]) -> Vec<u8> {
     let mut seen: Vec<u8> = Vec::new();
     loop {
-        let bytes = match session.recv() {
-            Ok(DaemonMsg::Output(bytes)) | Ok(DaemonMsg::Snapshot(bytes)) => bytes,
-            Ok(DaemonMsg::TerminalCheckpoint(bytes)) => {
-                let mut mirror = tty7_core::daemon::terminal_state::Mirror::new(size(), false);
-                tty7_core::daemon::terminal_state::decode(&bytes)
-                    .expect("the handoff replay is a valid terminal checkpoint")
-                    .apply(&mut mirror.term, &mut mirror.parser)
-                    .unwrap();
-                mirror.parser.stop_sync(&mut mirror.term);
-                mirror
-                    .term
-                    .grid()
-                    .display_iter()
-                    .map(|cell| cell.c)
-                    .collect::<String>()
-                    .into_bytes()
+        match session.recv() {
+            Ok(DaemonMsg::Output(bytes)) | Ok(DaemonMsg::Snapshot(bytes)) => {
+                seen.extend_from_slice(&bytes);
+                if windows_contain(&seen, marker) {
+                    return seen;
+                }
             }
             Ok(DaemonMsg::Exited { code }) => panic!(
                 "the pane exited ({code:?}) before {:?} appeared; saw {:?}",
                 String::from_utf8_lossy(marker),
                 String::from_utf8_lossy(&seen)
             ),
-            Ok(_) => continue,
+            Ok(_) => {}
             Err(e) => panic!(
                 "the pane stream ended early: {e}; saw {:?}",
                 String::from_utf8_lossy(&seen)
             ),
-        };
-        seen.extend_from_slice(&bytes);
-        if windows_contain(&seen, marker) {
-            return seen;
         }
     }
 }
@@ -209,7 +191,7 @@ fn a_handoff_keeps_the_process_the_pty_and_the_shell_that_is_on_it() {
         .set_recv_timeout(Some(STREAM_WITHIN))
         .expect("bound the stream reads");
 
-    // Replay can be raw bytes or the complete checkpoint the image carried.
+    // The replay is the ring the previous image was holding.
     let replayed = collect_until(&mut session, b"tty7_before_survivor");
     assert!(
         windows_contain(&replayed, b"tty7_before_survivor"),

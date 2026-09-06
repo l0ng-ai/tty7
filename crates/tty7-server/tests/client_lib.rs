@@ -53,7 +53,7 @@ impl Daemon {
     }
 
     fn panes(&self) -> PaneClient {
-        PaneClient::at(self.pane_endpoint()).management()
+        PaneClient::at(self.pane_endpoint())
     }
 
     fn control(&self, name: &str) -> ControlClient {

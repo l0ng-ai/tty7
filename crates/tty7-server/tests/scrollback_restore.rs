@@ -60,7 +60,7 @@ impl Instance {
     }
 
     fn panes(&self) -> PaneClient {
-        PaneClient::at(self.endpoint()).management()
+        PaneClient::at(self.endpoint())
     }
 
     fn control_endpoint(&self) -> PathBuf {
@@ -145,9 +145,6 @@ impl Instance {
     fn stop(&self, mut running: Running) {
         let mut stream =
             transport::connect_endpoint_at(&self.endpoint()).expect("connect to ask for shutdown");
-        ClientMsg::Access(tty7_core::daemon::protocol::PaneAccess::Manage)
-            .encode(&mut stream)
-            .unwrap();
         ClientMsg::Shutdown
             .encode(&mut stream)
             .expect("send Shutdown");
@@ -175,9 +172,6 @@ impl Instance {
     fn spawn_restoring(&self, dead: u64) -> (u64, Vec<u8>) {
         let mut stream =
             transport::connect_endpoint_at(&self.endpoint()).expect("connect to spawn");
-        ClientMsg::Access(tty7_core::daemon::protocol::PaneAccess::Manage)
-            .encode(&mut stream)
-            .unwrap();
         ClientMsg::Spawn {
             cwd: None,
             size: size(),

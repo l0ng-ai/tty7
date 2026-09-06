@@ -207,25 +207,10 @@ pub fn holder_pid() -> Option<u32> {
 /// spawn follows on each of those paths.
 #[cfg(unix)]
 pub fn clear_record_if_free() {
-    clear_record_after_exit(std::time::Duration::ZERO);
-}
-
-/// Process liveness can disappear before the kernel releases the final lock
-/// reference (notably during macOS exit). A reap may give that release a bounded
-/// grace, but must still acquire the lock before touching the record: a new
-/// holder always wins over cleanup of its predecessor.
-#[cfg(unix)]
-pub(crate) fn clear_record_after_exit(patience: std::time::Duration) {
-    let Some(path) = lock_path() else { return };
-    clear_record_at(&path, patience);
-}
-
-#[cfg(unix)]
-fn clear_record_at(path: &std::path::Path, patience: std::time::Duration) {
     use std::os::unix::io::AsRawFd as _;
 
-    let deadline = std::time::Instant::now() + patience;
-    let Ok(file) = File::options().write(true).open(path) else {
+    let Some(path) = lock_path() else { return };
+    let Ok(file) = File::options().write(true).open(&path) else {
         return;
     };
     loop {
@@ -235,13 +220,7 @@ fn clear_record_at(path: &std::path::Path, patience: std::time::Duration) {
             return;
         }
         match std::io::Error::last_os_error().raw_os_error() {
-            Some(libc::EINTR | libc::EWOULDBLOCK) => {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    return;
-                }
-                std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
-            }
+            Some(libc::EINTR) => continue,
             _ => return,
         }
     }
@@ -489,44 +468,6 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reap_cleanup_waits_for_the_final_lock_reference_to_be_released() {
-        use std::io::Write as _;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("daemon.lock");
-        let mut seat = open_exclusive(&path).unwrap().unwrap();
-        seat.write_all(b"dead-holder").unwrap();
-        clear_record_at(&path, std::time::Duration::ZERO);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "dead-holder");
-        // Model the gap between a process becoming unobservable and the last
-        // kernel/inherited descriptor releasing its flock.
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            drop(seat);
-        });
-        clear_record_at(&path, PATIENCE);
-        release.join().unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reap_cleanup_is_bounded_and_preserves_a_replacement_holders_record() {
-        use std::io::Write as _;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("daemon.lock");
-        let mut replacement = open_exclusive(&path).unwrap().unwrap();
-        replacement.write_all(b"new-holder").unwrap();
-        let started = std::time::Instant::now();
-        clear_record_at(&path, std::time::Duration::from_millis(30));
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new-holder");
-        assert!(open_exclusive(&path).unwrap().is_none());
     }
 
     #[test]

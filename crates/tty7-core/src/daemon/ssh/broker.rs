@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,7 +15,6 @@ pub struct PromptBroker {
     emit: Box<dyn Fn(DaemonMsg) -> bool + Send + Sync>,
     pending: Mutex<HashMap<u64, oneshot::Sender<AuthResponse>>>,
     next_id: AtomicU64,
-    cancelled: AtomicBool,
 }
 
 impl PromptBroker {
@@ -24,7 +23,6 @@ impl PromptBroker {
             emit,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
-            cancelled: AtomicBool::new(false),
         })
     }
 
@@ -32,47 +30,32 @@ impl PromptBroker {
         !self.pending.lock().unwrap().is_empty()
     }
 
-    pub fn cancel(&self) {
-        let mut pending = self.pending.lock().unwrap();
-        self.cancelled.store(true, Ordering::Release);
-        pending.clear();
-    }
-
     pub async fn prompt(&self, kind: AuthPromptKind) -> AuthResponse {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().unwrap();
-            if self.cancelled.load(Ordering::Acquire) {
-                return AuthResponse::Cancelled;
-            }
-            pending.insert(id, tx);
-        }
-        // Authentication can be dropped while awaiting delivery or a reply.
-        // Otherwise the stale sender keeps has_pending() true indefinitely,
-        // suspending network deadlines on subsequent attempts.
-        let _pending = PendingPrompt { broker: self, id };
+        self.pending.lock().unwrap().insert(id, tx);
 
         let frame = DaemonMsg::AuthPrompt {
             request_id: id,
             prompt: kind,
         };
         if !self.deliver_with_retry(frame).await {
+            self.pending.lock().unwrap().remove(&id);
             return AuthResponse::Cancelled;
         }
 
         match tokio::time::timeout(PROMPT_TIMEOUT, rx).await {
             Ok(Ok(resp)) => resp,
-            _ => AuthResponse::Cancelled,
+            _ => {
+                self.pending.lock().unwrap().remove(&id);
+                AuthResponse::Cancelled
+            }
         }
     }
 
     async fn deliver_with_retry(&self, frame: DaemonMsg) -> bool {
         let deadline = tokio::time::Instant::now() + DELIVERY_WINDOW;
         loop {
-            if self.cancelled.load(Ordering::Acquire) {
-                return false;
-            }
             if (self.emit)(frame.clone()) {
                 return true;
             }
@@ -101,77 +84,9 @@ impl PromptBroker {
     }
 }
 
-struct PendingPrompt<'a> {
-    broker: &'a PromptBroker,
-    id: u64,
-}
-
-impl Drop for PendingPrompt<'_> {
-    fn drop(&mut self) {
-        self.broker.pending.lock().unwrap().remove(&self.id);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test(start_paused = true)]
-    async fn abandoning_a_prompt_cleans_up_during_delivery_and_reply_waits() {
-        for delivered in [false, true] {
-            let broker = PromptBroker::new(Box::new(move |_| delivered));
-            let asking = broker.clone();
-            let task = tokio::spawn(async move {
-                asking
-                    .prompt(AuthPromptKind::Password {
-                        user: "u".into(),
-                        host: "h".into(),
-                    })
-                    .await
-            });
-            tokio::task::yield_now().await;
-            assert!(broker.has_pending());
-            task.abort();
-            assert!(task.await.unwrap_err().is_cancelled());
-            assert!(!broker.has_pending());
-            broker.deliver(1, AuthResponse::Secret("late reply".into()));
-            assert!(!broker.has_pending());
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn cancelling_a_route_wakes_prompts_owned_by_the_ssh_handler_too() {
-        for delivered in [false, true] {
-            let broker = PromptBroker::new(Box::new(move |_| delivered));
-            let asking = broker.clone();
-            let task = tokio::spawn(async move {
-                asking
-                    .prompt(AuthPromptKind::Password {
-                        user: "u".into(),
-                        host: "h".into(),
-                    })
-                    .await
-            });
-            tokio::task::yield_now().await;
-            assert!(broker.has_pending());
-            broker.cancel();
-            // The handler task is not aborted: cancellation must reach the
-            // prompt even when russh, not the route future, owns that task.
-            let response = tokio::time::timeout(Duration::from_secs(1), task)
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(matches!(response, AuthResponse::Cancelled));
-            assert!(!broker.has_pending());
-            let response = broker
-                .prompt(AuthPromptKind::Password {
-                    user: "u".into(),
-                    host: "h".into(),
-                })
-                .await;
-            assert!(matches!(response, AuthResponse::Cancelled));
-        }
-    }
 
     #[test]
     fn prompt_returns_delivered_response() {

@@ -197,6 +197,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.1-dev"
+source = "git+https://github.com/l0ng-ai/alacritty?rev=1276f128fbaa8832cbc66210675cbe8aeb570499#1276f128fbaa8832cbc66210675cbe8aeb570499"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.1",
@@ -9836,7 +9837,6 @@ dependencies = [
 name = "tty7-core"
 version = "26.9.0"
 dependencies = [
- "alacritty_terminal",
  "anyhow",
  "base64 0.22.1",
  "core-foundation 0.10.0",
@@ -10255,6 +10255,8 @@ dependencies = [
 [[package]]
 name = "vte"
 version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.1",

@@ -16,9 +16,8 @@
 //! invisible, which is the cell the correcting frame would have moved it back
 //! to anyway.
 //!
-//! Only conhost parks a cursor, so the reader runs this for local ConPTY
-//! output alone, not routed Linux/macOS or native SSH output on Windows.
-//! On those paths the pty is raw and the
+//! Only conhost parks a cursor, so the reader runs this on Windows alone
+//! (`RemoteTerminal::REPAIR_PARKED_CURSOR`). Off it the pty is raw and the
 //! application's cursor is the real one: a TUI is free to end a repaint on the
 //! text it just wrote and then echo the next keystroke straight after it, with
 //! no positioning of its own — vim opens its `:` command line exactly that way,

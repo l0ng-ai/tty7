@@ -672,10 +672,6 @@ pub fn ensure_wsl_server(distro: &str) -> io::Result<String> {
 }
 
 pub fn restart_wsl_daemon(distro: &str) -> io::Result<()> {
-    restart_wsl_daemon_consenting(distro, false)
-}
-
-pub fn restart_wsl_daemon_consenting(distro: &str, legacy_stop: bool) -> io::Result<()> {
     validate_distro(distro)?;
     let ops = WslRemoteOps::new(distro);
     let source = BundledServerBinary::discover();
@@ -687,9 +683,7 @@ pub fn restart_wsl_daemon_consenting(distro: &str, legacy_stop: bool) -> io::Res
     // restart fails halfway, the next pane must go and look rather than trust a
     // note written before the upheaval.
     forget_wsl_server(distro);
-    Installer::with_source(&ops, &source, confirm.as_ref(), host_label(distro))
-        .with_legacy_stop_consent(legacy_stop)
-        .restart_daemon()?;
+    Installer::with_source(&ops, &source, confirm.as_ref(), host_label(distro)).restart_daemon()?;
     Ok(())
 }
 
@@ -697,10 +691,6 @@ pub fn restart_wsl_daemon_consenting(distro: &str, legacy_stop: bool) -> io::Res
 /// build's. The bundled server is already on this computer, so unlike SSH there
 /// is nothing to download — the copy is the whole install.
 pub fn replace_wsl_server(distro: &str) -> io::Result<()> {
-    replace_wsl_server_consenting(distro, false)
-}
-
-pub fn replace_wsl_server_consenting(distro: &str, legacy_stop: bool) -> io::Result<()> {
     validate_distro(distro)?;
     let ops = WslRemoteOps::new(distro);
     let source = BundledServerBinary::discover();
@@ -708,9 +698,7 @@ pub fn replace_wsl_server_consenting(distro: &str, legacy_stop: bool) -> io::Res
     let lock = install_lock(distro);
     let _held = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     forget_wsl_server(distro);
-    Installer::with_source(&ops, &source, confirm.as_ref(), host_label(distro))
-        .with_legacy_stop_consent(legacy_stop)
-        .replace()?;
+    Installer::with_source(&ops, &source, confirm.as_ref(), host_label(distro)).replace()?;
     Ok(())
 }
 
@@ -1303,19 +1291,6 @@ mod tests {
             };
             if cmd.contains("uname -sm") {
                 return ok("Linux x86_64\n");
-            }
-            if cmd.contains(crate::daemon::maintenance::SERVING_FLAG) {
-                return if *self.serving.lock().unwrap() {
-                    ok(&crate::daemon::maintenance::Reply::Healthy {
-                        control: crate::daemon::control::CONTROL_VERSION,
-                        protocol: crate::daemon::protocol::PROTOCOL_VERSION,
-                        build: env!("CARGO_PKG_VERSION").into(),
-                        instance: "test-instance".into(),
-                    }
-                    .to_line())
-                } else {
-                    Err("not serving".into())
-                };
             }
             if cmd.contains("--stdio --bridge") {
                 return if *self.serving.lock().unwrap() {

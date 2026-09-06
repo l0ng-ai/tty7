@@ -3209,7 +3209,12 @@ impl Tty7App {
             .iter()
             .any(|tab| tab.pane.leaves().iter().any(|l| l.entity_id() == slot_id));
         if !still_there {
-            parts.discard_unclaimed(|route, id| kill_pane_off_thread(route, id, cx));
+            log::info!(
+                "pane {} arrived after its slot closed; killing it",
+                parts.pane_id
+            );
+            let route = crate::terminal::PaneRoute::for_workspace(parts.workspace.as_ref());
+            kill_pane_off_thread(route, parts.pane_id, cx);
             return;
         }
         let was_focused = pending.read(cx).focus_handle.contains_focused(window, cx);
@@ -6880,8 +6885,6 @@ impl Tty7App {
         };
         let bar = gpui_component::v_flex()
             .occlude()
-            .max_w(gpui::relative(0.95))
-            .min_w_0()
             .gap(px(6.))
             .px_3()
             .py_1p5()
@@ -6894,18 +6897,11 @@ impl Tty7App {
             .text_color(theme.muted_foreground)
             .child(
                 gpui_component::h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .child(gpui_component::Icon::new(gpui_component::IconName::Globe))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .whitespace_normal()
-                            .overflow_hidden()
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.foreground)
                             .child(message),
@@ -6915,7 +6911,6 @@ impl Tty7App {
                         use gpui_component::button::ButtonVariants as _;
                         this.child(
                             gpui_component::button::Button::new("remote-status-action")
-                                .flex_shrink_0()
                                 .label(label)
                                 .primary()
                                 .small()
@@ -8139,23 +8134,7 @@ fn start_pane_spawn(
     window: &mut Window,
     cx: &mut Context<Tty7App>,
 ) {
-    let mut spawn = pending.read(cx).spawn.clone();
-    if let Some(old) = &spawn.workspace {
-        let current = crate::ui::remote_workspace::pane_workspace_for(cx, old.workspace);
-        match current {
-            Some(current) if current.target == old.target && current.authorization.is_some() => {
-                spawn.workspace = Some(current);
-            }
-            _ => {
-                pending.update(cx, |p, cx| p.fail(t(L10nKey::RemoteNoticeDisconnected), cx));
-                return;
-            }
-        }
-    }
-    let attempt = pending.update(cx, |p, cx| {
-        p.spawn.workspace = spawn.workspace.clone();
-        p.begin_attempt(cx)
-    });
+    let spawn = pending.read(cx).spawn.clone();
     let slot_id = pending.entity_id();
     let font_size = spawn.font_size;
     cx.spawn_in(window, async move |this, cx| {
@@ -8173,63 +8152,10 @@ fn start_pane_spawn(
             })
             .await;
         let _ = this.update_in(cx, |app, window, cx| {
-            if !pending.read(cx).is_attempt(attempt) {
-                // Superseded restore attempts only release their connection.
-                if let Ok(parts) = parts {
-                    parts.discard_unclaimed(|route, id| kill_pane_off_thread(route, id, cx));
-                }
-                return;
-            }
-            if let Ok(parts) = &parts
-                && let Some(old) = &parts.workspace
-            {
-                let current = crate::ui::remote_workspace::pane_workspace_for(cx, old.workspace);
-                if current.as_ref().and_then(|w| w.authorization.as_ref())
-                    != old.authorization.as_ref()
-                {
-                    pending.update(cx, |p, cx| p.fail(t(L10nKey::RemoteNoticeDisconnected), cx));
-                    return;
-                }
-            }
             app.land_pane(slot_id, &pending, parts, font_size, window, cx);
         });
     })
     .detach();
-}
-
-impl Tty7App {
-    /// A failed restoration keeps its original pane id, so it is safe to retry
-    /// once this workspace has a new lease. Never auto-retry an uncertain Spawn.
-    pub(crate) fn retry_restoring_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let pending: Vec<_> = self
-            .tabs
-            .iter()
-            .flat_map(|tab| tab.pane.leaves())
-            .filter_map(|slot| match slot {
-                PaneSlot::Connecting(p) if p.read(cx).spawn.restore_pane.is_some() => {
-                    Some(p.clone())
-                }
-                _ => None,
-            })
-            .collect();
-        for pane in pending {
-            let before = pane.read(cx);
-            let Some(old) = &before.spawn.workspace else {
-                continue;
-            };
-            let current = crate::ui::remote_workspace::pane_workspace_for(cx, old.workspace);
-            let changed = current.as_ref().and_then(|w| w.authorization.as_ref())
-                != old.authorization.as_ref();
-            if changed
-                || matches!(
-                    before.state,
-                    crate::ui::pending_pane::PendingState::Failed(_)
-                )
-            {
-                start_pane_spawn(pane, window, cx);
-            }
-        }
-    }
 }
 
 fn build_terminal_view(

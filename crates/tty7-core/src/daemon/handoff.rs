@@ -28,8 +28,8 @@
 //!
 //! - **Native SSH panes.** Their session is a cipher state and a set of tasks
 //!   in this process's memory. The socket descriptor would survive, but nothing
-//!   that knows how to speak on it would. A handoff with any such pane is
-//!   refused before exec; maintenance must not close it as a fallback.
+//!   that knows how to speak on it would. They are hung up before the exec, so
+//!   the far end sees a clean disconnect rather than a stalled connection.
 //! - **Client connections.** A window is holding a socket to us; that socket
 //!   dies with the image. Clients reconnect and reattach by pane id, which is
 //!   the path they already use after any restart — except that this time the
@@ -97,8 +97,6 @@ struct PaneRecord {
     /// Length of this pane's ring in the data section, which follows the
     /// manifest in pane order.
     ring_len: u32,
-    #[serde(default)]
-    terminal_checkpoint: Option<Vec<u8>>,
 }
 
 /// What this process was told on the command line, if it was started as the far
@@ -245,7 +243,6 @@ fn stage(panes: &[Carried], next_pane_id: u64) -> std::io::Result<std::fs::File>
             agent_argv: pane.agent_argv.clone(),
             agent_session: pane.agent_session.clone(),
             ring_len: encoded.len() as u32,
-            terminal_checkpoint: pane.terminal_checkpoint.clone(),
         });
         data.extend_from_slice(&encoded);
     }
@@ -369,7 +366,6 @@ pub fn adopt(fd: RawFd) -> Option<Adopted> {
             integration_dir: record.integration_dir,
             size: record.size,
             ring,
-            terminal_checkpoint: record.terminal_checkpoint,
             cwd: record.cwd,
             osc_title: record.osc_title,
             shell_spec: record.shell,
@@ -408,7 +404,6 @@ mod tests {
             owner: Some("workspace".into()),
             master_fd: fd,
             child_pid: 4242,
-            terminal_checkpoint: None,
             integration_dir: Some(PathBuf::from("/tmp/tty7-int")),
             size: size(),
             ring: vec![crate::daemon::scrollback::Segment {
@@ -470,30 +465,6 @@ mod tests {
             "a silent pane is still a live shell"
         );
         assert!(adopted.panes[0].ring.is_empty());
-    }
-
-    #[test]
-    fn handoff_keeps_the_complete_checkpoint_not_only_truncated_raw_bytes() {
-        let mut mirror = crate::daemon::terminal_state::Mirror::new(size(), false);
-        mirror.advance(b"shell\x1b[?1049h\x1b[?1003;1006hTUI\xe4\xb8");
-        let checkpoint = mirror.encode().unwrap();
-        let mut pane = carried(3, 20, b"truncated tail");
-        pane.terminal_checkpoint = Some(checkpoint.clone());
-        let staged = stage(&[pane], 4).unwrap();
-        let adopted = adopt(std::os::fd::IntoRawFd::into_raw_fd(staged)).unwrap();
-        let bytes = adopted.panes[0].terminal_checkpoint.as_ref().unwrap();
-        assert_eq!(bytes, &checkpoint);
-        let mut restored = crate::daemon::terminal_state::Mirror::new(size(), false);
-        crate::daemon::terminal_state::decode(bytes)
-            .unwrap()
-            .apply(&mut restored.term, &mut restored.parser)
-            .unwrap();
-        mirror.advance(b"\xad\x1b[?1049l");
-        restored.advance(b"\xad\x1b[?1049l");
-        assert_eq!(
-            serde_json::to_value(mirror.term.checkpoint()).unwrap(),
-            serde_json::to_value(restored.term.checkpoint()).unwrap()
-        );
     }
 
     #[test]

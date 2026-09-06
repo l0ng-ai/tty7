@@ -36,7 +36,6 @@ pub struct PendingPane {
     pub machine: SharedString,
     pub state: PendingState,
     pub spawn: PendingSpawn,
-    attempt: Option<uuid::Uuid>,
 }
 
 impl EventEmitter<RetryRequested> for PendingPane {}
@@ -52,12 +51,10 @@ impl PendingPane {
             machine: machine.into(),
             state: PendingState::Connecting,
             spawn,
-            attempt: None,
         }
     }
 
     pub fn fail(&mut self, reason: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.attempt = None;
         self.state = PendingState::Failed(reason.into());
         cx.notify();
     }
@@ -66,65 +63,11 @@ impl PendingPane {
         self.state = PendingState::Connecting;
         cx.notify();
     }
-
-    pub(crate) fn begin_attempt(&mut self, cx: &mut Context<Self>) -> uuid::Uuid {
-        let attempt = uuid::Uuid::new_v4();
-        self.attempt = Some(attempt);
-        self.retrying(cx);
-        attempt
-    }
-
-    pub(crate) fn is_attempt(&self, attempt: uuid::Uuid) -> bool {
-        self.attempt == Some(attempt)
-    }
 }
 
 impl Focusable for PendingPane {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus_handle.clone()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[gpui::test]
-    fn superseded_restore_attempts_cannot_overwrite_a_retry(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let pending = cx.new(|cx| {
-                PendingPane::new(
-                    "remote",
-                    PendingSpawn {
-                        workspace: None,
-                        working_directory: None,
-                        restore_pane: Some(7),
-                        shell: None,
-                        agent: None,
-                        agent_session_id: None,
-                        agent_launch_argv: None,
-                        owner: None,
-                        font_size: 14.,
-                    },
-                    cx,
-                )
-            });
-            pending.update(cx, |p, cx| {
-                let first = p.begin_attempt(cx);
-                let retry = p.begin_attempt(cx);
-                assert!(!p.is_attempt(first));
-                assert!(p.is_attempt(retry));
-                p.fail("disconnected", cx);
-                assert!(!p.is_attempt(retry));
-                let next = p.begin_attempt(cx);
-                assert!(p.is_attempt(next));
-                assert_eq!(
-                    p.spawn.restore_pane,
-                    Some(7),
-                    "retry keeps original identity"
-                );
-            });
-        });
     }
 }
 

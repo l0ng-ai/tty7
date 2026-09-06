@@ -17,9 +17,7 @@ const READY_WITHIN: Duration = Duration::from_secs(30);
 const EXIT_WITHIN: Duration = Duration::from_secs(10);
 
 fn spawn_daemon(dir: &Path) -> Child {
-    let binary = std::env::var_os("TTY7_TEST_SERVER")
-        .unwrap_or_else(|| env!("CARGO_BIN_EXE_tty7-server").into());
-    Command::new(binary)
+    Command::new(env!("CARGO_BIN_EXE_tty7-server"))
         .arg("--daemon")
         .arg("--config-dir")
         .arg(dir)
@@ -48,9 +46,6 @@ fn send_shutdown(endpoint: &Path) {
     use std::io::Write as _;
     let mut stream =
         std::os::unix::net::UnixStream::connect(endpoint).expect("connect to the daemon");
-    ClientMsg::Access(tty7_core::daemon::protocol::PaneAccess::Manage)
-        .encode(&mut stream)
-        .unwrap();
     ClientMsg::Shutdown
         .encode(&mut stream)
         .expect("send Shutdown");

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -66,12 +66,6 @@ pub struct RouteHeader {
     pub channel: RouteChannel,
     #[serde(default)]
     pub action: RouteAction,
-    /// The user's explicit yes to ending a legacy server's sessions so the
-    /// update can proceed. Defaults to false on the wire in both directions:
-    /// an old peer that never heard of the field declines to stop anything,
-    /// which is the only safe reading of an absent consent.
-    #[serde(default)]
-    pub legacy_stop_consent: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -92,7 +86,6 @@ impl RouteHeader {
             server_command: None,
             channel: RouteChannel::Control,
             action: RouteAction::Forward,
-            legacy_stop_consent: false,
         }
     }
 
@@ -111,14 +104,6 @@ impl RouteHeader {
         self
     }
 
-    /// Carry the user's explicit confirmation that a legacy server's sessions
-    /// may end so the update can proceed. Meaningful only beside
-    /// `restart_server`/`replace_server`; forwarded alone it changes nothing.
-    pub fn with_legacy_stop_consent(mut self) -> RouteHeader {
-        self.legacy_stop_consent = true;
-        self
-    }
-
     pub fn wsl(distro: impl Into<String>) -> RouteHeader {
         RouteHeader {
             target: RouteTarget::Wsl {
@@ -127,7 +112,6 @@ impl RouteHeader {
             server_command: None,
             channel: RouteChannel::Control,
             action: RouteAction::Forward,
-            legacy_stop_consent: false,
         }
     }
 
@@ -140,7 +124,6 @@ impl RouteHeader {
             server_command: None,
             channel: RouteChannel::Control,
             action: RouteAction::Forward,
-            legacy_stop_consent: false,
         }
     }
 
@@ -273,19 +256,6 @@ impl RouteReply {
 
 pub trait RouteAuthResponder: Send + Sync {
     fn respond(&self, machine: &RouteTarget, prompt: &AuthPromptKind) -> AuthResponse;
-
-    fn respond_cancellable(
-        &self,
-        machine: &RouteTarget,
-        prompt: &AuthPromptKind,
-        cancellation: &super::cancel::RouteCancellation,
-    ) -> AuthResponse {
-        if cancellation.is_active() {
-            self.respond(machine, prompt)
-        } else {
-            AuthResponse::Cancelled
-        }
-    }
 }
 
 pub struct CancelAuth;
@@ -319,33 +289,13 @@ pub fn negotiate<S>(stream: &mut S, header: &RouteHeader) -> io::Result<RouteAck
 where
     for<'a> &'a mut S: Read + Write,
 {
-    negotiate_cancellable(stream, header, &super::cancel::RouteCancellation::default())
-}
-
-/// The caller registers the socket with `cancellation` before entering here.
-/// Responders receive the same token, so a GUI question cannot keep a closed
-/// route's worker blocked waiting for an answer nobody needs any more.
-pub fn negotiate_cancellable<S>(
-    stream: &mut S,
-    header: &RouteHeader,
-    cancellation: &super::cancel::RouteCancellation,
-) -> io::Result<RouteAck>
-where
-    for<'a> &'a mut S: Read + Write,
-{
-    cancellation.check()?;
     header.write(&mut &mut *stream)?;
     loop {
-        cancellation.check()?;
         let (kind, payload) = protocol::read_frame(&mut &mut *stream)?;
-        cancellation.check()?;
         match kind {
             ROUTE_KIND => return RouteAck::from_payload(&payload),
             ROUTE_PROMPT_KIND => {
-                if let Some(reply) =
-                    answer(&header.target, RoutePrompt::decode(&payload)?, cancellation)
-                {
-                    cancellation.check()?;
+                if let Some(reply) = answer(&header.target, RoutePrompt::decode(&payload)?) {
                     reply.write(&mut &mut *stream)?;
                 }
             }
@@ -362,15 +312,10 @@ where
     }
 }
 
-fn answer(
-    machine: &RouteTarget,
-    prompt: RoutePrompt,
-    cancellation: &super::cancel::RouteCancellation,
-) -> Option<RouteReply> {
+fn answer(machine: &RouteTarget, prompt: RoutePrompt) -> Option<RouteReply> {
     match prompt {
         RoutePrompt::Auth { request_id, prompt } => {
-            let response =
-                route_auth_responder().respond_cancellable(machine, &prompt, cancellation);
+            let response = route_auth_responder().respond(machine, &prompt);
             Some(RouteReply::Auth {
                 request_id,
                 response,
@@ -380,8 +325,8 @@ fn answer(
             request_id,
             request,
         } => {
-            let decision = crate::daemon::install::install_confirm()
-                .confirm_cancellable(&request.into_request(), cancellation);
+            let decision =
+                crate::daemon::install::install_confirm().confirm(&request.into_request());
             Some(RouteReply::Install {
                 request_id,
                 approve: decision == InstallDecision::Approve,
@@ -507,18 +452,9 @@ struct Relay {
     out: tokio::sync::mpsc::UnboundedSender<(u8, Vec<u8>)>,
     pending: Mutex<HashMap<u64, std::sync::mpsc::SyncSender<bool>>>,
     next_id: AtomicU64,
-    cancelled: AtomicBool,
 }
 
 impl Relay {
-    fn cancel(&self) {
-        // The flag and insertion use the same lock: a question cannot sneak
-        // into pending after cancellation has drained it.
-        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        self.cancelled.store(true, Ordering::Release);
-        pending.clear();
-    }
-
     fn fulfil(&self, request_id: u64, approve: bool) {
         if let Ok(mut pending) = self.pending.lock()
             && let Some(tx) = pending.remove(&request_id)
@@ -535,17 +471,10 @@ impl Relay {
 }
 
 impl InstallConfirm for Relay {
-    fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
-    }
-
     fn confirm(&self, request: &InstallRequest) -> InstallDecision {
         let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         if let Ok(mut pending) = self.pending.lock() {
-            if self.is_cancelled() {
-                return InstallDecision::Decline;
-            }
             pending.insert(request_id, tx);
         } else {
             return InstallDecision::Decline;
@@ -570,20 +499,6 @@ impl InstallConfirm for Relay {
                 InstallDecision::Decline
             }
         }
-    }
-}
-
-// Dropping spawn_blocking's JoinHandle does not stop its worker. Close the
-// relay explicitly when its local route disappears, waking consent waits.
-struct RouteLifetime {
-    relay: Arc<Relay>,
-    broker: Arc<PromptBroker>,
-}
-
-impl Drop for RouteLifetime {
-    fn drop(&mut self) {
-        self.relay.cancel();
-        self.broker.cancel();
     }
 }
 
@@ -616,7 +531,6 @@ async fn drive(local: Stream, header: &RouteHeader) -> io::Result<()> {
         out,
         pending: Mutex::new(HashMap::new()),
         next_id: AtomicU64::new(1),
-        cancelled: AtomicBool::new(false),
     });
     let setup = RouteSetup {
         broker: PromptBroker::new(Box::new(move |msg| match msg {
@@ -630,10 +544,6 @@ async fn drive(local: Stream, header: &RouteHeader) -> io::Result<()> {
         progress: relay.clone(),
         mismatches: Arc::new(Mutex::new(Vec::new())),
         channel: header.channel,
-    };
-    let _route_lifetime = RouteLifetime {
-        relay: relay.clone(),
-        broker: setup.broker.clone(),
     };
 
     let Some((mut link, conn, leftover)) = ({
@@ -815,16 +725,15 @@ async fn restart_server(
     setup: &RouteSetup,
     action: RouteAction,
 ) -> anyhow::Result<()> {
-    let legacy_stop = header.legacy_stop_consent;
     match (&header.target, action) {
         (RouteTarget::Ssh(spec), RouteAction::ReplaceServer) => {
             SshManager::global()
-                .replace_remote_server(spec, setup, legacy_stop)
+                .replace_remote_server(spec, setup)
                 .await
         }
         (RouteTarget::Ssh(spec), _) => {
             SshManager::global()
-                .restart_remote_server(spec, setup, legacy_stop)
+                .restart_remote_server(spec, setup)
                 .await
         }
         // A distro's server is installed and launched from here too, so both
@@ -833,18 +742,14 @@ async fn restart_server(
         (RouteTarget::Wsl { distro }, RouteAction::ReplaceServer) => {
             let distro = distro.clone();
             setup
-                .blocking(move || {
-                    crate::daemon::install::wsl::replace_wsl_server_consenting(&distro, legacy_stop)
-                })
+                .blocking(move || crate::daemon::install::wsl::replace_wsl_server(&distro))
                 .await??;
             Ok(())
         }
         (RouteTarget::Wsl { distro }, _) => {
             let distro = distro.clone();
             setup
-                .blocking(move || {
-                    crate::daemon::install::wsl::restart_wsl_daemon_consenting(&distro, legacy_stop)
-                })
+                .blocking(move || crate::daemon::install::wsl::restart_wsl_daemon(&distro))
                 .await??;
             Ok(())
         }
@@ -972,7 +877,6 @@ mod tests {
                 server_command: Some("tty7-server --stdio".to_string()),
                 channel: RouteChannel::Control,
                 action: RouteAction::Forward,
-                legacy_stop_consent: false,
             },
         ] {
             let describe = header.describe();
@@ -1083,46 +987,6 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_a_route_interrupts_blocked_negotiation_and_releases_its_socket() {
-        use super::super::cancel::RouteCancellation;
-        use std::net::{TcpListener, TcpStream};
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let cancellation = RouteCancellation::default();
-        cancellation
-            .register(Arc::new(client.try_clone().unwrap()))
-            .unwrap();
-        let (started, waiting) = std::sync::mpsc::channel();
-        let peer = std::thread::spawn(move || {
-            let (mut peer, _) = listener.accept().unwrap();
-            peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            let (kind, _) = protocol::read_frame(&mut peer).unwrap();
-            assert_eq!(kind, ROUTE_KIND);
-            started.send(()).unwrap();
-            peer.read(&mut [0u8; 1])
-        });
-        let worker_cancel = cancellation.clone();
-        let (completed, done) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            completed
-                .send(
-                    negotiate_cancellable(
-                        &mut client,
-                        &RouteHeader::local_stdio("unused", &[]),
-                        &worker_cancel,
-                    )
-                    .is_err(),
-                )
-                .unwrap();
-        });
-        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
-        cancellation.cancel();
-        assert!(done.recv_timeout(Duration::from_secs(2)).unwrap());
-        assert_eq!(peer.join().unwrap().unwrap(), 0);
-        worker.join().unwrap();
-    }
-
-    #[test]
     fn an_install_request_round_trips_through_a_prompt() {
         let original = a_request();
         let prompt = RoutePrompt::Install {
@@ -1153,7 +1017,6 @@ mod tests {
             out,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
-            cancelled: AtomicBool::new(false),
         });
 
         let asking = {
@@ -1179,41 +1042,8 @@ mod tests {
             out,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
-            cancelled: AtomicBool::new(false),
         };
         assert_eq!(relay.confirm(&a_request()), InstallDecision::Decline);
-    }
-
-    #[test]
-    fn closing_a_route_wakes_consent_waiters_and_refuses_late_questions() {
-        let (out, mut outbox) = tokio::sync::mpsc::unbounded_channel();
-        let relay = Arc::new(Relay {
-            out,
-            pending: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(1),
-            cancelled: AtomicBool::new(false),
-        });
-        let lifetime = RouteLifetime {
-            relay: relay.clone(),
-            broker: PromptBroker::new(Box::new(|_| true)),
-        };
-        let (done, finished) = std::sync::mpsc::channel();
-        let asking = relay.clone();
-        let worker = std::thread::spawn(move || {
-            done.send(asking.confirm(&a_request())).unwrap();
-        });
-        outbox.blocking_recv().expect("consent is being awaited");
-        drop(lifetime);
-        assert_eq!(
-            finished.recv_timeout(Duration::from_secs(2)).unwrap(),
-            InstallDecision::Decline
-        );
-        worker.join().unwrap();
-        assert!(relay.is_cancelled());
-        assert!(relay.pending.lock().unwrap().is_empty());
-        relay.fulfil(1, true);
-        assert_eq!(relay.confirm(&a_request()), InstallDecision::Decline);
-        assert!(outbox.try_recv().is_err());
     }
 
     #[test]
@@ -1435,33 +1265,6 @@ mod tests {
         let back = RouteHeader::decode(legacy).unwrap();
         assert_eq!(back.action, RouteAction::Forward);
         assert_eq!(back.channel, RouteChannel::Pane, "and nothing else moved");
-    }
-
-    #[test]
-    fn the_legacy_stop_consent_defaults_to_refused_and_survives_the_wire() {
-        let header = RouteHeader::local_stdio("cat", &[]);
-        assert!(
-            !header.legacy_stop_consent,
-            "consent is never on unless the user just gave it"
-        );
-
-        let mut buf = Vec::new();
-        header
-            .restart_server()
-            .with_legacy_stop_consent()
-            .write(&mut buf)
-            .unwrap();
-        let (_, payload) = protocol::read_frame(&mut buf.as_slice()).unwrap();
-        assert!(
-            RouteHeader::decode(&payload).unwrap().legacy_stop_consent,
-            "a granted consent must reach the router"
-        );
-
-        let legacy = br#"{"target":{"wsl":{"distro":"Ubuntu"}},"action":"restart_server"}"#;
-        assert!(
-            !RouteHeader::decode(legacy).unwrap().legacy_stop_consent,
-            "an older client never carries consent"
-        );
     }
 
     #[test]

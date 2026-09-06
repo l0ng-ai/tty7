@@ -16,16 +16,8 @@ use crate::daemon::install::{
 use crate::daemon::protocol::{AuthPromptKind, AuthResponse, NativeSshSpec};
 use crate::daemon::router::RouteHeader;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use tty7_core::daemon::cancel::RouteCancellation;
 use tty7_core::host::remote::RemoteHost;
 use tty7_core::host::{Host as _, HostId};
-
-mod attempt;
-pub use attempt::ConnectAttempt;
-mod prompt;
-use prompt::PromptValidity;
-mod resume;
-pub use resume::ResumeProofs;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostChoice {
@@ -327,9 +319,7 @@ pub fn connect_blocking(
     target: &RemoteTarget,
     header: RouteHeader,
     label: &str,
-    cancellation: &RouteCancellation,
 ) -> Result<Connected, String> {
-    cancellation.check().map_err(|e| e.to_string())?;
     note_origin(&header.target, target);
     crate::daemon::spawn::ensure_running().map_err(|e| {
         t_fmt(
@@ -338,7 +328,6 @@ pub fn connect_blocking(
         )
     })?;
 
-    cancellation.check().map_err(|e| e.to_string())?;
     let stream = crate::daemon::transport::connect().map_err(|e| {
         t_fmt(
             L10nKey::RemoteDaemonUnreachable,
@@ -347,20 +336,14 @@ pub fn connect_blocking(
     })?;
 
     let mut stream = stream;
-    cancellation
-        .register(Arc::new(stream.try_clone().map_err(|e| e.to_string())?))
-        .map_err(|e| e.to_string())?;
-    crate::daemon::router::negotiate_cancellable(&mut stream, &header, cancellation).map_err(
-        |e| {
-            t_fmt(
-                L10nKey::RemoteHostUnreachable,
-                &[("machine", label), ("error", &e.to_string())],
-            )
-        },
-    )?;
+    crate::daemon::router::negotiate(&mut stream, &header).map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteHostUnreachable,
+            &[("machine", label), ("error", &e.to_string())],
+        )
+    })?;
 
     let hello = ControlHello::host_rpc(new_session_token(), client_hostname());
-    cancellation.check().map_err(|e| e.to_string())?;
     let host = handshake(stream, &target.connection_key(), &hello).map_err(|e| {
         t_fmt(
             L10nKey::RemoteHostNotTty7,
@@ -368,7 +351,6 @@ pub fn connect_blocking(
         )
     })?;
 
-    cancellation.check().map_err(|e| e.to_string())?;
     let rows = list_workspaces(&host).map_err(|e| {
         t_fmt(
             L10nKey::RemoteWorkspaceListFailed,
@@ -376,7 +358,6 @@ pub fn connect_blocking(
         )
     })?;
     let home = host.home();
-    cancellation.check().map_err(|e| e.to_string())?;
     refresh_agent_hooks_once(&host, &home);
     Ok(Connected { host, home, rows })
 }
@@ -487,40 +468,11 @@ pub fn rows_from_machine(machine: &tty7_core::core::machine::Machine) -> Vec<Rem
 pub struct HostLinks {
     hosts: HashMap<HostId, Arc<RemoteHost>>,
     homes: HashMap<HostId, PathBuf>,
-    pane_access: HashMap<(HostId, WorkspaceId), crate::daemon::protocol::PaneAuthorization>,
 }
 
 impl Global for HostLinks {}
 
 impl HostLinks {
-    pub fn pane_access(
-        cx: &App,
-        host: HostId,
-        workspace: WorkspaceId,
-    ) -> Option<crate::daemon::protocol::PaneAuthorization> {
-        let links = cx.try_global::<HostLinks>()?;
-        if !links.hosts.get(&host)?.client().is_connected() {
-            return None;
-        }
-        links.pane_access.get(&(host, workspace)).cloned()
-    }
-
-    pub fn grant_panes(
-        cx: &mut App,
-        host: HostId,
-        workspace: WorkspaceId,
-        access: crate::daemon::protocol::PaneAuthorization,
-    ) {
-        cx.default_global::<HostLinks>()
-            .pane_access
-            .insert((host, workspace), access);
-    }
-
-    pub fn forget_panes(cx: &mut App, host: HostId, workspace: WorkspaceId) {
-        cx.default_global::<HostLinks>()
-            .pane_access
-            .remove(&(host, workspace));
-    }
     pub fn get(cx: &mut App, id: HostId) -> Option<Arc<RemoteHost>> {
         cx.default_global::<HostLinks>().hosts.get(&id).cloned()
     }
@@ -549,34 +501,15 @@ impl HostLinks {
         let id = host.id();
         crate::ui::host_registry::HostRegistry::insert(cx, Arc::clone(&host).into_shared());
         let table = cx.default_global::<HostLinks>();
-        let previous = table.hosts.insert(id, host.clone());
+        table.hosts.insert(id, host);
         table.homes.insert(id, home);
-        if let Some(previous) = previous
-            && !Arc::ptr_eq(&previous, &host)
-        {
-            table.pane_access.retain(|(host, _), _| *host != id);
-            Self::retire(previous, cx);
-        }
     }
 
     pub fn remove(cx: &mut App, id: HostId) {
         let table = cx.default_global::<HostLinks>();
-        let removed = table.hosts.remove(&id);
-        table.pane_access.retain(|(host, _), _| *host != id);
+        table.hosts.remove(&id);
         table.homes.remove(&id);
         crate::ui::host_registry::HostRegistry::remove(cx, id);
-        if let Some(host) = removed {
-            Self::retire(host, cx);
-        }
-    }
-
-    fn retire(host: Arc<RemoteHost>, cx: &App) {
-        // Invalidate immediately, but don't spend the reader's 500 ms close
-        // grace on the UI thread. Keep its owner alive through the reap.
-        host.client().request_close();
-        cx.background_executor()
-            .spawn(async move { host.client().close() })
-            .detach();
     }
 
     pub fn len(cx: &mut App) -> usize {
@@ -633,18 +566,11 @@ const CONSENT_TIMEOUT: Duration = Duration::from_secs(180);
 pub struct PendingInstall {
     pub request: InstallRequest,
     reply: std::sync::mpsc::SyncSender<InstallDecision>,
-    validity: PromptValidity,
 }
 
 impl PendingInstall {
-    pub fn is_active(&self) -> bool {
-        self.validity.is_active()
-    }
-
     pub fn answer(self, decision: InstallDecision) {
-        if self.is_active() {
-            let _ = self.reply.send(decision);
-        }
+        let _ = self.reply.send(decision);
     }
 }
 
@@ -654,32 +580,17 @@ pub struct GuiInstallConfirm;
 
 impl InstallConfirm for GuiInstallConfirm {
     fn confirm(&self, request: &InstallRequest) -> InstallDecision {
-        self.confirm_cancellable(request, &RouteCancellation::default())
-    }
-
-    fn confirm_cancellable(
-        &self,
-        request: &InstallRequest,
-        cancellation: &RouteCancellation,
-    ) -> InstallDecision {
-        if !cancellation.is_active() {
-            return InstallDecision::Decline;
-        }
-        let validity = PromptValidity::new(cancellation.clone());
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         {
             let Ok(mut mailbox) = MAILBOX.lock() else {
                 return InstallDecision::Decline;
             };
-            mailbox.retain(PendingInstall::is_active);
             mailbox.push(PendingInstall {
                 request: request.clone(),
                 reply: tx,
-                validity: validity.clone(),
             });
         }
-        validity
-            .wait(rx, CONSENT_TIMEOUT)
+        rx.recv_timeout(CONSENT_TIMEOUT)
             .unwrap_or(InstallDecision::Decline)
     }
 }
@@ -716,7 +627,6 @@ pub fn clear_install_progress(host: HostId) {
 }
 
 pub fn register(cx: &mut App) {
-    ResumeProofs::install(cx);
     crate::daemon::install::set_install_confirm(Arc::new(GuiInstallConfirm));
     crate::daemon::install::set_install_progress(Arc::new(GuiInstallProgress));
     crate::daemon::router::set_route_auth_responder(Arc::new(GuiRouteAuth));
@@ -724,9 +634,7 @@ pub fn register(cx: &mut App) {
 }
 
 pub fn take_pending_install() -> Option<PendingInstall> {
-    let mut mailbox = MAILBOX.lock().ok()?;
-    mailbox.retain(PendingInstall::is_active);
-    mailbox.pop()
+    MAILBOX.lock().ok()?.pop()
 }
 
 pub struct PendingAuth {
@@ -745,42 +653,11 @@ pub struct PendingAuth {
     /// password prompt arriving anyway means the server turned it down.
     pub auto_supplied_password: bool,
     reply: std::sync::mpsc::SyncSender<AuthResponse>,
-    validity: PromptValidity,
 }
 
 impl PendingAuth {
-    #[cfg(test)]
-    pub(crate) fn for_test(
-        host: HostId,
-        cancellation: RouteCancellation,
-    ) -> (Self, std::sync::mpsc::Receiver<AuthResponse>) {
-        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
-        (
-            Self {
-                host,
-                prompt: AuthPromptKind::Password {
-                    user: "test".into(),
-                    host: "test.invalid".into(),
-                },
-                endpoint: None,
-                auto_supplied_password: false,
-                reply,
-                validity: PromptValidity::new(cancellation),
-            },
-            receiver,
-        )
-    }
-    pub fn id(&self) -> uuid::Uuid {
-        self.validity.id
-    }
-    pub fn is_active(&self) -> bool {
-        self.validity.is_active()
-    }
-
     pub fn answer(self, response: AuthResponse) {
-        if self.is_active() {
-            let _ = self.reply.send(response);
-        }
+        let _ = self.reply.send(response);
     }
 }
 
@@ -834,19 +711,6 @@ impl crate::daemon::router::RouteAuthResponder for GuiRouteAuth {
         machine: &crate::daemon::router::RouteTarget,
         prompt: &AuthPromptKind,
     ) -> AuthResponse {
-        self.respond_cancellable(machine, prompt, &RouteCancellation::default())
-    }
-
-    fn respond_cancellable(
-        &self,
-        machine: &crate::daemon::router::RouteTarget,
-        prompt: &AuthPromptKind,
-        cancellation: &RouteCancellation,
-    ) -> AuthResponse {
-        if !cancellation.is_active() {
-            return AuthResponse::Cancelled;
-        }
-        let validity = PromptValidity::new(cancellation.clone());
         let key = machine.origin_key();
         let host = origin_host(&key).unwrap_or_else(|| HostId::from_connection_key(&key));
         let (endpoint, auto_supplied_password) = match machine {
@@ -865,26 +729,21 @@ impl crate::daemon::router::RouteAuthResponder for GuiRouteAuth {
             let Ok(mut mailbox) = AUTH_MAILBOX.lock() else {
                 return AuthResponse::Cancelled;
             };
-            mailbox.retain(PendingAuth::is_active);
             mailbox.push(PendingAuth {
                 host,
                 prompt: prompt.clone(),
                 endpoint,
                 auto_supplied_password,
                 reply: tx,
-                validity: validity.clone(),
             });
         }
-        validity
-            .wait(rx, CONSENT_TIMEOUT)
+        rx.recv_timeout(CONSENT_TIMEOUT)
             .unwrap_or(AuthResponse::Cancelled)
     }
 }
 
 pub fn take_pending_auth() -> Option<PendingAuth> {
-    let mut mailbox = AUTH_MAILBOX.lock().ok()?;
-    mailbox.retain(PendingAuth::is_active);
-    mailbox.pop()
+    AUTH_MAILBOX.lock().ok()?.pop()
 }
 
 #[cfg(test)]
@@ -899,8 +758,8 @@ pub fn mismatch_answers() -> [gpui::PromptButton; 2] {
     crate::ui::confirm_answers(t(L10nKey::RemoteMismatchReplaceServer), t(L10nKey::Cancel))
 }
 
-fn mismatch_running(m: &MismatchedRemoteDaemon) -> String {
-    match (&m.running_version, &m.running_exe) {
+pub fn mismatch_detail(m: &MismatchedRemoteDaemon) -> String {
+    let running = match (&m.running_version, &m.running_exe) {
         (Some(v), Some(exe)) => t_fmt(
             L10nKey::RemoteMismatchVersionFromExe,
             &[("version", v), ("exe", exe)],
@@ -908,11 +767,7 @@ fn mismatch_running(m: &MismatchedRemoteDaemon) -> String {
         (Some(v), None) => v.clone(),
         (None, Some(exe)) => t_fmt(L10nKey::RemoteMismatchUnknownBuildFromExe, &[("exe", exe)]),
         (None, None) => t(L10nKey::RemoteMismatchUnknownBuild).to_string(),
-    }
-}
-
-pub fn mismatch_detail(m: &MismatchedRemoteDaemon) -> String {
-    let running = mismatch_running(m);
+    };
     t_fmt(
         L10nKey::RemoteMismatchDetail,
         &[
@@ -950,21 +805,7 @@ pub fn dialect_complaint(error: &str, machine: &str) -> Option<String> {
     ))
 }
 
-/// What came of asking a machine's server to make way for this build.
-pub enum ServerMaintenance {
-    /// The far end is serving (or about to serve) the binary this client speaks.
-    Done,
-    /// The running server predates the polite-restart request, so the only way
-    /// forward is to have the new binary stop it outright — which ends every
-    /// session it serves. Nothing has been signalled yet; the user has to say
-    /// that out loud before the attempt is retried with consent.
-    NeedsLegacyStopConsent,
-}
-
-pub fn restart_server_blocking(
-    header: RouteHeader,
-    label: &str,
-) -> Result<ServerMaintenance, String> {
+pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), String> {
     let action = header.action;
     crate::daemon::spawn::ensure_running().map_err(|e| {
         t_fmt(
@@ -978,62 +819,16 @@ pub fn restart_server_blocking(
             &[("error", &e.to_string())],
         )
     })?;
-    let ack = match crate::daemon::router::negotiate(&mut stream, &header) {
-        Ok(ack) => ack,
-        Err(e) if crate::daemon::install::legacy_stop_needs_consent(&e.to_string()) => {
-            return Ok(ServerMaintenance::NeedsLegacyStopConsent);
-        }
-        Err(e) => {
-            return Err(t_fmt(
-                L10nKey::RemoteServerRestartFailed,
-                &[("machine", label), ("error", &e.to_string())],
-            ));
-        }
-    };
+    let ack = crate::daemon::router::negotiate(&mut stream, &header).map_err(|e| {
+        t_fmt(
+            L10nKey::RemoteServerRestartFailed,
+            &[("machine", label), ("error", &e.to_string())],
+        )
+    })?;
     if !ack.performed(action) {
         return Err(t_fmt(L10nKey::RemoteDaemonTooOld, &[("machine", label)]));
     }
-    Ok(ServerMaintenance::Done)
-}
-
-/// The stop-the-old-server question, asked only after the running server has
-/// already proved it cannot answer the polite-restart request. When the mismatch
-/// report that led here named the two builds, the detail names them again.
-pub fn legacy_stop_title(machine: &str) -> String {
-    t_fmt(L10nKey::RemoteLegacyStopTitle, &[("machine", machine)])
-}
-
-pub fn legacy_stop_detail(
-    machine: &str,
-    mismatch: Option<&MismatchedRemoteDaemon>,
-    keep: &str,
-) -> String {
-    let versions = mismatch
-        .map(|m| {
-            t_fmt(
-                L10nKey::RemoteLegacyStopVersions,
-                &[
-                    ("running", &mismatch_running(m)),
-                    ("wanted", &m.wanted_version),
-                ],
-            )
-        })
-        .unwrap_or_default();
-    t_fmt(
-        L10nKey::RemoteLegacyStopBody,
-        &[
-            ("machine", machine),
-            ("versions", &versions),
-            ("keep", keep),
-        ],
-    )
-}
-
-pub fn legacy_stop_answers(action: L10nKey) -> [gpui::PromptButton; 2] {
-    crate::ui::confirm_answers(
-        &t_fmt(L10nKey::RemoteLegacyStopConfirm, &[("action", t(action))]),
-        t(L10nKey::RemoteLegacyStopKeep),
-    )
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1131,7 +926,6 @@ mod tests {
         let pending = PendingInstall {
             request: request(),
             reply: tx,
-            validity: PromptValidity::default(),
         };
         drop(pending);
         assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
@@ -1143,7 +937,6 @@ mod tests {
         PendingInstall {
             request: request(),
             reply: tx,
-            validity: PromptValidity::default(),
         }
         .answer(InstallDecision::Approve);
         assert_eq!(rx.recv().unwrap(), InstallDecision::Approve);
@@ -1151,7 +944,6 @@ mod tests {
 
     #[test]
     fn the_gui_handler_parks_the_request_for_the_ui_to_answer() {
-        let _turn = claim_mailbox();
         while take_pending_install().is_some() {}
         let handle = std::thread::spawn(|| GuiInstallConfirm.confirm(&request()));
         let pending = loop {
@@ -1166,42 +958,8 @@ mod tests {
         assert_eq!(handle.join().unwrap(), InstallDecision::Approve);
     }
 
-    #[test]
-    fn a_cancelled_install_question_returns_without_waiting_for_the_native_dialog() {
-        let _turn = claim_mailbox();
-        while take_pending_install().is_some() {}
-        let cancellation = RouteCancellation::default();
-        let worker_cancel = cancellation.clone();
-        let (completed, done) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            completed
-                .send(GuiInstallConfirm.confirm_cancellable(&request(), &worker_cancel))
-                .unwrap();
-        });
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let pending = loop {
-            if let Some(pending) = take_pending_install() {
-                break pending;
-            }
-            assert!(Instant::now() < deadline);
-            std::thread::yield_now();
-        };
-        cancellation.cancel();
-        assert_eq!(
-            done.recv_timeout(Duration::from_secs(2)).unwrap(),
-            InstallDecision::Decline
-        );
-        assert!(!pending.is_active());
-        pending.answer(InstallDecision::Approve);
-        worker.join().unwrap();
-        assert!(take_pending_install().is_none());
-    }
-
     fn native_spec(user: &str, host: &str, port: u16) -> NativeSshSpec {
         let mut profile = crate::core::ssh_profile::SshProfile::new(host.to_string());
-        // `new` sets the display name, not the network host. Leaving it empty
-        // made independent tests overwrite the same me@:22 origin entry.
-        profile.host = host.to_string();
         profile.user = user.to_string();
         profile.port = port;
         crate::ui::ssh_connect::build_native_ssh_spec(
@@ -1253,50 +1011,6 @@ mod tests {
             handle.join().unwrap(),
             AuthResponse::Secret("hunter2".into())
         );
-    }
-
-    #[test]
-    fn a_cancelled_auth_question_returns_while_its_sheet_is_still_open() {
-        use crate::daemon::router::RouteAuthResponder as _;
-        let _turn = claim_mailbox();
-        while take_pending_auth().is_some() {}
-        let cancellation = RouteCancellation::default();
-        let worker_cancel = cancellation.clone();
-        let route = crate::daemon::router::RouteTarget::Ssh(Box::new(native_spec(
-            "me",
-            "cancel-auth.invalid",
-            22,
-        )));
-        let (completed, done) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            completed
-                .send(GuiRouteAuth.respond_cancellable(
-                    &route,
-                    &AuthPromptKind::Password {
-                        user: "me".into(),
-                        host: "cancel-auth.invalid".into(),
-                    },
-                    &worker_cancel,
-                ))
-                .unwrap();
-        });
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let pending = loop {
-            if let Some(pending) = take_pending_auth() {
-                break pending;
-            }
-            assert!(Instant::now() < deadline);
-            std::thread::yield_now();
-        };
-        cancellation.cancel();
-        assert_eq!(
-            done.recv_timeout(Duration::from_secs(2)).unwrap(),
-            AuthResponse::Cancelled
-        );
-        assert!(!pending.is_active());
-        pending.answer(AuthResponse::Secret("obsolete-test-answer".into()));
-        worker.join().unwrap();
-        assert!(take_pending_auth().is_none());
     }
 
     #[test]
@@ -1406,43 +1120,6 @@ mod tests {
                 "{label} is unexplained: {detail}"
             );
         }
-    }
-
-    #[test]
-    fn the_legacy_stop_prompt_names_the_machine_and_discloses_the_cut() {
-        crate::ui::i18n::set_locale("en");
-        let detail = legacy_stop_detail("me@legacy-box:22", None, t(L10nKey::RemoteLegacyStopKeep));
-        assert!(detail.contains("me@legacy-box:22"), "{detail}");
-        assert!(
-            detail.contains(t(L10nKey::RemoteLegacyStopKeep)),
-            "the safe answer is unexplained: {detail}"
-        );
-
-        let with_versions = legacy_stop_detail(
-            "me@legacy-box:22",
-            Some(&MismatchedRemoteDaemon {
-                host: "me@legacy-box:22".into(),
-                running_version: Some("0.8.0".into()),
-                running_exe: None,
-                wanted_version: "0.9.1".into(),
-            }),
-            t(L10nKey::RemoteLegacyStopKeep),
-        );
-        assert!(with_versions.contains("0.8.0"), "{with_versions}");
-        assert!(with_versions.contains("0.9.1"), "{with_versions}");
-    }
-
-    #[test]
-    fn the_legacy_stop_confirm_keeps_the_word_the_user_clicked() {
-        crate::ui::i18n::set_locale("en");
-        let [cut, keep] = legacy_stop_answers(L10nKey::RemoteMismatchReplaceServer);
-        let action = t(L10nKey::RemoteMismatchReplaceServer);
-        assert!(
-            cut.label().contains(action),
-            "the entry button said {action}, the consent must not rename it: {}",
-            cut.label()
-        );
-        assert!(keep.is_cancel(), "keeping the old build answers Escape");
     }
 
     #[test]

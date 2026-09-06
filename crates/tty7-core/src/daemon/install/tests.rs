@@ -3,10 +3,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use super::*;
-
-#[cfg(unix)]
-#[path = "live_startup_test.rs"]
-mod live_startup_test;
 use crate::daemon::install::asset::{ASSET_LINUX_X86_64, CHECKSUMS_ASSET};
 
 const VERSION: &str = "26.7.5";
@@ -16,6 +12,10 @@ const HOME: &str = "/home/me";
 const BIN_DIR: &str = "/home/me/.local/share/tty7/bin";
 const BINARY: &str = "/home/me/.local/share/tty7/bin/tty7-server-c3p4";
 const TEMP_BASE: &str = "/home/me/.local/share/tty7/bin/.tty7-server-c3p4.tmp";
+
+fn temp() -> String {
+    unique_temp(TEMP_BASE)
+}
 
 const SERVER_BYTES: &[u8] = b"\x7fELF...a static musl tty7-server, pretend it is 6 MB";
 
@@ -42,7 +42,6 @@ struct FakeRemote {
     journal: Mutex<Vec<Journal>>,
     uname: String,
     put_error: Option<String>,
-    rename_error: Option<String>,
     daemon_running: Mutex<bool>,
     running_exe: Mutex<Option<String>>,
     launch_works: bool,
@@ -52,12 +51,6 @@ struct FakeRemote {
     /// a login shell that could not read the script, which is the shape the
     /// no-`/proc` bug took on every Mac.
     stop_fails: bool,
-    maintenance_reply: Option<ExecOutput>,
-    health_reply: Option<ExecOutput>,
-    startup_diagnostic: Option<String>,
-    /// What the `--stop-recorded-server` probe answers; unset models the
-    /// recorded server verified and gone, set models any refusal.
-    stop_reply: Option<ExecOutput>,
 }
 
 impl FakeRemote {
@@ -76,17 +69,12 @@ impl FakeRemote {
             journal: Mutex::new(Vec::new()),
             uname: "Linux x86_64\n".to_string(),
             put_error: None,
-            rename_error: None,
             daemon_running: Mutex::new(false),
             running_exe: Mutex::new(None),
             launch_works: true,
             speaks: Mutex::new(HashMap::new()),
             installed_speaks: Some(ours()),
             stop_fails: false,
-            maintenance_reply: None,
-            health_reply: None,
-            startup_diagnostic: None,
-            stop_reply: None,
         }
     }
 
@@ -153,16 +141,6 @@ impl FakeRemote {
         self.files.lock().unwrap().get(path).cloned()
     }
 
-    fn staged(&self) -> String {
-        self.journal()
-            .into_iter()
-            .find_map(|entry| match entry {
-                Journal::Put { path, .. } => Some(path),
-                _ => None,
-            })
-            .expect("an upload was attempted")
-    }
-
     fn writes(&self) -> Vec<Journal> {
         self.journal()
             .into_iter()
@@ -188,9 +166,6 @@ impl RemoteOps for FakeRemote {
         if cmd == "uname -sm" {
             return ok(&self.uname);
         }
-        if cmd.contains("TTY7_STARTUP_EXIT=") {
-            return ok(self.startup_diagnostic.as_deref().unwrap_or(""));
-        }
         if let Some(exe) = cmd.strip_suffix(&format!(" {PROTOCOL_FLAG}")) {
             let exe = exe.trim_matches('\'');
             return match self.speaks.lock().unwrap().get(exe) {
@@ -206,10 +181,7 @@ impl RemoteOps for FakeRemote {
             let exe = self.running_exe.lock().unwrap().clone().unwrap_or_default();
             return ok(&exe);
         }
-        if cmd.contains(crate::daemon::maintenance::PREPARE_FLAG) {
-            if let Some(reply) = &self.maintenance_reply {
-                return Ok(reply.clone());
-            }
+        if cmd == TERMINATE_RUNNING_COMMAND {
             if self.stop_fails {
                 return Ok(ExecOutput {
                     status: Some(127),
@@ -219,46 +191,7 @@ impl RemoteOps for FakeRemote {
             }
             *self.daemon_running.lock().unwrap() = false;
             *self.running_exe.lock().unwrap() = None;
-            return ok("{\"status\":\"stopped\"}");
-        }
-        if cmd.contains(crate::daemon::maintenance::STOP_RECORDED_FLAG) {
-            if let Some(reply) = &self.stop_reply {
-                return Ok(reply.clone());
-            }
-            // The candidate verified the recorded pid and the server left.
-            *self.daemon_running.lock().unwrap() = false;
-            *self.running_exe.lock().unwrap() = None;
-            return ok("{\"status\":\"stopped\"}");
-        }
-        if cmd.contains(crate::daemon::maintenance::HEALTH_FLAG)
-            || cmd.contains(crate::daemon::maintenance::SERVING_FLAG)
-        {
-            if let Some(reply) = &self.health_reply {
-                return Ok(reply.clone());
-            }
-            if !*self.daemon_running.lock().unwrap() {
-                return Err("no server is answering".into());
-            }
-            if let Some(exe) = self.running_exe.lock().unwrap().as_ref() {
-                let speaks = self.speaks.lock().unwrap();
-                // Legacy fixtures with a dialect-named installed binary (or
-                // unavailable /proc identity) still model healthy endpoints.
-                if exe != BINARY
-                    && !exe.is_empty()
-                    && !speaks.get(exe).is_some_and(|spoken| {
-                        spoken.control == CONTROL && spoken.protocol == PROTOCOL
-                    })
-                {
-                    return Err("running dialect is unknown or mismatched".into());
-                }
-            }
-            return ok(&crate::daemon::maintenance::Reply::Healthy {
-                control: CONTROL,
-                protocol: PROTOCOL,
-                build: VERSION.into(),
-                instance: "test-instance".into(),
-            }
-            .to_line());
+            return ok("");
         }
         if cmd.contains("--stdio --bridge") {
             let running = *self.daemon_running.lock().unwrap();
@@ -358,9 +291,6 @@ impl RemoteOps for FakeRemote {
             from: from.into(),
             to: to.into(),
         });
-        if let Some(error) = &self.rename_error {
-            return Err(error.clone());
-        }
         let mut files = self.files.lock().unwrap();
         match files.remove(from) {
             Some(f) => {
@@ -521,7 +451,7 @@ fn first_install_runs_all_six_steps() {
     assert_eq!(installed.bytes, SERVER_BYTES, "the verified bytes landed");
     assert_eq!(installed.mode, 0o755, "and are executable");
     assert!(
-        remote.file(&remote.staged()).is_none(),
+        remote.file(&temp()).is_none(),
         "the temp name is consumed by the rename"
     );
 
@@ -546,7 +476,6 @@ fn the_final_path_is_only_ever_reached_by_renaming_a_ready_temp() {
         .unwrap();
 
     let writes = remote.writes();
-    let temp = remote.staged();
 
     assert!(
         !writes
@@ -557,15 +486,17 @@ fn the_final_path_is_only_ever_reached_by_renaming_a_ready_temp() {
 
     let put = writes
         .iter()
-        .position(|j| matches!(j, Journal::Put { path, .. } if path == &temp))
+        .position(|j| matches!(j, Journal::Put { path, .. } if path == &temp()))
         .expect("the bytes go to the temp path");
     let chmod = writes
         .iter()
-        .position(|j| matches!(j, Journal::Chmod { path, mode } if path == &temp && *mode == 0o755))
+        .position(
+            |j| matches!(j, Journal::Chmod { path, mode } if path == &temp() && *mode == 0o755),
+        )
         .expect("the temp is made executable");
     let rename = writes
         .iter()
-        .position(|j| matches!(j, Journal::Rename { from, to } if from == &temp && to == BINARY))
+        .position(|j| matches!(j, Journal::Rename { from, to } if from == &temp() && to == BINARY))
         .expect("the temp is renamed onto the binary");
 
     assert!(put < chmod, "bytes before mode: {writes:?}");
@@ -634,12 +565,7 @@ fn a_sha256_mismatch_aborts_before_touching_the_remote() {
         "nothing may be written after a failed verification: {:?}",
         remote.writes()
     );
-    assert!(
-        !remote
-            .journal()
-            .iter()
-            .any(|j| matches!(j, Journal::Put { .. }))
-    );
+    assert!(remote.file(&temp()).is_none());
     assert!(remote.file(BINARY).is_none());
     assert!(
         user.asked().is_empty(),
@@ -836,13 +762,13 @@ fn a_failed_write_names_the_path_and_does_not_fall_back() {
             ref path,
             ref reason,
         } => {
-            assert_eq!(path, &remote.staged(), "the exact path that failed");
+            assert_eq!(path, &temp(), "the exact path that failed");
             assert!(reason.contains("no space left"), "the server's own reason");
         }
         other => panic!("expected a write failure, got {other}"),
     }
     let message = err.to_string();
-    assert!(message.contains(&remote.staged()), "{message}");
+    assert!(message.contains(&temp()), "{message}");
     assert!(message.contains("no space left"), "{message}");
 
     let puts: Vec<_> = remote
@@ -894,8 +820,8 @@ fn a_daemon_is_launched_when_the_socket_answers_nothing() {
     assert!(
         journal[launched + 1..]
             .iter()
-            .any(|j| matches!(j, Journal::Exec(c) if c.contains("--check-serving"))),
-        "and checked with real protocol replies after launch"
+            .any(|j| matches!(j, Journal::Exec(c) if c.contains("--stdio --bridge"))),
+        "and re-probed after, because a shell's exit status says nothing about the daemon"
     );
 }
 
@@ -914,53 +840,6 @@ fn a_daemon_that_never_answers_is_an_error() {
         InstallError::Launch { ref reason } => assert!(reason.contains(BINARY), "{reason}"),
         other => panic!("expected a launch failure, got {other}"),
     }
-}
-
-#[test]
-fn eof_on_an_existing_control_socket_is_not_readiness() {
-    let mut remote = FakeRemote::new().with_previous_install().serving(BINARY);
-    remote.health_reply = Some(ExecOutput {
-        status: Some(0),
-        stdout: String::new(),
-        stderr: String::new(),
-    });
-    let release = FakeRelease::new();
-    let user = FakeUser::declining();
-    let error = installer(&remote, &release, &user, "not-ready")
-        .run()
-        .unwrap_err();
-    assert!(error.to_string().contains("not ready"));
-    assert!(
-        !remote.journal().contains(&Journal::Launch),
-        "an existing failed endpoint does not authorize a replacement"
-    );
-}
-
-#[test]
-fn a_failed_daemon_launch_reports_its_exit_and_stderr_without_exhausting_retries() {
-    let mut remote = FakeRemote::new().with_previous_install();
-    remote.launch_works = false;
-    remote.startup_diagnostic =
-        Some("TTY7_STARTUP_EXIT=1\ncontrol listener unavailable: Permission denied\n".into());
-    let release = FakeRelease::new();
-    let user = FakeUser::declining();
-    let error = installer(&remote, &release, &user, "broken-start")
-        .run()
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("Permission denied") && error.contains("TTY7_STARTUP_EXIT=1"),
-        "{error}"
-    );
-    assert!(error.contains("Startup log:"));
-    assert_eq!(
-        remote
-            .journal()
-            .iter()
-            .filter(|j| matches!(j, Journal::Exec(c) if c.contains("--check-serving")))
-            .count(),
-        1
-    );
 }
 
 #[test]
@@ -1024,210 +903,11 @@ fn restart_replaces_the_running_daemon() {
     let journal = remote.journal();
     let killed = journal
         .iter()
-        .position(|j| matches!(j, Journal::Exec(c) if c.contains(crate::daemon::maintenance::PREPARE_FLAG)))
+        .position(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND))
         .expect("the old daemon is asked to stop");
     let launched = journal.iter().position(|j| *j == Journal::Launch).unwrap();
     assert!(killed < launched, "stop before start — one socket, not two");
     assert!(*remote.daemon_running.lock().unwrap());
-}
-
-#[test]
-fn unsafe_or_unacknowledged_maintenance_never_launches_or_uses_a_kill_fallback() {
-    for (status, stdout, stderr) in [
-        (1, "", "terminal panes are still running"),
-        (1, "", "old server has no idle shutdown"),
-        (0, "", ""),
-        (0, "not a structured acknowledgement", ""),
-    ] {
-        let mut remote = FakeRemote::new().with_previous_install().serving(BINARY);
-        remote.maintenance_reply = Some(ExecOutput {
-            status: Some(status),
-            stdout: stdout.into(),
-            stderr: stderr.into(),
-        });
-        let release = FakeRelease::new();
-        let user = FakeUser::approving();
-        let result = installer(&remote, &release, &user, "busy-server").replace();
-        assert!(matches!(
-            result,
-            Err(InstallError::MaintenanceDeferred { .. })
-        ));
-        assert!(*remote.daemon_running.lock().unwrap());
-        assert!(!remote.journal().contains(&Journal::Launch));
-        assert!(remote.journal().iter().all(|entry| !matches!(entry, Journal::Exec(command) if command.contains("kill ") || command.contains("kill -"))));
-    }
-}
-
-/// The structured line a current candidate prints when the running server
-/// predates safe-idle maintenance (its stderr carries the prose).
-fn legacy_deferral() -> ExecOutput {
-    ExecOutput {
-        status: Some(1),
-        stdout: crate::daemon::maintenance::Reply::Deferred {
-            kind: crate::daemon::maintenance::DeferredKind::Unsupported,
-            message: "the running server does not support safe idle restart".into(),
-        }
-        .to_line(),
-        stderr: "tty7-server: maintenance deferred: the running server does not support safe idle restart".into(),
-    }
-}
-
-fn ran_recorded_stop(journal: &[Journal]) -> bool {
-    journal.iter().any(ran_recorded_stop_at)
-}
-
-fn ran_recorded_stop_at(entry: &Journal) -> bool {
-    matches!(entry, Journal::Exec(c) if c.contains(crate::daemon::maintenance::STOP_RECORDED_FLAG))
-}
-
-#[test]
-fn a_legacy_server_defers_until_the_user_confirms_the_stop() {
-    let mut remote = FakeRemote::new().with_previous_install().serving(BINARY);
-    remote.maintenance_reply = Some(legacy_deferral());
-    let release = FakeRelease::new();
-    let user = FakeUser::approving();
-
-    let err = installer(&remote, &release, &user, "me@legacy-box:22")
-        .replace()
-        .expect_err("a legacy server defers the update until the user says yes");
-    assert!(
-        matches!(err, InstallError::LegacyStopNeedsConsent { .. }),
-        "{err:?}"
-    );
-    assert!(
-        crate::daemon::install::legacy_stop_needs_consent(&err.to_string()),
-        "the marker survives the string boundary: {err}"
-    );
-    let journal = remote.journal();
-    assert!(
-        !ran_recorded_stop(&journal),
-        "nothing was stopped without consent: {journal:?}"
-    );
-    assert!(!journal.contains(&Journal::Launch));
-    assert!(*remote.daemon_running.lock().unwrap());
-}
-
-#[test]
-fn consent_turns_the_legacy_deferral_into_a_graceful_stop_then_a_start() {
-    let mut remote = FakeRemote::new().with_previous_install().serving(BINARY);
-    remote.maintenance_reply = Some(legacy_deferral());
-    let release = FakeRelease::new();
-    let user = FakeUser::approving();
-
-    installer(&remote, &release, &user, "me@legacy-box:22")
-        .with_legacy_stop_consent(true)
-        .replace()
-        .expect("consent lets the legacy server leave gracefully");
-
-    let journal = remote.journal();
-    let stopped = journal
-        .iter()
-        .position(ran_recorded_stop_at)
-        .expect("the recorded server is asked to exit");
-    let launched = journal.iter().position(|j| *j == Journal::Launch).unwrap();
-    assert!(
-        stopped < launched,
-        "stop before start — one socket, not two"
-    );
-    assert!(
-        *remote.daemon_running.lock().unwrap(),
-        "the new daemon is serving"
-    );
-}
-
-#[test]
-fn consent_never_turns_other_deferrals_into_a_signal() {
-    // A busy server (or any non-legacy deferral) stays a plain deferral even
-    // with consent: the yes is only for "the old server cannot answer the
-    // safe-idle question", never for "sessions are in the way".
-    let mut remote = FakeRemote::new().with_previous_install().serving(BINARY);
-    remote.maintenance_reply = Some(ExecOutput {
-        status: Some(1),
-        stdout: crate::daemon::maintenance::Reply::Deferred {
-            kind: crate::daemon::maintenance::DeferredKind::Other,
-            message: "terminal panes are still running".into(),
-        }
-        .to_line(),
-        stderr: "tty7-server: maintenance deferred: terminal panes are still running".into(),
-    });
-    let release = FakeRelease::new();
-    let user = FakeUser::approving();
-
-    let err = installer(&remote, &release, &user, "busy-server")
-        .with_legacy_stop_consent(true)
-        .replace()
-        .expect_err("busy is not the legacy question");
-    assert!(
-        matches!(err, InstallError::MaintenanceDeferred { .. }),
-        "{err:?}"
-    );
-    let journal = remote.journal();
-    assert!(!ran_recorded_stop(&journal), "{journal:?}");
-    assert!(!journal.contains(&Journal::Launch));
-    assert!(*remote.daemon_running.lock().unwrap());
-}
-
-#[test]
-fn a_refused_legacy_stop_launches_nothing_and_keeps_the_old_server() {
-    let mut remote = FakeRemote::new().with_previous_install().serving(BINARY);
-    remote.maintenance_reply = Some(legacy_deferral());
-    remote.stop_reply = Some(ExecOutput {
-        status: Some(1),
-        stdout: crate::daemon::maintenance::Reply::Deferred {
-            kind: crate::daemon::maintenance::DeferredKind::Refused,
-            message: "the recorded server pid 4242 now runs /usr/bin/vim".into(),
-        }
-        .to_line(),
-        stderr: "tty7-server: maintenance deferred: refusing to signal a reused pid".into(),
-    });
-    let release = FakeRelease::new();
-    let user = FakeUser::approving();
-
-    let err = installer(&remote, &release, &user, "me@legacy-box:22")
-        .with_legacy_stop_consent(true)
-        .replace()
-        .expect_err("a stop the candidate cannot verify defers the update");
-    assert!(
-        matches!(err, InstallError::MaintenanceDeferred { .. }),
-        "{err:?}"
-    );
-    let journal = remote.journal();
-    assert!(ran_recorded_stop(&journal), "the stop was attempted");
-    assert!(
-        !journal.contains(&Journal::Launch),
-        "but nothing launched after it: {journal:?}"
-    );
-    assert!(*remote.daemon_running.lock().unwrap());
-}
-
-#[test]
-fn a_socket_or_success_exit_is_not_a_matching_running_health_check() {
-    for reply in [
-        "",
-        "{\"status\":\"stopped\"}",
-        "{\"status\":\"healthy\",\"control\":999,\"protocol\":999,\"build\":\"wrong\",\"instance\":\"other\"}",
-    ] {
-        let mut remote = FakeRemote::new().with_previous_install().serving(BINARY);
-        remote.health_reply = Some(ExecOutput {
-            status: Some(0),
-            stdout: reply.into(),
-            stderr: String::new(),
-        });
-        let release = FakeRelease::new();
-        let user = FakeUser::approving();
-        let result = installer(&remote, &release, &user, "bad-health")
-            .with_timeouts(Duration::ZERO, Duration::from_millis(1))
-            .restart_daemon();
-        assert!(matches!(result, Err(InstallError::Launch { .. })));
-        assert_eq!(
-            remote
-                .journal()
-                .iter()
-                .filter(|entry| **entry == Journal::Launch)
-                .count(),
-            1
-        );
-    }
 }
 
 #[test]
@@ -1254,7 +934,7 @@ fn a_restart_with_nothing_to_start_leaves_the_running_daemon_alone() {
         !remote
             .journal()
             .iter()
-            .any(|j| matches!(j, Journal::Exec(c) if c.contains(crate::daemon::maintenance::PREPARE_FLAG))),
+            .any(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND)),
         "nothing was stopped: {:?}",
         remote.journal()
     );
@@ -1287,7 +967,7 @@ fn replacing_installs_the_matching_server_and_then_restarts_into_it() {
     let journal = remote.journal();
     let killed = journal
         .iter()
-        .position(|j| matches!(j, Journal::Exec(c) if c.contains(crate::daemon::maintenance::PREPARE_FLAG)))
+        .position(|j| matches!(j, Journal::Exec(c) if c == TERMINATE_RUNNING_COMMAND))
         .expect("the old daemon is asked to stop");
     let written = journal
         .iter()
@@ -1302,8 +982,7 @@ fn replacing_installs_the_matching_server_and_then_restarts_into_it() {
 
 #[test]
 fn the_launch_command_detaches_and_closes_every_stream() {
-    let logs = StartupLog::new(BINARY);
-    let cmd = launch_command("/home/me/.local/share/tty7/bin/tty7-server-26.7.5", &logs);
+    let cmd = launch_command("/home/me/.local/share/tty7/bin/tty7-server-26.7.5");
     assert!(cmd.contains("setsid"), "{cmd}");
     assert!(
         cmd.contains("nohup"),
@@ -1311,11 +990,7 @@ fn the_launch_command_detaches_and_closes_every_stream() {
     );
     assert!(cmd.contains("--daemon"), "{cmd}");
     assert!(cmd.contains("< /dev/null"), "{cmd}");
-    assert!(
-        cmd.contains(&format!(">> {} 2>&1", shell_quote(&logs.log))),
-        "{cmd}"
-    );
-    assert!(cmd.contains("umask 077") && cmd.contains("set -C"));
+    assert!(cmd.contains("> /dev/null 2>&1"), "{cmd}");
     assert!(
         cmd.trim_end().ends_with("fi"),
         "both branches background it: {cmd}"
@@ -1324,15 +999,10 @@ fn the_launch_command_detaches_and_closes_every_stream() {
 
 #[test]
 fn a_launch_settle_follows_the_launch_and_never_replaces_it() {
-    let logs = StartupLog::new(BINARY);
-    let plain = launch_script(BINARY, &logs, None);
-    assert_eq!(
-        plain,
-        launch_command(BINARY, &logs),
-        "no settle, no wrapping"
-    );
+    let plain = launch_script(BINARY, None);
+    assert_eq!(plain, launch_command(BINARY), "no settle, no wrapping");
 
-    let settled = launch_script(BINARY, &logs, Some("sleep 1\n".to_string()));
+    let settled = launch_script(BINARY, Some("sleep 1\n".to_string()));
     assert!(
         settled.starts_with(&plain),
         "the launch survives: {settled}"
@@ -1365,27 +1035,24 @@ fn remote_paths_are_shell_quoted() {
 
 #[test]
 fn the_launch_command_quotes_its_binary() {
-    let cmd = launch_command("/home/me/a b/tty7-server-1.0.0", &StartupLog::new(BINARY));
-    assert!(cmd.contains("/home/me/a b/tty7-server-1.0.0"), "{cmd}");
-    assert!(
-        cmd.contains("'\\''"),
-        "the executable is quoted inside the supervised shell: {cmd}"
-    );
+    let cmd = launch_command("/home/me/a b/tty7-server-1.0.0");
+    assert!(cmd.contains("'/home/me/a b/tty7-server-1.0.0'"), "{cmd}");
 }
 
 #[test]
 fn the_running_exe_probe_cannot_fail_the_command() {
     assert!(RUNNING_EXE_COMMAND.trim_end().ends_with("true"));
-    assert!(!RUNNING_EXE_COMMAND.contains("kill"));
+    assert!(TERMINATE_RUNNING_COMMAND.trim_end().ends_with("true"));
+    assert!(TERMINATE_RUNNING_COMMAND.contains("*/tty7-server-*"));
 }
 
-/// The read-only probe has to work on a machine with no `/proc`, which is every Mac
+/// Both commands have to work on a machine with no `/proc`, which is every Mac
 /// and every BSD, and the `/proc` glob has to stay inside the guard: zsh is the
 /// login shell over there, and a top-level glob that matches nothing takes the
 /// rest of the command line with it — including the trailing `true`.
 #[test]
 fn finding_the_running_server_survives_a_machine_without_proc() {
-    for cmd in [RUNNING_EXE_COMMAND] {
+    for cmd in [RUNNING_EXE_COMMAND, TERMINATE_RUNNING_COMMAND] {
         assert!(
             cmd.starts_with("if [ -d /proc ]; then"),
             "the glob has to be unreachable before the guard passes: {cmd}"
@@ -1408,11 +1075,12 @@ fn finding_the_running_server_survives_a_machine_without_proc() {
 /// error here is invisible in production, where the output is read as "no
 /// server is running" and the failure is a ten-second timeout.
 ///
-/// Parsing covers both platform branches without relying on the test host.
+/// Parsed, not run: the terminate command would kill this developer's own
+/// server, and this test is not the place to find that out.
 #[cfg(unix)]
 #[test]
 fn both_branches_of_the_probe_are_valid_shell() {
-    for cmd in [RUNNING_EXE_COMMAND] {
+    for cmd in [RUNNING_EXE_COMMAND, TERMINATE_RUNNING_COMMAND] {
         let out = std::process::Command::new("/bin/sh")
             .arg("-n")
             .arg("-c")
@@ -1434,7 +1102,9 @@ fn both_branches_of_the_probe_are_valid_shell() {
 /// this machine has, and hold it to an exit status: the old shape answered 1
 /// under zsh, having abandoned the command line before the trailing `true`.
 ///
-/// Only a read-only probe; maintenance no longer uses process-name signals.
+/// Only the probe. The terminate command differs from it by one word, and that
+/// word would end whatever server the developer running this happens to have
+/// up; the test above pins the two to the same shape.
 #[cfg(unix)]
 #[test]
 fn the_probe_runs_clean_in_every_shell_this_machine_has() {
@@ -1493,7 +1163,7 @@ fn the_ps_arm_is_a_ps_this_machine_accepts() {
 /// which reads as "the daemon refused to die" when the truth was that the
 /// command asking it to had fallen over before the `kill`.
 #[test]
-fn a_stop_that_failed_preserves_the_reason_and_defers_maintenance() {
+fn a_stop_that_failed_is_named_in_the_timeout() {
     let remote = FakeRemote::new()
         .with_previous_install()
         .refusing_to_stop()
@@ -1507,11 +1177,11 @@ fn a_stop_that_failed_preserves_the_reason_and_defers_maintenance() {
         .restart_daemon()
         .expect_err("nothing stopped, so the restart cannot claim to have worked");
 
-    let InstallError::MaintenanceDeferred { reason } = &failed else {
+    let InstallError::Launch { reason } = &failed else {
         panic!("{failed:?}");
     };
     assert!(
-        reason.contains("no shell over here"),
+        reason.contains("did not stop") && reason.contains("no shell over here"),
         "the reason has to carry why the stop failed, not just that it did: {reason}"
     );
     assert!(
@@ -1840,7 +1510,7 @@ fn every_report_carries_the_host() {
 }
 
 #[test]
-fn a_present_binary_reports_startup_without_transfer_progress() {
+fn a_present_binary_reports_no_progress() {
     let remote = FakeRemote::new().with_previous_install();
     let release = FakeRelease::new();
     let user = FakeUser::approving();
@@ -1852,7 +1522,11 @@ fn a_present_binary_reports_startup_without_transfer_progress() {
     .expect("install");
 
     assert!(!report.installed, "nothing was written");
-    assert_eq!(reports.phases(), vec![InstallPhase::Restarting]);
+    assert!(
+        reports.phases().is_empty(),
+        "nothing transferred, so nothing to show: {:?}",
+        reports.phases()
+    );
 }
 
 #[test]
@@ -2130,7 +1804,7 @@ fn an_upload_that_speaks_the_wrong_dialect_is_not_published() {
         "nothing may sit at the published name"
     );
     assert!(
-        remote.file(&remote.staged()).is_none(),
+        remote.file(&temp()).is_none(),
         "and the staged file is cleaned up rather than left to be found"
     );
     assert!(
@@ -2227,7 +1901,7 @@ fn a_legacy_named_binary_is_probed_not_assumed() {
 
 #[test]
 fn the_staging_path_carries_the_pid() {
-    let staged = unique_temp(TEMP_BASE);
+    let staged = temp();
     assert_ne!(staged, TEMP_BASE);
     assert!(staged.contains(&std::process::id().to_string()), "{staged}");
     assert!(staged.ends_with(".tmp"), "still recognisable as staging");
@@ -2239,218 +1913,6 @@ fn the_staging_path_carries_the_pid() {
         staged.rsplit_once('/').unwrap().0,
         BINARY.rsplit_once('/').unwrap().0,
         "same directory, so the publishing rename is still atomic"
-    );
-}
-
-#[test]
-fn staging_names_are_unique_across_threads_in_the_same_process() {
-    let paths: std::collections::HashSet<_> = (0..32)
-        .map(|_| std::thread::spawn(|| unique_temp(TEMP_BASE)))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .map(|thread| thread.join().unwrap())
-        .collect();
-    assert_eq!(paths.len(), 32);
-    assert_ne!(unique_temp("staging"), unique_temp("staging"));
-}
-
-#[test]
-fn failed_publication_preserves_the_existing_binary_and_original_error() {
-    let mut remote = FakeRemote::new().with_previous_install();
-    remote.rename_error = Some("source vanished before rename".into());
-    let release = FakeRelease::new();
-    let user = FakeUser::approving();
-    let before = remote.file(BINARY).unwrap();
-    let paths = asset::remote_paths(HOME, CONTROL, PROTOCOL);
-
-    let error = installer(&remote, &release, &user, "publish-failure")
-        .install(ASSET_LINUX_X86_64, &paths)
-        .unwrap_err();
-
-    assert!(error.to_string().contains("source vanished before rename"));
-    let after = remote.file(BINARY).expect("the original binary survives");
-    assert_eq!(after.bytes, before.bytes);
-    assert_eq!(after.mode, before.mode);
-    assert!(remote.file(&remote.staged()).is_none());
-    assert!(!remote.journal().contains(&Journal::Remove(BINARY.into())));
-    assert_eq!(
-        remote
-            .journal()
-            .iter()
-            .filter(|j| matches!(j, Journal::Rename { .. }))
-            .count(),
-        1,
-        "an ambiguous publication failure must not be retried destructively"
-    );
-}
-
-#[test]
-fn ssh_install_and_maintenance_share_a_lock_per_connection_key() {
-    let first = install_lock("install-lock-test-a");
-    let same = install_lock("install-lock-test-a");
-    let other = install_lock("install-lock-test-b");
-    assert!(Arc::ptr_eq(&first, &same));
-    assert!(!Arc::ptr_eq(&first, &other));
-    let weak = Arc::downgrade(&first);
-    drop(first);
-    drop(same);
-    assert!(
-        weak.upgrade().is_none(),
-        "a drained batch does not cache remote health forever"
-    );
-    let next = install_lock("install-lock-test-a");
-    assert!(!std::sync::Weak::ptr_eq(&weak, &Arc::downgrade(&next)));
-}
-
-struct CancelWhen<F>(F);
-
-impl<F: Fn() -> bool + Send + Sync> InstallConfirm for CancelWhen<F> {
-    fn confirm(&self, _: &InstallRequest) -> InstallDecision {
-        InstallDecision::Approve
-    }
-
-    fn is_cancelled(&self) -> bool {
-        (self.0)()
-    }
-}
-
-#[test]
-fn cancelled_preparation_and_maintenance_do_not_touch_the_remote() {
-    let remote = FakeRemote::new().with_previous_install().serving(BINARY);
-    let release = FakeRelease::new();
-    let cancelled = CancelWhen(|| true);
-    let installer = Installer::new(&remote, &release, &cancelled, "cancelled");
-    assert!(matches!(installer.run(), Err(InstallError::Cancelled)));
-    assert!(matches!(
-        installer.restart_daemon(),
-        Err(InstallError::Cancelled)
-    ));
-    assert!(matches!(installer.replace(), Err(InstallError::Cancelled)));
-    assert!(remote.journal().is_empty());
-    assert!(release.fetched().is_empty());
-    let error: io::Error = InstallError::Cancelled.into();
-    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
-}
-
-#[test]
-fn cancellation_after_upload_cleans_staging_without_publishing_or_launching() {
-    let remote = FakeRemote::new().with_previous_install().serving(BINARY);
-    let release = FakeRelease::new();
-    let cancelled = CancelWhen(|| {
-        remote
-            .journal()
-            .iter()
-            .any(|j| matches!(j, Journal::Put { .. }))
-    });
-    let installer = Installer::new(&remote, &release, &cancelled, "cancelled-upload")
-        .with_version(VERSION)
-        .with_dialect(CONTROL, PROTOCOL);
-    let before = remote.file(BINARY).unwrap();
-    let result = installer.install(
-        ASSET_LINUX_X86_64,
-        &asset::remote_paths(HOME, CONTROL, PROTOCOL),
-    );
-    assert!(matches!(result, Err(InstallError::Cancelled)));
-    assert!(remote.file(&remote.staged()).is_none());
-    assert_eq!(remote.file(BINARY).unwrap().bytes, before.bytes);
-    assert!(*remote.daemon_running.lock().unwrap());
-    assert!(
-        !remote
-            .journal()
-            .iter()
-            .any(|j| matches!(j, Journal::Rename { .. } | Journal::Launch))
-    );
-}
-
-#[test]
-fn closing_the_consent_window_cannot_authorize_a_late_install() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    struct ClosedDuringConsent(AtomicBool);
-    impl InstallConfirm for ClosedDuringConsent {
-        fn confirm(&self, _: &InstallRequest) -> InstallDecision {
-            self.0.store(true, Ordering::Release);
-            InstallDecision::Approve
-        }
-        fn is_cancelled(&self) -> bool {
-            self.0.load(Ordering::Acquire)
-        }
-    }
-    let remote = FakeRemote::new();
-    let release = FakeRelease::new();
-    let user = ClosedDuringConsent(AtomicBool::new(false));
-    let result = Installer::new(&remote, &release, &user, "closed-consent")
-        .with_version(VERSION)
-        .with_dialect(CONTROL, PROTOCOL)
-        .run();
-    assert!(matches!(result, Err(InstallError::Cancelled)));
-    assert!(remote.writes().is_empty());
-}
-
-#[test]
-fn explicit_maintenance_finishes_starting_if_its_window_closes_after_the_stop() {
-    let remote = FakeRemote::new().with_previous_install().serving(BINARY);
-    let release = FakeRelease::new();
-    let cancelled = CancelWhen(|| {
-        remote
-            .journal()
-            .iter().any(|j| matches!(j, Journal::Exec(c) if c.contains(crate::daemon::maintenance::PREPARE_FLAG)))
-    });
-    Installer::new(&remote, &release, &cancelled, "maintenance")
-        .with_version(VERSION)
-        .with_dialect(CONTROL, PROTOCOL)
-        .restart_daemon()
-        .unwrap();
-    assert!(remote.journal().contains(&Journal::Launch));
-    assert!(*remote.daemon_running.lock().unwrap());
-}
-
-#[test]
-fn a_parallel_restore_shares_the_whole_successful_installer_run() {
-    let remote = FakeRemote::new();
-    let release = FakeRelease::new();
-    let user = FakeUser::approving();
-    let batch = coordinator::PreparationBatch::default();
-    let generation = uuid::Uuid::new_v4();
-    let barrier = std::sync::Barrier::new(10);
-    std::thread::scope(|scope| {
-        let jobs: Vec<_> = (0..10)
-            .map(|_| {
-                scope.spawn(|| {
-                    barrier.wait();
-                    batch
-                        .prepare(generation, &|| false, || {
-                            Ok(installer(&remote, &release, &user, "restore-batch").run()?)
-                        })
-                        .unwrap()
-                })
-            })
-            .collect();
-        for job in jobs {
-            assert_eq!(job.join().unwrap().paths.binary, BINARY);
-        }
-    });
-    let journal = remote.journal();
-    assert_eq!(user.asked().len(), 1);
-    assert_eq!(
-        journal
-            .iter()
-            .filter(|j| **j == Journal::Exec("uname -sm".into()))
-            .count(),
-        1
-    );
-    assert_eq!(
-        journal
-            .iter()
-            .filter(|j| matches!(j, Journal::Put { .. }))
-            .count(),
-        1
-    );
-    assert_eq!(
-        journal
-            .iter()
-            .filter(|j| matches!(j, Journal::Launch))
-            .count(),
-        1
     );
 }
 

@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 
 pub mod asset;
 pub mod checksums;
-mod coordinator;
 #[cfg(feature = "remote-install")]
 pub mod download;
 pub mod outcome;
@@ -63,9 +62,6 @@ pub struct RemoteStat {
 pub trait RemoteOps: Send + Sync {
     fn home_dir(&self) -> Result<String, String>;
     fn run(&self, cmd: &str) -> Result<ExecOutput, String>;
-    fn run_with_timeout(&self, cmd: &str, _budget: Duration) -> Result<ExecOutput, String> {
-        self.run(cmd)
-    }
     fn spawn_detached(&self, cmd: &str) -> Result<(), String>;
     fn launch_settle(&self, _binary: &str) -> Option<String> {
         None
@@ -258,24 +254,6 @@ pub enum InstallDecision {
 
 pub trait InstallConfirm: Send + Sync {
     fn confirm(&self, request: &InstallRequest) -> InstallDecision;
-
-    fn confirm_cancellable(
-        &self,
-        request: &InstallRequest,
-        cancellation: &super::cancel::RouteCancellation,
-    ) -> InstallDecision {
-        if cancellation.is_active() {
-            self.confirm(request)
-        } else {
-            InstallDecision::Decline
-        }
-    }
-
-    /// A routed caller that has gone away must not leave queued preparation
-    /// or an unanswerable consent prompt running in a blocking worker.
-    fn is_cancelled(&self) -> bool {
-        false
-    }
 }
 
 pub struct DenyInstall;
@@ -489,7 +467,6 @@ pub fn take_mismatched_remote_daemons() -> Vec<MismatchedRemoteDaemon> {
 
 #[derive(Debug)]
 pub enum InstallError {
-    Cancelled,
     Probe(String),
     Unsupported(UnsupportedTarget),
     NoHome(String),
@@ -513,17 +490,6 @@ pub enum InstallError {
     Launch {
         reason: String,
     },
-    MaintenanceDeferred {
-        reason: String,
-    },
-    /// The running server predates safe-idle maintenance, so the update can
-    /// only proceed by stopping it — which ends its sessions, and no caller
-    /// brought the user's confirmation for that. The UI meets this error as a
-    /// string after the route boundary; the marker token is what it matches
-    /// to offer that confirmation, so the token is never reworded.
-    LegacyStopNeedsConsent {
-        host: String,
-    },
     /// Asked to restart a server this machine does not have. Nothing was
     /// stopped — see [`Installer::restart_daemon`].
     NoServerToRestart {
@@ -540,7 +506,6 @@ pub enum InstallError {
 impl std::fmt::Display for InstallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Cancelled => write!(f, "remote preparation cancelled"),
             Self::Probe(reason) => write!(f, "could not identify the remote machine: {reason}"),
             Self::Unsupported(target) => write!(f, "{target}"),
             Self::NoHome(reason) => {
@@ -568,17 +533,6 @@ impl std::fmt::Display for InstallError {
                 write!(f, "could not write {path} on the remote machine: {reason}")
             }
             Self::Launch { reason } => write!(f, "the remote tty7-server did not start: {reason}"),
-            Self::MaintenanceDeferred { reason } => write!(
-                f,
-                "remote maintenance was deferred to preserve existing sessions: {reason}"
-            ),
-            Self::LegacyStopNeedsConsent { host } => write!(
-                f,
-                "the tty7-server running on {host} predates safe maintenance, so updating it \
-                 means stopping it — which ends its sessions and needs an explicit confirmation \
-                 [{}]",
-                Self::LEGACY_STOP_NEEDS_CONSENT
-            ),
             Self::NoServerToRestart { host, path } => write!(
                 f,
                 "{host} has no tty7-server at {path} for this build to start, so nothing was \
@@ -609,28 +563,12 @@ impl std::fmt::Display for InstallError {
 
 impl std::error::Error for InstallError {}
 
-impl InstallError {
-    /// Stable token inside the `LegacyStopNeedsConsent` message. The UI
-    /// receives the error as a string after the route boundary and keys its
-    /// localized consent prompt off this marker — never off the English.
-    pub const LEGACY_STOP_NEEDS_CONSENT: &str = "legacy-stop-needs-consent";
-}
-
-/// Whether an error string coming back from the install path is the
-/// legacy-stop consent question. Same idea as `control::parse_dialect_refusal`:
-/// the wire carries strings, the parser restores the branch point.
-pub fn legacy_stop_needs_consent(error: &str) -> bool {
-    error.contains(InstallError::LEGACY_STOP_NEEDS_CONSENT)
-}
-
 impl From<InstallError> for io::Error {
     fn from(e: InstallError) -> io::Error {
         let kind = match &e {
-            InstallError::Cancelled => io::ErrorKind::Interrupted,
             InstallError::Unsupported(_)
             | InstallError::MissingBundled { .. }
             | InstallError::NoServerToRestart { .. }
-            | InstallError::LegacyStopNeedsConsent { .. }
             | InstallError::DialectMismatch { .. } => io::ErrorKind::Unsupported,
             InstallError::Declined { .. } => io::ErrorKind::PermissionDenied,
             InstallError::Checksum(_) => io::ErrorKind::InvalidData,
@@ -663,18 +601,9 @@ pub struct Installer<'a> {
     startup_timeout: Duration,
     shutdown_timeout: Duration,
     poll_interval: Duration,
-    legacy_stop_consent: bool,
 }
 
 impl<'a> Installer<'a> {
-    fn check_cancelled(&self) -> Result<(), InstallError> {
-        if self.confirm.is_cancelled() {
-            Err(InstallError::Cancelled)
-        } else {
-            Ok(())
-        }
-    }
-
     pub fn new(
         ops: &'a dyn RemoteOps,
         fetch: &'a dyn AssetFetcher,
@@ -692,7 +621,6 @@ impl<'a> Installer<'a> {
             startup_timeout: REMOTE_STARTUP_TIMEOUT,
             shutdown_timeout: REMOTE_SHUTDOWN_TIMEOUT,
             poll_interval: REMOTE_POLL_INTERVAL,
-            legacy_stop_consent: false,
         }
     }
 
@@ -713,7 +641,6 @@ impl<'a> Installer<'a> {
             startup_timeout: REMOTE_STARTUP_TIMEOUT,
             shutdown_timeout: REMOTE_SHUTDOWN_TIMEOUT,
             poll_interval: REMOTE_POLL_INTERVAL,
-            legacy_stop_consent: false,
         }
     }
 
@@ -734,7 +661,6 @@ impl<'a> Installer<'a> {
     }
 
     pub fn replace(&self) -> Result<(), InstallError> {
-        self.check_cancelled()?;
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
         let paths = self.paths_for(&home);
 
@@ -782,23 +708,16 @@ impl<'a> Installer<'a> {
         self
     }
 
-    /// How long the maintenance helper waits after the exact instance has
-    /// acknowledged an idle stop. Expiry never permits a forced termination.
+    /// How long [`Installer::cycle_daemon`] waits for the old server to go
+    /// away. Its own knob rather than a third argument to `with_timeouts`,
+    /// because the only caller that shortens it is the test that watches a
+    /// stop fail, and every other caller wants the shipped ten seconds.
     pub fn with_shutdown_timeout(mut self, shutdown: Duration) -> Self {
         self.shutdown_timeout = shutdown;
         self
     }
 
-    /// The user's explicit yes to stopping a server too old for safe-idle
-    /// maintenance, knowing its sessions end. Without it a legacy server
-    /// defers the update instead of losing work nobody agreed to lose.
-    pub fn with_legacy_stop_consent(mut self, consent: bool) -> Self {
-        self.legacy_stop_consent = consent;
-        self
-    }
-
     pub fn run(&self) -> Result<InstallReport, InstallError> {
-        self.check_cancelled()?;
         let uname = self
             .ops
             .run("uname -sm")
@@ -901,12 +820,10 @@ impl<'a> Installer<'a> {
         asset: &'static str,
         paths: &RemotePaths,
     ) -> Result<(bool, Vec<u8>), InstallError> {
-        self.check_cancelled()?;
         let LoadedBinary {
             bytes,
             origin: asset_url,
         } = self.load_binary(asset)?;
-        self.check_cancelled()?;
         let asset_origin = asset_url.clone();
 
         let confirmed = if self.is_first_install(paths) {
@@ -920,7 +837,6 @@ impl<'a> Installer<'a> {
                 sha256: checksums::hex(&checksums::sha256(&bytes)),
             };
             if self.confirm.confirm(&request) == InstallDecision::Decline {
-                self.check_cancelled()?;
                 return Err(InstallError::Declined {
                     host: self.host.clone(),
                     path: paths.binary.clone(),
@@ -932,7 +848,6 @@ impl<'a> Installer<'a> {
         };
 
         for dir in &paths.dir_chain {
-            self.check_cancelled()?;
             self.ops.mkdir(dir).map_err(|reason| InstallError::Write {
                 path: dir.clone(),
                 reason,
@@ -940,49 +855,45 @@ impl<'a> Installer<'a> {
         }
         let _ = self.ops.chmod(&paths.bin_dir, DIR_MODE);
 
-        self.check_cancelled()?;
         let temp = unique_temp(&paths.temp);
 
         let sink = install_progress();
         let total = bytes.len() as u64;
-        let publish = (|| {
-            self.ops
-                .put_with_progress(&temp, &bytes, &|done| {
-                    sink.report(&self.host, InstallPhase::Uploading { done, total });
-                })
-                .map_err(|reason| InstallError::Write {
-                    path: temp.clone(),
-                    reason,
-                })?;
-            self.check_cancelled()?;
-            self.ops
-                .chmod(&temp, BINARY_MODE)
-                .map_err(|reason| InstallError::Write {
-                    path: temp.clone(),
-                    reason,
-                })?;
-            let spoke = self.probe_protocol(&temp);
-            self.check_cancelled()?;
-            if !spoke.as_ref().is_some_and(|s| s.serves(&self.dialect)) {
-                return Err(InstallError::DialectMismatch {
-                    origin: asset_origin,
-                    wanted: self.dialect.clone(),
-                    spoke,
-                });
-            }
+        self.ops
+            .put_with_progress(&temp, &bytes, &|done| {
+                sink.report(&self.host, InstallPhase::Uploading { done, total });
+            })
+            .map_err(|reason| InstallError::Write {
+                path: temp.clone(),
+                reason,
+            })?;
+
+        self.ops
+            .chmod(&temp, BINARY_MODE)
+            .map_err(|reason| InstallError::Write {
+                path: temp.clone(),
+                reason,
+            })?;
+
+        let spoke = self.probe_protocol(&temp);
+        if !spoke.as_ref().is_some_and(|s| s.serves(&self.dialect)) {
+            let _ = self.ops.remove_file(&temp);
+            return Err(InstallError::DialectMismatch {
+                origin: asset_origin,
+                wanted: self.dialect.clone(),
+                spoke,
+            });
+        }
+
+        if let Err(reason) = self.ops.rename(&temp, &paths.binary) {
+            let _ = self.ops.remove_file(&paths.binary);
             self.ops
                 .rename(&temp, &paths.binary)
-                .map_err(|reason| InstallError::Write {
+                .map_err(|_| InstallError::Write {
                     path: paths.binary.clone(),
                     reason,
-                })
-        })();
-        if publish.is_err() {
-            // Cancellation, partial upload and ambiguous publication failures
-            // all clean only our unique staging file, never the published one.
-            let _ = self.ops.remove_file(&temp);
+                })?;
         }
-        publish?;
 
         Ok((confirmed, bytes))
     }
@@ -1016,73 +927,26 @@ impl<'a> Installer<'a> {
         &self,
         paths: &RemotePaths,
     ) -> Result<(bool, Option<MismatchedRemoteDaemon>), InstallError> {
-        self.check_cancelled()?;
         if self.daemon_is_serving(paths)? {
-            let deadline = Instant::now() + self.startup_timeout;
-            let mut health = self.check_health(paths, false, self.startup_timeout);
-            if health.is_ok() {
-                return Ok((false, None));
-            }
-            let mismatch = self.check_running_build(paths);
-            if mismatch.is_some() {
-                return Ok((false, mismatch));
-            }
-            // Another connect may have started this instance milliseconds ago:
-            // binding the control socket alone is not its ready barrier.
-            while health.is_err() && Instant::now() < deadline {
-                self.check_cancelled()?;
-                std::thread::sleep(
-                    self.poll_interval
-                        .min(deadline.saturating_duration_since(Instant::now())),
-                );
-                health = self.check_health(
-                    paths,
-                    false,
-                    deadline
-                        .saturating_duration_since(Instant::now())
-                        .max(Duration::from_millis(1)),
-                );
-            }
-            health.map_err(|reason| InstallError::Launch { reason: format!(
-                "an existing endpoint answered, but the daemon is not ready: {reason}; no replacement was started"
-            ) })?;
-            return Ok((false, None));
+            return Ok((false, self.check_running_build(paths)));
         }
 
-        self.check_cancelled()?;
-        install_progress().report(&self.host, InstallPhase::Restarting);
-        let launch = self.launch_daemon(paths)?;
+        self.launch_daemon(paths)?;
+
         let deadline = Instant::now() + self.startup_timeout;
         loop {
-            self.check_cancelled()?;
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let health = self.check_health(
-                paths,
-                false,
-                remaining
-                    .min(Duration::from_secs(3))
-                    .max(Duration::from_millis(1)),
-            );
-            if health.is_ok() {
-                return Ok((true, None));
+            if self.daemon_is_serving(paths)? {
+                return Ok((true, self.check_running_build(paths)));
             }
-            let diagnostic =
-                launch.diagnostic(self.ops, deadline.saturating_duration_since(Instant::now()));
-            if diagnostic.exited_unsuccessfully || Instant::now() >= deadline {
+            if Instant::now() >= deadline {
                 return Err(InstallError::Launch {
                     reason: format!(
-                        "{} did not become ready: {}\n{}\nStartup log: {}",
-                        paths.binary,
-                        health.unwrap_err(),
-                        diagnostic.text,
-                        launch.log,
+                        "{} started but nothing was answering on the control socket after {:?}",
+                        paths.binary, self.startup_timeout
                     ),
                 });
             }
-            std::thread::sleep(
-                self.poll_interval
-                    .min(deadline.saturating_duration_since(Instant::now())),
-            );
+            std::thread::sleep(self.poll_interval);
         }
     }
 
@@ -1091,58 +955,17 @@ impl<'a> Installer<'a> {
             "{} --stdio --bridge < /dev/null",
             shell_quote(&paths.binary)
         );
-        match self.ops.run_with_timeout(&cmd, self.startup_timeout) {
+        match self.ops.run(&cmd) {
             Ok(out) => Ok(out.success()),
             Err(reason) => Err(InstallError::Launch { reason }),
         }
     }
 
-    fn launch_daemon(&self, paths: &RemotePaths) -> Result<StartupLog, InstallError> {
-        let launch = StartupLog::new(&paths.binary);
+    fn launch_daemon(&self, paths: &RemotePaths) -> Result<(), InstallError> {
         let settle = self.ops.launch_settle(&paths.binary);
         self.ops
-            .spawn_detached(&launch_script(&paths.binary, &launch, settle))
-            .map_err(|reason| InstallError::Launch { reason })?;
-        Ok(launch)
-    }
-
-    fn check_health(
-        &self,
-        paths: &RemotePaths,
-        exact_build: bool,
-        budget: Duration,
-    ) -> Result<(), String> {
-        let flag = if exact_build {
-            super::maintenance::HEALTH_FLAG
-        } else {
-            super::maintenance::SERVING_FLAG
-        };
-        let command = format!(
-            "{} {flag} --wait-ms {}",
-            shell_quote(&paths.binary),
-            budget.as_millis().max(1)
-        );
-        let out = self.ops.run_with_timeout(&command, budget)?;
-        if !out.success() {
-            return Err(out.failure_reason());
-        }
-        match super::maintenance::Reply::parse(&out.stdout) {
-            Some(super::maintenance::Reply::Healthy {
-                control,
-                protocol,
-                build,
-                instance,
-            }) if control == self.dialect.control
-                && protocol == self.dialect.protocol
-                && (!exact_build || build == self.version)
-                && !instance.is_empty() =>
-            {
-                Ok(())
-            }
-            _ => Err(
-                "the endpoints did not prove the requested dialect and one daemon instance".into(),
-            ),
-        }
+            .spawn_detached(&launch_script(&paths.binary, settle))
+            .map_err(|reason| InstallError::Launch { reason })
     }
 
     fn check_running_build(&self, paths: &RemotePaths) -> Option<MismatchedRemoteDaemon> {
@@ -1175,11 +998,19 @@ impl<'a> Installer<'a> {
         Some(entry)
     }
 
-    /// Start the matching candidate after an endpoint-scoped, idle-only stop.
-    /// Unsupported old servers and busy servers are left running. Having a
-    /// replacement binary is necessary, but never authorizes killing sessions.
+    /// Stop whatever tty7-server is running over there and start the one this
+    /// build speaks to.
+    ///
+    /// Which is not the same binary: the path is named after *our* dialect
+    /// (`tty7-server-c{control}p{protocol}`), while the kill matches any
+    /// `tty7-server-*` — see [`TERMINATE_RUNNING_COMMAND`]. When
+    /// the far end is a machine we have never installed onto — the other side
+    /// of a dialect bump, most of all — the two are different files and the
+    /// second one is not there. Restarting into it would end every session on
+    /// the machine, including other clients', and then have nothing to launch.
+    /// So look before killing: a machine with no matching server to start is
+    /// left exactly as it was, and told to install one first.
     pub fn restart_daemon(&self) -> Result<(), InstallError> {
-        self.check_cancelled()?;
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
         let paths = self.paths_for(&home);
         if !self.published_binary_serves_us(&paths)? {
@@ -1194,130 +1025,59 @@ impl<'a> Installer<'a> {
     /// The restart itself, for callers that have just put the binary there and
     /// do not need to be told again that it is there.
     fn cycle_daemon(&self, paths: &RemotePaths) -> Result<(), InstallError> {
-        // Cancellation is honoured before stopping anything. Once an explicit
-        // maintenance operation has stopped the daemon, finish the start even
-        // if its window closes; abandoning the machine halfway is not undo.
-        self.check_cancelled()?;
         install_progress().report(&self.host, InstallPhase::Restarting);
 
-        let command = format!(
-            "{} {} --wait-ms {}",
-            shell_quote(&paths.binary),
-            super::maintenance::PREPARE_FLAG,
-            self.shutdown_timeout.as_millis()
-        );
-        let stopped = self
-            .ops
-            .run(&command)
-            .map_err(|reason| InstallError::MaintenanceDeferred { reason })?;
-        if !stopped.success() {
-            // A server too old to answer the safe-idle question can still
-            // leave gracefully — its SIGTERM handler has drained panes and
-            // stored scrollback since long before the feature gate. But that
-            // stop ends its sessions, so it runs only when the caller carries
-            // the user's explicit yes, and even then through the recorded
-            // pid's identity check, never a process-name match.
-            let legacy = matches!(
-                super::maintenance::Reply::parse(&stopped.stdout),
-                Some(super::maintenance::Reply::Deferred {
-                    kind: super::maintenance::DeferredKind::Unsupported,
-                    ..
-                })
+        // Keep why the stop failed, if it did. The command ends in `true`, so
+        // anything short of success means the far end never reached the kill at
+        // all — a login shell that choked on the script, a connection that went
+        // away. Throwing that away is half of what made the no-`/proc` bug cost
+        // a report instead of one glance at a log: the only thing anyone ever
+        // saw was the timeout below, and it blames a daemon for not stopping
+        // when nothing had asked it to.
+        let stop_failure = match self.ops.run(TERMINATE_RUNNING_COMMAND) {
+            Ok(out) if out.success() => None,
+            Ok(out) => Some(out.failure_reason()),
+            Err(reason) => Some(reason),
+        };
+        if let Some(reason) = &stop_failure {
+            log::warn!(
+                "remote {}: asking the running server to stop did not succeed: {reason}",
+                self.host,
             );
-            if !legacy {
-                return Err(InstallError::MaintenanceDeferred {
-                    reason: stopped.failure_reason(),
+        }
+
+        let shutdown_timeout = self.shutdown_timeout;
+        let deadline = Instant::now() + shutdown_timeout;
+        while self.daemon_is_serving(paths)? {
+            if Instant::now() >= deadline {
+                return Err(InstallError::Launch {
+                    reason: match &stop_failure {
+                        Some(reason) => format!(
+                            "the running remote daemon did not stop within {shutdown_timeout:?}, \
+                             and the command asking it to stop failed: {reason}"
+                        ),
+                        None => format!(
+                            "the running remote daemon did not stop within {shutdown_timeout:?}"
+                        ),
+                    },
                 });
             }
-            if !self.legacy_stop_consent {
-                return Err(InstallError::LegacyStopNeedsConsent {
-                    host: self.host.clone(),
-                });
-            }
-            self.stop_recorded_daemon(paths)?;
-        } else if super::maintenance::Reply::parse(&stopped.stdout)
-            != Some(super::maintenance::Reply::Stopped)
-        {
-            return Err(InstallError::MaintenanceDeferred { reason: "the candidate did not acknowledge a safe idle stop; no forced shutdown was attempted".into() });
+            std::thread::sleep(self.poll_interval);
         }
 
         self.launch_daemon(paths)?;
         let deadline = Instant::now() + self.startup_timeout;
         loop {
-            // Socket existence or an EOF bridge is not a health check. The
-            // candidate verifies Version, control Hello/Ping and one instance.
-            let command = format!(
-                "{} {}",
-                shell_quote(&paths.binary),
-                super::maintenance::HEALTH_FLAG
-            );
-            let result = self.ops.run(&command);
-            let failure = match result {
-                Ok(out) if out.success() => match super::maintenance::Reply::parse(&out.stdout) {
-                    Some(super::maintenance::Reply::Healthy {
-                        control,
-                        protocol,
-                        build,
-                        instance,
-                    }) if control == self.dialect.control
-                        && protocol == self.dialect.protocol
-                        && build == self.version
-                        && !instance.is_empty() =>
-                    {
-                        None
-                    }
-                    _ => Some(
-                        "the running endpoints did not prove the requested build and dialect"
-                            .to_string(),
-                    ),
-                },
-                Ok(out) => Some(out.failure_reason()),
-                Err(reason) => Some(reason),
-            };
-            if failure.is_none() {
+            if self.daemon_is_serving(paths)? {
                 return Ok(());
             }
             if Instant::now() >= deadline {
                 return Err(InstallError::Launch {
-                    reason: format!(
-                        "{} did not pass its running health check: {}",
-                        paths.binary,
-                        failure.unwrap()
-                    ),
+                    reason: format!("{} was restarted but never started answering", paths.binary),
                 });
             }
             std::thread::sleep(self.poll_interval);
         }
-    }
-
-    /// Ask the pidfile-recorded server to exit, through the candidate
-    /// binary's own identity checks. Reaching here means the running server
-    /// predates safe-idle maintenance AND the caller carries the user's
-    /// explicit yes to ending its sessions; anything the candidate cannot
-    /// verify defers the whole update rather than signalling on doubt.
-    fn stop_recorded_daemon(&self, paths: &RemotePaths) -> Result<(), InstallError> {
-        let command = format!(
-            "{} {} --wait-ms {}",
-            shell_quote(&paths.binary),
-            super::maintenance::STOP_RECORDED_FLAG,
-            self.shutdown_timeout.as_millis()
-        );
-        let stopped = self
-            .ops
-            .run(&command)
-            .map_err(|reason| InstallError::MaintenanceDeferred { reason })?;
-        if !stopped.success()
-            || super::maintenance::Reply::parse(&stopped.stdout)
-                != Some(super::maintenance::Reply::Stopped)
-        {
-            return Err(InstallError::MaintenanceDeferred {
-                reason: format!(
-                    "the legacy server stop was not confirmed; nothing was forced: {}",
-                    stopped.failure_reason()
-                ),
-            });
-        }
-        Ok(())
     }
 }
 
@@ -1348,64 +1108,21 @@ impl<'a> Installer<'a> {
 /// out its ten seconds for a daemon nobody had asked to stop.
 const RUNNING_EXE_COMMAND: &str = r#"if [ -d /proc ]; then for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) || continue; case "$e" in */tty7-server-*) printf '%s' "${e% (deleted)}"; break;; esac; done; else ps -xwwo pid=,comm= 2>/dev/null | while read -r pid e; do case "$e" in */tty7-server-*) printf '%s' "$e"; break;; esac; done; fi; true"#;
 
-struct StartupLog {
-    log: String,
-    exit: String,
-}
-struct StartupDiagnostic {
-    exited_unsuccessfully: bool,
-    text: String,
-}
+const TERMINATE_RUNNING_COMMAND: &str = r#"if [ -d /proc ]; then for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) || continue; case "$e" in */tty7-server-*) kill -TERM "${p#/proc/}" 2>/dev/null; break;; esac; done; else ps -xwwo pid=,comm= 2>/dev/null | while read -r pid e; do case "$e" in */tty7-server-*) kill -TERM "$pid" 2>/dev/null; break;; esac; done; fi; true"#;
 
-impl StartupLog {
-    fn new(binary: &str) -> Self {
-        let log = format!("{binary}.startup.{}.log", uuid::Uuid::new_v4());
-        Self {
-            exit: format!("{log}.exit"),
-            log,
-        }
-    }
-    fn diagnostic(&self, ops: &dyn RemoteOps, budget: Duration) -> StartupDiagnostic {
-        let command = format!(
-            "if test -s {exit}; then printf 'TTY7_STARTUP_EXIT='; head -c 16 {exit}; fi; tail -c 4096 {log}",
-            exit = shell_quote(&self.exit),
-            log = shell_quote(&self.log)
-        );
-        let text = ops
-            .run_with_timeout(&command, budget.max(Duration::from_millis(1)))
-            .map(|out| out.stdout)
-            .unwrap_or_default();
-        let exit = text
-            .lines()
-            .next()
-            .and_then(|line| line.strip_prefix("TTY7_STARTUP_EXIT="))
-            .and_then(|code| code.parse::<i32>().ok());
-        StartupDiagnostic {
-            exited_unsuccessfully: exit.is_some_and(|code| code != 0),
-            text,
-        }
-    }
-}
-
-fn launch_command(binary: &str, launch: &StartupLog) -> String {
-    let log = shell_quote(&launch.log);
-    let status = shell_quote(&launch.exit);
-    let supervised = shell_quote(&format!(
-        "{} --daemon; result=$?; printf '%s\\n' \"$result\" > {status}; exit \"$result\"",
-        shell_quote(binary)
-    ));
+fn launch_command(binary: &str) -> String {
+    let bin = shell_quote(binary);
     format!(
-        "umask 077; (set -C; : > {log} && : > {status}) || exit 1; \
-         if command -v setsid >/dev/null 2>&1; then \
-           nohup setsid sh -c {supervised} < /dev/null >> {log} 2>&1 & \
+        "if command -v setsid >/dev/null 2>&1; then \
+           setsid {bin} --daemon < /dev/null > /dev/null 2>&1 & \
          else \
-           nohup sh -c {supervised} < /dev/null >> {log} 2>&1 & \
+           nohup {bin} --daemon < /dev/null > /dev/null 2>&1 & \
          fi"
     )
 }
 
-fn launch_script(binary: &str, logs: &StartupLog, settle: Option<String>) -> String {
-    let launch = launch_command(binary, logs);
+fn launch_script(binary: &str, settle: Option<String>) -> String {
+    let launch = launch_command(binary);
     match settle {
         Some(settle) => format!("{launch}\n{settle}"),
         None => launch,
@@ -1414,32 +1131,10 @@ fn launch_script(binary: &str, logs: &StartupLog, settle: Option<String>) -> Str
 
 fn unique_temp(shared: &str) -> String {
     let pid = std::process::id();
-    let attempt = uuid::Uuid::new_v4();
     match shared.strip_suffix(".tmp") {
-        Some(stem) => format!("{stem}.{pid}.{attempt}.tmp"),
-        None => format!("{shared}.{pid}.{attempt}"),
+        Some(stem) => format!("{stem}.{pid}.tmp"),
+        None => format!("{shared}.{pid}"),
     }
-}
-
-// All SSH preparation/maintenance entry points share this lock, including
-// connections re-created with the same key. It is intentionally not keyed by
-// the display label. Cross-client coordination needs a remote lock as well;
-// unique staging names and non-destructive publication remain necessary.
-fn install_lock(key: &str) -> Arc<coordinator::PreparationBatch<InstallReport>> {
-    type Batch = coordinator::PreparationBatch<InstallReport>;
-    static LOCKS: Mutex<Vec<(String, std::sync::Weak<Batch>)>> = Mutex::new(Vec::new());
-    let mut locks = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
-    locks.retain(|(_, lock)| lock.strong_count() > 0);
-    if let Some(lock) = locks
-        .iter()
-        .find(|(known, _)| known == key)
-        .and_then(|(_, lock)| lock.upgrade())
-    {
-        return lock;
-    }
-    let lock = Arc::new(Batch::default());
-    locks.push((key.to_string(), Arc::downgrade(&lock)));
-    lock
 }
 
 pub(crate) fn shell_quote(s: &str) -> String {
@@ -1456,19 +1151,11 @@ pub fn ensure_remote_server(conn: &Arc<SshConnection>) -> io::Result<String> {
 }
 
 pub fn ensure_remote_server_labeled(conn: &Arc<SshConnection>, host: &str) -> io::Result<String> {
-    let lock = install_lock(conn.key().as_str());
+    let ops = ssh_ops::SshRemoteOps::new(conn.clone());
+    let fetch = default_fetcher();
     let confirm = install_confirm();
-    let report = lock.prepare(conn.generation, &|| confirm.is_cancelled(), || {
-        let ops = ssh_ops::SshRemoteOps::new(conn.clone());
-        let fetch = default_fetcher();
-        let source = BundledOrRelease::discover(fetch.as_ref());
-        Ok(Installer::with_source(&ops, &source, confirm.as_ref(), host).run()?)
-    })?;
-    // A coalesced caller still owes the mismatch to its own route/window.
-    if let Some(mut mismatch) = report.mismatch.clone() {
-        mismatch.host = host.to_string();
-        record_mismatch(mismatch);
-    }
+    let source = BundledOrRelease::discover(fetch.as_ref());
+    let report = Installer::with_source(&ops, &source, confirm.as_ref(), host).run()?;
     log::info!(
         "remote {host}: {} at {} ({}{})",
         if report.installed {
@@ -1492,46 +1179,22 @@ pub fn ensure_remote_server_labeled(conn: &Arc<SshConnection>, host: &str) -> io
 }
 
 pub fn restart_remote_daemon(conn: &Arc<SshConnection>) -> io::Result<()> {
-    restart_remote_daemon_consenting(conn, false)
-}
-
-pub fn restart_remote_daemon_consenting(
-    conn: &Arc<SshConnection>,
-    legacy_stop: bool,
-) -> io::Result<()> {
-    let lock = install_lock(conn.key().as_str());
+    let host = connection_label(conn);
+    let ops = ssh_ops::SshRemoteOps::new(conn.clone());
+    let fetch = default_fetcher();
     let confirm = install_confirm();
-    lock.maintain(&|| confirm.is_cancelled(), || {
-        let host = connection_label(conn);
-        let ops = ssh_ops::SshRemoteOps::new(conn.clone());
-        let fetch = default_fetcher();
-        Installer::new(&ops, fetch.as_ref(), confirm.as_ref(), host)
-            .with_legacy_stop_consent(legacy_stop)
-            .restart_daemon()?;
-        Ok(())
-    })
+    Installer::new(&ops, fetch.as_ref(), confirm.as_ref(), host).restart_daemon()?;
+    Ok(())
 }
 
 pub fn replace_remote_server(conn: &Arc<SshConnection>) -> io::Result<()> {
-    replace_remote_server_consenting(conn, false)
-}
-
-pub fn replace_remote_server_consenting(
-    conn: &Arc<SshConnection>,
-    legacy_stop: bool,
-) -> io::Result<()> {
-    let lock = install_lock(conn.key().as_str());
+    let host = connection_label(conn);
+    let ops = ssh_ops::SshRemoteOps::new(conn.clone());
+    let fetch = default_fetcher();
     let confirm = install_confirm();
-    lock.maintain(&|| confirm.is_cancelled(), || {
-        let host = connection_label(conn);
-        let ops = ssh_ops::SshRemoteOps::new(conn.clone());
-        let fetch = default_fetcher();
-        let source = BundledOrRelease::discover(fetch.as_ref());
-        Installer::with_source(&ops, &source, confirm.as_ref(), host)
-            .with_legacy_stop_consent(legacy_stop)
-            .replace()?;
-        Ok(())
-    })
+    let source = BundledOrRelease::discover(fetch.as_ref());
+    Installer::with_source(&ops, &source, confirm.as_ref(), host).replace()?;
+    Ok(())
 }
 
 #[cfg(feature = "remote-install")]

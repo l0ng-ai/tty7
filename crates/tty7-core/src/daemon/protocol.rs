@@ -5,27 +5,9 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 
-pub const PROTOCOL_VERSION: u32 = 9;
-
-/// An ephemeral pane capability, not the durable workspace resume proof.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneAuthorization {
-    pub workspace: crate::core::session::WorkspaceId,
-    pub token: crate::daemon::control::WorkspaceProof,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PaneAccess {
-    Workspace(PaneAuthorization),
-    /// Deliberate same-OS-user administration, never a remote GUI fallback.
-    Manage,
-}
+pub const PROTOCOL_VERSION: u32 = 6;
 
 pub const FEATURE_PANE_OWNER: &str = "pane-owner";
-pub const FEATURE_PANE_ACCESS: &str = "pane-access";
-pub const FEATURE_IDLE_SHUTDOWN: &str = "idle-shutdown";
-pub const FEATURE_TERMINAL_CHECKPOINT: &str = "terminal-checkpoint-v1";
 
 /// The daemon echoes a `DaemonMsg::Size` to the controlling subscriber, in
 /// stream order, when it applies a `ClientMsg::Resize`. A client that sees
@@ -63,9 +45,6 @@ impl DaemonVersion {
     pub fn current() -> DaemonVersion {
         let mut features = vec![
             FEATURE_PANE_OWNER.to_string(),
-            FEATURE_PANE_ACCESS.to_string(),
-            FEATURE_IDLE_SHUTDOWN.to_string(),
-            FEATURE_TERMINAL_CHECKPOINT.to_string(),
             FEATURE_RESIZE_ECHO.to_string(),
             FEATURE_RESTORE_SCROLLBACK.to_string(),
         ];
@@ -747,14 +726,6 @@ pub enum SshPhase {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientMsg {
-    /// Maintenance only: refuse unless this exact daemon has no panes and
-    /// no concurrent spawn can publish one before it exits.
-    ShutdownIfIdle {
-        expected_instance: String,
-    },
-    /// Must precede a pane-mutating opening request. Read-only requests may
-    /// omit it; old unscoped writes are refused rather than silently trusted.
-    Access(PaneAccess),
     Spawn {
         cwd: Option<PathBuf>,
         size: WinSize,
@@ -847,17 +818,11 @@ pub enum ClientMsg {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonMsg {
-    ShutdownAck {
-        instance: String,
-    },
     Spawned {
         pane_id: u64,
     },
     Size(WinSize),
     Snapshot(Vec<u8>),
-    /// Validated, compressed VT state, not an ANSI byte replay. Ordered before
-    /// all subsequent Output/Size frames on this attachment.
-    TerminalCheckpoint(Vec<u8>),
     Output(Vec<u8>),
     /// A kitty graphics image lifted out of the PTY stream daemon-side (issue
     /// #213). Carried out-of-band as a compact binary frame
@@ -885,9 +850,6 @@ pub enum DaemonMsg {
     },
     PaneList(Vec<PaneInfo>),
     InputAck {
-        pane_id: u64,
-    },
-    KillAck {
         pane_id: u64,
     },
     RemoteContext(Option<RemoteContext>),
@@ -946,8 +908,6 @@ mod kind {
     pub const OBSERVE: u8 = 54;
     pub const SEND_INPUT: u8 = 55;
     pub const HANDOFF: u8 = 56;
-    pub const ACCESS: u8 = 57;
-    pub const SHUTDOWN_IF_IDLE: u8 = 58;
 
     pub const SPAWNED: u8 = 1;
     pub const SNAPSHOT: u8 = 2;
@@ -974,8 +934,6 @@ mod kind {
     pub const VERSION_REPLY: u8 = 40;
     pub const PROCS: u8 = 50;
     pub const INPUT_ACK: u8 = 51;
-    pub const KILL_ACK: u8 = 52;
-    pub const SHUTDOWN_ACK: u8 = 53;
     /// `Image` — a kitty graphics frame lifted out of the PTY stream (issue
     /// #213). 60 sits clear of every range above; the payload is the compact
     /// binary encoding, not JSON, so it stays outside the `to_json` arms.
@@ -984,7 +942,6 @@ mod kind {
     /// (issue #213). Compact binary selector, like `IMAGE`.
     pub const DELETE_IMAGE: u8 = 61;
     pub const CLIPBOARD_WRITE: u8 = 62;
-    pub const TERMINAL_CHECKPOINT: u8 = 63;
 }
 
 pub fn write_frame<W: Write>(w: &mut W, kind: u8, payload: &[u8]) -> io::Result<()> {
@@ -1096,10 +1053,6 @@ pub struct RestoreFrom {
 impl ClientMsg {
     pub fn encode<W: Write>(&self, w: &mut W) -> io::Result<()> {
         match self {
-            ClientMsg::ShutdownIfIdle { expected_instance } => {
-                write_frame(w, kind::SHUTDOWN_IF_IDLE, &to_json(expected_instance)?)
-            }
-            ClientMsg::Access(access) => write_frame(w, kind::ACCESS, &to_json(access)?),
             ClientMsg::Spawn {
                 cwd,
                 size,
@@ -1211,10 +1164,6 @@ impl ClientMsg {
 
     pub fn from_frame(k: u8, payload: Vec<u8>) -> io::Result<Self> {
         Ok(match k {
-            kind::ACCESS => ClientMsg::Access(from_json(&payload)?),
-            kind::SHUTDOWN_IF_IDLE => ClientMsg::ShutdownIfIdle {
-                expected_instance: from_json(&payload)?,
-            },
             kind::SPAWN => {
                 let (cwd, size) = from_json(&payload)?;
                 ClientMsg::Spawn {
@@ -1358,9 +1307,6 @@ impl DaemonMsg {
             DaemonMsg::Spawned { pane_id } => write_frame(w, kind::SPAWNED, &to_json(pane_id)?),
             DaemonMsg::Size(size) => write_frame(w, kind::SIZE, &to_json(size)?),
             DaemonMsg::Snapshot(bytes) => write_frame(w, kind::SNAPSHOT, bytes),
-            DaemonMsg::TerminalCheckpoint(bytes) => {
-                write_frame(w, kind::TERMINAL_CHECKPOINT, bytes)
-            }
             DaemonMsg::Output(bytes) => write_frame(w, kind::OUTPUT, bytes),
             DaemonMsg::Image(frame) => write_frame(w, kind::IMAGE, frame),
             DaemonMsg::DeleteImage(sel) => write_frame(w, kind::DELETE_IMAGE, sel),
@@ -1374,10 +1320,6 @@ impl DaemonMsg {
             DaemonMsg::Exited { code } => write_frame(w, kind::EXITED, &to_json(code)?),
             DaemonMsg::PaneList(list) => write_frame(w, kind::PANE_LIST, &to_json(list)?),
             DaemonMsg::InputAck { pane_id } => write_frame(w, kind::INPUT_ACK, &to_json(pane_id)?),
-            DaemonMsg::ShutdownAck { instance } => {
-                write_frame(w, kind::SHUTDOWN_ACK, &to_json(instance)?)
-            }
-            DaemonMsg::KillAck { pane_id } => write_frame(w, kind::KILL_ACK, &to_json(pane_id)?),
             DaemonMsg::RemoteContext(remote) => {
                 write_frame(w, kind::REMOTE_CONTEXT, &to_json(remote)?)
             }
@@ -1422,7 +1364,6 @@ impl DaemonMsg {
             },
             kind::SIZE => DaemonMsg::Size(from_json(&payload)?),
             kind::SNAPSHOT => DaemonMsg::Snapshot(payload),
-            kind::TERMINAL_CHECKPOINT => DaemonMsg::TerminalCheckpoint(payload),
             kind::OUTPUT => DaemonMsg::Output(payload),
             kind::IMAGE => DaemonMsg::Image(payload),
             kind::DELETE_IMAGE => DaemonMsg::DeleteImage(payload),
@@ -1442,12 +1383,6 @@ impl DaemonMsg {
             kind::PANE_LIST => DaemonMsg::PaneList(from_json(&payload)?),
             kind::INPUT_ACK => DaemonMsg::InputAck {
                 pane_id: from_json(&payload)?,
-            },
-            kind::KILL_ACK => DaemonMsg::KillAck {
-                pane_id: from_json(&payload)?,
-            },
-            kind::SHUTDOWN_ACK => DaemonMsg::ShutdownAck {
-                instance: from_json(&payload)?,
             },
             kind::REMOTE_CONTEXT => DaemonMsg::RemoteContext(from_json(&payload)?),
             kind::AGENT => DaemonMsg::Agent(from_json(&payload)?),
@@ -1565,11 +1500,6 @@ mod tests {
     #[test]
     fn client_roundtrip() {
         let msgs = vec![
-            ClientMsg::Access(PaneAccess::Manage),
-            ClientMsg::Access(PaneAccess::Workspace(PaneAuthorization {
-                workspace: crate::core::session::WorkspaceId::new(),
-                token: crate::daemon::control::WorkspaceProof::fresh(),
-            })),
             ClientMsg::Spawn {
                 cwd: Some(PathBuf::from("/tmp/x")),
                 size: SIZE,
@@ -1642,9 +1572,6 @@ mod tests {
             ClientMsg::Kill { pane_id: 7 },
             ClientMsg::List,
             ClientMsg::Shutdown,
-            ClientMsg::ShutdownIfIdle {
-                expected_instance: "test-instance".into(),
-            },
             ClientMsg::EnsureLoopbackForward(LoopbackForwardRequest {
                 pane_id: 7,
                 remote_host: "127.0.0.1".into(),
@@ -1758,7 +1685,6 @@ mod tests {
             DaemonMsg::Spawned { pane_id: 1 },
             DaemonMsg::Size(SIZE),
             DaemonMsg::Snapshot(vec![1, 2, 3, 0, 255]),
-            DaemonMsg::TerminalCheckpoint(vec![120, 1, 0, 255]),
             DaemonMsg::Output((0u8..=255).collect()),
             DaemonMsg::Cwd(PathBuf::from("/home/u/dev")),
             DaemonMsg::Prompt {
@@ -1787,10 +1713,6 @@ mod tests {
                 },
             ]),
             DaemonMsg::InputAck { pane_id: 42 },
-            DaemonMsg::KillAck { pane_id: 42 },
-            DaemonMsg::ShutdownAck {
-                instance: "test-instance".into(),
-            },
             DaemonMsg::RemoteContext(Some(RemoteContext {
                 kind: RemoteKind::Ssh,
                 argv: vec!["ssh".into(), "-p".into(), "2222".into(), "dev".into()],
@@ -2584,10 +2506,7 @@ mod tests {
     #[test]
     fn the_local_daemon_does_not_claim_the_control_dialect() {
         let v = DaemonVersion::current();
-        assert_eq!(v.protocol, PROTOCOL_VERSION);
-        assert!(v.has_feature(FEATURE_TERMINAL_CHECKPOINT));
-        assert!(v.has_feature(FEATURE_PANE_ACCESS));
-        assert!(v.has_feature(FEATURE_IDLE_SHUTDOWN));
+        assert_eq!(v.protocol, 6);
         assert!(
             !v.has_feature(crate::daemon::control::feature::CONTROL),
             "the session daemon must not advertise a dialect it cannot serve"

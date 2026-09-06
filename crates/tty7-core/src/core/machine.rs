@@ -631,22 +631,6 @@ impl MachineStore {
         self.locked().panes.iter().find(|p| p.id == id).cloned()
     }
 
-    pub(crate) fn unique_workspace_for_pane(&self, pane: u64) -> Option<WorkspaceId> {
-        let machine = self.locked();
-        let mut owners = machine.workspaces.iter().filter(|workspace| {
-            workspace
-                .tabs
-                .iter()
-                .any(|tab| tab.root.pane_ids().contains(&pane))
-        });
-        let owner = owners.next()?.id;
-        if owners.next().is_some() {
-            None
-        } else {
-            Some(owner)
-        }
-    }
-
     pub fn workspace_create(
         &self,
         id: Option<WorkspaceId>,

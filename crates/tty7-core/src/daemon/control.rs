@@ -44,10 +44,7 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 /// server that had grown a project took the delta, failed to decode the frame,
 /// and lost the link exactly as described above. Only the number can turn that
 /// pairing away at the handshake, which is why it is the number's job.
-/// v9 separates automatic resume from explicit takeover and returns an opaque
-/// resume proof. Older clients must not silently fall back to stealing a seat.
-/// v10 returns a separate, revocable pane capability on every acquisition.
-pub const CONTROL_VERSION: u32 = 10;
+pub const CONTROL_VERSION: u32 = 8;
 
 const DIALECT_MARKER: &str = "speaks control v";
 
@@ -91,8 +88,8 @@ pub fn parse_dialect_refusal(message: &str) -> Option<DialectRefusal> {
 }
 
 pub fn server_instance() -> &'static str {
-    // Both endpoints must identify the same process during health checks.
-    crate::daemon::protocol::process_instance()
+    static INSTANCE: OnceLock<String> = OnceLock::new();
+    INSTANCE.get_or_init(|| uuid::Uuid::new_v4().to_string())
 }
 
 pub fn server_started() -> Instant {
@@ -140,23 +137,6 @@ pub use crate::core::machine::{
     Axis, LayoutDelta, Machine, PaneSeed, Project, ProjectId, Side, Tab, TabId,
 };
 pub use crate::core::session::WorkspaceId;
-
-/// A bearer credential: serde carries it, diagnostics must not print it.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct WorkspaceProof(String);
-
-impl WorkspaceProof {
-    pub(crate) fn fresh() -> Self {
-        Self(uuid::Uuid::new_v4().to_string())
-    }
-}
-
-impl std::fmt::Debug for WorkspaceProof {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("WorkspaceProof(<redacted>)")
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -235,21 +215,6 @@ pub enum ControlRequest {
 
     WorkspaceAttach {
         id: String,
-    },
-    /// Automatic recovery, never permission to displace another owner.
-    WorkspaceResume {
-        id: String,
-        proof: Option<WorkspaceProof>,
-    },
-    /// Explicit user intent; invalidates the previous resume proof.
-    WorkspaceTakeOver {
-        id: String,
-    },
-    /// Explicit same-user CLI administration, not a GUI background write.
-    /// The owner-only endpoint / authenticated SSH account is the authority;
-    /// this protocol is not a sandbox against that account running commands.
-    ManageWorkspace {
-        request: Box<ControlRequest>,
     },
     WorkspaceDetach {
         id: String,
@@ -409,71 +374,10 @@ pub struct ServerStatus {
 }
 
 impl ControlRequest {
-    /// Machine-tree writes share the handover lock with ownership changes.
-    pub fn workspace_mutation(&self) -> Option<WorkspaceId> {
-        use ControlRequest::*;
-        match self {
-            WorkspaceRename { workspace, .. }
-            | WorkspaceRemove { workspace }
-            | WorkspaceTouch { workspace }
-            | WorkspaceSetActiveTab { workspace, .. }
-            | TabCreate { workspace, .. }
-            | TabClose { workspace, .. }
-            | TabRename { workspace, .. }
-            | TabMove { workspace, .. }
-            | TabSetGroup { workspace, .. }
-            | TabSetProject { workspace, .. }
-            | ProjectCreate { workspace, .. }
-            | ProjectRename { workspace, .. }
-            | ProjectSetRoot { workspace, .. }
-            | ProjectMove { workspace, .. }
-            | ProjectDelete { workspace, .. }
-            | PaneSplit { workspace, .. }
-            | PaneClose { workspace, .. }
-            | PaneSetRatio { workspace, .. }
-            | PaneMove { workspace, .. }
-            | PaneReplace { workspace, .. } => Some(*workspace),
-            // Exhaustive on purpose: a new request must explicitly choose
-            // whether it participates in the workspace tree write boundary.
-            Ping
-            | ReadDir { .. }
-            | Stat { .. }
-            | Exists { .. }
-            | Canonicalize { .. }
-            | ReadFile { .. }
-            | Search { .. }
-            | WriteFile { .. }
-            | CreateFileNew { .. }
-            | CreateDir { .. }
-            | Rename { .. }
-            | Remove { .. }
-            | RepoRoot { .. }
-            | Git { .. }
-            | GitStream { .. }
-            | Shells
-            | WatchOpen { .. }
-            | WatchSet { .. }
-            | WatchClose { .. }
-            | WorkspaceAttach { .. }
-            | WorkspaceResume { .. }
-            | WorkspaceTakeOver { .. }
-            | WorkspaceDetach { .. }
-            | ManageWorkspace { .. }
-            | GuiOpen { .. }
-            | MachineGet
-            | WorkspaceTree { .. }
-            | WorkspaceCreate { .. }
-            | AgentStates
-            | Routes
-            | Status => None,
-        }
-    }
-
     pub fn deadline(&self) -> Duration {
         use ControlRequest::*;
         match self {
             Ping => Duration::from_secs(5),
-            ManageWorkspace { .. } => Duration::from_secs(10),
             ReadDir { .. }
             | Stat { .. }
             | Exists { .. }
@@ -488,10 +392,7 @@ impl ControlRequest {
             }
             Git { .. } | GitStream { .. } | Search { .. } => Duration::from_secs(20),
             Shells => Duration::from_secs(20),
-            WorkspaceAttach { .. }
-            | WorkspaceResume { .. }
-            | WorkspaceTakeOver { .. }
-            | WorkspaceDetach { .. } => Duration::from_secs(10),
+            WorkspaceAttach { .. } | WorkspaceDetach { .. } => Duration::from_secs(10),
             GuiOpen { .. } => Duration::from_secs(5),
             MachineGet
             | WorkspaceTree { .. }
@@ -556,25 +457,12 @@ pub enum ReplyOk {
     Bool(bool),
     Path(String),
     OptPath(Option<String>),
-    FileMeta {
-        meta: Meta,
-    },
+    FileMeta { meta: Meta },
     Hits(Vec<SearchHit>),
     Output(Output),
     WatchId(u64),
     Shells(ShellInventory),
-    Attached {
-        took_over_from: Option<String>,
-    },
-    WorkspaceLease {
-        proof: WorkspaceProof,
-        /// Short-lived pane capability; rotated on every successful Resume.
-        pane_token: WorkspaceProof,
-        took_over_from: Option<String>,
-    },
-    WorkspaceBusy {
-        by: String,
-    },
+    Attached { took_over_from: Option<String> },
     MachineTree(Box<Machine>),
     WorkspaceTree(Box<crate::core::machine::Workspace>),
     TabTree(Box<Tab>),
@@ -1034,7 +922,6 @@ pub const KEEPALIVE_IDLE_BEFORE_PING: Duration = Duration::from_secs(30);
 pub const KEEPALIVE_DEAD_AFTER: Duration = Duration::from_secs(45);
 
 pub const CLOSE_GRACE: Duration = Duration::from_millis(500);
-const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ControlResponse {
@@ -1080,38 +967,6 @@ struct ClientInner {
     link_down: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
 }
 
-fn read_hello_ok(r: &mut impl Read, hello: &ControlHello) -> io::Result<ControlHelloOk> {
-    let ok = match ControlServerMsg::read(r)? {
-        ControlServerMsg::HelloOk(ok) => ok,
-        other => {
-            return Err(invalid(format!(
-                "control peer answered the handshake with {other:?} instead of HELLO_OK"
-            )));
-        }
-    };
-    if ok.control_version != hello.control_version {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            dialect_refusal(&ok.build, ok.control_version, hello.control_version),
-        ));
-    }
-    Ok(ok)
-}
-
-fn socket_handshake(
-    sock: &mut impl super::deadline::Socket,
-    hello: &ControlHello,
-    budget: Duration,
-) -> io::Result<ControlHelloOk> {
-    // Authentication and installation have already finished before Hello.
-    // Bound the complete exchange, including trickled partial frames, and
-    // restore socket timeouts before starting the long-lived control reader.
-    let mut stream = super::deadline::DeadlineIo::new(sock, budget)?;
-    ControlClientMsg::Hello(hello.clone()).encode(&mut stream)?;
-    stream.flush()?;
-    read_hello_ok(&mut stream, hello)
-}
-
 impl ControlClient {
     pub fn connect<R, W>(
         r: R,
@@ -1127,26 +982,24 @@ impl ControlClient {
     }
 
     pub fn over_tcp(
-        mut sock: std::net::TcpStream,
+        sock: std::net::TcpStream,
         hello: &ControlHello,
         events: EventSink,
     ) -> io::Result<ControlClient> {
-        let ok = socket_handshake(&mut sock, hello, HELLO_TIMEOUT)?;
         let r = sock.try_clone()?;
         let closer: Arc<dyn LinkShutdown> = Arc::new(sock.try_clone()?);
-        Self::after_handshake(r, sock, Some(closer), ok, events)
+        Self::connect_with(r, sock, Some(closer), hello, events)
     }
 
     #[cfg(unix)]
     pub fn over_unix(
-        mut sock: std::os::unix::net::UnixStream,
+        sock: std::os::unix::net::UnixStream,
         hello: &ControlHello,
         events: EventSink,
     ) -> io::Result<ControlClient> {
-        let ok = socket_handshake(&mut sock, hello, HELLO_TIMEOUT)?;
         let r = sock.try_clone()?;
         let closer: Arc<dyn LinkShutdown> = Arc::new(sock.try_clone()?);
-        Self::after_handshake(r, sock, Some(closer), ok, events)
+        Self::connect_with(r, sock, Some(closer), hello, events)
     }
 
     pub fn connect_with<R, W>(
@@ -1163,21 +1016,21 @@ impl ControlClient {
         ControlClientMsg::Hello(hello.clone()).encode(&mut w)?;
         w.flush()?;
 
-        let ok = read_hello_ok(&mut r, hello)?;
-        Self::after_handshake(r, w, shutdown, ok, events)
-    }
+        let ok = match ControlServerMsg::read(&mut r)? {
+            ControlServerMsg::HelloOk(ok) => ok,
+            other => {
+                return Err(invalid(format!(
+                    "control peer answered the handshake with {other:?} instead of HELLO_OK"
+                )));
+            }
+        };
+        if ok.control_version != hello.control_version {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                dialect_refusal(&ok.build, ok.control_version, hello.control_version),
+            ));
+        }
 
-    fn after_handshake<R, W>(
-        r: R,
-        w: W,
-        shutdown: Option<Arc<dyn LinkShutdown>>,
-        ok: ControlHelloOk,
-        events: EventSink,
-    ) -> io::Result<ControlClient>
-    where
-        R: Read + Send + 'static,
-        W: Write + Send + 'static,
-    {
         let inner = Arc::new(ClientInner {
             writer: Mutex::new(Box::new(w)),
             next_req_id: AtomicU64::new(1),
@@ -1303,9 +1156,7 @@ impl ControlClient {
         self.call(ControlRequest::Ping).map(|_| ())
     }
 
-    /// Revoke this connection and wake socket I/O, without waiting for the
-    /// reader thread. UI owners can reap it with `close` on an executor.
-    pub fn request_close(&self) {
+    pub fn close(&self) {
         self.inner
             .fail_all("control connection closed by this client");
         if let Some(closer) = &self.inner.shutdown
@@ -1313,10 +1164,7 @@ impl ControlClient {
         {
             log::trace!("control link shutdown reported {e}");
         }
-    }
 
-    pub fn close(&self) {
-        self.request_close();
         let Ok(mut slot) = self.reader.lock() else {
             return;
         };
@@ -1619,20 +1467,6 @@ mod tests {
 
     fn every_request() -> Vec<ControlRequest> {
         vec![
-            ControlRequest::ManageWorkspace {
-                request: Box::new(ControlRequest::WorkspaceTouch {
-                    workspace: WorkspaceId::new(),
-                }),
-            },
-            ControlRequest::WorkspaceResume {
-                id: "w".into(),
-                proof: None,
-            },
-            ControlRequest::WorkspaceResume {
-                id: "w".into(),
-                proof: Some(WorkspaceProof::fresh()),
-            },
-            ControlRequest::WorkspaceTakeOver { id: "w".into() },
             ControlRequest::Ping,
             ControlRequest::ReadDir {
                 dir: "/home/me/proj/src".into(),
@@ -1707,14 +1541,6 @@ mod tests {
 
     fn every_reply() -> Vec<ControlReply> {
         vec![
-            ControlReply::Ok(ReplyOk::WorkspaceLease {
-                proof: WorkspaceProof::fresh(),
-                pane_token: WorkspaceProof::fresh(),
-                took_over_from: None,
-            }),
-            ControlReply::Ok(ReplyOk::WorkspaceBusy {
-                by: "desktop".into(),
-            }),
             ControlReply::Ok(ReplyOk::Unit),
             ControlReply::Ok(ReplyOk::Pong),
             ControlReply::Ok(ReplyOk::Entries(vec![
@@ -1849,89 +1675,6 @@ mod tests {
     }
 
     #[test]
-    fn a_silent_control_hello_times_out_and_releases_the_socket() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let server = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
-            ControlClientMsg::read(&mut socket).unwrap();
-            assert_eq!(
-                socket.read(&mut [0]).unwrap(),
-                0,
-                "failed caller closes its link"
-            );
-        });
-        let error = socket_handshake(&mut client, &hello(), Duration::from_millis(50)).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert_eq!(client.read_timeout().unwrap(), None);
-        assert_eq!(client.write_timeout().unwrap(), None);
-        drop(client);
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn partial_hello_bytes_do_not_extend_the_total_handshake_deadline() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let server = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
-            socket
-                .set_write_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
-            ControlClientMsg::read(&mut socket).unwrap();
-            let mut bytes = Vec::new();
-            ControlServerMsg::HelloOk(hello_ok())
-                .encode(&mut bytes)
-                .unwrap();
-            for byte in bytes {
-                if socket.write_all(&[byte]).is_err() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-        });
-        let started = Instant::now();
-        let error = socket_handshake(&mut client, &hello(), Duration::from_millis(70)).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < Duration::from_secs(3));
-        drop(client);
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn a_successful_hello_restores_the_socket_timeouts() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        client
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        client
-            .set_write_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-        let server = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            ControlClientMsg::read(&mut socket).unwrap();
-            ControlServerMsg::HelloOk(hello_ok())
-                .encode(&mut socket)
-                .unwrap();
-        });
-        let ok = socket_handshake(&mut client, &hello(), Duration::from_secs(1)).unwrap();
-        assert_eq!(ok.control_version, CONTROL_VERSION);
-        assert_eq!(client.read_timeout().unwrap(), Some(Duration::from_secs(2)));
-        assert_eq!(
-            client.write_timeout().unwrap(),
-            Some(Duration::from_secs(3))
-        );
-        server.join().unwrap();
-    }
-
-    #[test]
     fn the_server_instance_is_one_value_per_process() {
         let first = server_instance();
         assert!(!first.is_empty(), "an empty instance means \"unknown\"");
@@ -2009,22 +1752,6 @@ mod tests {
             let got = ControlClientMsg::read(&mut Cursor::new(&buf)).unwrap();
             assert_eq!(&got, msg, "client message did not survive the round trip");
         }
-    }
-
-    #[test]
-    fn resume_credentials_are_redacted_in_protocol_diagnostics() {
-        let proof = WorkspaceProof::fresh();
-        let secret = serde_json::to_string(&proof).unwrap();
-        let request = ControlRequest::WorkspaceResume {
-            id: "w".into(),
-            proof: Some(proof.clone()),
-        };
-        let reply = ReplyOk::WorkspaceLease {
-            proof,
-            pane_token: WorkspaceProof::fresh(),
-            took_over_from: None,
-        };
-        assert!(!format!("{request:?} {reply:?}").contains(secret.trim_matches('"')));
     }
 
     #[test]
@@ -2539,29 +2266,6 @@ mod tests {
             (R::AgentStates, s(5)),
             (R::Routes, s(5)),
             (R::Status, s(5)),
-            (
-                R::ManageWorkspace {
-                    request: Box::new(R::WorkspaceTouch {
-                        workspace: WorkspaceId::new(),
-                    }),
-                },
-                s(10),
-            ),
-            (
-                R::WorkspaceResume {
-                    id: "w".into(),
-                    proof: None,
-                },
-                s(10),
-            ),
-            (
-                R::WorkspaceResume {
-                    id: "w".into(),
-                    proof: Some(WorkspaceProof::fresh()),
-                },
-                s(10),
-            ),
-            (R::WorkspaceTakeOver { id: "w".into() }, s(10)),
         ];
         assert_eq!(
             cases.len(),
@@ -3106,39 +2810,6 @@ mod tests {
         let sock = TcpStream::connect(addr).unwrap();
         let e = ControlClient::over_tcp(sock, &hello(), no_events()).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn requesting_close_does_not_wait_for_or_take_the_reader_thread() {
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let release_rx = std::sync::Mutex::new(release_rx);
-        let client = client_with_peer(
-            Box::new(move |_| {
-                entered_tx.send(()).unwrap();
-                release_rx
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(5))
-                    .unwrap();
-            }),
-            |mut sock| {
-                ControlServerMsg::Event(ControlEvent::WatchOverflow { id: 1 })
-                    .encode(&mut sock)
-                    .unwrap();
-                sock.flush().unwrap();
-                let _ = ControlClientMsg::read(&mut sock);
-            },
-        );
-        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        client.request_close();
-        assert!(!client.is_connected());
-        assert!(
-            client.reader.lock().unwrap().is_some(),
-            "joining is left to the background owner"
-        );
-        release_tx.send(()).unwrap();
-        client.close();
     }
 
     #[test]

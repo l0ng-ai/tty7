@@ -258,7 +258,6 @@ updater = ["dep:async_zip"]
 # ---- caches are shared and versions stay aligned. ----
 [workspace]
 members = ["crates/*"]
-exclude = ["vendor/alacritty_terminal", "vendor/vte"]
 # The root `tty7` package is a member implicitly; naming every crate here is
 # what makes a bare `cargo build` / `cargo test` at the root cover the whole
 # workspace, which is how CI invokes them.
@@ -296,9 +295,11 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac10
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "runtime_shaders"] }
 
 # Our fork of Zed's alacritty_terminal fork: the VT parser + grid
-# (`Term`/`ansi::Processor`). The GUI, CLI captures and daemon-side reconnect
-# mirror must share one implementation. Source is pinned in vendor/ to expose
-# complete, validated terminal/parser checkpoints; see vendor/README.md.
+# (`Term`/`ansi::Processor`). Two packages read it and they must agree, hence
+# this being a workspace pin rather than one each — the GUI (`terminal::remote`)
+# to render the live mirror, and tty7-cli to turn a captured pane back into text
+# (`tty7 capture --plain`). The daemon parses nothing; it is a byte pipe, and its
+# PTY is driven by `portable-pty`.
 #
 # The `tty7` branch is Zed's `fcf32fe` (the rev Zed pins) plus two commits, both
 # still missing from alacritty master as of 852e971:
@@ -316,9 +317,9 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee3
 #    re-scores the sequence with `UnicodeWidthStr` and widens the cell (issue
 #    #203).
 #
-# Each original patch has a guard test in `src/terminal/remote.rs`. Return to
-# remote dependency pins only once these fixes and the checkpoint API land.
-alacritty_terminal = { path = "vendor/alacritty_terminal" }
+# Each patch has a guard test in `src/terminal/remote.rs`; drop this fork once
+# both land upstream.
+alacritty_terminal = { git = "https://github.com/l0ng-ai/alacritty", rev = "1276f128fbaa8832cbc66210675cbe8aeb570499" }
 
 anyhow = "1"
 log = "0.4"
@@ -328,7 +329,6 @@ smallvec = "1"
 smol = "2"
 
 [patch.crates-io]
-vte = { path = "vendor/vte" }
 # Temporary until upstream russh releases gssapi-with-mic client auth support
 # (https://github.com/Eugeny/russh/pull/737) — remove this patch and take the
 # crates.io release once it lands. Pinned to an exact rev (never a branch):
