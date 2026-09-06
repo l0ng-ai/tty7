@@ -92,7 +92,7 @@ fn link_from(
     has_link: bool,
 ) -> Link {
     match connect {
-        Some(ConnectFlow::Connecting { choice }) if &choice.target == target => {
+        Some(ConnectFlow::Connecting { choice, .. }) if &choice.target == target => {
             return Link::Connecting;
         }
         Some(ConnectFlow::Failed { choice, .. }) if &choice.target == target => {
@@ -527,7 +527,7 @@ impl Tty7App {
         cx.spawn(async move |this, cx| {
             let listed = cx
                 .background_spawn(async move {
-                    let client = tty7_core::client::PaneClient::local();
+                    let client = tty7_core::client::PaneClient::local().management();
                     client.kill(pane_id)?;
                     client.list()
                 })
@@ -3365,6 +3365,7 @@ mod tests {
         let build = RemoteTarget::direct("me", "build-box", 22);
         let gpu = RemoteTarget::direct("me", "gpu-lab", 22);
         let flow = ConnectFlow::Connecting {
+            attempt: crate::ui::remote_connect::ConnectAttempt::with_id(uuid::Uuid::new_v4()),
             choice: HostChoice {
                 target: gpu,
                 label: "gpu-lab".into(),
@@ -3687,12 +3688,9 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix))]
-mod gpui_tests {
-    use gpui::{Modifiers, TestAppContext};
-
-    use super::Column;
-    use crate::ui::app::test_window::harness_with_tabs;
+#[cfg(test)]
+mod workspace_deletion_tests {
+    use gpui::TestAppContext;
 
     /// Deleting a remote workspace has to take the listing snapshot's row with
     /// it. The snapshot every window keeps for the switcher is merged into the
@@ -3702,9 +3700,25 @@ mod gpui_tests {
     /// snapshot.
     #[gpui::test]
     fn a_deleted_remote_workspace_leaves_the_switcher(cx: &mut TestAppContext) {
+        check_remote_workspace_deletion(cx, true);
+    }
+
+    #[gpui::test]
+    fn an_unacknowledged_remote_delete_keeps_the_switcher_entry(cx: &mut TestAppContext) {
+        check_remote_workspace_deletion(cx, false);
+    }
+
+    fn check_remote_workspace_deletion(cx: &mut TestAppContext, connected: bool) {
         use gpui::VisualContext as _;
 
         use crate::core::session::{RemoteRef, RemoteTarget, WindowView, WorkspaceId};
+        use tty7_core::core::machine::MachineStore;
+        use tty7_core::daemon::control::ControlHello;
+        use tty7_core::host::{
+            local::LocalHost,
+            remote::RemoteHost,
+            server::{Services, serve_with},
+        };
 
         let (app, vcx) = crate::ui::app::test_window::harness(cx);
         let handle = vcx.window_handle();
@@ -3718,7 +3732,42 @@ mod gpui_tests {
         let view = WindowView::on_remote(RemoteRef::new(target.clone(), machine_ws));
         let doomed = view.id;
 
+        // Deletion now waits for an authoritative tree and removal reply. An
+        // offline fixture must retain the entry; the success case needs a real
+        // private control peer, not an immediate optimistic local removal.
+        let directory = tempfile::tempdir().unwrap();
+        let store = MachineStore::open(directory.path().join("machine.json"));
+        store
+            .workspace_create(Some(machine_ws), Some("doomed".into()), None)
+            .unwrap();
+        store
+            .workspace_create(Some(kept_ws), Some("kept".into()), None)
+            .unwrap();
+        let peer = connected.then(|| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            let services = Services::with_machine(store.clone());
+            let serving = std::thread::spawn(move || {
+                let _ = serve_with(server, LocalHost::new(), services);
+            });
+            let host = RemoteHost::over_tcp(
+                client,
+                &target.connection_key(),
+                &ControlHello::host_rpc("switcher-delete-test", "switcher-delete-test"),
+            )
+            .unwrap();
+            (host, serving)
+        });
+
         app.update(cx, |app, cx| {
+            if let Some((host, _)) = &peer {
+                crate::ui::remote_connect::HostLinks::insert(
+                    cx,
+                    host.clone(),
+                    directory.path().into(),
+                );
+            }
             crate::core::session::WorkspaceStore::install_for_test(
                 cx,
                 crate::core::session::WindowViews {
@@ -3755,7 +3804,32 @@ mod gpui_tests {
         // the reentrant read (#617's lesson).
         cx.update(|cx| {
             crate::ui::windows::delete_workspace(cx, doomed);
+            assert!(
+                crate::core::session::WorkspaceStore::all(cx)
+                    .get(doomed)
+                    .is_some(),
+                "the bookmark must survive until the remote reply is applied"
+            );
         });
+
+        if connected {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                cx.background_executor.run_until_parked();
+                if cx.read(|cx| {
+                    crate::core::session::WorkspaceStore::all(cx)
+                        .get(doomed)
+                        .is_none()
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < until,
+                    "acknowledged deletion did not reach the UI"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
 
         app.update(cx, |app, cx| {
             let listed: Vec<WorkspaceId> = app
@@ -3763,16 +3837,31 @@ mod gpui_tests {
                 .iter()
                 .flat_map(|g| g.rows.iter().filter_map(|r| r.remote_id))
                 .collect();
-            assert!(
-                !listed.contains(&machine_ws),
-                "the deleted workspace came back from the listing snapshot"
+            assert_eq!(
+                listed.contains(&machine_ws),
+                !connected,
+                "only an acknowledged delete may scrub the listing snapshot"
             );
             assert!(
                 listed.contains(&kept_ws),
                 "its machine's other workspaces are still on offer"
             );
         });
+        assert_eq!(store.workspace(machine_ws).is_ok(), !connected);
+        assert!(store.workspace(kept_ws).is_ok());
+        if let Some((host, serving)) = peer {
+            host.client().close();
+            serving.join().unwrap();
+        }
     }
+}
+
+#[cfg(all(test, unix))]
+mod gpui_tests {
+    use gpui::{Modifiers, TestAppContext};
+
+    use super::Column;
+    use crate::ui::app::test_window::harness_with_tabs;
 
     #[gpui::test]
     fn ctrl_tab_raises_the_panel_on_the_previously_used_tab(cx: &mut TestAppContext) {

@@ -616,7 +616,7 @@ impl OutputGate {
         }
     }
 
-    fn add(&self, n: usize) {
+    pub(super) fn add(&self, n: usize) {
         self.queued.fetch_add(n as i64, Ordering::Relaxed);
     }
 
@@ -860,6 +860,9 @@ struct NativeSshBackend {
 
 pub struct DaemonPane {
     pub id: u64,
+    /// Serializes controller changes with commands accepted from that stream.
+    /// Separate from `state`: a PTY write must not hold up output draining.
+    controller: Mutex<()>,
     owner: Option<String>,
     backend: PaneBackend,
     /// The input side (keyboard input / pasted text): the PTY writer, or the
@@ -1075,6 +1078,7 @@ pub struct Carried {
     pub integration_dir: Option<PathBuf>,
     pub size: WinSize,
     pub ring: Vec<crate::daemon::scrollback::Segment>,
+    pub terminal_checkpoint: Option<Vec<u8>>,
     pub cwd: Option<PathBuf>,
     pub osc_title: Option<String>,
     /// What the pane is running. Nothing on the other side of the exec can work
@@ -1504,6 +1508,7 @@ impl DaemonPane {
 
         let pane = Arc::new(Self {
             id,
+            controller: Mutex::new(()),
             owner,
             backend: PaneBackend::Pty(PtyBackend {
                 master: master.clone(),
@@ -1608,6 +1613,7 @@ impl DaemonPane {
             integration_dir: pty.integration_dir.clone(),
             size: st.ring.tail_size(),
             ring: st.ring.snapshot(),
+            terminal_checkpoint: Some(st.ring.mirror.encode().ok()?),
             cwd: st.cwd.clone(),
             osc_title: st.osc_title.clone(),
             shell_spec: st.shell_spec.clone(),
@@ -1651,6 +1657,11 @@ impl DaemonPane {
             .unwrap_or(carried.size);
 
         let mut ring = ReplayRing::seeded(carried.ring, size);
+        if let Some(bytes) = carried.terminal_checkpoint {
+            super::terminal_state::decode(&bytes)?
+                .apply(&mut ring.mirror.term, &mut ring.mirror.parser)?;
+            ring.truncated = true;
+        }
         // Not a restore banner: nothing was lost, so there is nothing to
         // announce and nothing to reset. The shell below these bytes is the
         // same shell that wrote them.
@@ -1722,7 +1733,7 @@ impl DaemonPane {
 
         let state = Arc::new(Mutex::new(PaneState {
             id,
-            ring: ReplayRing::new(size),
+            ring: ReplayRing::with_backend(size, false),
             subscriber: None,
             subscriber_epoch: 0,
             allow_remote_clipboard_write,
@@ -1757,6 +1768,7 @@ impl DaemonPane {
 
         let pane = Arc::new(Self {
             id,
+            controller: Mutex::new(()),
             owner: None,
             backend: PaneBackend::NativeSsh(NativeSshBackend {
                 handle: bridge.handle,
@@ -2081,7 +2093,12 @@ impl DaemonPane {
         subscriber: Sender<DaemonMsg>,
         allow_remote_clipboard_write: bool,
     ) -> u64 {
+        let _controller = self.controller.lock().unwrap();
         let mut st = self.state.lock().unwrap();
+        if self.shutting_down.load(Ordering::Acquire) {
+            let _ = subscriber.send(DaemonMsg::Error("this pane is closing".into()));
+            return st.subscriber_epoch;
+        }
         let epoch =
             attach_subscriber_with_permissions(&mut st, subscriber, allow_remote_clipboard_write);
         self.gate.reset();
@@ -2089,6 +2106,7 @@ impl DaemonPane {
     }
 
     pub fn detach(&self, epoch: u64) -> bool {
+        let _controller = self.controller.lock().unwrap();
         let mut st = self.state.lock().unwrap();
         if st.subscriber_epoch == epoch {
             st.subscriber = None;
@@ -2109,7 +2127,22 @@ impl DaemonPane {
     }
 
     pub fn controls(&self, epoch: u64) -> bool {
-        self.state.lock().unwrap().subscriber_epoch == epoch
+        let state = self.state.lock().unwrap();
+        !self.shutting_down.load(Ordering::Acquire)
+            && state.subscriber.is_some()
+            && state.subscriber_epoch == epoch
+    }
+
+    /// Validate and apply as one controller operation. Checking `controls`
+    /// before calling write/resize/kill separately races a new attachment.
+    /// An already admitted operation finishes before a new controller joins.
+    pub(crate) fn with_controller(&self, epoch: u64, apply: impl FnOnce(&Self)) -> bool {
+        let _controller = self.controller.lock().unwrap();
+        if !self.controls(epoch) {
+            return false;
+        }
+        apply(self);
+        true
     }
 
     pub fn agent_state(&self) -> Option<crate::daemon::control::PaneAgentState> {
@@ -2402,6 +2435,8 @@ fn pty_size(size: WinSize) -> PtySize {
 }
 
 struct ReplayRing {
+    mirror: super::terminal_state::Mirror,
+    truncated: bool,
     segments: VecDeque<RingSegment>,
     len: usize,
     /// Bytes ever appended, never reset — the mark the scrollback writer uses to
@@ -2436,7 +2471,13 @@ impl RingSegment {
 
 impl ReplayRing {
     fn new(size: WinSize) -> Self {
+        Self::with_backend(size, cfg!(windows))
+    }
+
+    fn with_backend(size: WinSize, conpty: bool) -> Self {
         Self {
+            mirror: super::terminal_state::Mirror::new(size, conpty),
+            truncated: false,
             segments: VecDeque::from([RingSegment::empty(size)]),
             len: 0,
             appended: 0,
@@ -2459,6 +2500,8 @@ impl ReplayRing {
         }
         ring.segments.clear();
         for seg in segments {
+            ring.mirror.resize(seg.size);
+            ring.mirror.advance(&seg.bytes);
             ring.len += seg.bytes.len();
             ring.segments.push_back(RingSegment {
                 size: seg.size,
@@ -2495,6 +2538,7 @@ impl ReplayRing {
     }
 
     fn resize(&mut self, size: WinSize) {
+        self.mirror.resize(size);
         let tail = self.tail();
         if tail.size == size {
             return;
@@ -2504,6 +2548,7 @@ impl ReplayRing {
             return;
         }
         if self.segments.len() >= MAX_RING_SEGMENTS {
+            self.truncated = true;
             let old = self.segments.pop_front().expect("len >= cap");
             let head = self.segments.front_mut().expect("cap >= 2");
             let mut merged = old.bytes;
@@ -2514,6 +2559,8 @@ impl ReplayRing {
     }
 
     fn append(&mut self, bytes: &[u8]) {
+        self.mirror.advance(bytes);
+        self.truncated |= self.len.saturating_add(bytes.len()) > RING_CAP;
         self.appended = self.appended.saturating_add(bytes.len() as u64);
         if bytes.len() >= RING_CAP {
             let size = self.tail().size;
@@ -2542,11 +2589,30 @@ impl ReplayRing {
         }
     }
 
-    fn replay(&self, subscriber: &Sender<DaemonMsg>) {
+    fn replay(&self, subscriber: &Sender<DaemonMsg>) -> usize {
+        if self.truncated {
+            // State and future output are ordered by the enclosing pane lock.
+            // Never feed a truncated escape stream into a freshly reset parser.
+            match self.mirror.encode() {
+                Ok(bytes) => {
+                    let len = bytes.len();
+                    let _ = subscriber.send(DaemonMsg::Size(self.tail_size()));
+                    let _ = subscriber.send(DaemonMsg::TerminalCheckpoint(bytes));
+                    return len;
+                }
+                Err(error) => {
+                    let _ = subscriber.send(DaemonMsg::Error(format!(
+                        "terminal checkpoint failed: {error}"
+                    )));
+                }
+            }
+            return 0;
+        }
         for seg in &self.segments {
             let _ = subscriber.send(DaemonMsg::Size(seg.size));
             let _ = subscriber.send(DaemonMsg::Snapshot(seg.to_vec()));
         }
+        self.len
     }
 
     #[cfg(test)]
@@ -2559,8 +2625,8 @@ impl ReplayRing {
     }
 }
 
-fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>) {
-    st.ring.replay(subscriber);
+fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>) -> usize {
+    let replay_bytes = st.ring.replay(subscriber);
     if let Some(cwd) = &st.cwd {
         let _ = subscriber.send(DaemonMsg::Cwd(cwd.clone()));
     }
@@ -2583,6 +2649,7 @@ fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>) {
     if !st.alive {
         let _ = subscriber.send(DaemonMsg::Exited { code: st.exit_code });
     }
+    replay_bytes
 }
 
 #[cfg(test)]
@@ -2615,12 +2682,14 @@ fn observe_subscriber(
     gate: Arc<OutputGate>,
 ) -> u64 {
     st.observer_seq += 1;
-    replay_state(st, &observer);
-    // The replay just queued the whole ring into this channel. Charge it, or
+    let replay_bytes = replay_state(st, &observer);
+    // Charge the actual queued payload (a checkpoint can be much smaller than
+    // the raw ring). The observer writer debits replay frames as it drains.
+    // Charge it, or
     // the first budget check would read zero while a full scrollback is already
     // sitting there unread — an observer that never drains would be allowed a
     // ring plus a full budget before anyone noticed.
-    gate.add(st.ring.len);
+    gate.add(replay_bytes);
     st.observers.push(Observer {
         id: st.observer_seq,
         tx: observer,
@@ -3323,6 +3392,113 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_displaced_pane_controller_cannot_apply_any_more_commands() {
+        let pane = DaemonPane::spawn(
+            774001,
+            Some(std::env::temp_dir()),
+            ws(80, 24),
+            Some(ShellSpec {
+                program: "/bin/cat".into(),
+                args: Vec::new(),
+                args_are_tty7_defaults: false,
+            }),
+            None,
+            None,
+            None,
+            false,
+            || {},
+        )
+        .unwrap();
+        let (old_tx, _old_rx) = mpsc::channel();
+        let old = pane.attach(old_tx);
+        let (new_tx, _new_rx) = mpsc::channel();
+        let current = pane.attach(new_tx);
+        assert!(!pane.with_controller(old, |pane| pane.write_input(b"stale\n")));
+        assert!(!pane.with_controller(old, |pane| pane.resize(ws(10, 10))));
+        assert!(!pane.with_controller(old, |pane| pane.kill()));
+        assert!(pane.alive());
+        assert!(pane.with_controller(current, |pane| pane.resize(ws(100, 30))));
+        assert_eq!(
+            pane.state
+                .lock()
+                .unwrap()
+                .ring
+                .segments
+                .back()
+                .unwrap()
+                .size,
+            ws(100, 30)
+        );
+        pane.detach(current);
+        assert!(!pane.with_controller(current, |_| panic!("detached stream retained control")));
+        pane.kill();
+        let (closing_tx, closing_rx) = mpsc::channel();
+        let closing = pane.attach(closing_tx);
+        assert!(matches!(closing_rx.try_recv(), Ok(DaemonMsg::Error(_))));
+        assert!(
+            !pane.controls(closing),
+            "a closing pane cannot accept a new controller"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_admitted_command_finishes_before_a_new_controller_can_attach() {
+        let pane = DaemonPane::spawn(
+            774002,
+            Some(std::env::temp_dir()),
+            ws(80, 24),
+            Some(ShellSpec {
+                program: "/bin/cat".into(),
+                args: Vec::new(),
+                args_are_tty7_defaults: false,
+            }),
+            None,
+            None,
+            None,
+            false,
+            || {},
+        )
+        .unwrap();
+        let (old_tx, _old_rx) = mpsc::channel();
+        let old = pane.attach(old_tx);
+        let (admitted_tx, admitted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let command = {
+            let pane = pane.clone();
+            std::thread::spawn(move || {
+                pane.with_controller(old, |_| {
+                    admitted_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                })
+            })
+        };
+        admitted_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (attached_tx, attached_rx) = mpsc::channel();
+        let attach = {
+            let pane = pane.clone();
+            std::thread::spawn(move || {
+                let (tx, _rx) = mpsc::channel();
+                let current = pane.attach(tx);
+                attached_tx.send(current).unwrap();
+            })
+        };
+        assert!(
+            attached_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err()
+        );
+        release_tx.send(()).unwrap();
+        assert!(command.join().unwrap());
+        let current = attached_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        attach.join().unwrap();
+        assert!(current > old);
+        assert!(!pane.with_controller(old, |_| panic!("old command was admitted after attach")));
+        pane.kill();
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn live_pty_child_argv_detects_the_agent() {
@@ -3915,6 +4091,48 @@ mod tests {
             String::from_utf8(head.to_vec())
                 .unwrap()
                 .ends_with("seg11 ")
+        );
+    }
+
+    #[test]
+    fn a_truncated_tui_attaches_with_state_then_continues_and_returns_to_its_primary_screen() {
+        use alacritty_terminal::term::TermMode;
+        let mut st = test_state(true);
+        st.ring
+            .append(b"original shell\x1b[?1049h\x1b[?1003;1006h\x1b[?25l");
+        for _ in 0..150_000 {
+            st.ring.append(
+                b"\x1b[Hthe btop screen keeps redrawing without reinitializing its terminal modes",
+            );
+        }
+        assert!(st.ring.appended > RING_CAP as u64);
+        let (tx, rx) = mpsc::channel();
+        attach_subscriber(&mut st, tx);
+        let DaemonMsg::Size(size) = rx.recv().unwrap() else {
+            panic!()
+        };
+        let DaemonMsg::TerminalCheckpoint(bytes) = rx.recv().unwrap() else {
+            panic!("truncated raw replay is not a terminal state")
+        };
+        let mut restored = super::super::terminal_state::Mirror::new(size, cfg!(windows));
+        super::super::terminal_state::decode(&bytes)
+            .unwrap()
+            .apply(&mut restored.term, &mut restored.parser)
+            .unwrap();
+        assert!(
+            restored
+                .term
+                .mode()
+                .contains(TermMode::ALT_SCREEN | TermMode::SGR_MOUSE)
+        );
+        assert!(restored.term.mode().intersects(TermMode::MOUSE_MODE));
+        let suffix = b"\x1b[2;2Hupdate\x1b[?1003;1006l\x1b[?1049l\r\nback at shell";
+        st.ring.append(suffix);
+        restored.advance(suffix);
+        assert!(!restored.term.mode().contains(TermMode::ALT_SCREEN));
+        assert_eq!(
+            serde_json::to_value(st.ring.mirror.term.checkpoint()).unwrap(),
+            serde_json::to_value(restored.term.checkpoint()).unwrap()
         );
     }
 

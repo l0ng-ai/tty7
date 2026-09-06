@@ -38,6 +38,7 @@ impl ControlClient {
             server_command: None,
             channel: RouteChannel::Control,
             action: RouteAction::Forward,
+            legacy_stop_consent: false,
         };
         negotiate(&mut stream, &header)?;
         Self::over_stream(stream, hello)

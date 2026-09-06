@@ -19,6 +19,11 @@ OPTIONS:
       --control-sock <p>    Use <p> as the control socket instead of the default
     --config-dir <dir>    Use <dir> for the socket, config and session files
     --protocol            Print the dialects this binary speaks, as JSON
+    --prepare-idle-restart Stop only an idle, matching daemon instance; never force
+    --stop-recorded-server  SIGTERM the pidfile-recorded server once its identity
+                          checks out; never match by name, never force-kill
+    --check-running       Check both running endpoints with real protocol requests
+    --check-serving       Check protocol-compatible endpoints, allowing another build
     -V, --version         Print the version and exit
     -h, --help            Print this help and exit
 ";
@@ -53,6 +58,73 @@ fn main() -> ExitCode {
     }
 
     apply_config_dir_arg(&args);
+
+    if args.iter().any(|a| {
+        a == tty7_core::daemon::maintenance::PREPARE_FLAG
+            || a == tty7_core::daemon::maintenance::HEALTH_FLAG
+            || a == tty7_core::daemon::maintenance::SERVING_FLAG
+            || a == tty7_core::daemon::maintenance::STOP_RECORDED_FLAG
+    }) {
+        let result = if args
+            .iter()
+            .any(|a| a == tty7_core::daemon::maintenance::PREPARE_FLAG)
+        {
+            let millis = flag_value(&args, "--wait-ms")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(10_000)
+                .clamp(1, 30_000);
+            tty7_core::daemon::maintenance::prepare_idle_restart(std::time::Duration::from_millis(
+                millis,
+            ))
+        } else if args
+            .iter()
+            .any(|a| a == tty7_core::daemon::maintenance::STOP_RECORDED_FLAG)
+        {
+            let millis = flag_value(&args, "--wait-ms")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(10_000)
+                .clamp(1, 30_000);
+            tty7_core::daemon::maintenance::stop_recorded(std::time::Duration::from_millis(millis))
+        } else if args
+            .iter()
+            .any(|a| a == tty7_core::daemon::maintenance::SERVING_FLAG)
+        {
+            let budget = flag_value(&args, "--wait-ms")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(5000)
+                .clamp(1, 15000);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(tty7_core::daemon::maintenance::check_serving());
+            });
+            rx.recv_timeout(std::time::Duration::from_millis(budget))
+                .unwrap_or_else(|_| {
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "daemon readiness handshake timed out",
+                    ))
+                })
+        } else {
+            tty7_core::daemon::maintenance::check_running()
+        };
+        return match result {
+            Ok(reply) => {
+                println!("{}", reply.to_line());
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("tty7-server: maintenance deferred: {error}");
+                // The far end of an SSH command sees only streams and an exit
+                // code; the prose is for the log, this line is for the branch
+                // that has to know *why* without matching on English.
+                println!(
+                    "{}",
+                    tty7_core::daemon::maintenance::Reply::deferred(&error).to_line()
+                );
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     tty7_core::core::crash::install("server");
     tty7_core::core::logfile::install("server");

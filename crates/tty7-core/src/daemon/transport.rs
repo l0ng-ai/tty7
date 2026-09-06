@@ -122,12 +122,37 @@ mod imp_unix {
                 }
             }
         }
-        let listener = UnixListener::bind(&path)
-            .map_err(|e| anyhow::anyhow!("bind {} failed: {}", path.display(), e))?;
+        let listener = match UnixListener::bind(&path) {
+            Ok(listener) => listener,
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse => reclaim_stale_socket(&path)?,
+            Err(e) => return Err(anyhow::anyhow!("bind {} failed: {}", path.display(), e)),
+        };
         if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
             log::warn!("could not chmod 0600 daemon socket {}: {e}", path.display());
         }
         Ok(listener)
+    }
+
+    /// Bind a socket path that is already taken.
+    ///
+    /// A Unix domain socket never binds over an existing path, so a daemon
+    /// that died without unlinking — killed, panicked, OOM-reaped — left its
+    /// socket file blocking every later start with EADDRINUSE until someone
+    /// removed it by hand. The pidfile cannot gate this cleanup: it records
+    /// the daemon that *was*, and "the recorded pid is dead" is exactly the
+    /// case that needs clearing, not a reason to skip it.
+    ///
+    /// The probe is the authority instead. A live owner answers the connect
+    /// and the start is refused; a path nobody answers is a leftover, and
+    /// this process — already holding the singleton seat — is the only one
+    /// entitled to remove it.
+    pub(crate) fn reclaim_stale_socket(path: &Path) -> anyhow::Result<Listener> {
+        if connect_endpoint_at(path).is_ok() {
+            anyhow::bail!("daemon already running at {}", path.display());
+        }
+        let _ = std::fs::remove_file(path);
+        UnixListener::bind(path)
+            .map_err(|e| anyhow::anyhow!("bind {} failed: {}", path.display(), e))
     }
 
     pub fn endpoint_display() -> String {
@@ -166,6 +191,47 @@ mod tests {
         drop(listener);
         remove_stale_endpoint();
         assert!(!endpoint_exists(), "endpoint cleared after removal");
+    }
+
+    // These two go through `reclaim_stale_socket` with an explicit path rather
+    // than `bind`, because `bind` resolves the path from the process-global
+    // config dir and these tests run beside others that pin their own.
+
+    #[test]
+    fn reclaim_replaces_a_socket_file_nobody_answers() {
+        let dir = std::env::temp_dir().join(format!("tty7-reclaim-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("staging dir");
+        let path = dir.join("daemon.sock");
+        // What a killed daemon leaves behind: the file outlives the listener.
+        drop(Listener::bind(&path).expect("stage the stale socket"));
+        assert!(path.exists(), "the stale file is still on disk");
+
+        let listener = reclaim_stale_socket(&path).expect("reclaim the stale path");
+        let _client = Stream::connect(&path).expect("the reclaimed endpoint serves");
+
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reclaim_refuses_a_live_owner_and_keeps_its_socket() {
+        let dir = std::env::temp_dir().join(format!("tty7-reclaim-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("staging dir");
+        let path = dir.join("daemon.sock");
+        let live = Listener::bind(&path).expect("the live owner binds first");
+
+        let err = reclaim_stale_socket(&path).expect_err("a live endpoint is not reclaimed");
+        assert!(
+            err.to_string().contains("already running"),
+            "the refusal names the live owner: {err}"
+        );
+        assert!(
+            path.exists(),
+            "a live owner's socket file must not be unlinked"
+        );
+
+        drop(live);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

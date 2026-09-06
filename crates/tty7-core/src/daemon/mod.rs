@@ -1,4 +1,6 @@
+pub mod cancel;
 pub mod control;
+pub mod deadline;
 pub mod duplex;
 /// Upgrading the daemon in place, keeping the ptys and the shells on them.
 ///
@@ -9,6 +11,7 @@ pub mod duplex;
 pub mod handoff;
 pub mod history;
 pub mod install;
+pub mod maintenance;
 pub mod pane;
 pub mod pidfile;
 pub mod procinfo;
@@ -21,6 +24,7 @@ pub mod server;
 pub mod singleton;
 pub mod spawn;
 pub mod ssh;
+pub mod terminal_state;
 pub mod transport;
 
 pub(crate) const DETECTED_SHELL_ENV: &str = "TTY7_DETECTED_SHELL";

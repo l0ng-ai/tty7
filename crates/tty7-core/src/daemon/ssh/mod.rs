@@ -317,6 +317,15 @@ impl SshManager {
     ) -> anyhow::Result<(RemoteLink, Arc<SshConnection>)> {
         let (conn, _reused) = self.open_connection(spec, &setup.broker).await?;
 
+        // An explicit endpoint must not prepare the account's default daemon
+        // or reuse its cached streamlocal socket. Otherwise two routes to
+        // different configurations on one SSH host silently land on one server.
+        if let Some(explicit) = server_command {
+            let command = setup.channel.bridge_command(explicit);
+            let link = exec_remote_link(&conn, &command).await?;
+            return Ok((link, conn));
+        }
+
         let installed = {
             let install_conn = conn.clone();
             setup
@@ -324,13 +333,10 @@ impl SshManager {
                 .await??
         };
 
-        let base = match server_command {
-            Some(explicit) => explicit.to_string(),
-            None => format!(
-                "{} --stdio",
-                crate::daemon::install::shell_quote(&installed)
-            ),
-        };
+        let base = format!(
+            "{} --stdio",
+            crate::daemon::install::shell_quote(&installed)
+        );
         let command = setup.channel.bridge_command(&base);
 
         let entry = match setup.channel {
@@ -362,25 +368,21 @@ impl SshManager {
             }
         }
 
-        let channel = conn
-            .open_session_channel()
-            .await
-            .map_err(|e| anyhow::anyhow!("open remote workspace channel failed: {e}"))?;
-        channel
-            .exec(false, command.as_bytes())
-            .await
-            .map_err(|e| anyhow::anyhow!("exec `{command}` on the remote failed: {e}"))?;
-        Ok((RemoteLink::session_exec(channel), conn))
+        let link = exec_remote_link(&conn, &command).await?;
+        Ok((link, conn))
     }
 
     pub async fn restart_remote_server(
         &self,
         spec: &NativeSshSpec,
         setup: &RouteSetup,
+        legacy_stop: bool,
     ) -> anyhow::Result<()> {
         let (conn, _reused) = self.open_connection(spec, &setup.broker).await?;
         setup
-            .blocking(move || crate::daemon::install::restart_remote_daemon(&conn))
+            .blocking(move || {
+                crate::daemon::install::restart_remote_daemon_consenting(&conn, legacy_stop)
+            })
             .await??;
         Ok(())
     }
@@ -389,10 +391,13 @@ impl SshManager {
         &self,
         spec: &NativeSshSpec,
         setup: &RouteSetup,
+        legacy_stop: bool,
     ) -> anyhow::Result<()> {
         let (conn, _reused) = self.open_connection(spec, &setup.broker).await?;
         setup
-            .blocking(move || crate::daemon::install::replace_remote_server(&conn))
+            .blocking(move || {
+                crate::daemon::install::replace_remote_server_consenting(&conn, legacy_stop)
+            })
             .await??;
         Ok(())
     }
@@ -570,6 +575,18 @@ impl SshManager {
     }
 }
 
+async fn exec_remote_link(conn: &SshConnection, command: &str) -> anyhow::Result<RemoteLink> {
+    let channel = conn
+        .open_session_channel()
+        .await
+        .map_err(|e| anyhow::anyhow!("open remote workspace channel failed: {e}"))?;
+    channel
+        .exec(false, command.as_bytes())
+        .await
+        .map_err(|e| anyhow::anyhow!("exec `{command}` on the remote failed: {e}"))?;
+    Ok(RemoteLink::session_exec(channel))
+}
+
 /// A broker that answers every prompt with "cancelled" the moment it is asked,
 /// and remembers what the first ask was for.
 ///
@@ -707,6 +724,62 @@ mod tests {
             assert!(
                 !mgr.probes.lock().unwrap().contains_key(sshd.conn.key()),
                 "the next session, on a fresh link, must ask again"
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_routes_never_install_or_reuse_another_daemons_socket() {
+        use tokio::io::AsyncReadExt as _;
+        let mgr = manager();
+        mgr.runtime.block_on(async {
+            let sshd = FakeSshd::connect(Exec::Exits, None).await;
+            let mut spec = base_spec();
+            spec.host = "127.0.0.1".into();
+            spec.port = sshd
+                .conn
+                .key()
+                .as_str()
+                .rsplit(':')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            mgr.conns.lock().unwrap().insert(
+                ConnectionKey::from_spec(&spec),
+                Arc::new(tokio::sync::Mutex::new(Arc::downgrade(&sshd.conn))),
+            );
+            sshd.conn
+                .set_remote_entry(RemoteEntry::StreamLocal {
+                    socket: "/default-do-not-touch.sock".into(),
+                })
+                .await;
+            for channel in [RouteChannel::Control, RouteChannel::Pane] {
+                let setup = RouteSetup::unattended(channel);
+                let (mut link, conn) = mgr
+                    .open_remote_link(
+                        &spec,
+                        &setup,
+                        Some("test-candidate --config-dir /private --stdio"),
+                    )
+                    .await
+                    .unwrap();
+                assert!(Arc::ptr_eq(&conn, &sshd.conn));
+                let mut bytes = Vec::new();
+                link.read_to_end(&mut bytes).await.unwrap();
+                assert_eq!(bytes, b"ok\n");
+            }
+            assert_eq!(
+                sshd.commands(),
+                vec![
+                    "test-candidate --config-dir /private --stdio",
+                    "test-candidate --config-dir /private --stdio --pane",
+                ]
+            );
+            assert_eq!(
+                sshd.opened(),
+                2,
+                "no install, home probe or default endpoint fallback"
             );
         });
     }

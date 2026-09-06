@@ -42,9 +42,9 @@ impl RemoteHost {
         connection_key: &str,
         hello: &ControlHello,
     ) -> io::Result<Arc<RemoteHost>> {
-        let r = sock.try_clone()?;
-        let closer: Arc<dyn LinkShutdown> = Arc::new(sock.try_clone()?);
-        Self::connect_with(r, sock, Some(closer), connection_key, hello)
+        Self::with_client(connection_key, |sink| {
+            ControlClient::over_tcp(sock, hello, sink)
+        })
     }
 
     #[cfg(unix)]
@@ -53,9 +53,9 @@ impl RemoteHost {
         connection_key: &str,
         hello: &ControlHello,
     ) -> io::Result<Arc<RemoteHost>> {
-        let r = sock.try_clone()?;
-        let closer: Arc<dyn LinkShutdown> = Arc::new(sock.try_clone()?);
-        Self::connect_with(r, sock, Some(closer), connection_key, hello)
+        Self::with_client(connection_key, |sink| {
+            ControlClient::over_unix(sock, hello, sink)
+        })
     }
 
     pub fn connect_with<R, W>(
@@ -69,6 +69,17 @@ impl RemoteHost {
         R: Read + Send + 'static,
         W: Write + Send + 'static,
     {
+        Self::with_client(connection_key, |sink| {
+            ControlClient::connect_with(r, w, shutdown, hello, sink)
+        })
+    }
+
+    // Keep event wiring shared without erasing the socket type before Hello:
+    // the socket constructors enforce a deadline on the whole exchange.
+    fn with_client(
+        connection_key: &str,
+        connect: impl FnOnce(EventSink) -> io::Result<ControlClient>,
+    ) -> io::Result<Arc<RemoteHost>> {
         let watches = Arc::new(WatchRegistry::default());
         let sink_watches = Arc::clone(&watches);
         let streams: Arc<GitStreamRegistry> = Arc::new(GitStreamRegistry::default());
@@ -84,7 +95,7 @@ impl RemoteHost {
             other => crate::daemon::control::observe_event(id, other),
         });
 
-        let client = Arc::new(ControlClient::connect_with(r, w, shutdown, hello, sink)?);
+        let client = Arc::new(connect(sink)?);
         let separator = client.hello().separator;
         let down_streams = Arc::clone(&streams);
         client.on_link_down(move || down_streams.close_all());
@@ -662,6 +673,38 @@ mod tests {
             ],
             instance: "test-instance".into(),
         }
+    }
+
+    #[test]
+    fn routed_host_hello_has_a_deadline_and_closes_a_silent_peer() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let peer = thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            // Also bound the regression test if the client loses its deadline.
+            peer.set_read_timeout(Some(Duration::from_secs(25)))
+                .unwrap();
+            assert!(matches!(
+                ControlClientMsg::read(&mut peer).unwrap(),
+                ControlClientMsg::Hello(_)
+            ));
+            let mut byte = [0];
+            peer.read(&mut byte)
+        });
+        let started = Instant::now();
+        let result = RemoteHost::over_tcp(
+            socket,
+            "test:silent-host",
+            &ControlHello::host_rpc("tok", "laptop"),
+        );
+        let error = result.err().expect("a silent peer must not become a host");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+        assert!(started.elapsed() < Duration::from_secs(25));
+        assert_eq!(
+            peer.join().unwrap().unwrap(),
+            0,
+            "the failed route releases its socket"
+        );
     }
 
     fn meta() -> Meta {

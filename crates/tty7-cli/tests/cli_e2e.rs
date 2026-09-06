@@ -619,6 +619,7 @@ fn send_enter_submits_in_a_paste_aware_raw_mode_tui(daemon: &Daemon) {
         args_are_tty7_defaults: false,
     };
     let mut pane = PaneClient::at(daemon.pane_endpoint())
+        .management()
         .spawn(
             None,
             WinSize {

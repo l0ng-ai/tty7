@@ -59,7 +59,7 @@ impl Daemon {
     }
 
     fn panes(&self) -> PaneClient {
-        PaneClient::at(self.dir.path().join("daemon.sock"))
+        PaneClient::at(self.dir.path().join("daemon.sock")).management()
     }
 
     fn global_history(&self) -> String {

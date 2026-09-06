@@ -764,6 +764,9 @@ pub fn hand_off() -> anyhow::Result<()> {
     // already in flight is describing the image being retired. Moving the
     // generation here rather than after the exec is what makes those verdicts
     // land before this one does harmless.
+    if local_daemon_supports(crate::daemon::protocol::FEATURE_PANE_ACCESS) {
+        ClientMsg::Access(crate::daemon::protocol::PaneAccess::Manage).encode(&mut stream)?;
+    }
     daemon_generation_moved();
     let generation = daemon_generation();
     ClientMsg::Handoff { exe: exe.clone() }.encode(&mut stream)?;
@@ -822,7 +825,19 @@ pub fn stop() {
         .filter(|&pid| pid > 4 && pid != std::process::id());
 
     let mut asked = false;
+    // Explicit maintenance may still target a pre-v7 daemon. Probe on a
+    // separate read-only socket, never downgrade workspace pane traffic.
+    let scoped = transport::connect().ok().is_some_and(|mut stream| {
+        matches!(query_daemon_version(&mut stream), VersionProbe::Speaks(version) if version.has_feature(crate::daemon::protocol::FEATURE_PANE_ACCESS))
+    });
     if let Ok(mut stream) = transport::connect() {
+        if scoped
+            && ClientMsg::Access(crate::daemon::protocol::PaneAccess::Manage)
+                .encode(&mut stream)
+                .is_err()
+        {
+            return;
+        }
         if ClientMsg::Shutdown.encode(&mut stream).is_ok() {
             let _ = stream.flush();
             asked = true;
@@ -936,7 +951,11 @@ fn reap_recorded_daemon(recorded: Option<u32>) {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn clear_daemon_records() {
     pidfile::remove();
-    crate::daemon::singleton::clear_record_if_free();
+    // On macOS a dying process can stop answering proc_pidinfo before its
+    // descriptors release the seat. A single nonblocking clear can therefore
+    // leave the old pid behind even after a confirmed reap. Retry briefly,
+    // always under the exclusive lock so a replacement's record stays intact.
+    crate::daemon::singleton::clear_record_after_exit(Duration::from_secs(1));
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1022,7 +1041,7 @@ fn signal_and_await_exit(pid: libc::pid_t, sig: libc::c_int, timeout: Duration) 
 /// the daemons it spawns, so a crashed daemon *is* a zombie of a long-lived
 /// GUI, not a rare state.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn process_alive(pid: libc::pid_t) -> bool {
+pub(crate) fn process_alive(pid: libc::pid_t) -> bool {
     let exists = unsafe { libc::kill(pid, 0) == 0 };
     exists && !is_zombie(pid)
 }

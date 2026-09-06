@@ -497,8 +497,7 @@ fn confirm_destructive(
 }
 
 pub fn stop_workspace(cx: &mut App, workspace: WorkspaceId) {
-    let doomed = doomed_pane_ids(cx, workspace);
-    stop_workspace_keeping(cx, workspace, doomed);
+    stop_or_delete_workspace(cx, workspace, false);
 }
 
 fn doomed_pane_ids(cx: &App, workspace: WorkspaceId) -> Vec<u64> {
@@ -508,22 +507,140 @@ fn doomed_pane_ids(cx: &App, workspace: WorkspaceId) -> Vec<u64> {
         .unwrap_or_default()
 }
 
-fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId, ids: Vec<u64>) {
+#[derive(Default)]
+struct PendingWorkspaceStops(std::collections::HashSet<WorkspaceId>);
+impl Global for PendingWorkspaceStops {}
+
+/// Keep the workspace and its controlling link alive until all pane kills
+/// are acknowledged. Removing its tree first revokes the very capability
+/// those kills require. A refusal must not look like a successful deletion.
+fn stop_or_delete_workspace(cx: &mut App, workspace: WorkspaceId, delete: bool) {
+    if cx
+        .default_global::<PendingWorkspaceStops>()
+        .0
+        .contains(&workspace)
+    {
+        return;
+    }
+    let host = WorkspaceStore::host_of(cx, workspace);
+    let client = match crate::ui::tree_sync::tree_control_for(cx, host) {
+        crate::ui::tree_sync::TreeLink::Ready(client) => client,
+        _ => {
+            workspace_stop_failed(cx, workspace, t(L10nKey::WindowReconnectToStop));
+            return;
+        }
+    };
+    let remote = WorkspaceStore::remote_ref(cx, workspace);
+    let machine_ws = remote
+        .as_ref()
+        .map(|remote| remote.workspace)
+        .unwrap_or(workspace);
     let route = crate::ui::remote_workspace::pane_route_for(cx, workspace);
+    let ids = doomed_pane_ids(cx, workspace);
+    cx.default_global::<PendingWorkspaceStops>()
+        .0
+        .insert(workspace);
+    let work = cx.background_executor().spawn(async move {
+        use tty7_core::daemon::control::{ControlRequest, ReplyOk};
+        // An empty/stale local mirror is not evidence that the remote
+        // workspace has no processes. Read its authoritative tree first.
+        let ids = match client.call(ControlRequest::WorkspaceTree {
+            workspace: machine_ws,
+        }) {
+            Ok(ReplyOk::WorkspaceTree(tree)) => tree
+                .tabs
+                .iter()
+                .flat_map(|tab| tab.root.pane_ids())
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => ids,
+            Err(error) => return Err(anyhow::Error::from(error)),
+            Ok(other) => {
+                return Err(anyhow::anyhow!(
+                    "unexpected workspace tree reply: {other:?}"
+                ));
+            }
+        };
+        for pane in ids {
+            crate::terminal::RemoteTerminal::try_kill_pane_on(&route, pane)?;
+        }
+        if delete {
+            match client.call(ControlRequest::WorkspaceRemove {
+                workspace: machine_ws,
+            }) {
+                Ok(ReplyOk::Panes(_)) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(anyhow::Error::from(error)),
+                Ok(other) => {
+                    return Err(anyhow::anyhow!(
+                        "unexpected workspace removal reply: {other:?}"
+                    ));
+                }
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    cx.spawn(async move |cx| {
+        let result = work.await;
+        let _ = cx.update(|cx| {
+            cx.default_global::<PendingWorkspaceStops>()
+                .0
+                .remove(&workspace);
+            if let Err(error) = result {
+                workspace_stop_failed(cx, workspace, &error.to_string());
+                return;
+            }
+            if delete {
+                let request = tty7_core::daemon::control::ControlRequest::WorkspaceRemove {
+                    workspace: machine_ws,
+                };
+                crate::ui::machine_mirror::MachineMirrors::note_workspace_op(cx, host, &request);
+                crate::ui::tree_sync::forget(cx, workspace);
+            }
+            finish_stopping_workspace(cx, workspace);
+            if delete {
+                WorkspaceStore::remove(cx, workspace);
+                if let Some(remote) = remote {
+                    scrub_host_snapshots(cx, &remote);
+                }
+                release_unused_hosts(cx);
+                refresh_menu(cx);
+            }
+        });
+    })
+    .detach();
+}
+
+fn workspace_stop_failed(cx: &mut App, workspace: WorkspaceId, reason: &str) {
+    log::warn!("workspace {workspace} was not stopped/deleted: {reason}");
+    if cx.try_global::<WindowRegistry>().is_none() {
+        return;
+    }
+    if let Some(handle) = WindowRegistry::window_for(cx, workspace).or_else(|| {
+        WindowRegistry::open_windows(cx)
+            .first()
+            .and_then(|(id, _)| WindowRegistry::window_for(cx, *id))
+    }) {
+        let _ = handle.update(cx, |_, window, cx| {
+            let answer = window.prompt(
+                gpui::PromptLevel::Warning,
+                t(L10nKey::WindowOperationIncomplete),
+                Some(reason),
+                &[t(L10nKey::Ok)],
+                cx,
+            );
+            cx.spawn(async move |_| {
+                let _ = answer.await;
+            })
+            .detach();
+        });
+    }
+}
+
+fn finish_stopping_workspace(cx: &mut App, workspace: WorkspaceId) {
     let host = WorkspaceStore::all(cx)
         .get(workspace)
         .map(|w| w.host_id())
         .unwrap_or(crate::ui::host_ops::HostId::LOCAL);
-    if !ids.is_empty() {
-        let route = route.clone();
-        cx.background_executor()
-            .spawn(async move {
-                for pane_id in ids {
-                    crate::terminal::RemoteTerminal::kill_pane_on(&route, pane_id);
-                }
-            })
-            .detach();
-    }
     if cx
         .try_global::<crate::terminal::pane_liveness::PaneLivenessCache>()
         .is_some()
@@ -543,15 +660,7 @@ fn stop_workspace_keeping(cx: &mut App, workspace: WorkspaceId, ids: Vec<u64>) {
 }
 
 pub fn delete_workspace(cx: &mut App, workspace: WorkspaceId) {
-    let remote = WorkspaceStore::remote_ref(cx, workspace);
-    let doomed = delete_from_tree(cx, workspace);
-    stop_workspace_keeping(cx, workspace, doomed);
-    WorkspaceStore::remove(cx, workspace);
-    if let Some(remote) = remote {
-        scrub_host_snapshots(cx, &remote);
-    }
-    release_unused_hosts(cx);
-    refresh_menu(cx);
+    stop_or_delete_workspace(cx, workspace, true);
 }
 
 /// Drops a deleted workspace's row from every window's machine-listing
@@ -579,9 +688,8 @@ fn scrub_host_snapshots(cx: &mut App, remote: &crate::core::session::RemoteRef) 
 }
 
 /// Drop a workspace's local bookmark without telling its machine anything.
-/// `delete_workspace` goes through `fire_workspace_op`, which sends
-/// `WorkspaceRemove` — and with a live link that really kills the remote
-/// panes. Forgetting only stops tracking the entry here; the remote daemon
+/// `delete_workspace` stops the panes before sending `WorkspaceRemove`.
+/// Forgetting only stops tracking the entry here; the remote daemon
 /// keeps the session, and the switcher re-discovers it from the machine's
 /// own workspace list if a route to it ever exists again (#485).
 pub fn forget_workspace(cx: &mut App, workspace: WorkspaceId) {
@@ -612,15 +720,6 @@ pub fn cascade_for_profile(cx: &mut App, profile: uuid::Uuid) -> Vec<WorkspaceId
                 && WindowRegistry::app_for(cx, *ws).is_none()
         })
         .collect()
-}
-
-fn delete_from_tree(cx: &mut App, workspace: WorkspaceId) -> Vec<u64> {
-    let doomed = doomed_pane_ids(cx, workspace);
-    crate::ui::tree_sync::fire_workspace_op(cx, workspace, |ws| {
-        tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: ws }
-    });
-    crate::ui::tree_sync::forget(cx, workspace);
-    doomed
 }
 
 fn release_unused_hosts(cx: &mut App) {
@@ -1018,11 +1117,16 @@ mod tests {
                 },
             );
 
-            let doomed = delete_from_tree(cx, id);
+            let doomed = doomed_pane_ids(cx, id);
             assert_eq!(
                 doomed,
                 vec![1, 2, 3],
                 "every shell the confirm prompt counted must be on the kill list"
+            );
+            crate::ui::machine_mirror::MachineMirrors::note_workspace_op(
+                cx,
+                crate::ui::host_ops::HostId::LOCAL,
+                &tty7_core::daemon::control::ControlRequest::WorkspaceRemove { workspace: id },
             );
             assert!(
                 doomed_pane_ids(cx, id).is_empty(),
@@ -1168,8 +1272,8 @@ mod tests {
                 "forgetting fired no WorkspaceRemove — the machine keeps its session"
             );
 
-            // Contrast: the delete path means it, and the mirror folds the
-            // removal in even with the control link down.
+            // A disconnected delete must not erase the bookmark or mirror
+            // and pretend the remote processes have actually stopped.
             let view = WindowView::on_remote(RemoteRef::new(target, machine_ws));
             let entry = view.id;
             WorkspaceStore::install_for_test(
@@ -1179,12 +1283,13 @@ mod tests {
                     active: None,
                 },
             );
-            delete_from_tree(cx, entry);
+            delete_workspace(cx, entry);
             let machine = crate::ui::machine_mirror::MachineMirrors::machine(cx, host).unwrap();
             assert!(
-                !machine.workspaces.iter().any(|w| w.id == machine_ws),
-                "delete_from_tree noted the remove it fired"
+                machine.workspaces.iter().any(|w| w.id == machine_ws),
+                "an unacknowledged delete keeps the machine mirror"
             );
+            assert!(WorkspaceStore::all(cx).get(entry).is_some());
         });
     }
 }

@@ -38,6 +38,7 @@ struct Counts {
     opened: AtomicUsize,
     closed: AtomicUsize,
     refused: AtomicUsize,
+    commands: std::sync::Mutex<Vec<String>>,
 }
 
 struct Sshd {
@@ -78,9 +79,14 @@ impl server::Handler for Sshd {
     async fn exec_request(
         &mut self,
         channel: ChannelId,
-        _command: &[u8],
+        command: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.counts
+            .commands
+            .lock()
+            .unwrap()
+            .push(String::from_utf8_lossy(command).into_owned());
         session.channel_success(channel)?;
         if let Exec::Exits = self.exec {
             session.data(channel, &b"ok\n"[..])?;
@@ -169,6 +175,10 @@ impl FakeSshd {
     /// Session channels the server accepted.
     pub(crate) fn opened(&self) -> usize {
         self.counts.opened.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn commands(&self) -> Vec<String> {
+        self.counts.commands.lock().unwrap().clone()
     }
 
     /// CHANNEL_CLOSEs the server received.

@@ -1228,11 +1228,15 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::WindowThisWorkspace => "このワークスペース",
         L10nKey::WindowConfirmTitle => "ワークスペース「{name}」を{verb}しますか？",
         L10nKey::WindowStopUnreachable => {
-            "そのマシンに到達できませんでした。そこでまだ実行中のシェルはすべて終了します"
+            "そのマシンに到達できませんでした。シェルを停止する前に再接続してください"
         }
         L10nKey::WindowDeleteUnreachable => {
-            "そのマシンに到達できませんでした。そこでまだ実行中のシェルはすべて終了し、レイアウトは消去されます"
+            "そのマシンに到達できませんでした。削除する前に再接続してください。マシンが確認するまでブックマークは保持されます"
         }
+        L10nKey::WindowReconnectToStop => {
+            "停止または削除する前に、このワークスペースに再接続してください"
+        }
+        L10nKey::WindowOperationIncomplete => "ワークスペースの操作が完了しませんでした",
         L10nKey::WindowStopShells => "{count} 個の実行中シェルが終了します",
         L10nKey::WindowDeleteShells => "{count} 個の実行中シェルが終了し、レイアウトが消去されます",
         L10nKey::DiffReading => "Diff を読み込み中…",
@@ -1318,17 +1322,24 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteProfileGone => "削除されたプロファイル",
         L10nKey::RemoteRestartTitle => "「{machine}」上の tty7 サーバーを再起動しますか？",
         L10nKey::RemoteRestartBody => {
-            "{machine} 上のシェルは、表示されていないものも含めてすべて終了します。ワークスペースとレイアウトは保持され、新しいシェルで開きます"
+            "{machine} のサーバーに端末がなく、安全な保守に対応している場合だけ再起動します。セッション実行中、端末作成中、または未対応の旧版の場合は、セッションを終了せず再起動を延期します"
         }
         L10nKey::RemoteReplaceBody => {
-            "tty7 は {machine} に対応するサーバーをインストールして起動します。\n\n{machine} で実行中のすべてのセッションが終了します。このウィンドウが接続していないセッションも含みます"
+            "tty7 は {machine} に対応するサーバーを準備します。元のサーバーが端末を持たず、安全に停止できると確認した場合だけ切り替えます。セッション実行中や未対応の旧版では更新を延期し、強制終了しません"
         }
         L10nKey::RemoteRestartFailedTitle => {
             "「{machine}」上の tty7 サーバーは再起動されませんでした"
         }
         L10nKey::RemoteRestartFailedBody => {
-            "{error}\n\nそこで実行中のセッションは古いビルドのままです。セッションがなくなっている場合は、再接続時にこのビルドのサーバーが起動します"
+            "{error}\n\nそこで実行中のセッションは古いビルドのままです。古いサーバーはセッションが終わっても自動では終了しないため、古いサーバー プロセス自体が終了してから再接続すると、このビルドのサーバーが起動します"
         }
+        L10nKey::RemoteLegacyStopTitle => "「{machine}」の古いサーバーは停止するしかありません",
+        L10nKey::RemoteLegacyStopBody => {
+            "{machine} で動いているサーバーは古く、「アイドル時に再起動」の要求を理解できません。退かすには直接停止するしかありません。\n\n{versions}続行すると古いサーバーを停止し、そこで動いているすべてのセッションが切断されます。{machine} 上のデータには触れません。\n「{keep}」を選ぶと現状のまま、今回は何も変更しません。"
+        }
+        L10nKey::RemoteLegacyStopVersions => "稼働中: {running}\nインストール予定: {wanted}\n\n",
+        L10nKey::RemoteLegacyStopConfirm => "セッションを切断して{action}",
+        L10nKey::RemoteLegacyStopKeep => "旧サーバーを保持",
         L10nKey::RemoteHostUnreachable => "{machine} に到達できませんでした: {error}",
         L10nKey::RemoteInstallTitle => "「{machine}」に tty7 サーバーをインストールしますか？",
         L10nKey::RemoteInstallDetail => {
@@ -1345,7 +1356,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::RemoteInstallBytes => "バイト",
         L10nKey::RemoteMismatchTitle => "「{machine}」上の tty7 サーバーを更新しますか？",
         L10nKey::RemoteMismatchDetail => {
-            "{machine} はサーバー {running} で動いていますが、このクライアント（{wanted}）はそのプロトコルを話せません。対応するサーバーはインストール済みですが、セッションは実行中のサーバー上にあります。\n\n{replace_server}\u{2003}{wanted} に置き換え、そのサーバー上のセッションをすべて終了します。\n{cancel}\u{2003}{machine} はそのままです。このウィンドウは接続しません"
+            "{machine} はサーバー {running} で動いていますが、このクライアント（{wanted}）はそのプロトコルを話せません。対応するサーバーは準備済みで、既存セッションは元のサーバー上にあります。\n\n{replace_server}\u{2003}端末がなく安全な保守に対応している場合だけ {wanted} に切り替えます。それ以外はセッションを保持して延期します。\n{cancel}\u{2003}{machine} はそのままです。このウィンドウは接続しません"
         }
         L10nKey::RemoteMismatchReplaceServer => "サーバーを更新",
         L10nKey::RemoteMismatchDowngradeServer => "サーバーを置き換え",

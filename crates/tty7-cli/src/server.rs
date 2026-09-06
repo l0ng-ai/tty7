@@ -132,6 +132,11 @@ pub fn restart(hard: bool) -> Result<Outcome> {
     let Ok(old) = client.version() else {
         return start();
     };
+    let client = if old.has_feature(tty7_core::daemon::protocol::FEATURE_PANE_ACCESS) {
+        client.management()
+    } else {
+        client
+    };
     if !hard && old.has_feature(FEATURE_HANDOFF) {
         return restart_in_place(&client, &old);
     }

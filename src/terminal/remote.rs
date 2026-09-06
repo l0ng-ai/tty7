@@ -1,5 +1,9 @@
 #![allow(dead_code)]
 
+#[cfg(all(test, windows))]
+#[path = "live_remote_test.rs"]
+mod live_remote_test;
+
 use std::borrow::Cow;
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -75,6 +79,8 @@ enum Cut {
 }
 
 struct ReaderSignals {
+    /// True only when output passes through the local Windows ConPTY.
+    repair_parked_cursor: bool,
     cwd: Arc<Mutex<Option<PathBuf>>>,
     shell: Arc<Mutex<ShellState>>,
     remote: Arc<Mutex<Option<RemoteContext>>>,
@@ -102,6 +108,7 @@ struct ReaderSignals {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneWorkspace {
     pub workspace: crate::core::session::WorkspaceId,
+    pub authorization: Option<crate::daemon::protocol::PaneAuthorization>,
     pub target: crate::core::session::RemoteTarget,
     pub spec: Option<Box<NativeSshSpec>>,
     /// The name the workspace answers to — its own label, or its machine's
@@ -153,6 +160,7 @@ pub enum PaneRoute {
     Local,
     Remote {
         header: Box<crate::daemon::router::RouteHeader>,
+        authorization: Option<crate::daemon::protocol::PaneAuthorization>,
         /// Whether the daemon at the far end of this route echoes a `Size`
         /// frame when it applies a resize, per its host's control hello (see
         /// [`PaneWorkspace::resize_echo`]). Riding on the route puts the
@@ -170,6 +178,7 @@ impl PaneRoute {
             Some(ws) => match ws.route_header() {
                 Ok(header) => PaneRoute::Remote {
                     header: Box::new(header),
+                    authorization: ws.authorization.clone(),
                     resize_echo: ws.resize_echo,
                 },
                 Err(e) => PaneRoute::Unroutable(e.to_string()),
@@ -186,6 +195,12 @@ impl PaneRoute {
 
     pub fn is_local(&self) -> bool {
         matches!(self, PaneRoute::Local)
+    }
+
+    fn repair_parked_cursor(&self) -> bool {
+        // Routed servers run on Linux/macOS (WSL included), regardless of
+        // which platform renders their output. Their PTYs are raw.
+        cfg!(windows) && self.is_local()
     }
 
     fn allow_remote_clipboard_write(&self) -> bool {
@@ -490,6 +505,8 @@ pub struct RemoteTerminal {
     pub exited: bool,
     size: TermSize,
     synced_size: bool,
+    /// Backend semantics survive config reloads; the client's OS is not the PTY's OS.
+    conpty_output: bool,
     /// The `(cell_w, cell_h)` last sent to the daemon, in device pixels. Tracked
     /// alongside `size` so a display-scale change still reaches the child even
     /// when the grid dimensions are unchanged.
@@ -692,7 +709,8 @@ impl RemoteTerminal {
             }
         };
 
-        let mut term = Self::from_stream(stream, size)?;
+        let mut term =
+            Self::from_stream_with_repair(stream, size, Vec::new(), route.repair_parked_cursor())?;
         term.route = route.clone();
         term.seed_cwd(spawned_in);
         Ok((term, pane_id))
@@ -762,8 +780,13 @@ impl RemoteTerminal {
             }
             Err(e) => return Err(e),
         };
-        let mut term = Self::from_stream_with(stream, size, buffered)?;
+        let mut term =
+            Self::from_stream_with_repair(stream, size, buffered, route.repair_parked_cursor())?;
         term.route = route.clone();
+        // Attach replays the old geometry; the server deliberately ignores its
+        // size field. Follow replay with the current viewport before accepting
+        // input, just as adopt_relink does, even before the first UI layout.
+        term.resize(size, cell_w, cell_h);
         Ok(term)
     }
 
@@ -811,9 +834,14 @@ impl RemoteTerminal {
 
         self.exited_flag.store(false, Ordering::SeqCst);
         self.exited = false;
+        self.conpty_output = route.repair_parked_cursor() && self.ssh_endpoint.is_none();
         {
             use alacritty_terminal::vte::ansi::Handler as _;
             let mut term = self.term.lock();
+            term.set_options(terminal_config_from_user(
+                &crate::core::config::Config::load(),
+                self.conpty_output,
+            ));
             term.reset_state();
         }
         // The grid was just reset, so every image anchor now points nowhere.
@@ -833,6 +861,7 @@ impl RemoteTerminal {
             buffered,
             quit.clone(),
             ReaderSignals {
+                repair_parked_cursor: route.repair_parked_cursor() && self.ssh_endpoint.is_none(),
                 cwd: self.cwd.clone(),
                 shell: self.shell_state.clone(),
                 remote: self.remote_context.clone(),
@@ -872,6 +901,20 @@ impl RemoteTerminal {
         size: TermSize,
         buffered: Vec<u8>,
     ) -> anyhow::Result<Self> {
+        Self::from_stream_with_repair(
+            stream,
+            size,
+            buffered,
+            PaneRoute::Local.repair_parked_cursor(),
+        )
+    }
+
+    fn from_stream_with_repair(
+        stream: Stream,
+        size: TermSize,
+        buffered: Vec<u8>,
+        repair_parked_cursor: bool,
+    ) -> anyhow::Result<Self> {
         let read_half = stream.try_clone()?;
         let write_half = stream;
 
@@ -882,7 +925,7 @@ impl RemoteTerminal {
         };
 
         let user_config = crate::core::config::Config::load();
-        let config = terminal_config_from_user(&user_config);
+        let config = terminal_config_from_user(&user_config, repair_parked_cursor);
         let term = Term::new(config, &size, proxy.clone());
         let term = Arc::new(FairMutex::new(term));
 
@@ -912,6 +955,7 @@ impl RemoteTerminal {
             buffered,
             reader_quit.clone(),
             ReaderSignals {
+                repair_parked_cursor,
                 cwd: cwd.clone(),
                 shell: shell_state.clone(),
                 remote: remote_context.clone(),
@@ -937,6 +981,7 @@ impl RemoteTerminal {
         )?;
 
         Ok(Self {
+            conpty_output: repair_parked_cursor,
             term,
             events: rx,
             palette: super::palette::build(),
@@ -1007,19 +1052,8 @@ impl RemoteTerminal {
 
     pub fn apply_user_config(&self, user_config: &crate::core::config::Config) {
         let mut term = self.term.lock();
-        term.set_options(terminal_config_from_user(user_config));
+        term.set_options(terminal_config_from_user(user_config, self.conpty_output));
     }
-
-    /// Whether this build puts back the cursor a repaint parked — see
-    /// [`crate::terminal::parked_cursor`].
-    ///
-    /// Only conhost parks one, so like `conpty_resize` the repair is Windows'
-    /// alone. On a raw pty the application owns the cursor and is free to end a
-    /// repaint on the text it just wrote and then echo the next keystroke
-    /// straight after it, with no positioning of its own: vim opens its command
-    /// line that way, and putting the cursor back on the cell the repaint hid it
-    /// on drops the `wq!` typed next onto the row being edited (#430).
-    const REPAIR_PARKED_CURSOR: bool = cfg!(windows);
 
     fn spawn_reader(
         term: Arc<FairMutex<Term<EventProxy>>>,
@@ -1033,6 +1067,7 @@ impl RemoteTerminal {
             .name("tty7-remote-reader".to_string())
             .spawn(move || {
                 let ReaderSignals {
+                    repair_parked_cursor,
                     cwd,
                     shell,
                     remote,
@@ -1115,7 +1150,7 @@ impl RemoteTerminal {
                                 // emulator to the cut, act on the state that
                                 // sequence left behind, carry on.
                                 let mut cuts: Vec<(usize, Cut)> = Vec::new();
-                                if Self::REPAIR_PARKED_CURSOR {
+                                if repair_parked_cursor {
                                     cursor_scan
                                         .feed(&out_batch, |off, c| cuts.push((off, Cut::Cursor(c))));
                                 }
@@ -1259,6 +1294,40 @@ impl RemoteTerminal {
                                         ws.rows as usize,
                                     ));
                                 }
+                                proxy.send_event(AlacEvent::Wakeup);
+                            }
+                            DaemonMsg::TerminalCheckpoint(bytes) => {
+                                flush_batch!();
+                                let state = match crate::daemon::terminal_state::decode(&bytes) {
+                                    Ok(state) => state,
+                                    Err(error) => {
+                                        teardown(Some(&format!("invalid terminal checkpoint: {error}")));
+                                        break 'main;
+                                    }
+                                };
+                                let title = state.title().map(str::to_owned);
+                                {
+                                    let mut term = term.lock();
+                                    if quit.load(Ordering::SeqCst) { return; }
+                                    if let Err(error) = state.apply(&mut *term, &mut processor) {
+                                        drop(term);
+                                        teardown(Some(&format!("cannot restore terminal checkpoint: {error}")));
+                                        break 'main;
+                                    }
+                                    proxy.send_event(match title {
+                                        Some(title) => AlacEvent::Title(title),
+                                        None => AlacEvent::ResetTitle,
+                                    });
+                                    // A checkpoint may carry a partially buffered
+                                    // synchronized update. Flush historical bytes
+                                    // silently, just like ordinary Snapshot replay.
+                                    proxy.replaying.store(true, Ordering::Relaxed);
+                                    processor.stop_sync(&mut *term);
+                                    proxy.replaying.store(false, Ordering::Relaxed);
+                                }
+                                cursor_scan.reset();
+                                parked_cursor.reset();
+                                turn_scan.reset();
                                 proxy.send_event(AlacEvent::Wakeup);
                             }
                             DaemonMsg::Snapshot(bytes) => {
@@ -1741,9 +1810,19 @@ impl RemoteTerminal {
     }
 
     pub fn kill_pane_on(route: &PaneRoute, pane_id: u64) {
-        if let Ok(mut stream) = connect_routed(route) {
-            let _ = ClientMsg::Kill { pane_id }.encode(&mut stream);
-            let _ = stream.shutdown(std::net::Shutdown::Write);
+        if let Err(error) = Self::try_kill_pane_on(route, pane_id) {
+            log::warn!("could not close pane {pane_id}: {error}");
+        }
+    }
+
+    pub(crate) fn try_kill_pane_on(route: &PaneRoute, pane_id: u64) -> anyhow::Result<()> {
+        let mut stream = connect_routed(route)?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
+        ClientMsg::Kill { pane_id }.encode(&mut stream)?;
+        match DaemonMsg::read(&mut stream)? {
+            DaemonMsg::KillAck { pane_id: killed } if killed == pane_id => Ok(()),
+            DaemonMsg::Error(message) => Err(anyhow::anyhow!(message)),
+            other => Err(anyhow::anyhow!("unexpected reply to Kill: {other:?}")),
         }
     }
 
@@ -1800,6 +1879,7 @@ impl RemoteTerminal {
         spec: Box<NativeSshSpec>,
     ) -> anyhow::Result<(Self, u64)> {
         let mut stream = connect()?;
+        ClientMsg::Access(crate::daemon::protocol::PaneAccess::Manage).encode(&mut stream)?;
         let win = win_size(size, cell_w, cell_h);
         let endpoint = (spec.host.clone(), spec.port);
         let user = spec.user.clone();
@@ -1829,7 +1909,8 @@ impl RemoteTerminal {
             }
         };
 
-        let mut term = Self::from_stream(stream, size)?;
+        // Native SSH output does not pass through the local ConPTY.
+        let mut term = Self::from_stream_with_repair(stream, size, Vec::new(), false)?;
         term.ssh_endpoint = Some(endpoint);
         term.ssh_user = Some(user);
         term.auto_supplied_password = auto_supplied_password;
@@ -2176,9 +2257,8 @@ fn spawn_reply(
     }
 }
 
-/// An `Attach` that produced no bytes within its wait — nobody served the
-/// connection. Distinct from a refusal (`Error` frame) and from a hangup so
-/// the caller can say the true thing: the pane may well still exist.
+/// An `Attach` that produced no complete reply within its absolute deadline.
+/// A stalled or fragmented reply says nothing about whether the pane exists.
 #[derive(Debug)]
 struct AttachUnanswered {
     pane_id: u64,
@@ -2189,8 +2269,8 @@ impl std::fmt::Display for AttachUnanswered {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "the daemon did not answer Attach for pane {} within {:?} (an attached pane replays \
-             its screen at once, so nobody is serving this connection)",
+            "the daemon did not answer Attach for pane {} with a complete reply within {:?}; \
+             the pane may still be alive",
             self.pane_id, self.wait
         )
     }
@@ -2205,10 +2285,8 @@ pub fn attach_unanswered(err: &anyhow::Error) -> bool {
         .any(|cause| cause.downcast_ref::<AttachUnanswered>().is_some())
 }
 
-/// An `Attach` the daemon answered with an `Error` frame — it heard us and
-/// said no, which for a relink means the pane is gone on its machine. Typed so
-/// a retry loop can tell this apart from the failures worth retrying: silence
-/// and transport trouble pass, a refusal repeats identically forever.
+/// Only the daemon's explicit missing-pane verdict. Permission failures,
+/// stale credentials and incomplete replies say nothing about process liveness.
 #[derive(Debug)]
 struct AttachRefused {
     message: String,
@@ -2222,93 +2300,45 @@ impl std::fmt::Display for AttachRefused {
 
 impl std::error::Error for AttachRefused {}
 
-/// Whether `err` is an `Attach` the daemon explicitly refused. Retrying one of
-/// these can only produce the same refusal.
+/// Whether this exact pane was confirmed missing, rather than temporarily denied.
 pub fn attach_refused(err: &anyhow::Error) -> bool {
     err.chain()
         .any(|cause| cause.downcast_ref::<AttachRefused>().is_some())
 }
 
-/// Reads far enough into the daemon's answer to an `Attach` to classify it, and
-/// hands back every byte read so the reader thread loses none of the replay.
-///
-/// Silence is a verdict, not a quiet pane. A daemon that attached replays the
-/// pane's ring before it reads a byte of our input, and the ring always holds
-/// a segment, so the first frame on a good attach is a `Size` — a quiet pane
-/// still sends that. An `Attach` that produced nothing within `wait` is one
-/// nobody is serving: a daemon still mid-restart, a socket held open by a
-/// process that will never read it. Taken for success it gave the window a
-/// pane drawn as restored whose every keystroke went into that socket — no
-/// fresh shell, no restored-screen banner, no agent resume, and Ctrl-C did
-/// nothing (#673). Taken for the failure it is, the caller spawns fresh and
-/// asks for the old screen back.
+/// Reads one complete Attach reply within an absolute deadline and hands it
+/// back for replay. Even a quiet pane sends Size. Partial frames cannot claim
+/// success, and neither timeouts nor permission errors prove a pane is gone:
+/// remote restores retain their identity for retry in those cases.
 fn attach_reply_prefix(
     stream: &mut Stream,
     pane_id: u64,
     wait: std::time::Duration,
 ) -> anyhow::Result<Vec<u8>> {
-    use std::io::Read as _;
-
-    let _ = stream.set_read_timeout(Some(wait));
-    let mut buffered: Vec<u8> = Vec::new();
-    let mut scratch = [0u8; 4096];
-    let mut kind = None;
-    while kind.is_none() {
-        match stream.read(&mut scratch) {
-            Ok(0) => {
-                let _ = stream.set_read_timeout(None);
-                return Err(anyhow::anyhow!(
-                    "the daemon closed the connection without answering Attach for pane {pane_id}"
-                ));
-            }
-            Ok(n) => buffered.extend_from_slice(&scratch[..n]),
-            Err(e) if would_block(&e) => break,
-            Err(e) => {
-                let _ = stream.set_read_timeout(None);
-                return Err(anyhow::Error::new(e).context(format!(
-                    "reading the daemon's answer to Attach for pane {pane_id}"
-                )));
-            }
-        }
-        kind = crate::daemon::protocol::peek_frame_kind(&buffered);
-    }
-    let _ = stream.set_read_timeout(None);
-    if buffered.is_empty() {
-        return Err(anyhow::Error::new(AttachUnanswered { pane_id, wait }));
-    }
-    if !kind.is_some_and(crate::daemon::protocol::is_error_kind) {
-        return Ok(buffered);
-    }
-    let message = read_error_frame(stream, &mut buffered, wait)
-        .unwrap_or_else(|| format!("no such pane {pane_id}"));
-    Err(anyhow::Error::new(AttachRefused { message }))
-}
-
-fn read_error_frame(
-    stream: &mut Stream,
-    buffered: &mut Vec<u8>,
-    wait: std::time::Duration,
-) -> Option<String> {
-    use std::io::Read as _;
-
-    let _ = stream.set_read_timeout(Some(wait));
-    let mut scratch = [0u8; 1024];
-    let message = loop {
-        match crate::daemon::protocol::take_frame(buffered) {
-            Ok(Some(frame)) => match DaemonMsg::from_frame(frame.0, frame.1) {
-                Ok(DaemonMsg::Error(message)) => break Some(message),
-                _ => break None,
-            },
-            Ok(None) => match stream.read(&mut scratch) {
-                Ok(0) => break None,
-                Ok(n) => buffered.extend_from_slice(&scratch[..n]),
-                Err(_) => break None,
-            },
-            Err(_) => break None,
-        }
+    let reply = {
+        let mut io = crate::daemon::deadline::DeadlineIo::new(stream, wait)?;
+        DaemonMsg::read(&mut io)
     };
-    let _ = stream.set_read_timeout(None);
-    message
+    match reply {
+        Ok(DaemonMsg::Error(message)) if message == format!("no such pane {pane_id}") => {
+            Err(anyhow::Error::new(AttachRefused { message }))
+        }
+        Ok(DaemonMsg::Error(message)) => Err(anyhow::anyhow!("daemon denied Attach: {message}")),
+        Ok(reply @ (DaemonMsg::Size(_) | DaemonMsg::Snapshot(_))) => {
+            let mut buffered = Vec::new();
+            reply.encode(&mut buffered)?;
+            Ok(buffered)
+        }
+        Ok(_) => Err(anyhow::anyhow!(
+            "unexpected reply to Attach for pane {pane_id}"
+        )),
+        Err(error) if would_block(&error) => {
+            Err(anyhow::Error::new(AttachUnanswered { pane_id, wait }))
+        }
+        Err(error) => Err(anyhow::Error::new(error).context(format!(
+            "reading the daemon's answer to Attach for pane {pane_id}"
+        ))),
+    }
 }
 
 fn would_block(err: &std::io::Error) -> bool {
@@ -2774,7 +2804,19 @@ fn connect_routed(route: &PaneRoute) -> anyhow::Result<Stream> {
         return Err(anyhow::anyhow!("{reason}"));
     }
     let Some(header) = route.header() else {
-        return connect();
+        let mut stream = connect()?;
+        ClientMsg::Access(crate::daemon::protocol::PaneAccess::Manage).encode(&mut stream)?;
+        return Ok(stream);
+    };
+
+    let PaneRoute::Remote {
+        authorization: Some(authorization),
+        ..
+    } = route
+    else {
+        return Err(anyhow::anyhow!(
+            "workspace control is not ready; resume it before opening panes"
+        ));
     };
 
     tty7_core::host::guard_off_ui();
@@ -2794,6 +2836,10 @@ fn connect_routed(route: &PaneRoute) -> anyhow::Result<Stream> {
     let mut stream = connect()?;
     let ack = crate::daemon::router::negotiate(&mut stream, header)
         .map_err(|e| anyhow::anyhow!("route this pane to {}: {e}", header.describe()))?;
+    ClientMsg::Access(crate::daemon::protocol::PaneAccess::Workspace(
+        authorization.clone(),
+    ))
+    .encode(&mut stream)?;
     log::debug!(
         "pane routed to {} over {}",
         header.describe(),
@@ -2802,21 +2848,15 @@ fn connect_routed(route: &PaneRoute) -> anyhow::Result<Stream> {
     Ok(stream)
 }
 
-fn terminal_config_from_user(user_config: &crate::core::config::Config) -> Config {
+fn terminal_config_from_user(user_config: &crate::core::config::Config, conpty: bool) -> Config {
     Config {
         scrolling_history: user_config.scrollback_limit,
         default_cursor_style: alacritty_cursor_style(user_config.cursor_style),
         semantic_escape_chars: user_config.word_separators.clone(),
         kitty_keyboard: true,
-        // Every pane on Windows is presented through ConPTY (a shell, wsl.exe,
-        // ssh.exe — conhost mediates them all), which repaints nothing after a
-        // resize and keeps addressing the screen against its own re-anchored
-        // layout: grow keeps rows/cursor pinned and opens blank rows below,
-        // shrink scrolls the last written row to the new bottom. The grid must
-        // resize the same way or every later absolute-CUP paint (PSReadLine
-        // redraws its prompt that way per keystroke) lands rows off, shredding
-        // the screen the first time a maximized pane draws anything.
-        conpty_resize: cfg!(windows),
+        // Only local Windows PTYs use conhost's row anchoring. Routed Linux
+        // servers and native SSH use Unix resize semantics, even on Windows.
+        conpty_resize: conpty,
         ..Config::default()
     }
 }
@@ -2824,6 +2864,272 @@ fn terminal_config_from_user(user_config: &crate::core::config::Config) -> Confi
 #[cfg(test)]
 mod config_tests {
     use super::*;
+    use std::io::Write as _;
+
+    fn pair() -> (Stream, Stream) {
+        #[cfg(windows)]
+        {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            (client, listener.accept().unwrap().0)
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::net::UnixStream::pair().unwrap()
+        }
+    }
+
+    #[test]
+    fn checkpoint_reader_restores_state_before_live_bytes_without_replaying_effects() {
+        use crate::daemon::terminal_state::Mirror;
+        use alacritty_terminal::{
+            index::{Column, Line},
+            term::TermMode,
+        };
+        crate::core::config::pin_test_config_dir();
+        let (stream, mut peer) = pair();
+        let pane = RemoteTerminal::from_stream_with_repair(
+            stream,
+            TermSize::new(80, 24),
+            Vec::new(),
+            false,
+        )
+        .unwrap();
+        let mut mirror = Mirror::new(win_size(TermSize::new(80, 24), 0, 0), false);
+        mirror.advance(b"\x1b[?2026h\x1b[6n\x1b]52;c;aGk=\x07\x07original shell\x1b[?1049h\x1b[?1003;1006h\x1b[24;1H:\xe4\xb8");
+        DaemonMsg::TerminalCheckpoint(mirror.encode().unwrap())
+            .encode(&mut peer)
+            .unwrap();
+        DaemonMsg::Output(b"\xadwq".to_vec())
+            .encode(&mut peer)
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let term = pane.term.lock();
+            if term.grid()[Line(23)][Column(4)].c == 'q' {
+                assert!(
+                    term.mode()
+                        .contains(TermMode::ALT_SCREEN | TermMode::SGR_MOUSE)
+                );
+                assert_eq!(term.grid()[Line(23)][Column(1)].c, '中');
+                assert_eq!(term.grid().cursor.point.line, Line(23));
+                break;
+            }
+            drop(term);
+            assert!(
+                std::time::Instant::now() < until,
+                "checkpoint must precede incremental UTF-8 output"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        while let Ok(event) = pane.events.try_recv() {
+            assert!(!matches!(
+                event,
+                AlacEvent::PtyWrite(_)
+                    | AlacEvent::ClipboardStore(..)
+                    | AlacEvent::ClipboardLoad(..)
+                    | AlacEvent::ColorRequest(..)
+                    | AlacEvent::Bell
+            ));
+        }
+    }
+
+    #[test]
+    fn malformed_checkpoint_disconnects_the_reader_without_applying_state() {
+        crate::core::config::pin_test_config_dir();
+        let (stream, mut peer) = pair();
+        let pane = RemoteTerminal::from_stream_with_repair(
+            stream,
+            TermSize::new(80, 24),
+            Vec::new(),
+            false,
+        )
+        .unwrap();
+        DaemonMsg::TerminalCheckpoint(b"invalid compression".to_vec())
+            .encode(&mut peer)
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !pane.exited_flag.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < until);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            !pane
+                .term
+                .lock()
+                .mode()
+                .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+        );
+    }
+
+    #[test]
+    fn recovery_permission_errors_do_not_mean_the_original_pane_is_gone() {
+        for message in [
+            "workspace pane capability is stale",
+            "pane command in flight",
+            "no such pane 8",
+        ] {
+            let (mut client, mut server) = pair();
+            DaemonMsg::Error(message.into())
+                .encode(&mut server)
+                .unwrap();
+            let error = attach_reply_prefix(&mut client, 7, std::time::Duration::from_millis(60))
+                .unwrap_err();
+            assert!(
+                !attach_refused(&error),
+                "a live pane must remain retryable: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_incomplete_reply_is_neither_success_nor_proof_of_a_missing_pane() {
+        for bytes in [&[32, 0][..], &[32, 0, 0, 0, 8][..]] {
+            let (mut client, mut server) = pair();
+            server.write_all(bytes).unwrap();
+            let error = attach_reply_prefix(&mut client, 7, std::time::Duration::from_millis(60))
+                .unwrap_err();
+            assert!(
+                !attach_refused(&error),
+                "truncation cannot prove a pane was deleted"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_raw_pty_resize_matches_unix_grid_after_config_reload() {
+        crate::core::config::pin_test_config_dir();
+        let (stream, mut peer) = pair();
+        let pane = RemoteTerminal::from_stream_with_repair(
+            stream,
+            TermSize::new(80, 4),
+            Vec::new(),
+            false,
+        )
+        .unwrap();
+        DaemonMsg::Output(b"one\r\ntwo\r\nthree\r\nfour\r\nfive".to_vec())
+            .encode(&mut peer)
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while pane.term.lock().grid().cursor.point.column.0 < 4 {
+            assert!(std::time::Instant::now() < until);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        pane.apply_user_config(&crate::core::config::Config::default());
+        let mut expected = Term::new(Config::default(), &TermSize::new(80, 4), pane.proxy.clone());
+        let mut processor: ansi::Processor = ansi::Processor::new();
+        processor.advance(&mut expected, b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        expected.resize(TermSize::new(80, 8));
+        let mut actual = pane.term.lock();
+        actual.resize(TermSize::new(80, 8));
+        assert_eq!(
+            actual.grid().cursor.point,
+            expected.grid().cursor.point,
+            "a Windows client must not impose ConPTY row semantics on a Unix PTY"
+        );
+    }
+
+    #[test]
+    fn a_remote_pane_without_a_current_capability_cannot_dial_or_fall_back_to_management() {
+        let mut workspace = PaneWorkspace {
+            authorization: None,
+            workspace: crate::core::session::WorkspaceId::new(),
+            target: crate::core::session::RemoteTarget::Wsl {
+                distro: "test-only".into(),
+            },
+            spec: None,
+            label: None,
+            resize_echo: false,
+        };
+        let route = PaneRoute::for_workspace(Some(&workspace));
+        let error = connect_routed(&route).unwrap_err().to_string();
+        assert!(error.contains("workspace control is not ready"), "{error}");
+        let access = crate::daemon::protocol::PaneAuthorization {
+            workspace: crate::core::session::WorkspaceId::new(),
+            token: serde_json::from_str("\"pane-secret\"").unwrap(),
+        };
+        workspace.authorization = Some(access.clone());
+        let route = PaneRoute::for_workspace(Some(&workspace));
+        assert!(
+            matches!(&route, PaneRoute::Remote { authorization: Some(found), .. } if found == &access)
+        );
+        assert!(!format!("{route:?}").contains("pane-secret"));
+    }
+
+    #[test]
+    fn a_raw_vim_command_line_keeps_the_colon_and_wq_on_the_same_row() {
+        crate::core::config::pin_test_config_dir();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let tcp_client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (tcp_server, _) = listener.accept().unwrap();
+        #[cfg(windows)]
+        let (client, mut server) = (tcp_client, tcp_server);
+        #[cfg(unix)]
+        let (client, mut server) = {
+            drop((tcp_client, tcp_server));
+            std::os::unix::net::UnixStream::pair().unwrap()
+        };
+        let term = RemoteTerminal::from_stream_with_repair(
+            client,
+            TermSize::new(80, 24),
+            Vec::new(),
+            false,
+        )
+        .unwrap();
+        // The application hides at row 6, then paints its command line. It
+        // intentionally leaves the cursor there for the following keystrokes.
+        DaemonMsg::Output(b"\x1b[6;4H\x1b[?25l\x1b[24;1H:\x1b[K\x1b[?25hwq".to_vec())
+            .encode(&mut server)
+            .unwrap();
+        server.flush().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let grid = term.term.lock();
+            let row = &grid.grid()[alacritty_terminal::index::Line(23)];
+            if row[alacritty_terminal::index::Column(2)].c == 'q' {
+                assert_eq!(row[alacritty_terminal::index::Column(0)].c, ':');
+                assert_eq!(row[alacritty_terminal::index::Column(1)].c, 'w');
+                assert_eq!(grid.grid().cursor.point.line.0, 23);
+                break;
+            }
+            drop(grid);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Vim's wq did not stay on the command row"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn routed_raw_ptys_never_use_the_local_conpty_cursor_repair() {
+        use crate::core::session::RemoteTarget;
+        for target in [
+            RemoteTarget::direct("me", "build-box", 22),
+            RemoteTarget::Wsl {
+                distro: "Ubuntu".into(),
+            },
+        ] {
+            let ws = PaneWorkspace {
+                authorization: None,
+                workspace: crate::core::session::WorkspaceId::new(),
+                target,
+                spec: Some(Box::new(
+                    serde_json::from_str(
+                        r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
+                    )
+                    .unwrap(),
+                )),
+                label: None,
+                resize_echo: false,
+            };
+            let route = PaneRoute::for_workspace(Some(&ws));
+            assert!(matches!(route, PaneRoute::Remote { .. }));
+            assert!(!route.repair_parked_cursor());
+        }
+        assert_eq!(PaneRoute::Local.repair_parked_cursor(), cfg!(windows));
+        assert!(!PaneRoute::Unroutable("unknown backend".into()).repair_parked_cursor());
+    }
 
     /// The whole conhost-semantics fix hangs on this one field: it defaults to
     /// off in `alacritty_terminal`, so dropping the line compiles clean, passes
@@ -2831,7 +3137,8 @@ mod config_tests {
     /// is exactly how it shipped disabled once (#415 follow-up).
     #[test]
     fn windows_panes_opt_into_conpty_resize_semantics() {
-        let config = terminal_config_from_user(&crate::core::config::Config::default());
+        let config =
+            terminal_config_from_user(&crate::core::config::Config::default(), cfg!(windows));
         assert_eq!(config.conpty_resize, cfg!(windows));
         #[cfg(windows)]
         assert!(config.conpty_resize);
@@ -3081,6 +3388,7 @@ mod tests {
 
     fn ssh_workspace() -> PaneWorkspace {
         PaneWorkspace {
+            authorization: None,
             workspace: crate::core::session::WorkspaceId::new(),
             target: crate::core::session::RemoteTarget::Direct {
                 user: "me".into(),
@@ -3134,6 +3442,7 @@ mod tests {
     #[test]
     fn a_wsl_workspace_routes_by_distro() {
         let ws = PaneWorkspace {
+            authorization: None,
             workspace: crate::core::session::WorkspaceId::new(),
             target: crate::core::session::RemoteTarget::Wsl {
                 distro: "Ubuntu-22.04".into(),
@@ -3151,6 +3460,7 @@ mod tests {
     #[test]
     fn a_local_stdio_workspace_routes_to_a_child_process_on_the_pane_dialect() {
         let ws = PaneWorkspace {
+            authorization: None,
             workspace: crate::core::session::WorkspaceId::new(),
             target: crate::core::session::RemoteTarget::LocalStdio {
                 program: "/tmp/tty7-server".into(),
@@ -3175,6 +3485,7 @@ mod tests {
     #[test]
     fn an_unroutable_workspace_is_not_treated_as_local() {
         let ws = PaneWorkspace {
+            authorization: None,
             workspace: crate::core::session::WorkspaceId::new(),
             target: crate::core::session::RemoteTarget::Alias {
                 alias: "build-box".into(),
@@ -3231,7 +3542,8 @@ mod tests {
 
     #[test]
     fn kitty_keyboard_negotiation_reports_the_requested_mode() {
-        let config = terminal_config_from_user(&crate::core::config::Config::default());
+        let config =
+            terminal_config_from_user(&crate::core::config::Config::default(), cfg!(windows));
         assert!(config.kitty_keyboard);
 
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
@@ -4202,7 +4514,7 @@ mod tests {
         let got = cursor_after_conpty_frame(
             b"\x1b[?25l\x1b[20;2HX\x1b[K\x1b[m\x1b[22;42H\x1b[K\x1b[?25h",
         );
-        if RemoteTerminal::REPAIR_PARKED_CURSOR {
+        if PaneRoute::Local.repair_parked_cursor() {
             assert_eq!(
                 got,
                 (5, 3),
@@ -4361,6 +4673,7 @@ mod tests {
         // answer rides the same gate through `local_daemon_supports`, so this
         // covers the deferral for both.
         term.route = PaneRoute::Remote {
+            authorization: None,
             header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
             resize_echo: true,
         };
@@ -4428,6 +4741,7 @@ mod tests {
         // What `for_workspace` builds when the host's hello named no echo —
         // an older server, or a link that was down when the route was made.
         term.route = PaneRoute::Remote {
+            authorization: None,
             header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
             resize_echo: false,
         };

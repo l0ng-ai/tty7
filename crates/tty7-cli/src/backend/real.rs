@@ -107,7 +107,7 @@ impl RealBackend {
                 Some(target) => PaneClient::routed(target),
                 None => PaneClient::local(),
             };
-            self.panes = Some(client);
+            self.panes = Some(client.management());
         }
         Ok(self.panes.as_ref().expect("just filled"))
     }
@@ -115,6 +115,13 @@ impl RealBackend {
 
 impl Backend for RealBackend {
     fn control(&mut self, req: ControlRequest) -> Result<ReplyOk> {
+        let req = if req.workspace_mutation().is_some() {
+            ControlRequest::ManageWorkspace {
+                request: Box::new(req),
+            }
+        } else {
+            req
+        };
         let reply = self.control_client()?.request(req)?;
         Ok(reply)
     }
@@ -173,6 +180,12 @@ impl Backend for RealBackend {
                 Ok(DaemonMsg::Snapshot(bytes)) => {
                     segments.push(CaptureSegment { size, bytes });
                     let _ = session.set_recv_timeout(Some(REPLAY_SETTLE));
+                }
+                Ok(DaemonMsg::TerminalCheckpoint(bytes)) => {
+                    let bytes =
+                        tty7_core::daemon::terminal_state::capture_ansi(&bytes, scrollback)?;
+                    segments.push(CaptureSegment { size, bytes });
+                    break;
                 }
                 Ok(DaemonMsg::Output(_)) | Ok(DaemonMsg::Exited { .. }) => break,
                 Ok(_) => {
@@ -260,6 +273,11 @@ impl Backend for RealBackend {
             .ok_or_else(|| anyhow!("run_wait without a spawned command"))?;
         let code = loop {
             match session.recv() {
+                Ok(DaemonMsg::TerminalCheckpoint(bytes)) => {
+                    crate::stdio::out(&tty7_core::daemon::terminal_state::capture_ansi(
+                        &bytes, true,
+                    )?);
+                }
                 Ok(DaemonMsg::Output(bytes)) | Ok(DaemonMsg::Snapshot(bytes)) => {
                     // Not `stdout.write_all`: a caller who stopped reading
                     // (`tty7 run -- … | head`) must end the pipeline, not turn

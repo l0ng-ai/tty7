@@ -277,6 +277,9 @@ impl Tty7App {
         };
         Some(
             v_flex()
+                .w(px(720.))
+                .max_w(gpui::relative(0.95))
+                .min_w_0()
                 .gap(px(6.))
                 .px(px(12.))
                 .py(px(6.))
@@ -288,13 +291,24 @@ impl Tty7App {
                 .text_color(theme.muted_foreground)
                 .child(
                     h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .flex_wrap()
                         .items_center()
                         .gap_2()
                         .child(gpui_component::Icon::new(IconName::Globe))
-                        .child(message)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_normal()
+                                .overflow_hidden()
+                                .child(message),
+                        )
                         .when_some(action, |this, (label, action)| {
                             this.child(
                                 Button::new("home-remote-status-action")
+                                    .flex_shrink_0()
                                     .label(label)
                                     .ghost()
                                     .small()
