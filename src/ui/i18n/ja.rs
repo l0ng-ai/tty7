@@ -1270,6 +1270,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffUntrackedSummary => "未追跡 {count}",
         L10nKey::DiffViewSplit => "左右分割",
         L10nKey::DiffViewUnified => "統合",
+        L10nKey::DiffCopySelection => "選択した行をコピー",
         L10nKey::PendingConnecting => "{machine} に接続中…",
         L10nKey::PendingUnreachable => "{machine} に到達できませんでした",
         L10nKey::WorktreePromptNeedsName => "ワークツリーには名前が必要です",

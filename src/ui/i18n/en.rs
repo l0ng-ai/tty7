@@ -1204,6 +1204,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::DiffUntrackedSummary => "{count} untracked",
         L10nKey::DiffViewSplit => "Side by Side",
         L10nKey::DiffViewUnified => "Unified",
+        L10nKey::DiffCopySelection => "Copy Selected Lines",
         L10nKey::PendingConnecting => "Connecting to {machine}…",
         L10nKey::PendingUnreachable => "Could not reach {machine}",
         L10nKey::WorktreePromptNeedsName => "The worktree needs a name",

@@ -1142,6 +1142,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffUntrackedSummary => "{count} 个未跟踪",
         L10nKey::DiffViewSplit => "并排",
         L10nKey::DiffViewUnified => "统一",
+        L10nKey::DiffCopySelection => "复制选中的行",
         L10nKey::PendingConnecting => "正在连接 {machine}…",
         L10nKey::PendingUnreachable => "无法连接到 {machine}",
         L10nKey::WorktreePromptNeedsName => "worktree 需要一个名称",

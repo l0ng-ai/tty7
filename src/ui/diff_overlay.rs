@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Background, FocusHandle, FontWeight, Hsla, KeyDownEvent, Pixels, SharedString,
-    Window, div, prelude::*, px,
+    AnyElement, Background, FocusHandle, FontWeight, Hsla, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Pixels, SharedString, Window, div, prelude::*, px,
 };
 use gpui_component::button::Button;
-use gpui_component::menu::ContextMenuExt as _;
+use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::core::config::{Config, DiffViewMode};
@@ -22,7 +22,7 @@ use crate::terminal::git_diff::{
 /// line budget below cuts rendering long before this does anyway.
 const MAX_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
 use crate::ui::app::Tty7App;
-use crate::ui::diff_rows::{Side, SplitCell, SplitRow, UnifiedRow, split_hunk, unified_rows};
+use crate::ui::diff_rows::{DiffSelection, HunkRows, RowId, Side, SplitCell, SplitRow, UnifiedRow};
 use crate::ui::document_column::DocumentChrome;
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::info_chip;
@@ -57,6 +57,15 @@ pub(crate) struct DiffOverlayState {
     pub(crate) preview: Option<(String, Option<Arc<FileDiff>>)>,
     pub(crate) preview_loading: Option<String>,
     pub(crate) scroll: gpui::ScrollHandle,
+    /// The rows the pointer has dragged over, and whether it is still down.
+    ///
+    /// A diff is read in order to be copied out of, and until this existed the
+    /// text on screen was unreachable — no selection, no clipboard, nothing
+    /// but retyping it (#721). Line-granular on purpose: the rows are a grid
+    /// of independent elements, not one text run, so a range of them is the
+    /// selection this layout can honestly offer.
+    pub(crate) selection: Option<DiffSelection>,
+    pub(crate) selecting: bool,
     /// The [`ScmData`](crate::terminal::git_data::ScmData) epoch this patch was
     /// read at, for the two sources that can go stale.
     ///
@@ -67,22 +76,24 @@ pub(crate) struct DiffOverlayState {
     pub(crate) epoch: Option<u64>,
 }
 
-/// One hunk, already turned into whichever kind of row the current view draws.
-enum HunkRows {
-    Split(Vec<SplitRow>),
-    Unified(Vec<UnifiedRow>),
+/// What one drawn row needs to take part in a drag: the card it belongs to,
+/// the view that drew it, and the selection it may already be inside.
+#[derive(Clone, Copy)]
+struct RowSelect<'a> {
+    path: &'a SharedString,
+    mode: DiffViewMode,
+    /// Only ever the selection belonging to *this* card — filtered once, where
+    /// the card is drawn, rather than re-compared on every row.
+    sel: Option<&'a DiffSelection>,
+    /// Whether a drag is in flight. Rows only listen for pointer movement
+    /// while one is: a diff runs to hundreds of rows, and a listener each is
+    /// worth paying for during a drag and not otherwise.
+    selecting: bool,
 }
 
-impl HunkRows {
-    fn len(&self) -> usize {
-        match self {
-            HunkRows::Split(rows) => rows.len(),
-            HunkRows::Unified(rows) => rows.len(),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
+impl RowSelect<'_> {
+    fn covers(&self, id: RowId, side: Option<Side>) -> bool {
+        self.sel.is_some_and(|sel| sel.covers(self.path, id, side))
     }
 }
 
@@ -154,6 +165,10 @@ impl Tty7App {
             }
             Some(o) => {
                 o.focus = focus;
+                // Another file is on screen now; the range belonged to the
+                // one that left.
+                o.selection = None;
+                o.selecting = false;
                 let handle = o.focus_handle.clone();
                 window.focus(&handle, cx);
                 cx.notify();
@@ -181,6 +196,8 @@ impl Tty7App {
             preview: None,
             preview_loading: None,
             scroll: gpui::ScrollHandle::new(),
+            selection: None,
+            selecting: false,
             epoch: None,
         });
         window.focus(&focus_handle, cx);
@@ -213,6 +230,177 @@ impl Tty7App {
             self.focus_active(window, cx);
             cx.notify();
         }
+    }
+
+    /// Wire one drawn row into the drag: a press starts a selection there, and
+    /// while one is in flight a move across the row extends it.
+    fn diff_row_drag<E: InteractiveElement + Styled>(
+        &self,
+        el: E,
+        rowsel: RowSelect,
+        side: Option<Side>,
+        id: RowId,
+        cx: &Context<Self>,
+    ) -> E {
+        let mode = rowsel.mode;
+        // The I-beam is the only standing sign that this text can be taken;
+        // nothing else about a row says so until one is dragged.
+        let el = el.cursor_text().on_mouse_down(MouseButton::Left, {
+            let path = rowsel.path.clone();
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.start_diff_selection(&path, mode, side, id, window, cx);
+            })
+        });
+        if !rowsel.selecting {
+            return el;
+        }
+        el.on_mouse_move({
+            let path = rowsel.path.clone();
+            cx.listener(move |this, ev: &MouseMoveEvent, _window, cx| {
+                this.extend_diff_selection(&path, side, id, ev.pressed_button, cx);
+            })
+        })
+    }
+
+    /// Begin a drag at `id`, in the column it was pressed in.
+    fn start_diff_selection(
+        &mut self,
+        path: &SharedString,
+        mode: DiffViewMode,
+        side: Option<Side>,
+        id: RowId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active = self.active;
+        let Some(overlay) = self
+            .tabs
+            .get_mut(active)
+            .and_then(|t| t.diff_overlay.as_mut())
+        else {
+            return;
+        };
+        overlay.selection = Some(DiffSelection {
+            path: path.to_string(),
+            mode,
+            side,
+            anchor: id,
+            head: id,
+        });
+        overlay.selecting = true;
+        let handle = overlay.focus_handle.clone();
+        // Copying needs the overlay to hold the keyboard. Docked beside a
+        // shell it often does not, and Ctrl+C would otherwise reach the pane
+        // and interrupt whatever is running in it.
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Extend the drag in flight to `id`.
+    ///
+    /// `held` is what the pointer is still pressing. A move with nothing held
+    /// means the button came up somewhere the overlay never saw — over a pane,
+    /// or outside the window — so the drag ends here rather than resuming the
+    /// next time the pointer wanders back over a row.
+    fn extend_diff_selection(
+        &mut self,
+        path: &SharedString,
+        side: Option<Side>,
+        id: RowId,
+        held: Option<MouseButton>,
+        cx: &mut Context<Self>,
+    ) {
+        let active = self.active;
+        let Some(overlay) = self
+            .tabs
+            .get_mut(active)
+            .and_then(|t| t.diff_overlay.as_mut())
+        else {
+            return;
+        };
+        if !overlay.selecting {
+            return;
+        }
+        if held != Some(MouseButton::Left) {
+            overlay.selecting = false;
+            cx.notify();
+            return;
+        }
+        let Some(sel) = overlay.selection.as_mut() else {
+            return;
+        };
+        if sel.path != path.as_ref() || sel.side != side || sel.head == id {
+            return;
+        }
+        sel.head = id;
+        cx.notify();
+    }
+
+    fn end_diff_selection(&mut self, cx: &mut Context<Self>) {
+        let active = self.active;
+        if let Some(overlay) = self
+            .tabs
+            .get_mut(active)
+            .and_then(|t| t.diff_overlay.as_mut())
+            && overlay.selecting
+        {
+            overlay.selecting = false;
+            cx.notify();
+        }
+    }
+
+    /// Forget a selection the rows under it no longer answer to. The two views
+    /// pair the same lines differently, so a row range drawn in one of them
+    /// points at other code in the other.
+    fn drop_stale_diff_selection(&mut self, mode: DiffViewMode) {
+        let active = self.active;
+        let Some(overlay) = self
+            .tabs
+            .get_mut(active)
+            .and_then(|t| t.diff_overlay.as_mut())
+        else {
+            return;
+        };
+        if overlay.selection.as_ref().is_some_and(|s| s.mode != mode) {
+            overlay.selection = None;
+            overlay.selecting = false;
+        }
+    }
+
+    /// Put the selected rows on the clipboard, as the file spells them.
+    fn copy_diff_selection(&self, cx: &mut Context<Self>) {
+        let Some(overlay) = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.diff_overlay.as_ref())
+        else {
+            return;
+        };
+        let Some(sel) = overlay.selection.as_ref() else {
+            return;
+        };
+        let hunks = match &overlay.load {
+            DiffLoad::Ready(snap) => snap
+                .files
+                .iter()
+                .find(|f| f.path == sel.path)
+                .map(|f| f.hunks.as_slice()),
+            _ => None,
+        }
+        // An untracked file has no patch in the snapshot — its card is
+        // synthesized from the file's own bytes, and so are its rows.
+        .or_else(|| match &overlay.preview {
+            Some((held, Some(file))) if *held == sel.path => Some(file.hunks.as_slice()),
+            _ => None,
+        });
+        let Some(hunks) = hunks else {
+            return;
+        };
+        let text = sel.text(hunks);
+        if text.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
     }
 
     fn spawn_diff_probe(&mut self, cx: &mut Context<Self>) {
@@ -335,6 +523,10 @@ impl Tty7App {
             // A new snapshot restarts any untracked preview: the file may
             // have changed with the tree, and the re-read costs one file.
             overlay.preview = None;
+            // The rows it was drawn against are gone. A range that survived
+            // would keep its coordinates and quietly cover other code.
+            overlay.selection = None;
+            overlay.selecting = false;
             landed = true;
         }
         if landed {
@@ -395,6 +587,7 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         self.spawn_untracked_preview_if_needed(cx);
+        self.drop_stale_diff_selection(view_mode(cx));
         let overlay = self.tabs.get(self.active)?.diff_overlay.as_ref()?;
 
         let content = match &overlay.load {
@@ -464,7 +657,22 @@ impl Tty7App {
                     if ev.keystroke.key.as_str() == "escape" {
                         this.close_diff_overlay(window, cx);
                     }
+                    // The overlay takes focus when a row is dragged, so this is
+                    // the copy key for the selection that drag made — and only
+                    // then: with nothing selected it falls through to whatever
+                    // else the window binds it to.
+                    let mods = ev.keystroke.modifiers;
+                    if ev.keystroke.key.as_str() == "c" && mods.secondary() && !mods.alt {
+                        this.copy_diff_selection(cx);
+                    }
                 }))
+                // A drag that ends anywhere in the overlay ends here; one that
+                // ends outside it is caught by the next move over a row, which
+                // sees no button held.
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| this.end_diff_selection(cx)),
+                )
                 .children(header)
                 .child(content)
                 .into_any_element(),
@@ -1026,17 +1234,27 @@ impl Tty7App {
             .child(header);
 
         if has_body {
-            let mut body = v_flex().w_full();
+            let (selection, selecting) = match self
+                .tabs
+                .get(self.active)
+                .and_then(|t| t.diff_overlay.as_ref())
+            {
+                Some(o) => (o.selection.as_ref(), o.selecting),
+                None => (None, false),
+            };
+            let path: SharedString = file.path.clone().into();
+            let rowsel = RowSelect {
+                // Only the card the drag started in draws or extends it.
+                sel: selection.filter(|s| s.path == file.path),
+                path: &path,
+                mode,
+                selecting,
+            };
+            let mut body = v_flex().id(("diff-card-body", idx)).w_full();
             let hunks: Vec<_> = file
                 .hunks
                 .iter()
-                .map(|hunk| {
-                    let rows = match mode {
-                        DiffViewMode::Split => HunkRows::Split(split_hunk(&hunk.lines)),
-                        DiffViewMode::Unified => HunkRows::Unified(unified_rows(&hunk.lines)),
-                    };
-                    (hunk, rows)
-                })
+                .map(|hunk| (hunk, HunkRows::build(mode, &hunk.lines)))
                 .collect();
             let closing_row = if file.truncated.is_some() {
                 None
@@ -1062,8 +1280,11 @@ impl Tty7App {
                 match rows {
                     HunkRows::Split(rows) => {
                         for (r, row) in rows.iter().enumerate() {
+                            let id = RowId { hunk: h, row: r };
                             body = body.child(self.diff_split_row(
                                 row,
+                                id,
+                                rowsel,
                                 closing_row == Some((h, r)),
                                 cx,
                             ));
@@ -1071,8 +1292,11 @@ impl Tty7App {
                     }
                     HunkRows::Unified(rows) => {
                         for (r, row) in rows.iter().enumerate() {
+                            let id = RowId { hunk: h, row: r };
                             body = body.child(self.diff_unified_row(
                                 row,
+                                id,
+                                rowsel,
                                 closing_row == Some((h, r)),
                                 cx,
                             ));
@@ -1098,12 +1322,35 @@ impl Tty7App {
                         .child(note),
                 );
             }
-            card = card.child(body);
+            // The one place a copy is offered by name. A drag says what will
+            // be copied; the menu says that copying is a thing you can do.
+            card = card.child(match rowsel.sel.is_some() {
+                true => {
+                    let app = cx.entity().downgrade();
+                    body.context_menu(move |menu, _window, _cx| {
+                        menu.item(PopupMenuItem::new(t(L10nKey::DiffCopySelection)).on_click({
+                            let app = app.clone();
+                            move |_, _window, cx| {
+                                app.update(cx, |this, cx| this.copy_diff_selection(cx)).ok();
+                            }
+                        }))
+                    })
+                    .into_any_element()
+                }
+                false => body.into_any_element(),
+            });
         }
         card.into_any_element()
     }
 
-    fn diff_split_row(&self, row: &SplitRow, closes_card: bool, cx: &Context<Self>) -> AnyElement {
+    fn diff_split_row(
+        &self,
+        row: &SplitRow,
+        id: RowId,
+        rowsel: RowSelect,
+        closes_card: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let radius = if closes_card {
             rounding::inner_radius(rounding::CARD_RADIUS, rounding::HAIRLINE)
         } else {
@@ -1115,9 +1362,9 @@ impl Tty7App {
             .items_stretch()
             .text_xs()
             .font_family(self.font_family.clone())
-            .child(self.diff_split_cell(row.left.as_ref(), Side::Old, radius, cx))
+            .child(self.diff_split_cell(row.left.as_ref(), Side::Old, id, rowsel, radius, cx))
             .child(div().flex_shrink_0().w(px(1.)).bg(cx.theme().border))
-            .child(self.diff_split_cell(row.right.as_ref(), Side::New, radius, cx))
+            .child(self.diff_split_cell(row.right.as_ref(), Side::New, id, rowsel, radius, cx))
             .into_any_element()
     }
 
@@ -1125,6 +1372,8 @@ impl Tty7App {
         &self,
         cell: Option<&SplitCell>,
         side: Side,
+        id: RowId,
+        rowsel: RowSelect,
         outer_radius: Pixels,
         cx: &Context<Self>,
     ) -> AnyElement {
@@ -1141,7 +1390,16 @@ impl Tty7App {
             (true, Side::New) => ("+", Some(cx.theme().success.opacity(0.12))),
             (false, _) => (" ", None),
         };
-        base.when_some(tint, |row, bg| row.bg(bg))
+        // A selected cell wears the theme's selection colour in place of its
+        // own wash, the way selected text does anywhere else. The `+`/`−` in
+        // front of the code still says which side of the change it is.
+        let selected = rowsel.covers(id, Some(side));
+        let fill = match selected {
+            true => Some(cx.theme().selection),
+            false => tint,
+        };
+        self.diff_row_drag(base, rowsel, Some(side), id, cx)
+            .when_some(fill, |row, bg| row.bg(bg))
             .child(
                 h_flex()
                     .flex_shrink_0()
@@ -1178,6 +1436,8 @@ impl Tty7App {
     fn diff_unified_row(
         &self,
         row: &UnifiedRow,
+        id: RowId,
+        rowsel: RowSelect,
         closes_card: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
@@ -1200,7 +1460,11 @@ impl Tty7App {
                 .text_color(cx.theme().muted_foreground.opacity(0.7))
                 .child(no.map(|n| n.to_string()).unwrap_or_default())
         };
-        h_flex()
+        let fill = match rowsel.covers(id, None) {
+            true => Some(cx.theme().selection),
+            false => tint,
+        };
+        self.diff_row_drag(h_flex(), rowsel, None, id, cx)
             .w_full()
             .h(px(19.))
             .items_center()
@@ -1208,7 +1472,7 @@ impl Tty7App {
             .font_family(self.font_family.clone())
             .rounded_bl(radius)
             .rounded_br(radius)
-            .when_some(tint, |line, bg| line.bg(bg))
+            .when_some(fill, |line, bg| line.bg(bg))
             .child(gutter(row.old))
             .child(gutter(row.new))
             // The split view's centre rule, in the one place it still means the
@@ -1545,6 +1809,7 @@ fn probe_key(
 mod tests {
     use super::*;
     use crate::terminal::git_diff::{DiffLine, LineKind};
+    use crate::ui::diff_rows::split_hunk;
     use crate::ui::i18n::set_locale;
 
     #[test]
@@ -2577,5 +2842,236 @@ mod render_idle_gpui_tests {
             "a settled overlay must stop re-reading its own diff"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// The drag itself, in a window: a press, a move, and what lands on the
+/// clipboard. The row geometry is `diff_rows`' business and tested there —
+/// what these check is the wiring the renderer hangs on it.
+#[cfg(test)]
+mod gpui_tests {
+    use super::*;
+    use crate::terminal::git_diff::{DiffLine, LineKind};
+    use crate::ui::app::test_window;
+    use crate::ui::pane::{Pane, PaneSlot};
+    use crate::ui::pending_pane::{PendingPane, PendingSpawn};
+    use gpui::{Entity, MouseButton, TestAppContext, VisualTestContext};
+
+    const PATH: &str = "src/a.rs";
+
+    fn line(kind: LineKind, old: Option<u32>, new: Option<u32>, text: &str) -> DiffLine {
+        DiffLine {
+            kind,
+            old_no: old,
+            new_no: new,
+            text: text.to_string(),
+        }
+    }
+
+    /// `a` kept, `b`/`c` replaced by `B`, `d` kept — four split rows, five
+    /// unified ones.
+    fn patched_file() -> FileDiff {
+        FileDiff {
+            path: PATH.to_string(),
+            old_path: None,
+            status: FileStatus::Modified,
+            added: 1,
+            removed: 2,
+            binary: false,
+            truncated: None,
+            hunks: vec![git_diff::Hunk {
+                header: "@@ -1,4 +1,3 @@".to_string(),
+                lines: vec![
+                    line(LineKind::Context, Some(1), Some(1), "a"),
+                    line(LineKind::Removed, Some(2), None, "b"),
+                    line(LineKind::Removed, Some(3), None, "c"),
+                    line(LineKind::Added, None, Some(2), "B"),
+                    line(LineKind::Context, Some(4), Some(3), "d"),
+                ],
+            }],
+        }
+    }
+
+    /// A window with one tab, showing that patch.
+    fn window(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
+        let (app, mut vcx) = test_window::harness(cx);
+        app.update_in(&mut vcx, |app, _, cx| {
+            let pending = cx.new(|cx| {
+                PendingPane::new(
+                    "test-box",
+                    PendingSpawn {
+                        workspace: None,
+                        working_directory: None,
+                        restore_pane: None,
+                        shell: None,
+                        agent: None,
+                        agent_session_id: None,
+                        agent_launch_argv: None,
+                        owner: None,
+                        font_size: 14.0,
+                    },
+                    cx,
+                )
+            });
+            app.tabs
+                .push(crate::ui::app::Tab::new(Pane::leaf(PaneSlot::Connecting(
+                    pending,
+                ))));
+            app.active = 0;
+            app.tabs[0].diff_overlay = Some(DiffOverlayState {
+                host_id: crate::ui::host_ops::HostId::LOCAL,
+                cwd: PathBuf::from("/repo"),
+                source: DiffSource::Head,
+                focus_handle: cx.focus_handle(),
+                load: DiffLoad::Ready(Arc::new(DiffSnapshot {
+                    files: vec![patched_file()],
+                    ..Default::default()
+                })),
+                loading: false,
+                expanded: HashMap::new(),
+                focus: None,
+                preview: None,
+                preview_loading: None,
+                scroll: gpui::ScrollHandle::new(),
+                selection: None,
+                selecting: false,
+                epoch: None,
+            });
+        });
+        (app, vcx)
+    }
+
+    fn drag(
+        app: &Entity<Tty7App>,
+        vcx: &mut VisualTestContext,
+        mode: DiffViewMode,
+        side: Option<Side>,
+        from: usize,
+        to: usize,
+    ) {
+        // The view mode is a window-wide setting, and the overlay drops a
+        // selection whose rows the current view never drew — so a drag in the
+        // unified view has to happen with the unified view on.
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.diff_view = mode;
+            cx.set_global(cfg);
+        });
+        app.update_in(vcx, |this, window, cx| {
+            let path: SharedString = PATH.into();
+            let row = |row| RowId { hunk: 0, row };
+            this.start_diff_selection(&path, mode, side, row(from), window, cx);
+            this.extend_diff_selection(&path, side, row(to), Some(MouseButton::Left), cx);
+        });
+    }
+
+    fn copied(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> Option<String> {
+        app.update_in(vcx, |this, _, cx| this.copy_diff_selection(cx));
+        vcx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+    }
+
+    #[gpui::test]
+    fn a_drag_down_a_column_copies_that_column(cx: &mut TestAppContext) {
+        let (app, mut vcx) = window(cx);
+
+        drag(&app, &mut vcx, DiffViewMode::Split, Some(Side::New), 0, 3);
+        assert_eq!(copied(&app, &mut vcx).as_deref(), Some("a\nB\nd"));
+
+        drag(&app, &mut vcx, DiffViewMode::Split, Some(Side::Old), 0, 3);
+        assert_eq!(copied(&app, &mut vcx).as_deref(), Some("a\nb\nc\nd"));
+
+        drag(&app, &mut vcx, DiffViewMode::Unified, None, 1, 3);
+        assert_eq!(copied(&app, &mut vcx).as_deref(), Some("b\nc\nB"));
+    }
+
+    /// The overlay is often drawn beside a live shell that holds the keyboard.
+    /// Ctrl+C is the copy key only once the overlay has taken focus — until
+    /// then the same keystroke would reach the pane and interrupt whatever is
+    /// running in it.
+    #[gpui::test]
+    fn starting_a_drag_takes_the_keyboard(cx: &mut TestAppContext) {
+        let (app, mut vcx) = window(cx);
+        drag(&app, &mut vcx, DiffViewMode::Split, Some(Side::New), 0, 1);
+        let focused = app.update_in(&mut vcx, |this, window, _| {
+            this.tabs[0]
+                .diff_overlay
+                .as_ref()
+                .expect("the overlay this window was built with")
+                .focus_handle
+                .is_focused(window)
+        });
+        assert!(focused);
+    }
+
+    /// A move with no button held is a release the overlay never saw — over a
+    /// pane, or outside the window. The drag ends there rather than resuming
+    /// the next time the pointer crosses a row.
+    #[gpui::test]
+    fn a_release_the_overlay_missed_ends_the_drag(cx: &mut TestAppContext) {
+        let (app, mut vcx) = window(cx);
+        drag(&app, &mut vcx, DiffViewMode::Split, Some(Side::New), 0, 1);
+
+        let path: SharedString = PATH.into();
+        app.update_in(&mut vcx, |this, _, cx| {
+            this.extend_diff_selection(&path, Some(Side::New), RowId { hunk: 0, row: 3 }, None, cx);
+        });
+        assert_eq!(
+            copied(&app, &mut vcx).as_deref(),
+            Some("a\nB"),
+            "the range stops where the pointer was last seen holding the button"
+        );
+    }
+
+    /// The two views pair the same lines into different rows, so a range drawn
+    /// in one of them points at other code in the other.
+    #[gpui::test]
+    fn switching_the_view_drops_the_selection(cx: &mut TestAppContext) {
+        let (app, mut vcx) = window(cx);
+        drag(&app, &mut vcx, DiffViewMode::Split, Some(Side::New), 0, 3);
+
+        app.update_in(&mut vcx, |this, _, _| {
+            this.drop_stale_diff_selection(DiffViewMode::Unified);
+            assert!(
+                this.tabs[0]
+                    .diff_overlay
+                    .as_ref()
+                    .unwrap()
+                    .selection
+                    .is_none()
+            );
+        });
+    }
+
+    /// A fresh read re-cuts the hunks. A range that survived one would keep its
+    /// coordinates and quietly cover other code.
+    #[gpui::test]
+    fn a_fresh_snapshot_drops_the_selection(cx: &mut TestAppContext) {
+        let (app, mut vcx) = window(cx);
+        drag(&app, &mut vcx, DiffViewMode::Split, Some(Side::New), 0, 3);
+
+        app.update_in(&mut vcx, |this, _, cx| {
+            this.install_diff_snapshot(
+                crate::ui::host_ops::HostId::LOCAL,
+                &PathBuf::from("/repo"),
+                &DiffSource::Head,
+                Some(Arc::new(DiffSnapshot {
+                    files: vec![patched_file()],
+                    ..Default::default()
+                })),
+                cx,
+            );
+            let overlay = this.tabs[0].diff_overlay.as_ref().unwrap();
+            assert!(overlay.selection.is_none());
+            assert!(!overlay.selecting);
+        });
+    }
+
+    #[gpui::test]
+    fn a_copy_with_nothing_selected_leaves_the_clipboard_alone(cx: &mut TestAppContext) {
+        let (app, mut vcx) = window(cx);
+        vcx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("untouched".into()))
+        });
+        assert_eq!(copied(&app, &mut vcx).as_deref(), Some("untouched"));
     }
 }

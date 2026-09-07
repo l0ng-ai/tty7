@@ -901,6 +901,7 @@ l10n_keys! {
     DiffUntrackedSummary,
     DiffViewSplit,
     DiffViewUnified,
+    DiffCopySelection,
     PendingConnecting,
     PendingUnreachable,
     WorktreePromptNeedsName,
