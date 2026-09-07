@@ -169,12 +169,18 @@ pub(crate) fn label_of(
         )
     };
     // A path can shorten away to nothing (a bare "user@host:"), and the process
-    // name is still worth more than a number.
+    // name the tree carries ("zsh") is still worth more than a number.
+    //
+    // Through `stated_title` because a tab of *this* window has no process name
+    // to offer: `Tab::label_view` fills that slot with the placeholder a pane
+    // answers to before anything has spoken, and printing the app's own name
+    // here is the one thing #740 exists to stop. Nothing to say falls to the
+    // number, which is what the strip showed before it shared this renderer.
     let shortened = |raw: &str| match short_title(raw, home) {
         shortened if !shortened.trim().is_empty() => shortened,
-        _ => match view.title.trim() {
-            "" => unnamed(),
-            title => title.to_string(),
+        _ => match crate::terminal::view::stated_title(&view.title) {
+            Some(title) => title.to_string(),
+            None => unnamed(),
         },
     };
     match view.label() {
@@ -2759,5 +2765,72 @@ mod tests {
         let mut empty = strip_tab();
         empty.title = String::new();
         assert!(label_of(&empty, 2, Some(home())).contains('3'));
+    }
+
+    /// The rung under the shortener, which the two surfaces reach holding
+    /// different things. A shell that has said who and where it is but not
+    /// *where* — `user@host:` with nothing after the colon — leaves nothing to
+    /// show, and whatever stands in has to be something the tab does not
+    /// already say: the switcher has the foreground process name, and a tab of
+    /// this window has only the placeholder, which is the answer #740 removed.
+    #[test]
+    fn a_title_that_shortens_away_never_puts_the_app_name_back_on_the_tab() {
+        let mut strip = strip_tab();
+        strip.osc_title = Some("user@host:".into());
+        assert_ne!(
+            label_of(&strip, 0, Some(home())),
+            crate::terminal::view::DEFAULT_TITLE
+        );
+        assert!(
+            label_of(&strip, 0, Some(home())).contains('1'),
+            "the numbered placeholder, which is what the strip showed here \
+             before it shared this renderer"
+        );
+
+        // The switcher arrives with a real process name in that slot, and it
+        // is still worth more than a number.
+        let from_tree = crate::ui::machine_mirror::TabView {
+            title: "zsh".into(),
+            osc_title: Some("user@host:".into()),
+            ..strip_tab()
+        };
+        assert_eq!(label_of(&from_tree, 0, Some(home())), "zsh");
+    }
+
+    /// A path is spelled the way the machine it is on spells it, and which
+    /// machine that is has nothing to do with which one tty7 is running on: a
+    /// remote pane reports POSIX to a Windows client, and a Windows pane
+    /// reports backslashes to a client that has never seen one (#580).
+    #[test]
+    fn a_cwd_is_cut_in_its_own_spelling_whichever_client_is_reading_it() {
+        let windows_home = Path::new(r"C:\Users\x");
+
+        // A Windows pane: shortened under its own home, and a path too deep to
+        // fit is rejoined with its own separator rather than with `/`.
+        let mut win = strip_tab();
+        win.cwd = Some(r"C:\Users\x\repo".into());
+        assert_eq!(label_of(&win, 0, Some(windows_home)), "~/repo");
+        win.cwd = Some(r"D:\work\a\b\proj".into());
+        assert_eq!(label_of(&win, 0, Some(windows_home)), r"…\a\b\proj");
+
+        // A remote pane's cwd is POSIX even when the client reading it is the
+        // Windows one: no drive to hang it off, no `~` borrowed from this
+        // machine's home, and no backslash anywhere in the answer.
+        let mut remote = strip_tab();
+        remote.cwd = Some("/srv/app".into());
+        assert_eq!(label_of(&remote, 0, Some(windows_home)), "/srv/app");
+        remote.cwd = Some("/home/deploy/app".into());
+        assert_eq!(
+            label_of(&remote, 0, Some(Path::new("/home/deploy"))),
+            "~/app",
+            "measured against the home of the host it is on, not of this one"
+        );
+
+        // The root of a filesystem is a directory like any other: a tab
+        // sitting in it says so, and says nothing more on hover.
+        let mut root = strip_tab();
+        root.cwd = Some("/".into());
+        assert_eq!(label_of(&root, 0, Some(home())), "/");
+        assert_eq!(tooltip_of(&root, 0, Some(home())), None);
     }
 }
