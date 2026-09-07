@@ -977,10 +977,15 @@ fn native_cell_residue(style: &GlyphStyle) -> Option<char> {
 /// when the neighbouring cell is blank and has nothing to lose.
 fn seg_budget(solo: bool, cells: usize, room: bool, cell_width: Pixels) -> Pixels {
     if solo {
-        // Single-cell glyphs have always been allowed to lean into the next
-        // cell. Narrowing that here would shrink a pile of symbols that look
-        // fine today, so it stays a separate decision.
-        cell_width * 2.
+        // Single-cell glyphs are allowed to lean into the next cell — that is
+        // what keeps the pile of symbols that look fine today from shrinking —
+        // but only while that cell is empty. A Nerd Font icon pulled from a
+        // fallback face inks well past a narrow primary's cell (1.6 cells is
+        // typical), and where the next cell has a glyph of its own the lean is
+        // not a lean, it is an overlap: the neighbour is painted afterwards
+        // and lands on top of the overshoot. Hand those their own cell and let
+        // `fit_scale` bring them down into it, the way kitty and ghostty do.
+        if room { cell_width * 2. } else { cell_width }
     } else if room {
         cell_width * (cells as f32 + 1.)
     } else {
@@ -2707,7 +2712,16 @@ mod tests {
     #[test]
     fn seg_budget_frees_solo_symbols_and_lends_a_cell_only_when_one_is_free() {
         let cell = px(10.);
-        assert_eq!(seg_budget(true, 1, false, cell), px(20.), "solo keeps two");
+        assert_eq!(
+            seg_budget(true, 1, true, cell),
+            px(20.),
+            "a solo glyph leans into a free cell"
+        );
+        assert_eq!(
+            seg_budget(true, 1, false, cell),
+            px(10.),
+            "but keeps to its own once the next cell is taken"
+        );
         assert_eq!(
             seg_budget(false, 2, false, cell),
             px(22.5),
@@ -2715,6 +2729,24 @@ mod tests {
         );
         assert_eq!(seg_budget(false, 2, true, cell), px(30.), "a whole cell");
         assert_eq!(seg_budget(false, 1, false, cell), px(12.5));
+    }
+
+    #[test]
+    fn a_fallback_icon_is_fitted_to_its_cell_only_when_the_next_one_is_taken() {
+        // Measured on Windows: Maple Mono NF CN supplying U+F059 to a
+        // 15px Cascadia Mono grid inks 13.85px across an 8.79px cell.
+        let cell = px(8.789);
+        let ink = px(13.845);
+
+        let leaning = fit_scale(ink, seg_budget(true, 1, true, cell));
+        assert_eq!(leaning, 1., "a blank neighbour still lends its cell");
+
+        let crowded = fit_scale(ink, seg_budget(true, 1, false, cell));
+        assert!(crowded < 1., "an occupied neighbour does not");
+        assert!(
+            ink * crowded <= cell,
+            "and the icon has to end inside its own cell"
+        );
     }
 
     #[test]
