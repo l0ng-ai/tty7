@@ -2835,7 +2835,7 @@ impl TerminalView {
             .lock()
             .mode()
             .contains(TermMode::BRACKETED_PASTE);
-        self.write_gap_text(&text, paste_bytes(&text, bracketed), cx);
+        self.write_gap_text(&text, paste_bytes(&text, bracketed), true, cx);
         cx.notify();
     }
 
@@ -4017,14 +4017,21 @@ impl TerminalView {
         self.terminal.shell_active() && !self.on_alt_screen() && !self.shell_owns_prompt()
     }
 
-    fn write_gap_text(&mut self, text: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
+    /// `pasted` says the text came off the clipboard rather than the keyboard,
+    /// so that a paste the hold keeps for the editor still reaches it marked.
+    fn write_gap_text(&mut self, text: &str, bytes: Vec<u8>, pasted: bool, cx: &mut Context<Self>) {
         if self.shell_owns_prompt() {
             self.release_hold();
             self.terminal.write(bytes);
             return;
         }
         if self.gap_holdable() && !text.chars().any(char::is_control) {
-            match self.hold.hold_text(text, &bytes) {
+            let held = if pasted {
+                self.hold.hold_pasted_text(text, &bytes)
+            } else {
+                self.hold.hold_text(text, &bytes)
+            };
+            match held {
                 Verdict::Held(arm) => {
                     if let Some(epoch) = arm {
                         self.arm_hold_timer(epoch, cx);
@@ -4038,6 +4045,26 @@ impl TerminalView {
         }
         self.terminal.write(bytes);
         self.observe_typeahead(RawInput::Text(text));
+    }
+
+    /// Move whatever the gap hold collected into the editor's buffer, keeping
+    /// the paste mark with it.
+    ///
+    /// The hold is the one route into that buffer that does not run through
+    /// the editor: text arriving before the prompt does is kept out here and
+    /// prepended when the editor takes over. A paste that lost its provenance
+    /// on the way would be submitted as typed (#660) — see
+    /// [`CmdEditor::prepend_pasted`].
+    fn engage_hold_into_editor(&mut self) {
+        let pasted = self.hold.pasted();
+        let Some(net) = self.hold.engage() else {
+            return;
+        };
+        if pasted {
+            self.cmd.prepend_pasted(&net);
+        } else {
+            self.cmd.prepend_str(&net);
+        }
     }
 
     fn release_hold(&mut self) {
@@ -4112,9 +4139,7 @@ impl TerminalView {
         if self.terminal.exited || !self.accepts_input(cx) {
             return;
         }
-        if let Some(net) = self.hold.engage() {
-            self.cmd.prepend_str(&net);
-        }
+        self.engage_hold_into_editor();
         let line = self.cmd.text();
         if !line.trim().is_empty() {
             let cwd = self.cwd();
@@ -4385,9 +4410,7 @@ impl TerminalView {
         if !self.accepts_input(cx) {
             return;
         }
-        if let Some(net) = self.hold.engage() {
-            self.cmd.prepend_str(&net);
-        }
+        self.engage_hold_into_editor();
         let line = self.cmd.text();
         if line.contains('\n') {
             cx.notify();
@@ -4878,7 +4901,7 @@ impl TerminalView {
             cx.notify();
             return;
         }
-        self.write_gap_text(text, text.as_bytes().to_vec(), cx);
+        self.write_gap_text(text, text.as_bytes().to_vec(), false, cx);
         self.cursor_visible = true;
         cx.notify();
     }
@@ -6388,9 +6411,7 @@ impl Render for TerminalView {
             }
             self.typeahead.drain();
         } else if self.input_active() {
-            if let Some(net) = self.hold.engage() {
-                self.cmd.prepend_str(&net);
-            }
+            self.engage_hold_into_editor();
             if self.terminal.zle_reading() {
                 self.flush_typeahead();
             }

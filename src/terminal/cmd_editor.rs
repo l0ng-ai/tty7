@@ -106,6 +106,16 @@ impl CmdEditor {
         self.pasted
     }
 
+    /// Prepend text the gap hold collected, and remember that some of it came
+    /// off the clipboard. The counterpart to [`insert_pasted`](Self::insert_pasted)
+    /// for the one route into this buffer that does not go through the editor:
+    /// a paste made before the prompt arrived is held outside it and prepended
+    /// when the editor takes over.
+    pub fn prepend_pasted(&mut self, s: &str) {
+        self.pasted = true;
+        self.prepend_str(s);
+    }
+
     pub fn prepend_str(&mut self, s: &str) {
         if s.is_empty() {
             return;
@@ -889,5 +899,17 @@ mod tests {
         assert!(!e.pasted());
         e.insert_str("j build");
         assert!(!e.pasted());
+
+        // Text pasted before the prompt arrived is held outside this buffer
+        // and prepended when the editor takes over; it has to bring the mark
+        // with it, or the gap would be a way around `insert_pasted`.
+        e.clear();
+        e.insert_str(" /tmp");
+        e.prepend_pasted("l");
+        assert_eq!(e.text(), "l /tmp");
+        assert!(e.pasted());
+        e.clear();
+        e.prepend_str("ls");
+        assert!(!e.pasted(), "typed gap text stays typed");
     }
 }
