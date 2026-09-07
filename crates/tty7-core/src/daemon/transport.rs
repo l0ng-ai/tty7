@@ -7,6 +7,44 @@ pub use imp_unix::*;
 #[cfg(windows)]
 pub use imp_windows::*;
 
+/// Deal with an endpoint someone left behind, so the bind after it can only be
+/// refused for a reason worth reporting.
+///
+/// `alone` is proof that this process holds the single-server seat. That, and
+/// not a probe, is what makes removal safe: whoever holds the seat is the
+/// server, so anything still sitting at the endpoint belongs to a process that
+/// is gone. Answering "is a server already running?" by connecting and reading
+/// one failed connect as proof of death is the race [`crate::daemon::singleton`]
+/// exists to eliminate — the loser holds a listener on an unlinked path and
+/// serves nobody, forever — so it is only used where there is no seat to reason
+/// from, and even there a socket that answers is refused rather than removed.
+///
+/// Removing is not optional on Unix. The endpoint is a socket *file* and `bind`
+/// refuses any path that already exists, so a daemon that died without
+/// unlinking its socket stops every later daemon from ever starting: the client
+/// launches one, it exits on the bind, the client launches another. On Windows
+/// the endpoint is a port file the bind overwrites, and the removal costs
+/// nothing.
+pub fn clear_endpoint_before_bind(alone: bool) -> anyhow::Result<()> {
+    if alone {
+        remove_stale_endpoint();
+        return Ok(());
+    }
+    if !endpoint_exists() {
+        return Ok(());
+    }
+    match connect() {
+        Ok(_) => Err(anyhow::anyhow!(
+            "daemon already running at {}",
+            endpoint_display()
+        )),
+        Err(_) => {
+            remove_stale_endpoint();
+            Ok(())
+        }
+    }
+}
+
 #[cfg(unix)]
 mod imp_unix {
     use super::*;
@@ -142,16 +180,22 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn pin_config_dir() {
+    /// The config directory is process-global and so is the one socket path
+    /// under it, so every test that binds it has to take a turn. Without this
+    /// they race each other into `bind` and fail on `EEXIST`.
+    fn pin_config_dir() -> std::sync::MutexGuard<'static, ()> {
+        static SOCKET: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = SOCKET.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("tty7-covtest-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();
         config::set_config_dir(dir);
+        remove_stale_endpoint();
+        guard
     }
 
     #[test]
     fn endpoint_lifecycle_bind_connect_and_clear() {
-        pin_config_dir();
-        remove_stale_endpoint();
+        let _turn = pin_config_dir();
         assert!(!endpoint_exists(), "no endpoint before bind");
 
         let listener = bind().expect("bind should succeed under the temp config dir");
@@ -166,6 +210,71 @@ mod tests {
         drop(listener);
         remove_stale_endpoint();
         assert!(!endpoint_exists(), "endpoint cleared after removal");
+    }
+
+    /// A daemon that died without unlinking its socket leaves a file `bind`
+    /// refuses, so every later daemon exits on the bind and the client
+    /// launches another, forever. Holding the seat is what says the file is a
+    /// leftover: nobody else can be the server while we are.
+    #[test]
+    fn holding_the_seat_clears_a_socket_its_daemon_never_unlinked() {
+        let _turn = pin_config_dir();
+
+        let dead = bind().expect("bind under the temp config dir");
+        drop(dead);
+        assert!(endpoint_exists(), "the file outlives the listener");
+
+        // And its pidfile still names it. That pair is what a daemon that
+        // died leaves behind, and it is the state the clearing used to skip:
+        // "the recorded daemon is gone, so let the bind overwrite the file" is
+        // true of a Windows port file and false of a Unix socket.
+        let pidfile = crate::daemon::pidfile::path().expect("a pinned config dir has one");
+        std::fs::write(&pidfile, dead_pid().to_string()).expect("plant it");
+        assert!(
+            crate::daemon::spawn::recorded_daemon_is_dead(),
+            "the recorded daemon is gone, which is the whole condition"
+        );
+
+        clear_endpoint_before_bind(true).expect("a leftover is not a refusal");
+        assert!(!endpoint_exists(), "and it is gone before the bind sees it");
+        let listener = bind().expect("so the next daemon starts");
+        let _client = connect().expect("and is reachable");
+
+        drop(listener);
+        remove_stale_endpoint();
+        let _ = std::fs::remove_file(pidfile);
+    }
+
+    /// A pid nothing on this machine is using.
+    fn dead_pid() -> u32 {
+        let mut pid = 200_000u32;
+        while unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+            pid += 1;
+        }
+        pid
+    }
+
+    /// Without a seat there is nothing to reason from, so the endpoint is
+    /// asked instead — and one that answers is refused, never removed.
+    /// Removing on a failed connect is the race `singleton` exists to kill;
+    /// doing it to a socket that *did* answer would be that race with the
+    /// evidence pointing the other way.
+    #[test]
+    fn without_a_seat_a_live_endpoint_is_refused_and_a_dead_one_cleared() {
+        let _turn = pin_config_dir();
+
+        let live = bind().expect("bind under the temp config dir");
+        let err = clear_endpoint_before_bind(false).expect_err("someone answers there");
+        assert!(
+            err.to_string().contains("daemon already running"),
+            "and is named rather than unlinked: {err}"
+        );
+        let _client = connect().expect("the listener still owns its endpoint");
+
+        drop(live);
+        assert!(endpoint_exists(), "the file outlives the listener");
+        clear_endpoint_before_bind(false).expect("now nothing answers");
+        assert!(!endpoint_exists(), "so it comes off");
     }
 
     #[test]
