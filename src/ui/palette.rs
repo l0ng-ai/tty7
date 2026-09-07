@@ -568,7 +568,6 @@ impl Command {
         ];
 
         let application = [
-            Command::localized(L10nKey::CmdCloseWindow, CloseWindow),
             Command::localized(L10nKey::CmdSettings, OpenSettings),
             Command::localized(L10nKey::CmdKeyboardShortcuts, ShowKeyboardShortcuts),
             Command::localized(L10nKey::CmdAboutTty7, About),
@@ -578,6 +577,11 @@ impl Command {
             Command::localized(L10nKey::CmdReportIssue, ReportIssue),
             Command::localized(L10nKey::CmdRestartServer, RestartDaemon)
                 .with_subtitle(t(L10nKey::CmdRestartServerSubtitle)),
+            // Beside Quit, because the pair is the whole point of the action:
+            // both end the window you are looking at, and only one of them
+            // takes your shells with it. Read together the subtitles say which.
+            Command::localized(L10nKey::CmdCloseWindow, CloseWindow)
+                .with_subtitle(t(L10nKey::CmdCloseWindowSubtitle)),
             Command::localized(L10nKey::CmdQuitTty7, Quit)
                 .with_subtitle(t(L10nKey::CmdQuitTty7Subtitle)),
         ];

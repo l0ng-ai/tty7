@@ -1164,6 +1164,7 @@ l10n_keys! {
     CmdMarkTabAsUnread,
     CmdClosePaneTab,
     CmdCloseWindow,
+    CmdCloseWindowSubtitle,
     CmdCloseOtherTabs,
     CmdCloseTabsToTheRight,
     CmdReopenClosedTab,
