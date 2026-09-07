@@ -186,7 +186,18 @@ impl Tty7App {
         let Some(spec) = self.unsaved_ssh_session(window, cx) else {
             return;
         };
-        let profile = profile_from_live_spec(&spec);
+        self.save_ssh_spec_as_host(&spec, window, cx);
+    }
+
+    /// The same form, for a connection named by the caller rather than by the
+    /// focus — the tab menu's row offers it for the tab it was opened on.
+    pub(crate) fn save_ssh_spec_as_host(
+        &mut self,
+        spec: &NativeSshSpec,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let profile = profile_from_live_spec(spec);
         let jumped = spec.jump.is_some();
         self.open_settings_section(crate::ui::settings::SettingsSection::Ssh, window, cx);
         self.ssh_form_load(&profile, window, cx);
@@ -241,6 +252,52 @@ impl Tty7App {
                 self.open_ssh_profile_new_from_target(target, window, cx);
             }
             RemoteTarget::Wsl { .. } | RemoteTarget::LocalStdio { .. } => {}
+        }
+    }
+
+    /// The host form a tab's own context menu offers, and what the row calls
+    /// it — read off the tab the menu was opened on rather than off whichever
+    /// pane happens to be focused, so right-clicking a background tab reaches
+    /// that tab's connection.
+    ///
+    /// `None` for a tab there is no host form to open: a local shell and a
+    /// remote workspace pane were never dialled with an SSH spec of their own,
+    /// and a WSL distro is configured nowhere this form could edit. The label
+    /// comes from the same [`host_form_label`] the switcher's machine menu
+    /// uses, so the two rows cannot drift apart.
+    ///
+    /// [`host_form_label`]: crate::ui::switcher::host_form_label
+    pub(crate) fn tab_ssh_host_form(
+        &self,
+        index: usize,
+        window: &gpui::Window,
+        cx: &gpui::App,
+    ) -> Option<(TabHostForm, &'static str)> {
+        let leaf = self.tabs.get(index)?.pane.focused_or_first(window, cx)?;
+        let spec = leaf.read(cx).ssh_spec()?;
+        let target = ssh_host_target_of_spec(&spec, &cx.global::<Config>().ssh_profiles);
+        let label = crate::ui::switcher::host_form_label(&target)?;
+        let form = match target {
+            crate::core::session::RemoteTarget::Profile { .. } => TabHostForm::Saved(target),
+            _ => TabHostForm::Unsaved(spec),
+        };
+        Some((form, label))
+    }
+
+    /// Open what the row offered. A saved host goes to its own record; an
+    /// unsaved one goes through the same "save this connection" path the
+    /// command already uses, so the proxy, the identity files and the forwards
+    /// the session was dialled with land in the draft rather than being
+    /// thrown away with everything that does not fit in `user@host:port`.
+    pub(crate) fn open_tab_ssh_host_form(
+        &mut self,
+        form: &TabHostForm,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        match form {
+            TabHostForm::Saved(target) => self.edit_ssh_host_of_target(target, window, cx),
+            TabHostForm::Unsaved(spec) => self.save_ssh_spec_as_host(spec, window, cx),
         }
     }
 
@@ -406,6 +463,49 @@ fn build_spec_inner(
             name => name.to_string(),
         }),
         profile_id: Some(profile.id.to_string()),
+    }
+}
+
+/// What a tab's host row opens when it is taken.
+///
+/// The two halves are not the same form. A saved host is already a record, so
+/// it is addressed by the target that names it and nothing about the live
+/// session is needed. An unsaved one is only ever the session, and it goes to
+/// the form whole: an address dialled by hand carries a proxy, a jump host,
+/// identity files and forwards, and a draft built from `user@host:port` alone
+/// would save fine and then not connect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TabHostForm {
+    Saved(crate::core::session::RemoteTarget),
+    Unsaved(Box<NativeSshSpec>),
+}
+
+/// Which host form a live connection belongs to: the saved host it was opened
+/// from, or the address it was dialled by.
+///
+/// A transient profile is handed a fresh uuid on its way to the daemon, so an
+/// id alone does not mean a host was saved — only one that still resolves
+/// against the saved list does. Anything else is an address worth keeping.
+///
+/// The `Direct` this hands back is the gate and the label, not the draft:
+/// [`host_form_label`] reads it to decide the row exists and what it says,
+/// while the form itself opens on the whole live spec, which carries far more
+/// than an address does.
+///
+/// [`host_form_label`]: crate::ui::switcher::host_form_label
+pub(crate) fn ssh_host_target_of_spec(
+    spec: &NativeSshSpec,
+    profiles: &[SshProfile],
+) -> crate::core::session::RemoteTarget {
+    use crate::core::session::RemoteTarget;
+    let saved = spec
+        .profile_id
+        .as_deref()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .filter(|id| profiles.iter().any(|p| p.id == *id));
+    match saved {
+        Some(id) => RemoteTarget::Profile { id },
+        None => RemoteTarget::direct(spec.user.clone(), spec.host.clone(), spec.port),
     }
 }
 

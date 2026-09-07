@@ -385,7 +385,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsMouseZoomOff => "关闭",
         L10nKey::SettingsReportMouseToApps => "向应用报告鼠标",
         L10nKey::SettingsReportMouseToAppsDesc => {
-            "让全屏应用（如 vim、tmux）处理点击和滚动；按住 Shift 可让操作保持本地。"
+            "让全屏应用（如 vim、tmux）处理点击和滚动；按住 Shift 可让操作保持本地。\
+             关闭后点击不再传给它们，滚轮也会变成方向键。"
         }
         L10nKey::SettingsBell => "铃声",
         L10nKey::SettingsTerminalBell => "终端铃声",
@@ -1348,6 +1349,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdForkSessionSubtitle => "将此 agent 会话 fork 到新标签页",
         L10nKey::CmdMarkTabAsUnread => "将标签页标记为未读",
         L10nKey::CmdClosePaneTab => "关闭窗格/标签页",
+        L10nKey::CmdCloseWindow => "关闭窗口",
+        L10nKey::CmdCloseWindowSubtitle => "shell 保持运行",
         L10nKey::CmdCloseOtherTabs => "关闭其他标签页",
         L10nKey::CmdCloseTabsToTheRight => "关闭右侧标签页",
         L10nKey::CmdReopenClosedTab => "重新打开已关闭标签页",
@@ -1422,7 +1425,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRestartServer => "重启 server…",
         L10nKey::CmdRestartServerSubtitle => "结束所有运行中的 shell；保留布局",
         L10nKey::CmdQuitTty7 => "退出 tty7",
-        L10nKey::CmdQuitTty7Subtitle => "shell 保持运行",
+        L10nKey::CmdQuitTty7Subtitle => "停止服务；结束所有运行中的 shell",
         L10nKey::CmdQuickConnect => "连接到“{target}”",
         L10nKey::CmdQuickConnectSaveProfile => "将“{target}”保存为主机配置…",
         L10nKey::CmdRecent => "最近使用",

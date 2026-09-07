@@ -23,12 +23,14 @@ pub(crate) enum Side {
     New,
 }
 
+#[derive(PartialEq, Eq)]
 pub(crate) struct SplitCell {
     pub(crate) no: Option<u32>,
     pub(crate) text: String,
     pub(crate) changed: bool,
 }
 
+#[derive(PartialEq, Eq)]
 pub(crate) struct SplitRow {
     pub(crate) left: Option<SplitCell>,
     pub(crate) right: Option<SplitCell>,
@@ -85,6 +87,7 @@ pub(crate) fn split_hunk(lines: &[DiffLine]) -> Vec<SplitRow> {
     rows
 }
 
+#[derive(PartialEq, Eq)]
 pub(crate) struct UnifiedRow {
     pub(crate) old: Option<u32>,
     pub(crate) new: Option<u32>,

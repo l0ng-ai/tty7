@@ -172,7 +172,7 @@ windows-sys = { version = "0.61", features = [
 # The standalone updater extracts only Windows release ZIPs. Reuse the async
 # reader already present in Cargo.lock and enable only the Deflate codec emitted
 # by PowerShell's Compress-Archive.
-async_zip = { version = "0.0.18", default-features = false, features = ["deflate"], optional = true }
+async_zip = { version = "0.0.19", default-features = false, features = ["deflate"], optional = true }
 
 # COM for toast branding (`core::aumid`): IShellLinkW + IPropertyStore stamp
 # System.AppUserModel.ID onto the Start Menu shortcut, which Windows requires
@@ -271,7 +271,7 @@ edition = "2024"
 # they must never drift apart. This is the line a release bump edits (and the
 # one nightly's `awk '/^version = /'` stamps: it is the first such line in the
 # file, since the package entries above are all `version.workspace = true`).
-version = "26.9.0"
+version = "26.9.1"
 
 [workspace.dependencies]
 # Our fork's `tty7` branch carries the local customizations tty7 relies on:
@@ -367,7 +367,7 @@ lto = "thin"
 codegen-units = 1
 
 # ---- gpui fork ------------------------------------------------------------
-# Our `tty7` branch (cut from the pinned upstream rev, three commits on top) carries:
+# Our `tty7` branch (cut from the pinned upstream rev) carries:
 #
 # 1. `prefers_ime_for_printable_keys` takes the keystroke, so an input handler can
 #    answer per key instead of per view. tty7 needs it for Option-as-Meta — macOS
@@ -385,6 +385,14 @@ codegen-units = 1
 #
 # 3. resvg/usvg bumped 0.45 → 0.47 so gpui's SVG stack unifies with the resvg
 #    tty7 pins directly above (follow-up to the #227 dependabot bump).
+#
+# 4. `ListState::with_size_hint`. A list counts an item it has not laid out yet
+#    as zero tall, so a long document reports itself as about one viewport and
+#    a scrollbar reading that height drags one viewport and stops — the diff
+#    overlay scrolls a whole working tree through one of these. The hint counts
+#    the unmeasured items at an estimate instead, which `measure_all` would
+#    settle exactly at the price of laying out the whole document on the first
+#    frame (see `ui::diff_overlay::DIFF_LINE_H`).
 #
 # Patching by source rather than editing the `gpui`/`gpui_platform` pins above is
 # deliberate: `gpui-component` declares its own `gpui` from the upstream URL, and
