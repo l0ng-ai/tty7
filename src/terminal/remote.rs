@@ -136,11 +136,24 @@ impl PaneWorkspace {
                 RouteHeader::local_stdio(program.clone(), &argv)
             }
             (_, Some(spec)) => RouteHeader::ssh((**spec).clone()),
-            (target, None) => {
-                return Err(anyhow::anyhow!(
-                    "this workspace has no SSH connection details ({target:?}), so its panes \
-                     cannot be routed"
-                ));
+            (_, None) => {
+                // Deliberately not the target: a `Profile` spells itself as
+                // its config UUID in `Display` and in `Debug` alike, and a
+                // deleted profile is exactly what empties `spec` here. This
+                // sentence is not only logged — `land_pane` hands it to the
+                // pending pane, which prints the reason verbatim under
+                // "could not reach {machine}", so the UUID reached the screen
+                // (#485). The workspace's own name is what every other
+                // surface calls this thing.
+                return Err(match self.label.as_deref() {
+                    Some(label) => anyhow::anyhow!(
+                        "{label} has no SSH connection details, so its panes cannot be routed"
+                    ),
+                    None => anyhow::anyhow!(
+                        "this workspace has no SSH connection details, so its panes \
+                         cannot be routed"
+                    ),
+                });
             }
         };
         Ok(header.for_pane())
@@ -3070,6 +3083,62 @@ mod windows_tests {
                  rather than scrolled away. History holds {history:?}"
             );
         }
+    }
+}
+
+/// Ungated on purpose: what a workspace can build a route out of is the same
+/// on every platform, and so is the name the refusal carries.
+#[cfg(test)]
+mod route_header_tests {
+    use super::*;
+    use crate::core::session::{RemoteTarget, WorkspaceId};
+
+    fn unroutable(target: RemoteTarget, label: Option<&str>) -> PaneWorkspace {
+        PaneWorkspace {
+            workspace: WorkspaceId::new(),
+            target,
+            spec: None,
+            label: label.map(str::to_string),
+            resize_echo: false,
+        }
+    }
+
+    /// A deleted profile is what empties `spec`, and the refusal built here is
+    /// what the pending pane prints verbatim under "could not reach
+    /// {machine}" — so this is one of the screens #485 is about. It used to
+    /// carry `{target:?}`, which for a `Profile` is its config UUID and
+    /// nothing else.
+    #[test]
+    fn an_unroutable_workspace_is_not_named_by_its_profile_uuid() {
+        let id = uuid::Uuid::new_v4();
+        let gone = RemoteTarget::Profile { id };
+
+        let named = unroutable(gone.clone(), Some("lager"));
+        let e = named
+            .route_header()
+            .expect_err("no spec, no route")
+            .to_string();
+        assert!(
+            !e.contains(&id.to_string()),
+            "a bare profile UUID reached the UI: {e}"
+        );
+        assert!(
+            e.contains("lager"),
+            "the entry's own name is what it is called: {e}"
+        );
+        assert!(e.contains("cannot be routed"), "{e}");
+
+        // Nothing to call it by is still no reason to print the UUID.
+        let bare = unroutable(gone, None);
+        let e = bare
+            .route_header()
+            .expect_err("no spec, no route")
+            .to_string();
+        assert!(
+            !e.contains(&id.to_string()),
+            "a bare profile UUID reached the UI: {e}"
+        );
+        assert!(e.contains("cannot be routed"), "{e}");
     }
 }
 
