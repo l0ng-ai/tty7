@@ -2737,7 +2737,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod overlay_gpui_tests {
     use super::*;
     use crate::ui::app::test_window;
@@ -3015,8 +3015,22 @@ mod overlay_gpui_tests {
 /// terminal, an editor, a worktree command — and the cached branch is a branch
 /// the repository has left. That is what the stale entry below stands for.
 ///
-/// Unix-gated like every other window harness in this tree: `harness_with_tabs`
-/// hands back a `std::os::unix::net::UnixStream` for the pane.
+/// Unix-only, and not for the harness: on Windows the root this test seeds
+/// the cache with is not the root the probe lands with, so `scm_epoch` never
+/// agrees with the landing snapshot and the overlay re-probes on every frame
+/// — `load` reaches `Ready` and `loading` goes straight back to `true`, which
+/// is the exact spin this test exists to catch.
+///
+/// Not the slash direction — `Path` compares by component, so `C:/x` and
+/// `C:\x` are already equal. It is the prefix, and since #796 it is this
+/// test's own: the product keys a repository by one spelling now
+/// (`Host::canonicalize` drops the `\\?\` extended-length prefix and
+/// `core::git::git_path` re-spells what git prints), while the seed below
+/// still comes straight from `std::fs::canonicalize` and so carries
+/// `\\?\C:\Users\—` — a `VerbatimDisk` prefix where everything it is
+/// compared against is now `Disk`. Seeding through
+/// `tty7_core::core::path_spelling` should lift this, as a change that can
+/// show it green rather than a drive-by.
 #[cfg(all(test, unix))]
 mod render_idle_gpui_tests {
     use super::*;

@@ -98,7 +98,7 @@ pub fn declare_displayed(cx: &App, panes: impl IntoIterator<Item = (EntityId, bo
 
 /// What the registry holds for `id`: `None` when the pane never registered
 /// (or already released), otherwise the flag the output gate would consult.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) fn displayed_for_test(cx: &App, id: EntityId) -> Option<bool> {
     cx.try_global::<DisplayedRegistry>()?
         .0
@@ -9192,10 +9192,18 @@ mod tests {
     }
 }
 
-/// A connected pair of pane-link ends, on whichever transport this platform
-/// gives a pane.
+/// A connected pair of [`crate::daemon::transport::Stream`]s, one for each end
+/// of a pane's link to its daemon.
+///
+/// The client half is what a pane really reads and writes; the daemon half is
+/// the test's, to speak protocol into.
+///
+/// This is the one thing a pane harness needs that Unix and Windows spell
+/// differently — `socketpair` there, a loopback connect here — and every gpui
+/// test in this crate is portable once it goes through this instead of naming
+/// `UnixStream` itself.
 #[cfg(test)]
-pub(crate) fn test_link_pair() -> (
+pub(crate) fn test_stream_pair() -> (
     crate::daemon::transport::Stream,
     crate::daemon::transport::Stream,
 ) {
@@ -9219,7 +9227,7 @@ pub(crate) fn quiet_test_pane(
     window: &mut Window,
     cx: &mut gpui::App,
 ) -> (gpui::Entity<TerminalView>, crate::daemon::transport::Stream) {
-    let (client_side, daemon_side) = test_link_pair();
+    let (client_side, daemon_side) = test_stream_pair();
     let terminal = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24))
         .expect("quiet test terminal");
     let view = cx.new(|cx| TerminalView::with_terminal(terminal, pane_id, window, cx));
@@ -9272,20 +9280,20 @@ pub(crate) fn quiet_test_ssh_pane_with(
     (view, stream)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod gpui_tests {
     use super::*;
     use crate::daemon::protocol::{ClientMsg, DaemonMsg};
+    use crate::daemon::transport::Stream;
     use gpui::{Entity, TestAppContext, point};
-    use std::os::unix::net::UnixStream;
 
-    fn harness(cx: &mut TestAppContext) -> (gpui::WindowHandle<TerminalView>, UnixStream) {
+    fn harness(cx: &mut TestAppContext) -> (gpui::WindowHandle<TerminalView>, Stream) {
         // Building a view reads the config. Whether that hit the real user
         // directory used to come down to which test happened to pin the
         // scratch dir first.
         crate::core::config::pin_test_config_dir();
         cx.executor().allow_parking();
-        let (client_side, daemon_side) = UnixStream::pair().unwrap();
+        let (client_side, daemon_side) = super::test_stream_pair();
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(Config::default());
@@ -9310,11 +9318,11 @@ mod gpui_tests {
     ) -> (
         gpui::WindowHandle<gpui_component::Root>,
         Entity<TerminalView>,
-        UnixStream,
+        Stream,
     ) {
         crate::core::config::pin_test_config_dir();
         cx.executor().allow_parking();
-        let (client_side, daemon_side) = UnixStream::pair().unwrap();
+        let (client_side, daemon_side) = super::test_stream_pair();
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(Config::default());
@@ -9340,7 +9348,7 @@ mod gpui_tests {
     fn prompt_ready(
         window: &gpui::WindowHandle<TerminalView>,
         cx: &mut TestAppContext,
-        daemon: &mut UnixStream,
+        daemon: &mut Stream,
     ) {
         DaemonMsg::Prompt {
             active: true,
@@ -9364,7 +9372,7 @@ mod gpui_tests {
     fn alt_screen_ready(
         window: &gpui::WindowHandle<TerminalView>,
         cx: &mut TestAppContext,
-        daemon: &mut UnixStream,
+        daemon: &mut Stream,
     ) {
         DaemonMsg::Output(b"\x1b[?1049h".to_vec())
             .encode(daemon)
@@ -9392,7 +9400,7 @@ mod gpui_tests {
             .encode(&mut daemon)
             .unwrap();
 
-        let report = |status: AgentStatus, daemon: &mut UnixStream| {
+        let report = |status: AgentStatus, daemon: &mut Stream| {
             DaemonMsg::AgentStatus(Some(AgentSessionState {
                 status,
                 message: None,
@@ -9499,7 +9507,7 @@ mod gpui_tests {
         status: crate::core::cli_agent::AgentStatus,
         pane: &gpui::Entity<TerminalView>,
         cx: &mut TestAppContext,
-        daemon: &mut UnixStream,
+        daemon: &mut Stream,
     ) {
         use crate::core::cli_agent::AgentSessionState;
 
@@ -9949,6 +9957,21 @@ mod gpui_tests {
     /// must not have made the promise. Otherwise those paths sit "not answered
     /// yet" for the life of the pane — no underline, and a click that says
     /// nothing, which is the silence this whole path exists to remove.
+    ///
+    /// Was unix-only because the path it prints is: `Path::new("/etc/hosts")`
+    /// is not absolute on Windows, so `FileCandidate::paths` measured it from
+    /// the roots rather than letting it stand alone — and a workspace that
+    /// never connected has no roots, so nothing was ever wanted. Which was
+    /// itself the divergence: a Windows tty7 looking at a *remote* Linux pane
+    /// never probed the POSIX paths that pane printed.
+    ///
+    /// #795 settled that. `paths` now asks the pane's own
+    /// [`super::search::PathStyle`] rather than this machine's, and a remote
+    /// pane that has not reported a cwd is read as `Posix`, so `/etc/hosts`
+    /// stands alone on every client. The gate is only still here because
+    /// nothing has run this test on Windows yet; lifting it belongs in a
+    /// change that can show it green, not in a merge.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_probe_with_no_host_to_ask_stays_wanted(cx: &mut TestAppContext) {
         let (window, mut daemon) = harness(cx);
@@ -10140,7 +10163,7 @@ mod gpui_tests {
             .unwrap();
     }
 
-    fn next_input(daemon: &mut UnixStream) -> Vec<u8> {
+    fn next_input(daemon: &mut Stream) -> Vec<u8> {
         loop {
             match ClientMsg::read(daemon).expect("client socket stays open") {
                 ClientMsg::Input(bytes) => return bytes,
@@ -10172,7 +10195,7 @@ mod gpui_tests {
         }
     }
 
-    fn next_input_until_timeout(daemon: &mut UnixStream) -> Option<Vec<u8>> {
+    fn next_input_until_timeout(daemon: &mut Stream) -> Option<Vec<u8>> {
         use std::io::ErrorKind;
 
         daemon
@@ -12917,7 +12940,7 @@ mod gpui_tests {
         }
         assert_eq!(seen, "before", "the pre-drop screen is what we relink over");
 
-        let (new_client, mut new_daemon) = UnixStream::pair().unwrap();
+        let (new_client, mut new_daemon) = super::test_stream_pair();
         window
             .update(cx, |view, _, cx| {
                 view.adopt_relink(
@@ -14260,7 +14283,7 @@ mod prompt_handover_tests {
     fn harness(cx: &mut TestAppContext) -> (gpui::WindowHandle<TerminalView>, Stream) {
         crate::core::config::pin_test_config_dir();
         cx.executor().allow_parking();
-        let (client_side, daemon_side) = test_link_pair();
+        let (client_side, daemon_side) = test_stream_pair();
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(Config::default());

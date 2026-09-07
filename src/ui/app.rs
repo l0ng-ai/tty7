@@ -440,6 +440,24 @@ pub struct Tab {
     /// Monotonic stamp of when this tab was last activated, used to order the
     /// switcher's tab column most-recently-used first. Zero means never.
     pub(crate) last_used: std::cell::Cell<u64>,
+    /// Where a directional focus move started, keyed by the pane it landed on
+    /// and the direction that undoes it, so reversing a move comes back here
+    /// instead of wherever geometry ranks first (#738). Per tab because the
+    /// panes are.
+    ///
+    /// Keyed by pane and not by direction alone: one slot per direction is
+    /// overwritten by the next move the same way, so a walk of two steps left
+    /// and two back right ends somewhere other than it started — the very drift
+    /// this is here to stop. A pane remembering its own way in retraces the
+    /// whole walk.
+    ///
+    /// A recorded pane only ever breaks a tie between the panes already next to
+    /// the one focus is leaving, so an entry left over from an older layout — or
+    /// from before a click moved focus somewhere else entirely — can at worst
+    /// pick a different neighbour, never a distant one. Entries naming a pane
+    /// the tab no longer holds are dropped as the next one is written, so a
+    /// closed pane leaves nothing behind either.
+    focus_origin: std::collections::HashMap<(gpui::EntityId, Dir), gpui::EntityId>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -463,6 +481,7 @@ impl Tab {
             sidebar_group: std::cell::RefCell::new(None),
             tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
             last_used: std::cell::Cell::new(0),
+            focus_origin: Default::default(),
         }
     }
 
@@ -481,6 +500,7 @@ impl Tab {
             ),
             tree_id: std::cell::Cell::new(tree.id),
             last_used: std::cell::Cell::new(0),
+            focus_origin: Default::default(),
         }
     }
 
@@ -489,6 +509,28 @@ impl Tab {
             Some(id) => self.pane.leaf_matching_or_first(|l| l.entity_id() == id),
             None => self.pane.first_leaf(),
         }
+    }
+
+    /// The pane a move in `dir` out of `at` should return to, if it reverses
+    /// the move that brought focus to `at`.
+    fn focus_origin(&self, at: gpui::EntityId, dir: Dir) -> Option<gpui::EntityId> {
+        self.focus_origin.get(&(at, dir)).copied()
+    }
+
+    /// Remember that a move in `dir` carried focus from `from` to `to`, so the
+    /// move back out of `to` returns. `live` names the panes the tab holds now:
+    /// anything the layout has moved on from is forgotten here rather than
+    /// accumulating for the life of the window.
+    fn remember_focus_origin(
+        &mut self,
+        from: gpui::EntityId,
+        to: gpui::EntityId,
+        dir: Dir,
+        live: &[gpui::EntityId],
+    ) {
+        self.focus_origin
+            .retain(|(at, _), origin| live.contains(at) && live.contains(origin));
+        self.focus_origin.insert((to, dir.opposite()), from);
     }
 
     pub(crate) fn detail_pane(
@@ -1742,6 +1784,7 @@ impl Tty7App {
                 sidebar_group: std::cell::RefCell::new(st.sidebar_group),
                 tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
                 last_used: std::cell::Cell::new(0),
+                focus_origin: Default::default(),
             },
         );
         self.active = insert_at;
@@ -3678,13 +3721,22 @@ impl Tty7App {
     }
 
     fn focus_pane_dir(&mut self, dir: Dir, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self
-            .tabs
-            .get(self.active)
-            .and_then(|tab| tab.pane.neighbor_in_dir(dir, window, cx))
-        else {
+        let Some(tab) = self.tabs.get(self.active) else {
             return;
         };
+        let Some(from) = tab.pane.focused_leaf(window, cx) else {
+            return;
+        };
+        let back = tab.focus_origin(from.entity_id(), dir);
+        let Some(target) = tab.pane.neighbor_in_dir(dir, back, window, cx) else {
+            return;
+        };
+        let live: Vec<gpui::EntityId> = tab.pane.leaves().iter().map(|l| l.entity_id()).collect();
+        let (from, to) = (from.entity_id(), target.entity_id());
+        let active = self.active;
+        if let Some(tab) = self.tabs.get_mut(active) {
+            tab.remember_focus_origin(from, to, dir, &live);
+        }
         self.maximized = None;
         self.focus_leaf(&target, window, cx);
         cx.notify();
@@ -8035,6 +8087,7 @@ fn tabs_from_session(
                     .unwrap_or_else(tty7_core::core::machine::TabId::new),
             ),
             last_used: std::cell::Cell::new(0),
+            focus_origin: Default::default(),
         });
     }
     let active = session.active.min(tabs.len().saturating_sub(1));
@@ -8826,15 +8879,51 @@ mod window_drag_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseReason, DOCUMENT_MIN_W, TERMINAL_MIN_W, TITLE_BAR_HEIGHT, TabAgentSession,
-        clear_window_override_values, close_prompt, document_column_px, join_shell_args,
-        leaf_shares_the_window_daemon, mru_order, pane_free_for, parse_ssh_connect_input,
-        parse_ssh_option_words, side_panel_max, split_shell_args, strip_band, wd_path_saveable,
+        CloseReason, DOCUMENT_MIN_W, Dir, Pane, TERMINAL_MIN_W, TITLE_BAR_HEIGHT, Tab,
+        TabAgentSession, clear_window_override_values, close_prompt, document_column_px,
+        join_shell_args, leaf_shares_the_window_daemon, mru_order, pane_free_for,
+        parse_ssh_connect_input, parse_ssh_option_words, side_panel_max, split_shell_args,
+        strip_band, wd_path_saveable,
     };
     use gpui::{Edges, point, px, size};
 
     const SIDEBAR_MIN: f32 = crate::ui::tab_sidebar::MIN_SIDEBAR_WIDTH;
     const PANEL_MIN: f32 = crate::ui::right_panel::MIN_WIDTH;
+
+    /// #738: which pane a directional move came from is remembered against the
+    /// pane it landed on, not against the direction alone.
+    ///
+    /// One slot per direction is enough for a single move and back, but the
+    /// second step of a walk overwrites the first: left off `3` onto `2` and
+    /// left again onto `1` would leave only `1 -> 2`, and the second move back
+    /// right — the one out of `2` — would be handed no origin and fall to the
+    /// geometry that sent the user to the wrong pane in the first place.
+    #[test]
+    fn each_pane_remembers_the_move_that_landed_on_it() {
+        fn id(n: u64) -> gpui::EntityId {
+            gpui::EntityId::from(n)
+        }
+        let mut tab = Tab::new(Pane::Empty);
+        let live = [id(1), id(2), id(3)];
+
+        tab.remember_focus_origin(id(3), id(2), Dir::Left, &live);
+        tab.remember_focus_origin(id(2), id(1), Dir::Left, &live);
+
+        // Walking back retraces both steps rather than only the last one.
+        assert_eq!(tab.focus_origin(id(1), Dir::Right), Some(id(2)));
+        assert_eq!(tab.focus_origin(id(2), Dir::Right), Some(id(3)));
+        // Nothing is claimed about a direction no move went in, or about a pane
+        // no move has landed on.
+        assert_eq!(tab.focus_origin(id(2), Dir::Left), None);
+        assert_eq!(tab.focus_origin(id(3), Dir::Right), None);
+
+        // A pane the tab no longer holds takes its entries with it, on either
+        // side: with `3` closed, `2` no longer remembers having come from it,
+        // and the move back out of `2` is left to geometry.
+        tab.remember_focus_origin(id(1), id(2), Dir::Right, &[id(1), id(2)]);
+        assert_eq!(tab.focus_origin(id(2), Dir::Right), None);
+        assert_eq!(tab.focus_origin(id(2), Dir::Left), Some(id(1)));
+    }
 
     /// #679: the band now starts at the frame padding rather than at the
     /// window's corner, and off Linux CSD there is no padding to start at —
@@ -9402,14 +9491,13 @@ pub(crate) mod test_window {
     }
 
     /// A window carrying `n` quiet tabs, active on the first.
-    #[cfg(unix)]
     pub(crate) fn harness_with_tabs(
         cx: &mut TestAppContext,
         n: usize,
     ) -> (
         Entity<Tty7App>,
         VisualTestContext,
-        Vec<std::os::unix::net::UnixStream>,
+        Vec<crate::daemon::transport::Stream>,
     ) {
         use crate::terminal::view::quiet_test_pane;
         use crate::ui::pane::{Pane, PaneSlot};
@@ -9436,13 +9524,12 @@ pub(crate) mod test_window {
         (app, vcx, streams)
     }
 
-    #[cfg(unix)]
     pub(crate) fn harness_with_pane(
         cx: &mut TestAppContext,
     ) -> (
         Entity<Tty7App>,
         VisualTestContext,
-        std::os::unix::net::UnixStream,
+        crate::daemon::transport::Stream,
     ) {
         use crate::terminal::view::quiet_test_pane;
         use crate::ui::pane::{Pane, PaneSlot};
@@ -9491,7 +9578,6 @@ pub(crate) mod test_window {
     /// another frame 250ms later. So the sleep below is load-bearing too, and
     /// a round that drew nothing is not on its own enough to stop on — a burst
     /// still open is a frame already owed.
-    #[cfg(unix)]
     pub(crate) fn quiesce(vcx: &mut VisualTestContext, cwd: Option<&std::path::Path>) {
         use crate::terminal::git_data::ScmData;
         use crate::terminal::git_status::GitStatusCache;
@@ -9603,7 +9689,7 @@ mod cursor_blink_gpui_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod ssh_rebuild_gpui_tests {
     use super::test_window::harness_with_pane;
     use crate::core::session::{
@@ -10040,9 +10126,7 @@ mod shell_menu_gpui_tests {
     }
 }
 
-// `harness_with_tabs` hands back the panes' `UnixStream`s, so it exists only
-// on unix — same as `ssh_rebuild_gpui_tests` below it.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod rename_gpui_tests {
     use gpui::TestAppContext;
 
@@ -10126,7 +10210,7 @@ mod rename_gpui_tests {
 // everything else hidden; a pane nobody has declared — or whose id nobody
 // registered — must err toward displayed, because the failure direction that
 // matters is a visible pane that stops repainting.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod displayed_gpui_tests {
     use gpui::TestAppContext;
 
@@ -10227,7 +10311,7 @@ mod displayed_gpui_tests {
 
 // Zoom is a tab's view state: it rides with the tab across a switch, while a
 // layout change (drag, split, close) still clears it.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod zoom_gpui_tests {
     use gpui::TestAppContext;
 
@@ -10355,7 +10439,7 @@ mod zoom_gpui_tests {
 // test config dir and nothing is listening on it — so every forward request
 // fails. That is exactly the case these are about: what the panel and the form
 // are left holding when the far side does not answer.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod managed_forward_gpui_tests {
     use gpui::TestAppContext;
     use gpui_component::input::InputState;

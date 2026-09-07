@@ -82,7 +82,7 @@ pub enum Pane<L = PaneSlot> {
     Empty,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Dir {
     Left,
     Right,
@@ -106,6 +106,16 @@ impl Dir {
 
     fn grows(self) -> bool {
         matches!(self, Dir::Right | Dir::Down)
+    }
+
+    /// The direction that undoes a move this way.
+    pub fn opposite(self) -> Dir {
+        match self {
+            Dir::Left => Dir::Right,
+            Dir::Right => Dir::Left,
+            Dir::Up => Dir::Down,
+            Dir::Down => Dir::Up,
+        }
     }
 }
 
@@ -135,6 +145,22 @@ pub struct Rect {
 
 fn overlap_1d(a0: f32, alen: f32, b0: f32, blen: f32) -> f32 {
     ((a0 + alen).min(b0 + blen) - a0.max(b0)).max(0.0)
+}
+
+/// Slack for the arithmetic behind `leaf_rects`: ratios multiply out down the
+/// tree, so edges that meet exactly in the layout can differ in the last bits.
+const ADJACENCY_EPS: f32 = 1e-4;
+
+/// How far `c` lies from `f` in `dir` and how much edge the two share, or
+/// `None` when `c` is not on that side of `f` or only touches it at a corner.
+fn adjacency(f: Rect, c: Rect, dir: Dir) -> Option<(f32, f32)> {
+    let (dist, overlap) = match dir {
+        Dir::Left => (f.x - (c.x + c.w), overlap_1d(f.y, f.h, c.y, c.h)),
+        Dir::Right => (c.x - (f.x + f.w), overlap_1d(f.y, f.h, c.y, c.h)),
+        Dir::Up => (f.y - (c.y + c.h), overlap_1d(f.x, f.w, c.x, c.w)),
+        Dir::Down => (c.y - (f.y + f.h), overlap_1d(f.x, f.w, c.x, c.w)),
+    };
+    (dist >= -ADJACENCY_EPS && overlap > ADJACENCY_EPS).then_some((dist, overlap))
 }
 
 pub enum CloseOutcome {
@@ -792,22 +818,22 @@ impl<L: Clone> Pane<L> {
 
     pub fn neighbor_in_direction(&self, from: usize, dir: Dir) -> Option<usize> {
         let rects = self.leaf_rects();
+        Self::ranked_neighbor(&rects, from, dir).map(|(i, _)| i)
+    }
+
+    /// The pane a move in `dir` lands on and how far off it sits: nearest wins,
+    /// and the widest shared edge breaks a tie.
+    fn ranked_neighbor(rects: &[(L, Rect)], from: usize, dir: Dir) -> Option<(usize, f32)> {
         let f = rects.get(from)?.1;
-        const EPS: f32 = 1e-4;
+        const EPS: f32 = ADJACENCY_EPS;
         let mut best: Option<(usize, f32, f32)> = None;
         for (i, (_, c)) in rects.iter().enumerate() {
             if i == from {
                 continue;
             }
-            let (dist, overlap) = match dir {
-                Dir::Left => (f.x - (c.x + c.w), overlap_1d(f.y, f.h, c.y, c.h)),
-                Dir::Right => (c.x - (f.x + f.w), overlap_1d(f.y, f.h, c.y, c.h)),
-                Dir::Up => (f.y - (c.y + c.h), overlap_1d(f.x, f.w, c.x, c.w)),
-                Dir::Down => (c.y - (f.y + f.h), overlap_1d(f.x, f.w, c.x, c.w)),
-            };
-            if dist < -EPS || overlap <= EPS {
+            let Some((dist, overlap)) = adjacency(f, *c, dir) else {
                 continue;
-            }
+            };
             let better = match best {
                 None => true,
                 Some((_, bd, bo)) => dist < bd - EPS || (dist <= bd + EPS && overlap > bo + EPS),
@@ -816,7 +842,52 @@ impl<L: Clone> Pane<L> {
                 best = Some((i, dist, overlap));
             }
         }
-        best.map(|(i, _, _)| i)
+        best.map(|(i, dist, _)| (i, dist))
+    }
+
+    /// Whether a move in `dir` could land on `to` without stepping over
+    /// anything: `to` shares an edge with that side of `from`, and nothing in
+    /// that direction sits nearer.
+    ///
+    /// Lying on the right side is not enough on its own. In a row of three
+    /// columns the far one also sits to the right of the first with a full edge
+    /// in common, and treating that as adjacent would skip the column between
+    /// them.
+    pub fn is_adjacent_in_direction(&self, from: usize, to: usize, dir: Dir) -> bool {
+        if from == to {
+            return false;
+        }
+        let rects = self.leaf_rects();
+        let (Some((_, f)), Some((_, c))) = (rects.get(from), rects.get(to)) else {
+            return false;
+        };
+        let Some((dist, _)) = adjacency(*f, *c, dir) else {
+            return false;
+        };
+        Self::ranked_neighbor(&rects, from, dir)
+            .is_some_and(|(_, nearest)| dist <= nearest + ADJACENCY_EPS)
+    }
+
+    /// The pane a move in `dir` lands on, preferring `back` — where the last
+    /// move the other way started — as long as it is still adjacent.
+    ///
+    /// Among the panes actually next to `from`, geometry can only rank by
+    /// shared edge, so at a T-junction (one tall pane facing a stack) the
+    /// reverse move lands on the same member of the stack whichever one you
+    /// left, and going back and forth drifts (#738). Preferring where you came
+    /// from settles that tie the only way the user can mean it.
+    ///
+    /// It settles a tie and nothing more: `back` still has to be one of the
+    /// nearest panes that way, so a move can never step over the pane in
+    /// between, however out of date the caller's memory is.
+    pub fn focus_target_in_direction(
+        &self,
+        from: usize,
+        dir: Dir,
+        back: Option<usize>,
+    ) -> Option<usize> {
+        back.filter(|&back| self.is_adjacent_in_direction(from, back, dir))
+            .or_else(|| self.neighbor_in_direction(from, dir))
     }
 
     pub fn resize_focused(&self, is_focused: &impl Fn(&L) -> bool, dir: Dir, step: f32) -> bool {
@@ -890,13 +961,24 @@ impl Pane<PaneSlot> {
             .collect()
     }
 
-    pub fn neighbor_in_dir(&self, dir: Dir, window: &Window, cx: &App) -> Option<PaneSlot> {
+    /// The pane focus moves to, `back` naming the pane the last move the other
+    /// way started from. A `back` that is no longer a leaf here — closed, or
+    /// left behind in another tab — is simply not found; one that is still here
+    /// but no longer next to `from` loses to the pane that is.
+    pub fn neighbor_in_dir(
+        &self,
+        dir: Dir,
+        back: Option<gpui::EntityId>,
+        window: &Window,
+        cx: &App,
+    ) -> Option<PaneSlot> {
         let focused = self.focused_leaf(window, cx)?;
         let leaves = self.leaves();
         let from = leaves
             .iter()
             .position(|l| l.entity_id() == focused.entity_id())?;
-        let target = self.neighbor_in_direction(from, dir)?;
+        let back = back.and_then(|id| leaves.iter().position(|l| l.entity_id() == id));
+        let target = self.focus_target_in_direction(from, dir, back)?;
         leaves.get(target).cloned()
     }
 
@@ -1589,6 +1671,139 @@ mod tests {
         );
         let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
         assert_eq!(pane.neighbor_in_direction(idx(0), Dir::Right), Some(idx(1)));
+    }
+
+    /// The layout from #738: one full-height pane facing a stack of two.
+    fn t_junction() -> TestPane {
+        TestPane::split_node(
+            Axis::Horizontal,
+            0.5,
+            Pane::Leaf(0),
+            TestPane::split_node(Axis::Vertical, 0.5, Pane::Leaf(4), Pane::Leaf(6)),
+        )
+    }
+
+    #[test]
+    fn reversing_a_move_at_a_t_junction_returns_to_where_it_started() {
+        let pane = t_junction();
+        let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
+        assert_eq!(
+            pane.focus_target_in_direction(idx(6), Dir::Left, None),
+            Some(idx(0))
+        );
+        // Geometry alone ties on overlap here and hands back the top pane.
+        assert_eq!(pane.neighbor_in_direction(idx(0), Dir::Right), Some(idx(4)));
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(6))),
+            Some(idx(6))
+        );
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(4))),
+            Some(idx(4))
+        );
+    }
+
+    #[test]
+    fn a_recorded_pane_the_layout_moved_on_from_falls_back_to_geometry() {
+        let pane = t_junction();
+        let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
+        // Gone entirely: the caller maps a missing pane to no index at all, and
+        // an index the tree no longer has must not resolve to whoever took it.
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, None),
+            Some(idx(4))
+        );
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, Some(99)),
+            Some(idx(4))
+        );
+        // Still there, but no longer reachable that way: splitting the tall
+        // pane leaves its top half facing only the top of the stack.
+        let mut pane = t_junction();
+        split(&mut pane, 0, Axis::Vertical, 1);
+        let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
+        assert!(!pane.is_adjacent_in_direction(idx(0), idx(6), Dir::Right));
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(6))),
+            Some(idx(4))
+        );
+        // And the direction still has to match: the pane below is never the
+        // answer to a move right, however recently focus came from there.
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(1))),
+            Some(idx(4))
+        );
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(0))),
+            Some(idx(4))
+        );
+    }
+
+    /// Two steps out and two back is the same walk the reverse of a single move
+    /// is, and it has to end where it started for the same reason. Replays the
+    /// bookkeeping `focus_pane_dir` does — each move recorded against the pane
+    /// it landed on — over the layout that breaks it: three columns whose last
+    /// one is a stack, so the second move back is the one geometry cannot call.
+    #[test]
+    fn a_walk_of_two_steps_comes_back_to_the_pane_it_started_from() {
+        // 0 | 1 | (2 over 3).
+        let pane = TestPane::split_node(
+            Axis::Horizontal,
+            1.0 / 3.0,
+            Pane::Leaf(0),
+            TestPane::split_node(
+                Axis::Horizontal,
+                0.5,
+                Pane::Leaf(1),
+                TestPane::split_node(Axis::Vertical, 0.5, Pane::Leaf(2), Pane::Leaf(3)),
+            ),
+        );
+        let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
+        // Geometry alone ties on overlap out of the middle column and answers
+        // with the top of the stack, whichever member the walk set off from.
+        assert_eq!(pane.neighbor_in_direction(idx(1), Dir::Right), Some(idx(2)));
+
+        let mut origin: std::collections::HashMap<(usize, Dir), usize> =
+            std::collections::HashMap::new();
+        let mut at = idx(3);
+        for dir in [Dir::Left, Dir::Left, Dir::Right, Dir::Right] {
+            let back = origin.get(&(at, dir)).copied();
+            let to = pane
+                .focus_target_in_direction(at, dir, back)
+                .expect("a neighbour that way");
+            origin.insert((to, dir.opposite()), at);
+            at = to;
+        }
+        assert_eq!(
+            at,
+            idx(3),
+            "the second move back must return to the bottom of the stack too"
+        );
+    }
+
+    #[test]
+    fn a_remembered_pane_further_off_never_steps_over_the_one_between() {
+        // Three equal full-height columns, 0 | 1 | 2.
+        let pane = TestPane::split_node(
+            Axis::Horizontal,
+            1.0 / 3.0,
+            Pane::Leaf(0),
+            TestPane::split_node(Axis::Horizontal, 0.5, Pane::Leaf(1), Pane::Leaf(2)),
+        );
+        let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
+        // Focus reaches 1 by moving left off 2, then leaves for 0 by a click or
+        // a cycle — neither of which records anything, so the origin still
+        // names 2 when the move back to the right happens from 0.
+        assert!(pane.is_adjacent_in_direction(idx(1), idx(2), Dir::Right));
+        assert!(!pane.is_adjacent_in_direction(idx(0), idx(2), Dir::Right));
+        // 2 does lie to the right of 0 with a full edge in common; only being
+        // farther off than 1 disqualifies it.
+        assert!(adjacency(rect_of(&pane, 0), rect_of(&pane, 2), Dir::Right).is_some());
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(2))),
+            Some(idx(1)),
+            "a move right must land on the next column, not skip it"
+        );
     }
 
     #[test]

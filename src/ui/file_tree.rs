@@ -2931,7 +2931,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod render_idle_gpui_tests {
     use super::*;
     use crate::daemon::protocol::DaemonMsg;
@@ -2959,7 +2959,7 @@ mod render_idle_gpui_tests {
     ) -> (
         Entity<Tty7App>,
         VisualTestContext,
-        std::os::unix::net::UnixStream,
+        crate::daemon::transport::Stream,
     ) {
         let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
         DaemonMsg::Cwd(root.to_path_buf())
@@ -3558,7 +3558,7 @@ mod render_idle_gpui_tests {
 /// What these cannot reach is the hit test — whether the row under the cursor
 /// is the one that gets the drop is decided by gpui's hitbox stack, and there
 /// is no headless way to put a cursor over a row.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod drop_gpui_tests {
     use super::render_idle_gpui_tests::{files_panel_on, rows, scratch, serial, settle};
     use super::*;

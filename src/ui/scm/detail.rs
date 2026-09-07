@@ -974,6 +974,20 @@ mod tests {
 /// here — a missing global, a theme token, a slice through the middle of a
 /// character — goes wrong during layout and paint, so these arm the render
 /// probe and insist something was actually drawn.
+///
+/// Still unix-only, and for a reason worth naming rather than a harness one:
+/// on Windows the root the panel settles on is not the root this module hands
+/// it, so the panel never settles on the directory it is already showing.
+///
+/// The forward slashes `git rev-parse --show-toplevel` prints are not what
+/// breaks it — `Path` compares by component, so `C:/x` and `C:\x` are equal.
+/// The prefix is, and since #796 it is this module's own: the product keys a
+/// repository by one spelling now, while `scratch` below still hands the pane
+/// `std::fs::canonicalize`'s `\\?\C:\Users\—`, a `VerbatimDisk` prefix where
+/// every root it is compared against is `Disk`. Taking the gate off needs
+/// that helper to spell its answer the way
+/// `tty7_core::core::path_spelling` does, in a change that can show these
+/// green rather than a drive-by.
 #[cfg(all(test, unix))]
 mod detail_gpui_tests {
     use super::*;
@@ -1043,7 +1057,7 @@ mod detail_gpui_tests {
     ) -> (
         Entity<Tty7App>,
         VisualTestContext,
-        std::os::unix::net::UnixStream,
+        crate::daemon::transport::Stream,
     ) {
         let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
         DaemonMsg::Cwd(root.to_path_buf())
