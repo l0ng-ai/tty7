@@ -1383,7 +1383,19 @@ impl Tty7App {
             Side::New => base.rounded_br(outer_radius),
         };
         let Some(cell) = cell else {
-            return base.bg(cx.theme().muted.opacity(0.3)).into_any_element();
+            // Blank, but still this row's half of this column. Left inert it
+            // is a dead band under the pointer — no I-beam, a press that
+            // starts nothing, and a range that visibly stops at the padding
+            // and resumes below it. A one-sided change is the ordinary shape
+            // of a diff, so that band runs down most of one column.
+            let fill = match rowsel.covers(id, Some(side)) {
+                true => cx.theme().selection,
+                false => cx.theme().muted.opacity(0.3),
+            };
+            return self
+                .diff_row_drag(base, rowsel, Some(side), id, cx)
+                .bg(fill)
+                .into_any_element();
         };
         let (marker, tint) = match (cell.changed, side) {
             (true, Side::Old) => ("−", Some(cx.theme().danger.opacity(0.12))),
@@ -2981,6 +2993,32 @@ mod gpui_tests {
         assert_eq!(copied(&app, &mut vcx).as_deref(), Some("a\nb\nc\nd"));
 
         drag(&app, &mut vcx, DiffViewMode::Unified, None, 1, 3);
+        assert_eq!(copied(&app, &mut vcx).as_deref(), Some("b\nc\nB"));
+    }
+
+    /// A drag that runs up the card leaves the head above the anchor. The
+    /// range is read in drawn order either way, so it copies what the same
+    /// two rows copy dragged the other way round.
+    #[gpui::test]
+    fn a_drag_up_a_column_copies_the_same_rows(cx: &mut TestAppContext) {
+        let (app, mut vcx) = window(cx);
+
+        drag(&app, &mut vcx, DiffViewMode::Split, Some(Side::New), 3, 0);
+        let reversed = app.update_in(&mut vcx, |this, _, _| {
+            let sel = this.tabs[0]
+                .diff_overlay
+                .as_ref()
+                .and_then(|o| o.selection.as_ref())
+                .expect("the drag this test just made");
+            sel.head < sel.anchor
+        });
+        assert!(reversed, "the drag ended above where it started");
+        assert_eq!(copied(&app, &mut vcx).as_deref(), Some("a\nB\nd"));
+
+        drag(&app, &mut vcx, DiffViewMode::Split, Some(Side::Old), 3, 0);
+        assert_eq!(copied(&app, &mut vcx).as_deref(), Some("a\nb\nc\nd"));
+
+        drag(&app, &mut vcx, DiffViewMode::Unified, None, 3, 1);
         assert_eq!(copied(&app, &mut vcx).as_deref(), Some("b\nc\nB"));
     }
 
