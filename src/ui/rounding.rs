@@ -40,24 +40,6 @@ pub(crate) fn segment_corners(
     }
 }
 
-pub(crate) fn stack_corners(
-    i: usize,
-    count: usize,
-    outer: Pixels,
-    border: Pixels,
-) -> Corners<Pixels> {
-    let r = inner_radius(outer, border);
-    let zero = px(0.);
-    let first = i < count && i == 0;
-    let last = i < count && i + 1 == count;
-    Corners {
-        top_left: if first { r } else { zero },
-        top_right: if first { r } else { zero },
-        bottom_left: if last { r } else { zero },
-        bottom_right: if last { r } else { zero },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,21 +90,5 @@ mod tests {
             segment_corners(0, 0, TRACK_RADIUS, HAIRLINE),
             Corners::all(px(0.))
         );
-    }
-
-    #[test]
-    fn a_stack_caps_its_first_and_last_band() {
-        let r = inner_radius(CARD_RADIUS, HAIRLINE);
-        let zero = px(0.);
-
-        let top = stack_corners(0, 2, CARD_RADIUS, HAIRLINE);
-        assert_eq!((top.top_left, top.top_right), (r, r));
-        assert_eq!((top.bottom_left, top.bottom_right), (zero, zero));
-
-        let bottom = stack_corners(1, 2, CARD_RADIUS, HAIRLINE);
-        assert_eq!((bottom.bottom_left, bottom.bottom_right), (r, r));
-        assert_eq!((bottom.top_left, bottom.top_right), (zero, zero));
-
-        assert_eq!(stack_corners(0, 1, CARD_RADIUS, HAIRLINE), Corners::all(r));
     }
 }

@@ -844,11 +844,11 @@ impl Tty7App {
             oversized: focused.is_none() && snap.stats().oversized,
             expanded: &overlay.expanded,
         };
-        if overlay
+        let stale = overlay
             .rows_key
             .as_ref()
-            .is_none_or(|held| !held.describes(&from))
-        {
+            .is_none_or(|held| !held.describes(&from));
+        if stale {
             let rows = match from.preview {
                 Some(file) => crate::ui::diff_list::preview_rows(file, from.mode),
                 None => crate::ui::diff_list::build_rows(
@@ -863,6 +863,8 @@ impl Tty7App {
             resync_list(&overlay.list, &overlay.rows, &rows);
             overlay.rows = Rc::new(rows);
             overlay.rows_key = Some(key);
+        } else if let Some(held) = overlay.rows_key.as_mut() {
+            held.retarget(&from);
         }
         Some(DiffBody::Rows(snap))
     }
@@ -978,18 +980,39 @@ impl RowsKey {
     /// probe that found nothing new still lands a fresh `Arc` over an equal
     /// snapshot, and rebuilding every row of the patch for that would undo the
     /// point of keeping them.
+    ///
+    /// The scalars go first so that the walk of the patch behind that second
+    /// comparison is only ever paid to answer a question the cheap fields
+    /// have not already answered.
     fn describes(&self, from: &RowsFrom<'_>) -> bool {
-        let same_preview = match (&self.preview, from.preview) {
-            (None, None) => true,
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
-            _ => false,
-        };
         self.mode == from.mode
             && self.focused == from.focused
             && self.oversized == from.oversized
             && self.expanded == *from.expanded
-            && same_preview
+            && self.same_preview(from)
             && (Arc::ptr_eq(&self.snap, from.snap) || self.snap == *from.snap)
+    }
+
+    /// The preview, by pointer and then by contents — a re-read of an
+    /// untracked file lands a fresh `Arc` over bytes that did not change.
+    fn same_preview(&self, from: &RowsFrom<'_>) -> bool {
+        match (&self.preview, from.preview) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
+            _ => false,
+        }
+    }
+
+    /// Points the key at the `Arc`s this frame was asked about, having just
+    /// found them equal to the ones held.
+    ///
+    /// Without this the key goes on holding the snapshot from the last
+    /// *rebuild*, so every frame after a probe that found nothing new proves
+    /// the two equal the long way — a walk of every line of the patch, once
+    /// per wheel event, which is the cost this key exists to avoid.
+    fn retarget(&mut self, from: &RowsFrom<'_>) {
+        self.snap = Arc::clone(from.snap);
+        self.preview = from.preview.cloned();
     }
 }
 
@@ -2113,6 +2136,56 @@ mod tests {
 
         let (replaced, with) = spliced_range(&rows, &[]);
         assert_eq!((replaced.start, replaced.end, with), (0, rows.len(), 0));
+    }
+
+    /// A probe that found nothing new still lands a fresh `Arc` over an equal
+    /// snapshot. The rows are rightly kept — and the key has to come away
+    /// holding the `Arc` that landed, or every frame from then on proves the
+    /// two equal the long way: a walk of every line of the patch, per wheel
+    /// event.
+    #[test]
+    fn an_equal_snapshot_leaves_the_key_pointing_at_the_one_that_landed() {
+        let held = Arc::new(DiffSnapshot {
+            files: vec![small_file("a.rs", 2)],
+            ..Default::default()
+        });
+        let landed = Arc::new(DiffSnapshot {
+            files: vec![small_file("a.rs", 2)],
+            ..Default::default()
+        });
+        assert!(
+            !Arc::ptr_eq(&held, &landed),
+            "two separate Arcs over equal contents"
+        );
+
+        let expanded = HashMap::new();
+        let mut key = RowsFrom {
+            snap: &held,
+            preview: None,
+            mode: DiffViewMode::Unified,
+            focused: None,
+            oversized: false,
+            expanded: &expanded,
+        }
+        .to_key();
+        let landed_from = RowsFrom {
+            snap: &landed,
+            preview: None,
+            mode: DiffViewMode::Unified,
+            focused: None,
+            oversized: false,
+            expanded: &expanded,
+        };
+
+        assert!(
+            key.describes(&landed_from),
+            "nothing about the rows changed"
+        );
+        key.retarget(&landed_from);
+        assert!(
+            Arc::ptr_eq(&key.snap, &landed),
+            "so the next frame settles it by pointer rather than by contents"
+        );
     }
 
     #[test]
