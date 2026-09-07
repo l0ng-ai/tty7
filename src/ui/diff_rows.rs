@@ -24,6 +24,7 @@ pub(crate) enum Side {
     New,
 }
 
+#[derive(PartialEq, Eq)]
 pub(crate) struct SplitCell {
     pub(crate) no: Option<u32>,
     pub(crate) text: String,
@@ -34,6 +35,7 @@ pub(crate) struct SplitCell {
     pub(crate) line: usize,
 }
 
+#[derive(PartialEq, Eq)]
 pub(crate) struct SplitRow {
     pub(crate) left: Option<SplitCell>,
     pub(crate) right: Option<SplitCell>,
@@ -98,6 +100,7 @@ pub(crate) fn split_hunk(lines: &[DiffLine]) -> Vec<SplitRow> {
     rows
 }
 
+#[derive(PartialEq, Eq)]
 pub(crate) struct UnifiedRow {
     pub(crate) old: Option<u32>,
     pub(crate) new: Option<u32>,
@@ -138,17 +141,6 @@ impl HunkRows {
             DiffViewMode::Split => Self::Split(split_hunk(lines)),
             DiffViewMode::Unified => Self::Unified(unified_rows(lines)),
         }
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        match self {
-            Self::Split(rows) => rows.len(),
-            Self::Unified(rows) => rows.len(),
-        }
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 }
 
@@ -565,11 +557,14 @@ mod tests {
         );
     }
 
+    /// The one place a view mode turns into rows, so a copy is read off the
+    /// rows the list drew rather than a second guess at them.
     #[test]
     fn each_view_builds_the_rows_its_renderer_draws() {
         let lines = hunk();
-        assert_eq!(HunkRows::build(DiffViewMode::Split, &lines).len(), 4);
-        assert_eq!(HunkRows::build(DiffViewMode::Unified, &lines).len(), 5);
-        assert!(HunkRows::build(DiffViewMode::Split, &[]).is_empty());
+        let split = HunkRows::build(DiffViewMode::Split, &lines);
+        assert!(matches!(split, HunkRows::Split(rows) if rows.len() == 4));
+        let unified = HunkRows::build(DiffViewMode::Unified, &lines);
+        assert!(matches!(unified, HunkRows::Unified(rows) if rows.len() == 5));
     }
 }
