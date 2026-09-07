@@ -177,9 +177,22 @@ impl Host for LocalHost {
         fs::read(p)
     }
 
+    /// The real path behind `p`, in the spelling the rest of tty7 keys by.
+    ///
+    /// `fs::canonicalize` answers with the extended-length form on Windows —
+    /// `\\?\C:\Users\x\repo` — which is a different `Prefix` component from
+    /// the `C:\Users\x\repo` a shell, a pane cwd and `git` all report, and so
+    /// compares unequal, hashes differently and fails `starts_with` against
+    /// every one of them. `\\?\` is a Win32 API escape hatch rather than part
+    /// of the path's identity, so it comes off here, at the one boundary that
+    /// produces it. What the call is actually *for* — resolving a junction, a
+    /// `subst` drive, an 8.3 short name or a symlink — is untouched. See
+    /// [`crate::core::path_spelling`].
     fn canonicalize(&self, p: &Path) -> io::Result<PathBuf> {
         guard_off_ui();
-        fs::canonicalize(p)
+        Ok(crate::core::path_spelling::local_spelling_buf(
+            fs::canonicalize(p)?,
+        ))
     }
 
     fn search(

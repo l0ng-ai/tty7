@@ -3066,10 +3066,14 @@ impl RowRef {
     }
 }
 
-/// What the machine menu's host row says, or `None` for a machine that has no
+/// What a host row offering the form says, or `None` for a machine that has no
 /// SSH host behind it at all — WSL and the local stdio server are configured
 /// nowhere this form could edit.
-fn host_form_label(target: &RemoteTarget) -> Option<&'static str> {
+///
+/// Shared with the tab menu, which offers the same row for the connection a tab
+/// is on (#438), so the two surfaces cannot drift on which machines are
+/// editable or on what the row is called.
+pub(crate) fn host_form_label(target: &RemoteTarget) -> Option<&'static str> {
     match target {
         RemoteTarget::Profile { .. } => Some(t(L10nKey::SwitcherEditHost)),
         RemoteTarget::Alias { .. } | RemoteTarget::Direct { .. } => {

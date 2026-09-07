@@ -1255,12 +1255,18 @@ impl Tty7App {
             },
             move |this, out, cx| {
                 this.scm.root_lookups.remove(&key);
+                // In the spelling everything else keys by: Git for Windows
+                // answers `C:/Users/…` and this root is what the panel, the
+                // commit detail and `ScmData` all compare against a path the
+                // OS spelled. Only for a repository on this machine — a remote
+                // root is native over there and every write below runs `git`
+                // from it on that box. See `tty7_core::core::path_spelling`.
                 let root = out
                     .as_deref()
                     .and_then(|s| s.lines().next())
                     .map(str::trim)
                     .filter(|l| !l.is_empty())
-                    .map(PathBuf::from);
+                    .map(|l| tty7_core::core::path_spelling::spelling_on_buf(id, l));
                 this.scm.roots.insert(key, (Instant::now(), root));
                 cx.notify();
             },

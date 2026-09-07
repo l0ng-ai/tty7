@@ -6,6 +6,7 @@ pub struct CmdEditor {
     undo: Vec<(Vec<char>, usize)>,
     redo: Vec<(Vec<char>, usize)>,
     kill: String,
+    pasted: bool,
 }
 
 const UNDO_LIMIT: usize = 200;
@@ -78,6 +79,41 @@ impl CmdEditor {
             self.chars.insert(self.cursor, c);
             self.cursor += 1;
         }
+    }
+
+    /// Insert clipboard (or dropped-file) text, and remember that this line has
+    /// carried some.
+    ///
+    /// The mark is what lets the submit path keep bracketed paste's contract —
+    /// what was pasted is what runs, with no shell-side rewriting — for a line
+    /// that came from outside, while a line the user typed goes to the shell as
+    /// typed. See `submit_bytes` in the terminal view.
+    pub fn insert_pasted(&mut self, s: &str) {
+        self.pasted = true;
+        self.insert_str(s);
+    }
+
+    /// Whether clipboard text has been inserted into the line being edited.
+    ///
+    /// Deliberately sticky for the life of the buffer rather than tracked per
+    /// character: `clear` runs on every submit and every handoff, so the mark
+    /// is already scoped to exactly one line, and every edit that survives
+    /// inside that line — a completion accepted over the pasted text, a ghost
+    /// suggestion, a kill and yank — keeps it. Erring toward "pasted" only ever
+    /// costs the shell-side expansion this line might have had; erring the
+    /// other way would hand the shell's binding table something the user pasted.
+    pub fn pasted(&self) -> bool {
+        self.pasted
+    }
+
+    /// Prepend text the gap hold collected, and remember that some of it came
+    /// off the clipboard. The counterpart to [`insert_pasted`](Self::insert_pasted)
+    /// for the one route into this buffer that does not go through the editor:
+    /// a paste made before the prompt arrived is held outside it and prepended
+    /// when the editor takes over.
+    pub fn prepend_pasted(&mut self, s: &str) {
+        self.pasted = true;
+        self.prepend_str(s);
     }
 
     pub fn prepend_str(&mut self, s: &str) {
@@ -391,6 +427,7 @@ impl CmdEditor {
         self.anchor = None;
         self.undo.clear();
         self.redo.clear();
+        self.pasted = false;
     }
 
     pub fn set(&mut self, text: &str) {
@@ -832,5 +869,47 @@ mod tests {
         assert_eq!((e.text().as_str(), e.cursor()), ("git status", 3));
         e.set_with_cursor("hi", 99);
         assert_eq!((e.text().as_str(), e.cursor()), ("hi", 2));
+    }
+
+    #[test]
+    fn the_paste_mark_lasts_exactly_one_line() {
+        let mut e = ed("git ", 4);
+        assert!(!e.pasted(), "a typed line carries no mark");
+        e.insert_str("status");
+        assert!(!e.pasted());
+
+        e.insert_pasted(" --short");
+        assert!(e.pasted());
+
+        // Every edit that leaves the pasted text inside this line keeps the
+        // mark, including the ones that rewrite the buffer wholesale on top of
+        // it -- a completion accepted over the paste, a ghost suggestion.
+        e.backspace();
+        e.delete_word_left();
+        e.set("git status --shor");
+        e.set_with_cursor("git status --short", 18);
+        assert!(
+            e.pasted(),
+            "losing the mark mid-line would hand the paste to the shell's bindings"
+        );
+
+        // `clear` runs on every submit and every handoff, so the next line
+        // starts clean and gets the typed delivery again.
+        e.clear();
+        assert!(!e.pasted());
+        e.insert_str("j build");
+        assert!(!e.pasted());
+
+        // Text pasted before the prompt arrived is held outside this buffer
+        // and prepended when the editor takes over; it has to bring the mark
+        // with it, or the gap would be a way around `insert_pasted`.
+        e.clear();
+        e.insert_str(" /tmp");
+        e.prepend_pasted("l");
+        assert_eq!(e.text(), "l /tmp");
+        assert!(e.pasted());
+        e.clear();
+        e.prepend_str("ls");
+        assert!(!e.pasted(), "typed gap text stays typed");
     }
 }

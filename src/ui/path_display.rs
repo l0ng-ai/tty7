@@ -69,56 +69,27 @@ fn normalized(s: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Re-spells a path on **this** machine with the separators this OS expects.
+/// Re-spells a path on **this** machine with the separators this OS expects,
+/// so the Win32 shell will take it.
 ///
-/// On Windows the shell's `IShellFolder::ParseDisplayName` bails out with
-/// `E_INVALIDARG` on a mixed-separator path — a forward-slash prefix joined
-/// with backslash entries. The forward slashes get in from two routes: the
-/// shell's PWD (OSC 7 from Git Bash / MSYS bash reports `/`, and that string
-/// survives `Path::ancestors()` when the file tree walks up to find `.git`),
-/// and `git rev-parse --show-toplevel` from Git for Windows (MSYS2), which
-/// always prints `/` regardless of the calling shell. `reveal_path` swallows
-/// that failure (it only logs), so handing it native separators is what makes
-/// "open folder" actually open.
+/// `IShellFolder::ParseDisplayName` bails out with `E_INVALIDARG` on a
+/// mixed-separator path — a forward-slash prefix joined with backslash
+/// entries — and `reveal_path` swallows that failure (it only logs), so
+/// handing it native separators is what makes "open folder" actually open.
+///
+/// The rule itself lives in [`tty7_core::core::path_spelling`], next to the
+/// prefix rule the SCM caches need, because a path spelled two ways is one
+/// problem and it must not have two answers in two crates. This is the
+/// separators half on its own: a `\\?\` path is already something
+/// `ParseDisplayName` will not take, and re-spelling one here would be a
+/// silent change of subject rather than a fix.
 ///
 /// **Only for paths on the machine this window runs on.** A remote host's
 /// `/home/u/src` is already native over there; re-spelling it would put a
 /// path on the clipboard that names nothing on either machine. Every caller
 /// sits behind a locality check for that reason.
-///
-/// The rewrite runs on the path's own UTF-16 code units, not on a
-/// `to_string_lossy` copy of them. A Windows filename may hold unpaired
-/// surrogates, which `to_string_lossy` turns into `U+FFFD` — the returned
-/// path would then silently name a *different* file, and reveal would open
-/// nothing without reporting why. `/` and `\` are ASCII, so a code unit
-/// equal to one of them is that character and never half of a surrogate
-/// pair, which is what makes the swap safe to do one unit at a time.
-#[cfg(windows)]
 pub(crate) fn native_separators(path: &Path) -> Cow<'_, Path> {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
-
-    const SLASH: u16 = b'/' as u16;
-    const BACKSLASH: u16 = b'\\' as u16;
-
-    let os = path.as_os_str();
-    // Nothing to fix — including every UNC (`\\wsl$\…`, `\\?\…`) and
-    // already-native path — hands the caller's own path straight back.
-    if !os.encode_wide().any(|unit| unit == SLASH) {
-        return Cow::Borrowed(path);
-    }
-    let wide: Vec<u16> = os
-        .encode_wide()
-        .map(|unit| if unit == SLASH { BACKSLASH } else { unit })
-        .collect();
-    Cow::Owned(PathBuf::from(OsString::from_wide(&wide)))
-}
-
-/// Off Windows the OS separator is already `/`, and a backslash in a path is
-/// an ordinary filename character — there is nothing to re-spell.
-#[cfg(not(windows))]
-pub(crate) fn native_separators(path: &Path) -> Cow<'_, Path> {
-    Cow::Borrowed(path)
+    tty7_core::core::path_spelling::native_separators(path)
 }
 
 /// Shortens `path` to start from `~` when it is (inside) `home` — the home

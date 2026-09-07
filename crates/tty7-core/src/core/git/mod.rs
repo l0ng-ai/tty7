@@ -48,8 +48,8 @@ pub fn probe(host: &dyn Host, cwd: &Path) -> Option<RepoSnapshot> {
         ],
     )?;
     let mut lines = paths.lines().map(|l| l.trim_end_matches(['\n', '\r']));
-    let root = PathBuf::from(lines.next()?);
-    let home = repo_home(&root, lines.next(), lines.next());
+    let root = git_path(host, lines.next()?);
+    let home = repo_home(host, &root, lines.next(), lines.next());
     let branch = branch_name(host, cwd)?;
     Some(RepoSnapshot {
         home,
@@ -59,18 +59,43 @@ pub fn probe(host: &dyn Host, cwd: &Path) -> Option<RepoSnapshot> {
     })
 }
 
-pub(crate) fn repo_home(root: &Path, git_dir: Option<&str>, common_dir: Option<&str>) -> PathBuf {
+/// A path `git` just printed, in the spelling the rest of tty7 keys by.
+///
+/// Git for Windows is MSYS2 and answers `rev-parse` with `C:/Users/…` whatever
+/// shell asked it. `Path` forgives that much on its own, but the same root also
+/// has to compare equal to one that came past `fs::canonicalize` — which spells
+/// it `\\?\C:\Users\…`, a different prefix component and so a different key.
+/// One spelling at the boundary, rather than a normalisation remembered at each
+/// of the places these roots are later compared. See
+/// [`crate::core::path_spelling`].
+///
+/// Asked of `host`, not of `cfg!(windows)`: the same probes run against a
+/// remote box, whose `/home/u/src` is native over there and goes straight
+/// back over the wire as the cwd of the next `git`. A Windows client
+/// re-spelling it would ask a Linux server about `\home\u\src`.
+pub(crate) fn git_path(host: &dyn Host, printed: &str) -> PathBuf {
+    crate::core::path_spelling::spelling_on_buf(host.id(), printed)
+}
+
+pub(crate) fn repo_home(
+    host: &dyn Host,
+    root: &Path,
+    git_dir: Option<&str>,
+    common_dir: Option<&str>,
+) -> PathBuf {
     let (Some(git_dir), Some(common)) = (git_dir, common_dir) else {
         return root.to_path_buf();
     };
     if git_dir == common {
         return root.to_path_buf();
     }
-    let common = Path::new(common);
-    match (common.file_name(), common.parent()) {
-        (Some(name), Some(parent)) if name == ".git" => parent.to_path_buf(),
-        _ => common.to_path_buf(),
+    let common = git_path(host, common);
+    if common.file_name().is_some_and(|name| name == ".git")
+        && let Some(parent) = common.parent()
+    {
+        return parent.to_path_buf();
     }
+    common
 }
 
 pub fn branch_name(host: &dyn Host, cwd: &Path) -> Option<String> {
@@ -659,24 +684,105 @@ mod tests {
     }
     #[test]
     fn repo_home_resolves_worktree_layouts() {
+        let host = h();
+        let host = &*host;
         let root = Path::new("/repo/.wt/feat");
 
         assert_eq!(
-            repo_home(Path::new("/repo"), Some("/repo/.git"), Some("/repo/.git")),
+            repo_home(
+                host,
+                Path::new("/repo"),
+                Some("/repo/.git"),
+                Some("/repo/.git")
+            ),
             PathBuf::from("/repo")
         );
         assert_eq!(
-            repo_home(root, Some("/repo/.git/worktrees/feat"), Some("/repo/.git")),
+            repo_home(
+                host,
+                root,
+                Some("/repo/.git/worktrees/feat"),
+                Some("/repo/.git")
+            ),
             PathBuf::from("/repo")
         );
         assert_eq!(
-            repo_home(root, Some("/bare.git/worktrees/feat"), Some("/bare.git")),
+            repo_home(
+                host,
+                root,
+                Some("/bare.git/worktrees/feat"),
+                Some("/bare.git")
+            ),
             PathBuf::from("/bare.git")
         );
         assert_eq!(
-            repo_home(root, Some("/repo/.git"), None),
+            repo_home(host, root, Some("/repo/.git"), None),
             root.to_path_buf()
         );
-        assert_eq!(repo_home(root, None, None), root.to_path_buf());
+        assert_eq!(repo_home(host, root, None, None), root.to_path_buf());
+    }
+
+    /// The root every git probe answers with is the directory the *OS* names,
+    /// compared as a plain `PathBuf` — which is how every consumer compares
+    /// it.
+    ///
+    /// Not gated to any platform, deliberately. Git for Windows is MSYS2 and
+    /// prints `C:/Users/…`; `Host::canonicalize` used to answer `\\?\C:\Users\
+    /// …`; those are different `Prefix` components, so the two never matched
+    /// and every SCM cache keyed by one missed the other. Nothing compared
+    /// them on Windows, which is exactly why nobody noticed — a `#[cfg(unix)]`
+    /// on this would put it straight back.
+    #[test]
+    fn a_probed_root_is_the_same_path_the_host_canonicalizes_to() {
+        let host = h();
+        let dir = std::env::temp_dir().join(format!("tty7-root-spelling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let made = git(&*host, &dir, &["init", "--quiet"]).is_some();
+        if !made {
+            let _ = std::fs::remove_dir_all(&dir);
+            return; // no git on this machine
+        }
+        assert!(super::test_support::pin_repo_config(&dir));
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        let mut commit = super::test_support::PINS.to_vec();
+        commit.extend_from_slice(&["commit", "--quiet", "-m", "base"]);
+        assert!(git(&*host, &dir, &["add", "-A"]).is_some());
+        assert!(git(&*host, &dir, &commit).is_some());
+
+        // The one directory, under the two names this process can learn it by:
+        // what the OS handed back, and what resolving it answers.
+        let canonical = host.canonicalize(&dir).expect("the scratch dir resolves");
+
+        let snap = probe(&*host, &dir).expect("a repository was just created here");
+        assert_eq!(
+            snap.root, canonical,
+            "the probed root and the resolved directory are one key"
+        );
+        assert_eq!(snap.home, canonical, "and so is a non-worktree's home");
+
+        // Asking from the resolved spelling has to reach the same answer, or
+        // a pane whose cwd arrived that way lands in a second repository.
+        let from_canonical =
+            probe(&*host, &canonical).expect("the same repository, asked from its other name");
+        assert_eq!(from_canonical.root, snap.root);
+
+        // The other two probes answer the same question and must not disagree
+        // with it: `probe_status` keys `ScmData`, `probe_diff` keys the diff
+        // overlay, and a disagreement between any two of them is a re-probe
+        // that never settles.
+        let status = match super::status::probe_status(&*host, &dir) {
+            super::status::StatusProbe::Status(status) => *status,
+            other => panic!("expected a repository, got {other:?}"),
+        };
+        assert_eq!(status.root, snap.root, "probe_status agrees with probe");
+        assert_eq!(status.home, snap.home);
+
+        let diff = super::diff::probe_diff(&*host, &dir, &Default::default())
+            .expect("an empty repository still has a diff");
+        assert_eq!(diff.root, snap.root, "probe_diff agrees with probe");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
