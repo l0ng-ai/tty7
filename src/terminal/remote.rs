@@ -2874,7 +2874,7 @@ mod replay_tests {
     use crate::daemon::protocol::DaemonMsg;
     use crate::daemon::transport::Stream;
 
-    fn socket_pair() -> (Stream, Stream) {
+    pub(super) fn socket_pair() -> (Stream, Stream) {
         #[cfg(unix)]
         {
             std::os::unix::net::UnixStream::pair().unwrap()
@@ -2941,6 +2941,14 @@ mod replay_tests {
             }
         }
         out
+    }
+
+    /// The grid's width. A grid is born at the size its `RemoteTerminal` was
+    /// built with and only ever leaves it on a `DaemonMsg::Size`, so this is
+    /// what says which geometry frames were applied.
+    fn columns(term: &RemoteTerminal) -> usize {
+        use alacritty_terminal::grid::Dimensions as _;
+        term.term.lock().grid().columns()
     }
 
     /// Waits for the reader thread to have applied everything named, then
@@ -3028,8 +3036,14 @@ mod replay_tests {
 
     /// The view resizes to its real geometry the first time it paints, which
     /// happens while the replay is still arriving. Against a resize-echoing
-    /// daemon the grid must not reflow until the echo, and the echo must not
-    /// cost the replayed screen.
+    /// daemon the grid must not reflow when the request goes out — only when
+    /// the daemon echoes the `Size` back, which is the stream position where
+    /// the bytes stop being old-width — and neither step may cost the
+    /// replayed screen.
+    ///
+    /// The two geometries are deliberately different: at identical dimensions
+    /// a reflow and a deferred reflow look the same, so the invariant would be
+    /// unobservable.
     #[test]
     fn a_resize_racing_the_replay_keeps_the_replayed_screen() {
         crate::core::config::pin_test_config_dir();
@@ -3064,12 +3078,33 @@ mod replay_tests {
         let text = settled(&term, &["REPLAYED-SCREEN"]);
         assert!(text.contains("REPLAYED-SCREEN"), "grid held:\n{text}");
 
-        // First paint: the pane is 120x40 on screen, which is what the daemon
-        // already has, so the echo it sends back changes nothing.
-        term.resize(TermSize::new(120, 40), 8, 17);
-        DaemonMsg::Size(ws(120, 40)).encode(&mut daemon).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(columns(&term), 120, "the replay set the grid's geometry");
+
+        // First paint: the pane is 100x30 on screen, not the 120x40 the ring
+        // was recorded at. The request goes down the link and the grid stays
+        // where the replay left it.
+        term.resize(TermSize::new(100, 30), 8, 17);
+        assert_eq!(
+            columns(&term),
+            120,
+            "the grid reflowed at request time instead of waiting for the echo"
+        );
+        let _ = daemon.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        match ClientMsg::read(&mut daemon) {
+            Ok(ClientMsg::Resize(size)) => assert_eq!((size.cols, size.rows), (100, 30)),
+            other => panic!("the resize never reached the daemon: {other:?}"),
+        }
+
+        // The echo is the stream position the reflow belongs at.
+        DaemonMsg::Size(ws(100, 30)).encode(&mut daemon).unwrap();
+        for _ in 0..600 {
+            if columns(&term) == 100 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let text = all_text(&term);
+        assert_eq!(columns(&term), 100, "the echo never reflowed the grid");
         assert!(
             text.contains("REPLAYED-SCREEN"),
             "the first paint's resize cost the replay; grid held:\n{text}"
@@ -3274,18 +3309,18 @@ mod replay_tests {
         pane.write_input(b"echo DURING-THE-SWITCH\r");
         std::thread::sleep(std::time::Duration::from_millis(600));
 
-        // Switching back: a brand new view, attaching at the hardcoded size,
-        // and resizing to the geometry it is drawn at while the replay is
-        // still on the wire — the first paint happens on the frame after the
-        // attach, not after the replay has drained.
-        let (_epoch, mut second, forward) = attach_client(&pane);
-        second.resize(TermSize::new(120, 40), 8, 17);
+        // Switching back: a brand new view, attaching at the hardcoded size.
+        //
+        // It deliberately never resizes. Resizing is the workaround #711's
+        // reporter found — it makes the daemon `TIOCSWINSZ` the pty and the
+        // *child* repaint, which would put the screen back whether or not the
+        // replay ever arrived, and would also feed the grid a `Size` echo that
+        // `resize_state` sends unconditionally. Everything asserted below has
+        // to come from the replay itself.
+        let (_epoch, second, forward) = attach_client(&pane);
         let landed = wait_for(&second, "DURING-THE-SWITCH");
         let text = all_text(&second);
-        let width = {
-            use alacritty_terminal::grid::Dimensions as _;
-            second.term.lock().grid().columns()
-        };
+        let width = columns(&second);
         pane.kill();
         drop(forward);
 
@@ -3298,10 +3333,8 @@ mod replay_tests {
             text.contains("BEFORE-THE-SWITCH"),
             "the re-attached pane lost the screen it had before the switch; grid held:\n{text}"
         );
-        // The grid is born at the hardcoded attach size and only ever leaves it
-        // on a `Size` frame, so a grid still 80 wide means none of the replay's
-        // geometry was applied and the two needles above found their way in by
-        // some other route.
+        // Nothing resized this client, so 120 can only have come from the
+        // `Size` frame the replay sends ahead of the segment recorded at it.
         assert_eq!(
             width, 120,
             "the replay's geometry never reached the grid, so it is still at the attach size"
@@ -3314,6 +3347,14 @@ mod replay_tests {
     /// view. That view must hold the screen, and it must still be the one the
     /// daemon obeys: the displaced attach's teardown must not take the seat
     /// with it.
+    ///
+    /// The needle is weaker here than in the switch test above, and knowingly
+    /// so: the pane is attached to throughout, and a ConPTY that owns the whole
+    /// viewport reprints what is on screen as ordinary live output, so
+    /// `RACED-OUTPUT` can reach the second view without the replay. What only
+    /// the replay can supply is the geometry — nothing resizes this client —
+    /// and what only the seat can supply is `AFTER-THE-RACE`. Those two are the
+    /// assertions that discriminate.
     #[test]
     fn the_later_of_two_racing_attaches_keeps_the_screen_and_the_seat() {
         crate::core::config::pin_test_config_dir();
@@ -3336,7 +3377,7 @@ mod replay_tests {
         assert!(wait_for(&first, "RACED-OUTPUT"), "the pane never echoed");
 
         // The second rebuild attaches before the first one's view is dropped.
-        let (second_epoch, mut second, second_forward) = attach_client(&pane);
+        let (second_epoch, second, second_forward) = attach_client(&pane);
         assert_ne!(
             first_epoch, second_epoch,
             "the second attach takes the seat"
@@ -3346,8 +3387,11 @@ mod replay_tests {
         // The displaced connection detaches on its way out, epoch-guarded.
         pane.detach(first_epoch);
 
-        second.resize(TermSize::new(120, 40), 8, 17);
+        // Never resized, for the reason the switch test is not: a resize would
+        // repaint the pane from the child and echo a `Size` back, and both are
+        // exactly what must not be allowed to stand in for the replay.
         let landed = wait_for(&second, "RACED-OUTPUT");
+        let width = columns(&second);
         // The seat has to still be the second view's, or nothing it types or
         // resizes reaches the pane.
         let controls = pane.controls(second_epoch);
@@ -3361,6 +3405,11 @@ mod replay_tests {
             landed,
             "the second attach's replay was lost; grid held:\n{text}"
         );
+        assert_eq!(
+            width, 120,
+            "the second attach's replay carried no geometry, so the grid is still at the \
+             attach size"
+        );
         assert!(controls, "the displaced attach's detach took the live seat");
         assert!(live, "the surviving view stopped receiving output");
     }
@@ -3370,13 +3419,7 @@ mod replay_tests {
 mod windows_tests {
     use super::*;
 
-    fn tcp_pair() -> (std::net::TcpStream, std::net::TcpStream) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let client_side = std::net::TcpStream::connect(addr).unwrap();
-        let (daemon_side, _) = listener.accept().unwrap();
-        (client_side, daemon_side)
-    }
+    use super::replay_tests::socket_pair as tcp_pair;
 
     /// On Windows, `shutdown()` does not wake a thread parked in a blocking
     /// `read` on the same socket (it does on unix). `detach_link`,
