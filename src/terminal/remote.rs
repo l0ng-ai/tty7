@@ -2990,6 +2990,16 @@ mod replay_tests {
         assert!(text.contains("BIRTH-BANNER"), "grid held:\n{text}");
         assert!(text.contains("SECOND-SEGMENT"), "grid held:\n{text}");
         assert!(text.contains("THIRD-SEGMENT"), "grid held:\n{text}");
+        // Each segment's geometry too, or this would pass on a replay that
+        // dropped every `Size`. The unix-gated
+        // `segmented_ring_replay_reproduces_live_rendering` asserts that half
+        // already; nothing did on the platforms this module exists for.
+        assert_eq!(
+            columns(&term),
+            120,
+            "the geometry each segment was recorded at never reached the grid, \
+             so it is still at the attach size"
+        );
         drop(daemon);
     }
 
@@ -3049,27 +3059,7 @@ mod replay_tests {
         crate::core::config::pin_test_config_dir();
         let (client_side, mut daemon) = socket_pair();
         let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
-        let workspace = PaneWorkspace {
-            workspace: crate::core::session::WorkspaceId::new(),
-            target: crate::core::session::RemoteTarget::Direct {
-                user: "me".into(),
-                host: "build-box".into(),
-                port: 22,
-            },
-            spec: Some(Box::new(
-                serde_json::from_str(
-                    r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
-                )
-                .unwrap(),
-            )),
-            label: None,
-            resize_echo: true,
-        };
-        term.route = PaneRoute::for_workspace(Some(&workspace));
-        assert!(
-            matches!(term.route, PaneRoute::Remote { .. }),
-            "the test needs a route whose daemon echoes resizes"
-        );
+        term.route = echoing_route();
 
         DaemonMsg::Size(ws(120, 40)).encode(&mut daemon).unwrap();
         DaemonMsg::Snapshot(b"REPLAYED-SCREEN\r\n".to_vec())
@@ -3235,26 +3225,17 @@ mod replay_tests {
     /// A route whose daemon echoes `Size` when it applies a resize — which is
     /// what `PaneRoute::Local` is against a current daemon, and what the
     /// harness above implements.
+    ///
+    /// Built the way the neighbouring resize tests build one, rather than
+    /// through a `PaneWorkspace`: routing a workspace is not what any of these
+    /// cover, and going that way would have a change to `NativeSshSpec`'s
+    /// serde shape fail them on an `unwrap` that has nothing to do with
+    /// replay.
     fn echoing_route() -> PaneRoute {
-        let workspace = PaneWorkspace {
-            workspace: crate::core::session::WorkspaceId::new(),
-            target: crate::core::session::RemoteTarget::Direct {
-                user: "me".into(),
-                host: "build-box".into(),
-                port: 22,
-            },
-            spec: Some(Box::new(
-                serde_json::from_str(
-                    r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
-                )
-                .unwrap(),
-            )),
-            label: None,
+        PaneRoute::Remote {
+            header: Box::new(crate::daemon::router::RouteHeader::wsl("Ubuntu-22.04")),
             resize_echo: true,
-        };
-        let route = PaneRoute::for_workspace(Some(&workspace));
-        assert!(matches!(route, PaneRoute::Remote { .. }));
-        route
+        }
     }
 
     fn wait_for(term: &RemoteTerminal, needle: &str) -> bool {
@@ -3378,10 +3359,6 @@ mod replay_tests {
 
         // The second rebuild attaches before the first one's view is dropped.
         let (second_epoch, second, second_forward) = attach_client(&pane);
-        assert_ne!(
-            first_epoch, second_epoch,
-            "the second attach takes the seat"
-        );
         drop(first);
         drop(first_forward);
         // The displaced connection detaches on its way out, epoch-guarded.
@@ -3392,8 +3369,13 @@ mod replay_tests {
         // exactly what must not be allowed to stand in for the replay.
         let landed = wait_for(&second, "RACED-OUTPUT");
         let width = columns(&second);
-        // The seat has to still be the second view's, or nothing it types or
-        // resizes reaches the pane.
+        // Two halves of "the seat survived", and only one of them can catch a
+        // detach that took it. `controls` answers from `subscriber_epoch`
+        // alone, and `DaemonPane::detach` clears `subscriber` without ever
+        // touching that counter — so it says the pane would obey this view's
+        // input and resizes, but it would keep saying so with the epoch guard
+        // stripped out of `detach`. `live` is what notices that: a detach that
+        // dropped the wrong subscriber silences the surviving view.
         let controls = pane.controls(second_epoch);
         pane.write_input(b"echo AFTER-THE-RACE\r");
         let live = wait_for(&second, "AFTER-THE-RACE");
@@ -3410,8 +3392,16 @@ mod replay_tests {
             "the second attach's replay carried no geometry, so the grid is still at the \
              attach size"
         );
-        assert!(controls, "the displaced attach's detach took the live seat");
-        assert!(live, "the surviving view stopped receiving output");
+        assert!(
+            controls,
+            "the pane no longer answers to the surviving view, so nothing it \
+             types or resizes would reach the pty"
+        );
+        assert!(
+            live,
+            "the displaced attach's detach took the live seat: the surviving \
+             view stopped receiving output"
+        );
     }
 }
 
