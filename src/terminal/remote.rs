@@ -2859,6 +2859,513 @@ fn win_size(size: TermSize, cell_w: u16, cell_h: u16) -> WinSize {
     }
 }
 
+/// What a re-attach's replay actually leaves in the grid.
+///
+/// Switching workspaces tears every pane down and attaches to the same daemon
+/// pane again (#711), so the whole of a pane's screen has to survive one trip
+/// through the replay — several ring segments, each preceded by the geometry it
+/// was written at, and a snapshot frame far larger than one socket read. These
+/// drive that over a real socket pair rather than a mock, because the loss
+/// being hunted is between the wire and the grid; and they are not `cfg(unix)`
+/// like their neighbours because nothing about the path is.
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    use crate::daemon::protocol::DaemonMsg;
+    use crate::daemon::transport::Stream;
+
+    fn socket_pair() -> (Stream, Stream) {
+        #[cfg(unix)]
+        {
+            std::os::unix::net::UnixStream::pair().unwrap()
+        }
+        #[cfg(windows)]
+        {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let client_side = std::net::TcpStream::connect(addr).unwrap();
+            let (daemon_side, _) = listener.accept().unwrap();
+            (client_side, daemon_side)
+        }
+    }
+
+    fn ws(cols: u16, rows: u16) -> WinSize {
+        WinSize {
+            cols,
+            rows,
+            cell_w: 8,
+            cell_h: 17,
+        }
+    }
+
+    /// Everything the grid holds, scrollback included, one row per line.
+    fn all_text(term: &RemoteTerminal) -> String {
+        use alacritty_terminal::grid::Dimensions as _;
+        use alacritty_terminal::index::{Column, Line};
+        let t = term.term.lock();
+        let grid = t.grid();
+        let mut out = String::new();
+        let top = -(grid.history_size() as i32);
+        for line in top..grid.screen_lines() as i32 {
+            let row = &grid[Line(line)];
+            let mut text = String::new();
+            for col in 0..grid.columns() {
+                text.push(row[Column(col)].c);
+            }
+            let text = text.trim_end();
+            if !text.is_empty() {
+                out.push_str(text);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// The visible screen alone.
+    fn screen_text(term: &RemoteTerminal) -> String {
+        use alacritty_terminal::grid::Dimensions as _;
+        use alacritty_terminal::index::{Column, Line};
+        let t = term.term.lock();
+        let grid = t.grid();
+        let mut out = String::new();
+        for line in 0..grid.screen_lines() as i32 {
+            let row = &grid[Line(line)];
+            let mut text = String::new();
+            for col in 0..grid.columns() {
+                text.push(row[Column(col)].c);
+            }
+            let text = text.trim_end();
+            if !text.is_empty() {
+                out.push_str(text);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// Waits for the reader thread to have applied everything named, then
+    /// returns the whole grid either way so a failure can print what landed.
+    fn settled(term: &RemoteTerminal, needles: &[&str]) -> String {
+        for _ in 0..600 {
+            let text = all_text(term);
+            if needles.iter().all(|n| text.contains(n)) {
+                return text;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        all_text(term)
+    }
+
+    /// The shape a re-attach takes: the client's grid is born at the hardcoded
+    /// attach size, and the daemon replays every ring segment at the geometry
+    /// it was recorded at.
+    #[test]
+    fn every_replayed_segment_reaches_the_grid() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon) = socket_pair();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        DaemonMsg::Size(ws(80, 24)).encode(&mut daemon).unwrap();
+        DaemonMsg::Snapshot(b"BIRTH-BANNER\r\n".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        DaemonMsg::Size(ws(120, 40)).encode(&mut daemon).unwrap();
+        DaemonMsg::Snapshot(b"SECOND-SEGMENT\r\n".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        DaemonMsg::Size(ws(120, 40)).encode(&mut daemon).unwrap();
+        DaemonMsg::Snapshot(b"THIRD-SEGMENT\r\n".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+
+        let text = settled(&term, &["BIRTH-BANNER", "SECOND-SEGMENT", "THIRD-SEGMENT"]);
+        assert!(text.contains("BIRTH-BANNER"), "grid held:\n{text}");
+        assert!(text.contains("SECOND-SEGMENT"), "grid held:\n{text}");
+        assert!(text.contains("THIRD-SEGMENT"), "grid held:\n{text}");
+        drop(daemon);
+    }
+
+    /// A real pane's ring is megabytes; one `Snapshot` frame is far larger than
+    /// the reader's 256 KiB read buffer, so the frame is assembled across many
+    /// reads — several of which time out at `QUIT_POLL` while the sender is
+    /// still pushing.
+    #[test]
+    fn a_snapshot_larger_than_one_read_still_lands_whole() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, daemon) = socket_pair();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+
+        let mut bulk = Vec::new();
+        bulk.extend_from_slice(b"HEAD-OF-THE-RING\r\n");
+        for i in 0..40_000 {
+            bulk.extend_from_slice(format!("line {i} of the pane's history\r\n").as_bytes());
+        }
+        bulk.extend_from_slice(b"TAIL-OF-THE-RING\r\n");
+
+        let feeder = std::thread::spawn(move || {
+            let mut daemon = daemon;
+            DaemonMsg::Size(ws(120, 40)).encode(&mut daemon).unwrap();
+            DaemonMsg::Snapshot(bulk).encode(&mut daemon).unwrap();
+            DaemonMsg::Size(ws(120, 40)).encode(&mut daemon).unwrap();
+            DaemonMsg::Snapshot(b"AFTER-THE-BULK\r\n".to_vec())
+                .encode(&mut daemon)
+                .unwrap();
+            daemon
+        });
+
+        let text = settled(&term, &["AFTER-THE-BULK"]);
+        assert!(
+            text.contains("AFTER-THE-BULK"),
+            "the frame after a multi-megabyte snapshot never arrived; grid tail:\n{}",
+            screen_text(&term)
+        );
+        assert!(
+            text.contains("TAIL-OF-THE-RING"),
+            "the snapshot itself was truncated"
+        );
+        drop(feeder.join().unwrap());
+    }
+
+    /// The view resizes to its real geometry the first time it paints, which
+    /// happens while the replay is still arriving. Against a resize-echoing
+    /// daemon the grid must not reflow until the echo, and the echo must not
+    /// cost the replayed screen.
+    #[test]
+    fn a_resize_racing_the_replay_keeps_the_replayed_screen() {
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon) = socket_pair();
+        let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        let workspace = PaneWorkspace {
+            workspace: crate::core::session::WorkspaceId::new(),
+            target: crate::core::session::RemoteTarget::Direct {
+                user: "me".into(),
+                host: "build-box".into(),
+                port: 22,
+            },
+            spec: Some(Box::new(
+                serde_json::from_str(
+                    r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
+                )
+                .unwrap(),
+            )),
+            label: None,
+            resize_echo: true,
+        };
+        term.route = PaneRoute::for_workspace(Some(&workspace));
+        assert!(
+            matches!(term.route, PaneRoute::Remote { .. }),
+            "the test needs a route whose daemon echoes resizes"
+        );
+
+        DaemonMsg::Size(ws(120, 40)).encode(&mut daemon).unwrap();
+        DaemonMsg::Snapshot(b"REPLAYED-SCREEN\r\n".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        let text = settled(&term, &["REPLAYED-SCREEN"]);
+        assert!(text.contains("REPLAYED-SCREEN"), "grid held:\n{text}");
+
+        // First paint: the pane is 120x40 on screen, which is what the daemon
+        // already has, so the echo it sends back changes nothing.
+        term.resize(TermSize::new(120, 40), 8, 17);
+        DaemonMsg::Size(ws(120, 40)).encode(&mut daemon).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let text = all_text(&term);
+        assert!(
+            text.contains("REPLAYED-SCREEN"),
+            "the first paint's resize cost the replay; grid held:\n{text}"
+        );
+        drop(daemon);
+    }
+
+    /// The attach handshake reads off the same socket the reader will, far
+    /// enough to tell an `Error` frame from a replay, and hands what it read
+    /// on as the reader's starting buffer. A whole replay can already be
+    /// sitting in the socket when it looks, so the prefix it takes is several
+    /// frames wide and the split lands mid-frame — every byte of it has to
+    /// reach the grid.
+    #[test]
+    fn the_attach_handshakes_prefix_carries_the_replay_it_swallowed() {
+        crate::core::config::pin_test_config_dir();
+        let (mut client_side, mut daemon) = socket_pair();
+
+        // The whole replay before the client looks: this is the daemon that
+        // answered instantly, which is the daemon a local attach meets.
+        DaemonMsg::Size(ws(80, 24)).encode(&mut daemon).unwrap();
+        DaemonMsg::Snapshot(b"BIRTH-BANNER\r\n".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        DaemonMsg::Size(ws(120, 40)).encode(&mut daemon).unwrap();
+        let mut bulk = Vec::new();
+        for i in 0..400 {
+            bulk.extend_from_slice(format!("scrollback row {i}\r\n").as_bytes());
+        }
+        bulk.extend_from_slice(b"LAST-ROW-OF-THE-RING\r\n");
+        DaemonMsg::Snapshot(bulk).encode(&mut daemon).unwrap();
+
+        let buffered =
+            attach_reply_prefix(&mut client_side, 1, std::time::Duration::from_secs(2)).unwrap();
+        assert!(
+            !buffered.is_empty(),
+            "the handshake read nothing, so it proves nothing"
+        );
+        let term =
+            RemoteTerminal::from_stream_with(client_side, TermSize::new(80, 24), buffered).unwrap();
+
+        let text = settled(&term, &["BIRTH-BANNER", "LAST-ROW-OF-THE-RING"]);
+        assert!(text.contains("BIRTH-BANNER"), "grid held:\n{text}");
+        assert!(
+            text.contains("LAST-ROW-OF-THE-RING"),
+            "the replay the handshake swallowed never reached the grid"
+        );
+        drop(daemon);
+    }
+
+    // ---- The switch, end to end, with a real daemon pane ----------------
+    //
+    // Everything above drives the client half against a scripted daemon. This
+    // drives the real one: a live `DaemonPane` over a real pty, in this
+    // process, with its `DaemonMsg` stream forwarded onto a socket pair the
+    // way `spawn_writer` forwards it, so an attach here is the same attach a
+    // re-attach makes. It is the switch (#711) minus gpui: attach, resize to
+    // the geometry the window actually has, produce output, drop the client,
+    // produce more, attach again — and read the grid the second client ends up
+    // with.
+
+    /// A client hung off `pane`, the way `stream_pane_with_attach` hangs one
+    /// off it: subscribe, forward every queued message onto the wire, and read
+    /// the client's own frames back the way `run_stream` does — epoch guard
+    /// included, so a displaced client's resize is dropped here exactly as the
+    /// daemon drops it.
+    ///
+    /// The route is a resize-echoing one, which is what the local daemon is:
+    /// the grid must not reflow until the `Size` the daemon echoes back.
+    fn attach_client(
+        pane: &std::sync::Arc<tty7_core::daemon::pane::DaemonPane>,
+    ) -> (u64, RemoteTerminal, std::thread::JoinHandle<()>) {
+        let (client_side, daemon_side) = socket_pair();
+        let mut daemon_write = daemon_side.try_clone().expect("clone the daemon half");
+        let (tx, rx) = std::sync::mpsc::channel::<DaemonMsg>();
+        let epoch = pane.attach(tx);
+        let gate = pane.gate();
+        let forward = std::thread::spawn(move || {
+            while let Ok(msg) = rx.recv() {
+                let drained = match &msg {
+                    DaemonMsg::Output(b) | DaemonMsg::Image(b) => b.len(),
+                    _ => 0,
+                };
+                let ok = msg.encode(&mut daemon_write).is_ok();
+                if drained > 0 {
+                    gate.sub(drained);
+                }
+                if !ok {
+                    break;
+                }
+            }
+        });
+        {
+            let pane = pane.clone();
+            let mut daemon_read = daemon_side;
+            std::thread::spawn(move || {
+                use std::io::Read as _;
+                let mut pending: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 65536];
+                loop {
+                    while let Ok(Some((kind, payload))) =
+                        crate::daemon::protocol::take_frame(&mut pending)
+                    {
+                        match ClientMsg::from_frame(kind, payload) {
+                            Ok(ClientMsg::Input(bytes)) if pane.controls(epoch) => {
+                                pane.write_input(&bytes)
+                            }
+                            Ok(ClientMsg::Resize(size)) if pane.controls(epoch) => {
+                                pane.resize(size)
+                            }
+                            Ok(_) => {}
+                            Err(_) => return,
+                        }
+                    }
+                    match daemon_read.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => pending.extend_from_slice(&chunk[..n]),
+                    }
+                }
+            });
+        }
+        let mut term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24))
+            .expect("a client over the pair");
+        term.route = echoing_route();
+        (epoch, term, forward)
+    }
+
+    /// A route whose daemon echoes `Size` when it applies a resize — which is
+    /// what `PaneRoute::Local` is against a current daemon, and what the
+    /// harness above implements.
+    fn echoing_route() -> PaneRoute {
+        let workspace = PaneWorkspace {
+            workspace: crate::core::session::WorkspaceId::new(),
+            target: crate::core::session::RemoteTarget::Direct {
+                user: "me".into(),
+                host: "build-box".into(),
+                port: 22,
+            },
+            spec: Some(Box::new(
+                serde_json::from_str(
+                    r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
+                )
+                .unwrap(),
+            )),
+            label: None,
+            resize_echo: true,
+        };
+        let route = PaneRoute::for_workspace(Some(&workspace));
+        assert!(matches!(route, PaneRoute::Remote { .. }));
+        route
+    }
+
+    fn wait_for(term: &RemoteTerminal, needle: &str) -> bool {
+        for _ in 0..600 {
+            if all_text(term).contains(needle) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        false
+    }
+
+    /// Switching workspaces drops every pane and attaches to the same daemon
+    /// panes again. Whatever the pane put on screen while the window was
+    /// elsewhere — and whatever it had already — has to come back with it.
+    #[test]
+    fn a_pane_re_attached_after_a_switch_gets_its_screen_back() {
+        crate::core::config::pin_test_config_dir();
+        let pane = tty7_core::daemon::pane::DaemonPane::spawn(
+            7711,
+            std::env::current_dir().ok(),
+            ws(80, 24),
+            None,
+            None,
+            None,
+            None,
+            false,
+            || {},
+        )
+        .expect("a pty-backed pane");
+
+        // The window this pane is shown in, attaching for the first time.
+        let (epoch, mut first, forward) = attach_client(&pane);
+        // What the first paint does, from the same side it does it on: the
+        // pane is not 80x24 on screen, so the real geometry goes down the link
+        // and the grid waits for the daemon to echo it back.
+        first.resize(TermSize::new(120, 40), 8, 17);
+        pane.write_input(b"echo BEFORE-THE-SWITCH\r");
+        assert!(
+            wait_for(&first, "BEFORE-THE-SWITCH"),
+            "the pane never echoed the first command; grid held:\n{}",
+            all_text(&first)
+        );
+
+        // Switching away: the view is dropped, which closes the link, and the
+        // daemon gives up the seat.
+        drop(first);
+        pane.detach(epoch);
+        drop(forward);
+
+        // The pane keeps working while the window is showing another workspace.
+        pane.write_input(b"echo DURING-THE-SWITCH\r");
+        std::thread::sleep(std::time::Duration::from_millis(600));
+
+        // Switching back: a brand new view, attaching at the hardcoded size,
+        // and resizing to the geometry it is drawn at while the replay is
+        // still on the wire — the first paint happens on the frame after the
+        // attach, not after the replay has drained.
+        let (_epoch, mut second, forward) = attach_client(&pane);
+        second.resize(TermSize::new(120, 40), 8, 17);
+        let landed = wait_for(&second, "DURING-THE-SWITCH");
+        let text = all_text(&second);
+        let width = {
+            use alacritty_terminal::grid::Dimensions as _;
+            second.term.lock().grid().columns()
+        };
+        pane.kill();
+        drop(forward);
+
+        assert!(
+            landed,
+            "the re-attached pane never got the output produced while it was hidden; \
+             grid held:\n{text}"
+        );
+        assert!(
+            text.contains("BEFORE-THE-SWITCH"),
+            "the re-attached pane lost the screen it had before the switch; grid held:\n{text}"
+        );
+        // The grid is born at the hardcoded attach size and only ever leaves it
+        // on a `Size` frame, so a grid still 80 wide means none of the replay's
+        // geometry was applied and the two needles above found their way in by
+        // some other route.
+        assert_eq!(
+            width, 120,
+            "the replay's geometry never reached the grid, so it is still at the attach size"
+        );
+    }
+
+    /// A switch can rebuild a window twice — a second hydration lands while the
+    /// first one's panes are still draining their replay — so the same pane is
+    /// attached to twice in quick succession and the window keeps the later
+    /// view. That view must hold the screen, and it must still be the one the
+    /// daemon obeys: the displaced attach's teardown must not take the seat
+    /// with it.
+    #[test]
+    fn the_later_of_two_racing_attaches_keeps_the_screen_and_the_seat() {
+        crate::core::config::pin_test_config_dir();
+        let pane = tty7_core::daemon::pane::DaemonPane::spawn(
+            7712,
+            std::env::current_dir().ok(),
+            ws(80, 24),
+            None,
+            None,
+            None,
+            None,
+            false,
+            || {},
+        )
+        .expect("a pty-backed pane");
+
+        let (first_epoch, mut first, first_forward) = attach_client(&pane);
+        first.resize(TermSize::new(120, 40), 8, 17);
+        pane.write_input(b"echo RACED-OUTPUT\r");
+        assert!(wait_for(&first, "RACED-OUTPUT"), "the pane never echoed");
+
+        // The second rebuild attaches before the first one's view is dropped.
+        let (second_epoch, mut second, second_forward) = attach_client(&pane);
+        assert_ne!(
+            first_epoch, second_epoch,
+            "the second attach takes the seat"
+        );
+        drop(first);
+        drop(first_forward);
+        // The displaced connection detaches on its way out, epoch-guarded.
+        pane.detach(first_epoch);
+
+        second.resize(TermSize::new(120, 40), 8, 17);
+        let landed = wait_for(&second, "RACED-OUTPUT");
+        // The seat has to still be the second view's, or nothing it types or
+        // resizes reaches the pane.
+        let controls = pane.controls(second_epoch);
+        pane.write_input(b"echo AFTER-THE-RACE\r");
+        let live = wait_for(&second, "AFTER-THE-RACE");
+        let text = all_text(&second);
+        pane.kill();
+        drop(second_forward);
+
+        assert!(
+            landed,
+            "the second attach's replay was lost; grid held:\n{text}"
+        );
+        assert!(controls, "the displaced attach's detach took the live seat");
+        assert!(live, "the surviving view stopped receiving output");
+    }
+}
+
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
