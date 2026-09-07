@@ -2975,10 +2975,13 @@ mod render_idle_gpui_tests {
     }
 
     /// The only test in this module that waits on `repo.root`, and so the
-    /// only one Windows cannot run: git spells that root `C:/Users/—` and
-    /// the pane's own cwd is spelled `C:\Users\`, so the equality below
-    /// never holds there. Its sibling keys off the pane's cwd instead, and
-    /// runs everywhere.
+    /// only one Windows cannot run: git spells that root `C:/Users/—`, which
+    /// parses to a `Disk` prefix, while the pane's cwd came out of `scratch`
+    /// above — `fs::canonicalize`, so `\\?\C:\Users\—` and a `VerbatimDisk`
+    /// prefix — and the equality below never holds between the two. The
+    /// slashes are the red herring here; `Path` compares by component, so
+    /// `C:/x` and `C:\x` are equal. Its sibling keys off the pane's cwd
+    /// instead, and runs everywhere.
     #[cfg(unix)]
     #[gpui::test]
     fn a_settled_source_control_panel_reaches_render_idle(cx: &mut TestAppContext) {

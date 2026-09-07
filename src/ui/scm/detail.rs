@@ -977,13 +977,15 @@ mod tests {
 ///
 /// Still unix-only, and for a reason worth naming rather than a harness
 /// one: on Windows `git rev-parse --show-toplevel` (Git for Windows is
-/// MSYS2) prints `C:/Users/—` with forward slashes, and that string is
-/// what `tty7_core::core::git::probe` stores as `RepoSnapshot::root`.
-/// Every comparison here — and in the SCM cache — is a plain `PathBuf`
-/// equality against a path the OS spelled `C:\Users\`, so the two never
-/// match and the panel never settles on the directory it is already
-/// showing. Taking the gate off needs those roots compared normalised,
-/// the way `ui::path_display` already normalises for display.
+/// MSYS2) prints `C:/Users/—`, and that string is what
+/// `tty7_core::core::git::probe` stores as `RepoSnapshot::root`. The
+/// forward slashes are not what breaks it — `Path` compares by component,
+/// so `C:/x` and `C:\x` are equal. The prefix is: `scratch` below hands the
+/// pane `fs::canonicalize`'s `\\?\C:\Users\—`, whose prefix component is
+/// `VerbatimDisk` where git's answer parses as `Disk`, so the plain
+/// `PathBuf` equalities here — and in the SCM cache — never match and the
+/// panel never settles on the directory it is already showing. Taking the
+/// gate off needs those roots keyed by one spelling (#796).
 #[cfg(all(test, unix))]
 mod detail_gpui_tests {
     use super::*;

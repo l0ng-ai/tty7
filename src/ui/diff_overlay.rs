@@ -2470,13 +2470,17 @@ mod overlay_gpui_tests {
 /// the repository has left. That is what the stale entry below stands for.
 ///
 /// Unix-only, and not for the harness: on Windows the repository root git
-/// reports (`C:/Users/—`, forward slashes, straight out of MSYS2 git) is
-/// not the root the seeded cache below holds, so `scm_epoch` never agrees
-/// with the landing snapshot and the overlay re-probes on every frame —
-/// `load` reaches `Ready` and `loading` goes straight back to `true`,
-/// which is the exact spin this test exists to catch. That is a real
-/// divergence in the SCM layer's path comparisons rather than a test
-/// artefact, so the gate stays until those roots are compared normalised.
+/// reports (`C:/Users/—`, straight out of MSYS2 git) is not the root the
+/// seeded cache below holds. Not for the slash direction — `Path` compares
+/// by component, so `C:/x` and `C:\x` are already equal. The splitter is
+/// the prefix: the seeded root came past `fs::canonicalize`, which spells
+/// it `\\?\C:\Users\—` and makes its prefix component `VerbatimDisk` where
+/// git's answer parses as `Disk`. So `scm_epoch` never agrees with the
+/// landing snapshot and the overlay re-probes on every frame — `load`
+/// reaches `Ready` and `loading` goes straight back to `true`, which is the
+/// exact spin this test exists to catch. That is a real divergence in the
+/// SCM layer's path comparisons rather than a test artefact, so the gate
+/// stays until those roots are keyed by one spelling (#796).
 #[cfg(all(test, unix))]
 mod render_idle_gpui_tests {
     use super::*;
