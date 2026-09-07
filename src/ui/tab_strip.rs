@@ -1433,13 +1433,13 @@ impl Tty7App {
         // is the switcher machine menu's, word for word: the saved host when
         // there is one, an offer to keep the address when it was dialled by
         // hand, and nothing at all for a tab with no host form behind it.
-        if let Some((target, label)) = this.tab_ssh_host_form(index, window, cx) {
+        if let Some((form, label)) = this.tab_ssh_host_form(index, window, cx) {
             menu = menu.separator().item(PopupMenuItem::new(label).on_click({
                 let app = app.clone();
                 move |_, window, cx| {
-                    let target = target.clone();
+                    let form = form.clone();
                     let _ = app.update(cx, |this, cx| {
-                        this.edit_ssh_host_of_target(&target, window, cx)
+                        this.open_tab_ssh_host_form(&form, window, cx)
                     });
                 }
             }));
@@ -1939,10 +1939,14 @@ mod ssh_host_row_tests {
     use crate::core::config::Config;
     use crate::core::session::RemoteTarget;
     use crate::core::ssh_profile::SshProfile;
-    use crate::terminal::view::{quiet_test_pane, quiet_test_ssh_pane, quiet_test_ssh_pane_of};
+    use crate::daemon::protocol::SshProxy;
+    use crate::terminal::view::{
+        quiet_test_pane, quiet_test_ssh_pane, quiet_test_ssh_pane_of, quiet_test_ssh_pane_with,
+    };
     use crate::ui::app::{Tab, test_window::harness};
     use crate::ui::i18n::{L10nKey, set_locale, t};
     use crate::ui::pane::{Pane, PaneSlot};
+    use crate::ui::ssh_connect::TabHostForm;
     use gpui::TestAppContext;
 
     #[gpui::test]
@@ -1984,19 +1988,29 @@ mod ssh_host_row_tests {
             );
 
             // An address typed by hand is worth keeping, not editing: there is
-            // no saved host behind it yet.
-            let (target, label) = app
+            // no saved host behind it yet, so the live session itself is what
+            // the form opens on.
+            let (form, label) = app
                 .tab_ssh_host_form(1, window, cx)
                 .expect("a tab dialled by hand offers to save the host");
-            assert_eq!(target, RemoteTarget::direct("me", "build-box", 22));
+            let TabHostForm::Unsaved(spec) = form else {
+                panic!("a hand-dialled tab must offer its own session, not a bare address");
+            };
+            assert_eq!(
+                (spec.user.as_str(), spec.host.as_str(), spec.port),
+                ("me", "build-box", 22)
+            );
             assert_eq!(label, t(L10nKey::SwitcherSaveAsHost));
 
             // One opened from a saved host edits that host — by its id, so the
             // form lands on the record the connection actually came from.
-            let (target, label) = app
+            let (form, label) = app
                 .tab_ssh_host_form(2, window, cx)
                 .expect("a tab on a saved host offers to edit it");
-            assert_eq!(target, RemoteTarget::Profile { id: saved });
+            assert_eq!(
+                form,
+                TabHostForm::Saved(RemoteTarget::Profile { id: saved })
+            );
             assert_eq!(label, t(L10nKey::SwitcherEditHost));
         });
     }
@@ -2018,11 +2032,65 @@ mod ssh_host_row_tests {
         vcx.background_executor.run_until_parked();
 
         app.update_in(&mut vcx, |app, window, cx| {
-            let (target, label) = app
+            let (form, label) = app
                 .tab_ssh_host_form(0, window, cx)
                 .expect("an unresolvable profile id still names a host worth keeping");
-            assert_eq!(target, RemoteTarget::direct("me", "build-box", 22));
+            let TabHostForm::Unsaved(spec) = form else {
+                panic!("a dangling profile id must not open a form on a host that is gone");
+            };
+            assert_eq!(
+                (spec.user.as_str(), spec.host.as_str(), spec.port),
+                ("me", "build-box", 22)
+            );
             assert_eq!(label, t(L10nKey::SwitcherSaveAsHost));
+        });
+    }
+
+    /// The row says "Save as SSH Host", and a host saved without the proxy it
+    /// was reached through is a host that will not connect. What the session
+    /// was dialled with has to reach the form whole — an address is only the
+    /// part of it that fits in `user@host:port`.
+    #[gpui::test]
+    fn saving_a_hand_dialled_tab_keeps_what_it_was_dialled_with(cx: &mut TestAppContext) {
+        set_locale("en");
+        let (app, mut vcx) = harness(cx);
+        let _end = app.update_in(&mut vcx, |app, window, cx| {
+            let mut spec: crate::daemon::protocol::NativeSshSpec = serde_json::from_str(
+                r#"{"host":"build-box","port":2222,"user":"me","auth_mode":"auto"}"#,
+            )
+            .expect("a minimal NativeSshSpec decodes");
+            spec.proxy = SshProxy::Socks {
+                host: "127.0.0.1".to_string(),
+                port: 1080,
+            };
+            spec.identity_files = vec!["/keys/id_ed25519".to_string()];
+            spec.login_script = vec!["tmux attach".to_string()];
+            let (view, end) = quiet_test_ssh_pane_with(1, spec, window, cx);
+            app.tabs.push(Tab::new(Pane::leaf(PaneSlot::Ready(view))));
+            app.active = 0;
+            cx.notify();
+            end
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let (form, _) = app
+                .tab_ssh_host_form(0, window, cx)
+                .expect("a hand-dialled tab offers to save the host");
+            let TabHostForm::Unsaved(spec) = form else {
+                panic!("nothing here is saved, so nothing here is an edit");
+            };
+            assert_eq!(
+                spec.proxy,
+                SshProxy::Socks {
+                    host: "127.0.0.1".to_string(),
+                    port: 1080,
+                },
+                "the proxy the session was reached through was dropped on the way to the form"
+            );
+            assert_eq!(spec.identity_files, vec!["/keys/id_ed25519".to_string()]);
+            assert_eq!(spec.login_script, vec!["tmux attach".to_string()]);
+            assert_eq!(spec.port, 2222, "a non-default port is part of the address");
         });
     }
 }

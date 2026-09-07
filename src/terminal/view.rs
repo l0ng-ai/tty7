@@ -8893,13 +8893,24 @@ pub(crate) fn quiet_test_ssh_pane_of(
     window: &mut Window,
     cx: &mut gpui::App,
 ) -> (gpui::Entity<TerminalView>, crate::daemon::transport::Stream) {
+    let mut spec: crate::daemon::protocol::NativeSshSpec =
+        serde_json::from_str(r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#)
+            .expect("a minimal NativeSshSpec decodes");
+    spec.profile_id = profile_id.map(|id| id.to_string());
+    quiet_test_ssh_pane_with(pane_id, spec, window, cx)
+}
+
+/// The same again, over a spec the caller shaped — for everything a live
+/// connection carries beyond its address.
+#[cfg(test)]
+pub(crate) fn quiet_test_ssh_pane_with(
+    pane_id: u64,
+    spec: crate::daemon::protocol::NativeSshSpec,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) -> (gpui::Entity<TerminalView>, crate::daemon::transport::Stream) {
     let (view, stream) = quiet_test_pane(pane_id, window, cx);
     view.update(cx, |view, _| {
-        let mut spec: crate::daemon::protocol::NativeSshSpec = serde_json::from_str(
-            r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
-        )
-        .expect("a minimal NativeSshSpec decodes");
-        spec.profile_id = profile_id.map(|id| id.to_string());
         view.ssh_spec = Some(Box::new(spec));
     });
     (view, stream)

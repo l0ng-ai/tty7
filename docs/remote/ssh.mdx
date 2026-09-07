@@ -71,7 +71,9 @@ Right-clicking an SSH tab opens that connection's host form — **Edit Host…**
 for a saved one, **Save as SSH Host…** for an address typed by hand. It is the
 same row the workspace switcher's machine menu carries, so a hostname or
 password typed wrong is corrected from the tab you noticed it on. The menu acts
-on the tab it was opened on, not on whichever pane is focused.
+on the tab it was opened on, not on whichever pane is focused. Saving one opens
+on the whole live connection — its proxy, keys and forwards as well as its
+address — so the host that lands is the one you were already on.
 
 Passwords and key passphrases go in the **OS keychain**, never in
 `config.json` and never on disk in plain text. **Forget Password** in a
