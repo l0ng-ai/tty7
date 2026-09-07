@@ -705,7 +705,7 @@ impl RemoteTerminal {
     /// here wins: it describes where the shell actually landed, which is not
     /// always where we asked (a missing directory sends the daemon home, an
     /// rc file may `cd` on its own).
-    fn seed_cwd(&self, cwd: Option<PathBuf>) {
+    pub(crate) fn seed_cwd(&self, cwd: Option<PathBuf>) {
         let Some(cwd) = cwd else { return };
         if let Ok(mut guard) = self.cwd.lock() {
             guard.get_or_insert(cwd);
