@@ -3945,6 +3945,22 @@ impl TerminalView {
         }
     }
 
+    /// Take the record into the editor without paying the wipe yet.
+    ///
+    /// `at_prompt` comes back on the `D` mark, a whole prompt draw ahead of the
+    /// `B` that arms `zle_reading`, and this editor is live for that whole
+    /// window. Everything it offers rewrites the line — history recall and the
+    /// ghost suggestion replace it wholesale, ⌃U empties it, completion filters
+    /// on it — so the line has to be whole *before* those run, not stitched
+    /// back together at submit time in front of whatever replaced it. The `^U`
+    /// stays owed until `flush_typeahead`, which keeps it where it has always
+    /// been on the wire: immediately before the line.
+    fn adopt_typeahead(&mut self) {
+        if let Some(seed) = self.typeahead.adopt() {
+            self.cmd.prepend_str(&seed);
+        }
+    }
+
     fn wipe_pending_typeahead(&mut self) {
         if self.typeahead.drain().is_some() {
             self.terminal.write(vec![0x15]);
@@ -4055,12 +4071,13 @@ impl TerminalView {
         }
         // The shell is still holding the recorded text on its own line, and the
         // ^U that erases it has not gone out yet: `at_prompt` comes back on the
-        // `D` mark, before the prompt is even drawn, while `flush_typeahead`
-        // has to wait for `B`. Every key typed in that window reaches this
-        // editor, so the drain here has to put the seed back in front of the
-        // line the way every other drain does. Dropping it submitted only what
-        // was typed after the handover, and an empty command when that was
-        // nothing, which is the blank line #433 reports.
+        // `D` mark, before the prompt is even drawn, while the wipe waits for
+        // `B`. `adopt_typeahead` has normally already folded the seed into the
+        // line by now, and this pays the wipe it left owed; on the frame where
+        // it has not, the drain here still puts the seed back the way every
+        // other drain does. Dropping it submitted only what was typed after the
+        // handover, and an empty command when that was nothing, which is the
+        // blank line #433 reports.
         self.flush_typeahead();
         let line = self.cmd.text();
         if !line.trim().is_empty() {
@@ -4335,13 +4352,16 @@ impl TerminalView {
         }
         // Same reason as `submit_command`: what the record holds is on the
         // shell's own line, so it belongs in front of the line handed back.
-        self.flush_typeahead();
+        // The wipe waits until past the multi-line bail, which hands nothing
+        // over and so must put nothing on the wire either.
+        self.adopt_typeahead();
         let line = self.cmd.text();
         if line.contains('\n') {
             cx.notify();
             return;
         }
         self.close_completion();
+        self.flush_typeahead();
         let tail = line.chars().count().saturating_sub(self.cmd.cursor());
         if !line.is_empty() {
             self.terminal.write(line.into_bytes());
@@ -6340,6 +6360,8 @@ impl Render for TerminalView {
             }
             if self.terminal.zle_reading() {
                 self.flush_typeahead();
+            } else {
+                self.adopt_typeahead();
             }
         }
         let entity = cx.entity();
@@ -13961,12 +13983,12 @@ mod prompt_handover_tests {
         }
     }
 
-    fn press_enter(window: &gpui::WindowHandle<TerminalView>, cx: &mut TestAppContext) {
+    fn press(window: &gpui::WindowHandle<TerminalView>, cx: &mut TestAppContext, key: &str) {
         window
             .update(cx, |view, window, cx| {
                 view.on_key_down(
                     &KeyDownEvent {
-                        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+                        keystroke: gpui::Keystroke::parse(key).unwrap(),
                         is_held: false,
                         prefer_character_input: false,
                     },
@@ -14032,6 +14054,17 @@ mod prompt_handover_tests {
                 .unwrap(),
             "this is the D-to-B window: the shell is not reading its line yet"
         );
+        settle(
+            cx,
+            window,
+            "the editor adopts the line the shell is holding",
+            |view| view.cmd.text() == text,
+        );
+        assert_eq!(
+            drain(daemon),
+            Vec::<u8>::new(),
+            "adopting the line owes the wipe, it does not send it early"
+        );
     }
 
     #[gpui::test]
@@ -14041,7 +14074,7 @@ mod prompt_handover_tests {
         let (window, mut daemon) = harness(cx);
         typed_into_the_gap_then_handed_back(cx, &window, &mut daemon, "echo hi");
 
-        press_enter(&window, cx);
+        press(&window, cx, "enter");
         cx.run_until_parked();
         assert_eq!(
             drain(&mut daemon),
@@ -14065,12 +14098,70 @@ mod prompt_handover_tests {
             "the editor owns these keys, so none of them reach the PTY"
         );
 
-        press_enter(&window, cx);
+        press(&window, cx, "enter");
         cx.run_until_parked();
         assert_eq!(
             drain(&mut daemon),
             b"\x15echo hi\r".to_vec(),
             "what the shell was holding leads the line, not the tail alone"
+        );
+    }
+
+    /// The half of the window the seed alone does not cover: the editor is
+    /// live, so the user can *replace* the line before submitting it. Recalling
+    /// history and pressing Enter has to run the entry recalled — not that
+    /// entry with the text the shell was holding glued to its front.
+    #[gpui::test]
+    fn recalling_history_in_the_gap_window_replaces_the_held_line(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        typed_into_the_gap_then_handed_back(cx, &window, &mut daemon, "echo");
+        window
+            .update(cx, |view, _, _| {
+                view.history.push("echo from history".to_string());
+            })
+            .unwrap();
+
+        press(&window, cx, "up");
+        cx.run_until_parked();
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(
+                    view.cmd.text(),
+                    "echo from history",
+                    "the recall searches on the whole line, held text included"
+                );
+            })
+            .unwrap();
+
+        press(&window, cx, "enter");
+        cx.run_until_parked();
+        assert_eq!(
+            drain(&mut daemon),
+            b"\x15echo from history\r".to_vec(),
+            "the recalled entry runs on its own, with the held text replaced \
+             rather than prefixed to it"
+        );
+    }
+
+    /// The same for an emptied line: ⌃U clears what the editor is holding, and
+    /// the shell's copy of it goes too instead of coming back at submit.
+    #[gpui::test]
+    fn clearing_the_line_in_the_gap_window_clears_the_held_text_too(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        typed_into_the_gap_then_handed_back(cx, &window, &mut daemon, "echo");
+
+        press(&window, cx, "ctrl-u");
+        cx.run_until_parked();
+        window
+            .update(cx, |view, _, _| assert_eq!(view.cmd.text(), ""))
+            .unwrap();
+
+        press(&window, cx, "enter");
+        cx.run_until_parked();
+        assert_eq!(
+            drain(&mut daemon),
+            b"\x15\r".to_vec(),
+            "an emptied line submits empty: the wipe is still owed, the seed is not"
         );
     }
 }
