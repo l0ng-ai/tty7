@@ -385,7 +385,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsMouseZoomOff => "关闭",
         L10nKey::SettingsReportMouseToApps => "向应用报告鼠标",
         L10nKey::SettingsReportMouseToAppsDesc => {
-            "让全屏应用（如 vim、tmux）处理点击和滚动；按住 Shift 可让操作保持本地。"
+            "让全屏应用（如 vim、tmux）处理点击和滚动；按住 Shift 可让操作保持本地。\
+             关闭后点击不再传给它们，滚轮也会变成方向键。"
         }
         L10nKey::SettingsBell => "铃声",
         L10nKey::SettingsTerminalBell => "终端铃声",

@@ -437,7 +437,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsMouseZoomOff => "Off",
         L10nKey::SettingsReportMouseToApps => "Report mouse to apps",
         L10nKey::SettingsReportMouseToAppsDesc => {
-            "Let full-screen apps (vim, tmux) handle clicks and scrolling; hold Shift to keep a gesture local."
+            "Let full-screen apps (vim, tmux) handle clicks and scrolling; hold Shift to keep a gesture local. \
+             Off keeps clicks from reaching them and turns the wheel into arrow keys."
         }
         L10nKey::SettingsBell => "Bell",
         L10nKey::SettingsTerminalBell => "Terminal bell",

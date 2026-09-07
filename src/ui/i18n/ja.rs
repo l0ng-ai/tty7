@@ -448,7 +448,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsMouseZoomOff => "オフ",
         L10nKey::SettingsReportMouseToApps => "マウスイベントをアプリに報告",
         L10nKey::SettingsReportMouseToAppsDesc => {
-            "フルスクリーンアプリ（vim、tmux）にクリックとスクロールを処理させる。Shift を押している間はローカルで処理されます"
+            "フルスクリーンアプリ（vim、tmux）にクリックとスクロールを処理させる。Shift を押している間はローカルで処理されます。\
+             オフにするとクリックは届かず、ホイールは矢印キーとして送られます"
         }
         L10nKey::SettingsBell => "ベル通知",
         L10nKey::SettingsTerminalBell => "ターミナルベル",
