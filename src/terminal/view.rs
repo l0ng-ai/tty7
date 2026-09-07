@@ -697,6 +697,50 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
+/// A line the shell can be handed byte for byte, exactly as if it had been
+/// typed at its own prompt.
+///
+/// Control characters are what rule a line out. Under bracketed paste the shell
+/// inserts every byte literally; delivered raw, each one runs through the line
+/// editor's binding table instead, and a Tab completes, a `^U` kills, a `^C`
+/// abandons the line. ESC is already stripped upstream; `is_control` covers the
+/// rest, embedded newlines included — a multi-line command still goes as one
+/// paste, which is what [`submit_bytes`] was built for.
+///
+/// The length bound is a cost ceiling, not a correctness one. Raw bytes make
+/// the shell redraw as it consumes them; measured against zsh 5.9 +
+/// zsh-syntax-highlighting + zsh-autosuggestions, submit-to-output stays at the
+/// bracketed 85ms up to ~300 bytes and then climbs — 233ms at 600, 390ms at
+/// 1200, 735ms at 2400. 512 sits at the knee: every command anyone types by
+/// hand takes the typed path, and a pasted-in wall of text keeps the flat cost
+/// the paste framing exists to give it.
+fn types_cleanly(line: &str) -> bool {
+    line.len() <= 512 && !line.chars().any(char::is_control)
+}
+
+/// Build the byte sequence that submits the local editor's buffer to the shell.
+///
+/// A plain single-line command goes raw, no paste markers: the shell's own
+/// reader then sees the same bytes a human typing would produce, so its
+/// input-time expansions run — fish abbreviations (#660), zsh `magic-space`,
+/// any readline macro bound to a printable key. Inside a bracketed paste none
+/// of that fires; fish's expand-on-execute only reaches the token under the
+/// cursor, so `j` expanded but `j build` ran literally.
+///
+/// Everything else keeps the paste framing. A multi-line command goes in as one
+/// paste and one CR, so it costs one prompt cycle instead of one per line —
+/// preexec, the user's precmd chain, a syntax-highlight pass over the whole
+/// buffer — and zle keeps the embedded newlines in its buffer, so backslash /
+/// open-quote continuation and heredocs still parse as one unit. A line
+/// carrying control characters goes as a paste because raw delivery would let
+/// the shell's binding table act on them.
+///
+/// ESC is stripped either way (unlike the paste path): clipboard text carrying
+/// its own `ESC[201~` could otherwise close the paste early and have the rest
+/// run as typed input, and a raw ESC reaching zle is an editor command.
+///
+/// An empty buffer skips the markers: zsh's `bracketed-paste-magic` (which
+/// oh-my-zsh turns on) errors on a paste with nothing between them.
 fn submit_bytes(line: &str, bracketed: bool) -> Vec<u8> {
     let clean: String = line
         .replace("\r\n", "\n")
@@ -704,7 +748,8 @@ fn submit_bytes(line: &str, bracketed: bool) -> Vec<u8> {
         .filter(|&c| c != '\x1b')
         .map(|c| if c == '\r' { '\n' } else { c })
         .collect();
-    let mut bytes = paste_bytes(&clean, bracketed && !clean.is_empty());
+    let framed = bracketed && !clean.is_empty() && !types_cleanly(&clean);
+    let mut bytes = paste_bytes(&clean, framed);
     bytes.push(b'\r');
     bytes
 }
@@ -8353,9 +8398,48 @@ mod tests {
         );
         let out = submit_bytes("a\nb\nc\nd", true);
         assert_eq!(out.iter().filter(|&&b| b == b'\r').count(), 1);
+    }
+
+    #[test]
+    fn submit_bytes_types_a_plain_single_line_instead_of_pasting_it() {
+        // #660: inside a bracketed paste fish never runs `expand-abbr`, so an
+        // abbreviation with arguments reached the shell verbatim and `j build`
+        // died as "command not found". Raw bytes are what a human typing
+        // produces, and that is the delivery every input-time expansion --
+        // fish abbreviations, zsh magic-space -- is bound to.
+        assert_eq!(submit_bytes("j build", true), b"j build\r".to_vec());
         assert_eq!(
-            submit_bytes("ls -la", true),
-            b"\x1b[200~ls -la\x1b[201~\r".to_vec()
+            submit_bytes("echo 'a  b' | cat", true),
+            b"echo 'a  b' | cat\r".to_vec()
+        );
+        // Non-ASCII is text, not a control character.
+        assert_eq!(submit_bytes("echo 中文", true), "echo 中文\r".as_bytes());
+
+        // A control character would be acted on by the shell's binding table
+        // rather than inserted -- a Tab completes, a ^U kills the line -- so
+        // those keep the paste framing.
+        assert_eq!(
+            submit_bytes("echo a\tb", true),
+            b"\x1b[200~echo a\tb\x1b[201~\r".to_vec()
+        );
+        assert_eq!(
+            submit_bytes("echo a\x15b", true),
+            b"\x1b[200~echo a\x15b\x1b[201~\r".to_vec()
+        );
+
+        // Past the length bound the flat cost of a paste wins over replaying
+        // the shell's redraw per byte.
+        let at_bound = format!("echo {}", "y".repeat(507));
+        assert_eq!(at_bound.len(), 512);
+        assert_eq!(
+            submit_bytes(&at_bound, true),
+            [at_bound.as_bytes(), b"\r"].concat()
+        );
+        let over_bound = format!("echo {}", "y".repeat(508));
+        assert_eq!(over_bound.len(), 513);
+        assert_eq!(
+            submit_bytes(&over_bound, true),
+            [b"\x1b[200~", over_bound.as_bytes(), b"\x1b[201~\r"].concat()
         );
     }
 
@@ -8385,6 +8469,13 @@ mod tests {
         assert_eq!(out.windows(end.len()).filter(|w| *w == end).count(), 1);
         assert_eq!(out, b"\x1b[200~foo[201~\nrm -rf ~\x1b[201~\r".to_vec());
         assert_eq!(submit_bytes("a\x1bb", false), b"ab\r".to_vec());
+        // The same smuggling attempt on the typed path is just literal text at
+        // the prompt: there is no paste to break out of, and no ESC survives to
+        // reach the line editor as a command.
+        assert_eq!(
+            submit_bytes("foo\x1b[201~; rm -rf ~", true),
+            b"foo[201~; rm -rf ~\r".to_vec()
+        );
 
         assert_eq!(submit_bytes("", true), b"\r".to_vec());
     }
