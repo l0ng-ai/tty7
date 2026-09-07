@@ -64,14 +64,17 @@ pub fn managed(host: &dyn Host, cwd: &Path) -> Option<ManagedWorktree> {
     if !cwd.ancestors().any(|a| a.ends_with(&suffix)) {
         return None;
     }
-    let path = git_path(&git(host, &cwd, &["rev-parse", "--show-toplevel"]).ok()?);
+    let path = git_path(
+        host,
+        &git(host, &cwd, &["rev-parse", "--show-toplevel"]).ok()?,
+    );
     let main_root = git(
         host,
         &path,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )
     .ok()
-    .map(|d| git_path(&d))?
+    .map(|d| git_path(host, &d))?
     .parent()?
     .to_path_buf();
     if !path.starts_with(managed_root(host, &main_root)) {
@@ -112,14 +115,14 @@ pub fn remove(host: &dyn Host, wt: &ManagedWorktree, force: bool) -> Result<(), 
 fn repo_dir(host: &dyn Host, cwd: &Path) -> Result<(PathBuf, PathBuf), String> {
     let repo_root = git(host, cwd, &["rev-parse", "--show-toplevel"])
         .map_err(|_| "not inside a git repository".to_string())?;
-    let repo_root = git_path(&repo_root);
+    let repo_root = git_path(host, &repo_root);
     let main_root = git(
         host,
         cwd,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )
     .ok()
-    .map(|d| git_path(&d))
+    .map(|d| git_path(host, &d))
     .and_then(|d| d.parent().map(Path::to_path_buf))
     .unwrap_or_else(|| repo_root.clone());
     let dir = managed_root(host, &main_root);

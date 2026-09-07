@@ -15,8 +15,14 @@ use crate::ui::host_ops::{ByHost, HostId, InFlight};
 /// is the one place that has to insist they agree. Off Windows, and for every
 /// path that already spells itself the OS's way, it is a borrow and nothing
 /// else. See [`tty7_core::core::path_spelling`].
-fn key(path: &Path) -> Cow<'_, Path> {
-    tty7_core::core::path_spelling::local_spelling(path)
+///
+/// Keyed by the *pane's* host, not by this process. Every method here serves a
+/// remote workspace too, whose `/home/u/src` is native over there and is handed
+/// straight back to `Host::git` and to `ScmData`'s watcher — folding it
+/// with Windows rules on a Windows client would ask a Linux box about
+/// `\home\u\src`. A path from another machine is left exactly as it arrived.
+fn key(host: HostId, path: &Path) -> Cow<'_, Path> {
+    tty7_core::core::path_spelling::spelling_on(host, path)
 }
 
 #[derive(Default)]
@@ -32,12 +38,12 @@ impl gpui::Global for GitStatusCache {}
 
 impl GitStatusCache {
     pub fn status_for(&self, host: HostId, cwd: &Path) -> Option<GitStatus> {
-        let root = self.roots.get(host, &*key(cwd))?.as_ref()?;
+        let root = self.roots.get(host, &*key(host, cwd))?.as_ref()?;
         self.status.get(host, root.as_path()).cloned()
     }
 
     pub fn known_repo_for(&self, host: HostId, cwd: &Path) -> Option<Option<PathBuf>> {
-        let root = self.roots.get(host, &*key(cwd))?;
+        let root = self.roots.get(host, &*key(host, cwd))?;
         Some(root.as_ref().map(|root| {
             self.homes
                 .get(host, root)
@@ -53,7 +59,7 @@ impl GitStatusCache {
     /// a "which project is this" question wants. This answers with the root,
     /// which is the key everything git-shaped is stored under.
     pub fn repo_root_for(&self, host: HostId, cwd: &Path) -> Option<&Path> {
-        self.roots.get(host, &*key(cwd))?.as_deref()
+        self.roots.get(host, &*key(host, cwd))?.as_deref()
     }
 
     /// Forget a machine we have stopped talking to, so a reconnect starts from
@@ -66,7 +72,7 @@ impl GitStatusCache {
     }
 
     pub fn begin_probe(&mut self, host: HostId, cwd: &Path) -> bool {
-        let key = (host, key(cwd).into_owned());
+        let key = (host, key(host, cwd).into_owned());
         if self.probes.begin(key.clone()) {
             true
         } else {
@@ -81,7 +87,7 @@ impl GitStatusCache {
         cwd: &Path,
         min_interval: Duration,
     ) -> bool {
-        let cwd = key(cwd);
+        let cwd = key(host, cwd);
         if self.probes.is_pending(&(host, cwd.to_path_buf())) {
             return false;
         }
@@ -140,7 +146,7 @@ impl GitStatusCache {
         branch: &str,
         counts: Option<(u32, u32)>,
     ) -> bool {
-        let root = key(root);
+        let root = key(host, root);
         let Some(status) = self.status.get(host, &*root) else {
             return false;
         };
@@ -169,10 +175,10 @@ impl GitStatusCache {
         // A snapshot arrives spelled by `git`, the cwd by whoever asked for
         // the probe. Both land in the cache's own spelling or the root a
         // status is filed under is not the root the next lookup asks for.
-        let cwd = key(cwd);
+        let cwd = key(host, cwd);
         let snapshot = snapshot.map(|snap| RepoSnapshot {
-            root: key(&snap.root).into_owned(),
-            home: key(&snap.home).into_owned(),
+            root: key(host, &snap.root).into_owned(),
+            home: key(host, &snap.home).into_owned(),
             ..snap
         });
         let rerun = !self.probes.finish(&(host, cwd.to_path_buf()));
@@ -532,6 +538,41 @@ mod tests {
                 "{spelling:?}"
             );
         }
+    }
+
+    /// A repository on another machine keeps that machine's spelling.
+    ///
+    /// The rule above is a *local* one, and this cache serves a remote
+    /// workspace with the same four methods. The root it hands back is what
+    /// `Host::git` puts on the far side's command line — `wire_path` is
+    /// `to_string_lossy`, verbatim — and what `ScmData` opens the `.git`
+    /// watch on. Folding `/home/u/src` with this client's rules would ask a
+    /// Linux box about `\home\u\src`, which names nothing there.
+    ///
+    /// Ungated, like the one above and for the same reason: the assertion is
+    /// only ever interesting on Windows, so gating it away from Windows is
+    /// how it would stop holding.
+    #[test]
+    fn a_repository_on_another_machine_keeps_that_machines_spelling() {
+        let mut cache = GitStatusCache::default();
+        let remote = HostId::from_connection_key("ssh-direct:me@box:22");
+        let (cwd, root) = (Path::new("/home/u/src/crates/app"), "/home/u/src");
+
+        cache.finish_probe(remote, cwd, Some(snap(root, "main", Some((2, 1)))));
+
+        assert_eq!(
+            cache.repo_root_for(remote, cwd).map(Path::to_string_lossy),
+            Some(root.into()),
+            "the far side is handed this string back unchanged"
+        );
+        assert_eq!(
+            cache.known_repo_for(remote, cwd),
+            Some(Some(PathBuf::from(root)))
+        );
+        assert_eq!(cache.status_for(remote, cwd).unwrap().branch, "main");
+        // And a diff read filed under git's own answer still reaches it.
+        assert!(cache.note_diff_read(remote, Path::new(root), "moved-on", Some((0, 0))));
+        assert_eq!(cache.status_for(remote, cwd).unwrap().branch, "moved-on");
     }
 
     /// The diff overlay's spin, in the cache underneath it.

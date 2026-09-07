@@ -428,7 +428,7 @@ pub fn probe_diff(host: &dyn Host, root: &Path, req: &DiffRequest<'_>) -> Option
         return None;
     }
     let toplevel = git::git(host, root, &["rev-parse", "--show-toplevel"])?;
-    let toplevel = git::git_path(toplevel.trim_end_matches(['\n', '\r']));
+    let toplevel = git::git_path(host, toplevel.trim_end_matches(['\n', '\r']));
     let branch = git::branch_name(host, root)?;
 
     let argv = req.args();

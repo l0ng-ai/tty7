@@ -48,8 +48,8 @@ pub fn probe(host: &dyn Host, cwd: &Path) -> Option<RepoSnapshot> {
         ],
     )?;
     let mut lines = paths.lines().map(|l| l.trim_end_matches(['\n', '\r']));
-    let root = git_path(lines.next()?);
-    let home = repo_home(&root, lines.next(), lines.next());
+    let root = git_path(host, lines.next()?);
+    let home = repo_home(host, &root, lines.next(), lines.next());
     let branch = branch_name(host, cwd)?;
     Some(RepoSnapshot {
         home,
@@ -68,18 +68,28 @@ pub fn probe(host: &dyn Host, cwd: &Path) -> Option<RepoSnapshot> {
 /// One spelling at the boundary, rather than a normalisation remembered at each
 /// of the places these roots are later compared. See
 /// [`crate::core::path_spelling`].
-pub(crate) fn git_path(printed: &str) -> PathBuf {
-    crate::core::path_spelling::local_spelling_buf(printed)
+///
+/// Asked of `host`, not of `cfg!(windows)`: the same probes run against a
+/// remote box, whose `/home/u/src` is native over there and goes straight
+/// back over the wire as the cwd of the next `git`. A Windows client
+/// re-spelling it would ask a Linux server about `\home\u\src`.
+pub(crate) fn git_path(host: &dyn Host, printed: &str) -> PathBuf {
+    crate::core::path_spelling::spelling_on_buf(host.id(), printed)
 }
 
-pub(crate) fn repo_home(root: &Path, git_dir: Option<&str>, common_dir: Option<&str>) -> PathBuf {
+pub(crate) fn repo_home(
+    host: &dyn Host,
+    root: &Path,
+    git_dir: Option<&str>,
+    common_dir: Option<&str>,
+) -> PathBuf {
     let (Some(git_dir), Some(common)) = (git_dir, common_dir) else {
         return root.to_path_buf();
     };
     if git_dir == common {
         return root.to_path_buf();
     }
-    let common = git_path(common);
+    let common = git_path(host, common);
     if common.file_name().is_some_and(|name| name == ".git")
         && let Some(parent) = common.parent()
     {
@@ -674,25 +684,42 @@ mod tests {
     }
     #[test]
     fn repo_home_resolves_worktree_layouts() {
+        let host = h();
+        let host = &*host;
         let root = Path::new("/repo/.wt/feat");
 
         assert_eq!(
-            repo_home(Path::new("/repo"), Some("/repo/.git"), Some("/repo/.git")),
+            repo_home(
+                host,
+                Path::new("/repo"),
+                Some("/repo/.git"),
+                Some("/repo/.git")
+            ),
             PathBuf::from("/repo")
         );
         assert_eq!(
-            repo_home(root, Some("/repo/.git/worktrees/feat"), Some("/repo/.git")),
+            repo_home(
+                host,
+                root,
+                Some("/repo/.git/worktrees/feat"),
+                Some("/repo/.git")
+            ),
             PathBuf::from("/repo")
         );
         assert_eq!(
-            repo_home(root, Some("/bare.git/worktrees/feat"), Some("/bare.git")),
+            repo_home(
+                host,
+                root,
+                Some("/bare.git/worktrees/feat"),
+                Some("/bare.git")
+            ),
             PathBuf::from("/bare.git")
         );
         assert_eq!(
-            repo_home(root, Some("/repo/.git"), None),
+            repo_home(host, root, Some("/repo/.git"), None),
             root.to_path_buf()
         );
-        assert_eq!(repo_home(root, None, None), root.to_path_buf());
+        assert_eq!(repo_home(host, root, None, None), root.to_path_buf());
     }
 
     /// The root every git probe answers with is the directory the *OS* names,

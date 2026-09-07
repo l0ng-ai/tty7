@@ -138,6 +138,31 @@ pub fn local_spelling_buf(path: impl AsRef<Path>) -> std::path::PathBuf {
     local_spelling(path.as_ref()).into_owned()
 }
 
+/// The spelling a path that lives on `host` is stored in.
+///
+/// [`local_spelling`] answers for the machine this process runs on, and every
+/// caller that keys a repository by its root has to ask this one instead: the
+/// same caches, the same `git` probes and the same SCM panel serve a pane on
+/// another machine, and `/home/u/src` from a Linux box is already native over
+/// there. Re-spelling it here would send `\home\u\src` back over the
+/// wire — `Host::git` puts the path on the far side's command line verbatim —
+/// and name nothing on either machine.
+///
+/// A remote host is left exactly as it arrived, which is what this tree did
+/// everywhere before the local rule existed. Path syntax is a property of the
+/// machine the path is *on*, not of the one asking.
+pub fn spelling_on(host: crate::host::HostId, path: &Path) -> Cow<'_, Path> {
+    match host.is_local() {
+        true => local_spelling(path),
+        false => Cow::Borrowed(path),
+    }
+}
+
+/// [`spelling_on`], for a caller with nothing to hand back borrowed.
+pub fn spelling_on_buf(host: crate::host::HostId, path: impl AsRef<Path>) -> std::path::PathBuf {
+    spelling_on(host, path.as_ref()).into_owned()
+}
+
 /// The plain form of an extended-length path, or `None` when there is not one.
 ///
 /// Split out so the rule is testable on literal UTF-16, which is the only way
@@ -220,6 +245,41 @@ mod tests {
                 local_spelling(Path::new(spelling)).as_ref(),
                 want.as_path(),
                 "{spelling:?}"
+            );
+        }
+    }
+
+    /// The local rule is asked of the machine the path is *on*.
+    ///
+    /// A pane, a git probe and the SCM panel all serve a remote workspace
+    /// with the same code, and the root they settle on goes back over the
+    /// wire as the cwd of the next `git` — `RemoteHost` sends
+    /// `to_string_lossy` of it, verbatim. A Windows client folding a Linux
+    /// box's `/home/u/src` would ask that box about `\home\u\src`.
+    ///
+    /// Ungated: on unix both arms are the identity anyway, and Windows is the
+    /// only client where getting this wrong is visible.
+    #[test]
+    fn a_path_on_another_machine_is_left_in_that_machines_spelling() {
+        use crate::host::HostId;
+
+        let remote = HostId::from_connection_key("ssh-direct:me@box:22");
+        for posix in ["/home/u/src", "/home/u/a b/c", "/"] {
+            let got = spelling_on(remote, Path::new(posix));
+            assert_eq!(got.as_ref(), Path::new(posix), "{posix:?}");
+            assert!(matches!(got, Cow::Borrowed(_)), "{posix:?}");
+            assert_eq!(spelling_on_buf(remote, posix).to_string_lossy(), posix);
+        }
+        // A remote *Windows* box is left alone too: its spelling is its own
+        // business, and this client may not even have a notion of a drive.
+        let win = r"C:/Users/x/repo";
+        assert_eq!(spelling_on_buf(remote, win).to_string_lossy(), win);
+        // This machine's own paths still go through the rule, which on
+        // Windows is what makes the two arms different answers at all.
+        if cfg!(windows) {
+            assert_eq!(
+                spelling_on_buf(HostId::LOCAL, win),
+                std::path::PathBuf::from(r"C:\Users\x\repo")
             );
         }
     }
