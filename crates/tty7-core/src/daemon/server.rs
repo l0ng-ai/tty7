@@ -369,7 +369,7 @@ pub fn run_daemon() -> anyhow::Result<()> {
     #[cfg(not(any(unix, windows)))]
     log::info!("no control listener on this platform; serving panes only");
 
-    run_with(registry)
+    run_with(registry, _seat.is_some())
 }
 
 /// Come up as the far side of a handoff: the panes are already running, and
@@ -437,7 +437,7 @@ fn run_adopting(inheritance: crate::daemon::handoff::Inheritance) -> anyhow::Res
         }
     }
 
-    run_with(registry)
+    run_with(registry, _seat.is_some())
 }
 
 /// Become `exe` in place, keeping every pane that can survive the crossing.
@@ -549,27 +549,13 @@ fn report_conpty_host() {
     }
 }
 
-fn run_with(registry: Arc<Registry>) -> anyhow::Result<()> {
+/// `alone` says this process holds the single-server seat. It decides how the
+/// endpoint left by whoever was here before may be dealt with — see
+/// [`transport::clear_endpoint_before_bind`].
+fn run_with(registry: Arc<Registry>, alone: bool) -> anyhow::Result<()> {
     crate::daemon::control::server_started();
 
-    // A stale daemon.port whose recorded daemon is gone cannot belong to a
-    // live server: skip the probe (which would pay the OS's refusal delay on
-    // the dead port) and let the bind below overwrite the file. A live
-    // recorded daemon still gets the connect — the singleton seat is held by
-    // this process, so it can only be a foreign server worth refusing.
-    if transport::endpoint_exists() && !crate::daemon::spawn::recorded_daemon_is_dead() {
-        match transport::connect() {
-            Ok(_) => {
-                anyhow::bail!(
-                    "daemon already running at {}",
-                    transport::endpoint_display()
-                );
-            }
-            Err(_) => {
-                transport::remove_stale_endpoint();
-            }
-        }
-    }
+    transport::clear_endpoint_before_bind(alone)?;
 
     let listener = transport::bind()?;
     log::info!("daemon listening on {}", transport::endpoint_display());
