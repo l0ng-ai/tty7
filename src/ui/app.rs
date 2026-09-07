@@ -10345,4 +10345,39 @@ mod new_window_action_tests {
             "the new window belongs on a workspace of its own"
         );
     }
+
+    /// The windowless state is the one `NewWindow` exists for.
+    ///
+    /// `show_tray_icon` is on by default, so closing the last window retires
+    /// tty7 to the tray rather than quitting it: the process is alive, the
+    /// menu bar is still tty7's, and there is nothing on screen. A listener
+    /// that lives only on `Tty7App`'s render root reaches nothing there, and
+    /// the chord that means "give me a window" is the one chord that has to
+    /// answer. `App::dispatch_action` falls through to the global listeners
+    /// when no window is active, which is where `keymap::init` puts this one.
+    #[gpui::test]
+    fn new_window_answers_with_no_window_to_dispatch_it(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+            WindowRegistry::init(cx);
+            assert_eq!(
+                WindowRegistry::count(cx),
+                0,
+                "the retired-to-tray state this covers has no window in it"
+            );
+            cx.dispatch_action(&NewWindow);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                WindowRegistry::count(cx),
+                1,
+                "NewWindow has to reach windows::open with no window to bubble through"
+            );
+        });
+    }
 }
