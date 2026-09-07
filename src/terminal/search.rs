@@ -763,17 +763,23 @@ impl PathStyle {
     };
 
     /// The dialect a host that called `sample` one of its own directories
-    /// speaks. A `/`-rooted directory is a POSIX one; a drive letter or a UNC
-    /// share is not.
+    /// speaks: a drive letter or a UNC share is a Windows host's, and anything
+    /// else is read as POSIX.
     ///
-    /// This is inference, and it is the only signal there is — a host reports
-    /// its cwd and its home over the control link and never its operating
-    /// system. It is a sound one in the direction that matters: nothing but a
-    /// POSIX host reports a `/`-rooted cwd.
+    /// Only a directory that names a *Windows* root counts as one, rather than
+    /// every directory that does not name a POSIX one. A cwd that is neither —
+    /// a relative one, or an empty one from a host that has not settled yet —
+    /// is the same "nothing to go on" as no cwd at all, and has to fall the
+    /// same way; reading it as Windows would spell a Linux host's paths with
+    /// backslashes on the strength of a directory it never really reported.
+    ///
+    /// This is inference from what a host says about itself in passing. It is
+    /// sound in the direction that matters: nothing but a POSIX host reports a
+    /// `/`-rooted cwd.
     pub fn of_dir(sample: &Path) -> Self {
-        match sample.to_string_lossy().starts_with('/') {
-            true => PathStyle::Posix,
-            false => PathStyle::Windows,
+        match PathStyle::Windows.is_absolute(&sample.to_string_lossy()) {
+            true => PathStyle::Windows,
+            false => PathStyle::Posix,
         }
     }
 
@@ -1600,13 +1606,19 @@ mod tests {
         assert_eq!((link.start, link.end), (6, 21));
     }
 
+    /// Ungated with the rest: what a `~` in a POSIX pane stands for is that
+    /// pane's business and not its client's, and the `#[cfg(unix)]` this used
+    /// to carry described the wrong machine.
     #[test]
-    #[cfg(unix)]
     fn tilde_expansion_prefers_home_inferred_from_the_pane_cwd() {
-        let cwd = Path::new("/Users/alice/clone/tty7");
+        let roots = LinkRoots {
+            dirs: vec![PathBuf::from("/Users/alice/clone/tty7")],
+            local_home: true,
+            style: PathStyle::Posix,
+        };
         assert_eq!(
-            expand_home("~/clone/tty7/src/main.rs", Some(cwd), true),
-            Some(PathBuf::from("/Users/alice/clone/tty7/src/main.rs"))
+            expand_home("~/clone/tty7/src/main.rs", &roots),
+            Some("/Users/alice/clone/tty7/src/main.rs".to_string())
         );
     }
 
@@ -1614,17 +1626,24 @@ mod tests {
     /// machine: this machine's `$HOME` describes nobody there, and a path built
     /// out of it would be asked about — and possibly answered — on the far side.
     #[test]
-    #[cfg(unix)]
     fn tilde_expansion_does_not_borrow_this_machines_home_for_another_one() {
-        let cwd = Path::new("/srv/app");
-        assert_eq!(expand_home("~/.zshrc", Some(cwd), false), None);
+        let elsewhere = |cwd: &str| LinkRoots {
+            dirs: vec![PathBuf::from(cwd)],
+            local_home: false,
+            style: PathStyle::Posix,
+        };
+        assert_eq!(expand_home("~/.zshrc", &elsewhere("/srv/app")), None);
         assert_eq!(
-            expand_home("~/.zshrc", Some(Path::new("/home/deploy/app")), false),
-            Some(PathBuf::from("/home/deploy/.zshrc")),
+            expand_home("~/.zshrc", &elsewhere("/home/deploy/app")),
+            Some("/home/deploy/.zshrc".to_string()),
             "a cwd that does reveal the home needs nothing from us"
         );
         assert!(
-            expand_home("~/.zshrc", Some(cwd), true).is_some(),
+            expand_home(
+                "~/.zshrc",
+                &LinkRoots::local(vec![PathBuf::from("/srv/app")])
+            )
+            .is_some(),
             "a local pane still falls back to the environment"
         );
     }
@@ -2064,6 +2083,17 @@ mod tests {
             PathStyle::of_dir(Path::new(r"\\wsl$\Ubuntu\home\u")),
             PathStyle::Windows
         );
+        // A directory that names no root at all says nothing about the host,
+        // so it has to fall the way no directory does — POSIX. Reading it as
+        // Windows would hand a Linux host `\`-joined paths on the strength of
+        // a cwd it never really reported.
+        for nothing_to_go_on in ["", "proj", "~/proj", "C:notes"] {
+            assert_eq!(
+                PathStyle::of_dir(Path::new(nothing_to_go_on)),
+                PathStyle::Posix,
+                "{nothing_to_go_on:?} names no Windows root"
+            );
+        }
     }
 
     #[test]
