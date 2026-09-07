@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 
+/// A frame is a little-endian `u32` length, a one-byte kind, then the payload.
+const HEADER: usize = 5;
+
 pub const PROTOCOL_VERSION: u32 = 6;
 
 pub const FEATURE_PANE_OWNER: &str = "pane-owner";
@@ -952,9 +955,33 @@ pub fn write_frame<W: Write>(w: &mut W, kind: u8, payload: &[u8]) -> io::Result<
             "frame payload exceeds MAX_FRAME",
         ));
     }
-    w.write_all(&(len as u32).to_le_bytes())?;
-    w.write_all(&[kind])?;
-    w.write_all(payload)?;
+    // One write, not three. The pane socket is a loopback `TcpStream` with
+    // `TCP_NODELAY` set, so three `write_all`s put the length, the kind and the
+    // payload on the wire as three separate segments, and the reader on the far
+    // side wakes from `read()` three times for one frame. Under a PTY flood the
+    // daemon frames every ConPTY read, so that is two extra syscalls on each
+    // side per frame, tens of thousands a second (issue #713).
+    let mut header = [0u8; HEADER];
+    header[..4].copy_from_slice(&(len as u32).to_le_bytes());
+    header[4] = kind;
+    let mut bufs = [io::IoSlice::new(&header), io::IoSlice::new(payload)];
+    let mut rest: &mut [io::IoSlice<'_>] = &mut bufs;
+    while !rest.is_empty() {
+        match w.write_vectored(rest) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "the frame could not be written in full",
+                ));
+            }
+            // A writer that does not implement `write_vectored` natively falls
+            // back to writing the first non-empty slice, so this loop still
+            // terminates — it just costs the two writes it used to cost.
+            Ok(n) => io::IoSlice::advance_slices(&mut rest, n),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
     Ok(())
 }
 
@@ -984,7 +1011,6 @@ pub fn is_error_kind(kind: u8) -> bool {
 }
 
 pub fn take_frame(buf: &mut Vec<u8>) -> io::Result<Option<(u8, Vec<u8>)>> {
-    const HEADER: usize = 5;
     if buf.len() < HEADER {
         return Ok(None);
     }
@@ -2044,6 +2070,57 @@ mod tests {
         let mut buf = Vec::new();
         assert!(write_frame(&mut buf, 3, &oversize).is_err());
         assert!(buf.is_empty());
+    }
+
+    /// The pane socket has `TCP_NODELAY` set, so a write is a segment and a
+    /// segment is a wakeup on the far side. A frame must therefore cost one
+    /// write, not one for the length, one for the kind and one for the payload
+    /// (issue #713) — at flood rates that difference is tens of thousands of
+    /// syscalls a second on each end.
+    #[test]
+    fn a_frame_is_one_write_on_a_vectored_writer() {
+        #[derive(Default)]
+        struct Counting {
+            writes: usize,
+            bytes: Vec<u8>,
+        }
+        impl Write for Counting {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.writes += 1;
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+                self.writes += 1;
+                let mut n = 0;
+                for b in bufs {
+                    self.bytes.extend_from_slice(b);
+                    n += b.len();
+                }
+                Ok(n)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut w = Counting::default();
+        write_frame(&mut w, kind::OUTPUT, b"a chunk of pty output").expect("write the frame");
+        assert_eq!(w.writes, 1, "one frame must cost one write");
+
+        // An empty payload is a frame too — the header still has to land, and
+        // the empty second slice must not spin the loop.
+        let mut empty = Counting::default();
+        write_frame(&mut empty, kind::DETACH, &[]).expect("write the empty frame");
+        assert_eq!(empty.writes, 1);
+
+        // Whatever the write count, the bytes on the wire are unchanged: a
+        // `read_frame` over them gives back exactly what went in.
+        let mut cursor = io::Cursor::new(w.bytes);
+        assert_eq!(
+            read_frame(&mut cursor).expect("read it back"),
+            (kind::OUTPUT, b"a chunk of pty output".to_vec())
+        );
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub enum CommandKind {
     StopWorkspace,
     DeleteWorkspace,
     NewWindow,
+    CloseWindow,
     SplitRight,
     SplitDown,
     ClosePane,
@@ -126,6 +127,7 @@ impl CommandKind {
             StopWorkspace => "stop-workspace",
             DeleteWorkspace => "delete-workspace",
             NewWindow => "new-window",
+            CloseWindow => "close-window",
             SplitRight => "split-right",
             SplitDown => "split-down",
             ClosePane => "close-pane",
@@ -233,6 +235,7 @@ impl CommandKind {
             StopWorkspace => "StopWorkspace",
             DeleteWorkspace => "DeleteWorkspace",
             NewWindow => "NewWindow",
+            CloseWindow => "CloseWindow",
             SplitRight => "SplitRight",
             SplitDown => "SplitDown",
             ClosePane => "CloseActiveTab",
@@ -578,6 +581,11 @@ impl Command {
             Command::localized(L10nKey::CmdReportIssue, ReportIssue),
             Command::localized(L10nKey::CmdRestartServer, RestartDaemon)
                 .with_subtitle(t(L10nKey::CmdRestartServerSubtitle)),
+            // Beside Quit, because the pair is the whole point of the action:
+            // both end the window you are looking at, and only one of them
+            // takes your shells with it. Read together the subtitles say which.
+            Command::localized(L10nKey::CmdCloseWindow, CloseWindow)
+                .with_subtitle(t(L10nKey::CmdCloseWindowSubtitle)),
             Command::localized(L10nKey::CmdQuitTty7, Quit)
                 .with_subtitle(t(L10nKey::CmdQuitTty7Subtitle)),
         ];
