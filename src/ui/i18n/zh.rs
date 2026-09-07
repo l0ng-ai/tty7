@@ -1682,6 +1682,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabTooltipHideSidebar => "隐藏侧栏",
         L10nKey::TabTooltipHideDetailPanel => "隐藏详情面板",
         L10nKey::TabTooltipShowDetailPanel => "显示详情面板",
+        L10nKey::TabTooltipZoomed => "窗格已缩放 — 其他窗格已隐藏",
         L10nKey::TabMenuLocalShells => "本地",
         L10nKey::TabMenuAddHost => "添加 SSH 主机…",
         L10nKey::TabMenuAllHosts => "所有 SSH 主机…",

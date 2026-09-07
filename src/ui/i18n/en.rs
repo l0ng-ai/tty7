@@ -1772,6 +1772,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TabTooltipHideSidebar => "Hide Sidebar",
         L10nKey::TabTooltipHideDetailPanel => "Hide Detail Panel",
         L10nKey::TabTooltipShowDetailPanel => "Show Detail Panel",
+        L10nKey::TabTooltipZoomed => "Pane zoomed — other panes hidden",
         L10nKey::TabMenuLocalShells => "Local",
         L10nKey::TabMenuAddHost => "Add SSH Host…",
         L10nKey::TabMenuAllHosts => "All SSH Hosts…",

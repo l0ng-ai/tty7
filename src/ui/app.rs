@@ -4125,6 +4125,27 @@ impl Tty7App {
         }
     }
 
+    /// Whether tab `index` has a pane zoomed over hidden siblings — what the
+    /// chrome marks so the state is readable without toggling it (#752).
+    ///
+    /// Zoom rides with its tab (#599): the active tab's lives in
+    /// `self.maximized`, every other tab's is parked in `Tab::zoomed`. Either
+    /// can name a pane that exited while nobody was looking, which is why the
+    /// answer is asked of the layout rather than of the handle alone.
+    pub(crate) fn tab_is_zoomed(&self, index: usize) -> bool {
+        let Some(tab) = self.tabs.get(index) else {
+            return false;
+        };
+        let zoom = match index == self.active {
+            true => self.maximized.as_ref(),
+            false => tab.zoomed.as_ref(),
+        };
+        zoom.is_some_and(|zoom| {
+            tab.pane
+                .zoom_hides_siblings(|slot| slot.entity_id() == zoom.entity_id())
+        })
+    }
+
     fn toggle_maximize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.maximized.is_some() {
             self.maximized = None;

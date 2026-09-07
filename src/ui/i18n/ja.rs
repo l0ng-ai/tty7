@@ -1843,6 +1843,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabTooltipHideSidebar => "サイドバーを非表示",
         L10nKey::TabTooltipHideDetailPanel => "詳細パネルを非表示",
         L10nKey::TabTooltipShowDetailPanel => "詳細パネルを表示",
+        L10nKey::TabTooltipZoomed => "ペインを拡大中 — 他のペインは非表示",
         L10nKey::TabMenuLocalShells => "ローカル",
         L10nKey::TabMenuAddHost => "SSH ホストを追加…",
         L10nKey::TabMenuAllHosts => "すべての SSH ホスト…",

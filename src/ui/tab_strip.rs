@@ -1222,6 +1222,30 @@ impl Tty7App {
         }
     }
 
+    /// The mark a tab wears while one of its panes is zoomed over the others
+    /// (#752). Without it a zoomed tab is pixel-for-pixel a tab that only ever
+    /// had one pane, and the only way to tell was to toggle the zoom off.
+    ///
+    /// Drawn in the tab entry rather than on the pane so it reads from either
+    /// tab surface, and so it says something about the tabs you are *not*
+    /// looking at — the zoom outlives a switch away from them.
+    pub(crate) fn zoom_mark(&self, id: impl Into<gpui::ElementId>, cx: &App) -> gpui::AnyElement {
+        let tip = chord_hint(t(L10nKey::TabTooltipZoomed), "ToggleMaximizePane", cx);
+        div()
+            .id(id)
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(16.))
+            .text_color(cx.theme().muted_foreground)
+            .child(Icon::new(IconName::Maximize).size(px(11.)))
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            })
+            .into_any_element()
+    }
+
     /// The full title behind a shortened one, for the row to name on hover.
     ///
     /// `tab_label` hands back a path elided to its last three segments and then
@@ -1613,6 +1637,7 @@ impl Tty7App {
             let agent = tab.agent(cx);
             let agent_status = tab.agent_status(cx);
             let agent_unread = tab.agent_unread_count(cx);
+            let zoomed = self.tab_is_zoomed(i);
 
             let rename_input = self
                 .renaming
@@ -1739,6 +1764,13 @@ impl Tty7App {
                         18.,
                         cx,
                     ))
+                })
+                // Leading, beside the other state marks: the trailing end of a
+                // chip belongs to the badge and to the close button that fades
+                // in over it, and a mark parked there would vanish under the
+                // pointer that came to read it.
+                .when(zoomed, |chip| {
+                    chip.child(self.zoom_mark(("tab-zoom", i), cx))
                 })
                 .child(label_region)
                 .when(show_badges && i < 9, |chip| {

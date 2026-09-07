@@ -47,6 +47,8 @@ mod row_metrics {
     pub(super) const GAP: f32 = 8.;
     /// The ⌘N badge, when one is shown.
     pub(super) const BADGE: f32 = 20.;
+    /// The zoom mark, when the tab has a pane zoomed over the others.
+    pub(super) const ZOOM: f32 = 16.;
     /// `gap_1p5`, between the branch icon and its text and before the counts.
     pub(super) const META_GAP: f32 = 6.;
     /// The branch icon.
@@ -296,9 +298,16 @@ impl Tty7App {
                 } else {
                     0.
                 };
+                let zoomed = self.tab_is_zoomed(i);
+                let zoom_extra = if zoomed {
+                    row_metrics::ZOOM + row_metrics::GAP
+                } else {
+                    0.
+                };
                 // Elision is measured against this budget so the label and
                 // branch never wrap or overflow into CSS truncation.
-                let label_avail = (row_metrics::text_budget(width) - badge_extra).max(48.);
+                let label_avail =
+                    (row_metrics::text_budget(width) - badge_extra - zoom_extra).max(48.);
                 let title_size = 0.875 * rem;
                 let meta_size = 0.75 * rem;
                 let title_font = if is_active { &title_font_active } else { &font };
@@ -723,6 +732,11 @@ impl Tty7App {
                         22.,
                         cx,
                     ))
+                    // Leading, like the chip's: the trailing end of a row is
+                    // the badge's, and the close button fades in over it.
+                    .when(zoomed, |row| {
+                        row.child(self.zoom_mark(("sidebar-zoom", i), cx))
+                    })
                     .child(label_region)
                     .when(show_badges && badge_pos < 9, |row| {
                         row.child(
