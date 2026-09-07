@@ -149,9 +149,37 @@ fn build_font(base: &Font, bold: bool, italic: bool) -> Font {
         FontStyle::Normal
     };
     if f.features.tag_value_list().is_empty() {
-        f.features = gpui::FontFeatures::disable_ligatures();
+        f.features = ligatures_off();
     }
     f
+}
+
+/// The feature set that actually turns ligatures off in a terminal grid.
+///
+/// gpui's own `FontFeatures::disable_ligatures()` emits `calt: 0` and nothing
+/// else. `calt` is only the contextual-alternate feature a programming face
+/// drives `=>` and `!=` from; the `fi`/`ffl`/`ffi` ligatures live in `liga` and
+/// `clig`, which that call never mentions — so they were left at the shaper's
+/// default, and CoreText, DirectWrite and rustybuzz all default them on. A
+/// terminal cannot have them: a ligature is one glyph where the grid budgeted a
+/// cell per character, so the row drifts.
+///
+/// Naming all three is therefore the whole fix, and it is not platform
+/// specific. Windows is the sharpest case only because gpui's DirectWrite
+/// backend always attaches an `IDWriteTypography` to the run: an empty feature
+/// list leaves that object empty, which suppresses DirectWrite's own defaults,
+/// while any non-empty list has `liga: 1`/`clig: 1` appended to it
+/// (`gpui_windows/src/direct_write.rs`, `apply_font_features`). Asking for
+/// `calt: 0` there bought ligatures that asking for nothing would not have.
+///
+/// `rlig` is deliberately left alone: it carries the required ligatures a
+/// script cannot be written without.
+fn ligatures_off() -> gpui::FontFeatures {
+    gpui::FontFeatures(std::sync::Arc::new(vec![
+        ("calt".to_string(), 0),
+        ("liga".to_string(), 0),
+        ("clig".to_string(), 0),
+    ]))
 }
 
 fn snapshot_cell(
@@ -2717,20 +2745,64 @@ mod tests {
         assert_eq!(seg_budget(false, 1, false, cell), px(12.5));
     }
 
+    /// The emitted feature set is the whole contract with the shaper, so pin it
+    /// tag for tag rather than asking after one tag at a time.
+    ///
+    /// `calt: 0` alone is not "ligatures off" on any platform: it never asks
+    /// for `liga`/`clig`, which every shaper defaults on. Shaping "office
+    /// waffle fluffier" in Calibri through the real DirectWrite shaper gives 15
+    /// glyphs for 22 characters with `calt: 0`, and 22 once all three are named
+    /// zero.
     #[test]
-    fn build_font_disables_ligatures_unless_features_are_configured() {
-        let font = build_font(&gpui::font("Test"), false, false);
-        assert_eq!(font.features.is_calt_enabled(), Some(false));
-
-        let mut configured = gpui::font("Test");
-        configured.features = serde_json::from_str(r#"{"calt":true,"liga":1}"#).unwrap();
-        let font = build_font(&configured, false, false);
-        assert_eq!(font.features.is_calt_enabled(), Some(true));
-        assert!(
+    fn build_font_emits_the_pinned_feature_set_for_each_ligature_setting() {
+        fn tags(font: &Font) -> Vec<(&str, u32)> {
             font.features
                 .tag_value_list()
                 .iter()
-                .any(|(tag, value)| tag == "liga" && *value == 1)
+                .map(|(tag, value)| (tag.as_str(), *value))
+                .collect()
+        }
+
+        // Default config, and the settings toggle switched off: both leave
+        // `font_features` unset, so the terminal names its own.
+        let font = build_font(&gpui::font("Test"), false, false);
+        assert_eq!(
+            tags(&font),
+            vec![("calt", 0), ("liga", 0), ("clig", 0)],
+            "an unconfigured face must name every ligature feature off",
+        );
+        assert_eq!(font.features.is_calt_enabled(), Some(false));
+
+        // Every face the grid paints with gets the same set, not just the plain one.
+        for (bold, italic) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(
+                tags(&build_font(&gpui::font("Test"), bold, italic)),
+                vec![("calt", 0), ("liga", 0), ("clig", 0)],
+                "bold={bold} italic={italic}",
+            );
+        }
+
+        // Explicitly on: what Settings → Appearance → Font ligatures writes.
+        let mut configured = gpui::font("Test");
+        configured.features = crate::core::config::gpui_font_features(
+            &serde_json::from_str(r#"{"calt":true,"liga":1}"#).unwrap(),
+        );
+        let font = build_font(&configured, false, false);
+        assert_eq!(
+            tags(&font),
+            vec![("calt", 1), ("liga", 1)],
+            "an explicit request for ligatures must survive untouched",
+        );
+        assert_eq!(font.features.is_calt_enabled(), Some(true));
+
+        // Explicitly off in `config.json`: also passed through unchanged.
+        let mut configured = gpui::font("Test");
+        configured.features = crate::core::config::gpui_font_features(
+            &serde_json::from_str(r#"{"calt":0,"liga":0,"clig":0}"#).unwrap(),
+        );
+        assert_eq!(
+            tags(&build_font(&configured, false, false)),
+            vec![("calt", 0), ("liga", 0), ("clig", 0)],
         );
     }
 

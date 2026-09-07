@@ -14,7 +14,7 @@ description: "The bundled default, fallback chains, ligatures, and why CJK needs
 | **Interface font family** | system UI font | The face for everything outside the grid |
 | **Line height** | 1.4 | A multiple of the font size |
 | **Bold font** / **Italic font** | — | Distinct faces, when you want them |
-| **Font ligatures** | off | Contextual alternates stay off unless you ask |
+| **Font ligatures** | off | `calt`, `liga` and `clig` all stay off unless you ask |
 
 ## Hack is bundled
 
@@ -59,6 +59,17 @@ another platform still resolves.
 A tag must be four alphanumeric characters; `true`/`false` map to `1`/`0`.
 Anything malformed is skipped with a log line rather than failing the whole
 config.
+
+Writing *any* tag hands the whole feature set to you: the terminal only names
+`calt: 0`, `liga: 0` and `clig: 0` itself while `font_features` is unset. So
+`{"font_features": {"zero": 1}}` turns slashed zeroes on **and** ligatures back
+on. Name them explicitly if you want both:
+
+```json
+{
+  "font_features": { "zero": 1, "calt": 0, "liga": 0, "clig": 0 }
+}
+```
 
 ## CJK and the two-column grid
 
