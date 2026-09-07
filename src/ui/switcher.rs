@@ -716,6 +716,11 @@ impl Tty7App {
             }
         }
 
+        // Listed once for the whole frame: the pending groups below name
+        // themselves from it, and so does the pass that settles every group's
+        // link state further down.
+        let configured = remote_connect::available_hosts(cx);
+
         for target in self.pending_machines() {
             let key = target.to_string();
             if index.contains_key(&key) {
@@ -723,7 +728,12 @@ impl Tty7App {
             }
             index.insert(key.clone(), groups.len());
             groups.push(Group {
-                label: key.clone(),
+                // Not `key`: a `Profile` target spells itself as its config
+                // UUID, so a machine whose profile has been deleted would
+                // announce itself to the banners below by a raw UUID (#485).
+                // The pass below overwrites this while the profile is still
+                // configured; this is what is left when it is not.
+                label: remote_connect::label_from_hosts(&configured, &target),
                 key,
                 endpoint: String::new(),
                 target: Some(target),
@@ -838,7 +848,6 @@ impl Tty7App {
         // trouble banners under the list come out in a stable order.
         groups.sort_by(|a, b| a.key.is_empty().cmp(&b.key.is_empty()).reverse());
 
-        let configured = remote_connect::available_hosts(cx);
         for group in &mut groups {
             let Some(target) = group.target.clone() else {
                 group.link = Link::Local;
@@ -3285,6 +3294,53 @@ fn glyph_col(w: f32, child: impl IntoElement) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #485 on the path #645 did not cover. A machine the switcher knows only
+    /// from a listing snapshot has no store entry to name it, so its group
+    /// used to be labelled by the target's own spelling — and a `Profile`
+    /// target spells itself as its config UUID. Delete the profile and every
+    /// banner under the list announced a raw UUID.
+    #[gpui::test]
+    fn a_pending_machine_whose_profile_is_gone_is_not_named_by_its_uuid(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::session::RemoteTarget;
+
+        let (app, _vcx) = crate::ui::app::test_window::harness(cx);
+
+        // A profile id that is in no config: the state left behind when the
+        // profile a machine was reached through is deleted.
+        let id = uuid::Uuid::new_v4();
+        let target = RemoteTarget::Profile { id };
+
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                super::HostSnapshot {
+                    target: target.clone(),
+                    rows: Vec::new(),
+                },
+            );
+        });
+
+        app.update(cx, |app, cx| {
+            let groups = app.switcher_groups(cx);
+            let group = groups
+                .iter()
+                .find(|g| g.target.as_ref() == Some(&target))
+                .expect("the snapshot puts its machine in the list");
+            assert!(
+                !group.label.contains(&id.to_string()),
+                "the switcher named a machine by its raw profile UUID: {}",
+                group.label
+            );
+            assert_eq!(
+                group.label,
+                t(L10nKey::RemoteProfileGone),
+                "a gone profile is named here the way a pane's route names it"
+            );
+        });
+    }
 
     /// A wrong hostname or a stale password used to be fixable only by
     /// finding the same machine again in Settings (#438). The machine is on
