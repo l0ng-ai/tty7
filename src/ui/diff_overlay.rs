@@ -168,7 +168,8 @@ impl Tty7App {
             focus,
             preview: None,
             preview_loading: None,
-            list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(256.)),
+            list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(256.))
+                .with_size_hint(DIFF_LINE_H),
             rows: Rc::new(Vec::new()),
             rows_key: None,
             epoch: None,
@@ -897,15 +898,14 @@ impl Tty7App {
         // padding here would be silently ignored. The rows carry their own —
         // see `diff_row_element`.
         .py_4();
-        // A whole working tree can scroll past here with nothing to say how
-        // far it runs or where in it you are — the one long document in the
-        // app without the bar every other scroll area has.
-        //
-        // The bar reads the list's own height, and a list only knows the rows
-        // it has measured: until the reader has been to the bottom once, the
-        // thumb is sized against a document that is still being discovered, so
-        // it shrinks as they scroll. `ListState::measure_all` would settle it
-        // by laying out every row on the first frame, which is the cost this
+        // The bar reads the list's own height, and a list only counts the
+        // rows it has measured. Left at that, a patch of any length would
+        // report itself as one screen long and the thumb would fill the
+        // track: a drag from top to bottom would travel one screen and stop,
+        // on the one document in the app long enough to need the bar. The
+        // rows below the fold are counted at `DIFF_LINE_H` until they are
+        // laid out — `ListState::measure_all` would settle it exactly, by
+        // laying out every row on the first frame, which is the cost this
         // whole list exists to avoid.
         crate::ui::scrollbar::with_vertical_scrollbar("diff-overlay-scrollbar", body, &list)
     }
@@ -1054,6 +1054,16 @@ const FILE_ROW_H: Pixels = px(26.);
 
 /// The radius on a row that lights up under the pointer. Matches the panel's.
 const ROW_RADIUS: Pixels = px(5.);
+
+/// The height of one line of a patch, in either view.
+///
+/// Also what the list counts a row it has not laid out yet at. A list knows
+/// only the rows it has measured, so without an estimate for the rest a patch
+/// of any length reports itself as one screen long — and the scrollbar, which
+/// reads that height, drags the reader one screen and stops. The file and hunk
+/// rows are a few pixels taller, so the estimate runs a little short until
+/// they have been measured; a diff is overwhelmingly its lines.
+const DIFF_LINE_H: Pixels = px(19.);
 
 /// The rule between one hunk and the last line of the one before it.
 ///
@@ -1322,7 +1332,7 @@ fn diff_untracked_row(
 fn diff_split_row(row: &SplitRow, font: &SharedString, cx: &gpui::App) -> impl IntoElement {
     h_flex()
         .w_full()
-        .h(px(19.))
+        .h(DIFF_LINE_H)
         .items_stretch()
         .text_xs()
         .font_family(font.clone())
@@ -1391,7 +1401,7 @@ fn diff_unified_row(row: &UnifiedRow, font: &SharedString, cx: &gpui::App) -> im
     };
     h_flex()
         .w_full()
-        .h(px(19.))
+        .h(DIFF_LINE_H)
         .items_center()
         .text_xs()
         .font_family(font.clone())
@@ -2776,6 +2786,25 @@ mod render_idle_gpui_tests {
         assert!(
             built < rows as u64 / 4,
             "a frame built {built} of {rows} rows: the list is not virtualised"
+        );
+
+        // The other half of virtualising: a list counts the rows it has not
+        // laid out at zero unless it is given an estimate, and the scrollbar
+        // reads that count as the length of the document. Without the size
+        // hint the bar reaches 248px into this patch — its thumb fills the
+        // track, and dragging it to the bottom lands a screen down.
+        let reach = app.update_in(&mut vcx, |app, _, _| {
+            app.tabs[app.active]
+                .diff_overlay
+                .as_ref()
+                .expect("the overlay is open")
+                .list
+                .max_offset_for_scrollbar()
+                .y
+        });
+        assert!(
+            reach > DIFF_LINE_H * (rows as f32 * 0.75),
+            "the scrollbar reaches {reach} into a patch of {rows} rows"
         );
 
         let _ = std::fs::remove_dir_all(&root);
