@@ -2956,47 +2956,20 @@ impl TabRow {
     }
 }
 
-/// Names a tab of a workspace this window does not own, matching what
-/// `Tty7App::tab_label` shows for local ones.
+/// Names a tab of a workspace this window does not own.
 ///
-/// The two read different sources and have to be talked into agreeing. A local
-/// tab is named by its live terminal's OSC title, which shells set to the
-/// working directory and agents overwrite with what they are doing. The tree
-/// carries a copy of that title (`PaneRecord::osc_title`), which is what makes
-/// the two columns agree; `PaneRecord::title` is the *foreground process name*
-/// ("zsh") and only stands in when there is no title at all.
+/// The two surfaces used to read different sources and had to be talked into
+/// agreeing: a local tab was named by its live terminal's title, this one by
+/// the tree's copy of it (`PaneRecord::osc_title`). They now go through the one
+/// renderer, [`crate::ui::tab_strip::label_of`] — a local tab is turned into
+/// the same [`TabView`](crate::ui::machine_mirror::TabView) this one already
+/// is, so neither column can rank the evidence its own way.
 fn tab_view_label(
     view: &crate::ui::machine_mirror::TabView,
     index: usize,
     home: Option<&std::path::Path>,
 ) -> String {
-    let unnamed = || {
-        t_fmt(
-            L10nKey::TabUnnamedShell,
-            &[("n", &((index + 1).to_string()))],
-        )
-    };
-    // A path can shorten away to nothing (a bare "user@host:"), and the process
-    // name is still worth more than a number.
-    let shortened = |raw: &str| match crate::ui::tab_strip::short_title(raw, home) {
-        shortened if !shortened.trim().is_empty() => shortened,
-        _ => match view.title.trim() {
-            "" => unnamed(),
-            title => title.to_string(),
-        },
-    };
-    match view.label() {
-        crate::ui::machine_mirror::TabLabel::Named(name) => name.to_string(),
-        // Through `short_title` because the local strip puts its own titles
-        // through it too: the shell integration writes `user@host:~/dir`, and a
-        // tab that spelled that out in full where the strip says "…/dir" would
-        // be the same disagreement in a new place.
-        crate::ui::machine_mirror::TabLabel::Osc(title) => shortened(title),
-        crate::ui::machine_mirror::TabLabel::Agent(agent) => agent.display_name().to_string(),
-        crate::ui::machine_mirror::TabLabel::Cwd(cwd) => shortened(cwd),
-        crate::ui::machine_mirror::TabLabel::Process(title) => title.to_string(),
-        crate::ui::machine_mirror::TabLabel::Unknown => unnamed(),
-    }
+    crate::ui::tab_strip::label_of(view, index, home)
 }
 
 impl Group {

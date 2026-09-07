@@ -326,9 +326,24 @@ impl Tty7App {
                         );
                         (shown, Some(full))
                     } else {
-                        let (raw_title, home) = tab.leaf_title_and_home(Some(window), cx);
-                        let title = strip_host_prefix(raw_title.trim());
-                        let raw = abbreviate_home(title, home.as_deref());
+                        // The ladder the strip and the switcher climb, read
+                        // here for the name and not for the shortening: this
+                        // column measures in pixels and lets a card expand the
+                        // row back to the whole string, so it wants what
+                        // `label_of` would have cut down rather than the cut.
+                        use crate::ui::machine_mirror::TabLabel;
+                        let (view, home) = tab.label_view(Some(window), cx);
+                        let raw = match view.label() {
+                            TabLabel::Osc(title) | TabLabel::Cwd(title) => {
+                                abbreviate_home(strip_host_prefix(title.trim()), home.as_deref())
+                                    .into_owned()
+                            }
+                            TabLabel::Agent(agent) => agent.display_name().to_string(),
+                            // A tab holding a name got one above.
+                            TabLabel::Named(name) => name.to_string(),
+                            TabLabel::Process(title) => title.to_string(),
+                            TabLabel::Unknown => String::new(),
+                        };
                         if raw.trim().is_empty() {
                             // Nothing to expand: the row is naming an unnamed
                             // shell, not hiding a title behind an ellipsis.
@@ -338,7 +353,7 @@ impl Tty7App {
                             ));
                             (placeholder, None)
                         } else {
-                            let full = SharedString::from(raw.as_ref());
+                            let full = SharedString::from(raw);
                             let shown = elide_label(
                                 &window.text_system(),
                                 title_font,

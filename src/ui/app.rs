@@ -536,6 +536,67 @@ impl Tab {
         (leaf.title.clone(), leaf.display_home(cx))
     }
 
+    /// This tab as the shared label ladder reads it, together with what a `~`
+    /// in whatever it ends up named would mean.
+    ///
+    /// [`TabView`](tty7_core::core::tab_view::TabView) is how a tab looks to
+    /// someone who is *not* the window showing it — the switcher listing
+    /// another window's workspace, `tty7 tab ls` on the far side of a socket.
+    /// Building one here from the live pane is what stops this window having a
+    /// second opinion: both sides then rank a given name, a title, an agent and
+    /// a directory through
+    /// [`TabView::label`](tty7_core::core::tab_view::TabView::label), so the
+    /// strip's answer to "which repo is this?" is the switcher's answer too.
+    ///
+    /// Everything comes off the one leaf the tab names itself after, so the
+    /// title and the directory standing in for it can never describe different
+    /// panes (#580).
+    pub(crate) fn label_view(
+        &self,
+        window: Option<&Window>,
+        cx: &App,
+    ) -> (
+        tty7_core::core::tab_view::TabView,
+        Option<std::path::PathBuf>,
+    ) {
+        let name = self.name.clone();
+        let Some(leaf) = self.title_leaf(window, cx) else {
+            return (
+                tty7_core::core::tab_view::TabView {
+                    id: self.tree_id.get(),
+                    name,
+                    title: String::new(),
+                    osc_title: None,
+                    cwd: None,
+                    agent: None,
+                    status: None,
+                    live: false,
+                    panes: 0,
+                },
+                None,
+            );
+        };
+        let leaf = leaf.read(cx);
+        let view = tty7_core::core::tab_view::TabView {
+            id: self.tree_id.get(),
+            name,
+            // The tree's `title` is the foreground process name — what it falls
+            // back on once a pane has said nothing about itself. A live pane's
+            // equivalent is the placeholder it answers to unprompted: any
+            // *other* default it was given (an SSH host, a workspace name) is a
+            // name tty7 chose for it deliberately, and `stated_title` hands
+            // those up as the title the pane is showing.
+            title: crate::terminal::view::DEFAULT_TITLE.to_string(),
+            osc_title: leaf.stated_title().map(str::to_string),
+            cwd: leaf.cwd().map(|p| p.display().to_string()),
+            agent: leaf.agent(),
+            status: leaf.agent_session().map(|s| s.status),
+            live: !leaf.terminal.exited,
+            panes: self.pane.terminals().len(),
+        };
+        (view, leaf.display_home(cx))
+    }
+
     pub(crate) fn git_status(
         &self,
         window: Option<&Window>,

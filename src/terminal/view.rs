@@ -163,6 +163,24 @@ pub struct NativeSshParts {
 /// What a pane is called when nothing running in it has said otherwise.
 pub(crate) const DEFAULT_TITLE: &str = "tty7";
 
+/// What a pane is *saying* about itself, if anything — the reading behind
+/// [`TerminalView::stated_title`], split out so it can be pinned without a
+/// live pane.
+///
+/// Anything but the placeholder counts. That is wider than "arrived over OSC
+/// 0/2" on purpose: an SSH pane answers to the host it dialled and a workspace
+/// pane to its workspace's name, and those are names tty7 gave the pane
+/// deliberately (#438) rather than the absence of one. The literal string
+/// `tty7` is the only title that says nothing, because it is the app's own
+/// name standing in for a pane that has never introduced itself.
+pub(crate) fn stated_title(title: &str) -> Option<&str> {
+    match title.trim() {
+        "" => None,
+        t if t == DEFAULT_TITLE => None,
+        t => Some(t),
+    }
+}
+
 pub struct ShellParts {
     terminal: RemoteTerminal,
     pub(crate) pane_id: u64,
@@ -1475,6 +1493,16 @@ impl TerminalView {
 
     pub fn cwd(&self) -> Option<std::path::PathBuf> {
         self.terminal.foreground_cwd()
+    }
+
+    /// The title this pane is showing, or `None` while it is still answering
+    /// to the app's own name — see [`stated_title`]. The label ladder reads
+    /// this where the machine tree reads
+    /// [`PaneRecord::osc_title`](tty7_core::core::machine::PaneRecord::osc_title),
+    /// which is what lets the tab strip and the switcher name a tab the same
+    /// way.
+    pub(crate) fn stated_title(&self) -> Option<&str> {
+        stated_title(&self.title)
     }
 
     /// Sets how opaque the pane wants this terminal painted; the pane leaf
@@ -7221,6 +7249,31 @@ fn drag_scroll_step(overshoot: f32) -> i32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// What the label ladder asks a pane: are you showing a name of your own,
+    /// or still standing under the app's? (#740)
+    #[test]
+    fn a_pane_states_a_title_whenever_it_is_not_the_placeholder() {
+        use super::stated_title;
+
+        // Nothing has spoken — this is the pane a directory stands in for.
+        assert_eq!(stated_title("tty7"), None);
+        assert_eq!(stated_title("  tty7  "), None);
+        assert_eq!(stated_title("   "), None);
+
+        // A title from the program running in it.
+        assert_eq!(stated_title("vim — main.rs"), Some("vim — main.rs"));
+        assert_eq!(stated_title(" user@host:~/repo "), Some("user@host:~/repo"));
+        // A default tty7 chose for the pane itself is a name, not the absence
+        // of one: an SSH pane answers to its host (#438) and a workspace pane
+        // to its workspace, and neither gives way to a directory.
+        assert_eq!(stated_title("prod-web"), Some("prod-web"));
+        // So does the state a finished pane is left showing.
+        assert_eq!(
+            stated_title("tty7 — process exited"),
+            Some("tty7 — process exited")
+        );
+    }
 
     #[test]
     fn an_unfocused_input_caret_is_always_a_steady_outline() {
