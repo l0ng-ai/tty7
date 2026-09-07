@@ -219,6 +219,30 @@ fn cwd_is_on_host(pane_runs_remotely: bool, host_is_local: bool) -> bool {
     }
 }
 
+/// Which path dialect a pane's output is written in.
+///
+/// A pane running on this machine spells paths the way this OS does, and that
+/// is the end of it: `/etc` printed by a `cmd.exe` pane sitting on `C:` means
+/// `C:\etc`, exactly as `cd /etc` would there. Reading it as a rooted POSIX
+/// path would underline a file this machine has not got, and a link that
+/// cannot be opened is worse than no link.
+///
+/// A pane whose paths live somewhere else is asked instead — by the only thing
+/// that host ever says about its own spelling, the directory it reports. A
+/// `/`-rooted cwd is a POSIX host's. A pane that has not said where it is
+/// falls to POSIX: there is no local drive to measure it from either way, and
+/// every host tty7 installs a server on over SSH or WSL spells paths that way.
+fn link_path_style(
+    paths_are_local: bool,
+    host_cwd: Option<&std::path::Path>,
+) -> super::search::PathStyle {
+    use super::search::PathStyle;
+    match paths_are_local {
+        true => PathStyle::NATIVE,
+        false => host_cwd.map_or(PathStyle::Posix, PathStyle::of_dir),
+    }
+}
+
 pub struct TerminalView {
     pub terminal: RemoteTerminal,
     host_id: crate::ui::host_ops::HostId,
@@ -5327,9 +5351,10 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let roots = self.link_roots(cx);
         // A word that is not written like a path was never a link, and saying
         // so on every modifier-click over ordinary output would be noise.
-        if !candidate.looks_like_a_path() {
+        if !candidate.looks_like_a_path(roots.style) {
             return false;
         }
         // The host has not answered yet. The underline is the promise that it
@@ -5340,10 +5365,10 @@ impl TerminalView {
         // An absolute or `~`-rooted path was never measured from anywhere, so
         // naming a directory it was "looked for under" would send the user to
         // somewhere nothing was ever asked about.
-        let rooted = candidate.is_rooted();
+        let rooted = candidate.is_rooted(roots.style);
         let root = match rooted {
             true => None,
-            false => self.link_roots(cx).dirs.into_iter().next(),
+            false => roots.dirs.into_iter().next(),
         };
         let message = match root {
             Some(root) => t_fmt(
@@ -5596,10 +5621,12 @@ impl TerminalView {
     /// that exists in both is the near one.
     fn link_roots(&mut self, cx: &mut Context<Self>) -> super::search::LinkRoots {
         let local_home = self.host_id.is_local();
+        let style = self.link_path_style();
         let Some(cwd) = self.effective_host_cwd() else {
             return super::search::LinkRoots {
                 dirs: Vec::new(),
                 local_home,
+                style,
             };
         };
         self.request_link_repo_root(&cwd, cx);
@@ -5610,7 +5637,17 @@ impl TerminalView {
         {
             dirs.push(root.clone());
         }
-        super::search::LinkRoots { dirs, local_home }
+        super::search::LinkRoots {
+            dirs,
+            local_home,
+            style,
+        }
+    }
+
+    /// Which path dialect this pane's output is written in — see
+    /// [`link_path_style`].
+    fn link_path_style(&self) -> super::search::PathStyle {
+        link_path_style(self.paths_are_local(), self.effective_host_cwd().as_deref())
     }
 
     fn request_link_repo_root(&mut self, cwd: &std::path::Path, cx: &mut Context<Self>) {
@@ -7285,7 +7322,7 @@ mod tests {
     use super::{
         COMPLETION_MENU_MAX_W, LoopbackPlan, RawInput, SelectEndCopy, Typeahead, WheelRoute,
         clipboard_paste_text, compose_notification_title, cwd_is_on_host, display_width,
-        is_typeahead_interrupt, loopback_plan, observe_typeahead_for_owner,
+        is_typeahead_interrupt, link_path_style, loopback_plan, observe_typeahead_for_owner,
     };
     use super::{SCROLL_ANIM_FRAME, scroll_anim_step};
     use super::{
@@ -8812,6 +8849,39 @@ mod tests {
         assert!(!cwd_is_on_host(false, false));
     }
 
+    /// Which machine's spelling a pane's paths are read in. Ungated on
+    /// purpose: the bug this settles was a Windows-only one that hid behind a
+    /// `#[cfg(unix)]` on the test that covered it.
+    #[test]
+    fn a_panes_paths_are_read_in_its_own_hosts_spelling() {
+        use super::super::search::PathStyle;
+        use std::path::Path;
+
+        assert_eq!(
+            link_path_style(true, Some(Path::new("/home/u/proj"))),
+            PathStyle::NATIVE,
+            "a pane on this machine reads its own output this OS's way, \
+             whatever its shell spells the cwd like"
+        );
+        assert_eq!(
+            link_path_style(false, Some(Path::new("/home/u/proj"))),
+            PathStyle::Posix,
+            "an SSH host, a remote workspace or a WSL distro reporting a \
+             /-rooted cwd is a POSIX one on every client"
+        );
+        assert_eq!(
+            link_path_style(false, Some(Path::new(r"C:\Users\u\proj"))),
+            PathStyle::Windows,
+            "and a remote Windows host is not"
+        );
+        assert_eq!(
+            link_path_style(false, None),
+            PathStyle::Posix,
+            "a remote pane that has not said where it is still has no local \
+             drive its paths could hang off"
+        );
+    }
+
     #[test]
     fn a_panes_host_is_its_workspaces_machine() {
         use crate::core::session::{RemoteTarget, WorkspaceId};
@@ -9500,7 +9570,7 @@ mod gpui_tests {
                     LinkAt::Unresolved { candidate, pending } => {
                         assert_eq!(candidate.path, "scratchpad/gone.md");
                         assert!(
-                            candidate.looks_like_a_path(),
+                            candidate.looks_like_a_path(view.link_path_style()),
                             "so the click reports it instead of staying silent"
                         );
                         assert!(!pending, "a local pane answers on the spot");

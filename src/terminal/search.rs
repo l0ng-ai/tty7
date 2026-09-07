@@ -727,6 +727,97 @@ pub(super) fn local_probe(path: &Path, require_file: bool) -> Probe {
     }
 }
 
+/// Which language a pane's paths are written in.
+///
+/// The machine tty7 runs on and the machine a pane's paths live on need not
+/// agree, and `std::path` only ever speaks the first one's dialect. On a
+/// Windows client that is the whole difference between a link and nothing: a
+/// leading `/` is not absolute to `Path` there, so `/etc/hosts` printed by a
+/// Linux pane used to be measured from that pane's directory instead of
+/// standing alone, and a relative `src/lib.rs` was joined onto it with a
+/// backslash the far side has never heard of.
+///
+/// The two arms are the two dialects, not the two operating systems: a WSL
+/// distro and an SSH host both speak [`PathStyle::Posix`] whatever the client
+/// is, and a pane on this machine speaks [`PathStyle::NATIVE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PathStyle {
+    /// `/`-rooted and `/`-joined. Everything a Unix host, a WSL distro or a
+    /// Git-Bash-style shell prints.
+    Posix,
+    /// Rooted by a drive letter or a UNC share, joined with `\`.
+    Windows,
+}
+
+impl Default for PathStyle {
+    fn default() -> Self {
+        Self::NATIVE
+    }
+}
+
+impl PathStyle {
+    /// The dialect the machine tty7 is running on speaks.
+    pub const NATIVE: PathStyle = match cfg!(windows) {
+        true => PathStyle::Windows,
+        false => PathStyle::Posix,
+    };
+
+    /// The dialect a host that called `sample` one of its own directories
+    /// speaks. A `/`-rooted directory is a POSIX one; a drive letter or a UNC
+    /// share is not.
+    ///
+    /// This is inference, and it is the only signal there is — a host reports
+    /// its cwd and its home over the control link and never its operating
+    /// system. It is a sound one in the direction that matters: nothing but a
+    /// POSIX host reports a `/`-rooted cwd.
+    pub fn of_dir(sample: &Path) -> Self {
+        match sample.to_string_lossy().starts_with('/') {
+            true => PathStyle::Posix,
+            false => PathStyle::Windows,
+        }
+    }
+
+    /// Whether a token says for itself which filesystem root it hangs off.
+    ///
+    /// Deliberately textual rather than [`Path::is_absolute`], which answers
+    /// for *this* machine: the same string has to be read the pane's way on
+    /// every client, or a link works on a Mac and not on the Windows box next
+    /// to it.
+    pub fn is_absolute(self, path: &str) -> bool {
+        match self {
+            PathStyle::Posix => path.starts_with('/'),
+            // A UNC share, or a drive letter with a separator behind it.
+            // `C:foo` is drive-*relative* and deliberately not included, which
+            // is what `Path::is_absolute` says on Windows too.
+            PathStyle::Windows => {
+                if path.starts_with("\\\\") {
+                    return true;
+                }
+                let mut chars = path.chars();
+                chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+                    && chars.next() == Some(':')
+                    && matches!(chars.next(), Some('\\' | '/'))
+            }
+        }
+    }
+
+    /// `rel` measured from `root`, spelled the way the pane's host spells it.
+    ///
+    /// The POSIX arm joins textually because `Path::join` would reach for this
+    /// machine's separator: on Windows it turns `/home/u` and `src/lib.rs`
+    /// into `/home/u\src/lib.rs`, which the Linux box on the other end of the
+    /// probe cannot stat.
+    pub fn join(self, root: &Path, rel: &str) -> PathBuf {
+        match self {
+            PathStyle::Posix => PathBuf::from(format!(
+                "{}/{rel}",
+                root.to_string_lossy().trim_end_matches('/')
+            )),
+            PathStyle::Windows => root.join(rel),
+        }
+    }
+}
+
 /// Where a relative path printed by a pane is measured from.
 ///
 /// `local_home` is the part that is easy to miss. `~` has to become a real
@@ -743,15 +834,18 @@ pub(super) struct LinkRoots {
     /// Whether this machine's `$HOME` may stand in for a `~` the roots cannot
     /// explain.
     pub local_home: bool,
+    /// How the pane's host spells the paths it prints.
+    pub style: PathStyle,
 }
 
 impl LinkRoots {
     /// Roots on the machine tty7 is running on, where `$HOME` means what it
-    /// says.
+    /// says and paths are spelled this OS's way.
     pub fn local(dirs: Vec<PathBuf>) -> Self {
         Self {
             dirs,
             local_home: true,
+            style: PathStyle::NATIVE,
         }
     }
 
@@ -841,18 +935,18 @@ impl FileCandidate {
     /// Every path this token could mean, best guess first: absolute paths
     /// stand alone, relative ones are joined onto each root in turn.
     pub fn paths(&self, roots: &LinkRoots) -> Vec<PathBuf> {
-        let Some(expanded) = expand_home(&self.path, roots.cwd(), roots.local_home) else {
+        let Some(expanded) = expand_home(&self.path, roots) else {
             return Vec::new();
         };
-        if expanded.as_os_str().is_empty() {
+        if expanded.is_empty() {
             return Vec::new();
         }
-        if expanded.is_absolute() {
-            return vec![expanded];
+        if roots.style.is_absolute(&expanded) {
+            return vec![PathBuf::from(expanded)];
         }
         let mut out: Vec<PathBuf> = Vec::new();
         for root in &roots.dirs {
-            let joined = root.join(&expanded);
+            let joined = roots.style.join(root, &expanded);
             if !out.contains(&joined) {
                 out.push(joined);
             }
@@ -864,17 +958,26 @@ impl FileCandidate {
     /// measured from anywhere. [`Self::paths`] ignores the roots entirely for
     /// these, so a report about one must not name a directory as the place it
     /// was looked for.
-    pub fn is_rooted(&self) -> bool {
-        self.path.starts_with('~') || Path::new(&self.path).is_absolute()
+    ///
+    /// Takes the pane's own dialect for the same reason `paths` does: on a
+    /// Windows client `/etc/hosts` printed by a Linux pane is rooted and
+    /// `/etc/hosts` printed by a `cmd.exe` pane is not, and `Path` alone
+    /// cannot tell those apart.
+    pub fn is_rooted(&self, style: PathStyle) -> bool {
+        self.path.starts_with('~') || style.is_absolute(&self.path)
     }
 
     /// Whether the token is written enough like a path to be worth telling the
     /// user about when nothing answers for it. A bare word is not — every
     /// modifier-click on ordinary output would raise a notification saying so.
-    pub fn looks_like_a_path(&self) -> bool {
+    ///
+    /// A backslash counts only where it separates directories. In a POSIX
+    /// pane it is an escape or an ordinary filename character, so `foo\ bar`
+    /// there is a word, not a path.
+    pub fn looks_like_a_path(&self, style: PathStyle) -> bool {
         self.path.starts_with('~')
             || self.path.contains('/')
-            || (cfg!(windows) && self.path.contains('\\'))
+            || (style == PathStyle::Windows && self.path.contains('\\'))
     }
 }
 
@@ -1054,14 +1157,29 @@ fn strip_numeric_suffix(token: &str) -> Option<(&str, u32)> {
     Some((prefix, value))
 }
 
-fn expand_home(path: &str, cwd: Option<&Path>, local_home: bool) -> Option<PathBuf> {
+/// The token with a leading `~` turned into a real directory, still spelled
+/// the pane's way — a string rather than a `PathBuf`, because deciding what is
+/// absolute and how to join is the [`PathStyle`]'s job from here on and
+/// `Path` would answer for the wrong machine.
+fn expand_home(path: &str, roots: &LinkRoots) -> Option<String> {
+    let home = || {
+        home_dir(roots.cwd(), roots.local_home, roots.style)
+            .map(|home| home.to_string_lossy().into_owned())
+    };
     if path == "~" {
-        return home_dir(cwd, local_home);
+        return home();
     }
-    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
-        return home_dir(cwd, local_home).map(|home| home.join(rest));
+    let rest = match roots.style {
+        PathStyle::Posix => path.strip_prefix("~/"),
+        PathStyle::Windows => path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")),
+    };
+    if let Some(rest) = rest {
+        return home().map(|home| match roots.style {
+            PathStyle::Posix => format!("{}/{rest}", home.trim_end_matches('/')),
+            PathStyle::Windows => Path::new(&home).join(rest).to_string_lossy().into_owned(),
+        });
     }
-    Some(PathBuf::from(path))
+    Some(path.to_string())
 }
 
 /// The home `~` stands for, read out of the cwd where it can be and out of the
@@ -1072,8 +1190,8 @@ fn expand_home(path: &str, cwd: Option<&Path>, local_home: bool) -> Option<PathB
 /// box says nothing about that box's home, and turning `~/.zshrc` into
 /// `/Users/me/.zshrc` and asking the far side about it is how a link ends up
 /// pointing at a file nobody meant.
-fn home_dir(cwd: Option<&Path>, local_home: bool) -> Option<PathBuf> {
-    if let Some(home) = cwd.and_then(home_from_cwd) {
+fn home_dir(cwd: Option<&Path>, local_home: bool, style: PathStyle) -> Option<PathBuf> {
+    if let Some(home) = cwd.and_then(|cwd| home_from_cwd(cwd, style)) {
         return Some(home);
     }
     if !local_home {
@@ -1085,25 +1203,26 @@ fn home_dir(cwd: Option<&Path>, local_home: bool) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-#[cfg(unix)]
-fn home_from_cwd(cwd: &Path) -> Option<PathBuf> {
-    let mut components = cwd.components();
-    let root = components.next()?;
-    let base = components.next()?;
-    let user = components.next()?;
-    let base = base.as_os_str().to_str()?;
-    matches!(base, "Users" | "home").then(|| {
-        let mut home = PathBuf::new();
-        home.push(root.as_os_str());
-        home.push(base);
-        home.push(user.as_os_str());
-        home
-    })
-}
-
-#[cfg(not(unix))]
-fn home_from_cwd(_cwd: &Path) -> Option<PathBuf> {
-    None
+/// The `/home/<user>` or `/Users/<user>` a POSIX cwd sits under.
+///
+/// Read off the string rather than `Path::components`, and keyed off the
+/// pane's dialect rather than `cfg!(unix)`. The old spelling was gated to Unix
+/// clients, which meant a Windows tty7 could not say what `~` meant in *any*
+/// pane it was looking at — `~/.zshrc` printed by a Linux host resolved on a
+/// Mac and silently did not on a Windows box beside it.
+///
+/// A Windows-dialect cwd still gets no answer: nothing about `D:\Users\team`
+/// says whose home it is, and the environment fallback in [`home_dir`] is both
+/// available and right for the panes that spell paths that way.
+fn home_from_cwd(cwd: &Path, style: PathStyle) -> Option<PathBuf> {
+    if style != PathStyle::Posix {
+        return None;
+    }
+    let cwd = cwd.to_str()?;
+    let mut parts = cwd.strip_prefix('/')?.split('/').filter(|p| !p.is_empty());
+    let base = parts.next()?;
+    let user = parts.next()?;
+    matches!(base, "Users" | "home").then(|| PathBuf::from(format!("/{base}/{user}")))
 }
 
 fn trim_trailing_punct(token: &mut String) {
@@ -1682,13 +1801,24 @@ mod tests {
     fn a_path_shaped_token_is_kept_apart_from_a_bare_word() {
         let path_shaped = file_candidate_at("wrote scratchpad/notes.md now", 8).expect("candidate");
         assert_eq!(path_shaped.path, "scratchpad/notes.md");
-        assert!(path_shaped.looks_like_a_path());
+        assert!(path_shaped.looks_like_a_path(PathStyle::NATIVE));
 
         let word = file_candidate_at("wrote notes now", 8).expect("candidate");
         assert_eq!(word.path, "notes");
         assert!(
-            !word.looks_like_a_path(),
+            !word.looks_like_a_path(PathStyle::NATIVE),
             "a bare word must not raise a notification on every modifier-click"
+        );
+
+        let escaped = file_candidate_at(r"wrote a\b now", 6).expect("candidate");
+        assert_eq!(escaped.path, r"a\b");
+        assert!(
+            escaped.looks_like_a_path(PathStyle::Windows),
+            "a backslash separates directories in a Windows pane"
+        );
+        assert!(
+            !escaped.looks_like_a_path(PathStyle::Posix),
+            "and escapes a space in a POSIX one, whatever this client runs"
         );
     }
 
@@ -1721,22 +1851,218 @@ mod tests {
     /// `is_rooted` decides whether a report about an unresolved token may name
     /// a directory it was "looked for under", so it has to agree with
     /// [`FileCandidate::paths`] about when the roots are consulted at all.
-    /// Both ask `is_absolute`, and on Windows a leading `/` does not make a
-    /// path that — which is why this only claims to hold where it does.
+    ///
+    /// Both used to ask `Path::is_absolute`, which answers for the machine
+    /// tty7 runs on rather than the one the pane's paths are on — so this only
+    /// held on Unix and was gated to it. Both now ask the pane's own dialect,
+    /// and the agreement holds on every client.
     #[test]
-    #[cfg(unix)]
     fn a_rooted_candidate_is_told_apart_from_one_measured_from_a_root() {
+        let posix_roots = LinkRoots {
+            dirs: vec![PathBuf::from("/home/u/proj")],
+            local_home: false,
+            style: PathStyle::Posix,
+        };
         for line in ["open /etc/hosts now", "open ~/.zshrc now"] {
+            let candidate = file_candidate_at(line, 6).expect("candidate");
             assert!(
-                file_candidate_at(line, 6).expect("candidate").is_rooted(),
+                candidate.is_rooted(PathStyle::Posix),
+                "{line} says for itself where it starts"
+            );
+            let paths = candidate.paths(&posix_roots);
+            assert!(
+                !paths.iter().any(|p| p.starts_with("/home/u/proj")),
+                "{line} was not measured from the pane's directory: {paths:?}"
+            );
+        }
+        for line in [r"open C:\Windows\win.ini now", "open ~/.gitconfig now"] {
+            assert!(
+                file_candidate_at(line, 6)
+                    .expect("candidate")
+                    .is_rooted(PathStyle::Windows),
                 "{line} says for itself where it starts"
             );
         }
+        for style in [PathStyle::Posix, PathStyle::Windows] {
+            assert!(
+                !file_candidate_at("see src/lib.rs here", 5)
+                    .expect("candidate")
+                    .is_rooted(style),
+                "a relative path is only ever found by measuring from somewhere"
+            );
+        }
+    }
+
+    /// The bug this whole [`PathStyle`] exists for: a Windows tty7 looking at
+    /// a Linux pane — a remote workspace, a native-SSH pane, or a WSL distro
+    /// reached as a host — used to read `/etc/hosts` as a *relative* path,
+    /// because `Path::is_absolute` speaks for the client and a leading `/` is
+    /// not absolute on Windows. The pane's paths were then measured from its
+    /// own directory and the far side was asked about something it never
+    /// printed, so nothing ever underlined.
+    #[test]
+    fn a_posix_pane_roots_its_own_paths_on_every_client() {
+        let roots = LinkRoots {
+            dirs: vec![PathBuf::from("/home/u/proj")],
+            local_home: false,
+            style: PathStyle::Posix,
+        };
+        let candidate = file_candidate_at("open /etc/hosts now", 6).expect("candidate");
+        assert_eq!(
+            candidate.paths(&roots),
+            vec![PathBuf::from("/etc/hosts")],
+            "the pane said where the path starts; the roots have nothing to add"
+        );
+
+        // And with no cwd reported at all there is still exactly one thing it
+        // can mean. This is the case that failed outright: no roots meant no
+        // paths, so the host was never even asked.
+        let roots = LinkRoots {
+            dirs: Vec::new(),
+            local_home: false,
+            style: PathStyle::Posix,
+        };
+        assert_eq!(candidate.paths(&roots), vec![PathBuf::from("/etc/hosts")]);
+    }
+
+    /// A relative path is the other half, and it fails more quietly: the join
+    /// used to reach for the *client's* separator, so a Windows tty7 asked a
+    /// Linux host about `/home/u/proj\src/lib.rs`.
+    #[test]
+    fn a_posix_pane_joins_a_relative_path_with_its_own_separator() {
+        let roots = LinkRoots {
+            dirs: vec![PathBuf::from("/home/u/proj"), PathBuf::from("/home/u")],
+            local_home: false,
+            style: PathStyle::Posix,
+        };
+        let paths = file_candidate_at("see src/lib.rs here", 5)
+            .expect("candidate")
+            .paths(&roots);
+        assert_eq!(
+            paths
+                .iter()
+                .map(|p| p.to_string_lossy())
+                .collect::<Vec<_>>(),
+            vec!["/home/u/proj/src/lib.rs", "/home/u/src/lib.rs"],
+            "the string the far side is asked about has to be one it can stat"
+        );
+    }
+
+    /// `~` in a POSIX pane is read out of the pane's own cwd — on every
+    /// client. The rule was gated to Unix ones, so a Windows tty7 could not
+    /// resolve `~/.zshrc` in any pane it was looking at.
+    #[test]
+    fn a_posix_pane_reads_a_tilde_out_of_its_own_cwd() {
+        let roots = LinkRoots {
+            dirs: vec![PathBuf::from("/home/u/proj")],
+            local_home: false,
+            style: PathStyle::Posix,
+        };
+        let paths = file_candidate_at("open ~/.zshrc now", 6)
+            .expect("candidate")
+            .paths(&roots);
+        assert_eq!(
+            paths
+                .iter()
+                .map(|p| p.to_string_lossy())
+                .collect::<Vec<_>>(),
+            vec!["/home/u/.zshrc"]
+        );
+
+        let no_home = LinkRoots {
+            dirs: vec![PathBuf::from("/srv/app")],
+            local_home: false,
+            style: PathStyle::Posix,
+        };
         assert!(
-            !file_candidate_at("see src/lib.rs here", 5)
+            file_candidate_at("open ~/.zshrc now", 6)
                 .expect("candidate")
-                .is_rooted(),
-            "a relative path is only ever found by measuring from somewhere"
+                .paths(&no_home)
+                .is_empty(),
+            "a cwd that reveals no home may not borrow this machine's (#568)"
+        );
+    }
+
+    /// The deliberate other half: a pane *on this machine* keeps this OS's
+    /// reading of its own output. `/etc` in a `cmd.exe` pane sitting on `C:`
+    /// means `C:\etc`, the way `cd /etc` does there — so it is measured from
+    /// the pane's root and not turned into a link to a file Windows has not
+    /// got. Pinned because the temptation is to make every `/`-rooted token
+    /// stand alone, and that would underline `/etc/hosts` in a PowerShell pane
+    /// with nothing behind it.
+    #[test]
+    fn a_local_pane_reads_its_own_output_the_way_its_own_os_does() {
+        let candidate = file_candidate_at("open /etc/hosts now", 6).expect("candidate");
+        assert_eq!(
+            candidate.is_rooted(PathStyle::NATIVE),
+            cfg!(unix),
+            "a leading slash roots a path on Unix and names a drive-relative \
+             directory on Windows"
+        );
+
+        let roots = LinkRoots::local(vec![PathBuf::from("/w")]);
+        assert_eq!(
+            roots.style,
+            PathStyle::NATIVE,
+            "a pane on this machine spells paths this machine's way"
+        );
+        assert_eq!(
+            candidate.paths(&roots),
+            vec![PathBuf::from("/etc/hosts")],
+            "which comes to the same thing under a root with no drive letter"
+        );
+    }
+
+    /// The Windows half of the rule above, spelled out where it can be: the
+    /// drive the pane is on is what a leading `/` there is measured from.
+    /// Cannot be asserted on a Unix client, where `PathBuf` has no notion of a
+    /// drive at all — the *rule* is pinned ungated above, this is the reading.
+    #[test]
+    #[cfg(windows)]
+    fn a_local_windows_pane_measures_a_leading_slash_from_its_own_drive() {
+        let roots = LinkRoots::local(vec![PathBuf::from(r"C:\proj")]);
+        assert_eq!(
+            file_candidate_at("open /etc/hosts now", 6)
+                .expect("candidate")
+                .paths(&roots),
+            vec![PathBuf::from(r"C:\etc\hosts")],
+            "`/etc` in a cmd.exe pane on C: is C:\\etc, the way `cd /etc` is"
+        );
+    }
+
+    #[test]
+    fn a_windows_pane_roots_a_drive_letter_and_a_share() {
+        let style = PathStyle::Windows;
+        for rooted in [r"C:\Windows", "C:/Windows", r"\\server\share\x"] {
+            assert!(style.is_absolute(rooted), "{rooted} names its own root");
+        }
+        for measured in ["/etc/hosts", "C:notes.txt", r"src\lib.rs", "", "C:"] {
+            assert!(
+                !style.is_absolute(measured),
+                "{measured} has to be measured from somewhere"
+            );
+        }
+        for measured in [r"C:\Windows", r"src\lib.rs", ""] {
+            assert!(
+                !PathStyle::Posix.is_absolute(measured),
+                "{measured} is not a POSIX root"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hosts_dialect_is_read_off_the_directory_it_reports() {
+        assert_eq!(
+            PathStyle::of_dir(Path::new("/home/u/proj")),
+            PathStyle::Posix
+        );
+        assert_eq!(
+            PathStyle::of_dir(Path::new(r"C:\Users\u\proj")),
+            PathStyle::Windows
+        );
+        assert_eq!(
+            PathStyle::of_dir(Path::new(r"\\wsl$\Ubuntu\home\u")),
+            PathStyle::Windows
         );
     }
 
