@@ -974,6 +974,16 @@ mod tests {
 /// here — a missing global, a theme token, a slice through the middle of a
 /// character — goes wrong during layout and paint, so these arm the render
 /// probe and insist something was actually drawn.
+///
+/// Still unix-only, and for a reason worth naming rather than a harness
+/// one: on Windows `git rev-parse --show-toplevel` (Git for Windows is
+/// MSYS2) prints `C:/Users/—` with forward slashes, and that string is
+/// what `tty7_core::core::git::probe` stores as `RepoSnapshot::root`.
+/// Every comparison here — and in the SCM cache — is a plain `PathBuf`
+/// equality against a path the OS spelled `C:\Users\`, so the two never
+/// match and the panel never settles on the directory it is already
+/// showing. Taking the gate off needs those roots compared normalised,
+/// the way `ui::path_display` already normalises for display.
 #[cfg(all(test, unix))]
 mod detail_gpui_tests {
     use super::*;
@@ -1043,7 +1053,7 @@ mod detail_gpui_tests {
     ) -> (
         Entity<Tty7App>,
         VisualTestContext,
-        std::os::unix::net::UnixStream,
+        crate::daemon::transport::Stream,
     ) {
         let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
         DaemonMsg::Cwd(root.to_path_buf())

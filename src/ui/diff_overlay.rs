@@ -2191,7 +2191,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod overlay_gpui_tests {
     use super::*;
     use crate::ui::app::test_window;
@@ -2469,8 +2469,14 @@ mod overlay_gpui_tests {
 /// terminal, an editor, a worktree command — and the cached branch is a branch
 /// the repository has left. That is what the stale entry below stands for.
 ///
-/// Unix-gated like every other window harness in this tree: `harness_with_tabs`
-/// hands back a `std::os::unix::net::UnixStream` for the pane.
+/// Unix-only, and not for the harness: on Windows the repository root git
+/// reports (`C:/Users/—`, forward slashes, straight out of MSYS2 git) is
+/// not the root the seeded cache below holds, so `scm_epoch` never agrees
+/// with the landing snapshot and the overlay re-probes on every frame —
+/// `load` reaches `Ready` and `loading` goes straight back to `true`,
+/// which is the exact spin this test exists to catch. That is a real
+/// divergence in the SCM layer's path comparisons rather than a test
+/// artefact, so the gate stays until those roots are compared normalised.
 #[cfg(all(test, unix))]
 mod render_idle_gpui_tests {
     use super::*;

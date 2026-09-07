@@ -2888,7 +2888,7 @@ mod tests {
 /// `default_global`, which fires the global observers whether or not anything
 /// changed, and it is called every frame. A watcher that notified on every one
 /// of those would request a frame from inside a frame and never stop.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod render_idle_gpui_tests {
     use super::*;
     use crate::daemon::protocol::DaemonMsg;
@@ -2927,7 +2927,7 @@ mod render_idle_gpui_tests {
     ) -> (
         Entity<Tty7App>,
         VisualTestContext,
-        std::os::unix::net::UnixStream,
+        crate::daemon::transport::Stream,
     ) {
         let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
         DaemonMsg::Cwd(root.to_path_buf())
@@ -2974,6 +2974,12 @@ mod render_idle_gpui_tests {
         render_probe::draws()
     }
 
+    /// The only test in this module that waits on `repo.root`, and so the
+    /// only one Windows cannot run: git spells that root `C:/Users/—` and
+    /// the pane's own cwd is spelled `C:\Users\`, so the equality below
+    /// never holds there. Its sibling keys off the pane's cwd instead, and
+    /// runs everywhere.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_settled_source_control_panel_reaches_render_idle(cx: &mut TestAppContext) {
         let _serial = serial();

@@ -3687,7 +3687,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod gpui_tests {
     use gpui::{Modifiers, TestAppContext};
 

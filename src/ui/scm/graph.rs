@@ -2186,11 +2186,7 @@ mod tests {
 /// way to know is to settle the window and count frames. Same shape as the file
 /// tree's own idle tests, including the serial lock: the render probe is
 /// thread-local and two of these at once would count each other's frames.
-///
-/// `unix` for the same reason `panel.rs`, `detail.rs` and `file_tree.rs` gate
-/// theirs: a real pane means `test_window::harness_with_pane`, and that harness
-/// hands back a `std::os::unix::net::UnixStream`.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod render_idle_gpui_tests {
     use super::*;
     use crate::ui::app::{render_probe, test_window};

@@ -3686,7 +3686,6 @@ mod tests {
     /// the window shows one, and the one it could not put up must not come out
     /// of a `Full` diff as `TabClose` — that op deleted from the machine exactly
     /// the tabs a restart had failed to bring back, panes and all (#672).
-    #[cfg(unix)]
     #[gpui::test]
     fn the_next_sync_leaves_a_tab_the_rebuild_could_not_put_up_on_the_machine(
         cx: &mut gpui::TestAppContext,
@@ -3775,7 +3774,6 @@ mod tests {
     /// straight after clears the queue, so by the time a test can look the
     /// ops are gone either way — while `informed` outliving the arrival is
     /// both durable and the thing that made them possible.
-    #[cfg(unix)]
     #[gpui::test]
     fn arriving_at_a_workspace_does_not_prune_what_is_already_in_it(cx: &mut gpui::TestAppContext) {
         let (app, mut vcx, _pane_stream) = crate::ui::app::test_window::harness_with_pane(cx);
