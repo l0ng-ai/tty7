@@ -714,16 +714,19 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 /// caller keeps pasted text away from this path entirely.
 ///
 /// The length bound is a cost ceiling, not a correctness one, and it is a
-/// policy choice rather than a discontinuity in the data. A paste lands in one
+/// policy dial rather than a discontinuity in the data. A paste lands in one
 /// go; raw bytes make the shell's line editor redraw as it consumes them, so
-/// the cost is linear in length from the very first byte — measured on a pty it
-/// rises smoothly, with no knee to put a bound at. What 512 buys is a ceiling
-/// on how much submit latency that can add: the slowest configuration measured
-/// (zsh with zsh-syntax-highlighting and zsh-autosuggestions, both of which
-/// re-run per keystroke) costs about a quarter of a millisecond per byte, so a
-/// hand-typed command pays single-digit-to-tens of milliseconds and a pasted-in
-/// wall of text keeps the flat cost the paste framing exists to give it. See
-/// the PR for #660 for the measured curve.
+/// the added latency is linear in length from the very first byte — measured on
+/// a pty it rises perfectly smoothly, with no knee to hang a bound on.
+///
+/// What 512 buys is a ceiling on that latency. The worst configuration measured
+/// is zsh with zsh-syntax-highlighting and zsh-autosuggestions, which both
+/// re-run per keystroke: ~0.26 ms per byte, so +15 ms on a typical 60-byte
+/// command and +126 ms at the bound. Bare zsh is ~0.012 ms per byte (+6 ms at
+/// the bound), bash is free at every length, and fish — the shell #660 is about
+/// — shows no penalty this harness can resolve. Halving the bound would halve
+/// the worst case; the number is a judgement about how much latency a long
+/// typed line may pay, not something the curve picks out.
 fn types_cleanly(line: &str) -> bool {
     line.len() <= 512 && !line.chars().any(char::is_control)
 }
