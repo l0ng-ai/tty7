@@ -172,7 +172,7 @@ windows-sys = { version = "0.61", features = [
 # The standalone updater extracts only Windows release ZIPs. Reuse the async
 # reader already present in Cargo.lock and enable only the Deflate codec emitted
 # by PowerShell's Compress-Archive.
-async_zip = { version = "0.0.18", default-features = false, features = ["deflate"], optional = true }
+async_zip = { version = "0.0.19", default-features = false, features = ["deflate"], optional = true }
 
 # COM for toast branding (`core::aumid`): IShellLinkW + IPropertyStore stamp
 # System.AppUserModel.ID onto the Start Menu shortcut, which Windows requires
