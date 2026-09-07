@@ -1468,6 +1468,22 @@ impl Tty7App {
         crate::ui::windows::refresh_menu(cx);
     }
 
+    /// Opens a second window, on a workspace of its own.
+    ///
+    /// A window on *this* workspace is not the other reading of "new window";
+    /// it is a thing the app cannot hold. `WindowRegistry` is keyed by
+    /// workspace — `window_for`, `app_for`, `unregister` and `rebind` all
+    /// address a window by the workspace it shows — and `windows::open`
+    /// answers a workspace that already has a window by activating it. Asking
+    /// for the current one here would raise the window you are already in.
+    ///
+    /// So this is the same call the switcher makes for "Open in New Window",
+    /// with no workspace named: a fresh one, which is also what a new window
+    /// holds everywhere else it is offered.
+    pub(crate) fn new_window(&self, cx: &mut App) {
+        crate::ui::windows::open(cx, None);
+    }
+
     pub(crate) fn teardown_workspace_forwards(&self, cx: &gpui::App) {
         let Some(route) = self
             .tabs
@@ -4892,6 +4908,7 @@ impl Tty7App {
         match kind {
             NewTab => self.new_tab(window, cx),
             NewWorkspace => self.open_workspace_form(window, cx),
+            NewWindow => self.new_window(cx),
             OpenWorkspacePicker => self.open_switcher(window, cx),
             StopWorkspace => self.stop_workspace(self.workspace, window, cx),
             DeleteWorkspace => self.delete_workspace(self.workspace, window, cx),
@@ -7390,6 +7407,9 @@ impl Render for Tty7App {
                 }))
                 .on_action(cx.listener(|this, _: &NewWorkspace, window, cx| {
                     this.open_workspace_form(window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &NewWindow, _window, cx| {
+                    this.new_window(cx);
                 }))
                 .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                     if !this.editor_close_active_if_focused(window, cx) {
@@ -10242,5 +10262,87 @@ mod managed_forward_gpui_tests {
             );
             assert!(app.loopback_panel.mf_error.is_some());
         });
+    }
+}
+
+#[cfg(test)]
+mod new_window_action_tests {
+    use crate::core::actions::NewWindow;
+    use crate::core::config::Config;
+    use crate::core::session::Session;
+    use crate::ui::app::Tty7App;
+    use crate::ui::windows::WindowRegistry;
+    use gpui::{AppContext as _, TestAppContext, VisualTestContext};
+
+    /// `NewWindow` has to open a window, not merely exist.
+    ///
+    /// Everything else about the action is a table entry — the `actions!`
+    /// row, the keymap slot, the palette command — and every one of those can
+    /// be there while the action reaches nothing. This drives the real
+    /// dispatch path and then asks the registry, so the assertion is "a second
+    /// window is open, on a workspace of its own, and the first one is still
+    /// here": the same `windows::open` the switcher calls for "Open in New
+    /// Window", with no workspace named.
+    #[gpui::test]
+    fn dispatching_new_window_opens_a_second_window_beside_the_first(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+            WindowRegistry::init(cx);
+        });
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty7App::with_session(None, Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view()
+                    .clone()
+                    .downcast::<Tty7App>()
+                    .ok()
+                    .expect("window root wraps a Tty7App")
+            })
+            .unwrap();
+        // Registered the way an opened window registers itself; without it the
+        // registry cannot tell the two windows apart afterwards.
+        let handle = window.into();
+        let weak = app.downgrade();
+        app.update(cx, |app, cx| {
+            WindowRegistry::register(cx, app.workspace, handle, weak);
+        });
+
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.background_executor.run_until_parked();
+        let first = app.update(&mut vcx, |app, _| app.workspace);
+        assert_eq!(
+            vcx.update(|_, cx| WindowRegistry::count(cx)),
+            1,
+            "the harness starts with exactly the one window"
+        );
+
+        vcx.dispatch_action(NewWindow);
+        vcx.background_executor.run_until_parked();
+
+        let open = vcx.update(|_, cx| WindowRegistry::open_windows(cx));
+        assert_eq!(
+            open.len(),
+            2,
+            "NewWindow has to reach windows::open; it opened {} window(s)",
+            open.len()
+        );
+        assert!(
+            open.iter().any(|(id, _)| *id == first),
+            "the window the action was fired from must survive it"
+        );
+        // The registry is keyed by workspace, so a second window on the
+        // current one is not a thing it could tell apart from the first.
+        assert!(
+            open.iter().any(|(id, _)| *id != first),
+            "the new window belongs on a workspace of its own"
+        );
     }
 }

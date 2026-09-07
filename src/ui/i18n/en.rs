@@ -1403,6 +1403,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdGroupAgents => "Agents",
         L10nKey::CmdGroupApplication => "Application",
         L10nKey::CmdNewTab => "New Tab",
+        L10nKey::CmdNewWindow => "New Window",
         L10nKey::CmdNewWorktreeTab => "New Worktree Tab…",
         L10nKey::CmdNewWorktreeTabSubtitle => "isolated checkout on a fresh branch",
         L10nKey::CmdRenameTab => "Rename Tab…",

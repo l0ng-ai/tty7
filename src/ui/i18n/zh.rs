@@ -1321,6 +1321,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdGroupAgents => "Agents",
         L10nKey::CmdGroupApplication => "应用",
         L10nKey::CmdNewTab => "新标签页",
+        L10nKey::CmdNewWindow => "新建窗口",
         L10nKey::CmdNewWorktreeTab => "新建 worktree 标签页…",
         L10nKey::CmdNewWorktreeTabSubtitle => "在全新分支上独立检出",
         L10nKey::CmdRenameTab => "重命名标签页…",

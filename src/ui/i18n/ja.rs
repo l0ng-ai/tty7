@@ -1460,6 +1460,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdGroupAgents => "エージェント",
         L10nKey::CmdGroupApplication => "アプリケーション",
         L10nKey::CmdNewTab => "新しいタブ",
+        L10nKey::CmdNewWindow => "新しいウィンドウ",
         L10nKey::CmdNewWorktreeTab => "新しいワークツリータブ…",
         L10nKey::CmdNewWorktreeTabSubtitle => "新しいブランチでの独立したチェックアウト",
         L10nKey::CmdRenameTab => "タブの名前を変更…",

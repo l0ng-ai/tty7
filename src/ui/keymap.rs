@@ -265,6 +265,16 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
     vec![
         ("NewTab", per_platform("secondary-t", "secondary-shift-t")),
         ("NewWorkspace", "secondary-shift-n"),
+        // Cmd+N is what "New Window" means on macOS, and nothing else here
+        // claims it. Off macOS both chords the convention offers are gone:
+        // Ctrl+N is a C0 byte the shell is owed, which
+        // `no_default_binding_sits_on_a_terminal_control_code` fails a build
+        // over, and Ctrl+Shift+N — where that same test says window actions
+        // belong — has been `NewWorkspace` for far longer than this action has
+        // existed. Minting an unguessable third chord would be worse than
+        // shipping unbound: the palette and the Keybindings page both carry
+        // this, so a key is one line of config away.
+        ("NewWindow", per_platform("secondary-n", "")),
         (
             "CloseActiveTab",
             per_platform("secondary-w", "secondary-shift-w"),
@@ -733,6 +743,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             CommandGroup::Application,
             t(L10nKey::AppMenuCommandPalette).to_string(),
         ),
+        "NewWindow" => (
+            CommandGroup::Application,
+            t(L10nKey::CmdNewWindow).to_string(),
+        ),
         "OpenSettings" => (
             CommandGroup::Application,
             t(L10nKey::CmdSettings).to_string(),
@@ -1036,6 +1050,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "DeleteWorkspace" => KeyBinding::new(keystroke, DeleteWorkspace, None),
         "RenameWorkspace" => KeyBinding::new(keystroke, RenameWorkspace, None),
         "ToggleSwitcher" => KeyBinding::new(keystroke, ToggleSwitcher, None),
+        "NewWindow" => KeyBinding::new(keystroke, NewWindow, None),
         "CloseActiveTab" => KeyBinding::new(keystroke, CloseActiveTab, None),
         "RenameTab" => KeyBinding::new(keystroke, RenameTab, None),
         "NewWorktreeTab" => KeyBinding::new(keystroke, NewWorktreeTab, None),
@@ -1217,6 +1232,7 @@ mod tests {
         // palette and the docs all say Zoom Pane.
         assert_eq!(action_entry("ToggleMaximizePane").1, "Zoom Pane");
         assert_eq!(action_entry("CloseActiveTab").1, "Close Pane / Tab");
+        assert_eq!(action_entry("NewWindow").1, "New Window");
         assert_eq!(action_entry("ClearScrollback").1, "Clear Scrollback");
         assert_eq!(action_entry("TogglePalette").1, "Command Palette…");
         assert_eq!(action_entry("ToggleSwitcher").1, "Switch Workspace…");
@@ -1228,6 +1244,57 @@ mod tests {
         assert_eq!(action_entry("SelectWorkspace7").0, CommandGroup::Workspaces);
         assert_eq!(action_entry("ToggleSftp").0, CommandGroup::Ssh);
         assert_eq!(action_entry("ForkAgentSessionUp").0, CommandGroup::Agents);
+    }
+
+    #[test]
+    fn new_window_ships_a_chord_only_where_one_is_free() {
+        let mut effective: Vec<(String, String)> = default_bindings()
+            .into_iter()
+            .map(|(a, k)| (a.to_string(), k.to_string()))
+            .collect();
+        let default = effective
+            .iter()
+            .find(|(action, _)| action == "NewWindow")
+            .map(|(_, key)| key.clone())
+            .expect("NewWindow has to be listed here or it cannot be bound at all");
+        assert_eq!(
+            default,
+            if cfg!(target_os = "macos") {
+                "secondary-n"
+            } else {
+                ""
+            },
+            "macOS gets Cmd+N; off macOS this ships unbound on purpose"
+        );
+
+        // Ask the keymap rather than the table. A default can look bound and
+        // dispatch nothing — gpui folds shift into the punctuation glyph, so
+        // `secondary-shift-]` reached no action at all off macOS (#750). An
+        // exact match is also the conflict check: any other action holding
+        // this chord would show up in the list.
+        if !default.is_empty() {
+            assert_eq!(
+                dispatched(&effective, &default, "Terminal"),
+                vec![NewWindow::name_for_type()],
+                "{default} must reach NewWindow, and nothing else may answer it"
+            );
+        }
+
+        // Unbound still has to mean bindable. `set_binding` only writes into
+        // slots this table already has, and `make_binding` is what turns the
+        // name back into a dispatchable binding; miss either and the action
+        // sits on the Keybindings page, takes a key, and does nothing — which
+        // is the whole complaint in #710, not just the missing default.
+        effective
+            .iter_mut()
+            .find(|(action, _)| action == "NewWindow")
+            .expect("found once already")
+            .1 = "ctrl-alt-shift-n".to_string();
+        assert_eq!(
+            dispatched(&effective, "ctrl-alt-shift-n", "Terminal"),
+            vec![NewWindow::name_for_type()],
+            "a chord the user assigns to NewWindow has to reach it"
+        );
     }
 
     #[cfg(target_os = "macos")]
