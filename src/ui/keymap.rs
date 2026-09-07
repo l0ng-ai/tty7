@@ -935,6 +935,88 @@ pub(crate) fn spec_from_keystroke(ks: &Keystroke) -> Option<String> {
     Some(spec)
 }
 
+/// The glyph a US keyboard prints on the shifted half of every key that is not
+/// a letter — `shift-]` types `}`, `shift-2` types `@`.
+const SHIFTED_GLYPHS: [(char, char); 21] = [
+    ('`', '~'),
+    ('1', '!'),
+    ('2', '@'),
+    ('3', '#'),
+    ('4', '$'),
+    ('5', '%'),
+    ('6', '^'),
+    ('7', '&'),
+    ('8', '*'),
+    ('9', '('),
+    ('0', ')'),
+    ('-', '_'),
+    ('=', '+'),
+    ('[', '{'),
+    (']', '}'),
+    ('\\', '|'),
+    (';', ':'),
+    ('\'', '"'),
+    (',', '<'),
+    ('.', '>'),
+    ('/', '?'),
+];
+
+/// Rewrites one chord into the shape the platform actually delivers, or
+/// returns `None` when it is already that shape.
+///
+/// Every gpui backend carries Shift as a modifier for letters only. Over the
+/// digits and the punctuation it spends the modifier on the character instead
+/// and clears the flag: that is the `chars_with_shift` branch on macOS,
+/// `need_to_convert_to_shifted_key` in the Windows mapper, and Linux's "we
+/// only include the shift for upper-case letters by convention". So the chord
+/// written `secondary-shift-]` arrives as `secondary-}` and the two never
+/// meet — the binding installs and is unreachable, which is why Ctrl+Shift+]
+/// stopped cycling panes off macOS and why hand-editing a config to that
+/// spelling changed nothing (#750).
+///
+/// Folding the spec the same way on the lookup side closes the round trip.
+/// The recorder already writes `secondary-}`, because that is what
+/// `spec_from_keystroke` was handed; a default or a config written the other
+/// way now installs the very same binding, so both spellings keep working and
+/// nobody's config comes undone. `secondary-shift-}`, which people also reach
+/// for, folds onto it too — the flag is simply redundant there.
+///
+/// The table is US-layout, and a chord it does not know is left alone rather
+/// than guessed at: this can only turn a dead spec into a live one.
+fn fold_shift_into_glyph(chord: &str) -> Option<String> {
+    let mut ks = Keystroke::parse(chord).ok()?;
+    if !ks.modifiers.shift {
+        return None;
+    }
+    let mut chars = ks.key.chars();
+    let (Some(key), None) = (chars.next(), chars.next()) else {
+        return None;
+    };
+    if let Some((_, shifted)) = SHIFTED_GLYPHS.iter().find(|(plain, _)| *plain == key) {
+        ks.key = shifted.to_string();
+    } else if !SHIFTED_GLYPHS.iter().any(|(_, shifted)| *shifted == key) {
+        return None;
+    }
+    ks.modifiers.shift = false;
+    spec_from_keystroke(&ks)
+}
+
+/// `spec` with every chord folded by `fold_shift_into_glyph`, ready to hand to
+/// `KeyBinding::new`. Anything already canonical comes back untouched.
+pub(crate) fn dispatchable_spec(spec: &str) -> String {
+    let mut out = String::with_capacity(spec.len());
+    for chord in spec.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        match fold_shift_into_glyph(chord) {
+            Some(folded) => out.push_str(&folded),
+            None => out.push_str(chord),
+        }
+    }
+    out
+}
+
 pub(crate) fn key_chords(spec: &str) -> Vec<Vec<String>> {
     spec.split_whitespace().map(key_tokens).collect()
 }
@@ -1029,6 +1111,10 @@ fn action_context(action: &str) -> Option<&'static str> {
 }
 
 fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
+    // The one place every binding is built, and so the one place worth folding
+    // a `shift-<punctuation>` spec into the chord the dispatcher will see.
+    let folded = dispatchable_spec(keystroke);
+    let keystroke = folded.as_str();
     Some(match action {
         "NewTab" => KeyBinding::new(keystroke, NewTab, None),
         "NewWorkspace" => KeyBinding::new(keystroke, NewWorkspace, None),
@@ -1158,19 +1244,47 @@ mod tests {
     /// table, so a chord the app would not really install, or would install in
     /// another context, cannot pass.
     fn dispatched(effective: &[(String, String)], keys: &str, context: &str) -> Vec<&'static str> {
-        let mut keymap = gpui::Keymap::default();
-        keymap.add_bindings(action_bindings(effective));
         let input: Vec<Keystroke> = keys
             .split(' ')
             .map(|k| Keystroke::parse(k).expect("the typed keystroke parses"))
             .collect();
+        dispatched_keystrokes(effective, &input, context)
+    }
+
+    /// The same lookup for input a spec cannot spell — the shifted-glyph shape
+    /// a backend hands over for `secondary-shift-]` has no written form that
+    /// `Keystroke::parse` turns back into it.
+    fn dispatched_keystrokes(
+        effective: &[(String, String)],
+        input: &[Keystroke],
+        context: &str,
+    ) -> Vec<&'static str> {
+        let mut keymap = gpui::Keymap::default();
+        keymap.add_bindings(action_bindings(effective));
         let context = [gpui::KeyContext::parse(context).expect("the context parses")];
         keymap
-            .bindings_for_input(&input, &context)
+            .bindings_for_input(input, &context)
             .0
             .iter()
             .map(|b| b.action().name())
             .collect()
+    }
+
+    /// What every gpui backend delivers when the secondary modifier is held
+    /// over a key whose shifted half is `glyph`: the glyph, and no shift flag —
+    /// the modifier is already spent on the character.
+    fn delivered_with_secondary(glyph: &str) -> Keystroke {
+        Keystroke {
+            modifiers: gpui::Modifiers {
+                control: cfg!(not(target_os = "macos")),
+                platform: cfg!(target_os = "macos"),
+                shift: false,
+                alt: false,
+                function: false,
+            },
+            key: glyph.to_string(),
+            key_char: None,
+        }
     }
 
     #[test]
@@ -1654,16 +1768,20 @@ mod tests {
         // `ScmCommit` and `ToggleFullscreen` both take secondary-enter on that
         // basis. Two bindings sharing a chord *and* a context is still a bug,
         // because then which one fires is arbitrary.
-        let mut seen: Vec<(&str, &str, Option<&'static str>)> = Vec::new();
+        // Compared folded, since `secondary-shift-]` and `secondary-}` are two
+        // spellings of one keystroke and would otherwise both slip through.
+        let mut seen: Vec<(&str, String, Option<&'static str>)> = Vec::new();
         for (action, spec) in default_bindings() {
             if spec.is_empty() {
                 continue;
             }
+            let chord = dispatchable_spec(spec);
             let context = action_context(action);
-            if let Some((other, _, _)) = seen.iter().find(|(_, s, c)| *s == spec && *c == context) {
-                panic!("{action} and {other} both claim {spec} in context {context:?}");
+            if let Some((other, _, _)) = seen.iter().find(|(_, s, c)| *s == chord && *c == context)
+            {
+                panic!("{action} and {other} both claim {chord} in context {context:?}");
             }
-            seen.push((action, spec, context));
+            seen.push((action, chord, context));
         }
     }
 
@@ -1685,6 +1803,63 @@ mod tests {
                 "round trip diverged for {spec}"
             );
         }
+    }
+
+    #[test]
+    fn a_shifted_punctuation_chord_dispatches_however_it_is_spelled() {
+        // Recording ⌘⇧] wrote `secondary-}` — correctly, since that is the
+        // keystroke it was handed — while the default table and every config
+        // in the wild spell the same chord `secondary-shift-]`. Only one of
+        // the two used to reach the dispatcher (#750); all three do now.
+        let typed = delivered_with_secondary("}");
+        let recorded = spec_from_keystroke(&typed).expect("the recorder spells the chord");
+        assert_eq!(recorded, "secondary-}");
+        for spec in [recorded.as_str(), "secondary-shift-]", "secondary-shift-}"] {
+            let effective = [("NextTab".to_string(), spec.to_string())];
+            assert_eq!(
+                dispatched_keystrokes(&effective, std::slice::from_ref(&typed), ""),
+                vec![NextTab::name_for_type()],
+                "{spec} never reaches the dispatcher"
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_pane_cycle_chord_reaches_its_action() {
+        // `secondary-]` on macOS, `secondary-shift-]` everywhere else — and
+        // either way the backend reports the chord as the bare glyph. The
+        // second spelling installed a binding nothing could press.
+        let effective: Vec<(String, String)> = default_bindings()
+            .into_iter()
+            .map(|(a, k)| (a.to_string(), k.to_string()))
+            .collect();
+        let glyph = if cfg!(target_os = "macos") { "]" } else { "}" };
+        assert!(
+            dispatched_keystrokes(&effective, &[delivered_with_secondary(glyph)], "")
+                .contains(&FocusNextPane::name_for_type()),
+            "the default pane-cycle chord dispatches nothing"
+        );
+    }
+
+    #[test]
+    fn folding_leaves_every_other_spelling_alone() {
+        // Shift over a letter is a real modifier, and the named keys have no
+        // shifted half at all — folding either would break far more than it
+        // fixed.
+        for spec in [
+            "secondary-shift-t",
+            "shift-enter",
+            "shift-insert",
+            "shift-tab",
+            "ctrl-shift-up",
+            "secondary-t",
+            "secondary--",
+            "ctrl-b n",
+        ] {
+            assert_eq!(dispatchable_spec(spec), spec, "{spec} was rewritten");
+        }
+        // A prefix chord folds per chord, not as a whole.
+        assert_eq!(dispatchable_spec("ctrl-b shift-5"), "ctrl-b %");
     }
 
     #[test]
