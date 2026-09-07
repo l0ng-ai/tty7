@@ -296,7 +296,225 @@ fn listening_ports(procs: &[ProcEntry]) -> Vec<PortEntry> {
     ports
 }
 
-#[cfg(not(unix))]
+/// Windows has no `lsof`, and the Ports section was simply never drawn there —
+/// the daemon answered `QueryProcs` with an empty list no matter what the pane
+/// was running, so a `npm run dev` in a Windows pane showed processes and no
+/// port to click.
+///
+/// `GetExtendedTcpTable` is the same answer without a subprocess: the kernel's
+/// own table of listening sockets, each already tagged with the pid that owns
+/// it. The table is machine-wide, so the filter against the pane's tree below
+/// is the whole difference between this panel and `netstat -ano`.
+///
+/// **Cost.** Two calls per poll — one per address family — into a buffer sized
+/// for far more listeners than a real machine has; a family only pays for a
+/// second call when its table outgrew that. The Info tab re-polls every two
+/// seconds while it is open, so this is a fixed handful of microseconds, with
+/// no process spawn and nothing allocated per pid.
+#[cfg(windows)]
+fn listening_ports(procs: &[ProcEntry]) -> Vec<PortEntry> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID,
+        MIB_TCPTABLE_OWNER_PID,
+    };
+
+    if procs.is_empty() {
+        return Vec::new();
+    }
+    let by_pid: HashMap<u32, &str> = procs.iter().map(|p| (p.pid, p.name.as_str())).collect();
+    let mut ports: Vec<PortEntry> = Vec::new();
+
+    let v4 = tcp_table(AF_INET);
+    // SAFETY: `tcp_table` hands back either an empty buffer or one the kernel
+    // filled with a `MIB_TCPTABLE_OWNER_PID`; the `Vec<u32>` gives it the 4-byte
+    // alignment every field of that struct wants, and `rows` is clamped to what
+    // the buffer can actually hold before anything is read out of it.
+    unsafe {
+        if let Some((rows, count)) = table_rows::<MIB_TCPTABLE_OWNER_PID, MIB_TCPROW_OWNER_PID>(&v4)
+        {
+            for i in 0..count {
+                let row = &*rows.add(i);
+                // Filter before spelling the address: the table is the whole
+                // machine's, and formatting a string for every stranger's
+                // socket is the one avoidable allocation on this path.
+                let Some(name) = by_pid.get(&row.dwOwningPid) else {
+                    continue;
+                };
+                let addr = Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes());
+                record_listener(
+                    &mut ports,
+                    name,
+                    local_port(row.dwLocalPort),
+                    row.dwOwningPid,
+                    spell_v4(addr),
+                );
+            }
+        }
+    }
+
+    let v6 = tcp_table(AF_INET6);
+    // SAFETY: as above, for the IPv6 shape of the same table.
+    unsafe {
+        if let Some((rows, count)) =
+            table_rows::<MIB_TCP6TABLE_OWNER_PID, MIB_TCP6ROW_OWNER_PID>(&v6)
+        {
+            for i in 0..count {
+                let row = &*rows.add(i);
+                let Some(name) = by_pid.get(&row.dwOwningPid) else {
+                    continue;
+                };
+                let addr = Ipv6Addr::from(row.ucLocalAddr);
+                record_listener(
+                    &mut ports,
+                    name,
+                    local_port(row.dwLocalPort),
+                    row.dwOwningPid,
+                    spell_v6(addr),
+                );
+            }
+        }
+    }
+
+    ports.sort_by_key(|e| (e.port, e.pid));
+    ports
+}
+
+/// The two Winsock address families, named here rather than by switching on
+/// `windows-sys`'s `Win32_Networking_WinSock`: the whole socket module is a
+/// long compile for two integers the ABI froze decades ago.
+#[cfg(windows)]
+const AF_INET: u32 = 2;
+#[cfg(windows)]
+const AF_INET6: u32 = 23;
+
+/// One `GetExtendedTcpTable` snapshot of the listening sockets in `family`, as
+/// the raw buffer the kernel filled, or an empty buffer if it would not answer.
+///
+/// Failure is soft, the way an absent `lsof` is soft on unix: the panel shows no
+/// ports rather than an error. A machine with IPv6 disabled takes that path for
+/// `AF_INET6` alone and still gets its IPv4 ports.
+#[cfg(windows)]
+fn tcp_table(family: u32) -> Vec<u32> {
+    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, TCP_TABLE_OWNER_PID_LISTENER,
+    };
+
+    // 8 KiB: room for ~340 IPv4 or ~146 IPv6 listeners, where a busy desktop has
+    // a few dozen. Sizing it up front is what keeps the common poll to one call
+    // per family instead of the usual size-then-fetch pair.
+    let mut buf = vec![0u32; 2048];
+    // Two rounds, not a loop until it fits: the table can keep growing between
+    // calls, and this runs on a 2 s timer where giving up costs one poll.
+    for _ in 0..2 {
+        let mut size = (buf.len() * std::mem::size_of::<u32>()) as u32;
+        // SAFETY: `buf` is at least `size` bytes, 4-aligned, and writable; the
+        // kernel writes no more than `size` and reports what it needed instead.
+        let rc = unsafe {
+            GetExtendedTcpTable(
+                buf.as_mut_ptr().cast(),
+                &mut size,
+                // No kernel-side sort: the rows are ordered by (port, pid) below
+                // anyway, and this one is over the address, not the port.
+                0,
+                family,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            )
+        };
+        match rc {
+            NO_ERROR => return buf,
+            ERROR_INSUFFICIENT_BUFFER => {
+                buf = vec![0u32; (size as usize).div_ceil(std::mem::size_of::<u32>()) + 64]
+            }
+            _ => break,
+        }
+    }
+    Vec::new()
+}
+
+/// Where the rows of a `MIB_*TABLE_OWNER_PID` start in `buf`, and how many of
+/// them the buffer can be trusted for.
+///
+/// The count is `min`'d against the buffer's own capacity rather than taken from
+/// `dwNumEntries` alone: that field is the kernel's, but the read that follows
+/// it is ours, and a table shorter than its header claims must not walk off the
+/// end of the allocation.
+///
+/// # Safety
+///
+/// `buf` must be empty or hold a `Table` the kernel filled.
+#[cfg(windows)]
+unsafe fn table_rows<Table, Row>(buf: &[u32]) -> Option<(*const Row, usize)> {
+    let bytes = std::mem::size_of_val(buf);
+    if bytes < std::mem::size_of::<Table>() {
+        return None;
+    }
+    let table = buf.as_ptr().cast::<Table>();
+    // Every `MIB_*TABLE_OWNER_PID` is `{ dwNumEntries: u32, table: [Row; 1] }`,
+    // so the count is the first word and the rows begin where the padding ends.
+    let count = buf[0] as usize;
+    let offset = std::mem::size_of::<Table>() - std::mem::size_of::<Row>();
+    let capacity = (bytes - offset) / std::mem::size_of::<Row>();
+    let rows = unsafe { table.cast::<u8>().add(offset) }.cast::<Row>();
+    Some((rows, count.min(capacity)))
+}
+
+/// `dwLocalPort` carries the port in *network* byte order in its low 16 bits.
+/// Reading it as a plain number is the classic way to end up showing 41247 for
+/// a server on 8099.
+#[cfg(windows)]
+fn local_port(raw: u32) -> u16 {
+    u16::from_be(raw as u16)
+}
+
+/// The wildcard binds are spelled `*`, exactly as `lsof -n` spells them on the
+/// other platforms, so the same server reads the same in the panel wherever it
+/// runs — and so `PortEntry::authority` resolves it to `localhost`.
+#[cfg(windows)]
+fn spell_v4(addr: std::net::Ipv4Addr) -> String {
+    match addr.is_unspecified() {
+        true => "*".to_string(),
+        false => addr.to_string(),
+    }
+}
+
+/// See `spell_v4`. A specific IPv6 address keeps `lsof`'s brackets, which is
+/// what makes `[::1]:5173` a pastable authority.
+#[cfg(windows)]
+fn spell_v6(addr: std::net::Ipv6Addr) -> String {
+    match addr.is_unspecified() {
+        true => "*".to_string(),
+        false => format!("[{addr}]"),
+    }
+}
+
+/// Adds one listening socket to the list, merging it with a row already there
+/// for the same port and pid.
+///
+/// The merge rule is the unix path's, for the same reason: a process bound to
+/// both `192.168.1.5` and `*` is on localhost, and the row the panel turns into
+/// a clickable URL should say so rather than whichever address the kernel
+/// happened to list first.
+#[cfg(windows)]
+fn record_listener(ports: &mut Vec<PortEntry>, name: &str, port: u16, pid: u32, addr: String) {
+    if let Some(seen) = ports.iter_mut().find(|e| e.port == port && e.pid == pid) {
+        if !PortEntry::reaches_loopback(&seen.addr) && PortEntry::reaches_loopback(&addr) {
+            seen.addr = addr;
+        }
+        return;
+    }
+    ports.push(PortEntry {
+        port,
+        pid,
+        addr,
+        name: name.to_string(),
+    });
+}
+
+#[cfg(not(any(unix, windows)))]
 fn listening_ports(_procs: &[ProcEntry]) -> Vec<PortEntry> {
     Vec::new()
 }
@@ -406,5 +624,189 @@ mod tests {
         }
         assert_eq!(entry("172.17.0.1").authority(), "172.17.0.1:8080");
         assert_eq!(entry("192.168.1.20").authority(), "192.168.1.20:8080");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use std::io::Write as _;
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// The port lives in the low half of a DWORD in *network* order. Getting
+    /// this wrong does not fail loudly — it yields a plausible port number for
+    /// a socket nobody is listening on.
+    #[test]
+    fn a_local_port_is_read_out_of_network_order() {
+        // 8099 == 0x1FA3, so the wire spells it 0xA31F.
+        assert_eq!(local_port(0x0000_A31F), 8099);
+        assert_eq!(local_port(0xBB01), 443);
+        assert_eq!(local_port(0x5000), 80);
+    }
+
+    /// The panel renders one server the same way on every platform, so a
+    /// Windows wildcard bind has to arrive spelled the way `lsof -n` spells it.
+    #[test]
+    fn addresses_are_spelled_the_way_lsof_spells_them() {
+        assert_eq!(spell_v4("0.0.0.0".parse().unwrap()), "*");
+        assert_eq!(spell_v4("127.0.0.1".parse().unwrap()), "127.0.0.1");
+        assert_eq!(spell_v4("192.168.1.20".parse().unwrap()), "192.168.1.20");
+        assert_eq!(spell_v6("::".parse().unwrap()), "*");
+        assert_eq!(spell_v6("::1".parse().unwrap()), "[::1]");
+    }
+
+    /// A dual-stack server shows up twice in the kernel's tables, once per
+    /// family, and is one row in the panel — the reachable one.
+    #[test]
+    fn a_dual_stack_listener_collapses_to_its_reachable_address() {
+        let mut ports = Vec::new();
+        record_listener(&mut ports, "node.exe", 3000, 42, "192.168.1.5".into());
+        record_listener(&mut ports, "node.exe", 3000, 42, "*".into());
+        assert_eq!(ports.len(), 1, "one port, not one per address family");
+        assert_eq!(ports[0].addr, "*", "the loopback-reachable bind wins");
+
+        // ...and never the other way round: a wildcard already recorded is not
+        // downgraded to an interface nobody can reach on localhost.
+        let mut ports = Vec::new();
+        record_listener(&mut ports, "node.exe", 3000, 42, "[::]".into());
+        record_listener(&mut ports, "node.exe", 3000, 42, "192.168.1.5".into());
+        assert_eq!(ports[0].addr, "[::]");
+
+        // Two processes on the same port number are two rows.
+        record_listener(&mut ports, "python.exe", 3000, 43, "127.0.0.1".into());
+        assert_eq!(ports.len(), 2);
+    }
+
+    /// The whole feature, against the live kernel table: a real
+    /// `cmd.exe -> powershell.exe` chain holding a real socket.
+    ///
+    /// Both halves matter. The port has to show up with the right number and
+    /// the right owner — that is the half that was missing entirely, since
+    /// `listening_ports` was `#[cfg(unix)]` and Windows got an empty list. And
+    /// a socket held *outside* the tree must not show up, because
+    /// `GetExtendedTcpTable` answers for the whole machine: without the pid
+    /// filter this panel would list every port on the box and still pass the
+    /// first assertion.
+    #[test]
+    fn listening_ports_finds_the_pane_tree_s_socket_and_only_its_tree_s() {
+        // The out-of-tree listener. It belongs to the test process, which is
+        // the parent of the chain and so is never inside the tree rooted at it.
+        let outsider = TcpListener::bind("127.0.0.1:0").expect("bind an out-of-tree listener");
+        let outside_port = outsider.local_addr().expect("read its port").port();
+
+        let stamp = format!("tty7-ports-{}", std::process::id());
+        let dir = std::env::temp_dir();
+        let script = dir.join(format!("{stamp}.ps1"));
+        let port_file = dir.join(format!("{stamp}.port"));
+        let _ = std::fs::remove_file(&port_file);
+        // The port comes back through a file rather than a pipe: PowerShell
+        // buffers redirected stdout, and a test that waits on a flush that
+        // never comes is a test that hangs.
+        let mut f = std::fs::File::create(&script).expect("write the listener script");
+        write!(
+            f,
+            "$l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)\r\n\
+             $l.Start()\r\n\
+             [System.IO.File]::WriteAllText('{}', [string]$l.LocalEndpoint.Port)\r\n\
+             while ($true) {{ Start-Sleep -Seconds 1 }}\r\n",
+            port_file.display().to_string().replace('\'', "''")
+        )
+        .expect("write the listener script");
+        drop(f);
+
+        // `cmd.exe` in front of PowerShell is what makes this a *tree* and not
+        // one child: the listener sits at depth 1, reached only by walking.
+        let mut child = std::process::Command::new("cmd.exe")
+            .args([
+                "/c",
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn the cmd -> powershell chain");
+        let root = child.id();
+
+        let cleanup = |child: &mut std::process::Child| {
+            let doomed = crate::daemon::winproc::descendants(
+                &crate::daemon::winproc::snapshot(),
+                child.id(),
+            );
+            let _ = child.kill();
+            let _ = child.wait();
+            crate::daemon::winproc::terminate_and_wait_all(
+                &doomed,
+                Instant::now() + Duration::from_secs(5),
+            );
+        };
+
+        // PowerShell's startup is measured in seconds on a cold machine, and
+        // `WriteAllText` can be observed mid-write, so parse until it parses.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let inside_port = loop {
+            if let Some(port) = std::fs::read_to_string(&port_file).ok().and_then(|text| {
+                text.trim()
+                    .trim_start_matches('\u{feff}')
+                    .parse::<u16>()
+                    .ok()
+            }) {
+                break port;
+            }
+            if Instant::now() >= deadline {
+                cleanup(&mut child);
+                let _ = std::fs::remove_file(&script);
+                panic!("the in-tree listener never reported its port");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+
+        let got = snapshot(root, None);
+        cleanup(&mut child);
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_file(&port_file);
+        drop(outsider);
+
+        assert!(
+            got.procs.iter().any(|p| p.depth > 0),
+            "the chain must be walked past its root: {:?}",
+            got.procs
+        );
+        let found = got
+            .ports
+            .iter()
+            .find(|e| e.port == inside_port)
+            .unwrap_or_else(|| {
+                panic!("port {inside_port} is missing from {:?}", got.ports);
+            });
+        assert_eq!(
+            found.addr, "127.0.0.1",
+            "a loopback bind keeps its address, as it does under lsof"
+        );
+        assert!(
+            got.procs.iter().any(|p| p.pid == found.pid),
+            "the port's owner must be one of the pane's own processes"
+        );
+        assert!(
+            found.name.eq_ignore_ascii_case("powershell.exe"),
+            "the row names the process holding the socket, got {:?}",
+            found.name
+        );
+        assert!(
+            !got.ports.iter().any(|e| e.port == outside_port),
+            "port {outside_port} is held outside the tree and must not be listed: {:?}",
+            got.ports
+        );
+        assert!(
+            got.ports.windows(2).all(|w| w[0].port <= w[1].port),
+            "rows arrive ordered by port, as they do on unix"
+        );
     }
 }
