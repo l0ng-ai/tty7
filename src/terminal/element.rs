@@ -1037,6 +1037,27 @@ fn ink_extent(
     })
 }
 
+/// Where a shaped run stops standing over the cells it came from.
+///
+/// `force_width` puts the *n*th glyph at *n × cell_width*, which is the whole
+/// grid only while the shaper hands back one glyph per character. A ligature
+/// substitution collapses several characters into one glyph, and from there on
+/// every glyph is pulled left by the cells the substitution swallowed: the
+/// text after it overlaps the ligature's tail, and the caret — drawn at the
+/// grid column, not at the ink — stands past the end of the run with a gap.
+///
+/// Takes the glyphs' byte indices, which in a run are their columns, and
+/// answers with the first column that has drifted. Only a glyph that arrives
+/// later than its ordinal counts: a face that *adds* glyphs cannot be helped
+/// by cutting the run, and treating it as drift would cut at column zero
+/// forever.
+fn run_drift(indices: impl IntoIterator<Item = usize>) -> Option<usize> {
+    indices
+        .into_iter()
+        .enumerate()
+        .find_map(|(ordinal, index)| (index > ordinal).then_some(index))
+}
+
 /// Whether the cell after a segment is free for its glyph to lean into.
 ///
 /// A blank still owns its cell if it paints anything there: a background, a
@@ -1091,7 +1112,13 @@ fn paint_glyphs(
             // A `Run` is one glyph per cell in the main font, which by
             // definition already fits; the rest can carry a glyph from a
             // fallback face that is wider than the cells it was handed.
-            let fit = !matches!(seg, RowSeg::Run { .. });
+            //
+            // A run is also the only segment `segment_row` builds out of more
+            // than one cell of plain text, and it only batches ASCII: one
+            // byte, one character, one column. That is what lets `run_drift`
+            // read a glyph's byte index as the column it came from.
+            let run = matches!(seg, RowSeg::Run { .. });
+            let fit = !run;
             let (start, cells, text, force_width, solo) = match seg {
                 RowSeg::Run { start, cells, text } => (
                     start,
@@ -1172,7 +1199,6 @@ fn paint_glyphs(
                 strikethrough: style.strikethrough_style(),
             };
 
-            let x = geom.origin.x + geom.cell_width * (start as f32);
             let budget = if fit {
                 seg_budget(
                     solo,
@@ -1184,33 +1210,78 @@ fn paint_glyphs(
                 geom.cell_width * cells as f32
             };
 
-            let mut shaped =
-                window
-                    .text_system()
-                    .shape_line(text.clone(), font_size, run_buf, force_width);
-            if fit && let Some(ink) = ink_extent(cx, &shaped, &text, font_size) {
-                let scale = fit_scale(ink, budget);
-                if scale < 1. {
-                    shaped = window.text_system().shape_line(
-                        text.clone(),
-                        font_size * scale,
-                        run_buf,
-                        force_width,
-                    );
-                }
-            }
+            // Everything but a run paints once. A run may have to be cut where
+            // the shaper collapsed characters into a ligature and start over
+            // in the column the rest of it belongs to, so it loops.
+            let mut col = start;
+            let mut rest = text;
+            loop {
+                let x = geom.origin.x + geom.cell_width * (col as f32);
+                run_buf[0].len = rest.len();
 
-            let clip = Bounds::new(point(x, y), size(budget, geom.line_height));
-            window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-                _ = shaped.paint(
-                    point(x, y),
-                    geom.line_height,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                );
-            });
+                let mut shaped =
+                    window
+                        .text_system()
+                        .shape_line(rest.clone(), font_size, run_buf, force_width);
+                if fit && let Some(ink) = ink_extent(cx, &shaped, &rest, font_size) {
+                    let scale = fit_scale(ink, budget);
+                    if scale < 1. {
+                        shaped = window.text_system().shape_line(
+                            rest.clone(),
+                            font_size * scale,
+                            run_buf,
+                            force_width,
+                        );
+                    }
+                }
+
+                let drift = run
+                    .then(|| {
+                        run_drift(
+                            shaped
+                                .runs
+                                .iter()
+                                .flat_map(|r| r.glyphs.iter().map(|g| g.index)),
+                        )
+                    })
+                    .flatten();
+                // A run's text is as long in bytes as it is wide in cells, so
+                // what is left to paint is what is left of the string.
+                let take = drift.unwrap_or(rest.len());
+                let width = if run {
+                    geom.cell_width * take as f32
+                } else {
+                    budget
+                };
+
+                // Clipping the drifted tail away is not enough: it drifted
+                // *left*, into the columns this piece is keeping. Shape the
+                // piece on its own so those glyphs are never handed to the
+                // painter at all.
+                if let Some(drift) = drift {
+                    let head = SharedString::from(rest[..drift].to_string());
+                    run_buf[0].len = head.len();
+                    shaped = window
+                        .text_system()
+                        .shape_line(head, font_size, run_buf, force_width);
+                }
+
+                let clip = Bounds::new(point(x, y), size(width, geom.line_height));
+                window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                    _ = shaped.paint(
+                        point(x, y),
+                        geom.line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                });
+
+                let Some(drift) = drift else { break };
+                col += drift;
+                rest = SharedString::from(rest[drift..].to_string());
+            }
         }
     }
 }
@@ -2370,6 +2441,37 @@ mod tests {
     }
 
     #[test]
+    fn a_run_that_keeps_one_glyph_per_cell_is_painted_whole() {
+        assert_eq!(run_drift([0, 1, 2, 3]), None);
+        assert_eq!(run_drift([0]), None);
+        assert_eq!(run_drift([0usize; 0]), None);
+    }
+
+    #[test]
+    fn a_ligature_cuts_the_run_at_the_column_that_drifted() {
+        // "office" through a face that ligates "ffi": the shaper answers with
+        // o, ffi, c, e, and `force_width` sits them on columns 0..4 — so 'c'
+        // lands two columns early, over the ligature's tail, and the row ends
+        // two columns short of where the caret is drawn.
+        assert_eq!(run_drift([0, 1, 4, 5]), Some(4));
+        // The remainder, restarted at column 4, lines up on its own.
+        assert_eq!(run_drift([0, 1]), None);
+        // A two-character ligature drifts by one: "afib" -> a, fi, b.
+        assert_eq!(run_drift([0, 1, 3]), Some(3));
+        // And a run can drift on its very first pair: "fib" -> fi, b.
+        assert_eq!(run_drift([0, 2]), Some(2));
+    }
+
+    #[test]
+    fn a_face_that_adds_glyphs_is_left_alone() {
+        // Two glyphs for one character walk ahead of their columns, not
+        // behind them. Cutting there would restart the run where it already
+        // is and never finish.
+        assert_eq!(run_drift([0, 0, 1, 2]), None);
+        assert_eq!(run_drift([0, 1, 1, 2]), None);
+    }
+
+    #[test]
     fn only_a_plain_blank_cell_counts_as_room() {
         let mut row: Vec<_> = "ab".chars().map(cell).collect();
         row.push(cell(' '));
@@ -2463,6 +2565,33 @@ mod tests {
         let mut row: Vec<_> = "ab cd".chars().map(cell).collect();
         row[2].c = '\0';
         assert_eq!(segment_row(&row), [run(0, 5, "ab cd")]);
+    }
+
+    /// `paint_glyphs` reads a glyph's byte index as the column it came from
+    /// and cuts a drifted run there, which only holds while a run is ASCII and
+    /// one byte wide per cell. Pin that here rather than in the paint code.
+    #[test]
+    fn a_run_is_as_long_in_bytes_as_it_is_wide_in_cells() {
+        let rows: [Vec<RenderCell>; 4] = [
+            " ab  cd  ".chars().map(cell).collect(),
+            "https://例/a".chars().map(cell).collect(),
+            {
+                let mut row: Vec<_> = "ab cd".chars().map(cell).collect();
+                for c in &mut row {
+                    c.underline = UnderlineKind::Single;
+                }
+                row
+            },
+            "x->y a//b".chars().map(cell).collect(),
+        ];
+        for row in rows {
+            for seg in segment_row(&row) {
+                if let RowSeg::Run { cells, text, .. } = seg {
+                    assert!(text.is_ascii(), "{text:?} is not ASCII");
+                    assert_eq!(text.len(), cells, "{text:?} does not span {cells} cells");
+                }
+            }
+        }
     }
 
     #[test]
