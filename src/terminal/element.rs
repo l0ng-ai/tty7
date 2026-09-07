@@ -1058,6 +1058,82 @@ fn run_drift(indices: impl IntoIterator<Item = usize>) -> Option<usize> {
         .find_map(|(ordinal, index)| (index > ordinal).then_some(index))
 }
 
+/// One thing [`paint_run`] asks of the caller, in bytes into the run's text.
+///
+/// A run is ASCII, one byte per cell, so `at` is also a column offset and
+/// `len` is also a width in cells.
+#[derive(Debug, PartialEq)]
+enum RunStep {
+    /// Shape `text[at..at + len]` and answer [`run_drift`] for it.
+    Drift { at: usize, len: usize },
+    /// Shape and paint `text[at..at + len]` starting at column `col`.
+    Paint { col: usize, at: usize, len: usize },
+}
+
+/// Walk a run in the pieces that stand over their own cells.
+///
+/// A run that does not drift is one `Drift` and one `Paint` of the whole
+/// thing, which is every run in a monospace face. Where it drifts, the part
+/// in front of the drift is painted as a piece of its own — shaped on its
+/// own, which is the point: clipping the tail away would not help, because
+/// the tail drifted *left*, into the columns this piece is keeping. The
+/// remainder then starts over in the column the grid puts it in.
+///
+/// The loop is separated from the shaping so it can be tested at all: gpui's
+/// test text system hands back one glyph per character, so nothing shaped
+/// through it ever drifts and the interesting half would never run.
+fn paint_run(start: usize, len: usize, mut step: impl FnMut(RunStep) -> Option<usize>) {
+    let mut col = start;
+    let mut at = 0;
+    loop {
+        match step(RunStep::Drift { at, len: len - at }) {
+            None => {
+                step(RunStep::Paint {
+                    col,
+                    at,
+                    len: len - at,
+                });
+                return;
+            }
+            Some(drift) => {
+                step(RunStep::Paint {
+                    col,
+                    at,
+                    len: drift,
+                });
+                col += drift;
+                at += drift;
+            }
+        }
+    }
+}
+
+/// Shape one piece of a segment's text.
+///
+/// The whole of it keeps the string it arrived in; only a piece cut out of a
+/// drifted run has to be copied, and that happens where a ligature forced the
+/// cut. Repeat calls for the same piece within a frame are answered from
+/// gpui's line-layout cache rather than shaped again.
+fn shape_piece(
+    window: &mut Window,
+    run_buf: &mut [TextRun; 1],
+    text: &SharedString,
+    at: usize,
+    len: usize,
+    font_size: Pixels,
+    force_width: Option<Pixels>,
+) -> gpui::ShapedLine {
+    let piece = if at == 0 && len == text.len() {
+        text.clone()
+    } else {
+        SharedString::from(text[at..at + len].to_string())
+    };
+    run_buf[0].len = piece.len();
+    window
+        .text_system()
+        .shape_line(piece, font_size, run_buf, force_width)
+}
+
 /// Whether the cell after a segment is free for its glyph to lean into.
 ///
 /// A blank still owns its cell if it paints anything there: a background, a
@@ -1118,7 +1194,6 @@ fn paint_glyphs(
             // byte, one character, one column. That is what lets `run_drift`
             // read a glyph's byte index as the column it came from.
             let run = matches!(seg, RowSeg::Run { .. });
-            let fit = !run;
             let (start, cells, text, force_width, solo) = match seg {
                 RowSeg::Run { start, cells, text } => (
                     start,
@@ -1199,89 +1274,80 @@ fn paint_glyphs(
                 strikethrough: style.strikethrough_style(),
             };
 
-            let budget = if fit {
-                seg_budget(
-                    solo,
-                    cells,
-                    has_room_after(row_cells, start, cells),
-                    geom.cell_width,
-                )
-            } else {
-                geom.cell_width * cells as f32
-            };
+            let x = geom.origin.x + geom.cell_width * (start as f32);
 
-            // Everything but a run paints once. A run may have to be cut where
-            // the shaper collapsed characters into a ligature and start over
-            // in the column the rest of it belongs to, so it loops.
-            let mut col = start;
-            let mut rest = text;
-            loop {
-                let x = geom.origin.x + geom.cell_width * (col as f32);
-                run_buf[0].len = rest.len();
-
-                let mut shaped =
-                    window
-                        .text_system()
-                        .shape_line(rest.clone(), font_size, run_buf, force_width);
-                if fit && let Some(ink) = ink_extent(cx, &shaped, &rest, font_size) {
-                    let scale = fit_scale(ink, budget);
-                    if scale < 1. {
-                        shaped = window.text_system().shape_line(
-                            rest.clone(),
-                            font_size * scale,
-                            run_buf,
-                            force_width,
-                        );
-                    }
-                }
-
-                let drift = run
-                    .then(|| {
+            // A run is walked in the pieces that stand over their own cells;
+            // every other segment is one shaping and one paint.
+            if run {
+                paint_run(start, text.len(), |step| match step {
+                    RunStep::Drift { at, len } => {
+                        let shaped =
+                            shape_piece(window, run_buf, &text, at, len, font_size, force_width);
                         run_drift(
                             shaped
                                 .runs
                                 .iter()
                                 .flat_map(|r| r.glyphs.iter().map(|g| g.index)),
                         )
-                    })
-                    .flatten();
-                // A run's text is as long in bytes as it is wide in cells, so
-                // what is left to paint is what is left of the string.
-                let take = drift.unwrap_or(rest.len());
-                let width = if run {
-                    geom.cell_width * take as f32
-                } else {
-                    budget
-                };
-
-                // Clipping the drifted tail away is not enough: it drifted
-                // *left*, into the columns this piece is keeping. Shape the
-                // piece on its own so those glyphs are never handed to the
-                // painter at all.
-                if let Some(drift) = drift {
-                    let head = SharedString::from(rest[..drift].to_string());
-                    run_buf[0].len = head.len();
-                    shaped = window
-                        .text_system()
-                        .shape_line(head, font_size, run_buf, force_width);
-                }
-
-                let clip = Bounds::new(point(x, y), size(width, geom.line_height));
-                window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-                    _ = shaped.paint(
-                        point(x, y),
-                        geom.line_height,
-                        TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    );
+                    }
+                    RunStep::Paint { col, at, len } => {
+                        let shaped =
+                            shape_piece(window, run_buf, &text, at, len, font_size, force_width);
+                        let x = geom.origin.x + geom.cell_width * (col as f32);
+                        let clip = Bounds::new(
+                            point(x, y),
+                            size(geom.cell_width * len as f32, geom.line_height),
+                        );
+                        window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                            _ = shaped.paint(
+                                point(x, y),
+                                geom.line_height,
+                                TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+                        });
+                        None
+                    }
                 });
-
-                let Some(drift) = drift else { break };
-                col += drift;
-                rest = SharedString::from(rest[drift..].to_string());
+                continue;
             }
+
+            let budget = seg_budget(
+                solo,
+                cells,
+                has_room_after(row_cells, start, cells),
+                geom.cell_width,
+            );
+
+            let mut shaped =
+                window
+                    .text_system()
+                    .shape_line(text.clone(), font_size, run_buf, force_width);
+            if let Some(ink) = ink_extent(cx, &shaped, &text, font_size) {
+                let scale = fit_scale(ink, budget);
+                if scale < 1. {
+                    shaped = window.text_system().shape_line(
+                        text.clone(),
+                        font_size * scale,
+                        run_buf,
+                        force_width,
+                    );
+                }
+            }
+
+            let clip = Bounds::new(point(x, y), size(budget, geom.line_height));
+            window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                _ = shaped.paint(
+                    point(x, y),
+                    geom.line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            });
         }
     }
 }
@@ -2460,6 +2526,99 @@ mod tests {
         assert_eq!(run_drift([0, 1, 3]), Some(3));
         // And a run can drift on its very first pair: "fib" -> fi, b.
         assert_eq!(run_drift([0, 2]), Some(2));
+    }
+
+    /// Drives the loop `paint_glyphs` runs a `RowSeg::Run` through, with the
+    /// shaping stubbed out. `drifts` is what the shaper is pretending to
+    /// answer for each piece it is handed, in order.
+    fn run_steps(start: usize, text: &str, drifts: &[Option<usize>]) -> Vec<RunStep> {
+        let mut seen = Vec::new();
+        let mut answers = drifts.iter().copied();
+        paint_run(start, text.len(), |step| {
+            let drift = matches!(step, RunStep::Drift { .. })
+                .then(|| {
+                    answers
+                        .next()
+                        .expect("asked to shape more pieces than scripted")
+                })
+                .flatten();
+            seen.push(step);
+            drift
+        });
+        seen
+    }
+
+    /// What the caller is told to paint, as `(column, text)`.
+    fn painted<'a>(steps: &[RunStep], text: &'a str) -> Vec<(usize, &'a str)> {
+        steps
+            .iter()
+            .filter_map(|step| match *step {
+                RunStep::Paint { col, at, len } => Some((col, &text[at..at + len])),
+                RunStep::Drift { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_run_that_does_not_drift_is_shaped_once_and_painted_whole() {
+        let steps = run_steps(7, "hello", &[None]);
+        assert_eq!(
+            steps,
+            [
+                RunStep::Drift { at: 0, len: 5 },
+                RunStep::Paint {
+                    col: 7,
+                    at: 0,
+                    len: 5
+                }
+            ],
+            "no drift is one shaping and one paint, at the column it started in"
+        );
+    }
+
+    #[test]
+    fn a_drifted_run_paints_the_head_alone_and_restarts_at_its_own_column() {
+        // "office" through a face that ligates "ffi": the shaper answers with
+        // o, ffi, c, e, so 'c' arrives at byte 4 as the third glyph and the
+        // run has to be cut there.
+        let steps = run_steps(0, "office", &[Some(4), None]);
+        assert_eq!(
+            painted(&steps, "office"),
+            [(0, "offi"), (4, "ce")],
+            "the head is a piece of its own, and the rest starts at column 4"
+        );
+        // The head must be *shaped* as "offi", not painted as the whole run
+        // under a four-cell clip: 'c' and 'e' drifted left, into those very
+        // cells, so a clip would leave them on top of the ligature.
+        assert_eq!(
+            steps[1],
+            RunStep::Paint {
+                col: 0,
+                at: 0,
+                len: 4
+            }
+        );
+        // And the remainder is re-shaped on its own before it is painted, so
+        // its own drift is measured from its own column.
+        assert_eq!(steps[2], RunStep::Drift { at: 4, len: 2 });
+    }
+
+    #[test]
+    fn a_run_that_drifts_twice_keeps_advancing_and_finishes() {
+        // "affib" -> a, ffi, b cuts once; the tail "b" then stands on its own.
+        assert_eq!(
+            painted(&run_steps(3, "affib", &[Some(4), None]), "affib"),
+            [(3, "affi"), (7, "b")]
+        );
+        // Two cuts in a row: every piece moves the column on by its own width
+        // and the walk ends on the piece that does not drift.
+        assert_eq!(
+            painted(
+                &run_steps(0, "offifie", &[Some(4), Some(2), None]),
+                "offifie"
+            ),
+            [(0, "offi"), (4, "fi"), (6, "e")]
+        );
     }
 
     #[test]
