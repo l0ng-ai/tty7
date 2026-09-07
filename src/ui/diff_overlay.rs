@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
@@ -13,8 +14,8 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 use crate::core::config::{Config, DiffViewMode};
 use crate::core::git::status::DecoStatus;
 use crate::terminal::git_diff::{
-    self, AUTO_COLLAPSE_LINES, CommitLabel, DiffSnapshot, DiffSource, DiffStats, FileDiff,
-    FileStatus, LineKind, MAX_RENDERED_FILES, Truncation,
+    self, CommitLabel, DiffSnapshot, DiffSource, DiffStats, FileDiff, FileStatus, LineKind,
+    Truncation,
 };
 
 /// How much of an untracked file the preview will read. Past this the card
@@ -22,12 +23,12 @@ use crate::terminal::git_diff::{
 /// line budget below cuts rendering long before this does anyway.
 const MAX_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
 use crate::ui::app::Tty7App;
-use crate::ui::diff_rows::{Side, SplitCell, SplitRow, UnifiedRow, split_hunk, unified_rows};
+use crate::ui::diff_list::{DiffRow, FileHead};
+use crate::ui::diff_rows::{Side, SplitCell, SplitRow, UnifiedRow};
 use crate::ui::document_column::DocumentChrome;
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::info_chip;
 use crate::ui::rounding;
-use crate::ui::rounding::RoundedCorners as _;
 use crate::ui::scm::path::relative_time;
 use crate::ui::scm::status::{status_color, status_glyph};
 
@@ -56,7 +57,13 @@ pub(crate) struct DiffOverlayState {
     /// cadence a tracked file's does.
     pub(crate) preview: Option<(String, Option<Arc<FileDiff>>)>,
     pub(crate) preview_loading: Option<String>,
-    pub(crate) scroll: gpui::ScrollHandle,
+    /// The virtualised list the rows scroll in. Held across frames: it owns
+    /// the scroll position, and the row heights gpui has measured.
+    pub(crate) list: gpui::ListState,
+    /// The patch, flattened into one row per line — see
+    /// [`crate::ui::diff_list`]. Rebuilt only when [`RowsKey`] changes.
+    pub(crate) rows: Rc<Vec<DiffRow>>,
+    rows_key: Option<RowsKey>,
     /// The [`ScmData`](crate::terminal::git_data::ScmData) epoch this patch was
     /// read at, for the two sources that can go stale.
     ///
@@ -65,25 +72,6 @@ pub(crate) struct DiffOverlayState {
     /// `None` until the first snapshot arrives: the epoch is keyed by the
     /// repository root, and only a snapshot knows where that is.
     pub(crate) epoch: Option<u64>,
-}
-
-/// One hunk, already turned into whichever kind of row the current view draws.
-enum HunkRows {
-    Split(Vec<SplitRow>),
-    Unified(Vec<UnifiedRow>),
-}
-
-impl HunkRows {
-    fn len(&self) -> usize {
-        match self {
-            HunkRows::Split(rows) => rows.len(),
-            HunkRows::Unified(rows) => rows.len(),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 /// Paints the full-window diff surface without inheriting workspace opacity.
@@ -180,7 +168,9 @@ impl Tty7App {
             focus,
             preview: None,
             preview_loading: None,
-            scroll: gpui::ScrollHandle::new(),
+            list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(256.)),
+            rows: Rc::new(Vec::new()),
+            rows_key: None,
             epoch: None,
         });
         window.focus(&focus_handle, cx);
@@ -395,38 +385,12 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         self.spawn_untracked_preview_if_needed(cx);
+        let body = self.sync_diff_rows(cx)?;
         let overlay = self.tabs.get(self.active)?.diff_overlay.as_ref()?;
 
-        let content = match &overlay.load {
-            DiffLoad::Loading => self.diff_message(t(L10nKey::DiffReading), cx),
-            DiffLoad::NotARepo => self.diff_message(t(L10nKey::DiffNotARepo), cx),
-            DiffLoad::Ready(snap) if empty_snapshot(snap) && snap.read_failed => {
-                self.diff_message(t(L10nKey::DiffReadFailed), cx)
-            }
-            DiffLoad::Ready(snap) if empty_snapshot(snap) => {
-                self.diff_message(t(L10nKey::DiffWorkingTreeClean), cx)
-            }
-            // A focused *untracked* file has no patch in the snapshot; its
-            // card is synthesized from the file's own bytes — see `preview`.
-            DiffLoad::Ready(snap) if untracked_focus(snap, overlay.focus.as_deref()).is_some() => {
-                let path = untracked_focus(snap, overlay.focus.as_deref()).unwrap();
-                match &overlay.preview {
-                    Some((held, Some(file))) if held == path => {
-                        self.diff_preview_card(file.as_ref(), &overlay.scroll, cx)
-                    }
-                    Some((held, None)) if held == path => {
-                        self.diff_message(t(L10nKey::DiffReadFailed), cx)
-                    }
-                    _ => self.diff_message(t(L10nKey::DiffReading), cx),
-                }
-            }
-            DiffLoad::Ready(snap) => self.diff_file_list(
-                snap,
-                &overlay.expanded,
-                focused_file(snap, overlay),
-                &overlay.scroll,
-                cx,
-            ),
+        let content = match body {
+            DiffBody::Message(text) => self.diff_message(text, cx),
+            DiffBody::Rows(snap) => self.diff_rows_list(overlay, snap, cx),
         };
 
         let header = chrome
@@ -675,25 +639,12 @@ impl Tty7App {
             .when(subject.label.is_none() && !subject_takes_the_slack, |bar| {
                 bar.child(div().flex_1())
             })
-            .child(div().occlude().flex_shrink_0().child({
-                let sf = cx.global::<crate::ui::presets::Surfaces>().window;
-                let selected = usize::from(view_mode(cx) == DiffViewMode::Unified);
-                self.segmented_on(
-                    sf,
-                    "diff-overlay-view",
-                    &[t(L10nKey::DiffViewSplit), t(L10nKey::DiffViewUnified)],
-                    selected,
-                    cx,
-                    |this, index, _window, cx| {
-                        let mode = if index == 0 {
-                            DiffViewMode::Split
-                        } else {
-                            DiffViewMode::Unified
-                        };
-                        this.update_config(cx, |cfg| cfg.diff_view = mode);
-                    },
-                )
-            }))
+            .child(
+                div()
+                    .occlude()
+                    .flex_shrink_0()
+                    .child(self.diff_view_switch(cx)),
+            )
             .child(
                 div().occlude().flex_shrink_0().child(
                     crate::ui::tab_strip::chrome_tile_sized(
@@ -713,6 +664,54 @@ impl Tty7App {
             .context_menu(move |menu, _window, cx| {
                 Tty7App::document_header_menu(menu, &menu_app, cx)
             })
+    }
+
+    /// The two views, as a switch rather than a control.
+    ///
+    /// Not [`Tty7App::segmented_on`]: that one is a bordered track, which is
+    /// right in a settings row, where it ends a line of prose and has to
+    /// announce itself as something you operate. On a title bar it was the
+    /// only bordered thing on the strip — the close tile beside it is a bare
+    /// glyph, and so is every tile at the other end of the window — so it read
+    /// as pasted on. Same two choices, no frame: the live one carries a soft
+    /// fill, the other is quiet text that lights up under the pointer.
+    fn diff_view_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+        let sf = cx.global::<crate::ui::presets::Surfaces>().window;
+        let current = view_mode(cx);
+        let cells = [
+            (DiffViewMode::Split, t(L10nKey::DiffViewSplit)),
+            (DiffViewMode::Unified, t(L10nKey::DiffViewUnified)),
+        ];
+        h_flex()
+            .id("diff-overlay-view")
+            .flex_shrink_0()
+            .gap(px(2.))
+            .children(cells.into_iter().enumerate().map(|(i, (mode, label))| {
+                let live = mode == current;
+                h_flex()
+                    .id(("diff-overlay-view-cell", i))
+                    .items_center()
+                    .h(px(22.))
+                    .px(px(8.))
+                    .rounded(ROW_RADIUS)
+                    .text_sm()
+                    .cursor_pointer()
+                    .when(live, |cell| {
+                        cell.bg(gpui::rgb(sf.selected))
+                            .text_color(gpui::rgb(sf.text_selected))
+                            .font_weight(FontWeight::MEDIUM)
+                    })
+                    .when(!live, |cell| {
+                        cell.text_color(cx.theme().muted_foreground)
+                            .hover(|h| h.bg(gpui::rgb(sf.hover)))
+                    })
+                    .active(|cell| cell.bg(gpui::rgb(sf.pressed)))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.update_config(cx, |cfg| cfg.diff_view = mode);
+                    }))
+                    .child(label)
+            }))
+            .into_any_element()
     }
 
     /// Dispatch the byte read behind an untracked file's preview, at most
@@ -788,33 +787,6 @@ impl Tty7App {
         );
     }
 
-    /// The one synthesized card, in the same scroll shell the file list uses.
-    fn diff_preview_card(
-        &self,
-        file: &FileDiff,
-        scroll: &gpui::ScrollHandle,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mode = view_mode(cx);
-        let list = v_flex()
-            .gap_3()
-            .p_4()
-            .w_full()
-            // `usize::MAX` keeps the element ids clear of the real list's.
-            .child(self.diff_file_card(usize::MAX, file, true, mode, cx));
-        crate::ui::scrollbar::with_vertical_scrollbar(
-            "diff-overlay-scrollbar",
-            div()
-                .id("diff-overlay-scroll")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(scroll)
-                .child(list),
-            scroll,
-        )
-    }
-
     fn diff_message(&self, text: &'static str, cx: &Context<Self>) -> AnyElement {
         div()
             .flex_1()
@@ -827,500 +799,595 @@ impl Tty7App {
             .into_any_element()
     }
 
-    fn diff_file_list(
+    /// Brings the active overlay's flattened rows up to date with what it is
+    /// meant to be showing, and says what to draw.
+    ///
+    /// Called from `render`, so the [`RowsKey`] comparison is what keeps it
+    /// cheap: flattening a twenty-thousand-line patch allocates a row per
+    /// line, and nothing about that changes between two frames of scrolling.
+    fn sync_diff_rows(&mut self, cx: &mut Context<Self>) -> Option<DiffBody> {
+        let mode = view_mode(cx);
+        let active = self.active;
+        let overlay = self.tabs.get_mut(active)?.diff_overlay.as_mut()?;
+
+        let snap = match &overlay.load {
+            DiffLoad::Loading => return Some(DiffBody::Message(t(L10nKey::DiffReading))),
+            DiffLoad::NotARepo => return Some(DiffBody::Message(t(L10nKey::DiffNotARepo))),
+            DiffLoad::Ready(snap) if empty_snapshot(snap) && snap.read_failed => {
+                return Some(DiffBody::Message(t(L10nKey::DiffReadFailed)));
+            }
+            DiffLoad::Ready(snap) if empty_snapshot(snap) => {
+                return Some(DiffBody::Message(t(L10nKey::DiffWorkingTreeClean)));
+            }
+            DiffLoad::Ready(snap) => Arc::clone(snap),
+        };
+
+        // A focused *untracked* file has no patch in the snapshot; its card is
+        // synthesized from the file's own bytes — see `preview`.
+        let preview = match untracked_focus(&snap, overlay.focus.as_deref()) {
+            Some(path) => match &overlay.preview {
+                Some((held, file)) if held == path => match file {
+                    Some(file) => Some(Arc::clone(file)),
+                    None => return Some(DiffBody::Message(t(L10nKey::DiffReadFailed))),
+                },
+                _ => return Some(DiffBody::Message(t(L10nKey::DiffReading))),
+            },
+            None => None,
+        };
+
+        let focused = focused_file(&snap, overlay);
+        let from = RowsFrom {
+            snap: &snap,
+            preview: preview.as_ref(),
+            mode,
+            focused,
+            oversized: focused.is_none() && snap.stats().oversized,
+            expanded: &overlay.expanded,
+        };
+        if overlay
+            .rows_key
+            .as_ref()
+            .is_none_or(|held| !held.describes(&from))
+        {
+            let rows = match from.preview {
+                Some(file) => crate::ui::diff_list::preview_rows(file, from.mode),
+                None => crate::ui::diff_list::build_rows(
+                    from.snap,
+                    from.expanded,
+                    from.focused,
+                    from.mode,
+                    from.oversized,
+                ),
+            };
+            let key = from.to_key();
+            resync_list(&overlay.list, &overlay.rows, &rows);
+            overlay.rows = Rc::new(rows);
+            overlay.rows_key = Some(key);
+        }
+        Some(DiffBody::Rows(snap))
+    }
+
+    /// The rows, in the virtualised list that draws only the visible ones.
+    fn diff_rows_list(
         &self,
-        snap: &DiffSnapshot,
-        expanded: &HashMap<String, bool>,
-        focused: Option<usize>,
-        scroll: &gpui::ScrollHandle,
+        overlay: &DiffOverlayState,
+        snap: Arc<DiffSnapshot>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let stats = snap.stats();
-        let mode = view_mode(cx);
-        let oversized = focused.is_none() && stats.oversized;
-        let mut list = v_flex().gap_3().p_4().w_full();
-        if oversized {
-            list = list.child(self.diff_oversized_notice(snap, &stats, cx));
-        }
-        let shown = snap.files.len().min(MAX_RENDERED_FILES);
-        for (idx, file) in snap.files.iter().enumerate() {
-            if focused.is_some_and(|f| f != idx) {
-                continue;
+        let rows = Rc::clone(&overlay.rows);
+        let font = SharedString::from(self.font_family.clone());
+        let app = cx.entity().downgrade();
+        let list = overlay.list.clone();
+        let body = gpui::list(list.clone(), move |ix, _window, cx| {
+            #[cfg(test)]
+            row_probe::record();
+            match rows.get(ix) {
+                Some(row) => diff_row_element(row, &font, &snap, &app, cx),
+                // The list is spliced in step with `rows`, so this is
+                // unreachable — and an empty row is a better answer to a bug
+                // than an index panic in a paint.
+                None => div().into_any_element(),
             }
-            if focused.is_none() && idx >= shown {
-                break;
-            }
-            let is_expanded = if focused == Some(idx) {
-                expanded.get(&file.path).copied().unwrap_or(true)
-            } else {
-                file_expanded(file, expanded, oversized)
-            };
-            list = list.child(self.diff_file_card(idx, file, is_expanded, mode, cx));
-        }
-        if focused.is_none() && snap.files.len() > shown {
-            let rest = snap.files.len() - shown;
-            list = list.child(
-                div()
-                    .w_full()
-                    .px_2p5()
-                    .py_1p5()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(t_plural(L10nKey::DiffMoreFiles, rest, &[])),
-            );
-        }
-        if focused.is_none() && !snap.untracked.is_empty() {
-            list = list.child(self.diff_untracked_section(snap, cx));
-        }
+        })
+        .size_full()
+        // Only the vertical padding: `List` lays every item out at its own
+        // full width and puts it at its own left edge, so a horizontal
+        // padding here would be silently ignored. The rows carry their own —
+        // see `diff_row_element`.
+        .py_4();
         // A whole working tree can scroll past here with nothing to say how
         // far it runs or where in it you are — the one long document in the
         // app without the bar every other scroll area has.
-        crate::ui::scrollbar::with_vertical_scrollbar(
-            "diff-overlay-scrollbar",
-            div()
-                .id("diff-overlay-scroll")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(scroll)
-                .child(list),
-            scroll,
-        )
+        //
+        // The bar reads the list's own height, and a list only knows the rows
+        // it has measured: until the reader has been to the bottom once, the
+        // thumb is sized against a document that is still being discovered, so
+        // it shrinks as they scroll. `ListState::measure_all` would settle it
+        // by laying out every row on the first frame, which is the cost this
+        // whole list exists to avoid.
+        crate::ui::scrollbar::with_vertical_scrollbar("diff-overlay-scrollbar", body, &list)
+    }
+}
+
+/// Counts the rows the list actually built, so a test can tell that a patch of
+/// any size costs the handful of rows on screen rather than all of them.
+#[cfg(test)]
+pub(crate) mod row_probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        static BUILT: Cell<u64> = const { Cell::new(0) };
     }
 
-    fn diff_oversized_notice(
-        &self,
-        snap: &DiffSnapshot,
-        stats: &DiffStats,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let text = t_fmt(
-            L10nKey::DiffOversizedNotice,
-            &[("summary", &oversized_summary(snap, stats))],
-        );
-        div()
-            .w_full()
-            .px_2p5()
-            .py_2()
-            .rounded_md()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child(text)
-            .into_any_element()
+    pub(crate) fn record() {
+        BUILT.set(BUILT.get() + 1);
     }
 
-    fn diff_file_card(
-        &self,
-        idx: usize,
-        file: &FileDiff,
-        expanded: bool,
-        mode: DiffViewMode,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let expandable =
-            !file.binary && (!file.hunks.is_empty() || file.truncated == Some(Truncation::Budget));
-        let deco = deco_status(file.status);
-        let (glyph, glyph_color) = (status_glyph(deco), status_color(deco, cx));
-        let shown_path = match &file.old_path {
-            Some(old) => format!("{old} → {}", file.path),
-            None => file.path.clone(),
+    /// The count since the last call, and zero from here.
+    pub(crate) fn take() -> u64 {
+        BUILT.replace(0)
+    }
+}
+
+/// What the overlay's scrolling area holds this frame.
+enum DiffBody {
+    Message(&'static str),
+    /// The rows are in [`DiffOverlayState::rows`]; the snapshot rides along
+    /// for the few rows whose text is derived from it.
+    Rows(Arc<DiffSnapshot>),
+}
+
+/// What this frame would flatten its rows from, borrowed from the overlay.
+struct RowsFrom<'a> {
+    snap: &'a Arc<DiffSnapshot>,
+    preview: Option<&'a Arc<FileDiff>>,
+    mode: DiffViewMode,
+    focused: Option<usize>,
+    oversized: bool,
+    expanded: &'a HashMap<String, bool>,
+}
+
+impl RowsFrom<'_> {
+    fn to_key(&self) -> RowsKey {
+        RowsKey {
+            snap: Arc::clone(self.snap),
+            preview: self.preview.cloned(),
+            mode: self.mode,
+            focused: self.focused,
+            oversized: self.oversized,
+            expanded: self.expanded.clone(),
+        }
+    }
+}
+
+/// What [`DiffOverlayState::rows`] was flattened from, kept so the next frame
+/// can tell whether it would flatten the same rows again.
+struct RowsKey {
+    snap: Arc<DiffSnapshot>,
+    preview: Option<Arc<FileDiff>>,
+    mode: DiffViewMode,
+    focused: Option<usize>,
+    oversized: bool,
+    expanded: HashMap<String, bool>,
+}
+
+impl RowsKey {
+    /// Whether the rows built from `from` would be the rows already held.
+    ///
+    /// The snapshot is compared by pointer first and by contents second: a
+    /// probe that found nothing new still lands a fresh `Arc` over an equal
+    /// snapshot, and rebuilding every row of the patch for that would undo the
+    /// point of keeping them.
+    fn describes(&self, from: &RowsFrom<'_>) -> bool {
+        let same_preview = match (&self.preview, from.preview) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
+            _ => false,
         };
+        self.mode == from.mode
+            && self.focused == from.focused
+            && self.oversized == from.oversized
+            && self.expanded == *from.expanded
+            && same_preview
+            && (Arc::ptr_eq(&self.snap, from.snap) || self.snap == *from.snap)
+    }
+}
 
-        let has_body = expanded && (!file.hunks.is_empty() || file.truncated.is_some());
+/// Tells the list which rows changed, rather than that all of them did.
+///
+/// `ListState::reset` would drop the scroll position, so collapsing one file
+/// would throw the reader back to the top of the tree. The rows either side of
+/// an edit are untouched, so the shared prefix and suffix are kept and only
+/// what is between them is spliced.
+fn resync_list(list: &gpui::ListState, old: &[DiffRow], new: &[DiffRow]) {
+    let (replaced, with) = spliced_range(old, new);
+    list.splice(replaced, with);
+}
 
-        let header_corners = rounding::stack_corners(
-            0,
-            if has_body { 2 } else { 1 },
-            rounding::CARD_RADIUS,
-            rounding::HAIRLINE,
-        );
-        let mut header = h_flex()
-            .id(("diff-file-header", idx))
-            .w_full()
-            .items_center()
-            .gap_2()
-            .px_2p5()
-            .py_1p5()
-            .rounded_corners(header_corners)
-            .bg(cx.theme().secondary)
-            .when(expandable, |h| {
-                let path = file.path.clone();
-                h.cursor_pointer()
-                    .hover(|s| s.bg(cx.theme().list_hover))
-                    .on_click(cx.listener(move |this, _, _window, cx| {
+/// Which of the old rows were replaced, and by how many new ones.
+fn spliced_range(old: &[DiffRow], new: &[DiffRow]) -> (std::ops::Range<usize>, usize) {
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    // Whatever is left of the shorter list once the shared head is off it —
+    // the most the shared tail can be, and what keeps the two slices below in
+    // step with each other.
+    let rest = old.len().min(new.len()) - prefix;
+    let suffix = old[old.len() - rest..]
+        .iter()
+        .rev()
+        .zip(new[new.len() - rest..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (prefix..old.len() - suffix, new.len() - prefix - suffix)
+}
+
+/// The row inset every row of the list shares, matching the source control
+/// panel's — the overlay is a second view of that panel's list, and the two
+/// stopped looking like one app when this one drew cards.
+const ROW_INSET: Pixels = px(10.);
+
+/// The height of a row that is a *file* rather than a line of one: the same
+/// 26px the panel gives its file rows.
+const FILE_ROW_H: Pixels = px(26.);
+
+/// The radius on a row that lights up under the pointer. Matches the panel's.
+const ROW_RADIUS: Pixels = px(5.);
+
+/// The rule between one hunk and the last line of the one before it.
+///
+/// Barely there on purpose: with the cards gone it is the only line left in
+/// the list, and it is separating two parts of one file rather than two
+/// files.
+fn hunk_rule(cx: &gpui::App) -> Hsla {
+    cx.theme().border.opacity(0.6)
+}
+
+/// One row, inset the way every row in the list is.
+fn diff_row_element(
+    row: &DiffRow,
+    font: &SharedString,
+    snap: &Arc<DiffSnapshot>,
+    app: &gpui::WeakEntity<Tty7App>,
+    cx: &mut gpui::App,
+) -> AnyElement {
+    match row {
+        // Stands in for the gap between the groups this list used to be a
+        // flex column of.
+        DiffRow::Gap => div().w_full().h(gpui::rems(0.75)).into_any_element(),
+        DiffRow::Oversized => padded(diff_oversized_notice(snap, cx)),
+        DiffRow::FileHeader(head) => padded(diff_file_header(head, font, app, cx)),
+        DiffRow::HunkHeader { text, leads } => padded(
+            div()
+                .w_full()
+                .px(ROW_INSET)
+                .py_1()
+                .when(!leads, |h| {
+                    h.mt_1().border_t_1().border_color(hunk_rule(cx))
+                })
+                .text_xs()
+                .font_family(font.clone())
+                .text_color(cx.theme().muted_foreground)
+                .truncate()
+                .child(text.clone())
+                .into_any_element(),
+        ),
+        // The lines run the full width of the list. A diff is read as a
+        // column of code, and code that is inset from both sides reads as a
+        // quotation of itself.
+        DiffRow::Split(row) => diff_split_row(row, font, cx).into_any_element(),
+        DiffRow::Unified(row) => diff_unified_row(row, font, cx).into_any_element(),
+        DiffRow::Truncated(reason) => {
+            let note = match reason {
+                Truncation::PerFile => t_fmt(
+                    L10nKey::DiffTruncatedPerFile,
+                    &[("limit", &git_diff::MAX_LINES_PER_FILE.to_string())],
+                ),
+                Truncation::Budget => t(L10nKey::DiffTruncatedBudget).to_string(),
+            };
+            padded(note_row(note, cx))
+        }
+        DiffRow::MoreFiles { rest } => {
+            padded(note_row(t_plural(L10nKey::DiffMoreFiles, *rest, &[]), cx))
+        }
+        // A section label, in the shape the sidebar gives its group headings:
+        // small, quiet, and carried by the space around it rather than a bar
+        // of its own.
+        DiffRow::UntrackedHeader { total } => padded(
+            div()
+                .w_full()
+                .px(ROW_INSET)
+                .py_1()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(t_plural(L10nKey::DiffUntrackedHeader, *total, &[]))
+                .into_any_element(),
+        ),
+        DiffRow::Untracked { index, path } => {
+            padded(diff_untracked_row(*index, path, font, app, cx))
+        }
+        DiffRow::MoreUntracked { rest } => padded(note_row(
+            t_plural(L10nKey::DiffMoreUntracked, *rest, &[]),
+            cx,
+        )),
+    }
+}
+
+/// The margin the file rows keep from the edge of the list.
+fn padded(row: AnyElement) -> AnyElement {
+    div().w_full().px_2().child(row).into_any_element()
+}
+
+/// An aside in the list's own voice — a cap that was hit, a tail that was not
+/// drawn. Never a row you can act on, so never one that lights up.
+fn note_row(text: String, cx: &gpui::App) -> AnyElement {
+    div()
+        .w_full()
+        .px(ROW_INSET)
+        .py_1()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(text)
+        .into_any_element()
+}
+
+fn diff_oversized_notice(snap: &DiffSnapshot, cx: &gpui::App) -> AnyElement {
+    let stats = snap.stats();
+    let text = t_fmt(
+        L10nKey::DiffOversizedNotice,
+        &[("summary", &oversized_summary(snap, &stats))],
+    );
+    div()
+        .w_full()
+        .px(ROW_INSET)
+        .py_2()
+        .rounded(rounding::CARD_RADIUS)
+        .bg(cx.theme().secondary)
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(text)
+        .into_any_element()
+}
+
+fn diff_file_header(
+    head: &FileHead,
+    font: &SharedString,
+    app: &gpui::WeakEntity<Tty7App>,
+    cx: &gpui::App,
+) -> AnyElement {
+    let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().window.hover);
+    let deco = deco_status(head.status);
+    let (glyph, glyph_color) = (status_glyph(deco), status_color(deco, cx));
+    let mut header = h_flex()
+        .id(("diff-file-header", head.index))
+        .w_full()
+        .items_center()
+        .gap_2()
+        .h(FILE_ROW_H)
+        .px(ROW_INSET)
+        .rounded(ROW_RADIUS)
+        .when(head.expandable, |h| {
+            let path = head.path.clone();
+            let want = !head.expanded;
+            let app = app.clone();
+            h.cursor_pointer()
+                .hover(|s| s.bg(hover))
+                .on_click(move |_, _window, cx| {
+                    let path = path.clone();
+                    app.update(cx, |this, cx| {
                         let active = this.active;
                         if let Some(overlay) = this
                             .tabs
                             .get_mut(active)
                             .and_then(|t| t.diff_overlay.as_mut())
                         {
-                            overlay.expanded.insert(path.clone(), !expanded);
+                            overlay.expanded.insert(path, want);
                             cx.notify();
                         }
-                    }))
-                    .child(
-                        Icon::new(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .small()
-                        .text_color(cx.theme().muted_foreground),
-                    )
-            })
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .font_family(self.font_family.clone())
-                    .text_xs()
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(glyph_color)
-                    .child(glyph),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_xs()
-                    .font_family(self.font_family.clone())
-                    .child(shown_path),
-            );
-        if file.binary {
-            header = header.child(
-                div()
-                    .flex_shrink_0()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(t(L10nKey::Binary)),
-            );
-        }
-        if file.added > 0 {
-            header = header.child(
-                div()
-                    .flex_shrink_0()
-                    .text_xs()
-                    .text_color(cx.theme().success)
-                    .child(format!("+{}", file.added)),
-            );
-        }
-        if file.removed > 0 {
-            header = header.child(
-                div()
-                    .flex_shrink_0()
-                    .text_xs()
-                    .text_color(cx.theme().danger)
-                    .child(format!("−{}", file.removed)),
-            );
-        }
-
-        let mut card = v_flex()
-            .w_full()
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded(rounding::CARD_RADIUS)
-            .overflow_hidden()
-            .child(header);
-
-        if has_body {
-            let mut body = v_flex().w_full();
-            let hunks: Vec<_> = file
-                .hunks
-                .iter()
-                .map(|hunk| {
-                    let rows = match mode {
-                        DiffViewMode::Split => HunkRows::Split(split_hunk(&hunk.lines)),
-                        DiffViewMode::Unified => HunkRows::Unified(unified_rows(&hunk.lines)),
-                    };
-                    (hunk, rows)
+                    })
+                    .ok();
                 })
-                .collect();
-            let closing_row = if file.truncated.is_some() {
-                None
-            } else {
-                hunks
-                    .iter()
-                    .rposition(|(_, rows)| !rows.is_empty())
-                    .map(|h| (h, hunks[h].1.len() - 1))
-            };
-            for (h, (hunk, rows)) in hunks.iter().enumerate() {
-                body = body.child(
-                    div()
-                        .w_full()
-                        .px_2()
-                        .py_0p5()
-                        .bg(cx.theme().muted)
-                        .text_xs()
-                        .font_family(self.font_family.clone())
-                        .text_color(cx.theme().muted_foreground)
-                        .truncate()
-                        .child(hunk.header.clone()),
-                );
-                match rows {
-                    HunkRows::Split(rows) => {
-                        for (r, row) in rows.iter().enumerate() {
-                            body = body.child(self.diff_split_row(
-                                row,
-                                closing_row == Some((h, r)),
-                                cx,
-                            ));
-                        }
-                    }
-                    HunkRows::Unified(rows) => {
-                        for (r, row) in rows.iter().enumerate() {
-                            body = body.child(self.diff_unified_row(
-                                row,
-                                closing_row == Some((h, r)),
-                                cx,
-                            ));
-                        }
-                    }
-                }
-            }
-            if let Some(reason) = file.truncated {
-                let note = match reason {
-                    Truncation::PerFile => t_fmt(
-                        L10nKey::DiffTruncatedPerFile,
-                        &[("limit", &git_diff::MAX_LINES_PER_FILE.to_string())],
-                    ),
-                    Truncation::Budget => t(L10nKey::DiffTruncatedBudget).to_string(),
+                .child(
+                    Icon::new(if head.expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .small()
+                    .text_color(cx.theme().muted_foreground),
+                )
+        })
+        .child(
+            div()
+                .flex_shrink_0()
+                .font_family(font.clone())
+                .text_xs()
+                .font_weight(FontWeight::BOLD)
+                .text_color(glyph_color)
+                .child(glyph),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_xs()
+                .font_family(font.clone())
+                .child(head.shown_path.clone()),
+        );
+    if head.binary {
+        header = header.child(
+            div()
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(t(L10nKey::Binary)),
+        );
+    }
+    if head.added > 0 {
+        header = header.child(
+            div()
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(cx.theme().success)
+                .child(format!("+{}", head.added)),
+        );
+    }
+    if head.removed > 0 {
+        header = header.child(
+            div()
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(cx.theme().danger)
+                .child(format!("−{}", head.removed)),
+        );
+    }
+    header.into_any_element()
+}
+
+// An untracked file has no patch in the snapshot, so it cannot be expanded in
+// place the way the files above it are — its contents are read one file at a
+// time and shown on their own. The row asks for that read, which until now
+// only the Source Control panel could: in the overlay these rows were the only
+// files in a list of files that did nothing when clicked.
+fn diff_untracked_row(
+    index: usize,
+    path: &str,
+    font: &SharedString,
+    app: &gpui::WeakEntity<Tty7App>,
+    cx: &gpui::App,
+) -> AnyElement {
+    let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().window.hover);
+    let for_focus = path.to_string();
+    let app = app.clone();
+    h_flex()
+        .id(("diff-untracked", index))
+        .w_full()
+        .items_center()
+        .gap_2()
+        .h(FILE_ROW_H)
+        .px(ROW_INSET)
+        .rounded(ROW_RADIUS)
+        .text_xs()
+        .font_family(font.clone())
+        .cursor_pointer()
+        .hover(|s| s.bg(hover))
+        .on_click(move |_, window, cx| {
+            let for_focus = for_focus.clone();
+            app.update(cx, |this, cx| {
+                let Some((host, cwd, source)) = this
+                    .tabs
+                    .get(this.active)
+                    .and_then(|t| t.diff_overlay.as_ref())
+                    .map(|o| (o.host_id, o.cwd.clone(), o.source.clone()))
+                else {
+                    return;
                 };
-                body = body.child(
-                    div()
-                        .w_full()
-                        .px_2()
-                        .py_1()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(note),
-                );
-            }
-            card = card.child(body);
-        }
-        card.into_any_element()
-    }
+                this.open_diff_overlay(host, cwd, source, Some(for_focus), window, cx);
+            })
+            .ok();
+        })
+        .child(
+            div()
+                .flex_shrink_0()
+                .font_weight(FontWeight::BOLD)
+                .text_color(status_color(DecoStatus::Untracked, cx))
+                .child(status_glyph(DecoStatus::Untracked)),
+        )
+        .child(div().flex_1().min_w_0().truncate().child(path.to_string()))
+        .into_any_element()
+}
 
-    fn diff_split_row(&self, row: &SplitRow, closes_card: bool, cx: &Context<Self>) -> AnyElement {
-        let radius = if closes_card {
-            rounding::inner_radius(rounding::CARD_RADIUS, rounding::HAIRLINE)
-        } else {
-            px(0.)
-        };
-        h_flex()
-            .w_full()
-            .h(px(19.))
-            .items_stretch()
-            .text_xs()
-            .font_family(self.font_family.clone())
-            .child(self.diff_split_cell(row.left.as_ref(), Side::Old, radius, cx))
-            .child(div().flex_shrink_0().w(px(1.)).bg(cx.theme().border))
-            .child(self.diff_split_cell(row.right.as_ref(), Side::New, radius, cx))
-            .into_any_element()
-    }
+fn diff_split_row(row: &SplitRow, font: &SharedString, cx: &gpui::App) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .h(px(19.))
+        .items_stretch()
+        .text_xs()
+        .font_family(font.clone())
+        .child(diff_split_cell(row.left.as_ref(), Side::Old, cx))
+        .child(div().flex_shrink_0().w(px(1.)).bg(hunk_rule(cx)))
+        .child(diff_split_cell(row.right.as_ref(), Side::New, cx))
+}
 
-    fn diff_split_cell(
-        &self,
-        cell: Option<&SplitCell>,
-        side: Side,
-        outer_radius: Pixels,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let base = h_flex().flex_1().min_w_0().h_full().items_center();
-        let base = match side {
-            Side::Old => base.rounded_bl(outer_radius),
-            Side::New => base.rounded_br(outer_radius),
-        };
-        let Some(cell) = cell else {
-            return base.bg(cx.theme().muted.opacity(0.3)).into_any_element();
-        };
-        let (marker, tint) = match (cell.changed, side) {
-            (true, Side::Old) => ("−", Some(cx.theme().danger.opacity(0.12))),
-            (true, Side::New) => ("+", Some(cx.theme().success.opacity(0.12))),
-            (false, _) => (" ", None),
-        };
-        base.when_some(tint, |row, bg| row.bg(bg))
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .w(px(42.))
-                    .justify_end()
-                    .pr_1p5()
-                    .text_color(cx.theme().muted_foreground.opacity(0.7))
-                    .child(cell.no.map(|n| n.to_string()).unwrap_or_default()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(format!("{marker} {}", cell.text)),
-            )
-            .into_any_element()
-    }
-
-    /// One line of the unified view.
-    ///
-    /// Every measurement it shares with [`Self::diff_split_cell`] is shared on
-    /// purpose — the same 19px row, the same `text_xs` in the same family, and
-    /// above all the same `0.12` wash behind an addition and a removal. The two
-    /// views are one diff seen twice; a different green would read as a
-    /// different thing.
-    ///
-    /// What differs is forced by the shape. The line numbers get 34px a side
-    /// rather than 42 (there are two gutters here in front of one column of
-    /// text, not one in front of each), and the `+`/`−` gets a column of its
-    /// own rather than riding in the text: with three kinds of line stacked in
-    /// one column, an inlined marker would leave the context lines' code
-    /// starting two characters left of everything else.
-    fn diff_unified_row(
-        &self,
-        row: &UnifiedRow,
-        closes_card: bool,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let radius = if closes_card {
-            rounding::inner_radius(rounding::CARD_RADIUS, rounding::HAIRLINE)
-        } else {
-            px(0.)
-        };
-        let (marker_color, tint) = match row.kind {
-            LineKind::Added => (cx.theme().success, Some(cx.theme().success.opacity(0.12))),
-            LineKind::Removed => (cx.theme().danger, Some(cx.theme().danger.opacity(0.12))),
-            LineKind::Context => (cx.theme().muted_foreground, None),
-        };
-        let gutter = |no: Option<u32>| {
+fn diff_split_cell(cell: Option<&SplitCell>, side: Side, cx: &gpui::App) -> AnyElement {
+    let base = h_flex().flex_1().min_w_0().h_full().items_center();
+    let Some(cell) = cell else {
+        return base.bg(cx.theme().muted.opacity(0.3)).into_any_element();
+    };
+    let (marker, tint) = match (cell.changed, side) {
+        (true, Side::Old) => ("−", Some(cx.theme().danger.opacity(0.12))),
+        (true, Side::New) => ("+", Some(cx.theme().success.opacity(0.12))),
+        (false, _) => (" ", None),
+    };
+    base.when_some(tint, |row, bg| row.bg(bg))
+        .child(
             h_flex()
                 .flex_shrink_0()
-                .w(px(34.))
+                .w(px(42.))
                 .justify_end()
                 .pr_1p5()
                 .text_color(cx.theme().muted_foreground.opacity(0.7))
-                .child(no.map(|n| n.to_string()).unwrap_or_default())
-        };
-        h_flex()
-            .w_full()
-            .h(px(19.))
-            .items_center()
-            .text_xs()
-            .font_family(self.font_family.clone())
-            .rounded_bl(radius)
-            .rounded_br(radius)
-            .when_some(tint, |line, bg| line.bg(bg))
-            .child(gutter(row.old))
-            .child(gutter(row.new))
-            // The split view's centre rule, in the one place it still means the
-            // same thing: everything left of it is a number, everything right
-            // of it is the file.
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .w(px(1.))
-                    .h_full()
-                    .bg(cx.theme().border),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .w(px(12.))
-                    .text_center()
-                    .text_color(marker_color)
-                    .child(unified_marker(row.kind)),
-            )
-            .child(div().flex_1().min_w_0().truncate().child(row.text.clone()))
-            .into_any_element()
-    }
+                .child(cell.no.map(|n| n.to_string()).unwrap_or_default()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(format!("{marker} {}", cell.text)),
+        )
+        .into_any_element()
+}
 
-    fn diff_untracked_section(&self, snap: &DiffSnapshot, cx: &Context<Self>) -> AnyElement {
-        let total = snap.untracked_count();
-        let untracked = &snap.untracked[..snap.untracked.len().min(MAX_RENDERED_FILES)];
-        let header_corners = rounding::stack_corners(
-            0,
-            if total == 0 { 1 } else { 2 },
-            rounding::CARD_RADIUS,
-            rounding::HAIRLINE,
-        );
-        let mut section = v_flex()
-            .w_full()
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded(rounding::CARD_RADIUS)
-            .overflow_hidden()
-            .child(
-                div()
-                    .w_full()
-                    .px_2p5()
-                    .py_1p5()
-                    .rounded_corners(header_corners)
-                    .bg(cx.theme().secondary)
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(t_plural(L10nKey::DiffUntrackedHeader, total, &[])),
-            );
-        for (i, path) in untracked.iter().enumerate() {
-            // An untracked file has no patch in the snapshot, so it cannot be
-            // expanded in place the way the cards above it are — its contents
-            // are read one file at a time and shown on their own. The row
-            // asks for that read, which until now only the Source Control
-            // panel could: in the overlay these rows were the only files in a
-            // list of files that did nothing when clicked.
-            let for_focus = path.clone();
-            section = section.child(
-                h_flex()
-                    .id(("diff-untracked", i))
-                    .w_full()
-                    .items_center()
-                    .gap_2()
-                    .px_2p5()
-                    .py_1()
-                    .text_xs()
-                    .font_family(self.font_family.clone())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(cx.theme().secondary))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        let Some((host, cwd, source)) = this
-                            .tabs
-                            .get(this.active)
-                            .and_then(|t| t.diff_overlay.as_ref())
-                            .map(|o| (o.host_id, o.cwd.clone(), o.source.clone()))
-                        else {
-                            return;
-                        };
-                        this.open_diff_overlay(
-                            host,
-                            cwd,
-                            source,
-                            Some(for_focus.clone()),
-                            window,
-                            cx,
-                        );
-                    }))
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(status_color(DecoStatus::Untracked, cx))
-                            .child(status_glyph(DecoStatus::Untracked)),
-                    )
-                    .child(div().flex_1().min_w_0().truncate().child(path.clone())),
-            );
-        }
-        if total > untracked.len() {
-            let rest = total - untracked.len();
-            section = section.child(
-                div()
-                    .w_full()
-                    .px_2p5()
-                    .py_1()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(t_plural(L10nKey::DiffMoreUntracked, rest, &[])),
-            );
-        }
-        section.into_any_element()
-    }
+/// One line of the unified view.
+///
+/// Every measurement it shares with [`diff_split_cell`] is shared on purpose —
+/// the same 19px row, the same `text_xs` in the same family, and above all the
+/// same `0.12` wash behind an addition and a removal. The two views are one
+/// diff seen twice; a different green would read as a different thing.
+///
+/// What differs is forced by the shape. The line numbers get 34px a side
+/// rather than 42 (there are two gutters here in front of one column of text,
+/// not one in front of each), and the `+`/`−` gets a column of its own rather
+/// than riding in the text: with three kinds of line stacked in one column, an
+/// inlined marker would leave the context lines' code starting two characters
+/// left of everything else.
+fn diff_unified_row(row: &UnifiedRow, font: &SharedString, cx: &gpui::App) -> impl IntoElement {
+    let (marker_color, tint) = match row.kind {
+        LineKind::Added => (cx.theme().success, Some(cx.theme().success.opacity(0.12))),
+        LineKind::Removed => (cx.theme().danger, Some(cx.theme().danger.opacity(0.12))),
+        LineKind::Context => (cx.theme().muted_foreground, None),
+    };
+    let gutter = |no: Option<u32>| {
+        h_flex()
+            .flex_shrink_0()
+            .w(px(34.))
+            .justify_end()
+            .pr_1p5()
+            .text_color(cx.theme().muted_foreground.opacity(0.7))
+            .child(no.map(|n| n.to_string()).unwrap_or_default())
+    };
+    h_flex()
+        .w_full()
+        .h(px(19.))
+        .items_center()
+        .text_xs()
+        .font_family(font.clone())
+        .when_some(tint, |line, bg| line.bg(bg))
+        .child(gutter(row.old))
+        .child(gutter(row.new))
+        // The split view's centre rule, in the one place it still means the
+        // same thing: everything left of it is a number, everything right of
+        // it is the file.
+        .child(div().flex_shrink_0().w(px(1.)).h_full().bg(hunk_rule(cx)))
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(12.))
+                .text_center()
+                .text_color(marker_color)
+                .child(unified_marker(row.kind)),
+        )
+        .child(div().flex_1().min_w_0().truncate().child(row.text.clone()))
 }
 
 /// Which layout the overlay draws. One setting for the window, not one per
@@ -1480,13 +1547,6 @@ fn empty_snapshot(snap: &DiffSnapshot) -> bool {
     snap.files.is_empty() && snap.untracked.is_empty()
 }
 
-fn file_expanded(file: &FileDiff, expanded: &HashMap<String, bool>, collapse_all: bool) -> bool {
-    if let Some(&want) = expanded.get(&file.path) {
-        return want;
-    }
-    !collapse_all && file.added + file.removed <= AUTO_COLLAPSE_LINES
-}
-
 fn oversized_summary(snap: &DiffSnapshot, stats: &DiffStats) -> String {
     let mut parts = vec![t_plural(L10nKey::DiffChangedFiles, snap.files.len(), &[])];
     let (added, removed) = stats.totals;
@@ -1544,7 +1604,9 @@ fn probe_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::git_diff::{DiffLine, LineKind};
+    use crate::terminal::git_diff::{AUTO_COLLAPSE_LINES, DiffLine, LineKind, MAX_RENDERED_FILES};
+    use crate::ui::diff_list::{build_rows, file_expanded};
+    use crate::ui::diff_rows::split_hunk;
     use crate::ui::i18n::set_locale;
 
     #[test]
@@ -1998,6 +2060,59 @@ mod tests {
             40_000,
             "while the reported count stays the true total"
         );
+    }
+
+    /// `ListState::reset` would drop the scroll position, so opening or
+    /// closing one file in a long tree would throw the reader back to the top.
+    /// Only the rows that actually changed are spliced.
+    #[test]
+    fn only_the_rows_that_changed_are_spliced() {
+        let snap = DiffSnapshot {
+            files: vec![
+                small_file("a.rs", 2),
+                small_file("b.rs", 2),
+                small_file("c.rs", 2),
+            ],
+            ..Default::default()
+        };
+        let shut = |path: &str| -> HashMap<String, bool> {
+            [(path.to_string(), false)].into_iter().collect()
+        };
+        let open = build_rows(&snap, &HashMap::new(), None, DiffViewMode::Unified, false);
+        let middle_shut = build_rows(&snap, &shut("b.rs"), None, DiffViewMode::Unified, false);
+
+        let (replaced, with) = spliced_range(&open, &middle_shut);
+        assert_eq!(
+            (replaced.start, with),
+            (5, 1),
+            "the first card and the gap after it are untouched"
+        );
+        assert_eq!(
+            open.len() - replaced.end,
+            middle_shut.len() - (replaced.start + with),
+            "and so is everything below the file that closed"
+        );
+
+        let (replaced, with) = spliced_range(&open, &open);
+        assert_eq!(
+            (replaced.start, replaced.end, with),
+            (open.len(), open.len(), 0)
+        );
+    }
+
+    #[test]
+    fn a_list_that_was_empty_or_becomes_empty_splices_in_one_piece() {
+        let snap = DiffSnapshot {
+            files: vec![small_file("a.rs", 2)],
+            ..Default::default()
+        };
+        let rows = build_rows(&snap, &HashMap::new(), None, DiffViewMode::Unified, false);
+
+        let (replaced, with) = spliced_range(&[], &rows);
+        assert_eq!((replaced.start, replaced.end, with), (0, 0, rows.len()));
+
+        let (replaced, with) = spliced_range(&rows, &[]);
+        assert_eq!((replaced.start, replaced.end, with), (0, rows.len(), 0));
     }
 
     #[test]
@@ -2488,6 +2603,109 @@ mod render_idle_gpui_tests {
             .output()
             .expect("git runs");
         assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    /// The whole point of the flattened row list: a patch of any size costs
+    /// the rows on screen, not the rows in the patch.
+    ///
+    /// Before this, the overlay built a card per file and an element per line
+    /// on every frame, and gpui notifies the view on every scroll wheel event
+    /// — so a few hundred lines of diff rebuilt tens of thousands of elements
+    /// tens of times a second, and the window visibly stalled.
+    #[gpui::test]
+    fn a_long_patch_builds_only_the_rows_on_screen(cx: &mut TestAppContext) {
+        const LINES: usize = 800;
+
+        let root = std::env::temp_dir().join(format!("tty7-diff-rows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        git(&root, &["init", "--quiet"]);
+        let before: String = (0..LINES).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(root.join("long.txt"), &before).unwrap();
+        git(&root, &["add", "long.txt"]);
+        git(
+            &root,
+            &[
+                "-c",
+                "user.email=t@x",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "one",
+            ],
+        );
+        // Every line rewritten, so the patch is a removal and an addition per
+        // line rather than a handful of hunks in a sea of context.
+        let after: String = (0..LINES).map(|i| format!("edited {i}\n")).collect();
+        std::fs::write(root.join("long.txt"), &after).unwrap();
+
+        let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
+        let open = root.clone();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_diff_overlay(HostId::LOCAL, open, DiffSource::Head, None, window, cx);
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            vcx.background_executor.run_until_parked();
+            let ready = app.update_in(&mut vcx, |app, _, _| {
+                app.tabs[app.active]
+                    .diff_overlay
+                    .as_ref()
+                    .is_some_and(|o| matches!(o.load, DiffLoad::Ready(_)) && !o.loading)
+            });
+            if ready {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the overlay never landed a snapshot"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // 1600 changed lines is well past the auto-collapse threshold, so the
+        // card starts shut. Open it: a reader opening a large file is exactly
+        // the frame this is about.
+        app.update_in(&mut vcx, |app, _, cx| {
+            let active = app.active;
+            app.tabs[active]
+                .diff_overlay
+                .as_mut()
+                .expect("the overlay is open")
+                .expanded
+                .insert("long.txt".to_string(), true);
+            cx.notify();
+        });
+        vcx.background_executor.run_until_parked();
+
+        let rows = app.update_in(&mut vcx, |app, _, _| {
+            app.tabs[app.active]
+                .diff_overlay
+                .as_ref()
+                .map(|o| o.rows.len())
+                .unwrap_or(0)
+        });
+        assert!(
+            rows > LINES,
+            "the patch flattens to a row per changed line ({rows} rows)"
+        );
+
+        row_probe::take();
+        app.update_in(&mut vcx, |_, _, cx| cx.notify());
+        vcx.background_executor.run_until_parked();
+        let built = row_probe::take();
+        assert!(
+            built > 0,
+            "the list drew something — a probe that counts nothing proves nothing"
+        );
+        assert!(
+            built < rows as u64 / 4,
+            "a frame built {built} of {rows} rows: the list is not virtualised"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[gpui::test]

@@ -1,5 +1,5 @@
 use gpui::{AnyElement, ElementId, Pixels, ScrollHandle, div, prelude::*, px};
-use gpui_component::scroll::Scrollbar;
+use gpui_component::scroll::{Scrollbar, ScrollbarHandle};
 use gpui_component::v_flex;
 
 /// Overlays the shared vertical scrollbar on a scroll area.
@@ -9,10 +9,10 @@ use gpui_component::v_flex;
 /// dropping it straight into whatever is around it. Without that the wrapper
 /// sizes to its content, the `size_full` scroll area inside grows with it, and
 /// the pane stops scrolling because nothing overflows any more.
-pub(crate) fn with_vertical_scrollbar(
+pub(crate) fn with_vertical_scrollbar<H: ScrollbarHandle + Clone>(
     id: impl Into<ElementId>,
     scroll_area: impl IntoElement,
-    handle: &ScrollHandle,
+    handle: &H,
 ) -> AnyElement {
     with_inset_vertical_scrollbar(id, scroll_area, handle, px(0.))
 }
@@ -23,10 +23,10 @@ pub(crate) fn with_vertical_scrollbar(
 /// the border is already the edge. A scroll area that *is* the window has no
 /// such edge, and a bar that runs to the last pixel lands on the rounded
 /// corner and reads as if it had been clipped.
-pub(crate) fn with_inset_vertical_scrollbar(
+pub(crate) fn with_inset_vertical_scrollbar<H: ScrollbarHandle + Clone>(
     id: impl Into<ElementId>,
     scroll_area: impl IntoElement,
-    handle: &ScrollHandle,
+    handle: &H,
     inset_y: Pixels,
 ) -> AnyElement {
     v_flex()
