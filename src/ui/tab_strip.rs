@@ -1426,6 +1426,25 @@ impl Tty7App {
             );
         }
 
+        // The connection this tab is on, editable from the tab itself. A
+        // hostname or password typed wrong used to be fixable only by finding
+        // the same host again in Settings, and right-clicking the connection —
+        // the gesture that asks "change this" — offered nothing (#438). The row
+        // is the switcher machine menu's, word for word: the saved host when
+        // there is one, an offer to keep the address when it was dialled by
+        // hand, and nothing at all for a tab with no host form behind it.
+        if let Some((target, label)) = this.tab_ssh_host_form(index, window, cx) {
+            menu = menu.separator().item(PopupMenuItem::new(label).on_click({
+                let app = app.clone();
+                move |_, window, cx| {
+                    let target = target.clone();
+                    let _ = app.update(cx, |this, cx| {
+                        this.edit_ssh_host_of_target(&target, window, cx)
+                    });
+                }
+            }));
+        }
+
         menu = menu
             .separator()
             .item(
@@ -1904,6 +1923,107 @@ impl Tty7App {
                 ),
                 None => this.child(chrome),
             })
+    }
+}
+
+/// The tab menu's SSH row, against real tabs in a real window.
+///
+/// `PopupMenu` keeps its items to itself — nothing outside `gpui_component` can
+/// read back what a built menu says — so these drive the predicate the menu
+/// branches on instead, which is where every decision about the row is made.
+///
+/// Ungated: `test_window::harness` and `quiet_test_pane` both run on Windows,
+/// and a `unix` gate here would skip the one platform this was written on.
+#[cfg(test)]
+mod ssh_host_row_tests {
+    use crate::core::config::Config;
+    use crate::core::session::RemoteTarget;
+    use crate::core::ssh_profile::SshProfile;
+    use crate::terminal::view::{quiet_test_pane, quiet_test_ssh_pane, quiet_test_ssh_pane_of};
+    use crate::ui::app::{Tab, test_window::harness};
+    use crate::ui::i18n::{L10nKey, set_locale, t};
+    use crate::ui::pane::{Pane, PaneSlot};
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn only_a_tab_on_an_ssh_host_is_offered_the_host_form(cx: &mut TestAppContext) {
+        set_locale("en");
+        let (app, mut vcx) = harness(cx);
+        let saved = uuid::Uuid::new_v4();
+
+        // Held for the life of the test: dropping the daemon end of a pane's
+        // transport tears the pane down under the assertions.
+        let _ends = app.update_in(&mut vcx, |app, window, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            let mut profile = SshProfile::new("build-box");
+            profile.id = saved;
+            profile.user = "me".to_string();
+            profile.host = "build-box".to_string();
+            cfg.ssh_profiles = vec![profile];
+            cx.set_global(cfg);
+
+            let (local, a) = quiet_test_pane(1, window, cx);
+            let (dialled, b) = quiet_test_ssh_pane(2, window, cx);
+            let (from_host, c) = quiet_test_ssh_pane_of(3, Some(saved), window, cx);
+            for view in [local, dialled, from_host] {
+                app.tabs.push(Tab::new(Pane::leaf(PaneSlot::Ready(view))));
+            }
+            app.active = 0;
+            cx.notify();
+            (a, b, c)
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            // A local shell has no connection to edit, so the menu it opens is
+            // the one it always was.
+            assert_eq!(
+                app.tab_ssh_host_form(0, window, cx),
+                None,
+                "a local tab was offered an SSH host form"
+            );
+
+            // An address typed by hand is worth keeping, not editing: there is
+            // no saved host behind it yet.
+            let (target, label) = app
+                .tab_ssh_host_form(1, window, cx)
+                .expect("a tab dialled by hand offers to save the host");
+            assert_eq!(target, RemoteTarget::direct("me", "build-box", 22));
+            assert_eq!(label, t(L10nKey::SwitcherSaveAsHost));
+
+            // One opened from a saved host edits that host — by its id, so the
+            // form lands on the record the connection actually came from.
+            let (target, label) = app
+                .tab_ssh_host_form(2, window, cx)
+                .expect("a tab on a saved host offers to edit it");
+            assert_eq!(target, RemoteTarget::Profile { id: saved });
+            assert_eq!(label, t(L10nKey::SwitcherEditHost));
+        });
+    }
+
+    #[gpui::test]
+    fn a_host_deleted_under_a_live_tab_is_offered_back_as_a_new_one(cx: &mut TestAppContext) {
+        // The id a pane carries is the one it was spawned with, and a quick
+        // connection is handed a fresh uuid on its way to the daemon. Trusting
+        // the id alone would open the form on a host that is not there.
+        set_locale("en");
+        let (app, mut vcx) = harness(cx);
+        let _end = app.update_in(&mut vcx, |app, window, cx| {
+            let (view, end) = quiet_test_ssh_pane_of(1, Some(uuid::Uuid::new_v4()), window, cx);
+            app.tabs.push(Tab::new(Pane::leaf(PaneSlot::Ready(view))));
+            app.active = 0;
+            cx.notify();
+            end
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let (target, label) = app
+                .tab_ssh_host_form(0, window, cx)
+                .expect("an unresolvable profile id still names a host worth keeping");
+            assert_eq!(target, RemoteTarget::direct("me", "build-box", 22));
+            assert_eq!(label, t(L10nKey::SwitcherSaveAsHost));
+        });
     }
 }
 

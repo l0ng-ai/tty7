@@ -8870,20 +8870,37 @@ pub(crate) fn quiet_test_pane(
     (view, daemon_side)
 }
 
-#[cfg(all(test, unix))]
+/// A quiet pane that was dialled by hand, with no saved host behind it.
+///
+/// Ungated on purpose: the transport this hands back is already
+/// platform-neutral, and gating it left every test that wanted an SSH pane
+/// silently skipped on Windows.
+#[cfg(test)]
 pub(crate) fn quiet_test_ssh_pane(
     pane_id: u64,
     window: &mut Window,
     cx: &mut gpui::App,
-) -> (gpui::Entity<TerminalView>, std::os::unix::net::UnixStream) {
+) -> (gpui::Entity<TerminalView>, crate::daemon::transport::Stream) {
+    quiet_test_ssh_pane_of(pane_id, None, window, cx)
+}
+
+/// The same, for a pane opened from a saved host — `profile_id` is what tells
+/// the two apart everywhere the connection is offered back to the user.
+#[cfg(test)]
+pub(crate) fn quiet_test_ssh_pane_of(
+    pane_id: u64,
+    profile_id: Option<uuid::Uuid>,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) -> (gpui::Entity<TerminalView>, crate::daemon::transport::Stream) {
     let (view, stream) = quiet_test_pane(pane_id, window, cx);
     view.update(cx, |view, _| {
-        view.ssh_spec = Some(Box::new(
-            serde_json::from_str(
-                r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
-            )
-            .expect("a minimal NativeSshSpec decodes"),
-        ));
+        let mut spec: crate::daemon::protocol::NativeSshSpec = serde_json::from_str(
+            r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
+        )
+        .expect("a minimal NativeSshSpec decodes");
+        spec.profile_id = profile_id.map(|id| id.to_string());
+        view.ssh_spec = Some(Box::new(spec));
     });
     (view, stream)
 }

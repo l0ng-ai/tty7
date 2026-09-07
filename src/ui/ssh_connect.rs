@@ -244,6 +244,31 @@ impl Tty7App {
         }
     }
 
+    /// The host form a tab's own context menu offers, and what the row calls
+    /// it — read off the tab the menu was opened on rather than off whichever
+    /// pane happens to be focused, so right-clicking a background tab reaches
+    /// that tab's connection.
+    ///
+    /// `None` for a tab there is no host form to open: a local shell and a
+    /// remote workspace pane were never dialled with an SSH spec of their own,
+    /// and a WSL distro is configured nowhere this form could edit. The label
+    /// comes from the same [`host_form_label`] the switcher's machine menu
+    /// uses, so the two rows cannot drift apart.
+    ///
+    /// [`host_form_label`]: crate::ui::switcher::host_form_label
+    pub(crate) fn tab_ssh_host_form(
+        &self,
+        index: usize,
+        window: &gpui::Window,
+        cx: &gpui::App,
+    ) -> Option<(crate::core::session::RemoteTarget, &'static str)> {
+        let leaf = self.tabs.get(index)?.pane.focused_or_first(window, cx)?;
+        let spec = leaf.read(cx).ssh_spec()?;
+        let target = ssh_host_target_of_spec(&spec, &cx.global::<Config>().ssh_profiles);
+        let label = crate::ui::switcher::host_form_label(&target)?;
+        Some((target, label))
+    }
+
     fn bump_ssh_frecency(&mut self, profile_id: uuid::Uuid, cx: &mut gpui::Context<Self>) {
         self.update_config(cx, |cfg| {
             let entry = cfg.ssh_profile_frecency.entry(profile_id).or_default();
@@ -406,6 +431,29 @@ fn build_spec_inner(
             name => name.to_string(),
         }),
         profile_id: Some(profile.id.to_string()),
+    }
+}
+
+/// Which host form a live connection belongs to: the saved host it was opened
+/// from, or the address it was dialled by.
+///
+/// A transient profile is handed a fresh uuid on its way to the daemon, so an
+/// id alone does not mean a host was saved — only one that still resolves
+/// against the saved list does. Anything else is an address worth keeping, and
+/// [`Tty7App::edit_ssh_host_of_target`] opens a new host prefilled from it.
+pub(crate) fn ssh_host_target_of_spec(
+    spec: &NativeSshSpec,
+    profiles: &[SshProfile],
+) -> crate::core::session::RemoteTarget {
+    use crate::core::session::RemoteTarget;
+    let saved = spec
+        .profile_id
+        .as_deref()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .filter(|id| profiles.iter().any(|p| p.id == *id));
+    match saved {
+        Some(id) => RemoteTarget::Profile { id },
+        None => RemoteTarget::direct(spec.user.clone(), spec.host.clone(), spec.port),
     }
 }
 
