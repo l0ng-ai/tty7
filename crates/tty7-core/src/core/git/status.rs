@@ -845,12 +845,12 @@ pub fn probe_status(host: &dyn Host, cwd: &Path) -> StatusProbe {
     }
     let paths = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut lines = paths.lines().map(|l| l.trim_end_matches(['\n', '\r']));
-    let Some(root) = lines.next().map(PathBuf::from) else {
+    let Some(root) = lines.next().map(super::git_path) else {
         return StatusProbe::Unreachable;
     };
     let git_dir = lines.next();
     let home = super::repo_home(&root, git_dir, lines.next());
-    let Some(git_dir) = git_dir.map(PathBuf::from) else {
+    let Some(git_dir) = git_dir.map(super::git_path) else {
         return StatusProbe::Unreachable;
     };
 

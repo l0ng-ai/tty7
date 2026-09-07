@@ -1,8 +1,23 @@
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use crate::core::git::{GitStatus, RepoSnapshot, probe};
 use crate::ui::host_ops::{ByHost, HostId, InFlight};
+
+/// The spelling a directory is keyed by in here.
+///
+/// This cache is where a repository gets its identity: `roots` maps a cwd to a
+/// root, and `homes`, `status` and `last_probe` are then all keyed by that
+/// root, which is in turn the key `ScmData` and the diff overlay use. The two
+/// halves of a lookup arrive from different places — a cwd from the pane, a
+/// root from `git`, and either one possibly past `fs::canonicalize` — so this
+/// is the one place that has to insist they agree. Off Windows, and for every
+/// path that already spells itself the OS's way, it is a borrow and nothing
+/// else. See [`tty7_core::core::path_spelling`].
+fn key(path: &Path) -> Cow<'_, Path> {
+    tty7_core::core::path_spelling::local_spelling(path)
+}
 
 #[derive(Default)]
 pub struct GitStatusCache {
@@ -17,12 +32,12 @@ impl gpui::Global for GitStatusCache {}
 
 impl GitStatusCache {
     pub fn status_for(&self, host: HostId, cwd: &Path) -> Option<GitStatus> {
-        let root = self.roots.get(host, cwd)?.as_ref()?;
-        self.status.get(host, root).cloned()
+        let root = self.roots.get(host, &*key(cwd))?.as_ref()?;
+        self.status.get(host, root.as_path()).cloned()
     }
 
     pub fn known_repo_for(&self, host: HostId, cwd: &Path) -> Option<Option<PathBuf>> {
-        let root = self.roots.get(host, cwd)?;
+        let root = self.roots.get(host, &*key(cwd))?;
         Some(root.as_ref().map(|root| {
             self.homes
                 .get(host, root)
@@ -38,7 +53,7 @@ impl GitStatusCache {
     /// a "which project is this" question wants. This answers with the root,
     /// which is the key everything git-shaped is stored under.
     pub fn repo_root_for(&self, host: HostId, cwd: &Path) -> Option<&Path> {
-        self.roots.get(host, cwd)?.as_deref()
+        self.roots.get(host, &*key(cwd))?.as_deref()
     }
 
     /// Forget a machine we have stopped talking to, so a reconnect starts from
@@ -51,7 +66,7 @@ impl GitStatusCache {
     }
 
     pub fn begin_probe(&mut self, host: HostId, cwd: &Path) -> bool {
-        let key = (host, cwd.to_path_buf());
+        let key = (host, key(cwd).into_owned());
         if self.probes.begin(key.clone()) {
             true
         } else {
@@ -66,22 +81,25 @@ impl GitStatusCache {
         cwd: &Path,
         min_interval: Duration,
     ) -> bool {
+        let cwd = key(cwd);
         if self.probes.is_pending(&(host, cwd.to_path_buf())) {
             return false;
         }
-        let key = self.throttle_key(host, cwd).to_path_buf();
+        let throttle = self.throttle_key(host, &cwd).to_path_buf();
         if self
             .last_probe
-            .get(host, key.as_path())
+            .get(host, throttle.as_path())
             .is_some_and(|at| at.elapsed() < min_interval)
         {
             return false;
         }
-        self.last_probe.insert(host, key, Instant::now());
-        self.probes.begin((host, cwd.to_path_buf()));
+        self.last_probe.insert(host, throttle, Instant::now());
+        self.probes.begin((host, cwd.into_owned()));
         true
     }
 
+    /// `cwd` is already in the cache's own spelling — every caller of this one
+    /// has been past [`key`].
     fn throttle_key<'a>(&'a self, host: HostId, cwd: &'a Path) -> &'a Path {
         match self.roots.get(host, cwd) {
             Some(Some(root)) => root,
@@ -122,7 +140,8 @@ impl GitStatusCache {
         branch: &str,
         counts: Option<(u32, u32)>,
     ) -> bool {
-        let Some(status) = self.status.get(host, root) else {
+        let root = key(root);
+        let Some(status) = self.status.get(host, &*root) else {
             return false;
         };
         let (added, removed) = counts.unwrap_or((status.added, status.removed));
@@ -131,7 +150,7 @@ impl GitStatusCache {
         }
         self.status.insert(
             host,
-            root.to_path_buf(),
+            root.into_owned(),
             GitStatus {
                 branch: branch.to_string(),
                 added,
@@ -147,12 +166,21 @@ impl GitStatusCache {
         cwd: &Path,
         snapshot: Option<RepoSnapshot>,
     ) -> bool {
+        // A snapshot arrives spelled by `git`, the cwd by whoever asked for
+        // the probe. Both land in the cache's own spelling or the root a
+        // status is filed under is not the root the next lookup asks for.
+        let cwd = key(cwd);
+        let snapshot = snapshot.map(|snap| RepoSnapshot {
+            root: key(&snap.root).into_owned(),
+            home: key(&snap.home).into_owned(),
+            ..snap
+        });
         let rerun = !self.probes.finish(&(host, cwd.to_path_buf()));
-        let key = match &snapshot {
+        let throttle = match &snapshot {
             Some(snap) => snap.root.clone(),
-            None => self.throttle_key(host, cwd).to_path_buf(),
+            None => self.throttle_key(host, &cwd).to_path_buf(),
         };
-        self.last_probe.insert(host, key, Instant::now());
+        self.last_probe.insert(host, throttle, Instant::now());
         match snapshot {
             Some(snap) => {
                 let (added, removed) = snap.counts.unwrap_or_else(|| {
@@ -463,6 +491,149 @@ mod tests {
         assert!(cache.begin_probe_throttled(L, cwd, Duration::ZERO));
         assert!(!cache.finish_probe(L, cwd, Some(snap("/repo", "main", Some((1, 0))))));
         assert!(cache.begin_probe(L, cwd));
+    }
+
+    /// Every way one directory can be spelled on the way into this cache is
+    /// one key.
+    ///
+    /// Ungated on purpose. The spellings below are the ones Windows actually
+    /// produces — a pane says `C:\repo`, `git rev-parse` says `C:/repo`,
+    /// `fs::canonicalize` says `\\?\C:\repo` — and on Unix they collapse to
+    /// one, so this costs nothing there and is the whole test here. Gating it
+    /// to unix is what let the divergence live: the *only* platform that has
+    /// three spellings was the only one not running the comparison.
+    #[test]
+    fn one_directory_spelled_three_ways_is_one_repository() {
+        let mut cache = GitStatusCache::default();
+        let (a, b, c) = match cfg!(windows) {
+            true => (r"C:\code\repo", "C:/code/repo", r"\\?\C:\code\repo"),
+            false => ("/code/repo", "/code/repo", "/code/repo"),
+        };
+        let (a, b, c) = (Path::new(a), Path::new(b), Path::new(c));
+
+        // Probed under the resolved spelling, which is what a caller that went
+        // through `Host::canonicalize` has.
+        cache.finish_probe(L, c, Some(snap(c.to_str().unwrap(), "main", Some((9, 9)))));
+
+        for spelling in [a, b, c] {
+            assert_eq!(
+                cache.repo_root_for(L, spelling),
+                Some(a),
+                "{spelling:?} names the repository the others do"
+            );
+            assert_eq!(
+                cache.known_repo_for(L, spelling),
+                Some(Some(a.to_path_buf())),
+                "{spelling:?}"
+            );
+            assert_eq!(
+                cache.status_for(L, spelling).unwrap().branch,
+                "main",
+                "{spelling:?}"
+            );
+        }
+    }
+
+    /// The diff overlay's spin, in the cache underneath it.
+    ///
+    /// `install_diff_snapshot` hands the branch it just read back with the
+    /// root `git rev-parse` printed, while the status it is correcting was
+    /// filed under the root whoever probed had. When those two spellings miss
+    /// each other the correction is dropped, the overlay's next
+    /// `maybe_refresh` finds the same disagreement it just tried to settle,
+    /// and it re-reads the diff — `load=ready loading=true`, two `git`
+    /// processes a lap, for as long as the overlay is open.
+    #[test]
+    fn a_diff_read_settles_a_branch_it_learned_the_root_of_from_git() {
+        let mut cache = GitStatusCache::default();
+        let (probed, from_git) = match cfg!(windows) {
+            true => (r"\\?\C:\code\repo", "C:/code/repo"),
+            false => ("/code/repo", "/code/repo"),
+        };
+        cache.finish_probe(
+            L,
+            Path::new(probed),
+            Some(snap(probed, "a-branch-this-repo-has-left", Some((99, 99)))),
+        );
+
+        assert!(
+            cache.note_diff_read(L, Path::new(from_git), "main", Some((1, 0))),
+            "the correction has to land, or the overlay reprobes forever"
+        );
+        let got = cache.status_for(L, Path::new(probed)).unwrap();
+        assert_eq!(got.branch, "main");
+        assert_eq!((got.added, got.removed), (1, 0));
+        assert!(
+            !cache.note_diff_read(L, Path::new(from_git), "main", Some((1, 0))),
+            "and the second lap has nothing left to say — this is what ends it"
+        );
+    }
+
+    /// The same loop, end to end against a repository `git` actually created,
+    /// because the literals above only prove the rule and not that this is the
+    /// rule the real answers need.
+    ///
+    /// This is the shape the diff overlay runs every frame: a status filed
+    /// under the cwd a probe was asked about, then a diff read filed under the
+    /// root `git rev-parse` printed. No window and no gpui, so it runs
+    /// everywhere the test binary does.
+    #[test]
+    fn a_real_repository_files_its_probe_and_its_diff_under_one_root() {
+        use tty7_core::core::git::diff::{DiffRequest, probe_diff};
+
+        let host = tty7_core::host::local::LocalHost::new();
+        let dir = std::env::temp_dir().join(format!("tty7-one-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = host
+            .git(&dir, &["init", "--quiet"])
+            .is_ok_and(|o| o.success());
+        if !ok {
+            let _ = std::fs::remove_dir_all(&dir);
+            return; // no git on this machine
+        }
+        for cfg in [
+            ["config", "user.email", "t@x"].as_slice(),
+            ["config", "user.name", "t"].as_slice(),
+        ] {
+            assert!(host.git(&dir, cfg).is_ok_and(|o| o.success()));
+        }
+        std::fs::write(dir.join("a.rs"), "fn main() {}\n").unwrap();
+        assert!(host.git(&dir, &["add", "-A"]).is_ok_and(|o| o.success()));
+        assert!(
+            host.git(&dir, &["commit", "--quiet", "-m", "one"])
+                .is_ok_and(|o| o.success())
+        );
+        std::fs::write(dir.join("a.rs"), "fn main() { /* edited */ }\n").unwrap();
+
+        // The cwd a pane reports can have been past `Host::canonicalize`; the
+        // root a diff carries never has been.
+        let cwd = host.canonicalize(&dir).expect("the scratch dir resolves");
+        let mut cache = GitStatusCache::default();
+        let snapshot = crate::core::git::probe(&*host, &cwd).expect("a repository is here");
+        cache.finish_probe(L, &cwd, Some(snapshot));
+        assert_eq!(
+            cache.repo_root_for(L, &cwd),
+            Some(cwd.as_path()),
+            "the probed root is the directory the cache was asked about"
+        );
+
+        let diff = probe_diff(&*host, &cwd, &DiffRequest::default()).expect("a diff is readable");
+        assert_eq!(diff.root, cwd, "and the diff names that same directory");
+        // A branch switched outside tty7 is what makes this correction the
+        // thing that ends the overlay's loop rather than a no-op: the read has
+        // to land the first time and have nothing to say the second.
+        assert!(
+            cache.note_diff_read(L, &diff.root, "moved-on", Some((0, 0))),
+            "a diff read filed under git's root must reach the probe's status"
+        );
+        assert_eq!(cache.status_for(L, &cwd).unwrap().branch, "moved-on");
+        assert!(
+            !cache.note_diff_read(L, &diff.root, "moved-on", Some((0, 0))),
+            "and the second lap says nothing — this is what ends the loop"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
