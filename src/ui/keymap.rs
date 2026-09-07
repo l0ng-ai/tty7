@@ -203,13 +203,27 @@ fn action_bindings(effective: &[(String, String)]) -> Vec<KeyBinding> {
         // without saying so — `no_default_binding_sits_on_a_terminal_control_code`
         // is the half of it that fails a build. A single chord only, since a
         // prefix like `ctrl-b n` is that choice made deliberately.
-        if !key.contains(' ')
-            && steals_a_control_code(key)
-            && !control_code_binding_allowed(action, key)
+        // Over both spellings that reach the keymap, because the fold is what
+        // decides which of them the shell actually loses. `steals_a_control_code`
+        // only ever recognises a bare Ctrl, so it waves `ctrl-shift-2` through —
+        // and then the fold installs `ctrl-@` beside it, which is NUL. The chord
+        // was dead before it was folded and stole nothing; now that it is live
+        // the warning has to follow it (#750). At most one of the two can trip:
+        // a written chord that folds carries Shift, and one that carries Shift
+        // is never a control code.
+        let folded = folded_spec(key);
+        for chord in [Some(key.as_str()), folded.as_deref()]
+            .into_iter()
+            .flatten()
         {
-            log::warn!(
-                "keybinding '{key}' for '{action}' takes a control code away from the shell"
-            );
+            if !chord.contains(' ')
+                && steals_a_control_code(chord)
+                && !control_code_binding_allowed(action, chord)
+            {
+                log::warn!(
+                    "keybinding '{chord}' for '{action}' takes a control code away from the shell"
+                );
+            }
         }
         if !push_binding(&mut bindings, action, key) {
             log::warn!("ignoring keybinding: unknown action '{action}'");
@@ -997,7 +1011,15 @@ const SHIFTED_GLYPHS: [(char, char); 21] = [
 /// for, folds onto it too — the flag is simply redundant there.
 ///
 /// The table is US-layout, and a chord it does not know is left alone rather
-/// than guessed at.
+/// than guessed at. It cannot be layout-aware from here: `?` is Shift+ß on a
+/// German keyboard and Shift+, on a French one, and the only mapper that knows
+/// which is gpui's, reached through `KeyBinding::load` rather than the
+/// `KeyBinding::new` that `make_binding` uses — and it exists on Windows only,
+/// where `MacKeyboardMapper` does no shift folding at all. So off a US layout
+/// the fold is a widening that may not land: `ctrl-shift-4` picks up `ctrl-$`,
+/// which on AZERTY is a key of its own. Harmless, because the fold only ever
+/// adds — the spec as written stays bound whatever the layout — but it is why
+/// this is not the last word on #750.
 ///
 /// The fold is *added* to a spec's bindings, never substituted for them,
 /// because the convention is not universal. Windows leaves Shift intact on
@@ -1744,15 +1766,25 @@ mod tests {
         // `control_code_binding_allowed`; anything new needs a fall-through of
         // its own to join them.
         for (action, spec) in default_bindings() {
-            for chord in spec.split_whitespace() {
-                Keystroke::parse(chord).expect("default chords parse");
-                assert!(
-                    !steals_a_control_code(chord) || control_code_binding_allowed(action, chord),
-                    "{action} is bound to {chord}, which the shell needs as a control code \
-                     (Ctrl+[ is ESC, Ctrl+D is EOF, Ctrl+W deletes a word, \
-                     Ctrl+2..8 are NUL/ESC/FS/GS/RS/US/DEL). \
-                     Window actions belong on ctrl-shift-* off macOS."
-                );
+            // Both spellings, because `push_binding` installs both. "Window
+            // actions belong on ctrl-shift-*" stops being an escape over the
+            // digits and the punctuation the moment the fold clears the Shift
+            // again: `ctrl-shift-2` goes into the keymap as `ctrl-@` (#750).
+            let folded = folded_spec(spec);
+            for spelling in [Some(spec), folded.as_deref()].into_iter().flatten() {
+                for chord in spelling.split_whitespace() {
+                    Keystroke::parse(chord).expect("default chords parse");
+                    assert!(
+                        !steals_a_control_code(chord)
+                            || control_code_binding_allowed(action, chord),
+                        "{action} is bound to {spec}, installed as {chord}, which the shell \
+                         needs as a control code \
+                         (Ctrl+[ is ESC, Ctrl+D is EOF, Ctrl+W deletes a word, \
+                         Ctrl+2..8 are NUL/ESC/FS/GS/RS/US/DEL). \
+                         Window actions belong on ctrl-shift-* off macOS — over a letter, \
+                         where the platform keeps the Shift."
+                    );
+                }
             }
         }
     }
@@ -1950,6 +1982,60 @@ mod tests {
         assert!(same_chord("secondary-t", "secondary-t"));
         assert!(!same_chord("secondary-shift-]", "secondary-shift-["));
         assert!(!same_chord("secondary-}", "secondary-{"));
+    }
+
+    #[test]
+    fn the_control_code_guard_follows_the_folded_chord() {
+        // The half of the control-code rule that only warns. A chord carrying
+        // Shift reads as safe on its own — `steals_a_control_code` recognises a
+        // bare Ctrl and nothing else — and it *was* safe while nothing could
+        // press it. The fold makes it live, and Ctrl+Shift+2 is delivered as
+        // Ctrl+@, which is the NUL the program on the far end is waiting for.
+        // So the guard is asked about the spelling that goes into the keymap
+        // (#750); `action_bindings` runs exactly this pair.
+        for (written, folded) in [
+            ("ctrl-shift-2", per_platform("ctrl-@", "secondary-@")),
+            ("ctrl-shift-6", per_platform("ctrl-^", "secondary-^")),
+            ("ctrl-shift--", per_platform("ctrl-_", "secondary-_")),
+            ("ctrl-shift-/", per_platform("ctrl-?", "secondary-?")),
+        ] {
+            assert!(
+                !steals_a_control_code(written),
+                "{written} reads as safe as written, which is why the fold has to be checked"
+            );
+            assert_eq!(folded_spec(written).as_deref(), Some(folded));
+            assert!(
+                steals_a_control_code(folded),
+                "{written} is installed as {folded} and takes a control code"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_the_us_table_does_not_know_is_left_alone() {
+        // `SHIFTED_GLYPHS` is a US keyboard, and every other layout prints
+        // something else on the shifted half: `?` is Shift+ß on a German
+        // keyboard and Shift+, on a French one. The fold cannot know that, so
+        // it declines rather than guesses — a key it has never seen keeps its
+        // Shift, and the binding written for it stays exactly as written. That
+        // is also what keeps the fold additive: it can widen a spec's reach but
+        // never move it onto a chord the user did not ask for.
+        for spec in [
+            "secondary-shift-ß",
+            "secondary-shift-é",
+            "secondary-shift-ä",
+            "secondary-shift-ç",
+            "secondary-shift-ñ",
+        ] {
+            assert_eq!(folded_spec(spec), None, "{spec} was guessed at");
+        }
+        // And the recorded spelling, which is what a non-US layout actually
+        // produces, needs no fold to reach the dispatcher in the first place.
+        let effective = [("NextTab".to_string(), "secondary-?".to_string())];
+        assert_eq!(
+            dispatched_keystrokes(&effective, &[delivered_with_secondary("?")], ""),
+            vec![NextTab::name_for_type()],
+        );
     }
 
     #[test]
