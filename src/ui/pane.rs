@@ -807,6 +807,12 @@ impl<L: Clone> Pane<L> {
 
     pub fn neighbor_in_direction(&self, from: usize, dir: Dir) -> Option<usize> {
         let rects = self.leaf_rects();
+        Self::ranked_neighbor(&rects, from, dir).map(|(i, _)| i)
+    }
+
+    /// The pane a move in `dir` lands on and how far off it sits: nearest wins,
+    /// and the widest shared edge breaks a tie.
+    fn ranked_neighbor(rects: &[(L, Rect)], from: usize, dir: Dir) -> Option<(usize, f32)> {
         let f = rects.get(from)?.1;
         const EPS: f32 = ADJACENCY_EPS;
         let mut best: Option<(usize, f32, f32)> = None;
@@ -825,38 +831,51 @@ impl<L: Clone> Pane<L> {
                 best = Some((i, dist, overlap));
             }
         }
-        best.map(|(i, _, _)| i)
+        best.map(|(i, dist, _)| (i, dist))
     }
 
-    /// Whether a move in `dir` could legally land on `to`: it sits on that side
-    /// of `from` and the two share an edge.
-    pub fn is_neighbor_in_direction(&self, from: usize, to: usize, dir: Dir) -> bool {
+    /// Whether a move in `dir` could land on `to` without stepping over
+    /// anything: `to` shares an edge with that side of `from`, and nothing in
+    /// that direction sits nearer.
+    ///
+    /// Lying on the right side is not enough on its own. In a row of three
+    /// columns the far one also sits to the right of the first with a full edge
+    /// in common, and treating that as adjacent would skip the column between
+    /// them.
+    pub fn is_adjacent_in_direction(&self, from: usize, to: usize, dir: Dir) -> bool {
         if from == to {
             return false;
         }
         let rects = self.leaf_rects();
-        match (rects.get(from), rects.get(to)) {
-            (Some((_, f)), Some((_, c))) => adjacency(*f, *c, dir).is_some(),
-            _ => false,
-        }
+        let (Some((_, f)), Some((_, c))) = (rects.get(from), rects.get(to)) else {
+            return false;
+        };
+        let Some((dist, _)) = adjacency(*f, *c, dir) else {
+            return false;
+        };
+        Self::ranked_neighbor(&rects, from, dir)
+            .is_some_and(|(_, nearest)| dist <= nearest + ADJACENCY_EPS)
     }
 
     /// The pane a move in `dir` lands on, preferring `back` — where the last
-    /// move the other way started — as long as it is still a neighbor.
+    /// move the other way started — as long as it is still adjacent.
     ///
-    /// Geometry alone can only rank candidates by overlap, so at a T-junction
-    /// (one tall pane facing a stack) the reverse move lands on the same member
-    /// of the stack whichever one you left, and going back and forth drifts
-    /// (#738). Preferring where you came from makes reversing a move undo it.
-    /// A `back` the layout has since closed, moved or walled off fails the
-    /// neighbor test, so geometry decides exactly as it did before.
+    /// Among the panes actually next to `from`, geometry can only rank by
+    /// shared edge, so at a T-junction (one tall pane facing a stack) the
+    /// reverse move lands on the same member of the stack whichever one you
+    /// left, and going back and forth drifts (#738). Preferring where you came
+    /// from settles that tie the only way the user can mean it.
+    ///
+    /// It settles a tie and nothing more: `back` still has to be one of the
+    /// nearest panes that way, so a move can never step over the pane in
+    /// between, however out of date the caller's memory is.
     pub fn focus_target_in_direction(
         &self,
         from: usize,
         dir: Dir,
         back: Option<usize>,
     ) -> Option<usize> {
-        back.filter(|&back| self.is_neighbor_in_direction(from, back, dir))
+        back.filter(|&back| self.is_adjacent_in_direction(from, back, dir))
             .or_else(|| self.neighbor_in_direction(from, dir))
     }
 
@@ -933,8 +952,8 @@ impl Pane<PaneSlot> {
 
     /// The pane focus moves to, `back` naming the pane the last move the other
     /// way started from. A `back` that is no longer a leaf here — closed, or
-    /// left behind in another tab — is simply not found, which is what keeps a
-    /// stale id from ever winning.
+    /// left behind in another tab — is simply not found; one that is still here
+    /// but no longer next to `from` loses to the pane that is.
     pub fn neighbor_in_dir(
         &self,
         dir: Dir,
@@ -1674,7 +1693,7 @@ mod tests {
         let mut pane = t_junction();
         split(&mut pane, 0, Axis::Vertical, 1);
         let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
-        assert!(!pane.is_neighbor_in_direction(idx(0), idx(6), Dir::Right));
+        assert!(!pane.is_adjacent_in_direction(idx(0), idx(6), Dir::Right));
         assert_eq!(
             pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(6))),
             Some(idx(4))
@@ -1688,6 +1707,31 @@ mod tests {
         assert_eq!(
             pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(0))),
             Some(idx(4))
+        );
+    }
+
+    #[test]
+    fn a_remembered_pane_further_off_never_steps_over_the_one_between() {
+        // Three equal full-height columns, 0 | 1 | 2.
+        let pane = TestPane::split_node(
+            Axis::Horizontal,
+            1.0 / 3.0,
+            Pane::Leaf(0),
+            TestPane::split_node(Axis::Horizontal, 0.5, Pane::Leaf(1), Pane::Leaf(2)),
+        );
+        let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
+        // Focus reaches 1 by moving left off 2, then leaves for 0 by a click or
+        // a cycle — neither of which records anything, so the origin still
+        // names 2 when the move back to the right happens from 0.
+        assert!(pane.is_adjacent_in_direction(idx(1), idx(2), Dir::Right));
+        assert!(!pane.is_adjacent_in_direction(idx(0), idx(2), Dir::Right));
+        // 2 does lie to the right of 0 with a full edge in common; only being
+        // farther off than 1 disqualifies it.
+        assert!(adjacency(rect_of(&pane, 0), rect_of(&pane, 2), Dir::Right).is_some());
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(2))),
+            Some(idx(1)),
+            "a move right must land on the next column, not skip it"
         );
     }
 

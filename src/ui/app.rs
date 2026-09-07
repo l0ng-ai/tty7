@@ -442,9 +442,12 @@ pub struct Tab {
     pub(crate) last_used: std::cell::Cell<u64>,
     /// Where the last directional focus move started, indexed by the direction
     /// that undoes it, so reversing a move comes back here instead of wherever
-    /// geometry ranks first (#738). Per tab because the panes are; the ids are
-    /// only ever trusted after the current layout confirms them, so a split,
-    /// close or swap needs no bookkeeping of its own.
+    /// geometry ranks first (#738). Per tab because the panes are.
+    ///
+    /// Nothing clears these: a recorded pane only ever breaks a tie between the
+    /// panes already next to the one focus is leaving, so the worst an entry
+    /// left over from an older layout — or from before a click moved focus
+    /// somewhere else entirely — can do is lose to geometry.
     focus_origin: [Option<gpui::EntityId>; 4],
 }
 
