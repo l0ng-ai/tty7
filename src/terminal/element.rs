@@ -975,7 +975,7 @@ fn native_cell_residue(style: &GlyphStyle) -> Option<char> {
 /// and letting it spill. This follows WezTerm, whose answer shows the glyph
 /// whole most often: a quarter cell of slack always, and a whole extra cell
 /// when the neighbouring cell is blank and has nothing to lose.
-fn seg_budget(solo: bool, cells: usize, room: bool, cell_width: Pixels) -> Pixels {
+fn seg_budget(solo: bool, measured: bool, cells: usize, room: bool, cell_width: Pixels) -> Pixels {
     if solo {
         // Single-cell glyphs are allowed to lean into the next cell — that is
         // what keeps the pile of symbols that look fine today from shrinking —
@@ -985,7 +985,16 @@ fn seg_budget(solo: bool, cells: usize, room: bool, cell_width: Pixels) -> Pixel
         // not a lean, it is an overlap: the neighbour is painted afterwards
         // and lands on top of the overshoot. Hand those their own cell and let
         // `fit_scale` bring them down into it, the way kitty and ghostty do.
-        if room { cell_width * 2. } else { cell_width }
+        //
+        // Only where the ink was measured, though. This number is the clip as
+        // well as the threshold to shrink at, so narrowing it for a segment
+        // nothing could measure would cut the glyph instead of scaling it —
+        // see `ink_covers_segment`.
+        if room || !measured {
+            cell_width * 2.
+        } else {
+            cell_width
+        }
     } else if room {
         cell_width * (cells as f32 + 1.)
     } else {
@@ -1040,6 +1049,21 @@ fn ink_extent(
         cache.borrow_mut().1.insert((font_id, c), extent);
         extent
     })
+}
+
+/// Whether [`ink_extent`]'s answer speaks for the whole segment.
+///
+/// It measures the segment's first character in the run's first face. That is
+/// all of a one-character segment and only part of anything longer: a
+/// cluster's combining marks can ink well to the right of the base they hang
+/// off — Devanagari `\u{915}` + `\u{93E}` — and are not in the number. `None`
+/// is a face that answered no bounds at all, which is no measurement either.
+///
+/// Neither can be scaled to fit, so neither may be held to one cell: the
+/// budget doubles as the clip, and a segment that cannot shrink into a
+/// narrowed one is simply cut off at it.
+fn ink_covers_segment(ink: Option<Pixels>, text: &str) -> bool {
+    ink.is_some() && text.chars().nth(1).is_none()
 }
 
 /// Whether the cell after a segment is free for its glyph to lean into.
@@ -1178,9 +1202,20 @@ fn paint_glyphs(
             };
 
             let x = geom.origin.x + geom.cell_width * (start as f32);
+
+            let mut shaped =
+                window
+                    .text_system()
+                    .shape_line(text.clone(), font_size, run_buf, force_width);
+            // Measured before the budget is set, because how far a solo glyph
+            // may reach turns on whether its ink is known at all.
+            let ink = fit
+                .then(|| ink_extent(cx, &shaped, &text, font_size))
+                .flatten();
             let budget = if fit {
                 seg_budget(
                     solo,
+                    ink_covers_segment(ink, &text),
                     cells,
                     has_room_after(row_cells, start, cells),
                     geom.cell_width,
@@ -1188,12 +1223,7 @@ fn paint_glyphs(
             } else {
                 geom.cell_width * cells as f32
             };
-
-            let mut shaped =
-                window
-                    .text_system()
-                    .shape_line(text.clone(), font_size, run_buf, force_width);
-            if fit && let Some(ink) = ink_extent(cx, &shaped, &text, font_size) {
+            if let Some(ink) = ink {
                 let scale = fit_scale(ink, budget);
                 if scale < 1. {
                     shaped = window.text_system().shape_line(
@@ -2363,7 +2393,7 @@ mod tests {
         let ink = px(18.75);
         let scale = |advance_em: f32, room: bool| {
             let cell = px(15. * advance_em);
-            fit_scale(ink, seg_budget(false, 2, room, cell))
+            fit_scale(ink, seg_budget(false, true, 2, room, cell))
         };
 
         // Menlo and friends: a quarter cell of slack is enough on its own.
@@ -2713,22 +2743,26 @@ mod tests {
     fn seg_budget_frees_solo_symbols_and_lends_a_cell_only_when_one_is_free() {
         let cell = px(10.);
         assert_eq!(
-            seg_budget(true, 1, true, cell),
+            seg_budget(true, true, 1, true, cell),
             px(20.),
             "a solo glyph leans into a free cell"
         );
         assert_eq!(
-            seg_budget(true, 1, false, cell),
+            seg_budget(true, true, 1, false, cell),
             px(10.),
             "but keeps to its own once the next cell is taken"
         );
         assert_eq!(
-            seg_budget(false, 2, false, cell),
+            seg_budget(false, true, 2, false, cell),
             px(22.5),
             "a quarter cell"
         );
-        assert_eq!(seg_budget(false, 2, true, cell), px(30.), "a whole cell");
-        assert_eq!(seg_budget(false, 1, false, cell), px(12.5));
+        assert_eq!(
+            seg_budget(false, true, 2, true, cell),
+            px(30.),
+            "a whole cell"
+        );
+        assert_eq!(seg_budget(false, true, 1, false, cell), px(12.5));
     }
 
     #[test]
@@ -2738,15 +2772,52 @@ mod tests {
         let cell = px(8.789);
         let ink = px(13.845);
 
-        let leaning = fit_scale(ink, seg_budget(true, 1, true, cell));
+        let leaning = fit_scale(ink, seg_budget(true, true, 1, true, cell));
         assert_eq!(leaning, 1., "a blank neighbour still lends its cell");
 
-        let crowded = fit_scale(ink, seg_budget(true, 1, false, cell));
+        let crowded = fit_scale(ink, seg_budget(true, true, 1, false, cell));
         assert!(crowded < 1., "an occupied neighbour does not");
         assert!(
             ink * crowded <= cell,
             "and the icon has to end inside its own cell"
         );
+    }
+
+    #[test]
+    fn a_solo_segment_is_held_to_its_cell_only_where_its_ink_was_measured() {
+        let cell = px(10.);
+        let budget = |ink, text| seg_budget(true, ink_covers_segment(ink, text), 1, false, cell);
+
+        // One character the face answered bounds for: the whole of it was
+        // measured, so `fit_scale` can bring it into one cell and the clip
+        // may be drawn there.
+        assert!(ink_covers_segment(Some(px(15.)), "\u{f059}"));
+        assert_eq!(budget(Some(px(15.)), "\u{f059}"), px(10.));
+
+        // A base with a combining mark hanging off it reaches paint_glyphs as
+        // a one-cell `Cluster`, which counts as solo. `ink_extent` read the
+        // base alone: Devanagari ka plus the aa matra inks to the right of the
+        // base, and none of that overhang is in the 9px. Nothing would shrink
+        // it, so a one-cell clip would cut the matra clean off.
+        assert!(!ink_covers_segment(Some(px(9.)), "\u{915}\u{93E}"));
+        assert_eq!(budget(Some(px(9.)), "\u{915}\u{93E}"), px(20.));
+
+        // A face that answers no bounds at all is the same story from the
+        // other side: `fit_scale` is never reached, so halving the clip only
+        // clips.
+        assert!(!ink_covers_segment(None, "\u{f059}"));
+        assert_eq!(budget(None, "\u{f059}"), px(20.));
+
+        // A free neighbour lends its cell either way \u2014 the measurement only
+        // decides whether the lean can be withdrawn.
+        for ink in [Some(px(15.)), None] {
+            for text in ["\u{f059}", "\u{915}\u{93E}"] {
+                assert_eq!(
+                    seg_budget(true, ink_covers_segment(ink, text), 1, true, cell),
+                    px(20.)
+                );
+            }
+        }
     }
 
     #[test]
