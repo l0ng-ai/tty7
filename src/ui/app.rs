@@ -536,6 +536,67 @@ impl Tab {
         (leaf.title.clone(), leaf.display_home(cx))
     }
 
+    /// This tab as the shared label ladder reads it, together with what a `~`
+    /// in whatever it ends up named would mean.
+    ///
+    /// [`TabView`](tty7_core::core::tab_view::TabView) is how a tab looks to
+    /// someone who is *not* the window showing it — the switcher listing
+    /// another window's workspace, `tty7 tab ls` on the far side of a socket.
+    /// Building one here from the live pane is what stops this window having a
+    /// second opinion: both sides then rank a given name, a title, an agent and
+    /// a directory through
+    /// [`TabView::label`](tty7_core::core::tab_view::TabView::label), so the
+    /// strip's answer to "which repo is this?" is the switcher's answer too.
+    ///
+    /// Everything comes off the one leaf the tab names itself after, so the
+    /// title and the directory standing in for it can never describe different
+    /// panes (#580).
+    pub(crate) fn label_view(
+        &self,
+        window: Option<&Window>,
+        cx: &App,
+    ) -> (
+        tty7_core::core::tab_view::TabView,
+        Option<std::path::PathBuf>,
+    ) {
+        let name = self.name.clone();
+        let Some(leaf) = self.title_leaf(window, cx) else {
+            return (
+                tty7_core::core::tab_view::TabView {
+                    id: self.tree_id.get(),
+                    name,
+                    title: String::new(),
+                    osc_title: None,
+                    cwd: None,
+                    agent: None,
+                    status: None,
+                    live: false,
+                    panes: 0,
+                },
+                None,
+            );
+        };
+        let leaf = leaf.read(cx);
+        let view = tty7_core::core::tab_view::TabView {
+            id: self.tree_id.get(),
+            name,
+            // The tree's `title` is the foreground process name — what it falls
+            // back on once a pane has said nothing about itself. A live pane's
+            // equivalent is the placeholder it answers to unprompted: any
+            // *other* default it was given (an SSH host, a workspace name) is a
+            // name tty7 chose for it deliberately, and `stated_title` hands
+            // those up as the title the pane is showing.
+            title: crate::terminal::view::DEFAULT_TITLE.to_string(),
+            osc_title: leaf.stated_title().map(str::to_string),
+            cwd: leaf.cwd().map(|p| p.display().to_string()),
+            agent: leaf.agent(),
+            status: leaf.agent_session().map(|s| s.status),
+            live: !leaf.terminal.exited,
+            panes: self.pane.terminals().len(),
+        };
+        (view, leaf.display_home(cx))
+    }
+
     pub(crate) fn git_status(
         &self,
         window: Option<&Window>,
@@ -1445,6 +1506,22 @@ impl Tty7App {
         crate::ui::windows::WindowRegistry::unregister(cx, self.workspace);
         crate::ui::tree_sync::forget(cx, self.workspace);
         crate::ui::windows::refresh_menu(cx);
+    }
+
+    /// Opens a second window, on a workspace of its own.
+    ///
+    /// A window on *this* workspace is not the other reading of "new window";
+    /// it is a thing the app cannot hold. `WindowRegistry` is keyed by
+    /// workspace — `window_for`, `app_for`, `unregister` and `rebind` all
+    /// address a window by the workspace it shows — and `windows::open`
+    /// answers a workspace that already has a window by activating it. Asking
+    /// for the current one here would raise the window you are already in.
+    ///
+    /// So this is the same call the switcher makes for "Open in New Window",
+    /// with no workspace named: a fresh one, which is also what a new window
+    /// holds everywhere else it is offered.
+    pub(crate) fn new_window(&self, cx: &mut App) {
+        crate::ui::windows::open(cx, None);
     }
 
     fn prepare_window_close(&self, cx: &mut App) {
@@ -4134,6 +4211,27 @@ impl Tty7App {
         }
     }
 
+    /// Whether tab `index` has a pane zoomed over hidden siblings — what the
+    /// chrome marks so the state is readable without toggling it (#752).
+    ///
+    /// Zoom rides with its tab (#599): the active tab's lives in
+    /// `self.maximized`, every other tab's is parked in `Tab::zoomed`. Either
+    /// can name a pane that exited while nobody was looking, which is why the
+    /// answer is asked of the layout rather than of the handle alone.
+    pub(crate) fn tab_is_zoomed(&self, index: usize) -> bool {
+        let Some(tab) = self.tabs.get(index) else {
+            return false;
+        };
+        let zoom = match index == self.active {
+            true => self.maximized.as_ref(),
+            false => tab.zoomed.as_ref(),
+        };
+        zoom.is_some_and(|zoom| {
+            tab.pane
+                .zoom_hides_siblings(|slot| slot.entity_id() == zoom.entity_id())
+        })
+    }
+
     fn toggle_maximize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.maximized.is_some() {
             self.maximized = None;
@@ -4901,6 +4999,7 @@ impl Tty7App {
         match kind {
             NewTab => self.new_tab(window, cx),
             NewWorkspace => self.open_workspace_form(window, cx),
+            NewWindow => self.new_window(cx),
             OpenWorkspacePicker => self.open_switcher(window, cx),
             StopWorkspace => self.stop_workspace(self.workspace, window, cx),
             DeleteWorkspace => self.delete_workspace(self.workspace, window, cx),
@@ -6669,10 +6768,15 @@ impl Tty7App {
     }
 
     fn assign_keybinding(&mut self, action: String, spec: String, cx: &mut Context<Self>) {
+        // Compared as chords, not as spellings: a recorded `secondary-}` and a
+        // config's `secondary-shift-]` are one keystroke written two ways, and
+        // only `same_chord` sees it. Compared as text, the displacement never
+        // fires and both bindings survive onto that keystroke, where which one
+        // wins is arbitrary (#750).
         let displaced = crate::ui::keymap::effective_bindings(cx)
             .into_iter()
             .chain(crate::ui::keymap::extra_bindings(cx))
-            .find(|(a, k)| *k == spec && *a != action)
+            .find(|(a, k)| *a != action && crate::ui::keymap::same_chord(k, &spec))
             .map(|(a, _)| a);
         // A trailing "…" on an action name marks a command that opens
         // something; it is not punctuation, and inside a sentence it reads as
@@ -7400,6 +7504,9 @@ impl Render for Tty7App {
                 }))
                 .on_action(cx.listener(|this, _: &NewWorkspace, window, cx| {
                     this.open_workspace_form(window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &NewWindow, _window, cx| {
+                    this.new_window(cx);
                 }))
                 .on_action(
                     cx.listener(|this, _: &CloseWindow, window, cx| this.close_window(window, cx)),
@@ -10162,6 +10269,86 @@ mod zoom_gpui_tests {
             );
         });
     }
+
+    /// The mark the chrome wears (#752) has to go out again by every road the
+    /// zoom itself leaves by, and it has to name the right tab while several
+    /// tabs are each holding one.
+    #[gpui::test]
+    fn the_zoom_mark_is_on_whichever_tabs_are_hiding_panes(cx: &mut TestAppContext) {
+        use crate::terminal::view::quiet_test_pane;
+        use crate::ui::pane::{Pane, PaneSlot};
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            // A zoom only hides something where there is a sibling to hide, so
+            // tabs 0 and 1 get a second pane and tab 2 stays single.
+            let mut held = Vec::new();
+            for tab in 0..2 {
+                let (view, stream) = quiet_test_pane(90 + tab as u64, window, cx);
+                held.push(stream);
+                let first = app.tabs[tab].pane.first_leaf().expect("tab has a pane");
+                app.tabs[tab].pane = Pane::split_node(
+                    gpui::Axis::Horizontal,
+                    0.5,
+                    Pane::leaf(first),
+                    Pane::leaf(PaneSlot::Ready(view)),
+                );
+            }
+
+            for i in 0..app.tabs.len() {
+                assert!(!app.tab_is_zoomed(i), "nothing is zoomed yet");
+            }
+
+            // Zooming marks the tab it happened in, and only that one.
+            app.toggle_maximize(window, cx);
+            assert!(app.tab_is_zoomed(0), "the zoomed tab wears the mark");
+            assert!(!app.tab_is_zoomed(1));
+            assert!(!app.tab_is_zoomed(2));
+
+            // And un-zooming takes it away again.
+            app.toggle_maximize(window, cx);
+            assert!(!app.tab_is_zoomed(0), "un-zooming clears the mark");
+
+            // The mark rides with its tab across a switch (#599) — an inactive
+            // tab holding a zoom still wears it — and two tabs can wear one at
+            // the same time, each reading its own handle.
+            app.toggle_maximize(window, cx);
+            app.activate(1, window, cx);
+            assert!(app.tab_is_zoomed(0), "the parked zoom is still a zoom");
+            assert!(!app.tab_is_zoomed(1));
+            app.toggle_maximize(window, cx);
+            assert!(app.tab_is_zoomed(0) && app.tab_is_zoomed(1));
+            assert!(!app.tab_is_zoomed(2), "a single-pane tab hides nothing");
+
+            // A parked zoom naming a pane that has since left the tab is no
+            // zoom: it would not come back on a switch, so it is not marked.
+            let parked = app.tabs[0].zoomed.clone().expect("tab 0 parked a zoom");
+            let elsewhere = app.tabs[2]
+                .pane
+                .first_leaf()
+                .and_then(|slot| slot.terminal().cloned());
+            app.tabs[0].zoomed = elsewhere;
+            assert!(
+                !app.tab_is_zoomed(0),
+                "a zoom over a pane this tab does not hold is not marked"
+            );
+            app.tabs[0].zoomed = Some(parked.clone());
+            assert!(app.tab_is_zoomed(0));
+
+            // Nor is a zoom over the last pane standing: its siblings closed
+            // while the tab was away, and the tab now looks like — and draws
+            // as — an ordinary single pane.
+            app.tabs[0].pane = Pane::leaf(PaneSlot::Ready(parked));
+            assert!(
+                !app.tab_is_zoomed(0),
+                "a zoom that covers nothing stops being marked"
+            );
+
+            assert!(!app.tab_is_zoomed(9), "there is no tab 9 to mark");
+            drop(held);
+        });
+    }
 }
 
 // A test window has no daemon behind it — its socket path is under the pinned
@@ -10254,6 +10441,123 @@ mod managed_forward_gpui_tests {
                 "the form is still editing it"
             );
             assert!(app.loopback_panel.mf_error.is_some());
+        });
+    }
+}
+
+#[cfg(test)]
+mod new_window_action_tests {
+    use crate::core::actions::NewWindow;
+    use crate::core::config::Config;
+    use crate::core::session::Session;
+    use crate::ui::app::Tty7App;
+    use crate::ui::windows::WindowRegistry;
+    use gpui::{AppContext as _, TestAppContext, VisualTestContext};
+
+    /// `NewWindow` has to open a window, not merely exist.
+    ///
+    /// Everything else about the action is a table entry — the `actions!`
+    /// row, the keymap slot, the palette command — and every one of those can
+    /// be there while the action reaches nothing. This drives the real
+    /// dispatch path and then asks the registry, so the assertion is "a second
+    /// window is open, on a workspace of its own, and the first one is still
+    /// here": the same `windows::open` the switcher calls for "Open in New
+    /// Window", with no workspace named.
+    #[gpui::test]
+    fn dispatching_new_window_opens_a_second_window_beside_the_first(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+            WindowRegistry::init(cx);
+        });
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty7App::with_session(None, Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view()
+                    .clone()
+                    .downcast::<Tty7App>()
+                    .ok()
+                    .expect("window root wraps a Tty7App")
+            })
+            .unwrap();
+        // Registered the way an opened window registers itself; without it the
+        // registry cannot tell the two windows apart afterwards.
+        let handle = window.into();
+        let weak = app.downgrade();
+        app.update(cx, |app, cx| {
+            WindowRegistry::register(cx, app.workspace, handle, weak);
+        });
+
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.background_executor.run_until_parked();
+        let first = app.update(&mut vcx, |app, _| app.workspace);
+        assert_eq!(
+            vcx.update(|_, cx| WindowRegistry::count(cx)),
+            1,
+            "the harness starts with exactly the one window"
+        );
+
+        vcx.dispatch_action(NewWindow);
+        vcx.background_executor.run_until_parked();
+
+        let open = vcx.update(|_, cx| WindowRegistry::open_windows(cx));
+        assert_eq!(
+            open.len(),
+            2,
+            "NewWindow has to reach windows::open; it opened {} window(s)",
+            open.len()
+        );
+        assert!(
+            open.iter().any(|(id, _)| *id == first),
+            "the window the action was fired from must survive it"
+        );
+        // The registry is keyed by workspace, so a second window on the
+        // current one is not a thing it could tell apart from the first.
+        assert!(
+            open.iter().any(|(id, _)| *id != first),
+            "the new window belongs on a workspace of its own"
+        );
+    }
+
+    /// The windowless state is the one `NewWindow` exists for.
+    ///
+    /// `show_tray_icon` is on by default, so closing the last window retires
+    /// tty7 to the tray rather than quitting it: the process is alive, the
+    /// menu bar is still tty7's, and there is nothing on screen. A listener
+    /// that lives only on `Tty7App`'s render root reaches nothing there, and
+    /// the chord that means "give me a window" is the one chord that has to
+    /// answer. `App::dispatch_action` falls through to the global listeners
+    /// when no window is active, which is where `keymap::init` puts this one.
+    #[gpui::test]
+    fn new_window_answers_with_no_window_to_dispatch_it(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+            WindowRegistry::init(cx);
+            assert_eq!(
+                WindowRegistry::count(cx),
+                0,
+                "the retired-to-tray state this covers has no window in it"
+            );
+            cx.dispatch_action(&NewWindow);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                WindowRegistry::count(cx),
+                1,
+                "NewWindow has to reach windows::open with no window to bubble through"
+            );
         });
     }
 }

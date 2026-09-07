@@ -28,6 +28,16 @@ pub fn init(cx: &mut App) {
     }
     rebuild_keymap(cx);
     cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+    // On the app rather than on a window, for the same reason `Quit` is: this
+    // is the one action in the table whose whole point is the state where no
+    // window is there to dispatch it. `show_tray_icon` is on by default, so
+    // closing the last window retires tty7 to the tray instead of quitting —
+    // process alive, nothing on screen — and a `NewWindow` that only exists on
+    // a window's render root is dead in exactly the state a New Window chord
+    // is for. `Tty7App`'s own listener still wins wherever there is a window:
+    // gpui runs the window's bubble phase first and returns before the global
+    // one, so the two never both fire.
+    cx.on_action(|_: &NewWindow, cx: &mut App| crate::ui::windows::open(cx, None));
     set_menus(cx);
 }
 
@@ -163,12 +173,31 @@ pub(crate) fn extra_bindings(cx: &App) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Installs `key` for `action`, and alongside it the chord the platform will
+/// actually deliver when the two are spelled differently — `secondary-shift-]`
+/// is pressed as `secondary-}`, and only the second ever reaches the
+/// dispatcher. Both go in rather than one replacing the other, so a spec that
+/// was already live stays live whatever the backend does with Shift (#750).
+///
+/// Answers whether the action was known at all, which is the caller's cue to
+/// warn about a name it cannot bind.
+fn push_binding(bindings: &mut Vec<KeyBinding>, action: &str, key: &str) -> bool {
+    let Some(binding) = make_binding(action, key) else {
+        return false;
+    };
+    bindings.push(binding);
+    if let Some(folded) = folded_spec(key)
+        && let Some(alias) = make_binding(action, &folded)
+    {
+        bindings.push(alias);
+    }
+    true
+}
+
 fn action_bindings(effective: &[(String, String)]) -> Vec<KeyBinding> {
     let mut bindings = Vec::new();
     for (action, key) in extra_keystrokes(effective) {
-        if let Some(b) = make_binding(action, key) {
-            bindings.push(b);
-        }
+        push_binding(&mut bindings, action, key);
     }
     for (action, key) in effective {
         if key.is_empty() {
@@ -184,26 +213,36 @@ fn action_bindings(effective: &[(String, String)]) -> Vec<KeyBinding> {
         // without saying so — `no_default_binding_sits_on_a_terminal_control_code`
         // is the half of it that fails a build. A single chord only, since a
         // prefix like `ctrl-b n` is that choice made deliberately.
-        if !key.contains(' ')
-            && steals_a_control_code(key)
-            && !control_code_binding_allowed(action, key)
+        // Over both spellings that reach the keymap, because the fold is what
+        // decides which of them the shell actually loses. `steals_a_control_code`
+        // only ever recognises a bare Ctrl, so it waves `ctrl-shift-2` through —
+        // and then the fold installs `ctrl-@` beside it, which is NUL. The chord
+        // was dead before it was folded and stole nothing; now that it is live
+        // the warning has to follow it (#750). At most one of the two can trip:
+        // a written chord that folds carries Shift, and one that carries Shift
+        // is never a control code.
+        let folded = folded_spec(key);
+        for chord in [Some(key.as_str()), folded.as_deref()]
+            .into_iter()
+            .flatten()
         {
-            log::warn!(
-                "keybinding '{key}' for '{action}' takes a control code away from the shell"
-            );
-        }
-        match make_binding(action, key) {
-            Some(b) => {
-                bindings.push(b);
-                if is_default_insert_newline_binding(action, key) {
-                    bindings.push(KeyBinding::new(
-                        INSERT_NEWLINE_DEFAULT,
-                        InsertNewlineFallback,
-                        Some("Terminal"),
-                    ));
-                }
+            if !chord.contains(' ')
+                && steals_a_control_code(chord)
+                && !control_code_binding_allowed(action, chord)
+            {
+                log::warn!(
+                    "keybinding '{chord}' for '{action}' takes a control code away from the shell"
+                );
             }
-            None => log::warn!("ignoring keybinding: unknown action '{action}'"),
+        }
+        if !push_binding(&mut bindings, action, key) {
+            log::warn!("ignoring keybinding: unknown action '{action}'");
+        } else if is_default_insert_newline_binding(action, key) {
+            bindings.push(KeyBinding::new(
+                INSERT_NEWLINE_DEFAULT,
+                InsertNewlineFallback,
+                Some("Terminal"),
+            ));
         }
     }
     bindings
@@ -265,6 +304,16 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
     vec![
         ("NewTab", per_platform("secondary-t", "secondary-shift-t")),
         ("NewWorkspace", "secondary-shift-n"),
+        // Cmd+N is what "New Window" means on macOS, and nothing else here
+        // claims it. Off macOS both chords the convention offers are gone:
+        // Ctrl+N is a C0 byte the shell is owed, which
+        // `no_default_binding_sits_on_a_terminal_control_code` fails a build
+        // over, and Ctrl+Shift+N — where that same test says window actions
+        // belong — has been `NewWorkspace` for far longer than this action has
+        // existed. Minting an unguessable third chord would be worse than
+        // shipping unbound: the palette and the Keybindings page both carry
+        // this, so a key is one line of config away.
+        ("NewWindow", per_platform("secondary-n", "")),
         ("CloseWindow", ""),
         (
             "CloseActiveTab",
@@ -734,6 +783,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             CommandGroup::Application,
             t(L10nKey::AppMenuCommandPalette).to_string(),
         ),
+        "NewWindow" => (
+            CommandGroup::Application,
+            t(L10nKey::CmdNewWindow).to_string(),
+        ),
         "CloseWindow" => (
             CommandGroup::Application,
             t(L10nKey::CmdCloseWindow).to_string(),
@@ -940,6 +993,126 @@ pub(crate) fn spec_from_keystroke(ks: &Keystroke) -> Option<String> {
     Some(spec)
 }
 
+/// The glyph a US keyboard prints on the shifted half of every key that is not
+/// a letter — `shift-]` types `}`, `shift-2` types `@`.
+const SHIFTED_GLYPHS: [(char, char); 21] = [
+    ('`', '~'),
+    ('1', '!'),
+    ('2', '@'),
+    ('3', '#'),
+    ('4', '$'),
+    ('5', '%'),
+    ('6', '^'),
+    ('7', '&'),
+    ('8', '*'),
+    ('9', '('),
+    ('0', ')'),
+    ('-', '_'),
+    ('=', '+'),
+    ('[', '{'),
+    (']', '}'),
+    ('\\', '|'),
+    (';', ':'),
+    ('\'', '"'),
+    (',', '<'),
+    ('.', '>'),
+    ('/', '?'),
+];
+
+/// Rewrites one chord into the shape the platform actually delivers, or
+/// returns `None` when it is already that shape.
+///
+/// Every gpui backend carries Shift as a modifier for letters only. Over the
+/// digits and the punctuation it spends the modifier on the character instead
+/// and clears the flag: that is the `chars_with_shift` branch on macOS,
+/// `need_to_convert_to_shifted_key` in the Windows mapper, and Linux's "we
+/// only include the shift for upper-case letters by convention". So the chord
+/// written `secondary-shift-]` arrives as `secondary-}` and the two never
+/// meet — the binding installs and is unreachable, which is why Ctrl+Shift+]
+/// stopped cycling panes off macOS and why hand-editing a config to that
+/// spelling changed nothing (#750).
+///
+/// Folding the spec the same way on the lookup side closes the round trip.
+/// The recorder already writes `secondary-}`, because that is what
+/// `spec_from_keystroke` was handed; a default or a config written the other
+/// way now installs the very same binding, so both spellings keep working and
+/// nobody's config comes undone. `secondary-shift-}`, which people also reach
+/// for, folds onto it too — the flag is simply redundant there.
+///
+/// The table is US-layout, and a chord it does not know is left alone rather
+/// than guessed at. It cannot be layout-aware from here: `?` is Shift+ß on a
+/// German keyboard and Shift+, on a French one, and the only mapper that knows
+/// which is gpui's, reached through `KeyBinding::load` rather than the
+/// `KeyBinding::new` that `make_binding` uses — and it exists on Windows only,
+/// where `MacKeyboardMapper` does no shift folding at all. So off a US layout
+/// the fold is a widening that may not land: `ctrl-shift-4` picks up `ctrl-$`,
+/// which on AZERTY is a key of its own. Harmless, because the fold only ever
+/// adds — the spec as written stays bound whatever the layout — but it is why
+/// this is not the last word on #750.
+///
+/// The fold is *added* to a spec's bindings, never substituted for them,
+/// because the convention is not universal. Windows leaves Shift intact on
+/// the numpad's `/ * + -`: `need_to_convert_to_shifted_key` lists the OEM
+/// keys and `VK_0..VK_9` but none of `VK_DIVIDE`/`VK_MULTIPLY`/`VK_ADD`/
+/// `VK_SUBTRACT`, so `get_keystroke_key` falls through to `get_key_from_vkey`
+/// and Ctrl+Shift+numpad-/ really does arrive as `ctrl-shift-/`. Substituting
+/// `ctrl-?` for it would unbind a chord that works today — the same class of
+/// bug this is fixing. macOS clears the flag there anyway (the numpad glyph
+/// is the same shifted or not, so `chars_with_shift` takes the branch that
+/// drops it) and Linux names those keys `divide`/`multiply`/`add`/`subtract`,
+/// which are not one character and never reach this.
+fn fold_shift_into_glyph(chord: &str) -> Option<String> {
+    let mut ks = Keystroke::parse(chord).ok()?;
+    if !ks.modifiers.shift {
+        return None;
+    }
+    let mut chars = ks.key.chars();
+    let (Some(key), None) = (chars.next(), chars.next()) else {
+        return None;
+    };
+    if let Some((_, shifted)) = SHIFTED_GLYPHS.iter().find(|(plain, _)| *plain == key) {
+        ks.key = shifted.to_string();
+    } else if !SHIFTED_GLYPHS.iter().any(|(_, shifted)| *shifted == key) {
+        return None;
+    }
+    ks.modifiers.shift = false;
+    spec_from_keystroke(&ks)
+}
+
+/// `spec` with every chord folded, or `None` when it is already the shape the
+/// platform delivers and there is nothing to add.
+pub(crate) fn folded_spec(spec: &str) -> Option<String> {
+    let mut folded = String::with_capacity(spec.len());
+    let mut changed = false;
+    for chord in spec.split_whitespace() {
+        if !folded.is_empty() {
+            folded.push(' ');
+        }
+        match fold_shift_into_glyph(chord) {
+            Some(chord) => {
+                folded.push_str(&chord);
+                changed = true;
+            }
+            None => folded.push_str(chord),
+        }
+    }
+    changed.then_some(folded)
+}
+
+/// Whether two specs claim the same keystroke — spelled the same way, or one
+/// the fold of the other. `secondary-shift-]` and `secondary-}` are one chord
+/// written twice, and a rebind that cannot see that leaves both installed on
+/// it, where which one fires is arbitrary (#750).
+pub(crate) fn same_chord(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let (folded_a, folded_b) = (folded_spec(a), folded_spec(b));
+    folded_a.as_deref() == Some(b)
+        || folded_b.as_deref() == Some(a)
+        || (folded_a.is_some() && folded_a == folded_b)
+}
+
 pub(crate) fn key_chords(spec: &str) -> Vec<Vec<String>> {
     spec.split_whitespace().map(key_tokens).collect()
 }
@@ -1041,6 +1214,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "DeleteWorkspace" => KeyBinding::new(keystroke, DeleteWorkspace, None),
         "RenameWorkspace" => KeyBinding::new(keystroke, RenameWorkspace, None),
         "ToggleSwitcher" => KeyBinding::new(keystroke, ToggleSwitcher, None),
+        "NewWindow" => KeyBinding::new(keystroke, NewWindow, None),
         "CloseWindow" => KeyBinding::new(keystroke, CloseWindow, None),
         "CloseActiveTab" => KeyBinding::new(keystroke, CloseActiveTab, None),
         "RenameTab" => KeyBinding::new(keystroke, RenameTab, None),
@@ -1164,19 +1338,47 @@ mod tests {
     /// table, so a chord the app would not really install, or would install in
     /// another context, cannot pass.
     fn dispatched(effective: &[(String, String)], keys: &str, context: &str) -> Vec<&'static str> {
-        let mut keymap = gpui::Keymap::default();
-        keymap.add_bindings(action_bindings(effective));
         let input: Vec<Keystroke> = keys
             .split(' ')
             .map(|k| Keystroke::parse(k).expect("the typed keystroke parses"))
             .collect();
+        dispatched_keystrokes(effective, &input, context)
+    }
+
+    /// The same lookup for input a spec cannot spell — the shifted-glyph shape
+    /// a backend hands over for `secondary-shift-]` has no written form that
+    /// `Keystroke::parse` turns back into it.
+    fn dispatched_keystrokes(
+        effective: &[(String, String)],
+        input: &[Keystroke],
+        context: &str,
+    ) -> Vec<&'static str> {
+        let mut keymap = gpui::Keymap::default();
+        keymap.add_bindings(action_bindings(effective));
         let context = [gpui::KeyContext::parse(context).expect("the context parses")];
         keymap
-            .bindings_for_input(&input, &context)
+            .bindings_for_input(input, &context)
             .0
             .iter()
             .map(|b| b.action().name())
             .collect()
+    }
+
+    /// What every gpui backend delivers when the secondary modifier is held
+    /// over a key whose shifted half is `glyph`: the glyph, and no shift flag —
+    /// the modifier is already spent on the character.
+    fn delivered_with_secondary(glyph: &str) -> Keystroke {
+        Keystroke {
+            modifiers: gpui::Modifiers {
+                control: cfg!(not(target_os = "macos")),
+                platform: cfg!(target_os = "macos"),
+                shift: false,
+                alt: false,
+                function: false,
+            },
+            key: glyph.to_string(),
+            key_char: None,
+        }
     }
 
     #[test]
@@ -1223,6 +1425,7 @@ mod tests {
         // palette and the docs all say Zoom Pane.
         assert_eq!(action_entry("ToggleMaximizePane").1, "Zoom Pane");
         assert_eq!(action_entry("CloseActiveTab").1, "Close Pane / Tab");
+        assert_eq!(action_entry("NewWindow").1, "New Window");
         assert_eq!(action_entry("CloseWindow").1, "Close Window");
         assert_eq!(action_entry("ClearScrollback").1, "Clear Scrollback");
         assert_eq!(action_entry("TogglePalette").1, "Command Palette…");
@@ -1235,6 +1438,57 @@ mod tests {
         assert_eq!(action_entry("SelectWorkspace7").0, CommandGroup::Workspaces);
         assert_eq!(action_entry("ToggleSftp").0, CommandGroup::Ssh);
         assert_eq!(action_entry("ForkAgentSessionUp").0, CommandGroup::Agents);
+    }
+
+    #[test]
+    fn new_window_ships_a_chord_only_where_one_is_free() {
+        let mut effective: Vec<(String, String)> = default_bindings()
+            .into_iter()
+            .map(|(a, k)| (a.to_string(), k.to_string()))
+            .collect();
+        let default = effective
+            .iter()
+            .find(|(action, _)| action == "NewWindow")
+            .map(|(_, key)| key.clone())
+            .expect("NewWindow has to be listed here or it cannot be bound at all");
+        assert_eq!(
+            default,
+            if cfg!(target_os = "macos") {
+                "secondary-n"
+            } else {
+                ""
+            },
+            "macOS gets Cmd+N; off macOS this ships unbound on purpose"
+        );
+
+        // Ask the keymap rather than the table. A default can look bound and
+        // dispatch nothing — gpui folds shift into the punctuation glyph, so
+        // `secondary-shift-]` reached no action at all off macOS (#750). An
+        // exact match is also the conflict check: any other action holding
+        // this chord would show up in the list.
+        if !default.is_empty() {
+            assert_eq!(
+                dispatched(&effective, &default, "Terminal"),
+                vec![NewWindow::name_for_type()],
+                "{default} must reach NewWindow, and nothing else may answer it"
+            );
+        }
+
+        // Unbound still has to mean bindable. `set_binding` only writes into
+        // slots this table already has, and `make_binding` is what turns the
+        // name back into a dispatchable binding; miss either and the action
+        // sits on the Keybindings page, takes a key, and does nothing — which
+        // is the whole complaint in #710, not just the missing default.
+        effective
+            .iter_mut()
+            .find(|(action, _)| action == "NewWindow")
+            .expect("found once already")
+            .1 = "ctrl-alt-shift-n".to_string();
+        assert_eq!(
+            dispatched(&effective, "ctrl-alt-shift-n", "Terminal"),
+            vec![NewWindow::name_for_type()],
+            "a chord the user assigns to NewWindow has to reach it"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -1596,15 +1850,25 @@ mod tests {
         // `control_code_binding_allowed`; anything new needs a fall-through of
         // its own to join them.
         for (action, spec) in default_bindings() {
-            for chord in spec.split_whitespace() {
-                Keystroke::parse(chord).expect("default chords parse");
-                assert!(
-                    !steals_a_control_code(chord) || control_code_binding_allowed(action, chord),
-                    "{action} is bound to {chord}, which the shell needs as a control code \
-                     (Ctrl+[ is ESC, Ctrl+D is EOF, Ctrl+W deletes a word, \
-                     Ctrl+2..8 are NUL/ESC/FS/GS/RS/US/DEL). \
-                     Window actions belong on ctrl-shift-* off macOS."
-                );
+            // Both spellings, because `push_binding` installs both. "Window
+            // actions belong on ctrl-shift-*" stops being an escape over the
+            // digits and the punctuation the moment the fold clears the Shift
+            // again: `ctrl-shift-2` goes into the keymap as `ctrl-@` (#750).
+            let folded = folded_spec(spec);
+            for spelling in [Some(spec), folded.as_deref()].into_iter().flatten() {
+                for chord in spelling.split_whitespace() {
+                    Keystroke::parse(chord).expect("default chords parse");
+                    assert!(
+                        !steals_a_control_code(chord)
+                            || control_code_binding_allowed(action, chord),
+                        "{action} is bound to {spec}, installed as {chord}, which the shell \
+                         needs as a control code \
+                         (Ctrl+[ is ESC, Ctrl+D is EOF, Ctrl+W deletes a word, \
+                         Ctrl+2..8 are NUL/ESC/FS/GS/RS/US/DEL). \
+                         Window actions belong on ctrl-shift-* off macOS — over a letter, \
+                         where the platform keeps the Shift."
+                    );
+                }
             }
         }
     }
@@ -1661,13 +1925,18 @@ mod tests {
         // `ScmCommit` and `ToggleFullscreen` both take secondary-enter on that
         // basis. Two bindings sharing a chord *and* a context is still a bug,
         // because then which one fires is arbitrary.
+        // `same_chord`, not string equality: `secondary-shift-]` and
+        // `secondary-}` are two spellings of one keystroke and both install it.
         let mut seen: Vec<(&str, &str, Option<&'static str>)> = Vec::new();
         for (action, spec) in default_bindings() {
             if spec.is_empty() {
                 continue;
             }
             let context = action_context(action);
-            if let Some((other, _, _)) = seen.iter().find(|(_, s, c)| *s == spec && *c == context) {
+            if let Some((other, _, _)) = seen
+                .iter()
+                .find(|(_, s, c)| same_chord(s, spec) && *c == context)
+            {
                 panic!("{action} and {other} both claim {spec} in context {context:?}");
             }
             seen.push((action, spec, context));
@@ -1692,6 +1961,165 @@ mod tests {
                 "round trip diverged for {spec}"
             );
         }
+    }
+
+    #[test]
+    fn a_shifted_punctuation_chord_dispatches_however_it_is_spelled() {
+        // Recording ⌘⇧] wrote `secondary-}` — correctly, since that is the
+        // keystroke it was handed — while the default table and every config
+        // in the wild spell the same chord `secondary-shift-]`. Only one of
+        // the two used to reach the dispatcher (#750); all three do now.
+        let typed = delivered_with_secondary("}");
+        let recorded = spec_from_keystroke(&typed).expect("the recorder spells the chord");
+        assert_eq!(recorded, "secondary-}");
+        for spec in [recorded.as_str(), "secondary-shift-]", "secondary-shift-}"] {
+            let effective = [("NextTab".to_string(), spec.to_string())];
+            assert_eq!(
+                dispatched_keystrokes(&effective, std::slice::from_ref(&typed), ""),
+                vec![NextTab::name_for_type()],
+                "{spec} never reaches the dispatcher"
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_pane_cycle_chord_reaches_its_action() {
+        // `secondary-]` on macOS, `secondary-shift-]` everywhere else — and
+        // either way the backend reports the chord as the bare glyph. The
+        // second spelling installed a binding nothing could press.
+        let effective: Vec<(String, String)> = default_bindings()
+            .into_iter()
+            .map(|(a, k)| (a.to_string(), k.to_string()))
+            .collect();
+        let glyph = if cfg!(target_os = "macos") { "]" } else { "}" };
+        assert!(
+            dispatched_keystrokes(&effective, &[delivered_with_secondary(glyph)], "")
+                .contains(&FocusNextPane::name_for_type()),
+            "the default pane-cycle chord dispatches nothing"
+        );
+    }
+
+    #[test]
+    fn folding_leaves_every_other_spelling_alone() {
+        // Shift over a letter is a real modifier, and the named keys have no
+        // shifted half at all — folding either would break far more than it
+        // fixed.
+        for spec in [
+            "secondary-shift-t",
+            "shift-enter",
+            "shift-insert",
+            "shift-tab",
+            "ctrl-shift-up",
+            "secondary-t",
+            "secondary--",
+            "ctrl-b n",
+        ] {
+            assert_eq!(folded_spec(spec), None, "{spec} was rewritten");
+        }
+        // A prefix chord folds per chord, not as a whole.
+        assert_eq!(folded_spec("ctrl-b shift-5").as_deref(), Some("ctrl-b %"));
+    }
+
+    #[test]
+    fn a_chord_the_platform_delivers_with_shift_intact_stays_bound() {
+        // Windows leaves Shift on the numpad's `/ * + -` — they are absent
+        // from gpui's `need_to_convert_to_shifted_key`, so Ctrl+Shift+numpad-/
+        // arrives as `ctrl-shift-/` and the recorder writes exactly that.
+        // Folding is an addition, never a substitution, so that spec has to
+        // survive the treatment `secondary-shift-]` gets (#750).
+        let numpad = Keystroke {
+            modifiers: gpui::Modifiers {
+                control: cfg!(not(target_os = "macos")),
+                platform: cfg!(target_os = "macos"),
+                shift: true,
+                alt: false,
+                function: false,
+            },
+            key: "/".to_string(),
+            key_char: None,
+        };
+        assert_eq!(
+            spec_from_keystroke(&numpad).as_deref(),
+            Some("secondary-shift-/")
+        );
+        let effective = [("NextTab".to_string(), "secondary-shift-/".to_string())];
+        assert_eq!(
+            dispatched_keystrokes(&effective, std::slice::from_ref(&numpad), ""),
+            vec![NextTab::name_for_type()],
+            "the numpad chord lost the binding written for it"
+        );
+        // And the main row's `?`, which the same spec also stands for, still
+        // reaches the action — the fold added it rather than taking over.
+        assert_eq!(
+            dispatched_keystrokes(&effective, &[delivered_with_secondary("?")], ""),
+            vec![NextTab::name_for_type()],
+        );
+    }
+
+    #[test]
+    fn two_spellings_of_one_chord_are_recognised_as_one() {
+        // What `assign_keybinding` leans on to displace the action already
+        // holding a chord, whichever way either of them is written down.
+        assert!(same_chord("secondary-shift-]", "secondary-}"));
+        assert!(same_chord("secondary-}", "secondary-shift-]"));
+        assert!(same_chord("secondary-shift-}", "secondary-shift-]"));
+        assert!(same_chord("secondary-t", "secondary-t"));
+        assert!(!same_chord("secondary-shift-]", "secondary-shift-["));
+        assert!(!same_chord("secondary-}", "secondary-{"));
+    }
+
+    #[test]
+    fn the_control_code_guard_follows_the_folded_chord() {
+        // The half of the control-code rule that only warns. A chord carrying
+        // Shift reads as safe on its own — `steals_a_control_code` recognises a
+        // bare Ctrl and nothing else — and it *was* safe while nothing could
+        // press it. The fold makes it live, and Ctrl+Shift+2 is delivered as
+        // Ctrl+@, which is the NUL the program on the far end is waiting for.
+        // So the guard is asked about the spelling that goes into the keymap
+        // (#750); `action_bindings` runs exactly this pair.
+        for (written, folded) in [
+            ("ctrl-shift-2", per_platform("ctrl-@", "secondary-@")),
+            ("ctrl-shift-6", per_platform("ctrl-^", "secondary-^")),
+            ("ctrl-shift--", per_platform("ctrl-_", "secondary-_")),
+            ("ctrl-shift-/", per_platform("ctrl-?", "secondary-?")),
+        ] {
+            assert!(
+                !steals_a_control_code(written),
+                "{written} reads as safe as written, which is why the fold has to be checked"
+            );
+            assert_eq!(folded_spec(written).as_deref(), Some(folded));
+            assert!(
+                steals_a_control_code(folded),
+                "{written} is installed as {folded} and takes a control code"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_the_us_table_does_not_know_is_left_alone() {
+        // `SHIFTED_GLYPHS` is a US keyboard, and every other layout prints
+        // something else on the shifted half: `?` is Shift+ß on a German
+        // keyboard and Shift+, on a French one. The fold cannot know that, so
+        // it declines rather than guesses — a key it has never seen keeps its
+        // Shift, and the binding written for it stays exactly as written. That
+        // is also what keeps the fold additive: it can widen a spec's reach but
+        // never move it onto a chord the user did not ask for.
+        for spec in [
+            "secondary-shift-ß",
+            "secondary-shift-é",
+            "secondary-shift-ä",
+            "secondary-shift-ç",
+            "secondary-shift-ñ",
+        ] {
+            assert_eq!(folded_spec(spec), None, "{spec} was guessed at");
+        }
+        // And the recorded spelling, which is what a non-US layout actually
+        // produces, needs no fold to reach the dispatcher in the first place.
+        let effective = [("NextTab".to_string(), "secondary-?".to_string())];
+        assert_eq!(
+            dispatched_keystrokes(&effective, &[delivered_with_secondary("?")], ""),
+            vec![NextTab::name_for_type()],
+        );
     }
 
     #[test]

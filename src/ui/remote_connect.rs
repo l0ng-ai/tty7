@@ -69,11 +69,18 @@ pub fn available_hosts(cx: &App) -> Vec<HostChoice> {
 /// exists, the target's own spelling when that is human-readable, and the
 /// deleted-profile placeholder for the bare-UUID case (#485).
 pub fn target_label(cx: &App, target: &RemoteTarget) -> String {
-    if let Some(choice) = available_hosts(cx)
-        .into_iter()
-        .find(|h| h.target == *target)
-    {
-        return choice.label;
+    label_from_hosts(&available_hosts(cx), target)
+}
+
+/// `target_label`'s rule applied to a listing the caller already has. The
+/// switcher builds `available_hosts` once per frame and names several targets
+/// from it; re-listing per target would re-read `~/.ssh/config` off the disk
+/// on the render path, which is the cost `route_label` goes out of its way to
+/// avoid. One rule, two entry points — so a name shown next to a pane and the
+/// same name shown in the switcher cannot drift apart (#485).
+pub fn label_from_hosts(hosts: &[HostChoice], target: &RemoteTarget) -> String {
+    if let Some(choice) = hosts.iter().find(|h| h.target == *target) {
+        return choice.label.clone();
     }
     match target {
         RemoteTarget::Profile { .. } => t(L10nKey::RemoteProfileGone).to_string(),
@@ -834,6 +841,36 @@ pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one rule for "what do we call a target we cannot resolve" (#485),
+    /// pinned where both `target_label` and the switcher's group listing read
+    /// it from.
+    #[test]
+    fn an_unresolvable_profile_is_named_never_spelled_as_its_uuid() {
+        let id = uuid::Uuid::new_v4();
+        let gone = RemoteTarget::Profile { id };
+
+        let label = label_from_hosts(&[], &gone);
+        assert!(
+            !label.contains(&id.to_string()),
+            "a bare profile UUID reached the UI: {label}"
+        );
+        assert_eq!(label, t(L10nKey::RemoteProfileGone));
+
+        // While the profile is configured, its own name wins.
+        let listed = vec![HostChoice {
+            target: gone.clone(),
+            label: "lager".into(),
+            detail: "qhw@222.29.101.16".into(),
+        }];
+        assert_eq!(label_from_hosts(&listed, &gone), "lager");
+
+        // Targets that spell themselves readably never need the placeholder.
+        let alias = RemoteTarget::Alias {
+            alias: "build-box".into(),
+        };
+        assert_eq!(label_from_hosts(&[], &alias), "build-box");
+    }
 
     fn request() -> InstallRequest {
         InstallRequest {

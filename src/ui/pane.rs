@@ -183,6 +183,17 @@ impl<L: Clone> Pane<L> {
         }
     }
 
+    /// Whether zooming the leaf `pred` names would actually hide anything.
+    ///
+    /// The zoom that gets marked in the chrome is the one a reader cannot see
+    /// for themselves: a zoom naming a pane that has since exited names no
+    /// leaf here, and a zoom over the last pane standing covers nothing. Both
+    /// look exactly like an unzoomed single pane, so neither earns a badge.
+    pub fn zoom_hides_siblings(&self, pred: impl Fn(&L) -> bool) -> bool {
+        let leaves = self.leaves();
+        leaves.len() > 1 && leaves.iter().any(pred)
+    }
+
     pub fn leaf_matching_or_first(&self, pred: impl Fn(&L) -> bool) -> Option<L> {
         self.leaves()
             .into_iter()
@@ -1277,6 +1288,24 @@ mod tests {
         assert_eq!(pane.leaf_matching_or_first(is(1)), Some(1));
         assert_eq!(pane.leaf_matching_or_first(is(99)), Some(0));
         assert_eq!(TestPane::Empty.leaf_matching_or_first(is(0)), None);
+    }
+
+    #[test]
+    fn a_zoom_is_only_worth_marking_while_it_covers_something() {
+        let mut pane = TestPane::leaf(0);
+        assert!(
+            !pane.zoom_hides_siblings(is(0)),
+            "zooming the only pane covers nothing"
+        );
+
+        split(&mut pane, 0, Axis::Horizontal, 1);
+        assert!(pane.zoom_hides_siblings(is(0)));
+        assert!(pane.zoom_hides_siblings(is(1)));
+        assert!(
+            !pane.zoom_hides_siblings(is(99)),
+            "a zoom whose pane has exited is not a zoom"
+        );
+        assert!(!TestPane::Empty.zoom_hides_siblings(is(0)));
     }
 
     #[test]

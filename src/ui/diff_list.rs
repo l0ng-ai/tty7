@@ -14,11 +14,13 @@
 
 use std::collections::HashMap;
 
+use gpui::SharedString;
+
 use crate::core::config::DiffViewMode;
 use crate::terminal::git_diff::{
     AUTO_COLLAPSE_LINES, DiffSnapshot, FileDiff, FileStatus, MAX_RENDERED_FILES, Truncation,
 };
-use crate::ui::diff_rows::{SplitRow, UnifiedRow, split_hunk, unified_rows};
+use crate::ui::diff_rows::{RowId, SplitRow, UnifiedRow, split_hunk, unified_rows};
 
 /// Everything the file header row draws, lifted out of its [`FileDiff`].
 ///
@@ -39,6 +41,21 @@ pub(crate) struct FileHead {
     pub(crate) expanded: bool,
 }
 
+/// Where a drawn line sits in the patch: which file's rows it belongs to, and
+/// its place among them.
+///
+/// Carried on the row rather than read off its position in the list. The list
+/// is spliced — collapsing a file above this one moves every index below it —
+/// so a range keyed on list positions would go on naming the same slots while
+/// the code under them changed.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct RowAt {
+    /// One of these rides on every line of a patch, so the path is shared
+    /// rather than copied per row.
+    pub(crate) path: SharedString,
+    pub(crate) id: RowId,
+}
+
 #[derive(PartialEq, Eq)]
 pub(crate) enum DiffRow {
     /// The space that used to be the `gap_3` of a flex column.
@@ -54,8 +71,14 @@ pub(crate) enum DiffRow {
         /// the hunk before.
         leads: bool,
     },
-    Split(SplitRow),
-    Unified(UnifiedRow),
+    Split {
+        row: SplitRow,
+        at: RowAt,
+    },
+    Unified {
+        row: UnifiedRow,
+        at: RowAt,
+    },
     Truncated(Truncation),
     MoreFiles {
         rest: usize,
@@ -152,18 +175,29 @@ fn file_rows(index: usize, file: &FileDiff, expanded: bool, mode: DiffViewMode) 
     })];
 
     if expanded && (!file.hunks.is_empty() || file.truncated.is_some()) {
+        let path = SharedString::from(file.path.clone());
         for (h, hunk) in file.hunks.iter().enumerate() {
             rows.push(DiffRow::HunkHeader {
                 text: hunk.header.clone(),
                 leads: h == 0,
             });
+            let at = |row| RowAt {
+                path: path.clone(),
+                id: RowId { hunk: h, row },
+            };
             match mode {
-                DiffViewMode::Split => {
-                    rows.extend(split_hunk(&hunk.lines).into_iter().map(DiffRow::Split))
-                }
-                DiffViewMode::Unified => {
-                    rows.extend(unified_rows(&hunk.lines).into_iter().map(DiffRow::Unified))
-                }
+                DiffViewMode::Split => rows.extend(
+                    split_hunk(&hunk.lines)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(r, row)| DiffRow::Split { row, at: at(r) }),
+                ),
+                DiffViewMode::Unified => rows.extend(
+                    unified_rows(&hunk.lines)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(r, row)| DiffRow::Unified { row, at: at(r) }),
+                ),
             }
         }
         if let Some(reason) = file.truncated {
@@ -252,6 +286,63 @@ mod tests {
         }
     }
 
+    /// `(path, hunk, row)` for each line row, in list order.
+    fn line_coords(rows: &[DiffRow]) -> Vec<(String, usize, usize)> {
+        rows.iter()
+            .filter_map(|row| match row {
+                DiffRow::Split { at, .. } | DiffRow::Unified { at, .. } => {
+                    Some((at.path.to_string(), at.id.hunk, at.id.row))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A row says where it is in the *patch*, not where it is in the list.
+    /// Collapsing a file splices the rows below it up the list; a range keyed
+    /// on list positions would stay where it was and come away naming other
+    /// code.
+    #[test]
+    fn a_line_row_names_its_file_and_its_place_in_the_hunk() {
+        let snap = snapshot(vec![file("a.rs", 1), file("b.rs", 1)]);
+        let open = build_rows(&snap, &HashMap::new(), None, DiffViewMode::Unified, false);
+        let coords = line_coords(&open);
+        assert_eq!(
+            coords,
+            vec![
+                ("a.rs".to_string(), 0, 0),
+                ("a.rs".to_string(), 0, 1),
+                ("a.rs".to_string(), 0, 2),
+                ("a.rs".to_string(), 0, 3),
+                ("b.rs".to_string(), 0, 0),
+                ("b.rs".to_string(), 0, 1),
+                ("b.rs".to_string(), 0, 2),
+                ("b.rs".to_string(), 0, 3),
+            ]
+        );
+
+        let collapsed = HashMap::from([("a.rs".to_string(), false)]);
+        let after = build_rows(&snap, &collapsed, None, DiffViewMode::Unified, false);
+        assert_eq!(
+            line_coords(&after),
+            coords[4..].to_vec(),
+            "b.rs's lines moved up the list and kept the coordinates they had"
+        );
+    }
+
+    /// Every hunk restarts the row count, so a range that spans two of them is
+    /// read hunk by hunk rather than as one run.
+    #[test]
+    fn each_hunk_numbers_its_own_rows() {
+        let snap = snapshot(vec![file("a.rs", 2)]);
+        let rows = build_rows(&snap, &HashMap::new(), None, DiffViewMode::Split, false);
+        let hunks: Vec<_> = line_coords(&rows)
+            .into_iter()
+            .map(|(_, hunk, row)| (hunk, row))
+            .collect();
+        assert_eq!(hunks, vec![(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]);
+    }
+
     fn shape(rows: &[DiffRow]) -> Vec<&'static str> {
         rows.iter()
             .map(|row| match row {
@@ -259,8 +350,8 @@ mod tests {
                 DiffRow::Oversized => "oversized",
                 DiffRow::FileHeader(_) => "file",
                 DiffRow::HunkHeader { .. } => "hunk",
-                DiffRow::Split(_) => "split",
-                DiffRow::Unified(_) => "unified",
+                DiffRow::Split { .. } => "split",
+                DiffRow::Unified { .. } => "unified",
                 DiffRow::Truncated(_) => "truncated",
                 DiffRow::MoreFiles { .. } => "more-files",
                 DiffRow::UntrackedHeader { .. } => "untracked-header",

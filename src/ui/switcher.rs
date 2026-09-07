@@ -716,6 +716,11 @@ impl Tty7App {
             }
         }
 
+        // Listed once for the whole frame: the pending groups below name
+        // themselves from it, and so does the pass that settles every group's
+        // link state further down.
+        let configured = remote_connect::available_hosts(cx);
+
         for target in self.pending_machines() {
             let key = target.to_string();
             if index.contains_key(&key) {
@@ -723,7 +728,12 @@ impl Tty7App {
             }
             index.insert(key.clone(), groups.len());
             groups.push(Group {
-                label: key.clone(),
+                // Not `key`: a `Profile` target spells itself as its config
+                // UUID, so a machine whose profile has been deleted would
+                // announce itself to the banners below by a raw UUID (#485).
+                // The pass below overwrites this while the profile is still
+                // configured; this is what is left when it is not.
+                label: remote_connect::label_from_hosts(&configured, &target),
                 key,
                 endpoint: String::new(),
                 target: Some(target),
@@ -838,7 +848,6 @@ impl Tty7App {
         // trouble banners under the list come out in a stable order.
         groups.sort_by(|a, b| a.key.is_empty().cmp(&b.key.is_empty()).reverse());
 
-        let configured = remote_connect::available_hosts(cx);
         for group in &mut groups {
             let Some(target) = group.target.clone() else {
                 group.link = Link::Local;
@@ -2956,47 +2965,20 @@ impl TabRow {
     }
 }
 
-/// Names a tab of a workspace this window does not own, matching what
-/// `Tty7App::tab_label` shows for local ones.
+/// Names a tab of a workspace this window does not own.
 ///
-/// The two read different sources and have to be talked into agreeing. A local
-/// tab is named by its live terminal's OSC title, which shells set to the
-/// working directory and agents overwrite with what they are doing. The tree
-/// carries a copy of that title (`PaneRecord::osc_title`), which is what makes
-/// the two columns agree; `PaneRecord::title` is the *foreground process name*
-/// ("zsh") and only stands in when there is no title at all.
+/// The two surfaces used to read different sources and had to be talked into
+/// agreeing: a local tab was named by its live terminal's title, this one by
+/// the tree's copy of it (`PaneRecord::osc_title`). They now go through the one
+/// renderer, [`crate::ui::tab_strip::label_of`] — a local tab is turned into
+/// the same [`TabView`](crate::ui::machine_mirror::TabView) this one already
+/// is, so neither column can rank the evidence its own way.
 fn tab_view_label(
     view: &crate::ui::machine_mirror::TabView,
     index: usize,
     home: Option<&std::path::Path>,
 ) -> String {
-    let unnamed = || {
-        t_fmt(
-            L10nKey::TabUnnamedShell,
-            &[("n", &((index + 1).to_string()))],
-        )
-    };
-    // A path can shorten away to nothing (a bare "user@host:"), and the process
-    // name is still worth more than a number.
-    let shortened = |raw: &str| match crate::ui::tab_strip::short_title(raw, home) {
-        shortened if !shortened.trim().is_empty() => shortened,
-        _ => match view.title.trim() {
-            "" => unnamed(),
-            title => title.to_string(),
-        },
-    };
-    match view.label() {
-        crate::ui::machine_mirror::TabLabel::Named(name) => name.to_string(),
-        // Through `short_title` because the local strip puts its own titles
-        // through it too: the shell integration writes `user@host:~/dir`, and a
-        // tab that spelled that out in full where the strip says "…/dir" would
-        // be the same disagreement in a new place.
-        crate::ui::machine_mirror::TabLabel::Osc(title) => shortened(title),
-        crate::ui::machine_mirror::TabLabel::Agent(agent) => agent.display_name().to_string(),
-        crate::ui::machine_mirror::TabLabel::Cwd(cwd) => shortened(cwd),
-        crate::ui::machine_mirror::TabLabel::Process(title) => title.to_string(),
-        crate::ui::machine_mirror::TabLabel::Unknown => unnamed(),
-    }
+    crate::ui::tab_strip::label_of(view, index, home)
 }
 
 impl Group {
@@ -3289,6 +3271,53 @@ fn glyph_col(w: f32, child: impl IntoElement) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #485 on the path #645 did not cover. A machine the switcher knows only
+    /// from a listing snapshot has no store entry to name it, so its group
+    /// used to be labelled by the target's own spelling — and a `Profile`
+    /// target spells itself as its config UUID. Delete the profile and every
+    /// banner under the list announced a raw UUID.
+    #[gpui::test]
+    fn a_pending_machine_whose_profile_is_gone_is_not_named_by_its_uuid(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::session::RemoteTarget;
+
+        let (app, _vcx) = crate::ui::app::test_window::harness(cx);
+
+        // A profile id that is in no config: the state left behind when the
+        // profile a machine was reached through is deleted.
+        let id = uuid::Uuid::new_v4();
+        let target = RemoteTarget::Profile { id };
+
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                super::HostSnapshot {
+                    target: target.clone(),
+                    rows: Vec::new(),
+                },
+            );
+        });
+
+        app.update(cx, |app, cx| {
+            let groups = app.switcher_groups(cx);
+            let group = groups
+                .iter()
+                .find(|g| g.target.as_ref() == Some(&target))
+                .expect("the snapshot puts its machine in the list");
+            assert!(
+                !group.label.contains(&id.to_string()),
+                "the switcher named a machine by its raw profile UUID: {}",
+                group.label
+            );
+            assert_eq!(
+                group.label,
+                t(L10nKey::RemoteProfileGone),
+                "a gone profile is named here the way a pane's route names it"
+            );
+        });
+    }
 
     /// A wrong hostname or a stale password used to be fixable only by
     /// finding the same machine again in Settings (#438). The machine is on

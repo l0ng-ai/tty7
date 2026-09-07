@@ -140,6 +140,94 @@ pub(crate) fn short_title(raw: &str, home: Option<&std::path::Path>) -> String {
     label
 }
 
+/// The one place a tab gets its displayed name, whichever surface is asking.
+///
+/// `label()` ranks the evidence — a given name, then the title the pane is
+/// showing, then an agent, then the working directory, then the process it is
+/// running — and this renders whatever came back. Both callers arrive with a
+/// [`TabView`](crate::ui::machine_mirror::TabView): the switcher reads one out
+/// of the machine tree for a window it does not own, and the strip builds one
+/// from its own live panes in
+/// [`Tab::label_view`](crate::ui::app::Tab::label_view).
+///
+/// They used to rank their own evidence, and disagreed where it mattered most:
+/// a pane with a working directory and no title — every non-PowerShell shell
+/// tty7 ships integration for reports OSC 7 and no OSC 0 — was listed by the
+/// switcher as `~/repo/tty7` and by the strip that owned it as "tty7", the
+/// app's own name (#740).
+pub(crate) fn label_of(
+    view: &crate::ui::machine_mirror::TabView,
+    index: usize,
+    home: Option<&std::path::Path>,
+) -> String {
+    use crate::ui::machine_mirror::TabLabel;
+
+    let unnamed = || {
+        t_fmt(
+            L10nKey::TabUnnamedShell,
+            &[("n", &((index + 1).to_string()))],
+        )
+    };
+    // A path can shorten away to nothing (a bare "user@host:"), and the process
+    // name the tree carries ("zsh") is still worth more than a number.
+    //
+    // Through `stated_title` because a tab of *this* window has no process name
+    // to offer: `Tab::label_view` fills that slot with the placeholder a pane
+    // answers to before anything has spoken, and printing the app's own name
+    // here is the one thing #740 exists to stop. Nothing to say falls to the
+    // number, which is what the strip showed before it shared this renderer.
+    let shortened = |raw: &str| match short_title(raw, home) {
+        shortened if !shortened.trim().is_empty() => shortened,
+        _ => match crate::terminal::view::stated_title(&view.title) {
+            Some(title) => title.to_string(),
+            None => unnamed(),
+        },
+    };
+    match view.label() {
+        TabLabel::Named(name) => name.to_string(),
+        // Through `short_title` because a title is so often a path: the shell
+        // integration writes `user@host:~/dir`, and a tab spelling that out in
+        // full where the one beside it says "…/dir" would be the same
+        // disagreement in a new place.
+        TabLabel::Osc(title) => shortened(title),
+        TabLabel::Agent(agent) => agent.display_name().to_string(),
+        TabLabel::Cwd(cwd) => shortened(cwd),
+        TabLabel::Process(title) => title.to_string(),
+        TabLabel::Unknown => unnamed(),
+    }
+}
+
+/// What a row can add on hover: the name behind the one [`label_of`] cut down,
+/// or `None` when it cut nothing and the tooltip would only repeat the row.
+///
+/// The comparison has to happen on the *same* spelling, which is the whole
+/// trick here. `label_of` abbreviates a path under the home before it elides
+/// it, and this returns the abbreviated form too, so a raw `/Users/x/repo`
+/// measured against a label of `~/repo` looks like a difference that isn't
+/// one — and every tab named after a directory inside the home would hang a
+/// tooltip saying exactly what it already says. Abbreviate first, compare
+/// after.
+fn tooltip_of(
+    view: &crate::ui::machine_mirror::TabView,
+    index: usize,
+    home: Option<&std::path::Path>,
+) -> Option<SharedString> {
+    use crate::ui::machine_mirror::TabLabel;
+
+    // The other rungs are never shortened: a given name and a process name are
+    // printed whole, and an agent's is a word.
+    let raw = match view.label() {
+        TabLabel::Osc(title) => title,
+        TabLabel::Cwd(cwd) => cwd,
+        _ => return None,
+    };
+    let full = abbreviate_home(raw.trim(), home);
+    if full.trim().is_empty() || full.as_ref() == label_of(view, index, home).as_str() {
+        return None;
+    }
+    Some(SharedString::from(full.into_owned()))
+}
+
 /// Width of `text` shaped in `font` at `size`, in pixels.
 ///
 /// The window's text system caches shaped runs, so measuring the same labels
@@ -1222,6 +1310,30 @@ impl Tty7App {
         }
     }
 
+    /// The mark a tab wears while one of its panes is zoomed over the others
+    /// (#752). Without it a zoomed tab is pixel-for-pixel a tab that only ever
+    /// had one pane, and the only way to tell was to toggle the zoom off.
+    ///
+    /// Drawn in the tab entry rather than on the pane so it reads from either
+    /// tab surface, and so it says something about the tabs you are *not*
+    /// looking at — the zoom outlives a switch away from them.
+    pub(crate) fn zoom_mark(&self, id: impl Into<gpui::ElementId>, cx: &App) -> gpui::AnyElement {
+        let tip = chord_hint(t(L10nKey::TabTooltipZoomed), "ToggleMaximizePane", cx);
+        div()
+            .id(id)
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(16.))
+            .text_color(cx.theme().muted_foreground)
+            .child(Icon::new(IconName::Maximize).size(px(11.)))
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            })
+            .into_any_element()
+    }
+
     /// The full title behind a shortened one, for the row to name on hover.
     ///
     /// `tab_label` hands back a path elided to its last three segments and then
@@ -1229,6 +1341,11 @@ impl Tty7App {
     /// read `…/a/b/c` with no way to find out which `a` that was. `None` when
     /// nothing was dropped, so tabs that already show their whole name stay
     /// quiet under the pointer.
+    ///
+    /// It has to unshorten whatever the label was *made of*, which is why it
+    /// reads the same [`TabView`](crate::ui::machine_mirror::TabView) the label
+    /// did: a tab named after its directory wants that directory spelled out,
+    /// not the title it never had. See [`tooltip_of`].
     pub(crate) fn tab_title_tooltip(
         &self,
         tab: &Tab,
@@ -1236,19 +1353,13 @@ impl Tty7App {
         window: Option<&Window>,
         cx: &App,
     ) -> Option<SharedString> {
-        if tab.name.as_ref().is_some_and(|n| !n.trim().is_empty()) {
-            return None;
-        }
-        let (raw, home) = tab.leaf_title_and_home(window, cx);
-        let raw = raw.trim();
-        if raw.is_empty() || raw == self.tab_label(tab, index, window, cx) {
-            return None;
-        }
-        Some(SharedString::from(
-            abbreviate_home(raw, home.as_deref()).into_owned(),
-        ))
+        let (view, home) = tab.label_view(window, cx);
+        tooltip_of(&view, index, home.as_deref())
     }
 
+    /// What this window puts on a tab of its own — the same ladder, through the
+    /// same renderer, as the switcher uses for a tab of somebody else's window.
+    /// See [`label_of`].
     pub(crate) fn tab_label(
         &self,
         tab: &Tab,
@@ -1256,22 +1367,8 @@ impl Tty7App {
         window: Option<&Window>,
         cx: &App,
     ) -> String {
-        if let Some(name) = tab.name.as_ref() {
-            let trimmed = name.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
-        }
-        let (raw, home) = tab.leaf_title_and_home(window, cx);
-        let label = short_title(&raw, home.as_deref());
-        if label.trim().is_empty() {
-            t_fmt(
-                L10nKey::TabUnnamedShell,
-                &[("n", &((index + 1).to_string()))],
-            )
-        } else {
-            label
-        }
+        let (view, home) = tab.label_view(window, cx);
+        label_of(&view, index, home.as_deref())
     }
 
     /// The New Tab control: one `+` that drops the list of everything it could
@@ -1632,6 +1729,7 @@ impl Tty7App {
             let agent = tab.agent(cx);
             let agent_status = tab.agent_status(cx);
             let agent_unread = tab.agent_unread_count(cx);
+            let zoomed = self.tab_is_zoomed(i);
 
             let rename_input = self
                 .renaming
@@ -1758,6 +1856,13 @@ impl Tty7App {
                         18.,
                         cx,
                     ))
+                })
+                // Leading, beside the other state marks: the trailing end of a
+                // chip belongs to the badge and to the close button that fades
+                // in over it, and a mark parked there would vanish under the
+                // pointer that came to read it.
+                .when(zoomed, |chip| {
+                    chip.child(self.zoom_mark(("tab-zoom", i), cx))
                 })
                 .child(label_region)
                 .when(show_badges && i < 9, |chip| {
@@ -2687,5 +2792,265 @@ mod tests {
         assert_eq!(spec.program, "custom-shell");
         assert_eq!(spec.args, ["--login"]);
         assert!(!spec.args_are_tty7_defaults);
+    }
+
+    /// A tab of this window as the strip reads it: `tab_label` is nothing but
+    /// [`label_of`] over the [`TabView`](crate::ui::machine_mirror::TabView)
+    /// that [`Tab::label_view`](crate::ui::app::Tab::label_view) builds from
+    /// the live leaf, so naming one here climbs the same ladder a real tab
+    /// climbs. `title` is the placeholder `label_view` fills that slot with —
+    /// the machine tree puts a process name there, a live pane has only the
+    /// name it answers to before anything has spoken.
+    fn strip_tab() -> crate::ui::machine_mirror::TabView {
+        crate::ui::machine_mirror::TabView {
+            id: tty7_core::core::machine::TabId::new(),
+            name: None,
+            title: crate::terminal::view::DEFAULT_TITLE.to_string(),
+            osc_title: None,
+            cwd: None,
+            agent: None,
+            status: None,
+            live: true,
+            panes: 1,
+        }
+    }
+
+    /// The home the paths below are measured against — named rather than read
+    /// off this machine, so the assertions do not depend on who is running
+    /// them (#580).
+    fn home() -> &'static Path {
+        Path::new("/Users/x")
+    }
+
+    #[test]
+    fn a_renamed_tab_keeps_its_name_over_every_other_answer() {
+        let mut tab = strip_tab();
+        tab.name = Some("  build  ".into());
+        tab.osc_title = Some("vim — main.rs".into());
+        tab.cwd = Some("/Users/x/repo/tty7".into());
+
+        assert_eq!(label_of(&tab, 0, Some(home())), "build");
+    }
+
+    #[test]
+    fn a_pane_showing_a_title_is_named_by_it_and_not_by_its_directory() {
+        let mut tab = strip_tab();
+        tab.osc_title = Some("vim — main.rs".into());
+        tab.cwd = Some("/Users/x/repo/tty7".into());
+
+        assert_eq!(label_of(&tab, 0, Some(home())), "vim — main.rs");
+
+        // Including the title an SSH pane answers to before the far shell has
+        // said anything (#438): `label_view` hands that up here, so a window
+        // full of them still reads as hosts rather than as directories.
+        tab.osc_title = Some("prod-web".into());
+        assert_eq!(label_of(&tab, 0, Some(home())), "prod-web");
+    }
+
+    /// #740: every shell tty7 ships integration for except PowerShell reports
+    /// its directory over OSC 7 and never sets a title, which left the tab
+    /// reading "tty7" — the app's own name — while the switcher listing the
+    /// very same tab showed the directory.
+    #[test]
+    fn a_pane_that_has_only_said_where_it_is_is_named_after_that() {
+        let mut tab = strip_tab();
+        tab.cwd = Some("/Users/x/repo/tty7".into());
+
+        assert_eq!(label_of(&tab, 0, Some(home())), "~/repo/tty7");
+        // Through the same shortener as a title, so a deep directory is cut
+        // where a deep path in a title would be.
+        tab.cwd = Some("/Users/x/repo/tty7/crates/tty7-core/src".into());
+        assert_eq!(
+            label_of(&tab, 0, Some(home())),
+            super::short_title("/Users/x/repo/tty7/crates/tty7-core/src", Some(home())),
+        );
+    }
+
+    /// A tooltip exists to say what the row had to leave out. One that repeats
+    /// the row is worse than none, and the label and the raw string it came
+    /// from are not comparable until both have been abbreviated: `~/repo` and
+    /// `/Users/x/repo` are the same name spelled two ways, and reading them as
+    /// a difference hung a tooltip on every tab named after a directory under
+    /// the home — which, after this change, is most of them.
+    #[test]
+    fn a_tab_named_after_a_directory_says_nothing_more_on_hover_unless_it_was_cut() {
+        let mut tab = strip_tab();
+        tab.cwd = Some("/Users/x/repo".into());
+
+        assert_eq!(label_of(&tab, 0, Some(home())), "~/repo");
+        assert_eq!(
+            tooltip_of(&tab, 0, Some(home())),
+            None,
+            "the row is already showing the whole directory"
+        );
+
+        // Cut down to its last three segments, so the head is worth having.
+        tab.cwd = Some("/Users/x/repo/crates/tty7-core/src".into());
+        assert_eq!(label_of(&tab, 0, Some(home())), "…/crates/tty7-core/src");
+        assert_eq!(
+            tooltip_of(&tab, 0, Some(home())).as_deref(),
+            Some("~/repo/crates/tty7-core/src")
+        );
+
+        // The same holds for a title that happens to be a path — the rung this
+        // guard was already getting wrong before a directory could reach it.
+        let mut titled = strip_tab();
+        titled.osc_title = Some("/Users/x/repo".into());
+        assert_eq!(tooltip_of(&titled, 0, Some(home())), None);
+
+        // A shell integration's `user@host:` head is not in the label, so it
+        // is still worth spelling out.
+        titled.osc_title = Some("me@box:/Users/x/repo".into());
+        assert_eq!(
+            tooltip_of(&titled, 0, Some(home())).as_deref(),
+            Some("me@box:/Users/x/repo")
+        );
+    }
+
+    /// The one test that fails if any of the wiring is put back: a real tab,
+    /// built the way the window builds one, named through `tab_label` — and
+    /// checked against what the switcher renders from the machine tree's view
+    /// of that very same pane. Before this change the strip said "tty7" and
+    /// the switcher said the directory (#740).
+    #[gpui::test]
+    fn the_strip_names_a_titleless_pane_exactly_as_the_switcher_does(cx: &mut TestAppContext) {
+        use crate::ui::pane::{Pane, PaneSlot};
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let _stream = app.update_in(&mut vcx, |app, window, cx| {
+            let (view, stream) = crate::terminal::view::quiet_test_pane(1, window, cx);
+            // A pane that has reported where it is over OSC 7 and has never
+            // titled itself — every shell tty7 ships integration for except
+            // PowerShell.
+            view.read(cx)
+                .terminal
+                .seed_cwd(Some(std::path::PathBuf::from("/work/repo")));
+            app.tabs
+                .push(crate::ui::app::Tab::new(Pane::leaf(PaneSlot::Ready(view))));
+            app.active = app.tabs.len() - 1;
+            stream
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let index = app.active;
+            let tab = &app.tabs[index];
+            let (view, home) = tab.label_view(Some(window), cx);
+            assert_eq!(view.osc_title, None, "the pane never titled itself");
+            assert_eq!(view.cwd.as_deref(), Some("/work/repo"));
+
+            let strip = app.tab_label(tab, index, Some(window), cx);
+            assert_eq!(strip, "/work/repo");
+            assert_ne!(
+                strip,
+                crate::terminal::view::DEFAULT_TITLE,
+                "and is not named after the app any more"
+            );
+
+            // The machine tree's reading of the same pane, which is all the
+            // switcher ever has: no title was seen, the cwd is the one above,
+            // and `title` is the foreground process name.
+            let from_tree = crate::ui::machine_mirror::TabView {
+                id: tab.tree_id.get(),
+                name: None,
+                title: "zsh".into(),
+                osc_title: None,
+                cwd: Some("/work/repo".into()),
+                agent: None,
+                status: None,
+                live: true,
+                panes: 1,
+            };
+            assert_eq!(
+                strip,
+                label_of(&from_tree, index, home.as_deref()),
+                "the two columns name the same tab the same way"
+            );
+
+            assert_eq!(
+                app.tab_title_tooltip(tab, index, Some(window), cx),
+                None,
+                "and the row is showing the whole path, so it stays quiet"
+            );
+        });
+    }
+
+    #[test]
+    fn a_pane_with_nothing_to_say_falls_back_the_way_it_always_did() {
+        // No title and no directory: the placeholder, exactly as before.
+        let tab = strip_tab();
+        assert_eq!(label_of(&tab, 0, Some(home())), "tty7");
+
+        // And a tab holding no live pane at all is still numbered.
+        let mut empty = strip_tab();
+        empty.title = String::new();
+        assert!(label_of(&empty, 2, Some(home())).contains('3'));
+    }
+
+    /// The rung under the shortener, which the two surfaces reach holding
+    /// different things. A shell that has said who and where it is but not
+    /// *where* — `user@host:` with nothing after the colon — leaves nothing to
+    /// show, and whatever stands in has to be something the tab does not
+    /// already say: the switcher has the foreground process name, and a tab of
+    /// this window has only the placeholder, which is the answer #740 removed.
+    #[test]
+    fn a_title_that_shortens_away_never_puts_the_app_name_back_on_the_tab() {
+        let mut strip = strip_tab();
+        strip.osc_title = Some("user@host:".into());
+        assert_ne!(
+            label_of(&strip, 0, Some(home())),
+            crate::terminal::view::DEFAULT_TITLE
+        );
+        assert!(
+            label_of(&strip, 0, Some(home())).contains('1'),
+            "the numbered placeholder, which is what the strip showed here \
+             before it shared this renderer"
+        );
+
+        // The switcher arrives with a real process name in that slot, and it
+        // is still worth more than a number.
+        let from_tree = crate::ui::machine_mirror::TabView {
+            title: "zsh".into(),
+            osc_title: Some("user@host:".into()),
+            ..strip_tab()
+        };
+        assert_eq!(label_of(&from_tree, 0, Some(home())), "zsh");
+    }
+
+    /// A path is spelled the way the machine it is on spells it, and which
+    /// machine that is has nothing to do with which one tty7 is running on: a
+    /// remote pane reports POSIX to a Windows client, and a Windows pane
+    /// reports backslashes to a client that has never seen one (#580).
+    #[test]
+    fn a_cwd_is_cut_in_its_own_spelling_whichever_client_is_reading_it() {
+        let windows_home = Path::new(r"C:\Users\x");
+
+        // A Windows pane: shortened under its own home, and a path too deep to
+        // fit is rejoined with its own separator rather than with `/`.
+        let mut win = strip_tab();
+        win.cwd = Some(r"C:\Users\x\repo".into());
+        assert_eq!(label_of(&win, 0, Some(windows_home)), "~/repo");
+        win.cwd = Some(r"D:\work\a\b\proj".into());
+        assert_eq!(label_of(&win, 0, Some(windows_home)), r"…\a\b\proj");
+
+        // A remote pane's cwd is POSIX even when the client reading it is the
+        // Windows one: no drive to hang it off, no `~` borrowed from this
+        // machine's home, and no backslash anywhere in the answer.
+        let mut remote = strip_tab();
+        remote.cwd = Some("/srv/app".into());
+        assert_eq!(label_of(&remote, 0, Some(windows_home)), "/srv/app");
+        remote.cwd = Some("/home/deploy/app".into());
+        assert_eq!(
+            label_of(&remote, 0, Some(Path::new("/home/deploy"))),
+            "~/app",
+            "measured against the home of the host it is on, not of this one"
+        );
+
+        // The root of a filesystem is a directory like any other: a tab
+        // sitting in it says so, and says nothing more on hover.
+        let mut root = strip_tab();
+        root.cwd = Some("/".into());
+        assert_eq!(label_of(&root, 0, Some(home())), "/");
+        assert_eq!(tooltip_of(&root, 0, Some(home())), None);
     }
 }
