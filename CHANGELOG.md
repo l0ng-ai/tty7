@@ -5,6 +5,43 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.9.1] - 2026-09-07
+
+### Fixed
+
+- **A remote server that will not start now says why** (#774). A remote
+  workspace could sit in a loop nobody could get out of: every reconnect failed
+  with "started but nothing was answering on the control socket after 15s", the
+  strip showed a copy bar frozen at 100%, and no button was offered. A daemon
+  whose control listener would not open logged one line and kept running — and a
+  running daemon holds the single-server lock, so every later start stood down
+  at once and every probe failed, forever. Whether something else is serving is
+  now settled by connecting rather than by reading the errno, and a daemon that
+  cannot listen exits. The reason is kept too: the remote daemon's output and
+  exit status land beside the binary, stamped with the launch's own nonce so a
+  restart never reads the outgoing daemon's status as the incoming one's, and a
+  start that has already failed no longer waits out the full timeout. On the
+  window side, an automatic reconnect retires its install progress instead of
+  drawing an install still in flight, and a long error no longer stretches the
+  status card past the window and takes the retry button off screen with it.
+
+- **A stale pane socket no longer stops every later daemon** (#779). A daemon
+  that died without unlinking its Unix socket left a file `bind` refuses, so the
+  client launched a daemon, it exited on the bind, and the client launched
+  another — forever. The removal is now decided by the single-server seat rather
+  than the pidfile: holding the seat means nobody else can be serving that config
+  dir, so anything still at the endpoint belongs to a process that is gone.
+  Where there is no seat, a socket that answers is refused rather than removed.
+
+### Changed
+
+- **The control dialect is v9.** v8 added the project verbs; this build takes
+  them back out and speaks v7's messages again, message for message — but the
+  number does not go back with them. v8 is deployed, and a number that moves
+  backwards stops being an identity: a 7 on the wire would mean either "before
+  projects" or "after them" depending on which build put it there, and the
+  handshake has nothing but the number to tell the two apart.
+
 ## [26.9.0] - 2026-09-04
 
 ### Added
@@ -4401,6 +4438,8 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
+[26.9.1]: https://github.com/l0ng-ai/tty7/compare/v26.9.0...v26.9.1
+[26.9.0]: https://github.com/l0ng-ai/tty7/compare/v26.8.3...v26.9.0
 [26.8.3]: https://github.com/l0ng-ai/tty7/compare/v26.8.2...v26.8.3
 [26.8.2]: https://github.com/l0ng-ai/tty7/compare/v26.8.1...v26.8.2
 [26.8.1]: https://github.com/l0ng-ai/tty7/compare/v26.8.0...v26.8.1

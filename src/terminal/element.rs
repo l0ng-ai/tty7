@@ -149,9 +149,37 @@ fn build_font(base: &Font, bold: bool, italic: bool) -> Font {
         FontStyle::Normal
     };
     if f.features.tag_value_list().is_empty() {
-        f.features = gpui::FontFeatures::disable_ligatures();
+        f.features = ligatures_off();
     }
     f
+}
+
+/// The feature set that actually turns ligatures off in a terminal grid.
+///
+/// gpui's own `FontFeatures::disable_ligatures()` emits `calt: 0` and nothing
+/// else. `calt` is only the contextual-alternate feature a programming face
+/// drives `=>` and `!=` from; the `fi`/`ffl`/`ffi` ligatures live in `liga` and
+/// `clig`, which that call never mentions — so they were left at the shaper's
+/// default, and CoreText, DirectWrite and rustybuzz all default them on. A
+/// terminal cannot have them: a ligature is one glyph where the grid budgeted a
+/// cell per character, so the row drifts.
+///
+/// Naming all three is therefore the whole fix, and it is not platform
+/// specific. Windows is the sharpest case only because gpui's DirectWrite
+/// backend always attaches an `IDWriteTypography` to the run: an empty feature
+/// list leaves that object empty, which suppresses DirectWrite's own defaults,
+/// while any non-empty list has `liga: 1`/`clig: 1` appended to it
+/// (`gpui_windows/src/direct_write.rs`, `apply_font_features`). Asking for
+/// `calt: 0` there bought ligatures that asking for nothing would not have.
+///
+/// `rlig` is deliberately left alone: it carries the required ligatures a
+/// script cannot be written without.
+fn ligatures_off() -> gpui::FontFeatures {
+    gpui::FontFeatures(std::sync::Arc::new(vec![
+        ("calt".to_string(), 0),
+        ("liga".to_string(), 0),
+        ("clig".to_string(), 0),
+    ]))
 }
 
 fn snapshot_cell(
@@ -975,12 +1003,26 @@ fn native_cell_residue(style: &GlyphStyle) -> Option<char> {
 /// and letting it spill. This follows WezTerm, whose answer shows the glyph
 /// whole most often: a quarter cell of slack always, and a whole extra cell
 /// when the neighbouring cell is blank and has nothing to lose.
-fn seg_budget(solo: bool, cells: usize, room: bool, cell_width: Pixels) -> Pixels {
+fn seg_budget(solo: bool, measured: bool, cells: usize, room: bool, cell_width: Pixels) -> Pixels {
     if solo {
-        // Single-cell glyphs have always been allowed to lean into the next
-        // cell. Narrowing that here would shrink a pile of symbols that look
-        // fine today, so it stays a separate decision.
-        cell_width * 2.
+        // Single-cell glyphs are allowed to lean into the next cell — that is
+        // what keeps the pile of symbols that look fine today from shrinking —
+        // but only while that cell is empty. A Nerd Font icon pulled from a
+        // fallback face inks well past a narrow primary's cell (1.6 cells is
+        // typical), and where the next cell has a glyph of its own the lean is
+        // not a lean, it is an overlap: the neighbour is painted afterwards
+        // and lands on top of the overshoot. Hand those their own cell and let
+        // `fit_scale` bring them down into it, the way kitty and ghostty do.
+        //
+        // Only where the ink was measured, though. This number is the clip as
+        // well as the threshold to shrink at, so narrowing it for a segment
+        // nothing could measure would cut the glyph instead of scaling it —
+        // see `ink_covers_segment`.
+        if room || !measured {
+            cell_width * 2.
+        } else {
+            cell_width
+        }
     } else if room {
         cell_width * (cells as f32 + 1.)
     } else {
@@ -1132,6 +1174,21 @@ fn shape_piece(
     window
         .text_system()
         .shape_line(piece, font_size, run_buf, force_width)
+}
+
+/// Whether [`ink_extent`]'s answer speaks for the whole segment.
+///
+/// It measures the segment's first character in the run's first face. That is
+/// all of a one-character segment and only part of anything longer: a
+/// cluster's combining marks can ink well to the right of the base they hang
+/// off — Devanagari `\u{915}` + `\u{93E}` — and are not in the number. `None`
+/// is a face that answered no bounds at all, which is no measurement either.
+///
+/// Neither can be scaled to fit, so neither may be held to one cell: the
+/// budget doubles as the clip, and a segment that cannot shrink into a
+/// narrowed one is simply cut off at it.
+fn ink_covers_segment(ink: Option<Pixels>, text: &str) -> bool {
+    ink.is_some() && text.chars().nth(1).is_none()
 }
 
 /// Whether the cell after a segment is free for its glyph to lean into.
@@ -1314,18 +1371,21 @@ fn paint_glyphs(
                 continue;
             }
 
-            let budget = seg_budget(
-                solo,
-                cells,
-                has_room_after(row_cells, start, cells),
-                geom.cell_width,
-            );
-
             let mut shaped =
                 window
                     .text_system()
                     .shape_line(text.clone(), font_size, run_buf, force_width);
-            if let Some(ink) = ink_extent(cx, &shaped, &text, font_size) {
+            // Measured before the budget is set, because how far a solo glyph
+            // may reach turns on whether its ink is known at all.
+            let ink = ink_extent(cx, &shaped, &text, font_size);
+            let budget = seg_budget(
+                solo,
+                ink_covers_segment(ink, &text),
+                cells,
+                has_room_after(row_cells, start, cells),
+                geom.cell_width,
+            );
+            if let Some(ink) = ink {
                 let scale = fit_scale(ink, budget);
                 if scale < 1. {
                     shaped = window.text_system().shape_line(
@@ -2495,7 +2555,7 @@ mod tests {
         let ink = px(18.75);
         let scale = |advance_em: f32, room: bool| {
             let cell = px(15. * advance_em);
-            fit_scale(ink, seg_budget(false, 2, room, cell))
+            fit_scale(ink, seg_budget(false, true, 2, room, cell))
         };
 
         // Menlo and friends: a quarter cell of slack is enough on its own.
@@ -2995,30 +3055,142 @@ mod tests {
     #[test]
     fn seg_budget_frees_solo_symbols_and_lends_a_cell_only_when_one_is_free() {
         let cell = px(10.);
-        assert_eq!(seg_budget(true, 1, false, cell), px(20.), "solo keeps two");
         assert_eq!(
-            seg_budget(false, 2, false, cell),
+            seg_budget(true, true, 1, true, cell),
+            px(20.),
+            "a solo glyph leans into a free cell"
+        );
+        assert_eq!(
+            seg_budget(true, true, 1, false, cell),
+            px(10.),
+            "but keeps to its own once the next cell is taken"
+        );
+        assert_eq!(
+            seg_budget(false, true, 2, false, cell),
             px(22.5),
             "a quarter cell"
         );
-        assert_eq!(seg_budget(false, 2, true, cell), px(30.), "a whole cell");
-        assert_eq!(seg_budget(false, 1, false, cell), px(12.5));
+        assert_eq!(
+            seg_budget(false, true, 2, true, cell),
+            px(30.),
+            "a whole cell"
+        );
+        assert_eq!(seg_budget(false, true, 1, false, cell), px(12.5));
     }
 
     #[test]
-    fn build_font_disables_ligatures_unless_features_are_configured() {
-        let font = build_font(&gpui::font("Test"), false, false);
-        assert_eq!(font.features.is_calt_enabled(), Some(false));
+    fn a_fallback_icon_is_fitted_to_its_cell_only_when_the_next_one_is_taken() {
+        // Measured on Windows: Maple Mono NF CN supplying U+F059 to a
+        // 15px Cascadia Mono grid inks 13.85px across an 8.79px cell.
+        let cell = px(8.789);
+        let ink = px(13.845);
 
-        let mut configured = gpui::font("Test");
-        configured.features = serde_json::from_str(r#"{"calt":true,"liga":1}"#).unwrap();
-        let font = build_font(&configured, false, false);
-        assert_eq!(font.features.is_calt_enabled(), Some(true));
+        let leaning = fit_scale(ink, seg_budget(true, true, 1, true, cell));
+        assert_eq!(leaning, 1., "a blank neighbour still lends its cell");
+
+        let crowded = fit_scale(ink, seg_budget(true, true, 1, false, cell));
+        assert!(crowded < 1., "an occupied neighbour does not");
         assert!(
+            ink * crowded <= cell,
+            "and the icon has to end inside its own cell"
+        );
+    }
+
+    #[test]
+    fn a_solo_segment_is_held_to_its_cell_only_where_its_ink_was_measured() {
+        let cell = px(10.);
+        let budget = |ink, text| seg_budget(true, ink_covers_segment(ink, text), 1, false, cell);
+
+        // One character the face answered bounds for: the whole of it was
+        // measured, so `fit_scale` can bring it into one cell and the clip
+        // may be drawn there.
+        assert!(ink_covers_segment(Some(px(15.)), "\u{f059}"));
+        assert_eq!(budget(Some(px(15.)), "\u{f059}"), px(10.));
+
+        // A base with a combining mark hanging off it reaches paint_glyphs as
+        // a one-cell `Cluster`, which counts as solo. `ink_extent` read the
+        // base alone: Devanagari ka plus the aa matra inks to the right of the
+        // base, and none of that overhang is in the 9px. Nothing would shrink
+        // it, so a one-cell clip would cut the matra clean off.
+        assert!(!ink_covers_segment(Some(px(9.)), "\u{915}\u{93E}"));
+        assert_eq!(budget(Some(px(9.)), "\u{915}\u{93E}"), px(20.));
+
+        // A face that answers no bounds at all is the same story from the
+        // other side: `fit_scale` is never reached, so halving the clip only
+        // clips.
+        assert!(!ink_covers_segment(None, "\u{f059}"));
+        assert_eq!(budget(None, "\u{f059}"), px(20.));
+
+        // A free neighbour lends its cell either way \u2014 the measurement only
+        // decides whether the lean can be withdrawn.
+        for ink in [Some(px(15.)), None] {
+            for text in ["\u{f059}", "\u{915}\u{93E}"] {
+                assert_eq!(
+                    seg_budget(true, ink_covers_segment(ink, text), 1, true, cell),
+                    px(20.)
+                );
+            }
+        }
+    }
+
+    /// The emitted feature set is the whole contract with the shaper, so pin it
+    /// tag for tag rather than asking after one tag at a time.
+    ///
+    /// `calt: 0` alone is not "ligatures off" on any platform: it never asks
+    /// for `liga`/`clig`, which every shaper defaults on. Shaping "office
+    /// waffle fluffier" in Calibri through the real DirectWrite shaper gives 15
+    /// glyphs for 22 characters with `calt: 0`, and 22 once all three are named
+    /// zero.
+    #[test]
+    fn build_font_emits_the_pinned_feature_set_for_each_ligature_setting() {
+        fn tags(font: &Font) -> Vec<(&str, u32)> {
             font.features
                 .tag_value_list()
                 .iter()
-                .any(|(tag, value)| tag == "liga" && *value == 1)
+                .map(|(tag, value)| (tag.as_str(), *value))
+                .collect()
+        }
+
+        // Default config, and the settings toggle switched off: both leave
+        // `font_features` unset, so the terminal names its own.
+        let font = build_font(&gpui::font("Test"), false, false);
+        assert_eq!(
+            tags(&font),
+            vec![("calt", 0), ("liga", 0), ("clig", 0)],
+            "an unconfigured face must name every ligature feature off",
+        );
+        assert_eq!(font.features.is_calt_enabled(), Some(false));
+
+        // Every face the grid paints with gets the same set, not just the plain one.
+        for (bold, italic) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(
+                tags(&build_font(&gpui::font("Test"), bold, italic)),
+                vec![("calt", 0), ("liga", 0), ("clig", 0)],
+                "bold={bold} italic={italic}",
+            );
+        }
+
+        // Explicitly on: what Settings → Appearance → Font ligatures writes.
+        let mut configured = gpui::font("Test");
+        configured.features = crate::core::config::gpui_font_features(
+            &serde_json::from_str(r#"{"calt":true,"liga":1}"#).unwrap(),
+        );
+        let font = build_font(&configured, false, false);
+        assert_eq!(
+            tags(&font),
+            vec![("calt", 1), ("liga", 1)],
+            "an explicit request for ligatures must survive untouched",
+        );
+        assert_eq!(font.features.is_calt_enabled(), Some(true));
+
+        // Explicitly off in `config.json`: also passed through unchanged.
+        let mut configured = gpui::font("Test");
+        configured.features = crate::core::config::gpui_font_features(
+            &serde_json::from_str(r#"{"calt":0,"liga":0,"clig":0}"#).unwrap(),
+        );
+        assert_eq!(
+            tags(&build_font(&configured, false, false)),
+            vec![("calt", 0), ("liga", 0), ("clig", 0)],
         );
     }
 
