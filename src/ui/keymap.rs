@@ -265,6 +265,7 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
     vec![
         ("NewTab", per_platform("secondary-t", "secondary-shift-t")),
         ("NewWorkspace", "secondary-shift-n"),
+        ("CloseWindow", ""),
         (
             "CloseActiveTab",
             per_platform("secondary-w", "secondary-shift-w"),
@@ -733,6 +734,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             CommandGroup::Application,
             t(L10nKey::AppMenuCommandPalette).to_string(),
         ),
+        "CloseWindow" => (
+            CommandGroup::Application,
+            t(L10nKey::CmdCloseWindow).to_string(),
+        ),
         "OpenSettings" => (
             CommandGroup::Application,
             t(L10nKey::CmdSettings).to_string(),
@@ -1036,6 +1041,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "DeleteWorkspace" => KeyBinding::new(keystroke, DeleteWorkspace, None),
         "RenameWorkspace" => KeyBinding::new(keystroke, RenameWorkspace, None),
         "ToggleSwitcher" => KeyBinding::new(keystroke, ToggleSwitcher, None),
+        "CloseWindow" => KeyBinding::new(keystroke, CloseWindow, None),
         "CloseActiveTab" => KeyBinding::new(keystroke, CloseActiveTab, None),
         "RenameTab" => KeyBinding::new(keystroke, RenameTab, None),
         "NewWorktreeTab" => KeyBinding::new(keystroke, NewWorktreeTab, None),
@@ -1217,6 +1223,7 @@ mod tests {
         // palette and the docs all say Zoom Pane.
         assert_eq!(action_entry("ToggleMaximizePane").1, "Zoom Pane");
         assert_eq!(action_entry("CloseActiveTab").1, "Close Pane / Tab");
+        assert_eq!(action_entry("CloseWindow").1, "Close Window");
         assert_eq!(action_entry("ClearScrollback").1, "Clear Scrollback");
         assert_eq!(action_entry("TogglePalette").1, "Command Palette…");
         assert_eq!(action_entry("ToggleSwitcher").1, "Switch Workspace…");

@@ -1395,29 +1395,8 @@ impl Tty7App {
 
         let weak_app = cx.weak_entity();
         window.on_window_should_close(cx, move |_window, cx| {
-            let last_window = crate::ui::windows::WindowRegistry::count(cx) <= 1;
             if let Some(app) = weak_app.upgrade() {
-                app.update(cx, |app, cx| app.detach_workspace(cx));
-            }
-            if last_window {
-                // With a tray icon, closing the last window retires to the
-                // tray: the daemon stays reachable (show / quit-and-stop)
-                // instead of being orphaned behind a dead icon. Without one
-                // the app quits — the only way it stays visible at all.
-                //
-                // The icon has to actually be up, not merely asked for: the
-                // backend can fail for the whole run (a Linux session with no
-                // StatusNotifier host), and retiring into an icon that never
-                // appeared leaves a process with no window and no tray — no
-                // way back in, and the daemon still held.
-                let retire_to_tray =
-                    cx.global::<Config>().show_tray_icon && crate::ui::tray::icon_is_up();
-                if !retire_to_tray {
-                    cx.spawn(async move |cx| {
-                        let _ = cx.update(|cx| cx.quit());
-                    })
-                    .detach();
-                }
+                app.update(cx, |app, cx| app.prepare_window_close(cx));
             }
             true
         });
@@ -1466,6 +1445,36 @@ impl Tty7App {
         crate::ui::windows::WindowRegistry::unregister(cx, self.workspace);
         crate::ui::tree_sync::forget(cx, self.workspace);
         crate::ui::windows::refresh_menu(cx);
+    }
+
+    fn prepare_window_close(&self, cx: &mut App) {
+        let last_window = crate::ui::windows::WindowRegistry::count(cx) <= 1;
+        self.detach_workspace(cx);
+        if last_window {
+            // With a tray icon, closing the last window retires to the
+            // tray: the daemon stays reachable (show / quit-and-stop)
+            // instead of being orphaned behind a dead icon. Without one
+            // the app quits — the only way it stays visible at all.
+            //
+            // The icon has to actually be up, not merely asked for: the
+            // backend can fail for the whole run (a Linux session with no
+            // StatusNotifier host), and retiring into an icon that never
+            // appeared leaves a process with no window and no tray — no
+            // way back in, and the daemon still held.
+            let retire_to_tray =
+                cx.global::<Config>().show_tray_icon && crate::ui::tray::icon_is_up();
+            if !retire_to_tray {
+                cx.spawn(async move |cx| {
+                    let _ = cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn close_window(&self, window: &mut Window, cx: &mut App) {
+        self.prepare_window_close(cx);
+        window.remove_window();
     }
 
     pub(crate) fn teardown_workspace_forwards(&self, cx: &gpui::App) {
@@ -4895,6 +4904,7 @@ impl Tty7App {
             OpenWorkspacePicker => self.open_switcher(window, cx),
             StopWorkspace => self.stop_workspace(self.workspace, window, cx),
             DeleteWorkspace => self.delete_workspace(self.workspace, window, cx),
+            CloseWindow => self.close_window(window, cx),
             SplitRight => self.split(Axis::Horizontal, window, cx),
             SplitDown => self.split(Axis::Vertical, window, cx),
             ClosePane => self.close_pane(window, cx),
@@ -7391,6 +7401,9 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &NewWorkspace, window, cx| {
                     this.open_workspace_form(window, cx);
                 }))
+                .on_action(
+                    cx.listener(|this, _: &CloseWindow, window, cx| this.close_window(window, cx)),
+                )
                 .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                     if !this.editor_close_active_if_focused(window, cx) {
                         this.close_pane(window, cx)
@@ -10237,5 +10250,85 @@ mod managed_forward_gpui_tests {
             );
             assert!(app.loopback_panel.mf_error.is_some());
         });
+    }
+}
+
+#[cfg(test)]
+mod close_window_action_tests {
+    use crate::core::actions::CloseWindow;
+    use crate::core::config::Config;
+    use crate::core::session::Session;
+    use crate::ui::app::Tty7App;
+    use crate::ui::windows::WindowRegistry;
+    use gpui::{AppContext as _, TestAppContext, VisualTestContext};
+
+    /// `CloseWindow` has to close the window, and close it the way the red
+    /// button does.
+    ///
+    /// The action is otherwise all table entries — the `actions!` row, the
+    /// keymap slot, the palette command, the Keybindings label — and every one
+    /// of those can be in place while the action reaches nothing at all. So
+    /// this drives the real dispatch path and then asks two separate
+    /// questions: the window is gone from gpui, *and* it left the
+    /// `WindowRegistry` on the way out. The second is what makes it the same
+    /// close as the native one — `detach_workspace` is where the session is
+    /// saved and the workspace is retired, and a `remove_window` that skipped
+    /// it would still pass the first assertion while quietly dropping a
+    /// window's tabs on the floor.
+    #[gpui::test]
+    fn dispatching_close_window_takes_the_window_down_with_its_registration(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+            WindowRegistry::init(cx);
+        });
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty7App::with_session(None, Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view()
+                    .clone()
+                    .downcast::<Tty7App>()
+                    .ok()
+                    .expect("window root wraps a Tty7App")
+            })
+            .unwrap();
+        // Registered the way an opened window registers itself; the registry
+        // is where the close has to show up, so an unregistered window would
+        // make the assertion below pass for the wrong reason.
+        let handle = window.into();
+        let weak = app.downgrade();
+        app.update(cx, |app, cx| {
+            WindowRegistry::register(cx, app.workspace, handle, weak);
+        });
+
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.background_executor.run_until_parked();
+        assert_eq!(
+            vcx.update(|_, cx| WindowRegistry::count(cx)),
+            1,
+            "the harness starts with exactly the one window"
+        );
+
+        vcx.dispatch_action(CloseWindow);
+        drop(vcx);
+
+        assert!(
+            cx.update(|cx| cx.windows().is_empty()),
+            "CloseWindow has to reach `remove_window`; the window is still open"
+        );
+        assert!(
+            cx.update(|cx| WindowRegistry::open_windows(cx).is_empty()),
+            "the close has to run the same cleanup the red button runs, \
+             which is what takes the window out of the registry"
+        );
     }
 }

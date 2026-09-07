@@ -975,17 +975,19 @@ mod tests {
 /// character — goes wrong during layout and paint, so these arm the render
 /// probe and insist something was actually drawn.
 ///
-/// Still unix-only, and for a reason worth naming rather than a harness
-/// one: on Windows `git rev-parse --show-toplevel` (Git for Windows is
-/// MSYS2) prints `C:/Users/—`, and that string is what
-/// `tty7_core::core::git::probe` stores as `RepoSnapshot::root`. The
-/// forward slashes are not what breaks it — `Path` compares by component,
-/// so `C:/x` and `C:\x` are equal. The prefix is: `scratch` below hands the
-/// pane `fs::canonicalize`'s `\\?\C:\Users\—`, whose prefix component is
-/// `VerbatimDisk` where git's answer parses as `Disk`, so the plain
-/// `PathBuf` equalities here — and in the SCM cache — never match and the
-/// panel never settles on the directory it is already showing. Taking the
-/// gate off needs those roots keyed by one spelling (#796).
+/// Still unix-only, and for a reason worth naming rather than a harness one:
+/// on Windows the root the panel settles on is not the root this module hands
+/// it, so the panel never settles on the directory it is already showing.
+///
+/// The forward slashes `git rev-parse --show-toplevel` prints are not what
+/// breaks it — `Path` compares by component, so `C:/x` and `C:\x` are equal.
+/// The prefix is, and since #796 it is this module's own: the product keys a
+/// repository by one spelling now, while `scratch` below still hands the pane
+/// `std::fs::canonicalize`'s `\\?\C:\Users\—`, a `VerbatimDisk` prefix where
+/// every root it is compared against is `Disk`. Taking the gate off needs
+/// that helper to spell its answer the way
+/// `tty7_core::core::path_spelling` does, in a change that can show these
+/// green rather than a drive-by.
 #[cfg(all(test, unix))]
 mod detail_gpui_tests {
     use super::*;

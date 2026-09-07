@@ -437,7 +437,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsMouseZoomOff => "Off",
         L10nKey::SettingsReportMouseToApps => "Report mouse to apps",
         L10nKey::SettingsReportMouseToAppsDesc => {
-            "Let full-screen apps (vim, tmux) handle clicks and scrolling; hold Shift to keep a gesture local."
+            "Let full-screen apps (vim, tmux) handle clicks and scrolling; hold Shift to keep a gesture local. \
+             Off keeps clicks from reaching them and turns the wheel into arrow keys."
         }
         L10nKey::SettingsBell => "Bell",
         L10nKey::SettingsTerminalBell => "Terminal bell",
@@ -1430,6 +1431,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdForkSessionSubtitle => "branch this agent session into a new tab",
         L10nKey::CmdMarkTabAsUnread => "Mark Tab as Unread",
         L10nKey::CmdClosePaneTab => "Close Pane / Tab",
+        L10nKey::CmdCloseWindow => "Close Window",
+        L10nKey::CmdCloseWindowSubtitle => "shells keep running",
         L10nKey::CmdCloseOtherTabs => "Close Other Tabs",
         L10nKey::CmdCloseTabsToTheRight => "Close Tabs to the Right",
         L10nKey::CmdReopenClosedTab => "Reopen Closed Tab",
@@ -1506,7 +1509,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdRestartServer => "Restart Server…",
         L10nKey::CmdRestartServerSubtitle => "ends every running shell; layout is kept",
         L10nKey::CmdQuitTty7 => "Quit tty7",
-        L10nKey::CmdQuitTty7Subtitle => "shells keep running",
+        L10nKey::CmdQuitTty7Subtitle => "stops the server; every running shell ends",
         L10nKey::CmdQuickConnect => "Connect to \"{target}\"",
         L10nKey::CmdQuickConnectSaveProfile => "Save \"{target}\" as profile…",
         L10nKey::CmdRecent => "Recent",

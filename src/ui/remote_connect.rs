@@ -960,6 +960,7 @@ mod tests {
 
     fn native_spec(user: &str, host: &str, port: u16) -> NativeSshSpec {
         let mut profile = crate::core::ssh_profile::SshProfile::new(host.to_string());
+        profile.host = host.to_string();
         profile.user = user.to_string();
         profile.port = port;
         crate::ui::ssh_connect::build_native_ssh_spec(
@@ -970,6 +971,36 @@ mod tests {
         )
     }
 
+    /// `SshProfile::new` takes a *name*, and the address lives in a separate
+    /// `host` field; every production caller assigns both. `native_spec` used
+    /// to assign only the name, so the spec it handed back addressed nobody
+    /// and `ConnectionKey::from_spec` spelled it `me@:22` — one key for every
+    /// machine in this module that talks to port 22.
+    ///
+    /// `ORIGINS` is keyed by exactly that string, so the two tests below that
+    /// note an origin and read it back were writing to and reading from the
+    /// same slot. Whichever noted last won, and the other was handed the wrong
+    /// machine: 17 failures in 20 runs of this module alone, 6 in 20 of the
+    /// whole binary, and none when either test ran by itself.
+    #[test]
+    fn two_machines_do_not_share_one_route_origin_key() {
+        use crate::daemon::router::RouteTarget;
+
+        let build = RouteTarget::Ssh(Box::new(native_spec("me", "build-box", 22)));
+        let twin = RouteTarget::Ssh(Box::new(native_spec("me", "twin-box", 22)));
+
+        assert_eq!(
+            build.origin_key(),
+            "me@build-box:22",
+            "a route origin key names the machine it dials"
+        );
+        assert_ne!(
+            build.origin_key(),
+            twin.origin_key(),
+            "two machines sharing one key make `note_origin` overwrite the other's"
+        );
+    }
+
     #[test]
     fn a_routed_auth_prompt_carries_the_machine_that_raised_it() {
         let _turn = claim_mailbox();
@@ -978,6 +1009,7 @@ mod tests {
         let route =
             crate::daemon::router::RouteTarget::Ssh(Box::new(native_spec("me", "build-box", 22)));
         note_origin(&route, &target);
+        let origin_key = route.origin_key();
 
         let handle = std::thread::spawn(move || {
             use crate::daemon::router::RouteAuthResponder as _;
@@ -1005,7 +1037,12 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         };
-        assert_eq!(pending.host, target.host_id());
+        assert_eq!(
+            pending.host,
+            target.host_id(),
+            "the prompt names the machine noted under {:?}",
+            origin_key
+        );
         pending.answer(AuthResponse::Secret("hunter2".into()));
         assert_eq!(
             handle.join().unwrap(),
