@@ -82,7 +82,7 @@ pub enum Pane<L = PaneSlot> {
     Empty,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Dir {
     Left,
     Right,
@@ -1707,6 +1707,48 @@ mod tests {
         assert_eq!(
             pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(0))),
             Some(idx(4))
+        );
+    }
+
+    /// Two steps out and two back is the same walk the reverse of a single move
+    /// is, and it has to end where it started for the same reason. Replays the
+    /// bookkeeping `focus_pane_dir` does — each move recorded against the pane
+    /// it landed on — over the layout that breaks it: three columns whose last
+    /// one is a stack, so the second move back is the one geometry cannot call.
+    #[test]
+    fn a_walk_of_two_steps_comes_back_to_the_pane_it_started_from() {
+        // 0 | 1 | (2 over 3).
+        let pane = TestPane::split_node(
+            Axis::Horizontal,
+            1.0 / 3.0,
+            Pane::Leaf(0),
+            TestPane::split_node(
+                Axis::Horizontal,
+                0.5,
+                Pane::Leaf(1),
+                TestPane::split_node(Axis::Vertical, 0.5, Pane::Leaf(2), Pane::Leaf(3)),
+            ),
+        );
+        let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
+        // Geometry alone ties on overlap out of the middle column and answers
+        // with the top of the stack, whichever member the walk set off from.
+        assert_eq!(pane.neighbor_in_direction(idx(1), Dir::Right), Some(idx(2)));
+
+        let mut origin: std::collections::HashMap<(usize, Dir), usize> =
+            std::collections::HashMap::new();
+        let mut at = idx(3);
+        for dir in [Dir::Left, Dir::Left, Dir::Right, Dir::Right] {
+            let back = origin.get(&(at, dir)).copied();
+            let to = pane
+                .focus_target_in_direction(at, dir, back)
+                .expect("a neighbour that way");
+            origin.insert((to, dir.opposite()), at);
+            at = to;
+        }
+        assert_eq!(
+            at,
+            idx(3),
+            "the second move back must return to the bottom of the stack too"
         );
     }
 
