@@ -107,6 +107,16 @@ impl Dir {
     fn grows(self) -> bool {
         matches!(self, Dir::Right | Dir::Down)
     }
+
+    /// The direction that undoes a move this way.
+    pub fn opposite(self) -> Dir {
+        match self {
+            Dir::Left => Dir::Right,
+            Dir::Right => Dir::Left,
+            Dir::Up => Dir::Down,
+            Dir::Down => Dir::Up,
+        }
+    }
 }
 
 /// What a tab wants drawn around its panes this frame.
@@ -135,6 +145,22 @@ pub struct Rect {
 
 fn overlap_1d(a0: f32, alen: f32, b0: f32, blen: f32) -> f32 {
     ((a0 + alen).min(b0 + blen) - a0.max(b0)).max(0.0)
+}
+
+/// Slack for the arithmetic behind `leaf_rects`: ratios multiply out down the
+/// tree, so edges that meet exactly in the layout can differ in the last bits.
+const ADJACENCY_EPS: f32 = 1e-4;
+
+/// How far `c` lies from `f` in `dir` and how much edge the two share, or
+/// `None` when `c` is not on that side of `f` or only touches it at a corner.
+fn adjacency(f: Rect, c: Rect, dir: Dir) -> Option<(f32, f32)> {
+    let (dist, overlap) = match dir {
+        Dir::Left => (f.x - (c.x + c.w), overlap_1d(f.y, f.h, c.y, c.h)),
+        Dir::Right => (c.x - (f.x + f.w), overlap_1d(f.y, f.h, c.y, c.h)),
+        Dir::Up => (f.y - (c.y + c.h), overlap_1d(f.x, f.w, c.x, c.w)),
+        Dir::Down => (c.y - (f.y + f.h), overlap_1d(f.x, f.w, c.x, c.w)),
+    };
+    (dist >= -ADJACENCY_EPS && overlap > ADJACENCY_EPS).then_some((dist, overlap))
 }
 
 pub enum CloseOutcome {
@@ -782,21 +808,15 @@ impl<L: Clone> Pane<L> {
     pub fn neighbor_in_direction(&self, from: usize, dir: Dir) -> Option<usize> {
         let rects = self.leaf_rects();
         let f = rects.get(from)?.1;
-        const EPS: f32 = 1e-4;
+        const EPS: f32 = ADJACENCY_EPS;
         let mut best: Option<(usize, f32, f32)> = None;
         for (i, (_, c)) in rects.iter().enumerate() {
             if i == from {
                 continue;
             }
-            let (dist, overlap) = match dir {
-                Dir::Left => (f.x - (c.x + c.w), overlap_1d(f.y, f.h, c.y, c.h)),
-                Dir::Right => (c.x - (f.x + f.w), overlap_1d(f.y, f.h, c.y, c.h)),
-                Dir::Up => (f.y - (c.y + c.h), overlap_1d(f.x, f.w, c.x, c.w)),
-                Dir::Down => (c.y - (f.y + f.h), overlap_1d(f.x, f.w, c.x, c.w)),
-            };
-            if dist < -EPS || overlap <= EPS {
+            let Some((dist, overlap)) = adjacency(f, *c, dir) else {
                 continue;
-            }
+            };
             let better = match best {
                 None => true,
                 Some((_, bd, bo)) => dist < bd - EPS || (dist <= bd + EPS && overlap > bo + EPS),
@@ -806,6 +826,38 @@ impl<L: Clone> Pane<L> {
             }
         }
         best.map(|(i, _, _)| i)
+    }
+
+    /// Whether a move in `dir` could legally land on `to`: it sits on that side
+    /// of `from` and the two share an edge.
+    pub fn is_neighbor_in_direction(&self, from: usize, to: usize, dir: Dir) -> bool {
+        if from == to {
+            return false;
+        }
+        let rects = self.leaf_rects();
+        match (rects.get(from), rects.get(to)) {
+            (Some((_, f)), Some((_, c))) => adjacency(*f, *c, dir).is_some(),
+            _ => false,
+        }
+    }
+
+    /// The pane a move in `dir` lands on, preferring `back` — where the last
+    /// move the other way started — as long as it is still a neighbor.
+    ///
+    /// Geometry alone can only rank candidates by overlap, so at a T-junction
+    /// (one tall pane facing a stack) the reverse move lands on the same member
+    /// of the stack whichever one you left, and going back and forth drifts
+    /// (#738). Preferring where you came from makes reversing a move undo it.
+    /// A `back` the layout has since closed, moved or walled off fails the
+    /// neighbor test, so geometry decides exactly as it did before.
+    pub fn focus_target_in_direction(
+        &self,
+        from: usize,
+        dir: Dir,
+        back: Option<usize>,
+    ) -> Option<usize> {
+        back.filter(|&back| self.is_neighbor_in_direction(from, back, dir))
+            .or_else(|| self.neighbor_in_direction(from, dir))
     }
 
     pub fn resize_focused(&self, is_focused: &impl Fn(&L) -> bool, dir: Dir, step: f32) -> bool {
@@ -879,13 +931,24 @@ impl Pane<PaneSlot> {
             .collect()
     }
 
-    pub fn neighbor_in_dir(&self, dir: Dir, window: &Window, cx: &App) -> Option<PaneSlot> {
+    /// The pane focus moves to, `back` naming the pane the last move the other
+    /// way started from. A `back` that is no longer a leaf here — closed, or
+    /// left behind in another tab — is simply not found, which is what keeps a
+    /// stale id from ever winning.
+    pub fn neighbor_in_dir(
+        &self,
+        dir: Dir,
+        back: Option<gpui::EntityId>,
+        window: &Window,
+        cx: &App,
+    ) -> Option<PaneSlot> {
         let focused = self.focused_leaf(window, cx)?;
         let leaves = self.leaves();
         let from = leaves
             .iter()
             .position(|l| l.entity_id() == focused.entity_id())?;
-        let target = self.neighbor_in_direction(from, dir)?;
+        let back = back.and_then(|id| leaves.iter().position(|l| l.entity_id() == id));
+        let target = self.focus_target_in_direction(from, dir, back)?;
         leaves.get(target).cloned()
     }
 
@@ -1560,6 +1623,72 @@ mod tests {
         );
         let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
         assert_eq!(pane.neighbor_in_direction(idx(0), Dir::Right), Some(idx(1)));
+    }
+
+    /// The layout from #738: one full-height pane facing a stack of two.
+    fn t_junction() -> TestPane {
+        TestPane::split_node(
+            Axis::Horizontal,
+            0.5,
+            Pane::Leaf(0),
+            TestPane::split_node(Axis::Vertical, 0.5, Pane::Leaf(4), Pane::Leaf(6)),
+        )
+    }
+
+    #[test]
+    fn reversing_a_move_at_a_t_junction_returns_to_where_it_started() {
+        let pane = t_junction();
+        let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
+        assert_eq!(
+            pane.focus_target_in_direction(idx(6), Dir::Left, None),
+            Some(idx(0))
+        );
+        // Geometry alone ties on overlap here and hands back the top pane.
+        assert_eq!(pane.neighbor_in_direction(idx(0), Dir::Right), Some(idx(4)));
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(6))),
+            Some(idx(6))
+        );
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(4))),
+            Some(idx(4))
+        );
+    }
+
+    #[test]
+    fn a_recorded_pane_the_layout_moved_on_from_falls_back_to_geometry() {
+        let pane = t_junction();
+        let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
+        // Gone entirely: the caller maps a missing pane to no index at all, and
+        // an index the tree no longer has must not resolve to whoever took it.
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, None),
+            Some(idx(4))
+        );
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, Some(99)),
+            Some(idx(4))
+        );
+        // Still there, but no longer reachable that way: splitting the tall
+        // pane leaves its top half facing only the top of the stack.
+        let mut pane = t_junction();
+        split(&mut pane, 0, Axis::Vertical, 1);
+        let idx = |id: u32| pane.leaves().iter().position(|v| *v == id).unwrap();
+        assert!(!pane.is_neighbor_in_direction(idx(0), idx(6), Dir::Right));
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(6))),
+            Some(idx(4))
+        );
+        // And the direction still has to match: the pane below is never the
+        // answer to a move right, however recently focus came from there.
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(1))),
+            Some(idx(4))
+        );
+        assert_eq!(
+            pane.focus_target_in_direction(idx(0), Dir::Right, Some(idx(0))),
+            Some(idx(4))
+        );
     }
 
     #[test]

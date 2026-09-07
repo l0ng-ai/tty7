@@ -440,6 +440,12 @@ pub struct Tab {
     /// Monotonic stamp of when this tab was last activated, used to order the
     /// switcher's tab column most-recently-used first. Zero means never.
     pub(crate) last_used: std::cell::Cell<u64>,
+    /// Where the last directional focus move started, indexed by the direction
+    /// that undoes it, so reversing a move comes back here instead of wherever
+    /// geometry ranks first (#738). Per tab because the panes are; the ids are
+    /// only ever trusted after the current layout confirms them, so a split,
+    /// close or swap needs no bookkeeping of its own.
+    focus_origin: [Option<gpui::EntityId>; 4],
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -463,6 +469,7 @@ impl Tab {
             sidebar_group: std::cell::RefCell::new(None),
             tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
             last_used: std::cell::Cell::new(0),
+            focus_origin: Default::default(),
         }
     }
 
@@ -481,6 +488,7 @@ impl Tab {
             ),
             tree_id: std::cell::Cell::new(tree.id),
             last_used: std::cell::Cell::new(0),
+            focus_origin: Default::default(),
         }
     }
 
@@ -489,6 +497,16 @@ impl Tab {
             Some(id) => self.pane.leaf_matching_or_first(|l| l.entity_id() == id),
             None => self.pane.first_leaf(),
         }
+    }
+
+    /// The pane a move in `dir` should return to, if it reverses the last move.
+    fn focus_origin(&self, dir: Dir) -> Option<gpui::EntityId> {
+        self.focus_origin[dir as usize]
+    }
+
+    /// Remember that a move in `dir` left `from`, so the move back returns.
+    fn remember_focus_origin(&mut self, dir: Dir, from: gpui::EntityId) {
+        self.focus_origin[dir.opposite() as usize] = Some(from);
     }
 
     pub(crate) fn detail_pane(
@@ -1656,6 +1674,7 @@ impl Tty7App {
                 sidebar_group: std::cell::RefCell::new(st.sidebar_group),
                 tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
                 last_used: std::cell::Cell::new(0),
+                focus_origin: Default::default(),
             },
         );
         self.active = insert_at;
@@ -3592,13 +3611,22 @@ impl Tty7App {
     }
 
     fn focus_pane_dir(&mut self, dir: Dir, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self
-            .tabs
-            .get(self.active)
-            .and_then(|tab| tab.pane.neighbor_in_dir(dir, window, cx))
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let Some(from) = tab.pane.focused_leaf(window, cx) else {
+            return;
+        };
+        let Some(target) = tab
+            .pane
+            .neighbor_in_dir(dir, tab.focus_origin(dir), window, cx)
         else {
             return;
         };
+        let active = self.active;
+        if let Some(tab) = self.tabs.get_mut(active) {
+            tab.remember_focus_origin(dir, from.entity_id());
+        }
         self.maximized = None;
         self.focus_leaf(&target, window, cx);
         cx.notify();
@@ -7915,6 +7943,7 @@ fn tabs_from_session(
                     .unwrap_or_else(tty7_core::core::machine::TabId::new),
             ),
             last_used: std::cell::Cell::new(0),
+            focus_origin: Default::default(),
         });
     }
     let active = session.active.min(tabs.len().saturating_sub(1));
