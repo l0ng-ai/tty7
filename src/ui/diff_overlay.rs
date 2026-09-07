@@ -1109,9 +1109,8 @@ pub(crate) mod row_probe {
 
 /// What a row needs to take part in a drag, for the frame it is drawn in.
 ///
-/// Cloned into the list's item builder, so a step of a drag costs a refcount
-/// bump per visible row rather than a walk of the patch.
-#[derive(Clone)]
+/// Read off the overlay once and moved into the list's item builder, so a step
+/// of a drag costs a refcount bump rather than a walk of the patch.
 struct Drag {
     sel: Option<Rc<DiffSelection>>,
     /// Whether a drag is in flight. Rows only listen for pointer movement
