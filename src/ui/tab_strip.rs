@@ -5,7 +5,9 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::Input;
+use gpui_component::kbd::Kbd;
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex};
 use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -512,11 +514,25 @@ impl Render for DragTab {
 /// What a chrome tile says on hover: what it does, then the chord that does it.
 /// The tile's own name is no use as a tooltip — the workspace head already
 /// wears it as its label.
-pub(crate) fn chord_hint(what: &str, action: &str, cx: &gpui::App) -> SharedString {
-    match crate::ui::home::key_hint(action, cx) {
-        Some(keys) => SharedString::from(format!("{what}  {keys}")),
-        None => SharedString::from(what.to_string()),
-    }
+///
+/// This used to be `chord_hint`, which pasted the two together into one string
+/// — `"Hide sidebar  \u{2318}B"` — and handed that to `Button::tooltip`. Inside the
+/// card the chord then wore the label's own size and colour, so the tooltip
+/// read as one odd sentence rather than as a name with a shortcut beside it.
+/// `Tooltip` has a `key_binding` slot that already renders a chord the way a
+/// chord should look — set apart on the right, a size down, in
+/// `muted_foreground` — and all that was missing was a way to hand `Button` a
+/// built tooltip instead of a string, which is what `tooltip_element` is for.
+pub(crate) fn chord_tooltip(
+    what: impl Into<SharedString>,
+    action: &str,
+    cx: &gpui::App,
+) -> impl Fn(&mut Window, &mut App) -> gpui::Entity<Tooltip> + 'static {
+    let what: SharedString = what.into();
+    // Resolved now, while there is a `cx`: the builder below runs on hover, and
+    // is handed only the window it is drawing into.
+    let kbd = crate::ui::home::key_stroke(action, cx).map(Kbd::new);
+    move |_window, cx| cx.new(|_| Tooltip::new(what.clone()).key_binding(kbd.clone()))
 }
 
 pub(crate) fn chrome_tile_variant(cx: &gpui::App) -> ButtonCustomVariant {
@@ -1014,7 +1030,7 @@ impl Tty7App {
                     .w_full()
                     .h(px(30.))
                     .rounded_md()
-                    .tooltip(chord_hint(
+                    .tooltip_element(chord_tooltip(
                         t(L10nKey::HomeSwitchWorkspace),
                         "ToggleSwitcher",
                         cx,
@@ -1078,7 +1094,7 @@ impl Tty7App {
                         cx,
                     )
                     .rounded_lg()
-                    .tooltip(chord_hint(
+                    .tooltip_element(chord_tooltip(
                         match panel_open {
                             true => t(L10nKey::TabTooltipHideDetailPanel),
                             false => t(L10nKey::TabTooltipShowDetailPanel),
@@ -1318,7 +1334,7 @@ impl Tty7App {
     /// tab surface, and so it says something about the tabs you are *not*
     /// looking at — the zoom outlives a switch away from them.
     pub(crate) fn zoom_mark(&self, id: impl Into<gpui::ElementId>, cx: &App) -> gpui::AnyElement {
-        let tip = chord_hint(t(L10nKey::TabTooltipZoomed), "ToggleMaximizePane", cx);
+        let tip = chord_tooltip(t(L10nKey::TabTooltipZoomed), "ToggleMaximizePane", cx);
         div()
             .id(id)
             .flex_shrink_0()
@@ -1328,9 +1344,10 @@ impl Tty7App {
             .size(px(16.))
             .text_color(cx.theme().muted_foreground)
             .child(Icon::new(IconName::Maximize).size(px(11.)))
-            .tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-            })
+            // Not a `Button`, so this one goes through gpui's own `tooltip`
+            // rather than `tooltip_element` — but it is the same builder, and
+            // the chord lands in the same slot the chrome tiles use.
+            .tooltip(move |window, cx| tip(window, cx).into())
             .into_any_element()
     }
 
@@ -1397,7 +1414,7 @@ impl Tty7App {
             // come through here were the ones left silent. The chord is worth
             // more here than anywhere else in the row: it is the way back to
             // opening a tab without reading a menu first.
-            .tooltip(chord_hint(t(L10nKey::AppMenuNewTab), "NewTab", cx))
+            .tooltip_element(chord_tooltip(t(L10nKey::AppMenuNewTab), "NewTab", cx))
             // Built when the menu opens, not when the strip draws: this
             // closure runs once per press, and again after each dismissal.
             .dropdown_menu(move |menu, window, cx| {
@@ -1991,7 +2008,7 @@ impl Tty7App {
                             cx,
                         )
                         .rounded_lg()
-                        .tooltip(chord_hint(
+                        .tooltip_element(chord_tooltip(
                             t(L10nKey::TabTooltipShowSidebar),
                             "ToggleLeftPanel",
                             cx,

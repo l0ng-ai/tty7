@@ -140,11 +140,20 @@ fn snap_to_separator(tail: &str) -> &str {
     }
 }
 
-pub(crate) fn key_hint(action: &str, cx: &App) -> Option<String> {
+/// The first keystroke bound to `action`, as a `Keystroke`.
+///
+/// `key_hint` below formats one of these into text. Callers that hand the
+/// chord to a `Tooltip` want the stroke itself: a `Kbd` built from it renders
+/// as a shortcut — a step down in size and colour from the label — where a
+/// formatted string can only be concatenated onto the end of one.
+pub(crate) fn key_stroke(action: &str, cx: &App) -> Option<Keystroke> {
     let spec = crate::ui::keymap::effective_key(action, cx)?;
     let first = spec.split_whitespace().next()?;
-    let stroke = Keystroke::parse(first).ok()?;
-    Some(Kbd::format(&stroke))
+    Keystroke::parse(first).ok()
+}
+
+pub(crate) fn key_hint(action: &str, cx: &App) -> Option<String> {
+    Some(Kbd::format(&key_stroke(action, cx)?))
 }
 
 fn home_shortcut_label(action: &str, closed: Option<&str>) -> String {
