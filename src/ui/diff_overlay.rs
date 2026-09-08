@@ -689,12 +689,20 @@ impl Tty7App {
             })
             // The subject takes the slack the spacer below would otherwise
             // have, which is why that one is skipped when a label is present:
-            // two `flex_1` siblings split the line in half and the subject
+            // two growing siblings split the line in half and the subject
             // would truncate with empty space beside it.
+            //
+            // `flex_auto` rather than `flex_1` for the shrinking half of that:
+            // both grow the same, but `flex_1` bases the item at zero, and an
+            // item based at zero has a scaled shrink factor of zero — it
+            // absorbs none of a deficit and simply gets nothing, so the
+            // subject would vanish first however high the others' shrink
+            // factors were. Based at its content width it yields last, which
+            // is the order the strip wants.
             .when_some(subject.label.as_ref(), |bar, label| {
                 bar.child(
                     div()
-                        .flex_1()
+                        .flex_auto()
                         .min_w_0()
                         .truncate()
                         .text_sm()

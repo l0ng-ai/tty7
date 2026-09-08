@@ -1482,9 +1482,6 @@ pub fn reveal_label() -> &'static str {
     }
 }
 
-/// Splits a path into everything-but-the-last-segment and the last segment,
-/// so a row can shrink the first and keep the second.
-
 /// `home` is the home directory of the machine `path` lives on. A remote
 /// pane's cwd is measured against *its* host's home, never this machine's
 /// (#580) — and against nothing at all while the host has not said.
