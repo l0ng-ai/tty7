@@ -212,6 +212,16 @@ pub struct Config {
     pub scm_graph_expanded: bool,
     #[serde(default, deserialize_with = "de_lenient")]
     pub sidebar_grouping: SidebarGrouping,
+    /// Which sidebar groups are folded shut, by group key: the repo root the
+    /// group is named after, or the empty path for the scratch group, which
+    /// has no root of its own and no real key can ever collide with.
+    ///
+    /// Kept as a list of the folded ones rather than a flag per group because
+    /// groups come and go with the tabs — a group nobody has opened yet has to
+    /// start expanded, and an entry for a repo that is no longer around costs
+    /// one dead path in the file.
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub sidebar_collapsed_groups: Vec<PathBuf>,
     #[serde(default = "default_true")]
     pub sidebar_diff_preview: bool,
     #[serde(default, deserialize_with = "de_lenient")]
@@ -613,6 +623,7 @@ impl Default for Config {
             document_ratio: default_document_ratio(),
             scm_graph_expanded: false,
             sidebar_grouping: SidebarGrouping::Repo,
+            sidebar_collapsed_groups: Vec::new(),
             sidebar_diff_preview: true,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,

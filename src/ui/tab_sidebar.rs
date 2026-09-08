@@ -164,6 +164,13 @@ impl Tty7App {
 
         let keys: Rc<Vec<Option<PathBuf>>> = Rc::new(self.sidebar_group_keys(cx));
         let sections = sidebar_sections(&keys);
+        // A search outranks a fold. Typing something that matches a row inside
+        // a folded group has to show that row — a box that says nothing
+        // matches while the match sits behind a chevron is just lying.
+        let folded_keys: Vec<PathBuf> = match query.is_empty() {
+            true => cx.global::<Config>().sidebar_collapsed_groups.clone(),
+            false => Vec::new(),
+        };
 
         // ⌘N runs ActivateTabN, which goes through `activate_visual` — the
         // Nth row as the sidebar lays it out, not the Nth tab in `self.tabs`.
@@ -266,8 +273,21 @@ impl Tty7App {
         for (group_slot, group_ix) in blocks {
             let section = &sections[group_ix];
             let group_key = section.key.clone();
+            // Only a group that draws a header can be folded — there is
+            // nothing to click otherwise, and the one headerless section (the
+            // whole sidebar, when grouping is off) must never answer to the
+            // scratch group's key.
+            let folded = section.name.is_some() && folded_keys.contains(&collapse_key(&group_key));
             let mut rows: Vec<ContextMenu<Stateful<Div>>> = Vec::new();
-            let visible = visible_by_section[group_ix].clone();
+            // The header keeps counting every row the group has; folding only
+            // stops them being drawn. Nothing downstream then registers a
+            // rectangle for them, which is what keeps a pane from being
+            // dropped into a group that is shut.
+            let row_count = visible_by_section[group_ix].len();
+            let visible: Vec<usize> = match folded {
+                true => Vec::new(),
+                false => visible_by_section[group_ix].clone(),
+            };
             let visible_tabs: Vec<usize> = visible.clone();
             let row_slots: Rc<RefCell<Vec<Bounds<Pixels>>>> =
                 Rc::new(RefCell::new(vec![Bounds::default(); visible.len()]));
@@ -826,7 +846,7 @@ impl Tty7App {
                 }));
             }
 
-            if rows.is_empty() {
+            if row_count == 0 {
                 continue;
             }
 
@@ -845,7 +865,6 @@ impl Tty7App {
                 }
                 None => (0..rows.len()).collect(),
             };
-            let row_count = rows.len();
             let mut rows: Vec<Option<ContextMenu<Stateful<Div>>>> =
                 rows.into_iter().map(Some).collect();
             let rows: Vec<AnyElement> = row_display
@@ -894,6 +913,11 @@ impl Tty7App {
                     .pb_0p5()
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
+                    .hover(|s| s.text_color(cx.theme().foreground))
+                    .on_click(cx.listener({
+                        let key = group_key.clone();
+                        move |this, _, _window, cx| this.toggle_sidebar_group(&key, cx)
+                    }))
                     .when_some(group_slot, |header, slot| {
                         crate::ui::reorder::cursor_grab(header).on_drag(DragGroup, {
                             let state = self.reorder.clone();
@@ -912,6 +936,15 @@ impl Tty7App {
                             }
                         })
                     })
+                    .child(
+                        div().flex_shrink_0().child(
+                            Icon::new(match folded {
+                                true => IconName::ChevronRight,
+                                false => IconName::ChevronDown,
+                            })
+                            .xsmall(),
+                        ),
+                    )
                     .child(
                         div()
                             .flex_shrink(1.)
@@ -1256,6 +1289,21 @@ impl Tty7App {
             .then_some(info)
     }
 
+    /// Fold the sidebar group `key` names, or unfold it if it is already
+    /// shut. Persisted: a group folded away is a statement about a repo you
+    /// are done with for now, and it should still be shut tomorrow.
+    pub(crate) fn toggle_sidebar_group(&mut self, key: &Option<PathBuf>, cx: &mut Context<Self>) {
+        let id = collapse_key(key);
+        self.update_config(cx, |cfg| {
+            match cfg.sidebar_collapsed_groups.iter().position(|p| *p == id) {
+                Some(at) => {
+                    cfg.sidebar_collapsed_groups.remove(at);
+                }
+                None => cfg.sidebar_collapsed_groups.push(id),
+            }
+        });
+    }
+
     fn sidebar_group_keys(&self, cx: &gpui::App) -> Vec<Option<PathBuf>> {
         let grouping = cx.global::<Config>().sidebar_grouping;
         self.tabs
@@ -1343,6 +1391,13 @@ fn resolved_group(
         None if grouping == SidebarGrouping::RepoOrDirectory => Some(cwd.to_path_buf()),
         None => None,
     })
+}
+
+/// How a group is named in `Config::sidebar_collapsed_groups`. A keyed group
+/// is its repo root; the scratch group has no root, so it is written as the
+/// empty path — which no repo root can ever be.
+fn collapse_key(key: &Option<PathBuf>) -> PathBuf {
+    key.clone().unwrap_or_default()
 }
 
 #[derive(Debug, PartialEq)]
@@ -1492,11 +1547,122 @@ pub(crate) fn diff_click_cwd<T>(cfg: &Config, target: Option<T>) -> Option<T> {
 }
 
 #[cfg(test)]
+mod fold_tests {
+    use super::*;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use gpui::TestAppContext;
+
+    /// Bounds a row registered for itself while it was on screen. A folded
+    /// row leaves the default rectangle behind, and that is what stops a pane
+    /// being dropped into a group that is shut.
+    fn drawn(app: &Tty7App, i: usize) -> bool {
+        app.sidebar_slots.borrow()[i].size.height > px(0.)
+    }
+
+    #[gpui::test]
+    fn folding_a_group_takes_its_rows_off_the_sidebar(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+        let alpha = PathBuf::from("/w/alpha");
+        let beta = PathBuf::from("/w/beta");
+
+        app.update(&mut vcx, |app, cx| {
+            for (i, root) in [(0, &alpha), (1, &alpha), (2, &beta)] {
+                *app.tabs[i].sidebar_group.borrow_mut() = Some(root.clone());
+            }
+            cx.notify();
+        });
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, _| {
+            assert!(
+                (0..3).all(|i| drawn(app, i)),
+                "every row is on screen before anything is folded"
+            );
+        });
+
+        app.update(&mut vcx, |app, cx| {
+            app.toggle_sidebar_group(&Some(alpha.clone()), cx)
+        });
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, cx| {
+            assert!(
+                !drawn(app, 0) && !drawn(app, 1),
+                "the folded group's rows left no rectangle behind"
+            );
+            assert!(drawn(app, 2), "the group next to it is untouched");
+            assert_eq!(
+                cx.global::<Config>().sidebar_collapsed_groups,
+                vec![alpha.clone()],
+                "the fold is written where the next launch will read it"
+            );
+        });
+
+        app.update(&mut vcx, |app, cx| {
+            app.toggle_sidebar_group(&Some(alpha), cx)
+        });
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, cx| {
+            assert!((0..3).all(|i| drawn(app, i)), "unfolding brings them back");
+            assert!(
+                cx.global::<Config>().sidebar_collapsed_groups.is_empty(),
+                "and takes the entry back out rather than piling up"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_search_outranks_a_fold(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        let alpha = PathBuf::from("/w/alpha");
+
+        app.update(&mut vcx, |app, cx| {
+            for i in 0..2 {
+                *app.tabs[i].sidebar_group.borrow_mut() = Some(alpha.clone());
+            }
+            app.toggle_sidebar_group(&Some(alpha), cx);
+        });
+        vcx.run_until_parked();
+        app.update(&mut vcx, |app, _| {
+            assert!(!drawn(app, 0), "folded, so nothing is drawn");
+        });
+
+        // Whatever the row is actually showing — the label is derived from the
+        // test process's cwd, and this has to be a query that matches it.
+        app.update_in(&mut vcx, |app, window, cx| {
+            let label = app.tab_label(&app.tabs[0], 0, Some(window), cx).to_string();
+            app.sidebar_search.update(cx, |state, cx| {
+                state.set_value(&label, window, cx);
+            });
+        });
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, _| {
+            assert!(
+                drawn(app, 0),
+                "a row a query matches has to show, fold or no fold"
+            );
+        });
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    #[test]
+    fn the_scratch_group_folds_under_a_key_no_repo_can_take() {
+        assert_eq!(collapse_key(&Some(p("/w/repo"))), p("/w/repo"));
+        assert_eq!(
+            collapse_key(&None),
+            PathBuf::new(),
+            "scratch has no root, so it is stored as the path that is not one"
+        );
     }
 
     #[test]
