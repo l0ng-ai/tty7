@@ -284,19 +284,16 @@ impl Tty7App {
             // rectangle for them, which is what keeps a pane from being
             // dropped into a group that is shut.
             //
-            // The active tab is the one exception: a fold says "I am done
-            // with this repo for now", never "hide the tab I am looking at".
-            // Without it ⌘T inside a folded group — `spawn_group` seeds the
-            // new tab with the group it came from — draws nothing but a
-            // header count going up by one, and with the tab bar docked left
-            // that row is the tab's only representation on screen.
+            // No exception for the active tab. A fold that leaves one row
+            // hanging under a shut chevron, with the header counting rows
+            // that are not there, reads as a list that failed to load. The
+            // cost is that ⌘T inside a folded group — `spawn_group` seeds
+            // the new tab with the group it came from — puts the new tab
+            // behind the chevron: the pane area shows the fresh shell and the
+            // header count goes up, but the row waits for the group to open.
             let row_count = visible_by_section[group_ix].len();
             let visible: Vec<usize> = match folded {
-                true => visible_by_section[group_ix]
-                    .iter()
-                    .copied()
-                    .filter(|&i| i == active)
-                    .collect(),
+                true => Vec::new(),
                 false => visible_by_section[group_ix].clone(),
             };
             let visible_tabs: Vec<usize> = visible.clone();
@@ -1582,8 +1579,6 @@ mod fold_tests {
             for (i, root) in [(0, &alpha), (1, &alpha), (2, &beta)] {
                 *app.tabs[i].sidebar_group.borrow_mut() = Some(root.clone());
             }
-            // Active in the group that stays open: the folded group's own
-            // active row has its own test below, and it would mask this one.
             app.active = 2;
             cx.notify();
         });
@@ -1640,10 +1635,8 @@ mod fold_tests {
             app.toggle_sidebar_group(&Some(alpha), cx);
         });
         vcx.run_until_parked();
-        // Row 1, not row 0: row 0 is the active tab and a fold never takes
-        // that one off the screen, so it says nothing about the fold.
         app.update(&mut vcx, |app, _| {
-            assert!(!drawn(app, 1), "folded, so the inactive row is not drawn");
+            assert!(!drawn(app, 1), "folded, so the row is not drawn");
         });
 
         // Whatever the row is actually showing — the label is derived from the
@@ -1664,11 +1657,13 @@ mod fold_tests {
         });
     }
 
-    /// A fold means "I am done with this repo for now", never "hide the tab I
-    /// am looking at". Without this, ⌘T inside a folded group — the new tab
-    /// inherits the group it was spawned from — draws nothing at all.
+    /// A fold hides every row the group has, the active one included. The
+    /// alternative — leaving the active row on screen under a shut chevron,
+    /// with the header counting rows that are not drawn — looks like a list
+    /// that failed to load, which is what folding a group you are working in
+    /// used to produce.
     #[gpui::test]
-    fn the_active_row_stays_on_screen_inside_a_folded_group(cx: &mut TestAppContext) {
+    fn a_fold_hides_the_active_row_too(cx: &mut TestAppContext) {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
         let alpha = PathBuf::from("/w/alpha");
 
@@ -1682,21 +1677,17 @@ mod fold_tests {
         vcx.run_until_parked();
 
         app.update(&mut vcx, |app, _| {
-            assert!(drawn(app, 0), "the active row survives its group folding");
-            assert!(!drawn(app, 1), "everything else in the group is gone");
+            assert!(!drawn(app, 0), "the active row folds away with the rest");
+            assert!(!drawn(app, 1), "and so does everything else in the group");
         });
 
-        // And it follows the active tab, rather than being decided once when
-        // the fold happened.
         app.update(&mut vcx, |app, cx| {
-            app.active = 1;
-            cx.notify();
+            app.toggle_sidebar_group(&Some(alpha), cx)
         });
         vcx.run_until_parked();
 
         app.update(&mut vcx, |app, _| {
-            assert!(drawn(app, 1), "the row that is active now is the one drawn");
-            assert!(!drawn(app, 0), "and the one that no longer is went away");
+            assert!((0..2).all(|i| drawn(app, i)), "unfolding brings both back");
         });
     }
 }
