@@ -142,6 +142,30 @@ fn abbreviate_under<'a>(path: &'a str, home: &str) -> Cow<'a, str> {
     Cow::Owned(format!("~/{}", path[boundary + 1..].replace('\\', "/")))
 }
 
+/// Splits a path into the part that may be eaten by truncation and the
+/// segment that must survive it.
+///
+/// A path identifies a thing by its *last* segment, and plain end-truncation
+/// eats exactly that: a deep checkout reads "/private/tmp/claude-501…" and
+/// tells you nothing. Drawn as two elements — a head that shrinks first and
+/// a leaf that shrinks last — the filename stays legible however narrow the
+/// row gets, the way a file manager shows a path. `head + leaf` rejoins into
+/// the original string, so nothing is invented at either end.
+pub(crate) fn split_path_leaf(s: &str) -> (String, String) {
+    // The larger of the two separator positions, not cfg-gated by platform:
+    // the Info panel shows remote paths too, so a Windows build describes
+    // Unix paths and vice versa — and a mixed-spelling path (`C:\Users\dev/
+    // project`, which agent-reported cwds arrive as) still cuts at its true
+    // leaf (#544). A Unix filename containing a literal `\` loses a shorter
+    // leaf; head + leaf still rejoins exactly, so the cost is decorative.
+    let leaf_at = s.rfind('/').max(s.rfind('\\'));
+    match leaf_at {
+        // Keep the separator with the head: "~/a/b/" + "c" rejoins exactly.
+        Some(i) if i + 1 < s.len() => (s[..=i].to_string(), s[i + 1..].to_string()),
+        _ => (String::new(), s.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +316,64 @@ mod tests {
             assert_eq!(got.as_ref(), Path::new(p), "{p:?}");
             assert!(matches!(got, Cow::Borrowed(_)));
         }
+    }
+
+    #[test]
+    fn the_head_and_leaf_rejoin_into_the_path_they_came_from() {
+        for p in [
+            "~/repo/tty7",
+            "/private/tmp/claude-501/a-very-long-directory/and-another-level",
+            "/",
+            "relative",
+            "",
+            "C:\\Users\\dev\\project",
+            "C:\\Users\\dev/project",
+            "\\\\server\\share\\dir",
+        ] {
+            let (head, leaf) = split_path_leaf(p);
+            assert_eq!(format!("{head}{leaf}"), p, "rejoining {p:?}");
+        }
+    }
+
+    #[test]
+    fn the_leaf_is_the_segment_that_names_the_directory() {
+        let (head, leaf) = split_path_leaf("/a/b/c");
+        assert_eq!((head.as_str(), leaf.as_str()), ("/a/b/", "c"));
+        // A trailing slash has no leaf to keep, so the whole thing is head.
+        let (head, leaf) = split_path_leaf("/a/b/");
+        assert_eq!((head.as_str(), leaf.as_str()), ("", "/a/b/"));
+        // Root is one segment with nothing before it.
+        let (head, leaf) = split_path_leaf("/");
+        assert_eq!((head.as_str(), leaf.as_str()), ("", "/"));
+    }
+
+    #[test]
+    fn the_leaf_survives_windows_and_mixed_spellings() {
+        // Backslash-native, the shape an agent-reported cwd arrives in.
+        let (head, leaf) = split_path_leaf("C:\\Users\\dev\\project");
+        assert_eq!(
+            (head.as_str(), leaf.as_str()),
+            ("C:\\Users\\dev\\", "project")
+        );
+        // Mixed separators cut at the *last* one of either kind.
+        let (head, leaf) = split_path_leaf("C:\\Users\\dev/project");
+        assert_eq!(
+            (head.as_str(), leaf.as_str()),
+            ("C:\\Users\\dev/", "project")
+        );
+        let (head, leaf) = split_path_leaf("C:/Users/dev\\project");
+        assert_eq!(
+            (head.as_str(), leaf.as_str()),
+            ("C:/Users/dev\\", "project")
+        );
+        // A drive root has no leaf to keep.
+        let (head, leaf) = split_path_leaf("C:\\");
+        assert_eq!((head.as_str(), leaf.as_str()), ("", "C:\\"));
+        // A UNC path splits at its last component, head keeping the share.
+        let (head, leaf) = split_path_leaf("\\\\server\\share\\dir");
+        assert_eq!(
+            (head.as_str(), leaf.as_str()),
+            ("\\\\server\\share\\", "dir")
+        );
     }
 }

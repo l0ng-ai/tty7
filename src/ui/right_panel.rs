@@ -808,7 +808,7 @@ impl Tty7App {
             // absorb the shrinking so the leaf survives, the way a file
             // manager shows a path.
             InfoValue::Path(v) => {
-                let (head, leaf) = split_path_leaf(&v);
+                let (head, leaf) = crate::ui::path_display::split_path_leaf(&v);
                 h_flex()
                     .flex_1()
                     .min_w_0()
@@ -1484,20 +1484,6 @@ pub fn reveal_label() -> &'static str {
 
 /// Splits a path into everything-but-the-last-segment and the last segment,
 /// so a row can shrink the first and keep the second.
-fn split_path_leaf(s: &str) -> (String, String) {
-    // The larger of the two separator positions, not cfg-gated by platform:
-    // the Info panel shows remote paths too, so a Windows build describes
-    // Unix paths and vice versa — and a mixed-spelling path (`C:\Users\dev/
-    // project`, which agent-reported cwds arrive as) still cuts at its true
-    // leaf (#544). A Unix filename containing a literal `\` loses a shorter
-    // leaf; head + leaf still rejoins exactly, so the cost is decorative.
-    let leaf_at = s.rfind('/').max(s.rfind('\\'));
-    match leaf_at {
-        // Keep the separator with the head: "~/a/b/" + "c" rejoins exactly.
-        Some(i) if i + 1 < s.len() => (s[..=i].to_string(), s[i + 1..].to_string()),
-        _ => (String::new(), s.to_string()),
-    }
-}
 
 /// `home` is the home directory of the machine `path` lives on. A remote
 /// pane's cwd is measured against *its* host's home, never this machine's
@@ -1518,7 +1504,7 @@ fn turn_is_jumpable(row: Option<i64>, alt_now: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{InfoRow, InfoValue, split_path_leaf, turn_is_jumpable};
+    use super::{InfoRow, InfoValue, turn_is_jumpable};
 
     fn diff(added: u32, removed: u32, open: bool) -> InfoRow {
         InfoRow {
@@ -1616,65 +1602,6 @@ mod tests {
             diff(3, 1, true).copyable().copy,
             None,
             "there is no sensible clipboard form of two coloured numbers"
-        );
-    }
-
-    #[test]
-    fn the_head_and_leaf_rejoin_into_the_path_they_came_from() {
-        for p in [
-            "~/repo/tty7",
-            "/private/tmp/claude-501/a-very-long-directory/and-another-level",
-            "/",
-            "relative",
-            "",
-            "C:\\Users\\dev\\project",
-            "C:\\Users\\dev/project",
-            "\\\\server\\share\\dir",
-        ] {
-            let (head, leaf) = split_path_leaf(p);
-            assert_eq!(format!("{head}{leaf}"), p, "rejoining {p:?}");
-        }
-    }
-
-    #[test]
-    fn the_leaf_is_the_segment_that_names_the_directory() {
-        let (head, leaf) = split_path_leaf("/a/b/c");
-        assert_eq!((head.as_str(), leaf.as_str()), ("/a/b/", "c"));
-        // A trailing slash has no leaf to keep, so the whole thing is head.
-        let (head, leaf) = split_path_leaf("/a/b/");
-        assert_eq!((head.as_str(), leaf.as_str()), ("", "/a/b/"));
-        // Root is one segment with nothing before it.
-        let (head, leaf) = split_path_leaf("/");
-        assert_eq!((head.as_str(), leaf.as_str()), ("", "/"));
-    }
-
-    #[test]
-    fn the_leaf_survives_windows_and_mixed_spellings() {
-        // Backslash-native, the shape an agent-reported cwd arrives in.
-        let (head, leaf) = split_path_leaf("C:\\Users\\dev\\project");
-        assert_eq!(
-            (head.as_str(), leaf.as_str()),
-            ("C:\\Users\\dev\\", "project")
-        );
-        // Mixed separators cut at the *last* one of either kind.
-        let (head, leaf) = split_path_leaf("C:\\Users\\dev/project");
-        assert_eq!(
-            (head.as_str(), leaf.as_str()),
-            ("C:\\Users\\dev/", "project")
-        );
-        let (head, leaf) = split_path_leaf("C:/Users/dev\\project");
-        assert_eq!(
-            (head.as_str(), leaf.as_str()),
-            ("C:/Users/dev\\", "project")
-        );
-        // A drive root has no leaf to keep.
-        let (head, leaf) = split_path_leaf("C:\\");
-        assert_eq!((head.as_str(), leaf.as_str()), ("", "C:\\"));
-        // A UNC path splits at its last component, head keeping the share.
-        let (head, leaf) = split_path_leaf("\\\\server\\share\\dir");
-        assert_eq!(
-            (head.as_str(), leaf.as_str()),
-            ("\\\\server\\share\\", "dir")
         );
     }
 }

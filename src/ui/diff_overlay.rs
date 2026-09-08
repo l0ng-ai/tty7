@@ -700,20 +700,37 @@ impl Tty7App {
                         .text_sm()
                         .child(SharedString::from(label.subject.clone())),
                 )
+                // Yields before the subject does, for the same reason the
+                // path below it does: an author name is unbounded too, and of
+                // the three things on this strip it is the one nobody reads
+                // twice.
                 .child(
                     div()
-                        .flex_shrink_0()
+                        .min_w_0()
+                        .flex_shrink(999.)
+                        .truncate()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(label_byline(label, now_unix())),
                 )
             })
+            // The focused file's path is the only other thing on the strip
+            // that grows without bound, and it used to refuse to yield any of
+            // it: a header with a commit label already spends its slack on the
+            // subject, so the path pushed the view switch and the close tile
+            // off the end of a docked column and they were clipped away
+            // mid-word. It shrinks now, ahead of the subject (`999.` against
+            // the subject's `1.`) because a path has a second home one line
+            // down in the file list and the subject has none — and it shrinks
+            // head-first, so the filename is the last thing to go.
             .when_some(focused_name(overlay), |bar, name| {
+                let (head, leaf) = crate::ui::path_display::split_path_leaf(&name);
                 bar.child(
-                    div().occlude().flex_shrink_0().child(
+                    div().occlude().min_w_0().flex_shrink(999.).child(
                         h_flex()
                             .id("diff-overlay-unfocus")
                             .items_center()
+                            .min_w_0()
                             .gap_1()
                             .px_1p5()
                             .py_0p5()
@@ -734,13 +751,16 @@ impl Tty7App {
                             .child(
                                 Icon::new(IconName::ChevronLeft)
                                     .small()
+                                    .flex_shrink_0()
                                     .text_color(cx.theme().muted_foreground),
                             )
                             .child(
-                                div()
+                                h_flex()
+                                    .min_w_0()
                                     .text_xs()
                                     .font_family(self.font_family.clone())
-                                    .child(name),
+                                    .child(div().min_w_0().flex_shrink(999.).truncate().child(head))
+                                    .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf)),
                             ),
                     ),
                 )
