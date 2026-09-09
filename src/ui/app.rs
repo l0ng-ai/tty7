@@ -748,6 +748,35 @@ impl Tab {
     }
 }
 
+/// What a rename box's contents mean for the tab's name.
+#[derive(Debug, PartialEq, Eq)]
+enum Rename {
+    /// The box still holds what it was seeded with, so nothing was asked for.
+    Unchanged,
+    /// Emptied on purpose: the tab goes back to following its pane.
+    Cleared,
+    /// A name the user typed.
+    Named(String),
+}
+
+/// Read a rename box against the label it was seeded with.
+///
+/// The box is prefilled with the label as rendered, so it is never empty when
+/// it opens and a commit cannot tell "left alone" from "typed the same thing"
+/// by looking at the value alone. `Blur` commits as readily as Enter does, so
+/// without the comparison, opening the box and clicking away stored the label
+/// as a name — and a name is a different thing from the title it was copied
+/// from: it stops following the pane, freezing the tab on whatever it happened
+/// to say at that moment, with no way to undo it.
+fn rename_outcome(value: &str, prefill: &str) -> Rename {
+    let value = value.trim();
+    match value {
+        v if v == prefill.trim() => Rename::Unchanged,
+        "" => Rename::Cleared,
+        v => Rename::Named(v.to_string()),
+    }
+}
+
 pub(crate) struct Renaming {
     /// The tab being renamed, by tree id rather than index: an index drifts
     /// the moment any other tab closes or the strip reorders, which used to
@@ -755,6 +784,11 @@ pub(crate) struct Renaming {
     /// and left a window where the commit landed on the wrong tab (#598).
     pub(crate) tab: tty7_core::core::machine::TabId,
     pub(crate) input: Entity<InputState>,
+    /// What the box was prefilled with, so a commit can tell an untouched box
+    /// from a typed one. The box is seeded with the label already on screen,
+    /// which means it is never empty and every commit would otherwise store a
+    /// name — including the ones the user never typed.
+    prefill: String,
     _subs: Vec<Subscription>,
 }
 
@@ -5054,6 +5088,7 @@ impl Tty7App {
             return;
         }
         let current = self.tab_label(&self.tabs[index], index, Some(&*window), cx);
+        let prefill = current.to_string();
         let input = Self::rename_box(current, window, cx);
         let subs = vec![cx.subscribe_in(
             &input,
@@ -5066,6 +5101,7 @@ impl Tty7App {
         self.renaming = Some(Renaming {
             tab: self.tabs[index].tree_id.get(),
             input,
+            prefill,
             _subs: subs,
         });
         cx.notify();
@@ -5106,13 +5142,25 @@ impl Tty7App {
         let Some(renaming) = self.renaming.take() else {
             return;
         };
-        let value = renaming.input.read(cx).value().trim().to_string();
-        if let Some(tab) = self
-            .tabs
-            .iter_mut()
-            .find(|t| t.tree_id.get() == renaming.tab)
-        {
-            tab.name = if value.is_empty() { None } else { Some(value) };
+        let value = renaming.input.read(cx).value();
+        match rename_outcome(&value, &renaming.prefill) {
+            Rename::Unchanged => {
+                self.focus_active(window, cx);
+                cx.notify();
+                return;
+            }
+            outcome => {
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.tree_id.get() == renaming.tab)
+                {
+                    tab.name = match outcome {
+                        Rename::Named(name) => Some(name),
+                        _ => None,
+                    };
+                }
+            }
         }
         self.save_session(cx);
         crate::ui::windows::refresh_menu(cx);
@@ -9159,13 +9207,51 @@ mod window_drag_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseReason, DOCUMENT_MIN_W, Dir, Pane, TERMINAL_MIN_W, TITLE_BAR_HEIGHT, Tab,
+        CloseReason, DOCUMENT_MIN_W, Dir, Pane, Rename, TERMINAL_MIN_W, TITLE_BAR_HEIGHT, Tab,
         TabAgentSession, clear_window_override_values, close_prompt, document_column_px,
         join_shell_args, leaf_shares_the_window_daemon, mru_order, pane_free_for,
-        parse_ssh_connect_input, parse_ssh_option_words, side_panel_max, split_shell_args,
-        strip_band, wd_path_saveable,
+        parse_ssh_connect_input, parse_ssh_option_words, rename_outcome, side_panel_max,
+        split_shell_args, strip_band, wd_path_saveable,
     };
     use gpui::{Edges, point, px, size};
+
+    #[test]
+    fn a_rename_box_left_alone_is_not_a_rename() {
+        // The box opens holding the label already on screen, and `Blur`
+        // commits — so this is what happens when the user opens it, thinks
+        // better of it, and clicks away.
+        assert_eq!(
+            rename_outcome("api", "api"),
+            Rename::Unchanged,
+            "an untouched box asked for nothing"
+        );
+        assert_eq!(
+            rename_outcome("  api  ", "api"),
+            Rename::Unchanged,
+            "whitespace either side is not an edit"
+        );
+    }
+
+    #[test]
+    fn an_emptied_rename_box_gives_the_tab_back_to_its_pane() {
+        // The only way to remove a name once set, so it has to survive the
+        // comparison above.
+        assert_eq!(rename_outcome("", "api"), Rename::Cleared);
+        assert_eq!(rename_outcome("   ", "api"), Rename::Cleared);
+    }
+
+    #[test]
+    fn a_typed_rename_box_names_the_tab() {
+        assert_eq!(
+            rename_outcome("billing", "api"),
+            Rename::Named("billing".into())
+        );
+        assert_eq!(
+            rename_outcome("  billing  ", "api"),
+            Rename::Named("billing".into()),
+            "the name is stored trimmed"
+        );
+    }
 
     const SIDEBAR_MIN: f32 = crate::ui::tab_sidebar::MIN_SIDEBAR_WIDTH;
     const PANEL_MIN: f32 = crate::ui::right_panel::MIN_WIDTH;
