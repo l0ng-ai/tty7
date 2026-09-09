@@ -1319,13 +1319,22 @@ impl Tty7App {
         size: f32,
         cx: &App,
     ) -> gpui::AnyElement {
-        let base = div()
-            .id(id)
-            .flex_shrink_0()
-            .size(px(size))
-            .flex()
-            .items_center()
-            .justify_center();
+        // The wrapper positions; the disc below carries the radius.
+        // `status_dot` hangs itself off the edge with negative offsets — that
+        // overhang is what makes it a badge on the avatar rather than a notch
+        // in it — and as a child of the rounded element the overhang was
+        // clipped along the arc, leaving a crescent.
+        let base = div().id(id).flex_shrink_0().relative().size(px(size));
+        // Fill, hairline and mark all live here, so the radius only ever clips
+        // the disc's own paint.
+        let disc = || {
+            div()
+                .size(px(size))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+        };
         match agent {
             Some(agent) => {
                 let hollow = status == Some(crate::core::cli_agent::AgentStatus::Waiting);
@@ -1344,40 +1353,41 @@ impl Tty7App {
                 // column of twenty.
                 let accent = agent.accent_rgb();
                 let surface = cx.theme().background;
-                base.relative()
-                    .rounded_full()
-                    .bg(gpui::rgb(accent))
-                    // Codex and Grok are both pure black, which is the window
-                    // fill on a dark theme — the disc dissolves and leaves the
-                    // glyph floating. A hairline keeps it a disc in any theme.
-                    .when(crate::ui::presets::needs_edge(accent, surface), |d| {
-                        d.border_1().border_color(cx.theme().border)
-                    })
-                    .child(
-                        gpui::svg()
-                            .path(agent.icon_path())
-                            .size(px(size * 0.54))
-                            // SVG assets render as a single-colour mask, so
-                            // the mark's colour comes from the agent rather
-                            // than from the file. The tray icon reads the same
-                            // answer.
-                            .text_color(gpui::rgb(agent.icon_rgb())),
-                    )
-                    .when_some(dot, |b, dot| b.child(dot))
-                    .tooltip(move |window, cx| {
-                        gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                    })
-                    .into_any_element()
+                base.child(
+                    disc()
+                        .bg(gpui::rgb(accent))
+                        // Codex and Grok are both pure black, which is the
+                        // window fill on a dark theme — the disc dissolves and
+                        // leaves the glyph floating. A hairline keeps it a disc
+                        // in any theme.
+                        .when(crate::ui::presets::needs_edge(accent, surface), |d| {
+                            d.border_1().border_color(cx.theme().border)
+                        })
+                        .child(
+                            gpui::svg()
+                                .path(agent.icon_path())
+                                .size(px(size * 0.54))
+                                // SVG assets render as a single-colour mask, so
+                                // the mark's colour comes from the agent rather
+                                // than from the file. The tray icon reads the
+                                // same answer.
+                                .text_color(gpui::rgb(agent.icon_rgb())),
+                        ),
+                )
+                .when_some(dot, |b, dot| b.child(dot))
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
+                .into_any_element()
             }
             None => base
-                .relative()
-                .rounded_full()
-                .bg(cx.theme().muted)
                 .child(
-                    gpui::svg()
-                        .path("icons/terminal.svg")
-                        .size(px(size * 0.56))
-                        .text_color(cx.theme().foreground.opacity(0.65)),
+                    disc().bg(cx.theme().muted).child(
+                        gpui::svg()
+                            .path("icons/terminal.svg")
+                            .size(px(size * 0.56))
+                            .text_color(cx.theme().foreground.opacity(0.65)),
+                    ),
                 )
                 .when_some(ssh, |b, rgb| {
                     b.child(Self::status_dot(rgb, 0, size, cx.theme().background, false))
