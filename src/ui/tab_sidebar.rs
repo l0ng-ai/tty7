@@ -422,9 +422,14 @@ impl Tty7App {
             // column they were also the loudest thing in it. Read off every
             // row the group counts rather than the ones it draws, so a folded
             // group still names its branch.
+            //
+            // A lone row is no exception. Its branch describes the same repo
+            // the heading above it names, and leaving it down there gave a
+            // one-tab group a shape no other group in the column has: a
+            // bare heading over a two-line row. It lifts like any other.
             let shared_git: Option<SharedGit> = section.name.as_ref().and_then(|_| {
                 let rows = &visible_by_section[group_ix];
-                if rows.len() < 2 {
+                if rows.is_empty() {
                     return None;
                 }
                 // Only rows that *have* a status get a vote. A tab that was
