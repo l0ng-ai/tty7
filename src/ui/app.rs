@@ -1166,6 +1166,22 @@ fn clear_window_override_values(config: &mut Config, backdrop_is_local: bool) {
     }
 }
 
+/// The id the fullscreen hint is pushed under, so that entering again replaces
+/// it and leaving takes it away.
+struct FullscreenHint;
+
+/// Whether fullscreen takes the title bar away on this platform.
+///
+/// Not on macOS, where fullscreen belongs to the system rather than to the app.
+/// The traffic lights live on that bar, and revealing the menu bar draws a
+/// translucent strip over the same band, which the bar absorbs; without it the
+/// strip lands on the terminal instead and covers its first row. There is also
+/// nothing there to fix: `WindowControls` draws no minimize, maximize or close
+/// on macOS — the three that are dead in fullscreen elsewhere are the system's
+/// there, and it hides them itself. So the bar is not broken chrome on macOS,
+/// it is part of how the system dresses a fullscreen window.
+const FULLSCREEN_TAKES_THE_TITLE_BAR: bool = !cfg!(target_os = "macos");
+
 impl Tty7App {
     pub fn for_workspace(
         id: Option<WorkspaceId>,
@@ -3526,6 +3542,46 @@ impl Tty7App {
         remember_leaf_in(&mut self.tabs, leaf);
     }
 
+    /// Toggle fullscreen, and say how to leave it on the way in.
+    ///
+    /// Only on the way in, and only from the action: entering is an instant in
+    /// which the title bar disappears, and a window that starts fullscreen
+    /// because the setting says so is not a surprise anybody needs explaining.
+    /// The chord comes from the keymap rather than from a string, because it is
+    /// `F11` on Windows and Linux, `Cmd+Enter` on macOS, and either of them may
+    /// have been rebound.
+    ///
+    /// The hint carries an id of its own, which is what keeps a held-down
+    /// `F11` to one notice rather than a column of identical ones: pushing
+    /// under an id already on screen replaces that one. Leaving through the
+    /// action takes it back too, so a quick in-and-out does not leave the way
+    /// out on screen after it has been taken. Leaving some other way — a
+    /// window manager with a chord of its own — just lets it time out, which
+    /// is a second or two of a stale notice and not worth watching every
+    /// frame for.
+    fn toggle_fullscreen(&self, window: &mut Window, cx: &mut App) {
+        let entering = !window.is_fullscreen();
+        window.toggle_fullscreen();
+        window.remove_notification::<FullscreenHint>(cx);
+        // Nothing disappeared where the bar stays, so there is nothing to
+        // explain.
+        if !entering || !FULLSCREEN_TAKES_THE_TITLE_BAR {
+            return;
+        }
+        let hint = match crate::ui::home::key_hint("ToggleFullscreen", cx) {
+            Some(chord) => t_fmt(L10nKey::AppFullscreenEntered, &[("key", &chord)]),
+            // Rebound to nothing at all: still worth saying the bar is gone,
+            // just without naming a key that would not work.
+            None => t(L10nKey::AppFullscreenEnteredNoKey).to_string(),
+        };
+        window.push_notification(
+            gpui_component::notification::Notification::new()
+                .id::<FullscreenHint>()
+                .message(hint),
+            cx,
+        );
+    }
+
     fn focus_leaf(&self, leaf: &PaneSlot, window: &mut Window, cx: &mut App) {
         let handle = leaf.focus_handle(cx);
         window.focus(&handle, cx);
@@ -5358,7 +5414,7 @@ impl Tty7App {
             NextTab => self.cycle_tab(true, window, cx),
             PrevTab => self.cycle_tab(false, window, cx),
             ToggleMaximizePane => self.toggle_maximize(window, cx),
-            ToggleFullscreen => window.toggle_fullscreen(),
+            ToggleFullscreen => self.toggle_fullscreen(window, cx),
             ToggleTabSidebar => self.toggle_tab_sidebar(cx),
             ToggleLeftPanel => self.toggle_left_panel(cx),
             ToggleRightPanel => self.toggle_right_panel(cx),
@@ -7609,11 +7665,22 @@ impl Render for Tty7App {
             }
         };
 
-        let title_bar = TitleBar::new()
-            .h(px(TITLE_BAR_HEIGHT))
-            .bg(cx.theme().transparent)
-            .border_color(cx.theme().transparent)
-            .child(strip);
+        // No title bar in fullscreen. The bar is window chrome — a caption to
+        // drag the window by and the three controls at its end — and a
+        // fullscreen window has none of that to offer: it has no caption for
+        // the platform to hit-test, so the buttons draw, light up under the
+        // pointer and do nothing at all when clicked. Drawing chrome that
+        // cannot work is worse than drawing none, and taking it away is also
+        // what the mode is for.
+        let fullscreen = window.is_fullscreen();
+        let bar_is_gone = fullscreen && FULLSCREEN_TAKES_THE_TITLE_BAR;
+        let title_bar = (!bar_is_gone).then(|| {
+            TitleBar::new()
+                .h(px(TITLE_BAR_HEIGHT))
+                .bg(cx.theme().transparent)
+                .border_color(cx.theme().transparent)
+                .child(strip)
+        });
         let body_area = div()
             .flex_1()
             .relative()
@@ -7717,9 +7784,9 @@ impl Render for Tty7App {
         let panel_below_title_bar =
             (right_panel.is_some() || document_column.is_some()) && !cfg!(target_os = "macos");
         let (column_title_bar, spanning_title_bar) = if panel_below_title_bar {
-            (None, Some(title_bar))
+            (None, title_bar)
         } else {
-            (Some(title_bar), None)
+            (title_bar, None)
         };
         let (column_overlays, hoisted_overlays) = if panel_below_title_bar {
             (Vec::new(), overlays)
@@ -8012,9 +8079,9 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &ToggleMaximizePane, window, cx| {
                     this.toggle_maximize(window, cx)
                 }))
-                .on_action(
-                    cx.listener(|_, _: &ToggleFullscreen, window, _cx| window.toggle_fullscreen()),
-                )
+                .on_action(cx.listener(|this, _: &ToggleFullscreen, window, cx| {
+                    this.toggle_fullscreen(window, cx)
+                }))
                 .on_action(cx.listener(|this, _: &ToggleTabSidebar, _window, cx| {
                     this.toggle_tab_sidebar(cx)
                 }))
