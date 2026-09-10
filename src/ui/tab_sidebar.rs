@@ -77,6 +77,12 @@ mod row_metrics {
 /// and an ellipsis, which is still a name and not a stub.
 const HEADER_NAME_FLOOR: f32 = 40.;
 
+/// The narrowest a row's title is allowed to get before the working directory
+/// beside it stops taking room, and the narrowest that path may be drawn at:
+/// below this it is an ellipsis and a slash, which names no directory.
+const ROW_TITLE_FLOOR: f32 = 48.;
+const ROW_CWD_FLOOR: f32 = 24.;
+
 /// How a group header divides its line between the heading and the branch its
 /// rows share. The branch takes what it wants up to half the line, and the
 /// heading keeps the rest — so a long branch can no longer crush the name
@@ -477,29 +483,23 @@ impl Tty7App {
                 let title_size = 0.875 * rem;
                 let meta_size = 0.75 * rem;
                 let title_font = if is_active { &title_font_active } else { &font };
-                // Title: elide the *full* label against the row budget, so a
-                // wide sidebar shows the whole thing and a narrow one keeps
-                // whichever end identifies it — the tail for a path, both
-                // edges for anything else. A fixed segment cap
+                // Title: the *full* label, elided further down once the
+                // working directory beside it has said how much of the line
+                // it wants. A wide sidebar shows the whole thing and a narrow
+                // one keeps whichever end identifies it — the tail for a
+                // path, both edges for anything else. A fixed segment cap
                 // (`short_title`) would elide even when the row has room, so
                 // only the width may decide here.
                 //
                 // `full_title` is the unelided string the card can expand
                 // back to; `None` means the row is showing a placeholder that
                 // no card can improve on.
-                let (shown_title, full_title) =
+                let (title_text, full_title) =
                     if let Some(name) = tab.name.as_ref().filter(|n| !n.trim().is_empty()) {
                         // A renamed tab is elided like anything else — and so
                         // the card has to be able to spell the name back out.
                         let full = SharedString::from(name.trim().to_string());
-                        let shown = elide_label(
-                            &window.text_system(),
-                            title_font,
-                            title_size,
-                            &full,
-                            label_avail,
-                        );
-                        (shown, Some(full))
+                        (full.clone(), Some(full))
                     } else {
                         // The ladder the strip and the switcher climb, read
                         // here for the name and not for the shortening: this
@@ -529,14 +529,7 @@ impl Tty7App {
                             (placeholder, None)
                         } else {
                             let full = SharedString::from(raw);
-                            let shown = elide_label(
-                                &window.text_system(),
-                                title_font,
-                                title_size,
-                                &full,
-                                label_avail,
-                            );
-                            (shown, Some(full))
+                            (full.clone(), Some(full))
                         }
                     };
                 let mut branch_shown: Option<(SharedString, SharedString, u32, u32)> = None;
@@ -625,11 +618,17 @@ impl Tty7App {
                     }
                     line
                 });
-                // Outside a repo there is no branch line; the second line then
-                // carries the compressed cwd with its root marker, so a tab
-                // whose title is just a shell name still says where it lives.
-                if git_line.is_none() && shared_git.is_none() {
-                    cwd_shown = tab
+                // Outside a repo there is no branch line, and the working
+                // directory rides on the title's own line rather than growing
+                // a second one under it: a group of plain shells was a column
+                // of two-line rows describing paths that mostly agree, which
+                // is twice the height for a line of small grey text nobody
+                // was reading. A row keeps its second line only for a branch.
+                let cwd_full: Option<SharedString> = match git_line.is_none()
+                    && shared_git.is_none()
+                {
+                    false => None,
+                    true => tab
                         .pane
                         .focused_or_first(window, cx)
                         .and_then(|leaf| {
@@ -638,21 +637,55 @@ impl Tty7App {
                         })
                         .map(|(cwd, home)| {
                             let text = cwd.display().to_string();
-                            let full = SharedString::from(
-                                abbreviate_home(&text, home.as_deref()).into_owned(),
-                            );
-                            let shown = elide_path_keep_tail(
-                                &window.text_system(),
-                                &font,
-                                meta_size,
-                                &full,
-                                label_avail,
-                            );
-                            (shown, full)
+                            SharedString::from(abbreviate_home(&text, home.as_deref()).into_owned())
                         })
                         // The title already carries the whole path; a second
                         // copy adds noise, not information.
-                        .filter(|(shown, _)| shown.as_ref() != shown_title.as_ref());
+                        .filter(|full| full.as_ref() != title_text.as_ref()),
+                };
+                // The path takes what it needs up to half the line and the
+                // title keeps the rest — the same split a group header makes
+                // with the branch beside its heading. Flex would hand the
+                // overflow to the two of them in proportion to what each
+                // asked for, which cuts the longer string hardest.
+                let cwd_want = cwd_full.as_ref().map(|full| {
+                    row_metrics::META_GAP
+                        + measure_text(&window.text_system(), &font, meta_size, full)
+                });
+                let title_avail = match cwd_want {
+                    Some(want) => (label_avail - want.min(label_avail * 0.5)).max(ROW_TITLE_FLOOR),
+                    None => label_avail,
+                };
+                let shown_title = elide_label(
+                    &window.text_system(),
+                    title_font,
+                    title_size,
+                    &title_text,
+                    title_avail,
+                );
+                if let Some(full) = cwd_full {
+                    // Measured against what the title actually took, not what
+                    // it was allowed to: a short title hands the slack back
+                    // instead of leaving the path elided around a gap.
+                    let avail = (label_avail
+                        - measure_text(
+                            &window.text_system(),
+                            title_font,
+                            title_size,
+                            &shown_title,
+                        )
+                        - row_metrics::META_GAP)
+                        .max(0.);
+                    if avail >= ROW_CWD_FLOOR {
+                        let shown = elide_path_keep_tail(
+                            &window.text_system(),
+                            &font,
+                            meta_size,
+                            &full,
+                            avail,
+                        );
+                        cwd_shown = Some((shown, full));
+                    }
                 }
                 let rename_input = self
                     .renaming
@@ -778,26 +811,34 @@ impl Tty7App {
                             })
                         })
                         .child(
-                            div()
+                            h_flex()
                                 .w_full()
-                                .truncate()
-                                .text_sm()
-                                .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
-                                .child(shown_title),
+                                .items_center()
+                                .gap_1p5()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_sm()
+                                        .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
+                                        .child(shown_title),
+                                )
+                                // The path is elided to the room the title
+                                // left, so it may not shrink again here — a
+                                // second cut would come out of its tail, the
+                                // half that says which directory this is.
+                                .when_some(cwd_shown.map(|(cwd, _)| cwd), |line, cwd| {
+                                    line.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(cwd),
+                                    )
+                                }),
                         )
                         .children(git_line)
-                        .when_some(cwd_shown, |col, (cwd, _)| {
-                            col.child(
-                                h_flex()
-                                    .id(("sidebar-cwd", i))
-                                    .w_full()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(div().flex_1().min_w_0().truncate().child(cwd)),
-                            )
-                        })
                         .into_any_element(),
                 };
 
