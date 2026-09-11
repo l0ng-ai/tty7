@@ -1496,6 +1496,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppReopenTabFailed => "无法重新打开标签页：没有启动终端",
         L10nKey::AppOpenTerminalFailed => "无法打开终端：{error}",
         L10nKey::AppTabsNotRestored => "上次的 {count} 个标签页没能重新打开",
+        L10nKey::AppFullscreenEntered => "已进入全屏 —— 按 {key} 退出",
+        L10nKey::AppFullscreenEnteredNoKey => "已进入全屏 —— 标题栏在退出前会一直隐藏",
         L10nKey::LaunchWorkspacesLeftRunning => {
             "只恢复了这个窗口——还有 {count} 个工作区在后台运行，可从侧边栏重新打开。"
         }

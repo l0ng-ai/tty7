@@ -1339,6 +1339,55 @@ mod tests {
     use super::*;
     use gpui::Action as _;
 
+    /// Everything the title bar offers a button for stays reachable from the
+    /// keyboard, because on Windows and Linux the title bar is not drawn in
+    /// fullscreen at all — it is window chrome there, and a fullscreen window
+    /// has no chrome for the platform to hit-test, so its buttons would light
+    /// up under the pointer and do nothing when clicked. (On macOS the bar
+    /// stays: fullscreen is the system's there, and the bar is where it puts
+    /// the traffic lights.)
+    ///
+    /// Reachable means either a chord of its own or a seat in the palette,
+    /// which has one; both are hands-free, and the palette is how the sidebar
+    /// toggle is reached, since it ships without a chord. What this pins is
+    /// that a control on that bar is never mouse-only — if one ever is,
+    /// hiding the bar would take a feature away with it, and this is where
+    /// that should be noticed.
+    #[test]
+    fn what_the_title_bar_offers_is_reachable_without_it() {
+        let defaults = default_bindings();
+        let chord = |action: &str| {
+            defaults
+                .iter()
+                .any(|(name, keystroke)| *name == action && !keystroke.is_empty())
+        };
+        // The palette is the fallback, so it is the one that must not be.
+        assert!(
+            chord("TogglePalette"),
+            "the fallback needs a chord of its own"
+        );
+        for action in [
+            "NewTab",
+            "ToggleTabSidebar",
+            "OpenSettings",
+            "ToggleFullscreen",
+            "ToggleSwitcher",
+        ] {
+            assert!(
+                chord(action) || palette_lists(action),
+                "{action} would be mouse-only once the bar is hidden"
+            );
+        }
+    }
+
+    /// Whether the palette lists `action` under a name somebody wrote, which is
+    /// what having a real seat there means: `action_entry` answers for every
+    /// action, falling back to a name split on capitals, and a fallback name is
+    /// not evidence that anyone meant the action to be found.
+    fn palette_lists(action: &str) -> bool {
+        authored_entry(action).is_some()
+    }
+
     /// The actions a keymap built from `action_bindings` dispatches for `keys`
     /// typed in `context`, in precedence order — the same lookup gpui performs
     /// on a real keypress.
