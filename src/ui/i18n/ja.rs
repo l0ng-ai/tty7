@@ -262,13 +262,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDiscardChangesBody => "編集中の接続に、まだ保存していない変更があります。",
         L10nKey::SettingsKeepEditing => "編集を続ける",
         L10nKey::SettingsName => "名前",
-        L10nKey::SettingsNameDesc => "この接続の表示名",
         L10nKey::SettingsHost => "ホスト名",
-        L10nKey::SettingsHostDesc => "ホスト名または IP アドレス",
         L10nKey::SettingsHostRequired => "ホスト名が必要です — 保存されません",
         L10nKey::SettingsPortInvalid => "ポートは 1-65535 の範囲です — 空欄なら 22 です",
         L10nKey::SettingsUser => "ユーザー名",
-        L10nKey::SettingsUserDesc => "ログインユーザー (空欄 = 接続時に解決)",
         L10nKey::SettingsAuth => "認証方式",
         L10nKey::SettingsAuthDesc => "認証方式。自動の場合は適用可能なすべての方式を試します",
         L10nKey::SettingsAuthModeAuto => "自動",
@@ -276,6 +273,25 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAuthModeKey => "公開鍵",
         L10nKey::SettingsAuthModeAgent => "SSH エージェント",
         L10nKey::SettingsAuthMode2Fa => "二要素認証 (2FA)",
+        L10nKey::SettingsPassword => "パスワード",
+        L10nKey::SettingsNameHint => "任意のラベル",
+        L10nKey::SettingsHostHint => "ホスト名または IP",
+        L10nKey::SettingsUserHint => "接続時に解決",
+        L10nKey::SettingsPasswordDesc => {
+            "システムのキーチェーンに保存され、設定ファイルには書き込まれません。"
+        }
+        L10nKey::SettingsPasswordHint => "接続時に入力する",
+        L10nKey::SettingsForget => "削除",
+        L10nKey::SettingsKeyPassphrase => "鍵のパスフレーズ",
+        L10nKey::SettingsKeyPassphraseDesc => {
+            "上の鍵を解錠します。システムのキーチェーンに保存されます。"
+        }
+        L10nKey::SettingsPassphraseNeedsKey => {
+            "先に鍵ファイルを指定してください。パスフレーズは解錠する鍵ごとに保存されます。"
+        }
+        L10nKey::SettingsBrowseKey => "参照…",
+        L10nKey::SettingsCouldntSavePassword => "{endpoint} のパスワードを保存できません: {error}",
+        L10nKey::SettingsCouldntSavePassphrase => "{key} のパスフレーズを保存できません: {error}",
         L10nKey::SettingsJumpHost => "ジャンプホスト",
         L10nKey::SettingsJumpHostDesc => {
             "トンネリングに使用する別のプロファイル名 (空欄 = 直接接続)"

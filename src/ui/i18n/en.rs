@@ -261,13 +261,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsKeepEditing => "Keep Editing",
         L10nKey::SettingsName => "Name",
-        L10nKey::SettingsNameDesc => "A label for this connection.",
         L10nKey::SettingsHost => "Host",
-        L10nKey::SettingsHostDesc => "Hostname or IP address.",
         L10nKey::SettingsHostRequired => "Needs a host — won't be saved.",
         L10nKey::SettingsPortInvalid => "Port must be 1-65535 — blank means 22.",
         L10nKey::SettingsUser => "User",
-        L10nKey::SettingsUserDesc => "Login user (blank = resolve at connect).",
         L10nKey::SettingsAuth => "Auth",
         L10nKey::SettingsAuthDesc => "Authentication method. Auto tries every applicable method.",
         L10nKey::SettingsAuthModeAuto => "Auto",
@@ -275,6 +272,25 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAuthModeKey => "Key",
         L10nKey::SettingsAuthModeAgent => "Agent",
         L10nKey::SettingsAuthMode2Fa => "2FA",
+        L10nKey::SettingsPassword => "Password",
+        L10nKey::SettingsNameHint => "Optional label",
+        L10nKey::SettingsHostHint => "hostname or IP",
+        L10nKey::SettingsUserHint => "resolved at connect",
+        L10nKey::SettingsPasswordDesc => "Kept in the system keychain, never in the config file.",
+        L10nKey::SettingsPasswordHint => "Ask when connecting",
+        L10nKey::SettingsForget => "Forget",
+        L10nKey::SettingsKeyPassphrase => "Key passphrase",
+        L10nKey::SettingsKeyPassphraseDesc => "Unlocks the key above. Kept in the system keychain.",
+        L10nKey::SettingsPassphraseNeedsKey => {
+            "Name a key file first — a passphrase is stored against the key it unlocks."
+        }
+        L10nKey::SettingsBrowseKey => "Browse…",
+        L10nKey::SettingsCouldntSavePassword => {
+            "Could not save the password for {endpoint}: {error}"
+        }
+        L10nKey::SettingsCouldntSavePassphrase => {
+            "Could not save the passphrase for {key}: {error}"
+        }
         L10nKey::SettingsJumpHost => "Jump host",
         L10nKey::SettingsJumpHostDesc => {
             "Name of another profile to tunnel through (blank = direct)."

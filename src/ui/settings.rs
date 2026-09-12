@@ -26,7 +26,9 @@ use crate::core::config::{
     BellMode, Config, CursorStyle, LinkFileOpen, MouseZoomModifier, NewTabPosition, NotifyMode,
     TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel, WindowBackdrop,
 };
-use crate::core::keychain::CredentialRef;
+use crate::core::keychain::{
+    CredentialRef, CredentialStore as _, OsCredentialStore, key_account_from_contents,
+};
 use crate::core::ssh_profile::{
     Algorithms, AuthMode, ForwardKind, ForwardRule, HostPort, SshProfile, to_connect_string,
 };
@@ -227,6 +229,19 @@ fn ui_scale(cx: &App) -> f32 {
 /// requirement behind it: a font name or a shell path has to be readable
 /// without being truncated.
 const FIELD_W: f32 = 260.;
+
+/// The host editor's own two numbers: the column its labels stand in, and how
+/// wide a field beside one grows to. The label column fits the longest field
+/// name in any locale at the default interface font; the field is wider than
+/// [`FIELD_W`] because the form is what a path, a key file and a hostname are
+/// actually typed into.
+const SSH_LABEL_W: f32 = 104.;
+const FORM_FIELD_W: f32 = 320.;
+
+/// Width a host-editor row needs before its label column and its field fit
+/// side by side. Under it the label goes above the field instead, which is
+/// what the narrowest window leaves the SSH page room for.
+const STACK_FIELD_ROW_BELOW: f32 = 420.;
 
 /// Width a settings row needs before its label and its control fit side by
 /// side: a [`FIELD_W`] control, the `gap_8` between them, and enough left for a
@@ -981,6 +996,21 @@ pub(crate) struct SshProfileForm {
     auth: AuthMode,
     auth_select: Entity<SelectState<SearchableVec<String>>>,
 
+    /// The secret half of a connection. Neither of these is part of the
+    /// profile — they live in the system keychain, and the config file holds
+    /// no copy — so the form carries what the keychain had when it opened and
+    /// compares against it on the way out. A form that was only read writes
+    /// nothing back, and one that cleared a field says so.
+    password: Entity<InputState>,
+    passphrase: Entity<InputState>,
+    loaded_password: String,
+    loaded_passphrase: String,
+    /// The endpoint the password above was read for, and the key file the
+    /// passphrase belongs to. An edit to the address moves the entry, and
+    /// without these there is nothing left pointing at the one to remove.
+    loaded_endpoint: (String, String, u16),
+    loaded_key: Option<String>,
+
     jump: Entity<InputState>,
 
     forwards: Vec<ForwardRuleForm>,
@@ -1026,9 +1056,71 @@ impl SshProfileForm {
     /// needs a host before anyone had the chance to type one. Same deal the
     /// forward rows strike with `ForwardRuleForm::is_blank`.
     fn core_is_blank(&self, cx: &App) -> bool {
-        [&self.name, &self.host, &self.port, &self.user]
+        // The port is not in the list: it opens on 22 and is never empty, so
+        // counting it meant a brand-new host was never "untouched" and the
+        // form opened with "Needs a host" already in red under an empty box
+        // nobody had reached yet.
+        [&self.name, &self.host, &self.user]
             .iter()
             .all(|e| e.read(cx).value().trim().is_empty())
+    }
+
+    /// Whether either secret differs from what the keychain handed over.
+    ///
+    /// Nothing about a password reaches the profile, so the dirty check that
+    /// compares profiles cannot see one being typed — without this, Save stays
+    /// greyed out over a password the user just entered.
+    ///
+    /// Untrimmed on purpose: a trailing space is a character of the secret,
+    /// and the server is the one that decides whether it belongs.
+    fn secrets_changed(&self, cx: &App) -> bool {
+        self.password.read(cx).value().as_ref() != self.loaded_password
+            || self.passphrase.read(cx).value().as_ref() != self.loaded_passphrase
+    }
+
+    fn wants_password(&self) -> bool {
+        auth_uses_password(self.auth)
+    }
+
+    fn wants_key(&self) -> bool {
+        auth_uses_key(self.auth)
+    }
+}
+
+/// Which credential fields a method actually uses — the same split
+/// `ssh_connect::build_spec_inner` makes when it decides what to hand the
+/// daemon. A password box under "Agent" would be a secret that is stored and
+/// then never offered, and a form holding one quietly is worse than a form
+/// that has none.
+fn auth_uses_password(mode: AuthMode) -> bool {
+    matches!(mode, AuthMode::Auto | AuthMode::Password)
+}
+
+fn auth_uses_key(mode: AuthMode) -> bool {
+    matches!(mode, AuthMode::Auto | AuthMode::PublicKey)
+}
+
+/// What saving does to the keychain for the password field: which entry to
+/// drop, and whether to write one.
+///
+/// A plain function because these are the cases a keychain makes expensive to
+/// reach by hand — an address edited out from under a saved password, a field
+/// cleared to mean "stop remembering this", a form opened and closed without a
+/// keystroke.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct PasswordPlan {
+    drop_old: bool,
+    store: bool,
+}
+
+fn password_plan(was: &str, typed: &str, moved: bool) -> PasswordPlan {
+    PasswordPlan {
+        // Only what this form read is ours to drop, and only once it is no
+        // longer the entry this form would write to.
+        drop_old: !was.is_empty() && (moved || typed.is_empty()),
+        // A move rewrites even an unchanged secret: the account it is filed
+        // under is the address, and the address is what changed.
+        store: !typed.is_empty() && (typed != was || moved),
     }
 }
 
@@ -1533,6 +1625,102 @@ fn seed_input(
             .multi_line(multi_line)
             .default_value(value)
     })
+}
+
+fn seed_hinted_multi(
+    window: &mut Window,
+    cx: &mut Context<Tty7App>,
+    value: &str,
+    placeholder: &'static str,
+) -> Entity<InputState> {
+    let value = value.to_string();
+    cx.new(|cx| {
+        InputState::new(window, cx)
+            .multi_line(true)
+            .placeholder(placeholder)
+            .default_value(value)
+    })
+}
+
+/// A picked path written the way a config file spells it. `~/.ssh/id_ed25519`
+/// keeps meaning the right file on another machine, or after the account is
+/// renamed; the absolute path the system picker hands back does not.
+fn tildify(path: &str) -> String {
+    #[cfg(windows)]
+    let home = std::env::var("USERPROFILE").ok();
+    #[cfg(not(windows))]
+    let home = std::env::var("HOME").ok();
+    tildify_with(path, home.as_deref().filter(|h| !h.is_empty()))
+}
+
+fn tildify_with(path: &str, home: Option<&str>) -> String {
+    let Some(home) = home else {
+        return path.to_string();
+    };
+    let home = home.trim_end_matches(['/', '\\']);
+    match path.strip_prefix(home) {
+        // A separator has to follow, or `/Users/adalovelace` would come back
+        // as a file inside `/Users/ada`.
+        Some(rest) if rest.starts_with('/') || rest.starts_with('\\') => format!(
+            "~/{}",
+            rest.trim_start_matches(['/', '\\']).replace('\\', "/")
+        ),
+        _ => path.to_string(),
+    }
+}
+
+/// What the key field shows while it is empty: the file ssh would reach for on
+/// its own. A hint, not a value — an empty field still means "try the usual
+/// `~/.ssh` keys", which is exactly what `default_identity_candidates` does.
+const DEFAULT_KEY_HINT: &str = "~/.ssh/id_ed25519";
+
+/// The password the keychain holds for this profile's endpoint, or nothing.
+///
+/// Read once, when a host is opened for editing — not per render, and not per
+/// keystroke. A profile with no host yet has no endpoint to ask about: the
+/// account would come out as `@:22`, which belongs to no server.
+fn stored_password(profile: &SshProfile) -> String {
+    if profile.host.trim().is_empty() {
+        return String::new();
+    }
+    OsCredentialStore
+        .password_for(&profile.user, &profile.host, profile.port)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// The first key file a profile names that is actually there.
+///
+/// A passphrase is accounted by the key's *contents*, not by its path, so a
+/// file that cannot be read is a key nothing can be stored against.
+fn first_readable_key(profile: &SshProfile) -> Option<String> {
+    profile
+        .expanded_identity_files()
+        .into_iter()
+        .find(|p| std::fs::metadata(crate::core::ssh_profile::expand_tilde(p)).is_ok())
+}
+
+/// The same answer for a form that has not been collected into a profile yet:
+/// the key field as typed, with the host and user beside it filling in `%h`
+/// and `%r`.
+fn first_readable_key_in(files: &[String], host: &str, user: &str) -> Option<String> {
+    files
+        .iter()
+        .map(|f| crate::core::ssh_profile::expand_identity_placeholders(f, host, user))
+        .find(|p| std::fs::metadata(crate::core::ssh_profile::expand_tilde(p)).is_ok())
+}
+
+fn stored_passphrase(key_path: &str) -> String {
+    let path = crate::core::ssh_profile::expand_tilde(key_path);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return String::new();
+    };
+    OsCredentialStore
+        .passphrase_for_key(&key_account_from_contents(&bytes))
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 impl Tty7App {
@@ -3551,17 +3739,45 @@ impl Tty7App {
             })
             .unwrap_or_default();
 
-        let name = seed_input(window, cx, &profile.name, false);
-        let host = seed_input(window, cx, &profile.host, false);
+        let name = seed_hinted(window, cx, &profile.name, t(L10nKey::SettingsNameHint));
+        let host = seed_hinted(window, cx, &profile.host, t(L10nKey::SettingsHostHint));
         let port = seed_input(window, cx, &profile.port.to_string(), false);
-        let user = seed_input(window, cx, &profile.user, false);
+        let user = seed_hinted(window, cx, &profile.user, t(L10nKey::SettingsUserHint));
         let jump = seed_input(window, cx, &jump_name, false);
         let forwards: Vec<ForwardRuleForm> = profile
             .forwards
             .iter()
             .map(|r| seed_forward_row(window, cx, r))
             .collect();
-        let identity_files = seed_input(window, cx, &profile.identity_files.join("\n"), true);
+        let identity_files = seed_hinted_multi(
+            window,
+            cx,
+            &profile.identity_files.join("\n"),
+            DEFAULT_KEY_HINT,
+        );
+
+        // One keychain read per host opened, not one per keystroke: the
+        // password box shows what is actually stored, the way every other SSH
+        // client shows it, so it can be read back, corrected or cleared
+        // without connecting first.
+        let loaded_password = stored_password(profile);
+        let loaded_key = first_readable_key(profile);
+        let loaded_passphrase = loaded_key
+            .as_deref()
+            .map(stored_passphrase)
+            .unwrap_or_default();
+        let password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder(t(L10nKey::SettingsPasswordHint))
+                .default_value(loaded_password.clone())
+        });
+        let passphrase = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder(t(L10nKey::SettingsPasswordHint))
+                .default_value(loaded_passphrase.clone())
+        });
         let proxy_command = seed_input(
             window,
             cx,
@@ -3638,12 +3854,27 @@ impl Tty7App {
                 }
             },
         ));
+        // The passphrase belongs to whichever key the field above names, so
+        // when that answer changes the box has to change with it. Without this
+        // a form opened on one key and pointed at another would carry the
+        // first key's passphrase across and save it over the second's.
+        subs.push(cx.subscribe_in(
+            &identity_files,
+            window,
+            |this, _i, ev: &InputEvent, window, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    this.resync_key_passphrase(window, cx);
+                }
+            },
+        ));
         let mut watch = vec![
             &name,
             &host,
             &port,
             &user,
             &jump,
+            &password,
+            &passphrase,
             &identity_files,
             &proxy_command,
             &socks,
@@ -3691,6 +3922,12 @@ impl Tty7App {
             user,
             auth: profile.auth,
             auth_select,
+            password,
+            passphrase,
+            loaded_password,
+            loaded_passphrase,
+            loaded_endpoint: (profile.user.clone(), profile.host.clone(), profile.port),
+            loaded_key,
             jump,
             forwards,
             identity_files,
@@ -3772,7 +4009,76 @@ impl Tty7App {
         ))
     }
 
-    pub(crate) fn save_editing_profile(&mut self, cx: &mut Context<Self>) -> Option<Uuid> {
+    /// Point the passphrase box at the key the form now names.
+    ///
+    /// A passphrase is stored against the contents of the key it unlocks, so
+    /// the box is only ever right about one key at a time. A box the user has
+    /// started typing in is left alone — it is the one place where what is on
+    /// screen outranks what the keychain holds.
+    fn resync_key_passphrase(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = self.active_settings().and_then(|s| s.ssh_form.as_ref()) else {
+            return;
+        };
+        let files = split_lines(&form.identity_files.read(cx).value());
+        let host = form.host.read(cx).value().trim().to_string();
+        let user = form.user.read(cx).value().trim().to_string();
+        let key = first_readable_key_in(&files, &host, &user);
+        if key == form.loaded_key {
+            return;
+        }
+        let stored = key.as_deref().map(stored_passphrase).unwrap_or_default();
+        // A box the user has already typed in keeps what they typed — only
+        // the key it will be saved against moves under it.
+        let untouched = form.passphrase.read(cx).value().as_ref() == form.loaded_passphrase;
+        let input = form.passphrase.clone();
+        if let Some(form) = self.ssh_form_mut() {
+            form.loaded_key = key;
+            form.loaded_passphrase = stored.clone();
+        }
+        if untouched {
+            input.update(cx, |i, cx| i.set_value(stored, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Add key files to the profile from the system file picker, one per line
+    /// alongside whatever is already named. Typing the path still works — this
+    /// is for the far more common case of knowing the key by sight and not by
+    /// path.
+    pub(crate) fn pick_ssh_identity_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                let Some(form) = this.active_settings().and_then(|s| s.ssh_form.as_ref()) else {
+                    return;
+                };
+                let input = form.identity_files.clone();
+                let mut lines = split_lines(&input.read(cx).value());
+                for path in paths {
+                    let path = tildify(&path.to_string_lossy());
+                    if !lines.contains(&path) {
+                        lines.push(path);
+                    }
+                }
+                input.update(cx, |i, cx| i.set_value(lines.join("\n"), window, cx));
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn save_editing_profile(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Uuid> {
         let (profile, errors) = self.ssh_form_collect(cx)?;
         // Save and Connect are both disabled while anything is wrong, but this
         // is the door all of them go through, and what gets past it lands in
@@ -3784,16 +4090,156 @@ impl Tty7App {
         let id = profile.id;
         self.update_config(cx, |cfg| {
             if let Some(slot) = cfg.ssh_profiles.iter_mut().find(|p| p.id == id) {
-                *slot = profile;
+                *slot = profile.clone();
             } else {
-                cfg.ssh_profiles.push(profile);
+                cfg.ssh_profiles.push(profile.clone());
             }
         });
+        self.save_ssh_form_secrets(&profile, window, cx);
         Some(id)
     }
 
-    pub(crate) fn save_ssh_form(&mut self, cx: &mut Context<Self>) {
-        self.save_editing_profile(cx);
+    /// Move the two secrets in the form into the keychain — or out of it.
+    ///
+    /// The config file never holds either of them, so this is the whole of
+    /// what saving means for a password: an entry keyed by the endpoint the
+    /// profile now names. Editing the address moves the entry rather than
+    /// leaving the old one behind to be offered to a host that no longer
+    /// exists, and clearing the field removes it.
+    fn save_ssh_form_secrets(
+        &mut self,
+        profile: &SshProfile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form) = self.active_settings().and_then(|s| s.ssh_form.as_ref()) else {
+            return;
+        };
+        let typed = form.password.read(cx).value().to_string();
+        let typed_passphrase = form.passphrase.read(cx).value().to_string();
+        let (old_user, old_host, old_port) = form.loaded_endpoint.clone();
+        let was = form.loaded_password.clone();
+        let was_passphrase = form.loaded_passphrase.clone();
+        let moved = (old_user.as_str(), old_host.as_str(), old_port)
+            != (profile.user.as_str(), profile.host.as_str(), profile.port);
+
+        let mut failures: Vec<String> = Vec::new();
+        let endpoint = |u: &str, h: &str, p: u16| format!("{u}@{h}:{p}");
+        let plan = password_plan(&was, &typed, moved);
+
+        // The entry the form read from, once it is no longer the entry the
+        // form would write to. Left alone when another profile still dials the
+        // same address — the keychain accounts by endpoint, not by profile.
+        let stranded = plan.drop_old && !old_host.trim().is_empty();
+        if stranded
+            && !self.endpoint_still_in_use(&old_user, &old_host, old_port, profile.id, cx)
+            && let Err(e) = OsCredentialStore.delete_password(&old_user, &old_host, old_port)
+        {
+            failures.push(t_fmt(
+                L10nKey::SettingsCouldntForgetPassword,
+                &[
+                    ("endpoint", &endpoint(&old_user, &old_host, old_port)),
+                    ("error", &e.to_string()),
+                ],
+            ));
+        }
+        if plan.store
+            && !profile.host.trim().is_empty()
+            && let Err(e) =
+                OsCredentialStore.set_password(&profile.user, &profile.host, profile.port, &typed)
+        {
+            failures.push(t_fmt(
+                L10nKey::SettingsCouldntSavePassword,
+                &[
+                    (
+                        "endpoint",
+                        &endpoint(&profile.user, &profile.host, profile.port),
+                    ),
+                    ("error", &e.to_string()),
+                ],
+            ));
+        }
+
+        // A passphrase belongs to the key it unlocks, not to this profile, so
+        // a save only ever touches the entry for the key named here. Pointing
+        // the profile at a different key leaves the first key's passphrase
+        // alone — other hosts use that key too.
+        let key = first_readable_key(profile);
+        if typed_passphrase != was_passphrase {
+            match key.as_deref() {
+                Some(path) => self.write_key_passphrase(path, &typed_passphrase, &mut failures),
+                // Nowhere to put it: the field names no key, or names one that
+                // is not on this machine. Storing nothing quietly would lose a
+                // passphrase the user watched themselves type.
+                None if !typed_passphrase.is_empty() => {
+                    failures.push(t(L10nKey::SettingsPassphraseNeedsKey).to_string())
+                }
+                None => {}
+            }
+        }
+
+        for line in failures {
+            window.push_notification(line, cx);
+        }
+
+        // What the form would now read back, so a save leaves it clean.
+        if let Some(form) = self.ssh_form_mut() {
+            form.loaded_password = typed;
+            form.loaded_passphrase = typed_passphrase;
+            form.loaded_endpoint = (profile.user.clone(), profile.host.clone(), profile.port);
+            form.loaded_key = key;
+        }
+    }
+
+    /// A blank secret deletes rather than stores: an empty string is not a
+    /// passphrase, and leaving one behind would keep offering it.
+    fn write_key_passphrase(&self, key_path: &str, secret: &str, failures: &mut Vec<String>) {
+        let path = crate::core::ssh_profile::expand_tilde(key_path);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                failures.push(t_fmt(
+                    L10nKey::SettingsCouldntSavePassphrase,
+                    &[("key", key_path), ("error", &e.to_string())],
+                ));
+                return;
+            }
+        };
+        let account = key_account_from_contents(&bytes);
+        let result = if secret.is_empty() {
+            OsCredentialStore.delete_key_passphrase(&account)
+        } else {
+            OsCredentialStore
+                .set_key_passphrase(&account, secret)
+                .map(|_| ())
+        };
+        if let Err(e) = result {
+            failures.push(t_fmt(
+                L10nKey::SettingsCouldntSavePassphrase,
+                &[("key", key_path), ("error", &e.to_string())],
+            ));
+        }
+    }
+
+    /// Whether some other saved host still dials this endpoint. The keychain
+    /// entry is the address's, not the profile's — the same reason "Forget
+    /// password" counts the hosts it would sign out.
+    fn endpoint_still_in_use(
+        &self,
+        user: &str,
+        host: &str,
+        port: u16,
+        except: Uuid,
+        cx: &App,
+    ) -> bool {
+        cx.global::<Config>()
+            .ssh_profiles
+            .iter()
+            .any(|p| p.id != except && p.user == user && p.host == host && p.port == port)
+    }
+
+    pub(crate) fn save_ssh_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_editing_profile(window, cx);
         cx.notify();
     }
 
@@ -3812,7 +4258,7 @@ impl Tty7App {
             .iter()
             .find(|p| p.id == form.editing)
             .cloned();
-        self.ssh_form_collect(cx).map(|(profile, _)| profile) != saved
+        self.ssh_form_collect(cx).map(|(profile, _)| profile) != saved || form.secrets_changed(cx)
     }
 
     /// Closing from Escape or the X is the user leaving; every other caller
@@ -3847,7 +4293,26 @@ impl Tty7App {
         if !errors.is_empty() {
             return;
         }
-        let spec = Box::new(self.native_ssh_spec_for_profile(&profile, cx));
+        let mut spec = Box::new(self.native_ssh_spec_for_profile(&profile, cx));
+        // The spec is built from the keychain, so without this Test would dial
+        // with the *saved* password while a new one sits typed on screen —
+        // and report a failure the form could not explain.
+        if let Some(form) = self.active_settings().and_then(|s| s.ssh_form.as_ref()) {
+            if form.wants_password() {
+                let typed = form.password.read(cx).value().to_string();
+                if !typed.is_empty() {
+                    spec.password = Some(typed);
+                }
+            }
+            if form.wants_key() {
+                let typed = form.passphrase.read(cx).value().to_string();
+                if let (false, Some(key)) = (typed.is_empty(), first_readable_key(&profile)) {
+                    spec.key_passphrases
+                        .get_or_insert_with(Default::default)
+                        .insert(key, typed);
+                }
+            }
+        }
         let editing = profile.id;
         if let Some(form) = self.ssh_form_mut() {
             form.test = Some(SshTestState::Running);
@@ -3873,7 +4338,7 @@ impl Tty7App {
     }
 
     pub(crate) fn save_and_connect_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(id) = self.save_editing_profile(cx) {
+        if let Some(id) = self.save_editing_profile(window, cx) {
             self.close_settings(window, cx);
             self.connect_ssh_profile(id, window, cx);
         }
@@ -4226,7 +4691,10 @@ impl Tty7App {
             .cloned();
         let (collected, errors) = self.ssh_form_collect(cx).unzip();
         let errors = errors.unwrap_or_default();
-        let dirty = collected != saved;
+        // A password is not part of the profile, so a change to one is
+        // invisible to the comparison above — and Save would sit greyed out
+        // over a secret the user just typed.
+        let dirty = collected != saved || form.secrets_changed(cx);
         let address = collected
             .as_ref()
             .map(to_connect_string)
@@ -4319,7 +4787,9 @@ impl Tty7App {
                             .label(t(L10nKey::Save))
                             .small()
                             .disabled(!dirty || !errors.is_empty())
-                            .on_click(cx.listener(|this, _, _w, cx| this.save_ssh_form(cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.save_ssh_form(window, cx)),
+                            ),
                     )
                     .child(
                         // Connect saves first, so it answers to the same
@@ -4350,78 +4820,40 @@ impl Tty7App {
             .map(|e| field_error(e.message(), cx));
         let port_error = errors.port.as_ref().map(|e| field_error(e.message(), cx));
 
+        // Three fields whose labels say everything a sentence under them
+        // would: what goes in them is shown in the box itself, as a hint that
+        // gets out of the way the moment anything is typed.
         let core = v_flex()
-            .gap_3()
+            .gap_1()
+            .child(self.ssh_field_row(
+                t(L10nKey::SettingsName),
+                Input::new(&form.name).small().w_full().into_any_element(),
+                vec![],
+                cx,
+            ))
             .child(
-                self.settings_row(
-                    t(L10nKey::SettingsName),
-                    t(L10nKey::SettingsNameDesc),
-                    div()
-                        .w(px(FIELD_W))
-                        .max_w_full()
-                        .child(Input::new(&form.name).small())
-                        .into_any_element(),
-                    cx,
-                ),
-            )
-            .child(
-                self.settings_row(
+                self.ssh_field_row(
                     t(L10nKey::SettingsHost),
-                    t(L10nKey::SettingsHostDesc),
-                    v_flex()
-                        .gap_1()
-                        .max_w_full()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .max_w_full()
-                                .child(
-                                    div()
-                                        .w(px(172.))
-                                        .min_w_0()
-                                        .child(Input::new(&form.host).small()),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(80.))
-                                        .flex_shrink_0()
-                                        .child(Input::new(&form.port).small()),
-                                ),
-                        )
-                        .when_some(host_error, |col, line| col.child(line))
-                        .when_some(port_error, |col, line| col.child(line))
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(Input::new(&form.host).small().flex_1().min_w_0())
+                        .child(Input::new(&form.port).small().w(px(64. * ui_scale(cx))))
                         .into_any_element(),
+                    host_error
+                        .into_iter()
+                        .chain(port_error)
+                        .map(IntoElement::into_any_element)
+                        .collect(),
                     cx,
                 ),
             )
-            .child(
-                self.settings_row(
-                    t(L10nKey::SettingsUser),
-                    t(L10nKey::SettingsUserDesc),
-                    div()
-                        .w(px(FIELD_W))
-                        .max_w_full()
-                        .child(Input::new(&form.user).small())
-                        .into_any_element(),
-                    cx,
-                ),
-            )
-            .child(
-                self.settings_row(
-                    t(L10nKey::SettingsAuth),
-                    t(L10nKey::SettingsAuthDesc),
-                    // Six methods is more than a segmented control can label without
-                    // squeezing, and this row is the one that stacks first on a
-                    // narrow page. A dropdown carries the same choice at a fixed
-                    // width, the way the other long-form pickers on this page do.
-                    Select::new(&form.auth_select)
-                        .small()
-                        .w(px(FIELD_W))
-                        .max_w_full()
-                        .into_any_element(),
-                    cx,
-                ),
-            );
+            .child(self.ssh_field_row(
+                t(L10nKey::SettingsUser),
+                Input::new(&form.user).small().w_full().into_any_element(),
+                vec![],
+                cx,
+            ));
 
         v_flex()
             .gap_4()
@@ -4432,9 +4864,166 @@ impl Tty7App {
                 col.child(h_flex().w_full().justify_end().child(line))
             })
             .child(core)
+            .child(self.render_ssh_profile_auth_section(form, cx))
             .child(self.render_ssh_profile_jump_section(form, &errors, cx))
             .child(self.render_ssh_profile_forwards_section(form, cx))
             .child(self.render_ssh_profile_advanced_section(form, &errors, cx))
+            .into_any_element()
+    }
+
+    /// One field of the host editor: its label in a narrow column on the left,
+    /// the field immediately beside it, and whatever the field has to say —
+    /// its description, or a complaint about what is in it — underneath the
+    /// field rather than underneath the label.
+    ///
+    /// The settings rows on the rest of this page push their control to the
+    /// far right edge of the page, which is right for a list of independent
+    /// switches and wrong for a form: it left a hand's width of nothing
+    /// between the word "Host" and the box a hostname goes in, and the eye had
+    /// to cross it once per field. Every SSH client worth borrowing from keeps
+    /// the two together.
+    fn ssh_field_row(
+        &self,
+        label: &str,
+        control: AnyElement,
+        under: Vec<AnyElement>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let stacked = self.settings_row_under(STACK_FIELD_ROW_BELOW, cx);
+        let scale = ui_scale(cx);
+        div()
+            .flex()
+            .w_full()
+            .py_1p5()
+            .when(stacked, |row| row.flex_col().items_start().gap_1())
+            .when(!stacked, |row| row.flex_row().items_start().gap_3())
+            .child(
+                div()
+                    .when(!stacked, |l| {
+                        // Right up against the field, and level with the text
+                        // inside it rather than with the top of its border —
+                        // a left-aligned column of short words would leave a
+                        // different-sized hole after every label.
+                        l.w(px(SSH_LABEL_W * scale))
+                            .flex_shrink_0()
+                            .pt(px(6.))
+                            .text_right()
+                    })
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(cx.theme().foreground)
+                    .child(label.to_string()),
+            )
+            .child(
+                // A definite width, not `flex_1`: a percentage inside a
+                // flex-grown box has no definite parent to resolve against,
+                // and every `w_full` control in here came out at its intrinsic
+                // size — a hostname field one character wide.
+                v_flex()
+                    .w(px(FORM_FIELD_W * scale))
+                    .max_w_full()
+                    .gap_1()
+                    .child(control)
+                    .children(under),
+            )
+            .into_any_element()
+    }
+
+    /// The credential half of the form, and the only part of it that is not
+    /// stored in the config file.
+    ///
+    /// Which boxes appear follows the method, the way every SSH client does
+    /// it: a password box under a key-only method would be a secret that is
+    /// stored and never offered. The split is the one `build_spec_inner`
+    /// makes when it decides what to hand the daemon.
+    fn render_ssh_profile_auth_section(
+        &self,
+        form: &SshProfileForm,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Whether there is a key to *store a passphrase against* — which is a
+        // readable file, not merely a path someone typed. `loaded_key` is that
+        // answer, kept current by `resync_key_passphrase`.
+        let has_key = form.loaded_key.is_some();
+        v_flex()
+            .gap_1()
+            .child(self.subgroup_header(L10nKey::SettingsGroupAuthentication, cx))
+            .child(
+                self.ssh_field_row(
+                    t(L10nKey::SettingsAuth),
+                    // Six methods is more than a segmented control can label
+                    // without squeezing, so a dropdown carries the choice — the
+                    // way the other long-form pickers on this page do.
+                    Select::new(&form.auth_select)
+                        .small()
+                        .w_full()
+                        .into_any_element(),
+                    vec![field_note(t(L10nKey::SettingsAuthDesc), cx).into_any_element()],
+                    cx,
+                ),
+            )
+            .when(form.wants_password(), |col| {
+                col.child(
+                    self.ssh_field_row(
+                        t(L10nKey::SettingsPassword),
+                        Input::new(&form.password)
+                            .small()
+                            .mask_toggle()
+                            .w_full()
+                            .into_any_element(),
+                        vec![field_note(t(L10nKey::SettingsPasswordDesc), cx).into_any_element()],
+                        cx,
+                    ),
+                )
+            })
+            .when(form.wants_key(), |col| {
+                col.child(
+                    self.ssh_field_row(
+                        t(L10nKey::SettingsIdentityFiles),
+                        h_flex()
+                            .w_full()
+                            .items_start()
+                            .gap_2()
+                            .child(Input::new(&form.identity_files).small().flex_1().min_w_0())
+                            .child(
+                                Button::new("ssh-form-browse-key")
+                                    .label(t(L10nKey::SettingsBrowseKey))
+                                    .small()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.pick_ssh_identity_file(window, cx)
+                                    })),
+                            )
+                            .into_any_element(),
+                        vec![
+                            field_note(t(L10nKey::SettingsIdentityFilesDesc), cx)
+                                .into_any_element(),
+                        ],
+                        cx,
+                    ),
+                )
+                .child(
+                    self.ssh_field_row(
+                        t(L10nKey::SettingsKeyPassphrase),
+                        Input::new(&form.passphrase)
+                            .small()
+                            .mask_toggle()
+                            .disabled(!has_key)
+                            .w_full()
+                            .into_any_element(),
+                        vec![
+                            field_note(
+                                match has_key {
+                                    true => t(L10nKey::SettingsKeyPassphraseDesc),
+                                    false => t(L10nKey::SettingsPassphraseNeedsKey),
+                                },
+                                cx,
+                            )
+                            .into_any_element(),
+                        ],
+                        cx,
+                    ),
+                )
+            })
             .into_any_element()
     }
 
@@ -4851,14 +5440,12 @@ impl Tty7App {
         };
 
         section = section
+            // The key file and the two secrets moved up to the Authentication
+            // block on the form itself — they are what a connection is made
+            // of, not a corner of it. What is left here is the option that
+            // hands this host the local agent, which is a decision about
+            // trust rather than about how to log in.
             .child(self.subgroup_header(L10nKey::SettingsGroupAuthentication, cx))
-            .child(text_row(
-                self,
-                t(L10nKey::SettingsIdentityFiles),
-                t(L10nKey::SettingsIdentityFilesDesc),
-                &form.identity_files,
-                cx,
-            ))
             .child(
                 self.settings_row(
                     t(L10nKey::SettingsAgentForwarding),
@@ -7411,6 +7998,144 @@ mod tests {
         );
     }
 
+    /// The credential boxes the form shows have to be the ones the connection
+    /// will actually offer. `build_spec_inner` sends a password for Auto and
+    /// Password and key passphrases for Auto and Key, and nothing for the
+    /// rest — a box outside that split collects a secret, stores it in the
+    /// keychain, and never hands it to anybody.
+    #[test]
+    fn a_credential_box_only_appears_where_the_handshake_would_use_it() {
+        for mode in AUTH_MODES {
+            assert_eq!(
+                auth_uses_password(mode),
+                matches!(mode, AuthMode::Auto | AuthMode::Password),
+                "{mode:?} password box"
+            );
+            assert_eq!(
+                auth_uses_key(mode),
+                matches!(mode, AuthMode::Auto | AuthMode::PublicKey),
+                "{mode:?} key boxes"
+            );
+        }
+        assert!(!auth_uses_password(AuthMode::Agent));
+        assert!(!auth_uses_key(AuthMode::Gssapi));
+    }
+
+    /// The password lives in the keychain under the address, not in the
+    /// profile — so saving has to decide two things the config file cannot
+    /// record: whether the entry the form read is now stranded, and whether
+    /// there is anything new to write.
+    #[test]
+    fn saving_moves_a_password_with_the_address_it_belongs_to() {
+        let plan = |was, typed, moved| password_plan(was, typed, moved);
+
+        // A form nobody typed in writes nothing at all.
+        assert_eq!(
+            plan("hunter2", "hunter2", false),
+            PasswordPlan {
+                drop_old: false,
+                store: false
+            }
+        );
+        // A new secret replaces the old one in place.
+        assert_eq!(
+            plan("hunter2", "correct horse", false),
+            PasswordPlan {
+                drop_old: false,
+                store: true
+            }
+        );
+        // Clearing the box is how a saved password is let go of.
+        assert_eq!(
+            plan("hunter2", "", false),
+            PasswordPlan {
+                drop_old: true,
+                store: false
+            }
+        );
+        // Retargeting the host carries the secret across and leaves nothing
+        // behind under the old address — even when the secret itself is
+        // untouched, because the account it is filed under is the address.
+        assert_eq!(
+            plan("hunter2", "hunter2", true),
+            PasswordPlan {
+                drop_old: true,
+                store: true
+            }
+        );
+        // A host that never had one, and still does not.
+        assert_eq!(
+            plan("", "", true),
+            PasswordPlan {
+                drop_old: false,
+                store: false
+            }
+        );
+        // The first password a host is given.
+        assert_eq!(
+            plan("", "hunter2", false),
+            PasswordPlan {
+                drop_old: false,
+                store: true
+            }
+        );
+    }
+
+    /// A key picked from the system dialog arrives as an absolute path under
+    /// the home directory. Written back that way it names the right file on
+    /// this machine and the wrong one everywhere else — and `~` is how the
+    /// rest of the field, and `~/.ssh/config` itself, spells it.
+    #[test]
+    fn a_picked_key_is_written_the_way_the_config_spells_it() {
+        let home = Some("/Users/ada");
+        assert_eq!(
+            tildify_with("/Users/ada/.ssh/id_ed25519", home),
+            "~/.ssh/id_ed25519"
+        );
+        // Outside the home directory there is nothing to shorten.
+        assert_eq!(tildify_with("/etc/ssh/key", home), "/etc/ssh/key");
+        // And a sibling that merely starts with the same letters is not
+        // inside it.
+        assert_eq!(
+            tildify_with("/Users/adalovelace/key", home),
+            "/Users/adalovelace/key"
+        );
+        // A trailing separator on the home directory changes nothing.
+        assert_eq!(
+            tildify_with("/Users/ada/.ssh/id_rsa", Some("/Users/ada/")),
+            "~/.ssh/id_rsa"
+        );
+        // Nowhere to anchor against leaves the path as it came.
+        assert_eq!(
+            tildify_with("/Users/ada/.ssh/id_rsa", None),
+            "/Users/ada/.ssh/id_rsa"
+        );
+    }
+
+    /// The passphrase box is about one key at a time: the first one named that
+    /// is actually on disk, with `%h` and `%r` filled in the way the daemon
+    /// will fill them. A path that is not there can hold no passphrase.
+    #[test]
+    fn the_passphrase_follows_the_first_key_that_is_really_there() {
+        let dir = std::env::temp_dir().join(format!("tty7-keyform-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("id_example.com");
+        std::fs::write(&real, b"key").unwrap();
+        let missing = dir.join("absent").to_string_lossy().to_string();
+        let pattern = dir.join("id_%h").to_string_lossy().to_string();
+
+        assert_eq!(
+            first_readable_key_in(&[missing.clone(), pattern], "example.com", "ada"),
+            Some(real.to_string_lossy().to_string())
+        );
+        assert_eq!(
+            first_readable_key_in(&[missing], "example.com", "ada"),
+            None
+        );
+        assert_eq!(first_readable_key_in(&[], "example.com", "ada"), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The dropdown resolves a pick by its row index, so the row a mode opens
     /// on and the mode that row saves have to be the same one. A list that
     /// drifted out of step would quietly save the wrong method.
@@ -8217,6 +8942,49 @@ mod gpui_tests {
             .unwrap();
         let vcx = VisualTestContext::from_window(window.into(), cx);
         (app, vcx)
+    }
+
+    /// The password is the one field on the host editor that never reaches the
+    /// profile — it goes to the system keychain — so the dirty check that
+    /// compares profiles is blind to it. Without the secret folded in, Save
+    /// stays greyed out over a password the user has just typed, and the only
+    /// way to store one is to connect and wait to be asked.
+    #[gpui::test]
+    fn a_typed_password_is_something_the_form_has_to_save(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+            // A saved host that names no address, so opening its editor asks
+            // the keychain nothing and starts out with nothing to save.
+            let profile = crate::core::ssh_profile::SshProfile::new("blank");
+            app.update_config(cx, |cfg| cfg.ssh_profiles.push(profile.clone()));
+            app.ssh_form_load(&profile, window, cx);
+        });
+        vcx.simulate_resize(size(px(1100.), px(800.)));
+        vcx.run_until_parked();
+
+        assert!(
+            !vcx.update(|_, cx| app.read(cx).ssh_form_dirty(cx)),
+            "a form nobody has typed in has nothing to save"
+        );
+
+        let password = vcx.update(|_, cx| {
+            app.read(cx)
+                .active_settings()
+                .and_then(|s| s.ssh_form.as_ref())
+                .map(|f| f.password.clone())
+                .expect("the host editor is open")
+        });
+        app.update_in(&mut vcx, |_app, window, cx| {
+            password.update(cx, |input, cx| input.set_value("hunter2", window, cx));
+        });
+        vcx.run_until_parked();
+
+        assert!(
+            vcx.update(|_, cx| app.read(cx).ssh_form_dirty(cx)),
+            "a password typed into the form is an unsaved change"
+        );
     }
 
     #[gpui::test]
