@@ -90,17 +90,15 @@ impl Typeahead {
     }
 
     fn record_enter(&mut self) {
-        if self.text.len() + 1 > RECORD_CAP {
-            self.tainted = true;
-            return;
-        }
-        self.text.push('\r');
+        // Enter has already gone to the foreground reader. That line is no
+        // longer pending shell input: keeping even an empty seed would send
+        // Ctrl-U into the next prompt after `exit` returns from SSH or a TUI.
+        // Only text typed after this boundary can belong to the next prompt.
+        self.discard();
     }
 
     fn record_backspace(&mut self) {
-        if !self.text.ends_with('\r') {
-            self.text.pop();
-        }
+        self.text.pop();
     }
 
     fn taint(&mut self) {
@@ -117,8 +115,7 @@ impl Typeahead {
         if self.tainted {
             return Some(String::new());
         }
-        let seed = self.text.rsplit('\r').next().unwrap_or("");
-        Some(seed.to_string())
+        Some(self.text)
     }
 }
 
@@ -322,11 +319,11 @@ mod tests {
     }
 
     #[test]
-    fn fully_submitted_input_wipes_but_seeds_nothing() {
+    fn fully_submitted_input_owes_no_wipe() {
         let mut p = Typeahead::new();
         p.record_text("ls");
         p.record_enter();
-        assert_eq!(p.drain(), Some(String::new()));
+        assert_eq!(p.drain(), None);
     }
 
     #[test]
@@ -335,7 +332,7 @@ mod tests {
         p.record_text("ls");
         p.record_enter();
         p.record_backspace();
-        assert_eq!(p.drain(), Some(String::new()));
+        assert_eq!(p.drain(), None);
     }
 
     #[test]
@@ -381,7 +378,63 @@ mod tests {
         let mut p = Typeahead::new();
         p.taint();
         p.record_text("ls");
-        p.record_enter();
         assert_eq!(p.drain(), Some(String::new()));
+    }
+
+    #[test]
+    fn submitting_a_recalled_exit_discards_taint_and_paste_provenance() {
+        let mut t = Typeahead::new();
+        t.observe(RawInput::Pasted("old command"), false);
+        t.observe(
+            RawInput::Key {
+                key: "up",
+                plain: true,
+            },
+            false,
+        );
+        t.observe(
+            RawInput::Key {
+                key: "enter",
+                plain: true,
+            },
+            false,
+        );
+        assert!(!t.pasted(), "the submitted line's paste mark is spent");
+        assert_eq!(
+            t.adopt(),
+            None,
+            "returning to the prompt must not owe Ctrl-U"
+        );
+        assert_eq!(t.drain(), None);
+        t.observe(RawInput::Text("git status"), false);
+        assert_eq!(t.drain(), Some("git status".to_string()));
+    }
+
+    #[test]
+    fn a_submitted_exit_does_not_taint_the_next_prompts_typeahead() {
+        let mut t = Typeahead::new();
+        t.observe(RawInput::Text("x".repeat(RECORD_CAP).as_str()), false);
+        t.observe(
+            RawInput::Key {
+                key: "enter",
+                plain: true,
+            },
+            false,
+        );
+        t.observe(RawInput::Text("exit"), false);
+        t.observe(
+            RawInput::Key {
+                key: "enter",
+                plain: true,
+            },
+            false,
+        );
+        t.observe(RawInput::Text("git status"), false);
+        assert_eq!(t.adopt(), Some("git status".to_string()));
+        assert_eq!(
+            t.drain(),
+            Some(String::new()),
+            "only the unsubmitted text needs a wipe"
+        );
     }
 }
