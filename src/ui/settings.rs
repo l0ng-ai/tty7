@@ -6430,8 +6430,19 @@ impl Tty7App {
                         .when_some(row_note, |col, text| {
                             col.child(
                                 div()
-                                    .max_w_80()
-                                    .max_w_full()
+                                    // One cap, not two: `max_w` holds a single
+                                    // length, so stating both left the note
+                                    // sized against a shrink-proof column that
+                                    // is itself sized to the note — no cap at
+                                    // all, and a long error (Codex's missing
+                                    // `codex` binary) inflated the row until
+                                    // the label column, `min_w_0`, came out one
+                                    // character per line. Stacked, the control
+                                    // column *is* the row, so a relative cap
+                                    // resolves; beside the label it cannot, and
+                                    // 320 is what the row has room for.
+                                    .when(stacked, |note| note.max_w_full())
+                                    .when(!stacked, |note| note.max_w_80())
                                     .text_xs()
                                     .when(!stacked, |note| note.text_right())
                                     .text_color(muted_fg)
