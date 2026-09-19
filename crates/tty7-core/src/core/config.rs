@@ -249,6 +249,8 @@ pub struct Config {
     pub sidebar_diff_preview: bool,
     #[serde(default, deserialize_with = "de_lenient")]
     pub notify_on_command_finish: NotifyMode,
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub notify_on_agent_event: NotifyMode,
     pub check_for_updates: bool,
     /// Which release feed update checks follow. Stable by default, so an
     /// installation only ever ends up on Nightly by asking for it.
@@ -497,6 +499,16 @@ pub enum NotifyMode {
     Always,
 }
 
+impl NotifyMode {
+    pub fn allows(self, window_active: bool) -> bool {
+        match self {
+            Self::Never => false,
+            Self::Unfocused => !window_active,
+            Self::Always => true,
+        }
+    }
+}
+
 /// Which release feed this installation follows.
 ///
 /// The channel is a property of the installation, not something derived from
@@ -649,6 +661,7 @@ impl Default for Config {
             sidebar_collapsed_groups: Vec::new(),
             sidebar_diff_preview: true,
             notify_on_command_finish: NotifyMode::Unfocused,
+            notify_on_agent_event: NotifyMode::Unfocused,
             check_for_updates: true,
             update_channel: UpdateChannel::default(),
             auto_download_updates: true,
@@ -1633,6 +1646,34 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .collect();
         assert!(leftover.is_empty(), "temp file should be renamed away");
+    }
+
+    #[test]
+    fn agent_notifications_are_independent_and_persist() {
+        let defaults: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.notify_on_agent_event, NotifyMode::Unfocused);
+        for (agent_mode, active, inactive) in [
+            (NotifyMode::Never, false, false),
+            (NotifyMode::Unfocused, false, true),
+            (NotifyMode::Always, true, true),
+        ] {
+            for command_mode in [NotifyMode::Never, NotifyMode::Unfocused, NotifyMode::Always] {
+                let cfg = Config {
+                    notify_on_command_finish: command_mode,
+                    notify_on_agent_event: agent_mode,
+                    ..Config::default()
+                };
+                let restored: Config =
+                    serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+                assert_eq!(restored.notify_on_command_finish, command_mode);
+                assert_eq!(restored.notify_on_agent_event, agent_mode);
+                assert_eq!(restored.notify_on_agent_event.allows(true), active);
+                assert_eq!(restored.notify_on_agent_event.allows(false), inactive);
+            }
+        }
+        let invalid: Config =
+            serde_json::from_str(r#"{"notify_on_agent_event":"sometimes"}"#).unwrap();
+        assert_eq!(invalid.notify_on_agent_event, NotifyMode::Unfocused);
     }
 
     #[test]

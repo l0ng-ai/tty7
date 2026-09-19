@@ -106,6 +106,7 @@ struct ReaderSignals {
     images: crate::terminal::images::ImageStore,
     clipboard_writes: Arc<Mutex<VecDeque<tty7_core::core::clipboard::ClipboardWrite>>>,
     clipboard_write_busy: Arc<AtomicBool>,
+    agent_notifications: Arc<Mutex<VecDeque<(Option<String>, String)>>>,
     /// Whether this pane's pty is one a conhost renders into, and so whether
     /// the reader puts back the cursor a repaint parked. Decided per pane from
     /// its [`PtySource`], and shared rather than copied because the reader can
@@ -588,6 +589,7 @@ pub struct RemoteTerminal {
     images: crate::terminal::images::ImageStore,
     clipboard_writes: Arc<Mutex<VecDeque<tty7_core::core::clipboard::ClipboardWrite>>>,
     clipboard_write_busy: Arc<AtomicBool>,
+    agent_notifications: Arc<Mutex<VecDeque<(Option<String>, String)>>>,
     route: PaneRoute,
     proxy: EventProxy,
     reader_thread: Option<JoinHandle<()>>,
@@ -872,6 +874,9 @@ impl RemoteTerminal {
         if let Ok(mut pending) = self.clipboard_writes.lock() {
             pending.clear();
         }
+        if let Ok(mut pending) = self.agent_notifications.lock() {
+            pending.clear();
+        }
         self.clipboard_write_busy.store(false, Ordering::Release);
 
         let read_half = stream.try_clone()?;
@@ -926,6 +931,7 @@ impl RemoteTerminal {
                 images: self.images.clone(),
                 clipboard_writes: self.clipboard_writes.clone(),
                 clipboard_write_busy: self.clipboard_write_busy.clone(),
+                agent_notifications: self.agent_notifications.clone(),
                 // Deliberately the pane's existing answer rather than one
                 // rebuilt from `route`: the pty on the far side is the same pty
                 // it was before the link dropped, and only this value still
@@ -1022,6 +1028,7 @@ impl RemoteTerminal {
         let images = crate::terminal::images::ImageStore::new();
         let clipboard_writes = Arc::new(Mutex::new(VecDeque::new()));
         let clipboard_write_busy = Arc::new(AtomicBool::new(false));
+        let agent_notifications = Arc::new(Mutex::new(VecDeque::new()));
 
         let reader_quit = Arc::new(AtomicBool::new(false));
         let local_conpty = Arc::new(AtomicBool::new(pty == PtySource::LocalConpty));
@@ -1048,6 +1055,7 @@ impl RemoteTerminal {
                 images: images.clone(),
                 clipboard_writes: clipboard_writes.clone(),
                 clipboard_write_busy: clipboard_write_busy.clone(),
+                agent_notifications: agent_notifications.clone(),
                 local_conpty: local_conpty.clone(),
             },
         );
@@ -1084,6 +1092,7 @@ impl RemoteTerminal {
             images,
             clipboard_writes,
             clipboard_write_busy,
+            agent_notifications,
             route: PaneRoute::Local,
             proxy,
             reader_thread: Some(reader_thread),
@@ -1159,6 +1168,7 @@ impl RemoteTerminal {
                     images,
                     clipboard_writes,
                     clipboard_write_busy,
+                    agent_notifications,
                     local_conpty,
                 } = signals;
                 let mut awaiting_replay = awaiting_replay;
@@ -1255,7 +1265,15 @@ impl RemoteTerminal {
                                 let mut notes = Vec::new();
                                 osc.feed(&out_batch, &mut notes);
                                 for (title, body) in notes {
-                                    notify_desktop(title.as_deref(), &body);
+                                    if agent.lock().ok().is_some_and(|agent| agent.is_some()) {
+                                        // The view applies the current Agent notification
+                                        // mode and window focus before showing the alert.
+                                        if let Ok(mut pending) = agent_notifications.lock() {
+                                            pending.push_back((title, body));
+                                        }
+                                    } else {
+                                        notify_desktop(title.as_deref(), &body);
+                                    }
                                 }
                                 mode_tok.feed(&out_batch, |payload| {
                                     if let Some(mode) = payload.strip_prefix(b"133;V;") {
@@ -1880,14 +1898,16 @@ impl RemoteTerminal {
         remote_host: &str,
         remote_port: u16,
     ) -> anyhow::Result<LoopbackForward> {
-        let mut stream = connect()?;
-        ClientMsg::EnsureLoopbackForward(LoopbackForwardRequest {
-            pane_id,
-            remote_host: remote_host.to_string(),
-            remote_port,
-        })
-        .encode(&mut stream)?;
-        match DaemonMsg::read(&mut stream)? {
+        let reply = Self::control_request(
+            connect()?,
+            ClientMsg::EnsureLoopbackForward(LoopbackForwardRequest {
+                pane_id,
+                remote_host: remote_host.to_string(),
+                remote_port,
+            }),
+            Self::WORKSPACE_OP_TIMEOUT,
+        )?;
+        match reply {
             DaemonMsg::LoopbackForward(forward) => Ok(forward),
             DaemonMsg::Error(msg) => Err(anyhow::anyhow!(msg)),
             other => Err(anyhow::anyhow!(
@@ -1965,6 +1985,10 @@ impl RemoteTerminal {
         term.ssh_user = Some(user);
         term.auto_supplied_password = auto_supplied_password;
         Ok((term, pane_id))
+    }
+
+    pub fn take_agent_notification(&self) -> Option<(Option<String>, String)> {
+        self.agent_notifications.lock().ok()?.pop_front()
     }
 
     pub fn take_auth_prompt(&self) -> Option<(u64, AuthPromptKind)> {
@@ -2193,11 +2217,24 @@ impl RemoteTerminal {
 
     const WORKSPACE_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+    fn control_request(
+        mut stream: Stream,
+        request: ClientMsg,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<DaemonMsg> {
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        request.encode(&mut stream)?;
+        Ok(DaemonMsg::read(&mut stream)?)
+    }
+
     pub fn on_workspace(req: WorkspaceRequest) -> anyhow::Result<DaemonMsg> {
-        let mut stream = connect()?;
-        let _ = stream.set_read_timeout(Some(Self::WORKSPACE_OP_TIMEOUT));
-        ClientMsg::OnWorkspace(Box::new(req)).encode(&mut stream)?;
-        match DaemonMsg::read(&mut stream)? {
+        let reply = Self::control_request(
+            connect()?,
+            ClientMsg::OnWorkspace(Box::new(req)),
+            Self::WORKSPACE_OP_TIMEOUT,
+        )?;
+        match reply {
             DaemonMsg::Error(msg) => Err(anyhow::anyhow!(msg)),
             reply => Ok(reply),
         }
@@ -3143,6 +3180,77 @@ mod replay_tests {
             let (daemon_side, _) = listener.accept().unwrap();
             (client_side, daemon_side)
         }
+    }
+
+    #[test]
+    fn control_request_times_out_and_reads_replies() {
+        use std::io::ErrorKind;
+        use std::time::Duration;
+
+        let request = || {
+            ClientMsg::EnsureLoopbackForward(LoopbackForwardRequest {
+                pane_id: 1,
+                remote_host: "127.0.0.1".into(),
+                remote_port: 8080,
+            })
+        };
+        let timeout = Duration::from_millis(50);
+        let (client, silent_peer) = socket_pair();
+        let err = RemoteTerminal::control_request(client, request(), timeout).unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<std::io::Error>().map(|e| e.kind()),
+                Some(ErrorKind::WouldBlock | ErrorKind::TimedOut)
+            ),
+            "silent peer should time out: {err:?}"
+        );
+        drop(silent_peer);
+
+        let (client, mut peer) = socket_pair();
+        DaemonMsg::LoopbackForward(LoopbackForward { local_port: 8081 })
+            .encode(&mut peer)
+            .unwrap();
+        let reply = RemoteTerminal::control_request(client, request(), timeout).unwrap();
+        assert!(matches!(reply, DaemonMsg::LoopbackForward(f) if f.local_port == 8081));
+
+        let (client, peer) = socket_pair();
+        drop(peer);
+        assert!(RemoteTerminal::control_request(client, request(), timeout).is_err());
+    }
+
+    #[test]
+    fn agent_osc_notifications_wait_for_the_view_policy() {
+        use std::io::Write as _;
+
+        crate::core::config::pin_test_config_dir();
+        let (client, mut daemon) = socket_pair();
+        let term = RemoteTerminal::from_stream(client, TermSize::new(80, 24)).unwrap();
+        *term.agent.lock().unwrap() = Some(CLIAgent::Codex);
+        DaemonMsg::Output(
+            b"\x1b]9;Approve command?\x07\x1b]777;notify;Codex;Choose an option\x07".to_vec(),
+        )
+        .encode(&mut daemon)
+        .unwrap();
+        daemon.flush().unwrap();
+
+        let mut notes = Vec::new();
+        for _ in 0..200 {
+            while let Some(note) = term.take_agent_notification() {
+                notes.push(note);
+            }
+            if notes.len() == 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            notes,
+            vec![
+                (None, "Approve command?".into()),
+                (Some("Codex".into()), "Choose an option".into()),
+            ]
+        );
+        assert_eq!(term.take_agent_notification(), None);
     }
 
     fn ws(cols: u16, rows: u16) -> WinSize {

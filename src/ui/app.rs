@@ -660,7 +660,7 @@ impl Tab {
             // those up as the title the pane is showing.
             title: crate::terminal::view::DEFAULT_TITLE.to_string(),
             osc_title: leaf.stated_title().map(str::to_string),
-            cwd: leaf.cwd().map(|p| p.display().to_string()),
+            cwd: leaf.effective_cwd().map(|p| p.display().to_string()),
             agent: leaf.agent(),
             status: leaf.agent_session().map(|s| s.status),
             live: !leaf.terminal.exited,
@@ -3365,6 +3365,14 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         self.update_config(cx, |cfg| cfg.notify_on_command_finish = mode);
+    }
+
+    pub(crate) fn set_agent_notify_mode(
+        &mut self,
+        mode: crate::core::config::NotifyMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.notify_on_agent_event = mode);
     }
 
     pub(crate) fn set_notify_threshold(&mut self, secs: u64, cx: &mut Context<Self>) {

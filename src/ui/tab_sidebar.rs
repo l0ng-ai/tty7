@@ -22,7 +22,7 @@ use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::right_panel::RESIZE_HANDLE_WIDTH;
 use crate::ui::tab_strip::{
     DragTab, REORDER_SLIDE_MS, abbreviate_home, elide_keep_edges, elide_label,
-    elide_path_keep_tail, measure_text, strip_host_prefix,
+    elide_path_keep_tail, measure_text, project_name, strip_host_prefix,
 };
 
 pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.;
@@ -509,10 +509,11 @@ impl Tty7App {
                         use crate::ui::machine_mirror::TabLabel;
                         let (view, home) = tab.label_view(Some(window), cx);
                         let raw = match view.label() {
-                            TabLabel::Osc(title) | TabLabel::Cwd(title) => {
+                            TabLabel::Osc(title) => {
                                 abbreviate_home(strip_host_prefix(title.trim()), home.as_deref())
                                     .into_owned()
                             }
+                            TabLabel::Cwd(cwd) => project_name(cwd),
                             TabLabel::Agent(agent) => agent.display_name().to_string(),
                             // A tab holding a name got one above.
                             TabLabel::Named(name) => name.to_string(),
@@ -528,8 +529,13 @@ impl Tty7App {
                             ));
                             (placeholder, None)
                         } else {
-                            let full = SharedString::from(raw);
-                            (full.clone(), Some(full))
+                            let full = match view.label() {
+                                TabLabel::Cwd(cwd) => SharedString::from(
+                                    abbreviate_home(cwd, home.as_deref()).into_owned(),
+                                ),
+                                _ => SharedString::from(raw.clone()),
+                            };
+                            (SharedString::from(raw), Some(full))
                         }
                     };
                 let mut branch_shown: Option<(SharedString, SharedString, u32, u32)> = None;

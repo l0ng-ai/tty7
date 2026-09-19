@@ -1,11 +1,8 @@
-//! Whether a path a pane printed actually exists — for panes that cannot
-//! answer that question on the spot.
+//! Whether a path a pane printed actually exists, without blocking the UI.
 //!
-//! A local pane resolves a file link straight out of the filesystem while the
-//! mouse event is still on the stack. A pane whose paths live on another
-//! machine cannot: the answer costs a round trip, and the click that wanted it
-//! is long gone by the time it lands. So a remote pane keeps this cache
-//! instead. A lookup either finds a recorded answer or reports
+//! Even a local path can live on an unavailable network drive, so both local
+//! and remote panes ask their host off the UI thread. A lookup either finds a
+//! recent recorded answer or reports
 //! [`Probe::Unknown`](super::search::Probe::Unknown) and remembers the path as
 //! wanted; the view then asks the host once for everything wanted and files
 //! the replies here, so the *next* hover — a mouse-move away — is a hit.
@@ -16,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::ui::host_ops::HostId;
 
@@ -45,11 +43,14 @@ impl Existence {
 /// so the working set is tiny; the cap only exists so a pane printing
 /// thousands of distinct paths cannot grow this without bound.
 const MAX_ANSWERS: usize = 512;
+const MAX_WANTED: usize = 64;
+const ANSWER_TTL: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 pub(super) struct LinkProbeCache {
     host: Option<HostId>,
-    answers: HashMap<PathBuf, Existence>,
+    generation: u64,
+    answers: HashMap<PathBuf, (Existence, Instant)>,
     /// Paths a lookup wanted and could not answer. Drained by the view, which
     /// turns them into one host call.
     wanted: HashSet<PathBuf>,
@@ -66,17 +67,35 @@ impl LinkProbeCache {
             return;
         }
         self.host = Some(host);
+        self.generation = self.generation.wrapping_add(1);
         self.answers.clear();
         self.wanted.clear();
         self.in_flight.clear();
     }
 
+    /// Identifies the host assignment, including a switch away and back.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Drops old answers so a hover over the same cell can be resolved again.
+    pub fn expire(&mut self) -> bool {
+        let now = Instant::now();
+        let before = self.answers.len();
+        self.answers
+            .retain(|_, (_, checked)| now.duration_since(*checked) < ANSWER_TTL);
+        self.answers.len() != before
+    }
+
     /// The cached answer for `path`, recording it as wanted when there is none.
     pub fn probe(&mut self, path: &Path, require_file: bool) -> Probe {
-        if let Some(known) = self.answers.get(path) {
+        if let Some(&(known, checked)) = self.answers.get(path)
+            && checked.elapsed() < ANSWER_TTL
+        {
             return known.answers(require_file);
         }
-        if !self.in_flight.contains(path) {
+        self.answers.remove(path);
+        if !self.in_flight.contains(path) && self.wanted.len() < MAX_WANTED {
             self.wanted.insert(path.to_path_buf());
         }
         Probe::Unknown
@@ -85,6 +104,9 @@ impl LinkProbeCache {
     /// The paths to ask the host about, moved into the in-flight set so the
     /// next lookup does not ask for them again.
     pub fn take_wanted(&mut self) -> Vec<PathBuf> {
+        if !self.in_flight.is_empty() {
+            return Vec::new();
+        }
         let wanted: Vec<PathBuf> = self.wanted.drain().collect();
         self.in_flight.extend(wanted.iter().cloned());
         wanted
@@ -95,9 +117,14 @@ impl LinkProbeCache {
     /// would otherwise repaint for replies that change nothing.
     pub fn land(&mut self, answers: Vec<(PathBuf, Existence)>) -> bool {
         let mut news = false;
+        let now = Instant::now();
         for (path, existence) in answers {
             self.in_flight.remove(&path);
-            news |= self.answers.insert(path, existence) != Some(existence);
+            news |= self
+                .answers
+                .insert(path, (existence, now))
+                .map(|(previous, _)| previous)
+                != Some(existence);
         }
         // Cheaper than tracking use order, and correct for the same reason the
         // cap is generous: what a hover needs was written microseconds ago, so
@@ -168,6 +195,9 @@ mod tests {
     fn answers_do_not_survive_a_change_of_host() {
         let mut cache = LinkProbeCache::default();
         cache.retarget(local());
+        let local_generation = cache.generation();
+        cache.retarget(local());
+        assert_eq!(cache.generation(), local_generation);
         cache.land(vec![(PathBuf::from("/etc/hosts"), Existence::File)]);
         assert_eq!(
             cache.probe(Path::new("/etc/hosts"), false),
@@ -175,6 +205,56 @@ mod tests {
         );
 
         cache.retarget(HostId::from_connection_key("ssh-direct:me@box:22"));
+        assert_ne!(cache.generation(), local_generation);
         assert_eq!(cache.probe(Path::new("/etc/hosts"), false), Probe::Unknown);
+        cache.take_wanted();
+        cache.retarget(local());
+        assert_ne!(cache.generation(), local_generation);
+        assert!(cache.in_flight.is_empty());
+        assert!(cache.wanted.is_empty());
+    }
+
+    #[test]
+    fn expired_hits_and_misses_are_probed_again() {
+        let mut cache = LinkProbeCache::default();
+        cache.retarget(local());
+        let hit = PathBuf::from("/a/hit");
+        let miss = PathBuf::from("/a/miss");
+        cache.land(vec![
+            (hit.clone(), Existence::File),
+            (miss.clone(), Existence::Missing),
+        ]);
+        assert!(!cache.expire());
+        cache.answers.get_mut(&hit).unwrap().1 = Instant::now() - ANSWER_TTL;
+        assert!(cache.expire());
+        assert!(!cache.expire());
+        assert_eq!(cache.probe(&hit, true), Probe::Unknown);
+        assert_eq!(cache.probe(&miss, false), Probe::Miss);
+        cache.answers.get_mut(&miss).unwrap().1 = Instant::now() - ANSWER_TTL;
+        assert_eq!(cache.probe(&miss, false), Probe::Unknown);
+        assert_eq!(cache.take_wanted().len(), 2);
+    }
+
+    #[test]
+    fn batches_are_bounded_and_only_one_can_be_in_flight() {
+        let mut cache = LinkProbeCache::default();
+        cache.retarget(local());
+        for n in 0..=MAX_WANTED {
+            cache.probe(&PathBuf::from(format!("/a/{n}")), false);
+        }
+        let first = cache.take_wanted();
+        assert_eq!(first.len(), MAX_WANTED);
+        let next = PathBuf::from("/a/next");
+        cache.probe(&next, false);
+        cache.probe(&next, false);
+        assert!(cache.take_wanted().is_empty());
+        assert_eq!(cache.wanted.len(), 1);
+        cache.land(
+            first
+                .into_iter()
+                .map(|path| (path, Existence::Missing))
+                .collect(),
+        );
+        assert_eq!(cache.take_wanted(), vec![next]);
     }
 }

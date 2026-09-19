@@ -46,8 +46,8 @@ pub enum TabLabel<'a> {
     /// sets), so a caller that abbreviates [`Cwd`](Self::Cwd) has to abbreviate
     /// this too.
     Osc(&'a str),
-    /// No name and no title, but an agent is running in it — which is what
-    /// anyone scanning a list of tabs is looking for.
+    /// No name, title, or useful cwd, but an agent is running in it — which is
+    /// what anyone scanning a list of tabs is looking for.
     Agent(CLIAgent),
     /// The working directory of the tab's leading pane.
     Cwd(&'a str),
@@ -158,6 +158,19 @@ pub fn strip_status_mark(title: &str) -> &str {
     }
 }
 
+/// A shell can briefly report its executable path as the terminal title while
+/// it starts. That is process metadata, not a useful tab name; let the cwd
+/// rung below name the project instead.
+fn is_shell_executable_title(title: &str) -> bool {
+    let basename = title.rsplit(['/', '\\']).next().unwrap_or(title);
+    let name = basename.to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    matches!(
+        name,
+        "bash" | "cmd" | "fish" | "nu" | "powershell" | "pwsh" | "wsl" | "zsh"
+    )
+}
+
 impl TabView {
     pub fn label(&self) -> TabLabel<'_> {
         if let Some(name) = self
@@ -173,15 +186,25 @@ impl TabView {
             .as_deref()
             .map(str::trim)
             .map(strip_status_mark)
-            .filter(|t| !t.is_empty())
+            .filter(|t| {
+                !t.is_empty()
+                    && !is_shell_executable_title(t)
+                    && !CLIAgent::ALL.into_iter().any(|agent| {
+                        t.eq_ignore_ascii_case(agent.display_name())
+                            || t.eq_ignore_ascii_case(agent.slug())
+                    })
+            })
         {
             return TabLabel::Osc(title);
         }
-        if let Some(agent) = self.agent {
-            return TabLabel::Agent(agent);
-        }
+        // A bare agent identity is shared by every tab running that agent;
+        // the project directory distinguishes them. A concrete OSC task title
+        // already won above, so this only changes the generic fallback.
         if let Some(cwd) = self.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
             return TabLabel::Cwd(cwd);
+        }
+        if let Some(agent) = self.agent {
+            return TabLabel::Agent(agent);
         }
         match self.title.trim() {
             "" => TabLabel::Unknown,
@@ -215,7 +238,7 @@ pub fn tab_views_of(ws: &Workspace, panes: &[PaneRecord]) -> Vec<TabView> {
                 name: tab.name.clone(),
                 title: head.map(|p| p.title.clone()).unwrap_or_default(),
                 osc_title: titled.and_then(|p| p.osc_title.clone()),
-                cwd: head.and_then(|p| p.cwd.clone()),
+                cwd: titled.and_then(|p| p.cwd.clone()),
                 agent: facts.map(|f| f.agent),
                 status: facts.and_then(|f| f.status),
                 live: records.iter().any(|p| p.live),
@@ -311,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn a_label_prefers_the_name_then_the_title_then_the_agent_then_the_place() {
+    fn a_label_prefers_the_name_then_the_title_then_the_place_then_the_agent() {
         let named = TabView {
             name: Some("  deploy  ".into()),
             osc_title: Some("✳ fixing the switcher".into()),
@@ -344,7 +367,7 @@ mod tests {
             cwd: Some("/work".into()),
             ..view()
         };
-        assert_eq!(working.label(), TabLabel::Agent(CLIAgent::Claude));
+        assert_eq!(working.label(), TabLabel::Cwd("/work"));
 
         let plain = TabView {
             cwd: Some("/work".into()),
@@ -363,6 +386,44 @@ mod tests {
         };
         assert_eq!(blank.label(), TabLabel::Process("zsh"));
         assert_eq!(view().label(), TabLabel::Unknown);
+    }
+
+    #[test]
+    fn generic_shell_and_agent_titles_fall_back_to_the_project_directory() {
+        for titled in [
+            TabView {
+                osc_title: Some(r"C:\WINDOWS\system32\cmd.exe".into()),
+                ..view()
+            },
+            TabView {
+                osc_title: Some(r"D:\Software\PowerShell\7\pwsh.exe".into()),
+                ..view()
+            },
+            TabView {
+                osc_title: Some("Codex".into()),
+                agent: Some(CLIAgent::Codex),
+                ..view()
+            },
+            // The OSC title can arrive before foreground-agent detection.
+            TabView {
+                osc_title: Some("codex".into()),
+                ..view()
+            },
+            TabView {
+                osc_title: Some("✳ Claude Code".into()),
+                agent: Some(CLIAgent::Claude),
+                ..view()
+            },
+        ] {
+            let titled = TabView {
+                cwd: Some(r"D:\workspace\code\backend\tty7".into()),
+                ..titled
+            };
+            assert_eq!(
+                titled.label(),
+                TabLabel::Cwd(r"D:\workspace\code\backend\tty7")
+            );
+        }
     }
 
     #[test]
@@ -386,6 +447,7 @@ mod tests {
                 ..PaneRecord::new(1)
             },
             PaneRecord {
+                cwd: Some("/work/tty7".into()),
                 osc_title: Some("✳ fixing the switcher".into()),
                 agent: Some(AgentFacts {
                     agent: CLIAgent::Claude,
@@ -399,7 +461,7 @@ mod tests {
 
         let views = tab_views_of(&ws, &panes);
         assert_eq!(views.len(), 1);
-        assert_eq!(views[0].cwd.as_deref(), Some("/work"));
+        assert_eq!(views[0].cwd.as_deref(), Some("/work/tty7"));
         assert_eq!(views[0].agent, Some(CLIAgent::Claude));
         assert_eq!(views[0].panes, 2);
         assert!(views[0].live, "one live pane makes the tab live");

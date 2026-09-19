@@ -614,6 +614,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNotifyOnCommandFinishDesc => {
             "長時間のフォアグラウンドコマンドが完了したらデスクトップ通知を表示"
         }
+        L10nKey::SettingsAgentNotifications => "Agent 通知",
+        L10nKey::SettingsAgentNotificationsDesc => {
+            "Agent のタスク完了、権限確認、入力待ちをデスクトップ通知で知らせます。"
+        }
         L10nKey::SettingsNotifyThreshold => "通知閾値（秒）",
         L10nKey::SettingsNotifyThresholdDesc => "「長時間」とみなすのに必要なコマンドの実行時間",
         L10nKey::SettingsWindow => "ウィンドウ",
@@ -889,6 +893,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchNotifyOnCommandFinishKeywords => {
             "通知 アラート 完了 osc デスクトップ バナー 長い コマンド notify on command finish notification alert desktop"
+        }
+        L10nKey::SettingsSearchAgentNotificationsKeywords => {
+            "Agent 通知 権限 確認 質問 入力待ち 完了 agent notifications permission approval question waiting input"
         }
         L10nKey::SettingsSearchNotifyThresholdKeywords => {
             "通知 アラート 秒 時間 長い コマンド 遅延 notify threshold notification alert seconds duration delay"

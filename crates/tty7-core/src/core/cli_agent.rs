@@ -760,7 +760,7 @@ impl AgentSessionState {
                 self.message = ev.message.clone();
             }
             AgentEventKind::Notification => {
-                if self.status == AgentStatus::Working {
+                if matches!(self.status, AgentStatus::Working | AgentStatus::Waiting) {
                     self.status = AgentStatus::Waiting;
                     self.message = ev.message.clone();
                 }
@@ -1218,6 +1218,17 @@ mod tests {
         ));
         assert_eq!(s.status, AgentStatus::Waiting);
         assert!(s.message.as_deref().unwrap().contains("permission"));
+
+        s.apply_event(&ev(
+            AgentEventKind::Notification,
+            Some("Which environment should I use?"),
+            None,
+        ));
+        assert_eq!(s.status, AgentStatus::Waiting);
+        assert_eq!(
+            s.message.as_deref(),
+            Some("Which environment should I use?")
+        );
 
         s.apply_event(&ev(AgentEventKind::ToolComplete, None, None));
         assert_eq!(s.status, AgentStatus::Working);

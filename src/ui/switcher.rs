@@ -3746,15 +3746,15 @@ mod tests {
         view.osc_title = None;
         assert_eq!(
             tab_view_label(&view, 0, None),
-            "Claude Code",
-            "an agent names a tab that has told us nothing else"
+            "tty7",
+            "the project distinguishes tabs running the same agent"
         );
 
         view.agent = None;
         assert_eq!(
             tab_view_label(&view, 0, None),
-            crate::ui::tab_strip::short_title("/Users/x/repo/tty7", None),
-            "otherwise the directory, put through the same shortener as the strip"
+            "tty7",
+            "the directory names the project in the strip and switcher"
         );
 
         view.cwd = None;

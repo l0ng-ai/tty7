@@ -533,6 +533,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNotifications => "通知",
         L10nKey::SettingsNotifyOnCommandFinish => "命令完成时通知",
         L10nKey::SettingsNotifyOnCommandFinishDesc => "较长的前台命令完成后发出桌面提醒。",
+        L10nKey::SettingsAgentNotifications => "Agent 通知",
+        L10nKey::SettingsAgentNotificationsDesc => {
+            "Agent 任务完成、请求权限或等待输入时发出桌面提醒。"
+        }
         L10nKey::SettingsNotifyThreshold => "通知阈值",
         L10nKey::SettingsNotifyThresholdDesc => "命令需运行多久才能算作“较长”。",
         L10nKey::SettingsWindow => "窗口",
@@ -788,6 +792,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchNotifyOnCommandFinishKeywords => {
             "命令完成时通知 通知 提醒 命令 notify command finish notification alert desktop"
+        }
+        L10nKey::SettingsSearchAgentNotificationsKeywords => {
+            "Agent 通知 权限 确认 提问 等待 输入 完成 agent notifications permission approval question waiting input"
         }
         L10nKey::SettingsSearchNotifyThresholdKeywords => {
             "通知阈值 通知 秒数 时长 命令 notify threshold notification duration seconds"

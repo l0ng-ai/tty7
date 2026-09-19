@@ -605,6 +605,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsNotifyOnCommandFinishDesc => {
             "Desktop alert after a long foreground command completes."
         }
+        L10nKey::SettingsAgentNotifications => "Agent notifications",
+        L10nKey::SettingsAgentNotificationsDesc => {
+            "Desktop alerts when an agent finishes a task, requests permission, or needs input."
+        }
         L10nKey::SettingsNotifyThreshold => "Notify threshold",
         L10nKey::SettingsNotifyThresholdDesc => {
             "How long a command must run to qualify as \"long\"."
@@ -848,6 +852,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchNewTabPositionKeywords => "tabs order end after current",
         L10nKey::SettingsSearchNotifyOnCommandFinishKeywords => {
             "notification alert done osc desktop banner long command"
+        }
+        L10nKey::SettingsSearchAgentNotificationsKeywords => {
+            "agent notifications permission approval question waiting input completion desktop"
         }
         L10nKey::SettingsSearchNotifyThresholdKeywords => {
             "notification alert seconds duration long command delay"

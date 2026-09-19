@@ -30,7 +30,7 @@ use crate::core::actions::{
     OpenLinkUnderPointer, RevealLinkUnderPointer, SendBackTab, SendTab, SplitDown, SplitRight,
     ToggleMaximizePane,
 };
-use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier, NotifyMode};
+use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier};
 use crate::core::shell_quote::quote_for_shell;
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
@@ -363,10 +363,12 @@ pub struct TerminalView {
     last_mouse_cell: Option<(usize, usize)>,
     last_hover_cell: Option<(usize, usize)>,
     link_modifier_down: bool,
-    /// What this pane's host has said about paths printed in it, for panes
-    /// that cannot answer that from the local filesystem. Empty and unused on
-    /// a local pane, which resolves inline instead.
+    /// Filesystem answers arrive off the UI thread even for local paths: a
+    /// local pathname can live on an unavailable network share.
     link_probes: super::link_probe::LinkProbeCache,
+    link_epoch: u64,
+    pending_file_links: Vec<(FileLinkRequest, FileLinkAction)>,
+    pending_loopback_urls: Vec<(LoopbackPlan, String)>,
     /// The repository the pane's directory sits in, once the host has been
     /// asked, and the directory that answer belongs to. A second root for
     /// relative paths: build output routinely names files from the workspace
@@ -381,7 +383,7 @@ pub struct TerminalView {
     /// The file link the most recent right mouse-down landed on, latched for
     /// the same reason [`context_menu_allowed`](Self::context_menu_allowed)
     /// is: by the time the menu is built the pointer is only a memory.
-    menu_link: Option<super::search::LinkTarget>,
+    menu_link: Option<(std::path::PathBuf, FileLinkRequest)>,
     scroll_debt: f32,
     /// Lines travelled under the zoom modifier that have not yet added up to a
     /// font-size step. Kept apart from [`scroll_debt`](Self::scroll_debt) so
@@ -410,12 +412,15 @@ pub struct TerminalView {
     /// the flash: a burst of bells holds one steady flash instead of strobing.
     bell_epoch: u64,
     pub report_mouse: bool,
+    last_reported_focus: Option<bool>,
     last_at_prompt: bool,
     last_typeahead_blocked: bool,
     running_since: Option<std::time::Instant>,
     running_title: String,
     running_agent: Option<crate::core::cli_agent::CLIAgent>,
     last_agent_status: Option<crate::core::cli_agent::AgentStatus>,
+    last_agent_message: Option<String>,
+    agent_bell_pending: bool,
     last_agent_session: (Option<String>, Option<Vec<String>>),
     agent_turn_started: Option<std::time::Instant>,
     agent_was_rich: bool,
@@ -506,13 +511,8 @@ pub(super) struct HoveredLink {
     pub armed: bool,
 }
 
-enum LoopbackOpen {
-    Forwarded(String),
-    ForwardFailed(String),
-    NotLoopback,
-}
-
 /// What sits under a cell, once the grid has been read.
+#[derive(Clone)]
 enum GridLink {
     /// An OSC 8 hyperlink the emitter declared, with the extent it declared.
     Hyperlink(String, Point, Point),
@@ -532,6 +532,27 @@ enum LinkAt {
         pending: bool,
     },
     None,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct FileLinkRequest {
+    text: String,
+    click_idx: usize,
+    roots: super::search::LinkRoots,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileLinkAction {
+    Open,
+    Reveal,
+    CopyPath,
+}
+
+fn explicit_file_candidate(
+    candidate: &super::search::FileCandidate,
+    style: super::search::PathStyle,
+) -> bool {
+    candidate.looks_like_a_path(style) || candidate.line.is_some() || candidate.path.contains('.')
 }
 
 /// What it takes to open one of a pane's loopback ports from this machine.
@@ -703,6 +724,30 @@ fn compose_notification_title(
         (Some(only), None) | (None, Some(only)) => only,
         (None, None) => "tty7".to_string(),
     }
+}
+
+fn agent_attention_requested(
+    previous_status: Option<crate::core::cli_agent::AgentStatus>,
+    previous_message: Option<&str>,
+    session: Option<&crate::core::cli_agent::AgentSessionState>,
+    bell: bool,
+) -> bool {
+    use crate::core::cli_agent::AgentStatus;
+
+    if let Some(session) = session.filter(|s| s.rich) {
+        // A rich completion already has its own notification. Codex can emit
+        // a BEL for the same result as well as for mid-turn approval prompts.
+        if session.status == AgentStatus::Done {
+            return false;
+        }
+        if session.status == AgentStatus::Waiting
+            && (previous_status != Some(AgentStatus::Waiting)
+                || previous_message != session.message.as_deref())
+        {
+            return true;
+        }
+    }
+    bell
 }
 
 /// The longest command line to put in a confirmation. The shell sends up to
@@ -1453,7 +1498,7 @@ impl TerminalView {
         .detach();
 
         let focus_subs = vec![
-            cx.on_focus_in(&focus_handle, window, |view, _window, cx| {
+            cx.on_focus_in(&focus_handle, window, |view, window, cx| {
                 view.cursor_visible = true;
                 if view.keep_unread_on_focus {
                     view.keep_unread_on_focus = false;
@@ -1461,12 +1506,19 @@ impl TerminalView {
                     view.agent_result_unread = false;
                     view.note_agent_result_unread(cx);
                 }
-                view.report_focus_change(true);
+                view.report_focus_change(window.is_window_active());
                 cx.notify();
             }),
             cx.on_blur(&focus_handle, window, |view, _window, cx| {
                 view.report_focus_change(false);
                 cx.notify();
+            }),
+            // A minimized Windows window may not draw the frame that would
+            // deliver on_blur. Report immediately, deduplicating both paths.
+            cx.observe_window_activation(window, |view, window, _cx| {
+                if view.focus_handle.is_focused(window) {
+                    view.report_focus_change(window.is_window_active());
+                }
             }),
         ];
 
@@ -1587,9 +1639,13 @@ impl TerminalView {
             marked_text: String::new(),
             last_mouse_cell: None,
             report_mouse,
+            last_reported_focus: None,
             last_hover_cell: None,
             link_modifier_down: false,
             link_probes: Default::default(),
+            link_epoch: 0,
+            pending_file_links: Vec::new(),
+            pending_loopback_urls: Vec::new(),
             link_repo_root: None,
             link_repo_root_pending: false,
             context_menu_allowed: true,
@@ -1616,6 +1672,8 @@ impl TerminalView {
             running_title: String::new(),
             running_agent: None,
             last_agent_status: None,
+            last_agent_message: None,
+            agent_bell_pending: false,
             last_agent_session: (None, None),
             agent_turn_started: None,
             agent_was_rich: false,
@@ -1778,9 +1836,21 @@ impl TerminalView {
     }
 
     pub fn set_workspace(&mut self, workspace: Option<crate::terminal::PaneWorkspace>) {
+        if self.workspace != workspace {
+            self.link_epoch = self.link_epoch.wrapping_add(1);
+            self.pending_file_links.clear();
+            self.pending_loopback_urls.clear();
+            self.link_probes = Default::default();
+            self.link_repo_root = None;
+            self.link_repo_root_pending = false;
+            self.last_hover_cell = None;
+            self.hovered_link = None;
+            self.menu_link = None;
+        }
         self.host_id = workspace
             .as_ref()
             .map_or(crate::ui::host_ops::HostId::LOCAL, |w| w.target.host_id());
+        self.link_probes.retarget(self.host_id);
         // The pane answers to its workspace's name from here on: untitled tabs
         // show it, and a dead link's "— disconnected" suffix hangs off it
         // instead of the bare app name.
@@ -1828,6 +1898,7 @@ impl TerminalView {
         self.remote_clipboard_write_in_flight = None;
         self.terminal
             .adopt_relink(stream, buffered, route, size, cell_w, cell_h)?;
+        self.last_reported_focus = None;
         self.relink_abandoned = false;
         self.relink_inflight = false;
         self.title = self.default_title.clone();
@@ -2215,19 +2286,24 @@ impl TerminalView {
                 };
                 self.terminal.write(fmt(rgb).into_bytes());
             }
-            AlacEvent::Bell => match cx.global::<Config>().bell {
-                BellMode::None => {}
-                BellMode::Visual => self.flash_bell(cx),
-                BellMode::Audible => {
-                    if !ring_system_bell() {
+            AlacEvent::Bell => {
+                // Codex's automatic notification backend uses BEL in terminals
+                // it does not recognize as supporting OSC 9, including tty7.
+                self.agent_bell_pending |= self.terminal.foreground_agent().is_some();
+                match cx.global::<Config>().bell {
+                    BellMode::None => {}
+                    BellMode::Visual => self.flash_bell(cx),
+                    BellMode::Audible => {
+                        if !ring_system_bell() {
+                            self.flash_bell(cx);
+                        }
+                    }
+                    BellMode::Both => {
+                        ring_system_bell();
                         self.flash_bell(cx);
                     }
                 }
-                BellMode::Both => {
-                    ring_system_bell();
-                    self.flash_bell(cx);
-                }
-            },
+            }
             AlacEvent::TextAreaSizeRequest(fmt) => {
                 let size = self.terminal.size();
                 let reply = fmt(alacritty_terminal::event::WindowSize {
@@ -2242,11 +2318,17 @@ impl TerminalView {
         }
     }
 
-    fn report_focus_change(&self, focused: bool) {
+    fn report_focus_change(&mut self, focused: bool) {
         let mode = *self.terminal.term.lock().mode();
-        if let Some(bytes) = focus_report_bytes(mode, focused) {
-            self.terminal.write(bytes);
+        let Some(bytes) = focus_report_bytes(mode, focused) else {
+            self.last_reported_focus = None;
+            return;
+        };
+        if self.last_reported_focus == Some(focused) {
+            return;
         }
+        self.last_reported_focus = Some(focused);
+        self.terminal.write(bytes);
     }
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -3623,6 +3705,17 @@ impl TerminalView {
     }
 
     fn poll_foreground(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let agent_notify_allowed = cx
+            .global::<Config>()
+            .notify_on_agent_event
+            .allows(window.is_window_active());
+        // Consume disabled alerts too, so enabling notifications does not
+        // deliver old permission requests.
+        while let Some((title, body)) = self.terminal.take_agent_notification() {
+            if agent_notify_allowed {
+                self.notify_pane(title.as_deref(), &body, cx);
+            }
+        }
         if self.terminal.exited {
             return;
         }
@@ -3653,11 +3746,10 @@ impl TerminalView {
             cx.notify();
         }
 
-        let notify_allowed = match cx.global::<Config>().notify_on_command_finish {
-            NotifyMode::Never => false,
-            NotifyMode::Unfocused => !window.is_window_active(),
-            NotifyMode::Always => true,
-        };
+        let notify_allowed = cx
+            .global::<Config>()
+            .notify_on_command_finish
+            .allows(window.is_window_active());
 
         let running = !at_prompt;
         if running && self.running_agent.is_none() {
@@ -3675,25 +3767,25 @@ impl TerminalView {
                 let title = std::mem::take(&mut self.running_title);
                 let agent = self.running_agent.take();
                 self.running_since = None;
-                if notify_allowed {
-                    match agent {
-                        Some(_) if self.agent_was_rich => {}
-                        Some(agent) => self.notify_agent_finished(agent, elapsed, cx),
-                        None => {
-                            let threshold = std::time::Duration::from_secs(
-                                cx.global::<Config>().notify_threshold_secs,
-                            );
-                            if elapsed >= threshold {
-                                self.notify_command_finished(&title, elapsed, cx);
-                            }
+                match agent {
+                    Some(agent) if !self.agent_was_rich && agent_notify_allowed => {
+                        self.notify_agent_finished(agent, elapsed, cx);
+                    }
+                    None if notify_allowed => {
+                        let threshold = std::time::Duration::from_secs(
+                            cx.global::<Config>().notify_threshold_secs,
+                        );
+                        if elapsed >= threshold {
+                            self.notify_command_finished(&title, elapsed, cx);
                         }
                     }
+                    _ => {}
                 }
             }
             _ => {}
         }
 
-        let turn_finished = self.poll_agent_status(notify_allowed, window, cx);
+        let turn_finished = self.poll_agent_status(agent_notify_allowed, window, cx);
 
         let session = self.terminal.agent_session();
         let tool_activity = match session.as_ref().map(|s| s.activity) {
@@ -4007,6 +4099,29 @@ impl TerminalView {
 
         let status = session.as_ref().map(|s| s.status);
         let turns = session.as_ref().map_or(0, |s| s.turns);
+        let agent_name = self
+            .terminal
+            .foreground_agent()
+            .map(|a| a.display_name())
+            .unwrap_or("Agent");
+        let bell = std::mem::take(&mut self.agent_bell_pending);
+        if !adopted_baseline
+            && notify_allowed
+            && agent_attention_requested(
+                self.last_agent_status,
+                self.last_agent_message.as_deref(),
+                session.as_ref(),
+                bell,
+            )
+        {
+            let body = session
+                .as_ref()
+                .filter(|s| s.status == AgentStatus::Waiting)
+                .and_then(|s| s.message.clone())
+                .unwrap_or_else(|| t(L10nKey::NotifyAgentWaiting).to_string());
+            self.notify_pane(Some(agent_name), &body, cx);
+        }
+        self.last_agent_message = session.as_ref().and_then(|s| s.message.clone());
         if adopted_baseline {
             // From here on this app is watching the pane, so a later rebuild
             // must find a mark rather than adopt its own replay.
@@ -4065,21 +4180,9 @@ impl TerminalView {
         self.record_agent_read_mark(turns, cx);
 
         let rich = session.as_ref().is_some_and(|s| s.rich);
-        let agent_name = self
-            .terminal
-            .foreground_agent()
-            .map(|a| a.display_name())
-            .unwrap_or("Agent");
         match status {
             Some(AgentStatus::Working) => {
                 self.agent_turn_started = Some(std::time::Instant::now());
-            }
-            Some(AgentStatus::Waiting) if rich && notify_allowed => {
-                let body = session
-                    .as_ref()
-                    .and_then(|s| s.message.clone())
-                    .unwrap_or_else(|| t(L10nKey::NotifyAgentWaiting).to_string());
-                self.notify_pane(Some(agent_name), &body, cx);
             }
             Some(AgentStatus::Done)
                 if rich
@@ -5744,45 +5847,199 @@ impl TerminalView {
         if !cx.global::<Config>().link_url {
             return false;
         }
-        let include_loopback = self.can_forward_loopback(cx);
-        match self.resolve_link_at(col, row, true, include_loopback, cx) {
-            LinkAt::Found(LinkTarget::Url(url), ..) => self.open_url(&url, window, cx),
-            LinkAt::Found(
-                LinkTarget::File {
-                    path,
-                    line,
-                    column,
-                    is_dir,
-                },
-                ..,
-            ) => self.open_file_link(path, line, column, is_dir, window, cx),
-            LinkAt::Unresolved { candidate, pending } => {
-                return self.report_unresolved_link(&candidate, pending, window, cx);
+        let Some(line) = self.link_line_at(col, row) else {
+            return false;
+        };
+        let (text, points, click_idx) = match line {
+            GridLink::Hyperlink(url, ..) => {
+                self.open_url(&url, window, cx);
+                return true;
             }
-            LinkAt::None => return false,
+            GridLink::Text(text, points, click_idx) => (text, points, click_idx),
+        };
+        // URLs require no filesystem answer. Resolve them before submitting
+        // a file lookup, including bare localhost links on a remote pane.
+        let url = super::search::link_at(
+            &text,
+            click_idx,
+            &super::search::LinkRoots::default(),
+            false,
+            &mut |_, _| super::search::Probe::Unknown,
+        )
+        .and_then(|link| match link.target {
+            LinkTarget::Url(url) => Some(url),
+            _ => None,
+        })
+        .or_else(|| {
+            self.can_forward_loopback(cx)
+                .then(|| super::loopback::loopback_url_span_at(&text, click_idx))?
+                .map(|(_, _, url)| url)
+        });
+        if let Some(url) = url {
+            self.open_url(&url, window, cx);
+            return true;
         }
+        if !self.cwd_is_on_host() {
+            return false;
+        }
+        let roots = self.link_roots(cx);
+        let Some(candidate) = super::search::unresolved_candidate(&text, click_idx, roots.style)
+        else {
+            return false;
+        };
+        // An ordinary word is only a link once a hover has found a file for
+        // it. Otherwise let the terminal handle the click, even on a cold cache.
+        if !explicit_file_candidate(&candidate, roots.style)
+            && !matches!(
+                self.resolve_grid_link(
+                    GridLink::Text(text.clone(), points, click_idx),
+                    &roots,
+                    true,
+                    false,
+                    cx,
+                ),
+                LinkAt::Found(LinkTarget::File { .. }, ..)
+            )
+        {
+            return false;
+        }
+        self.resolve_file_link(
+            FileLinkRequest {
+                text,
+                click_idx,
+                roots,
+            },
+            FileLinkAction::Open,
+            window,
+            cx,
+        )
+    }
+
+    fn resolve_file_link(
+        &mut self,
+        request: FileLinkRequest,
+        action: FileLinkAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !cx.global::<Config>().link_url || !self.cwd_is_on_host() {
+            return false;
+        }
+        let Some(host) = self.host(cx) else {
+            return false;
+        };
+        let pending = (request.clone(), action);
+        if self.pending_file_links.contains(&pending) || self.pending_file_links.len() >= 8 {
+            return true;
+        }
+        self.pending_file_links.push(pending.clone());
+        let epoch = self.link_epoch;
+        let FileLinkRequest {
+            text,
+            click_idx,
+            roots,
+        } = request.clone();
+        // Keep the clicked text and roots, not screen coordinates: output or
+        // scrolling can replace that cell before a slow filesystem answers.
+        crate::ui::host_ops::HostOps::run_in(
+            host,
+            window,
+            cx,
+            move |host| {
+                super::search::link_at(&text, click_idx, &roots, true, &mut |path, require_file| {
+                    match host.stat(path) {
+                        Ok(meta) if !require_file || !meta.is_dir => super::search::Probe::Hit {
+                            is_dir: meta.is_dir,
+                        },
+                        _ => super::search::Probe::Miss,
+                    }
+                })
+            },
+            move |view, link, window, cx| {
+                if view.link_epoch != epoch {
+                    return;
+                }
+                view.pending_file_links.retain(|queued| queued != &pending);
+                if !cx.global::<Config>().link_url || !view.cwd_is_on_host() {
+                    return;
+                }
+                match link.map(|link| link.target) {
+                    Some(LinkTarget::File {
+                        path,
+                        line,
+                        column,
+                        is_dir,
+                    }) => match action {
+                        FileLinkAction::Open => {
+                            view.open_file_link(path, line, column, is_dir, window, cx)
+                        }
+                        FileLinkAction::Reveal if view.host_id.is_local() => {
+                            if let Err(e) = reveal_file_path(&path) {
+                                view.warn_file_open_failed(&path, &e, window, cx);
+                            }
+                        }
+                        FileLinkAction::CopyPath => cx.write_to_clipboard(
+                            ClipboardItem::new_string(path.to_string_lossy().into_owned()),
+                        ),
+                        FileLinkAction::Reveal => {}
+                    },
+                    _ => {
+                        if let Some(candidate) = super::search::unresolved_candidate(
+                            &request.text,
+                            request.click_idx,
+                            request.roots.style,
+                        ) {
+                            view.report_unresolved_link(&candidate, &request.roots, window, cx);
+                        }
+                    }
+                }
+            },
+        );
         true
     }
 
     /// Latches the file link under a right mouse-down for the context menu.
     ///
-    /// Resolving here rather than in the menu builder is what lets the menu
-    /// name a real file: the builder runs a turn later, with no event and no
-    /// pointer, and asking the grid then would be asking about wherever the
-    /// mouse has since gone.
+    /// The menu can offer operations on a cold path candidate; the chosen
+    /// action validates it off-thread against these captured roots. Neither
+    /// moving the mouse nor new output can change the menu's target.
     pub fn record_menu_link(&mut self, col: usize, row: usize, cx: &mut Context<Self>) {
         // The same switch that decides whether a path underlines and whether a
         // click follows one. Without this the menu would go on offering to
         // open files in a pane where link detection is turned off.
-        if !cx.global::<Config>().link_url {
-            self.menu_link = None;
+        self.menu_link = None;
+        if !cx.global::<Config>().link_url || !self.cwd_is_on_host() {
             return;
         }
-        let include_loopback = self.can_forward_loopback(cx);
-        self.menu_link = match self.resolve_link_at(col, row, true, include_loopback, cx) {
-            LinkAt::Found(target @ LinkTarget::File { .. }, ..) => Some(target),
-            _ => None,
+        let Some(snapshot @ GridLink::Text(..)) = self.link_line_at(col, row) else {
+            return;
         };
+        let roots = self.link_roots(cx);
+        let include_loopback = self.can_forward_loopback(cx);
+        let path =
+            match self.resolve_grid_link(snapshot.clone(), &roots, true, include_loopback, cx) {
+                LinkAt::Found(LinkTarget::File { path, .. }, ..) => Some(path),
+                LinkAt::Unresolved {
+                    candidate,
+                    pending: true,
+                } if explicit_file_candidate(&candidate, roots.style) => {
+                    Some(std::path::PathBuf::from(candidate.path))
+                }
+                _ => None,
+            };
+        self.menu_link = path.and_then(|path| {
+            let GridLink::Text(text, _, click_idx) = snapshot else {
+                return None;
+            };
+            Some((
+                path,
+                FileLinkRequest {
+                    text,
+                    click_idx,
+                    roots,
+                },
+            ))
+        });
     }
 
     /// Drops a latched link, for a right click the application is taking.
@@ -5792,40 +6049,27 @@ impl TerminalView {
 
     /// The path the context menu is about, if it is about one.
     fn menu_link_path(&self) -> Option<&std::path::Path> {
-        match self.menu_link.as_ref()? {
-            LinkTarget::File { path, .. } => Some(path),
-            LinkTarget::Url(_) => None,
-        }
+        self.menu_link.as_ref().map(|(path, _)| path.as_path())
     }
 
     fn open_menu_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(LinkTarget::File {
-            path,
-            line,
-            column,
-            is_dir,
-        }) = self.menu_link.clone()
-        else {
-            return;
-        };
-        self.open_file_link(path, line, column, is_dir, window, cx);
+        self.resolve_menu_link(FileLinkAction::Open, window, cx);
     }
 
     fn reveal_menu_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.menu_link_path().map(std::path::Path::to_path_buf) else {
-            return;
-        };
-        if let Err(e) = reveal_file_path(&path) {
-            self.warn_file_open_failed(&path, &e, window, cx);
-        }
+        self.resolve_menu_link(FileLinkAction::Reveal, window, cx);
     }
 
-    fn copy_menu_link_path(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.menu_link_path() else {
+    fn resolve_menu_link(
+        &mut self,
+        action: FileLinkAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, request)) = self.menu_link.clone() else {
             return;
         };
-        let text = path.to_string_lossy().into_owned();
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.resolve_file_link(request, action, window, cx);
     }
 
     /// Hands a resolved file link to whatever the user wants opening files.
@@ -5892,19 +6136,13 @@ impl TerminalView {
     fn report_unresolved_link(
         &mut self,
         candidate: &super::search::FileCandidate,
-        pending: bool,
+        roots: &super::search::LinkRoots,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let roots = self.link_roots(cx);
         // A word that is not written like a path was never a link, and saying
         // so on every modifier-click over ordinary output would be noise.
-        if !candidate.looks_like_a_path(roots.style) {
-            return false;
-        }
-        // The host has not answered yet. The underline is the promise that it
-        // has; before then, accusing it of losing the file would be a guess.
-        if pending {
+        if !explicit_file_candidate(candidate, roots.style) {
             return false;
         }
         // An absolute or `~`-rooted path was never measured from anywhere, so
@@ -5913,7 +6151,7 @@ impl TerminalView {
         let rooted = candidate.is_rooted(roots.style);
         let root = match rooted {
             true => None,
-            false => roots.dirs.into_iter().next(),
+            false => roots.dirs.first(),
         };
         let message = match root {
             Some(root) => t_fmt(
@@ -5930,47 +6168,71 @@ impl TerminalView {
         true
     }
 
-    fn open_url(&self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
-        match self.forwarded_loopback_url(url, cx) {
-            LoopbackOpen::Forwarded(url) => cx.open_url(&url),
-            LoopbackOpen::NotLoopback => cx.open_url(url),
-            LoopbackOpen::ForwardFailed(reason) => {
-                window.push_notification(reason, cx);
-            }
-        }
+    fn open_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_url_with_forwarder(url, window, cx, |route, loopback| {
+            route.ensure_loopback(loopback.forward_host(), loopback.port)
+        });
     }
 
-    fn forwarded_loopback_url(&self, url: &str, cx: &mut Context<Self>) -> LoopbackOpen {
+    fn open_url_with_forwarder(
+        &mut self,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        forward: impl FnOnce(
+            crate::ui::app::ForwardRoute,
+            super::loopback::LoopbackUrl,
+        ) -> anyhow::Result<crate::daemon::protocol::LoopbackForward>
+        + Send
+        + 'static,
+    ) {
         let plan = self.loopback_plan(cx);
-        if matches!(plan, LoopbackPlan::Direct) {
-            return LoopbackOpen::NotLoopback;
+        let loopback = super::loopback::parse_loopback_url(url);
+        if matches!(plan, LoopbackPlan::Direct | LoopbackPlan::NoForwardNeeded)
+            || loopback.is_none()
+        {
+            cx.open_url(url);
+            return;
         }
-        let Some(loopback) = super::loopback::parse_loopback_url(url) else {
-            return LoopbackOpen::NotLoopback;
-        };
-        if matches!(plan, LoopbackPlan::NoForwardNeeded) {
-            return LoopbackOpen::NotLoopback;
+        let loopback = loopback.expect("a forwardable loopback URL");
+        let request = (plan, url.to_string());
+        if self.pending_loopback_urls.contains(&request) || self.pending_loopback_urls.len() >= 8 {
+            return;
         }
-
-        let forwarded = match &plan {
-            LoopbackPlan::ForwardOnPane(_) | LoopbackPlan::ForwardOnWorkspace(_) => self
-                .forward_route()
-                .ensure_loopback(loopback.forward_host(), loopback.port),
-            LoopbackPlan::Direct | LoopbackPlan::NoForwardNeeded => unreachable!("handled above"),
-        };
-        match forwarded {
-            Ok(forward) => LoopbackOpen::Forwarded(loopback.forwarded_url(forward.local_port)),
-            Err(e) => {
-                log::warn!("failed to forward loopback URL {url}: {e}");
-                LoopbackOpen::ForwardFailed(t_fmt(
-                    L10nKey::LoopbackForwardFailed,
-                    &[
-                        ("port", &loopback.port.to_string()),
-                        ("error", &e.to_string()),
-                    ],
-                ))
-            }
-        }
+        self.pending_loopback_urls.push(request.clone());
+        let route = self.forward_route();
+        let epoch = self.link_epoch;
+        let target = loopback.clone();
+        let work = cx
+            .background_executor()
+            .spawn(async move { forward(route, target) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = work.await;
+            let _ = this.update_in(cx, |view, window, cx| {
+                if view.link_epoch != epoch {
+                    return;
+                }
+                view.pending_loopback_urls
+                    .retain(|pending| pending != &request);
+                if view.loopback_plan(cx) != request.0 || !cx.global::<Config>().link_url {
+                    return;
+                }
+                match result {
+                    Ok(forward) => cx.open_url(&loopback.forwarded_url(forward.local_port)),
+                    Err(e) => window.push_notification(
+                        t_fmt(
+                            L10nKey::LoopbackForwardFailed,
+                            &[
+                                ("port", &loopback.port.to_string()),
+                                ("error", &e.to_string()),
+                            ],
+                        ),
+                        cx,
+                    ),
+                }
+            });
+        })
+        .detach();
     }
 
     /// How forward requests about this pane reach the daemon that owns them —
@@ -6011,6 +6273,9 @@ impl TerminalView {
         armed: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.link_probes.expire() {
+            self.last_hover_cell = None;
+        }
         // A mouse crossing a pane lands on the same cell many times over.
         // Nothing about the answer depends on where inside the cell the
         // pointer is, so the work is worth doing once.
@@ -6129,13 +6394,6 @@ impl TerminalView {
         let Some(line) = self.link_line_at(col, row) else {
             return LinkAt::None;
         };
-        let (text, points, click_idx) = match line {
-            GridLink::Hyperlink(uri, start, end) => {
-                return LinkAt::Found(LinkTarget::Url(uri), start, end);
-            }
-            GridLink::Text(text, points, click_idx) => (text, points, click_idx),
-        };
-
         // A pane whose paths belong to neither its host nor this machine —
         // an `ssh` typed into a local shell — has nothing that can answer for
         // them. It used to fall through to the local filesystem, so an
@@ -6146,7 +6404,23 @@ impl TerminalView {
             true => self.link_roots(cx),
             false => super::search::LinkRoots::default(),
         };
-        let local = self.host_id.is_local();
+        self.resolve_grid_link(line, &roots, files, include_loopback, cx)
+    }
+
+    fn resolve_grid_link(
+        &mut self,
+        snapshot: GridLink,
+        roots: &super::search::LinkRoots,
+        files: bool,
+        include_loopback: bool,
+        cx: &mut Context<Self>,
+    ) -> LinkAt {
+        let (text, points, click_idx) = match snapshot {
+            GridLink::Hyperlink(uri, start, end) => {
+                return LinkAt::Found(LinkTarget::Url(uri), start, end);
+            }
+            GridLink::Text(text, points, click_idx) => (text, points, click_idx),
+        };
         // Before the first probe, not after: `retarget` empties the cache when
         // the host has changed, and doing that between recording a wanted path
         // and draining it would throw the question away unasked.
@@ -6154,14 +6428,11 @@ impl TerminalView {
         let probes = &mut self.link_probes;
         let mut pending = false;
         let mut probe = |path: &std::path::Path, require_file: bool| {
-            let answer = match local {
-                true => super::search::local_probe(path, require_file),
-                false => probes.probe(path, require_file),
-            };
+            let answer = probes.probe(path, require_file);
             pending |= matches!(answer, super::search::Probe::Unknown);
             answer
         };
-        let link = super::search::link_at(&text, click_idx, &roots, files, &mut probe);
+        let link = super::search::link_at(&text, click_idx, roots, files, &mut probe);
         // `probe` holds the cache borrow; nothing below touches it, so the
         // borrow ends here and `self` is whole again for the flush.
         self.flush_link_probes(cx);
@@ -6278,6 +6549,7 @@ impl TerminalView {
         };
         self.link_repo_root_pending = true;
         let cwd = cwd.to_path_buf();
+        let epoch = self.link_epoch;
         crate::ui::host_ops::HostOps::run(
             host,
             cx,
@@ -6286,6 +6558,9 @@ impl TerminalView {
                 move |h| h.repo_root(&cwd).ok().flatten()
             },
             move |view, root, cx| {
+                if view.link_epoch != epoch {
+                    return;
+                }
                 view.link_repo_root_pending = false;
                 view.link_repo_root = Some((cwd, root));
                 view.recompute_link_hover(cx);
@@ -6297,9 +6572,6 @@ impl TerminalView {
     /// call, and re-runs the hover once the replies are in — the mouse may
     /// have been resting on the link the whole time it took.
     fn flush_link_probes(&mut self, cx: &mut Context<Self>) {
-        if self.host_id.is_local() {
-            return;
-        }
         // The host comes first: `take_wanted` moves the paths into the
         // in-flight set on the promise that a call is about to carry them, and
         // a host that has gone away between the hover and here would break
@@ -6313,6 +6585,8 @@ impl TerminalView {
         if wanted.is_empty() {
             return;
         }
+        let generation = self.link_probes.generation();
+        let epoch = self.link_epoch;
         crate::ui::host_ops::HostOps::run(
             host,
             cx,
@@ -6330,10 +6604,14 @@ impl TerminalView {
                     })
                     .collect::<Vec<_>>()
             },
-            |view, answers, cx| {
+            move |view, answers, cx| {
+                if view.link_epoch != epoch || view.link_probes.generation() != generation {
+                    return;
+                }
                 if view.link_probes.land(answers) {
                     view.recompute_link_hover(cx);
                 }
+                view.flush_link_probes(cx);
             },
         );
     }
@@ -7084,9 +7362,11 @@ impl Render for TerminalView {
             .on_action(cx.listener(|this, _: &RevealLinkUnderPointer, window, cx| {
                 this.reveal_menu_link(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &CopyLinkPathUnderPointer, _w, cx| {
-                this.copy_menu_link_path(cx);
-            }))
+            .on_action(
+                cx.listener(|this, _: &CopyLinkPathUnderPointer, window, cx| {
+                    this.resolve_menu_link(FileLinkAction::CopyPath, window, cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &InsertNewline, _w, cx| {
                 this.insert_newline_action(cx);
             }))
@@ -8118,6 +8398,57 @@ mod tests {
             "Claude"
         );
         assert_eq!(compose_notification_title(None, None, None), "tty7");
+    }
+
+    #[test]
+    fn agent_attention_notifications_cover_bells_and_new_waiting_messages() {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus};
+
+        let mut session = AgentSessionState {
+            status: AgentStatus::Working,
+            rich: true,
+            ..Default::default()
+        };
+        let needs_attention = |status, message, session: &AgentSessionState, bell| {
+            super::agent_attention_requested(Some(status), message, Some(session), bell)
+        };
+        assert!(!needs_attention(
+            AgentStatus::Working,
+            None,
+            &session,
+            false
+        ));
+        assert!(needs_attention(AgentStatus::Working, None, &session, true));
+
+        session.status = AgentStatus::Waiting;
+        session.message = Some("Approve running tests?".into());
+        assert!(needs_attention(AgentStatus::Working, None, &session, false));
+        assert!(!needs_attention(
+            AgentStatus::Waiting,
+            session.message.as_deref(),
+            &session,
+            false,
+        ));
+        assert!(needs_attention(
+            AgentStatus::Waiting,
+            Some("Which environment?"),
+            &session,
+            false,
+        ));
+        // A later BEL is a new event even when the status and text are equal.
+        assert!(needs_attention(
+            AgentStatus::Waiting,
+            session.message.as_deref(),
+            &session,
+            true,
+        ));
+
+        session.status = AgentStatus::Done;
+        assert!(!needs_attention(AgentStatus::Working, None, &session, true));
+        session.rich = false;
+        assert!(needs_attention(AgentStatus::Working, None, &session, true));
+        assert!(super::agent_attention_requested(None, None, None, true));
+        assert!(!super::agent_attention_requested(None, None, None, false));
     }
 
     #[test]
@@ -10832,6 +11163,187 @@ mod gpui_tests {
             .unwrap();
     }
 
+    fn settle_link_opens(window: gpui::WindowHandle<TerminalView>, cx: &mut TestAppContext) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            cx.run_until_parked();
+            if window
+                .update(cx, |view, _, _| {
+                    view.pending_file_links.is_empty() && view.pending_loopback_urls.is_empty()
+                })
+                .unwrap()
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "link open did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[gpui::test]
+    fn link_open_first_click_keeps_its_target_after_output_changes(cx: &mut TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let dir = std::env::temp_dir();
+        let name = format!("tty7-link-open-{}.txt", std::process::id());
+        let path = dir.join(&name);
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let (window, _daemon) = harness(cx);
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        window
+            .update(cx, |view, window, cx| {
+                let seen = opened.clone();
+                cx.subscribe(&cx.entity(), move |_, _, event: &OpenFileRequested, _| {
+                    seen.borrow_mut().push(event.path.clone());
+                })
+                .detach();
+                view.terminal.seed_cwd(Some(dir));
+                let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+                parser.advance(
+                    &mut *view.terminal.term.lock(),
+                    format!("see {name}\r\n").as_bytes(),
+                );
+                assert!(
+                    !view.open_link_at(0, 0, window, cx),
+                    "ordinary text must keep its terminal mouse handling"
+                );
+                assert!(view.open_link_at(5, 0, window, cx));
+                assert!(view.open_link_at(5, 0, window, cx));
+                assert_eq!(
+                    view.pending_file_links.len(),
+                    1,
+                    "a repeated click shares the request"
+                );
+                assert!(
+                    opened.borrow().is_empty(),
+                    "file validation must yield to the UI"
+                );
+                view.record_menu_link(5, 0, cx);
+                assert!(
+                    view.menu_link_path().is_some(),
+                    "a cold file candidate has a menu"
+                );
+                view.terminal.seed_cwd(None);
+                view.resolve_menu_link(FileLinkAction::CopyPath, window, cx);
+                assert_eq!(
+                    view.pending_file_links.len(),
+                    2,
+                    "copy and open are distinct actions"
+                );
+                view.record_menu_link(0, 0, cx);
+                assert!(
+                    view.menu_link_path().is_none(),
+                    "ordinary words have no file menu"
+                );
+                parser.advance(
+                    &mut *view.terminal.term.lock(),
+                    b"\x1b[2J\x1b[Hunrelated output",
+                );
+            })
+            .unwrap();
+        settle_link_opens(window, cx);
+        assert_eq!(*opened.borrow(), vec![path.clone()]);
+        assert_eq!(
+            cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some(path.to_string_lossy().into_owned()),
+            "the menu copies the resolved path using the roots captured at right click"
+        );
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[gpui::test]
+    fn link_open_forwarding_yields_deduplicates_and_discards_old_routes(cx: &mut TestAppContext) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (window, _daemon) = harness(cx);
+        let calls = Arc::new(AtomicUsize::new(0));
+        window
+            .update(cx, |view, window, cx| {
+                bind_to_a_disconnected_remote_workspace(view, cx);
+                let called = calls.clone();
+                view.open_url_with_forwarder(
+                    "http://localhost:3000/a?q=1#part",
+                    window,
+                    cx,
+                    move |_, _| {
+                        called.fetch_add(1, Ordering::SeqCst);
+                        Ok(crate::daemon::protocol::LoopbackForward { local_port: 4000 })
+                    },
+                );
+                view.open_url_with_forwarder(
+                    "http://localhost:3000/a?q=1#part",
+                    window,
+                    cx,
+                    |_, _| panic!("a duplicate click must not start another request"),
+                );
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    0,
+                    "forwarding cannot run in the click handler"
+                );
+                assert_eq!(view.pending_loopback_urls.len(), 1);
+            })
+            .unwrap();
+        settle_link_opens(window, cx);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("http://127.0.0.1:4000/a?q=1#part")
+        );
+
+        window
+            .update(cx, |view, window, cx| {
+                view.open_url_with_forwarder("http://localhost:3000/stale", window, cx, |_, _| {
+                    Ok(crate::daemon::protocol::LoopbackForward { local_port: 5000 })
+                });
+                view.set_workspace(None);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("http://127.0.0.1:4000/a?q=1#part")
+        );
+    }
+
+    fn settle_link_probe(
+        window: gpui::WindowHandle<TerminalView>,
+        col: usize,
+        row: usize,
+        cx: &mut TestAppContext,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let pending = window
+                .update(cx, |view, _, cx| {
+                    matches!(
+                        view.resolve_link_at(col, row, true, false, cx),
+                        LinkAt::Unresolved { pending: true, .. }
+                    )
+                })
+                .unwrap();
+            if !pending {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "link probe did not finish"
+            );
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// The case from the bug report: a relative path printed by a tool, sitting
     /// in a pane that reported its directory. It resolves; a name that is not
     /// there does not, and comes back as an unresolved *candidate* so the click
@@ -10861,6 +11373,8 @@ mod gpui_tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
+        settle_link_probe(window, 7, 0, cx);
+        settle_link_probe(window, "ready (scratchpad/notes.md) and (".len(), 0, cx);
         window
             .update(cx, |view, _, cx| {
                 assert_eq!(view.cwd().as_deref(), Some(dir.as_path()));
@@ -10893,7 +11407,7 @@ mod gpui_tests {
                             candidate.looks_like_a_path(view.link_path_style()),
                             "so the click reports it instead of staying silent"
                         );
-                        assert!(!pending, "a local pane answers on the spot");
+                        assert!(!pending, "the background probe has answered");
                     }
                     _ => panic!("expected an unresolved path-shaped candidate"),
                 }
@@ -11222,8 +11736,17 @@ mod gpui_tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
+        settle_link_probe(window, 6, 0, cx);
         window
             .update(cx, |view, _, cx| {
+                // Pumping the async lookup sizes the grid to the test window.
+                // Restore the narrow grid and its output after that resize.
+                view.set_grid_size(20, 6, px(8.), px(17.), 1., cx);
+                let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+                parser.advance(
+                    &mut *view.terminal.term.lock(),
+                    b"\x1b[2J\x1b[Hsee a/bb/ccc/dddd/notes.md here\r\n",
+                );
                 // Row 0 holds `see a/bb/ccc/dddd/n`, row 1 the rest.
                 for (col, row, where_) in [(6, 0, "before the seam"), (2, 1, "after it")] {
                     assert!(
@@ -11270,6 +11793,7 @@ mod gpui_tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
+        settle_link_probe(window, 4, 0, cx);
         window
             .update(cx, |view, _, cx| {
                 // `see 文档/…`: column 4 carries 文, column 5 is its spacer.
@@ -11312,6 +11836,7 @@ mod gpui_tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
+        settle_link_probe(window, 6, 0, cx);
         window
             .update(cx, |view, _, cx| {
                 assert!(view.on_alt_screen(), "the application took the grid");
@@ -14869,6 +15394,44 @@ mod gpui_tests {
                 assert_eq!(view.title, "tty7 — process exited");
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn window_activation_reports_terminal_focus(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, window, cx| {
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |view, _, _| {
+                let mut processor: alacritty_terminal::vte::ansi::Processor =
+                    alacritty_terminal::vte::ansi::Processor::new();
+                processor.advance(&mut *view.terminal.term.lock(), b"\x1b[?1004h");
+            })
+            .unwrap();
+
+        gpui::VisualTestContext::from_window(window.into(), cx).deactivate_window();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"\x1b[O".to_vec())
+        );
+        window
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(b"\x1b[I".to_vec())
+        );
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "activation is reported once"
+        );
     }
 
     /// Holding Backspace on an empty bash prompt (or Tab with nothing to

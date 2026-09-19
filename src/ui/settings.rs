@@ -728,6 +728,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: WindowTabs,
+            title: SettingsAgentNotifications,
+            keywords: SettingsSearchAgentNotificationsKeywords,
+        },
+        SearchEntry {
+            section: WindowTabs,
             title: SettingsNotifyThreshold,
             keywords: SettingsSearchNotifyThresholdKeywords,
         },
@@ -6569,6 +6574,11 @@ impl Tty7App {
             NotifyMode::Unfocused => 1,
             NotifyMode::Always => 2,
         };
+        let agent_notify_idx = match cfg.notify_on_agent_event {
+            NotifyMode::Never => 0,
+            NotifyMode::Unfocused => 1,
+            NotifyMode::Always => 2,
+        };
         // Exact-match highlight with a "Custom (Ns)" fallback, same as the
         // scrollback row: a hand-set 20s used to light up "30s" (#550).
         let (threshold_sel, threshold_custom) = preset_choice(
@@ -6592,6 +6602,24 @@ impl Tty7App {
                     _ => NotifyMode::Always,
                 };
                 this.set_notify_mode(mode, cx);
+            },
+        );
+        let agent_notify_radio = self.segmented(
+            "wt-agent-notify",
+            &[
+                t(L10nKey::NotifyModeNever),
+                t(L10nKey::NotifyModeUnfocused),
+                t(L10nKey::NotifyModeAlways),
+            ],
+            agent_notify_idx,
+            cx,
+            |this, ix, _w, cx| {
+                let mode = match ix {
+                    0 => NotifyMode::Never,
+                    1 => NotifyMode::Unfocused,
+                    _ => NotifyMode::Always,
+                };
+                this.set_agent_notify_mode(mode, cx);
             },
         );
         let threshold_radio = self.segmented_valued(
@@ -6748,6 +6776,12 @@ impl Tty7App {
                 t(L10nKey::SettingsNotifyOnCommandFinish),
                 t(L10nKey::SettingsNotifyOnCommandFinishDesc),
                 notify_radio,
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsAgentNotifications),
+                t(L10nKey::SettingsAgentNotificationsDesc),
+                agent_notify_radio,
                 cx,
             ))
             .child(self.settings_row(
@@ -8613,6 +8647,7 @@ mod tests {
             ("ctrl-r", Input),
             ("grouping", WindowTabs),
             ("threshold", WindowTabs),
+            ("agent notifications", WindowTabs),
             ("report mouse", Terminal),
             ("nushell", Terminal),
             ("open files with", Terminal),
