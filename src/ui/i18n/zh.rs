@@ -937,7 +937,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SwitcherNoMatch => "没有匹配的工作区或机器。",
         L10nKey::AddSshHost => "添加 SSH 主机…",
-        L10nKey::ClickForNewWindow => "点击打开新窗口",
         L10nKey::RestartServer => "重启 tty7 server",
         L10nKey::OtherMachines => "其他机器",
         L10nKey::Ok => "确定",
@@ -1353,6 +1352,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherActiveTab => "当前",
         L10nKey::SwitcherHoldToSwitch => "按 Tab 移动 · 松开切换",
         L10nKey::SwitcherTabToCrossColumns => "按 Tab 换到另一列",
+        L10nKey::SwitcherHintNavigate => "导航",
+        L10nKey::SwitcherHintOpen => "打开",
+        L10nKey::SwitcherHintNewWindow => "新窗口",
         L10nKey::SwitcherLocalHost => "本机",
         L10nKey::SwitcherConnectingTo => "正在连接 {machine}…",
         L10nKey::SwitcherFormName => "名字",
