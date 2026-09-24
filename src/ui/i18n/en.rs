@@ -1127,6 +1127,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelPortsRestricted => {
             "Something here runs as another user, whose ports aren't visible."
         }
+        L10nKey::PanelPortsEmpty => "No forwarded ports",
         L10nKey::PanelLatency => "latency",
         L10nKey::PortAutoForwarded => "Remote :{port} is now http://localhost:{local}",
         L10nKey::PanelCwd => "cwd",

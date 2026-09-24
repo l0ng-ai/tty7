@@ -32,9 +32,9 @@ fn right_panel_tabs_floor(window: &Window, cx: &gpui::App) -> f32 {
     (TAB_ROW_LEAD + crate::ui::tab_strip::right_panel_tab_labels_w(window, cx) + chrome).ceil()
 }
 
-/// The tab row's leading inset, and the 2px gaps it puts between the three
-/// tabs, the spacer and the chrome.
-const TAB_ROW_LEAD: f32 = 4.;
+/// The tab row's leading inset: the first label lands 22px in, and each tab's
+/// click target already reaches `TAB_OUTER_PAD` past its label.
+const TAB_ROW_LEAD: f32 = 22. - crate::ui::tab_strip::TAB_OUTER_PAD;
 
 /// How tall the tab row is where it sits below the title bar (Windows and
 /// Linux): the tab's 26px hover pill plus 2px either side. A full title-bar
@@ -67,8 +67,32 @@ pub(crate) const TEXT_MONO: f32 = TEXT - STEP;
 pub(crate) const META: f32 = 12. * STEP;
 pub(crate) const META_MONO: f32 = META - STEP;
 
-/// Compact section headings share the sidebar group-label size.
-pub(crate) const HEADING: f32 = META;
+/// Compact section headings: a half step under the caption size, set apart by
+/// weight and ink rather than by size.
+pub(crate) const HEADING: f32 = 11.5 * STEP;
+
+/// The word tabs at the top of the panel, a half step under body text.
+pub(crate) const TAB_TEXT: f32 = 12.5 * STEP;
+
+/// How tall a Session, section-heading or search row is.
+const INFO_ROW_H: f32 = 28.;
+
+/// How tall a process row is — a notch tighter than the Session rows, since
+/// the list is read as one block rather than line by line.
+const PROC_ROW_H: f32 = 26.;
+
+/// How far a child process sits in from its parent, the width of the `└`
+/// elbow that marks it.
+const PROC_INDENT: f32 = 14.;
+
+/// The space between two sections of the Info tab.
+const SECTION_GAP: f32 = 16.;
+
+/// The Session label column's floor, gap included, at the default 16px rem.
+const INFO_LABEL_MIN: f32 = 76.;
+
+/// The space between a Session label and its value.
+const INFO_LABEL_GAP: f32 = 9.;
 
 /// The leading glyph on a panel row — the file tree's folder and file marks.
 ///
@@ -360,8 +384,11 @@ fn info_label_column(rows: &[InfoRow], window: &mut Window, cx: &gpui::App) -> g
     // they are carried as multiples of it rather than as pixels — otherwise
     // raising `ui_font_size` grows the labels into a clamp fitted to a
     // smaller face, and every one of them wraps.
-    let label_px = TEXT * window.rem_size().as_f32();
-    let min = 46. / 12. * label_px;
+    let rem = window.rem_size().as_f32();
+    let label_px = TEXT * rem;
+    // The column is 76px at the default rem — room for "changes" and the
+    // gap after it — and grows with the interface size.
+    let min = INFO_LABEL_MIN / 16. * rem - INFO_LABEL_GAP;
     let max = 108. / 12. * label_px;
     let font = gpui::Font {
         family: cx.theme().font_family.clone(),
@@ -500,10 +527,6 @@ impl Tty7App {
                     .items_center()
                     .gap(px(2.))
                     .pl(px(TAB_ROW_LEAD))
-                    // The tab bar is a strip of labels over a body, so it
-                    // closes on a hairline the current tab's bar sits on.
-                    .border_b_1()
-                    .border_color(cx.theme().sidebar_border)
                     .relative()
                     .children(self.right_panel_tabs(
                         width
@@ -517,7 +540,7 @@ impl Tty7App {
                     // Navigation controls stay visible on both sidebars.
                     .child(self.window_chrome(window, cx))
                 }))
-                .children(cfg!(target_os = "macos").then(|| div().flex_none().h(px(10.))))
+                .children(cfg!(target_os = "macos").then(|| div().flex_none().h(px(8.))))
                 .child(body)
                 .children(self.sftp_transfers_footer(cx))
                 .child(handle)
@@ -667,12 +690,8 @@ impl Tty7App {
             }))
             // Where the tabs live in this row, they are the heading: the
             // current one already names the panel, and the Changes tab carries
-            // the count. The row closes on the hairline their bar sits on.
-            .when(tabs.is_some(), |row| {
-                row.pl(px(TAB_ROW_LEAD))
-                    .border_b_1()
-                    .border_color(cx.theme().sidebar_border)
-            })
+            // the count. No rule under it — the body's own inset is the break.
+            .when(tabs.is_some(), |row| row.pl(px(TAB_ROW_LEAD)))
             .when(tabs.is_none(), |row| {
                 row.child(
                     h_flex()
@@ -708,11 +727,8 @@ impl Tty7App {
                 this.child(
                     h_flex()
                         .flex_shrink_0()
-                        // Full height, so the current tile's underline — pinned
-                        // to the bottom of its own box — lands on the rule that
-                        // closes this row, the way it does on macOS. Without it
-                        // the tiles are only as tall as a glyph and the bar
-                        // floats a few pixels above the line.
+                        // Full height, so each tab's click target is the
+                        // whole row, not a glyph-tall strip in its middle.
                         .h_full()
                         .items_center()
                         .gap(px(2.))
@@ -729,29 +745,43 @@ impl Tty7App {
         input: &gpui::Entity<gpui_component::input::InputState>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // The strip keeps `SEARCH_H` so it still lines up with the Source
+        // Control commit box beside it; the field inside is a 28px well on the
+        // faint fill, the same shape as the sidebar's search.
         h_flex()
             .flex_none()
             .items_center()
-            // 8 here plus the `.xsmall()` field's own 4px of leading padding
-            // is 12px of daylight between the glyph and the first character.
-            .gap(px(8.))
             .h(px(SEARCH_H))
-            .px(px(CONTENT_INSET))
+            .px(px(CONTENT_INSET - ROW_INSET))
             .child(
-                Icon::new(IconName::Search)
-                    .small()
-                    .text_color(cx.theme().muted_foreground),
-            )
-            .child(
-                div()
+                h_flex()
                     .flex_1()
                     .min_w_0()
-                    // A filter with no way out of it but selecting the text
-                    // and deleting it is a filter people leave on and then
-                    // wonder where their files went. The button only exists
-                    // while there is something to clear, so an empty field
-                    // still reads as one line of chrome.
-                    .child(Input::new(input).appearance(false).xsmall().cleanable(true)),
+                    .items_center()
+                    // 7 here plus the `.xsmall()` field's own 4px of leading
+                    // padding is 11px of daylight between glyph and text.
+                    .gap(px(7.))
+                    .h(px(INFO_ROW_H))
+                    .px(px(ROW_INSET + 2.))
+                    .rounded(px(7.))
+                    .bg(cx.theme().muted)
+                    .child(
+                        Icon::new(IconName::Search)
+                            .size(px(12.))
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            // A filter with no way out of it but selecting the
+                            // text and deleting it is a filter people leave on
+                            // and then wonder where their files went. The
+                            // button only exists while there is something to
+                            // clear, so an empty field still reads as one line
+                            // of chrome.
+                            .child(Input::new(input).appearance(false).xsmall().cleanable(true)),
+                    ),
             )
             .into_any_element()
     }
@@ -910,14 +940,19 @@ impl Tty7App {
         // Rows pad themselves back out to `CONTENT_INSET`, so their hover fill
         // bleeds past the text on both sides — the geometry the Source Control
         // tab's rows are on, one tab over.
-        let mut list = v_flex().px(px(CONTENT_INSET - ROW_INSET)).py(px(2.));
+        let mut list = v_flex().px(px(CONTENT_INSET - ROW_INSET));
         for (i, row) in rows.into_iter().enumerate() {
             list = list.child(self.info_row(i, row, label_w, cx));
         }
 
         let inner = v_flex()
-            .child(self.panel_subtitle(t(L10nKey::PanelSessionSubtitle), false, None, cx))
-            .child(list)
+            .pb(px(SECTION_GAP))
+            .gap(px(SECTION_GAP))
+            .child(
+                v_flex()
+                    .child(self.panel_subtitle(t(L10nKey::PanelSessionSubtitle), None, cx))
+                    .child(list),
+            )
             .children(self.procs_section(pane_id, cx))
             .children(self.ports_section(ctx.as_ref(), cx))
             .into_any_element();
@@ -963,7 +998,7 @@ impl Tty7App {
                     .flex_1()
                     .min_w_0()
                     .text_size(rems(TEXT))
-                    .text_color(cx.theme().sidebar_foreground)
+                    .text_color(cx.theme().foreground)
                     .child(
                         div()
                             .min_w_0()
@@ -972,14 +1007,7 @@ impl Tty7App {
                             .text_color(cx.theme().muted_foreground)
                             .child(head),
                     )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_shrink(1.)
-                            .truncate()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .child(leaf),
-                    )
+                    .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf))
                     .into_any_element()
             }
             InfoValue::Text(v) => div()
@@ -987,7 +1015,7 @@ impl Tty7App {
                 .min_w_0()
                 .truncate()
                 .text_size(rems(TEXT))
-                .text_color(cx.theme().sidebar_foreground)
+                .text_color(cx.theme().foreground)
                 .child(v)
                 .into_any_element(),
             InfoValue::Diff {
@@ -1100,10 +1128,10 @@ impl Tty7App {
             .id(id.clone())
             .group(id)
             .relative()
-            .items_baseline()
-            .gap(px(9.))
+            .items_center()
+            .gap(px(INFO_LABEL_GAP))
+            .h(px(INFO_ROW_H))
             .px(px(ROW_INSET))
-            .py(px(4.))
             .rounded(crate::ui::rounding::ROW_RADIUS)
             .text_size(rems(TEXT))
             // Only rows that can do something light up, so the fill is never a
@@ -1146,39 +1174,31 @@ impl Tty7App {
         .tooltip(tooltip)
     }
 
+    /// A section heading of the Info tab: a 28px row, the label a half step
+    /// under captions, medium and muted. Sections are told apart by the space
+    /// between them, not by rules, so there is no divider to ask for.
     pub(crate) fn panel_subtitle(
         &self,
         text: &str,
-        divider: bool,
         trailing: Option<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         h_flex()
-            .when(divider, |d| {
-                d.mt(px(6.))
-                    .border_t_1()
-                    .border_color(cx.theme().sidebar_border)
-            })
+            .flex_none()
+            .h(px(INFO_ROW_H))
             .items_center()
             .justify_between()
             .pl(px(CONTENT_INSET))
             .pr(px(if trailing.is_some() {
-                CONTENT_INSET - crate::ui::app::TILE_PAD
+                CONTENT_INSET - crate::ui::app::TILE_PAD_SM
             } else {
                 CONTENT_INSET
             }))
-            .pt(px(match (divider, trailing.is_some()) {
-                (true, false) => 12.,
-                (true, true) => 8.,
-                (false, false) => 10.,
-                (false, true) => 6.,
-            }))
-            .pb(px(if trailing.is_some() { 0. } else { 4. }))
             .child(
                 // Weight and ink, not capitals, set a compact heading apart.
                 div()
                     .text_size(rems(HEADING))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(cx.theme().muted_foreground)
                     .child(text.to_string()),
             )
@@ -1192,30 +1212,46 @@ impl Tty7App {
             return None;
         }
         let mono = cx.theme().mono_font_family.clone();
-        let mut list = v_flex().px(px(CONTENT_INSET)).py(px(1.)).gap(px(2.));
+        let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().sidebar.hover);
+        let mut list = v_flex().px(px(CONTENT_INSET - ROW_INSET));
         for p in procs {
+            let depth = f32::from(p.depth);
             list = list.child(
                 h_flex()
+                    .h(px(PROC_ROW_H))
                     .items_center()
-                    .gap(px(8.))
+                    .gap(px(6.))
+                    .px(px(ROW_INSET))
+                    .rounded(crate::ui::rounding::ROW_RADIUS)
+                    .hover(move |s| s.bg(hover))
+                    // A child hangs off its parent by an elbow in the last
+                    // column of its indent; the root has neither.
+                    .when(p.depth > 0, |row| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .w(px(depth * PROC_INDENT))
+                                .flex()
+                                .justify_end()
+                                .pr(px(2.))
+                                .text_size(rems(META))
+                                .text_color(cx.theme().muted_foreground)
+                                .child("└"),
+                        )
+                    })
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .pl(px(f32::from(p.depth) * 10.))
-                            .text_size(rems(TEXT_MONO))
-                            .font_family(mono.clone())
+                            .text_size(rems(TEXT))
                             // Which of these has the terminal is the one thing
                             // the list is read for, and a hue apart from its
                             // neighbours was carrying it alone — a difference
                             // a light theme flattens and colour vision can
                             // miss. Weight says it a second way.
-                            .when(p.foreground, |d| {
-                                d.font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(cx.theme().foreground)
-                            })
-                            .when(!p.foreground, |d| d.text_color(cx.theme().muted_foreground))
+                            .text_color(cx.theme().foreground)
+                            .when(p.foreground, |d| d.font_weight(gpui::FontWeight::MEDIUM))
                             .child(p.name.clone()),
                     )
                     .child(
@@ -1230,7 +1266,7 @@ impl Tty7App {
         }
         Some(
             v_flex()
-                .child(self.panel_subtitle(t(L10nKey::PanelProcessesSubtitle), true, None, cx))
+                .child(self.panel_subtitle(t(L10nKey::PanelProcessesSubtitle), None, cx))
                 .child(list)
                 .into_any_element(),
         )
@@ -1360,8 +1396,8 @@ impl Tty7App {
                     .relative()
                     .items_center()
                     .gap(px(8.))
+                    .h(px(PROC_ROW_H))
                     .px(px(ROW_INSET))
-                    .py(px(1.))
                     .rounded(crate::ui::rounding::ROW_RADIUS)
                     .hover(|s| s.bg(gpui::rgb(sf.hover)))
                     .child(info_chip(
@@ -1429,7 +1465,7 @@ impl Tty7App {
 
         Some(
             v_flex()
-                .child(self.panel_subtitle(t(L10nKey::PanelPortsSubtitle), true, add, cx))
+                .child(self.panel_subtitle(t(L10nKey::PanelPortsSubtitle), add, cx))
                 .when(
                     ports.is_empty() && forwards.is_empty() && !form_open,
                     |this| {
@@ -1446,12 +1482,14 @@ impl Tty7App {
                             (true, _) => L10nKey::PanelPortsUnsupported,
                             (false, PortProbe::Unavailable(_)) => L10nKey::PanelPortsProbeFailed,
                             (false, PortProbe::Restricted) => L10nKey::PanelPortsRestricted,
-                            (false, PortProbe::Ok) => L10nKey::None,
+                            (false, PortProbe::Ok) => L10nKey::PanelPortsEmpty,
                         };
                         this.child(
                             div()
                                 .px(px(CONTENT_INSET))
-                                .py(px(2.))
+                                .min_h(px(PROC_ROW_H))
+                                .flex()
+                                .items_center()
                                 .text_size(rems(TEXT))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(t(key)),

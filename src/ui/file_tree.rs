@@ -38,6 +38,19 @@ use gpui_component::{
 // glyph sits right there to compare against.
 const INDENT: f32 = 14.0;
 
+/// How tall a tree row is.
+const TREE_ROW_H: f32 = 26.;
+
+/// The disclosure chevron's column, drawn on folders and left empty on files
+/// so every name at one depth starts at the same x.
+const CHEVRON_W: f32 = 10.;
+
+/// The gap between a row's chevron, icon and name.
+const TREE_GAP: f32 = 6.;
+
+/// Where a row's label starts, measured from the row's own inset.
+const LABEL_LEAD: f32 = CHEVRON_W + TREE_GAP + ROW_GLYPH + TREE_GAP;
+
 const REFRESH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
 
 const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
@@ -1779,8 +1792,8 @@ impl Tty7App {
                     // Aligned with the label column of a real row at this
                     // depth: ROW_INSET for the row's own inset, INDENT for the
                     // depth, then the width of the icon and its gap.
-                    .pl(px(ROW_INSET + row.depth as f32 * INDENT + 20.0))
-                    .py_1()
+                    .pl(px(ROW_INSET + row.depth as f32 * INDENT + LABEL_LEAD))
+                    .h(px(TREE_ROW_H))
                     .items_center()
                     .text_xs()
                     .italic()
@@ -1853,7 +1866,9 @@ impl Tty7App {
                     cx.theme().sidebar_foreground
                 })
                 .when(selected, |d| d.font_weight(gpui::FontWeight::MEDIUM))
-                .when(row.entry.ignored, |d| d.italic().text_color(muted))
+                // Ignored entries recede — dimmer ink and a half-strength icon —
+                // but stay upright: they are still files you can open.
+                .when(row.entry.ignored, |d| d.text_color(muted))
                 // Ordinary changes belong in the status badge. Only a conflict
                 // should turn an entire filename into an attention signal.
                 .when_some(deco.tint, |d, status| {
@@ -1868,24 +1883,50 @@ impl Tty7App {
                 .into_any_element()
         };
 
+        let chevron = is_dir.then(|| {
+            Icon::new(match row.expanded || row.is_root {
+                true => IconName::ChevronDown,
+                false => IconName::ChevronRight,
+            })
+            .size(px(CHEVRON_W))
+            .text_color(muted)
+        });
         let row_el = h_flex()
             .id(SharedString::from(format!("tree-{}", path.display())))
             .items_center()
-            .gap_1()
+            .gap(px(TREE_GAP))
+            .h(px(TREE_ROW_H))
             .pl(px(ROW_INSET + row.depth as f32 * INDENT))
             .pr(px(ROW_INSET))
-            .py_1()
-            .rounded(cx.theme().radius)
+            .rounded(px(6.))
             .cursor_pointer()
             .when(selected, |d| d.bg(gpui::rgb(sf.selected)))
             .when(!selected, |d| d.hover(|s| s.bg(gpui::rgb(sf.hover))))
-            .child(Icon::new(icon).size(px(ROW_GLYPH)).text_color(muted))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(CHEVRON_W))
+                    .flex()
+                    .justify_center()
+                    .children(chevron),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .when(row.entry.ignored, |d| d.opacity(0.5))
+                    .child(Icon::new(icon).size(px(ROW_GLYPH)).text_color(muted)),
+            )
             .child(label)
+            // A folder with work under it says so with one small dot in the
+            // tint of the change — amber for ordinary edits, red for a
+            // conflict — rather than a letter it cannot honestly carry.
             .when(is_dir && deco.tint.is_some(), |d| {
                 d.child(
                     div()
                         .flex_none()
-                        .size(px(4.))
+                        .size(px(5.))
                         .rounded_full()
                         .bg(status_color(deco.tint.unwrap(), cx)),
                 )
@@ -2322,7 +2363,7 @@ fn order_innermost_first(decor: &mut Decorations) {
 
 /// One hash probe per row and no allocation on the path that matters.
 fn row_decoration(decor: &Decorations, entry: &TreeEntry) -> RowDeco {
-    // A gitignored row keeps the italic-and-dim it has always worn and takes
+    // A gitignored row keeps the dimmed ink and icon it already wears and takes
     // nothing else: a letter and a colour would be describing a file the
     // repository is not tracking.
     if entry.ignored {
@@ -2709,7 +2750,7 @@ mod tests {
         assert_eq!(
             row_decoration(&decor, &tree_entry("/repo/target/debug/app", false, true)),
             RowDeco::default(),
-            "italic and dim is the whole of what an ignored row says"
+            "dimmed ink and icon are the whole of what an ignored row says"
         );
         assert_eq!(
             row_decoration(&decor, &tree_entry("/repo/target", true, true)),
