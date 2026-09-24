@@ -472,7 +472,7 @@ pub(crate) fn elide_label(
 
 /// Keeps the longest tail of `text` that fits after a bare ellipsis. Shared
 /// by the path and token elisions as their last resort.
-fn elide_tail_clusters(
+pub(crate) fn elide_tail_clusters(
     text_system: &gpui::WindowTextSystem,
     font: &gpui::Font,
     size: f32,
@@ -565,6 +565,17 @@ pub(crate) fn chrome_tile_variant_for(selected: bool, cx: &gpui::App) -> ButtonC
 }
 
 pub(crate) const BUTTON_ICON_SCALE: f32 = 0.75;
+
+/// The rail header's icon tiles: 26px boxes with a 6px corner, the glyph a
+/// notch under the toolbar's so the pair sits quieter than the rows below.
+pub(crate) const RAIL_TILE: f32 = 26.;
+
+/// A sidebar row's trailing status dot, and the box it is centred in (wide
+/// enough for the unread pill that replaces it).
+pub(crate) const ROW_STATUS_DOT: f32 = 5.;
+pub(crate) const ROW_STATUS_SLOT: f32 = 14.;
+pub(crate) const RAIL_TILE_GLYPH: f32 = 14.;
+pub(crate) const RAIL_TILE_RADIUS: f32 = 6.;
 
 /// WCAG 2.2 SC 2.5.8 puts the desktop floor for a pointer target at 24×24, and
 /// gpui-component renders an icon-only `.xsmall()` button as a 20×20 box (18×18
@@ -1002,7 +1013,7 @@ pub(crate) fn select_workspace_action(index: usize) -> Option<Box<dyn gpui::Acti
 }
 
 impl Tty7App {
-    pub(crate) const AVATAR_PX: f32 = 20.0;
+    pub(crate) const AVATAR_PX: f32 = 18.0;
 
     pub(crate) fn workspace_head(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         if let Some(rename) = self.workspace_rename.as_ref() {
@@ -1096,7 +1107,7 @@ impl Tty7App {
                     .xsmall()
                     .w_full()
                     .h(px(28.))
-                    .rounded_md()
+                    .rounded(px(7.))
                     .tooltip_element(chord_tooltip(
                         t(L10nKey::HomeSwitchWorkspace),
                         "ToggleSwitcher",
@@ -1391,6 +1402,93 @@ impl Tty7App {
         size: f32,
         cx: &App,
     ) -> gpui::AnyElement {
+        self.tab_avatar_badged(id, agent, status, unread, ssh, size, true, cx)
+    }
+
+    /// The avatar without the agent's status badge, for a row that says the
+    /// status at its trailing end instead (see [`row_status_dot`]). The
+    /// tooltip still names the state; the SSH dot on a shell stays, since it
+    /// describes the connection rather than an agent's run.
+    ///
+    /// [`row_status_dot`]: Self::row_status_dot
+    pub(crate) fn tab_avatar_plain(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        agent: Option<crate::core::cli_agent::CLIAgent>,
+        status: Option<crate::core::cli_agent::AgentStatus>,
+        ssh: Option<u32>,
+        size: f32,
+        cx: &App,
+    ) -> gpui::AnyElement {
+        self.tab_avatar_badged(id, agent, status, 0, ssh, size, false, cx)
+    }
+
+    /// A row's trailing status mark: a 5px dot in the state's colour, hollow
+    /// while the agent waits on the user, blinking while it works — or the
+    /// unread count in a small pill once there is something to read. `None`
+    /// for a row with nothing to report.
+    pub(crate) fn row_status_dot(
+        &self,
+        status: Option<crate::core::cli_agent::AgentStatus>,
+        unread: usize,
+        surface: gpui::Hsla,
+    ) -> Option<gpui::AnyElement> {
+        let rgb = status.and_then(|s| s.dot_rgb())?;
+        let hollow = status == Some(crate::core::cli_agent::AgentStatus::Waiting);
+        let faded =
+            status == Some(crate::core::cli_agent::AgentStatus::Working) && !self.working_dot_on;
+        let ink: gpui::Hsla = gpui::rgb(rgb).into();
+        let fill = match faded {
+            true => surface.blend(ink.opacity(0.4)),
+            false => ink,
+        };
+        let slot = div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .min_w(px(ROW_STATUS_SLOT));
+        Some(
+            match unread > 0 {
+                true => slot.child(
+                    div()
+                        .h(px(14.))
+                        .min_w(px(14.))
+                        .px(px(3.))
+                        .rounded_full()
+                        .bg(fill)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(9.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(gpui::white())
+                        .child(unread.min(9).to_string()),
+                ),
+                false => slot.child(
+                    div()
+                        .size(px(ROW_STATUS_DOT))
+                        .rounded_full()
+                        .when(!hollow, |d| d.bg(fill))
+                        .when(hollow, |d| d.border_1().border_color(fill)),
+                ),
+            }
+            .into_any_element(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tab_avatar_badged(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        agent: Option<crate::core::cli_agent::CLIAgent>,
+        status: Option<crate::core::cli_agent::AgentStatus>,
+        unread: usize,
+        ssh: Option<u32>,
+        size: f32,
+        badge: bool,
+        cx: &App,
+    ) -> gpui::AnyElement {
         // The wrapper positions; the disc below carries the radius.
         // `status_dot` hangs itself off the edge with negative offsets — that
         // overhang is what makes it a badge on the avatar rather than a notch
@@ -1410,13 +1508,16 @@ impl Tty7App {
         match agent {
             Some(agent) => {
                 let hollow = status == Some(crate::core::cli_agent::AgentStatus::Waiting);
-                let dot = status.and_then(|s| s.dot_rgb()).map(|rgb| {
-                    // A working agent's dot blinks, so a column of tabs
-                    // says at a glance which ones are still going.
-                    let faded = status == Some(crate::core::cli_agent::AgentStatus::Working)
-                        && !self.working_dot_on;
-                    Self::status_dot(rgb, unread, size, cx.theme().background, hollow, faded)
-                });
+                let dot = status
+                    .filter(|_| badge)
+                    .and_then(|s| s.dot_rgb())
+                    .map(|rgb| {
+                        // A working agent's dot blinks, so a column of tabs
+                        // says at a glance which ones are still going.
+                        let faded = status == Some(crate::core::cli_agent::AgentStatus::Working)
+                            && !self.working_dot_on;
+                        Self::status_dot(rgb, unread, size, cx.theme().background, hollow, faded)
+                    });
                 // Which agent this is, and what it wants, were carried entirely
                 // by a brand hue and a nine-pixel dot. Say it in words too.
                 let tip = match agent_status_label(status) {
@@ -1559,25 +1660,46 @@ impl Tty7App {
         id: &'static str,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
+        self.new_tab_button_sized(id, crate::ui::app::TILE_SIZE, cx)
+    }
+
+    /// [`new_tab_button`](Self::new_tab_button) at another tile size — the
+    /// rail's header draws its two tiles at `RAIL_TILE`.
+    pub(crate) fn new_tab_button_sized(
+        &self,
+        id: &'static str,
+        tile: f32,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
         let app = cx.entity().downgrade();
-        chrome_tile(Button::new(id).icon(Icon::new(IconName::Plus)), false, cx)
-            .rounded_lg()
-            // Every other tile in this row names itself on hover — Switch
-            // Workspace, More, Hide Sidebar. The three New Tab buttons that
-            // come through here were the ones left silent. The chord is worth
-            // more here than anywhere else in the row: it is the way back to
-            // opening a tab without reading a menu first.
-            .tooltip_element(chord_tooltip(t(L10nKey::AppMenuNewTab), "NewTab", cx))
-            // Built when the menu opens, not when the strip draws: this
-            // closure runs once per press, and again after each dismissal.
-            .dropdown_menu(move |menu, window, cx| {
-                let Some(this) = app.upgrade() else {
-                    return menu;
-                };
-                this.read(cx)
-                    .new_tab_menu_rows(app.clone(), cx)
-                    .build(menu, window)
-            })
+        let glyph = match tile < crate::ui::app::TILE_SIZE {
+            true => RAIL_TILE_GLYPH,
+            false => TILE_GLYPH,
+        };
+        chrome_tile_sized(
+            Button::new(id).icon(Icon::new(IconName::Plus)),
+            tile,
+            glyph,
+            false,
+            cx,
+        )
+        .rounded(px(RAIL_TILE_RADIUS))
+        // Every other tile in this row names itself on hover — Switch
+        // Workspace, More, Hide Sidebar. The three New Tab buttons that
+        // come through here were the ones left silent. The chord is worth
+        // more here than anywhere else in the row: it is the way back to
+        // opening a tab without reading a menu first.
+        .tooltip_element(chord_tooltip(t(L10nKey::AppMenuNewTab), "NewTab", cx))
+        // Built when the menu opens, not when the strip draws: this
+        // closure runs once per press, and again after each dismissal.
+        .dropdown_menu(move |menu, window, cx| {
+            let Some(this) = app.upgrade() else {
+                return menu;
+            };
+            this.read(cx)
+                .new_tab_menu_rows(app.clone(), cx)
+                .build(menu, window)
+        })
     }
 
     /// What the menu offers, read off the app as the menu opens — the builder
@@ -2240,6 +2362,34 @@ impl Tty7App {
         // drops them while a docked document holds the right edge.
         let right_chrome = strip_chrome.then(|| self.window_chrome(window, cx));
 
+        // With the tabs in the rail, the bar over the terminal names the one
+        // in front: centred, small, and in caption ink, the way a document
+        // window titles itself. It is painted under the tiles and carries no
+        // hitbox, so the bar still drags the window and the tiles still click.
+        let centre_title = (!show_chips)
+            .then(|| self.tabs.get(active))
+            .flatten()
+            .map(|tab| {
+                let title = match tab.name.as_ref().filter(|n| !n.trim().is_empty()) {
+                    Some(name) => name.trim().to_string(),
+                    None => self.tab_label(tab, active, Some(window), cx),
+                };
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .max_w(gpui::relative(0.5))
+                            .truncate()
+                            .text_size(window.rem_size() * 0.75)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(title)),
+                    )
+            });
+
         h_flex()
             .id("tab-strip")
             .relative()
@@ -2249,6 +2399,7 @@ impl Tty7App {
             .when(!show_chips, |this| this.w_full())
             .pl_0()
             .min_w_0()
+            .when_some(centre_title, |this, title| this.child(title))
             .when_some(left_group, |this, g| this.child(g))
             .child(chips)
             .when(show_chips, move |this| this.child(add_button))

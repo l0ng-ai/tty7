@@ -18,7 +18,7 @@ use crate::ui::presets::Fill;
 use std::sync::OnceLock;
 
 pub(crate) fn traffic_light_position() -> Point<Pixels> {
-    point(px(9.), px(13.))
+    point(px(9.), px(17.))
 }
 
 pub(crate) fn set_menus(cx: &mut App) {
@@ -466,7 +466,18 @@ pub(crate) fn default_window_opacity(backdrop: WindowBackdrop, blur: bool) -> f3
 /// `theme.sidebar` itself stays opaque — the settings theme picker paints
 /// with it on top of the opaque settings overlay and must stay legible.
 pub(crate) fn workspace_surface_color(cx: &App) -> Hsla {
-    let base: Hsla = cx.theme().sidebar;
+    translucent_surface(cx.theme().sidebar, cx)
+}
+
+/// The left tab rail's fill: the one tinted surface in the workspace (see
+/// `Neutrals::rail`), with the same translucency rule as
+/// [`workspace_surface_color`].
+pub(crate) fn rail_surface_color(cx: &App) -> Hsla {
+    let base: Hsla = rgb(cx.global::<presets::Surfaces>().rail.base).into();
+    translucent_surface(base, cx)
+}
+
+fn translucent_surface(base: Hsla, cx: &App) -> Hsla {
     let translucent = cx
         .try_global::<presets::ActiveBackground>()
         .and_then(|bg| bg.opacity)
