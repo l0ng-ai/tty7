@@ -48,10 +48,13 @@ fn spawn_config_watcher(cx: &mut App) {
         if !tty7_core::host::is_content_change(&event.kind) {
             return;
         }
-        let hit = event
-            .paths
-            .iter()
-            .any(|p| p.file_name() == watched_file.file_name() || is_theme_file(p));
+        // The saved SSH hosts live beside config.json in a file of their own
+        // (#911), and a hand edit there has to land the same way.
+        let hit = event.paths.iter().any(|p| {
+            p.file_name() == watched_file.file_name()
+                || p.file_name() == Some(std::ffi::OsStr::new(crate::core::config::SERVERS_FILE))
+                || is_theme_file(p)
+        });
         if hit {
             let _ = tx.try_send(());
         }

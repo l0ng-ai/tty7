@@ -628,6 +628,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
             "行の +N −N をクリックすると、オーバーレイでワーキングツリーの Diff を開きます。オフならカウントは表示されたまま、クリックだけできません"
         }
+        L10nKey::SettingsSshTabTitle => "SSH タブのタイトル",
+        L10nKey::SettingsSshTabTitleDesc => {
+            "SSH タブに表示する名前。「動的」はリモート側が設定したタイトルに従い、ほかの二つはタブをホストに固定します。名前を変更したタブはその名前のまま"
+        }
+        L10nKey::SettingsSshTabTitleDynamic => "動的",
+        L10nKey::SettingsSshTabTitleProfileName => "プロファイル名",
+        L10nKey::SettingsSshTabTitleHostname => "ホスト名",
         L10nKey::DocumentDock => "ターミナルの隣にドック",
         L10nKey::DocumentFill => "ウィンドウ全体",
         L10nKey::SettingsNotifications => "通知",
@@ -1004,6 +1011,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "タブ グループ リポジトリ git スクラッチ ヘッダー サイドバー フラット フォルダ ディレクトリ sidebar grouping tabs repo repository git scratch header flat folder directory"
+        }
+        L10nKey::SettingsSearchSshTabTitleKeywords => {
+            "SSH タブ タイトル 名前 ホスト ホスト名 プロファイル エイリアス 固定 ssh tab title name host hostname profile alias pin"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "ダブルクリック 単語 url パス 選択 セマンティック 括弧 メール smart selection double click word url path bracket email"

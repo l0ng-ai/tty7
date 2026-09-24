@@ -5,6 +5,35 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **SSH tabs can be named after the host instead of whatever the remote shell
+  titles itself** (#726). **Settings → Window & Tabs → SSH tab title** is
+  *Dynamic* (the default, and what tty7 always did), *Profile name* — the saved
+  host's name, the alias for a `~/.ssh/config` host, the address typed for a
+  quick connect — or *Hostname*, the address dialled. Only the tab's name is
+  pinned: OSC 0/2 titles are still tracked and come back the moment it is
+  *Dynamic* again, a tab you renamed keeps its name, a split tab follows the
+  pane in front as before, and an ended session still says so. The key is
+  `ssh_tab_title` (`dynamic`, `profile-name`, `hostname`).
+
+### Changed
+
+- **Saved SSH hosts live in `servers.json`, beside `config.json`** (#911), so
+  `config.json` can be synced between machines for its colours and keys
+  without carrying a list of servers. `ssh_profiles` and
+  `ssh_profile_frecency` move across by themselves the first time a new build
+  reads an older `config.json`: `servers.json` is written first (mode `0600`),
+  and only once it has landed are the two keys taken out of `config.json` —
+  nothing else in that file is touched, including keys this build does not
+  know. When both files hold hosts, `servers.json` wins and the stale copy in
+  `config.json` is dropped at its next save. A `servers.json` that cannot be
+  parsed is kept aside as `servers.json.corrupt` and saving is refused until it
+  is repaired, the same rule `config.json` has. Hand edits to `servers.json`
+  hot-reload. Passwords and passphrases stay in the OS keychain.
+
 ## [26.9.3] - 2026-09-23
 
 ### Added

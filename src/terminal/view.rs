@@ -1774,6 +1774,35 @@ impl TerminalView {
         stated_title(&self.title)
     }
 
+    /// The title this pane gives its tab: [`Self::stated_title`], unless this
+    /// is an SSH pane and Settings pins its tab to the host's name instead
+    /// (#726). The pane's own title is untouched either way — OSC 0/2 keep
+    /// landing in it, and it is back on the tab the moment the setting is.
+    ///
+    /// A pane that has ended still says so: the pinned name takes the same
+    /// suffix the pane's own title would have.
+    pub(crate) fn tab_title(&self, cx: &App) -> Option<String> {
+        let pinned = self.ssh_spec.as_deref().and_then(|spec| {
+            let cfg = cx.try_global::<Config>()?;
+            crate::ui::ssh_connect::pinned_ssh_title(cfg.ssh_tab_title, spec, &cfg.ssh_profiles)
+        });
+        match pinned {
+            Some(name) if self.terminal.exited => Some(self.ended_title(&name)),
+            Some(name) => Some(name),
+            None => self.stated_title().map(str::to_string),
+        }
+    }
+
+    /// `name` with the suffix that says how this pane ended.
+    fn ended_title(&self, name: &str) -> String {
+        let key = if self.workspace().is_some() && !self.terminal.child_exited() {
+            L10nKey::PaneTitleDisconnected
+        } else {
+            L10nKey::PaneTitleProcessExited
+        };
+        t_fmt(key, &[("title", name)])
+    }
+
     /// Sets how opaque the pane wants this terminal painted; the pane leaf
     /// calls this every frame while rendering, and the terminal element
     /// blends its colours toward the window background during paint (see
@@ -2257,17 +2286,7 @@ impl TerminalView {
                 self.pending_title = None;
                 // The pane keeps answering to its own name (an SSH pane's
                 // host, #438) — only the state suffix is localized (#602).
-                self.title = if self.workspace().is_some() && !self.terminal.child_exited() {
-                    t_fmt(
-                        L10nKey::PaneTitleDisconnected,
-                        &[("title", &self.default_title)],
-                    )
-                } else {
-                    t_fmt(
-                        L10nKey::PaneTitleProcessExited,
-                        &[("title", &self.default_title)],
-                    )
-                };
+                self.title = self.ended_title(&self.default_title);
                 if self.terminal.child_exited() {
                     cx.emit(ChildExited);
                 }

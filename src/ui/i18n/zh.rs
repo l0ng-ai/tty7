@@ -549,6 +549,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
             "点击行上的 +N −N 在浮层中打开 worktree diff。关闭后计数仍显示，只是不可点击。"
         }
+        L10nKey::SettingsSshTabTitle => "SSH 标签页标题",
+        L10nKey::SettingsSshTabTitleDesc => {
+            "SSH 标签页显示的名字。“动态”跟随远端设置的标题；另外两项把标签页固定为主机。手动重命名过的标签页保留其名字。"
+        }
+        L10nKey::SettingsSshTabTitleDynamic => "动态",
+        L10nKey::SettingsSshTabTitleProfileName => "配置名称",
+        L10nKey::SettingsSshTabTitleHostname => "主机名",
         L10nKey::DocumentDock => "停靠在终端旁",
         L10nKey::DocumentFill => "铺满窗口",
         L10nKey::SettingsNotifications => "通知",
@@ -895,6 +902,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "侧栏分组 标签页 分组 仓库 git 侧栏 文件夹 目录 sidebar grouping tabs repo repository folder directory"
+        }
+        L10nKey::SettingsSearchSshTabTitleKeywords => {
+            "SSH 标签页 标题 名称 主机 主机名 配置 别名 固定 ssh tab title name host hostname profile alias pin"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "智能选择 双击 选择 单词 URL 路径 邮箱 括号 smart selection double click"

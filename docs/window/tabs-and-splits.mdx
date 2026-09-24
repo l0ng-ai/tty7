@@ -23,6 +23,12 @@ A new tab always opens in the current pane's directory. Where it lands in the
 list is **Settings → Window & Tabs → New tab position** — *After current* by
 default, or *At end*.
 
+An SSH tab is named by whatever the remote shell titles itself, like any other.
+To keep it on the host instead, set **Settings → Window & Tabs → SSH tab
+title** to *Profile name* — the saved host's name, the `~/.ssh/config` alias, or
+the address you typed — or *Hostname*. A tab you renamed keeps its name either
+way, and a split tab still follows the pane in front.
+
 Right-click a tab for the rest: rename, split right or down, a new worktree tab,
 copy the working directory, copy the session id, close · close others · close to
 the right, and — when a coding agent is running there — mark unread and fork its

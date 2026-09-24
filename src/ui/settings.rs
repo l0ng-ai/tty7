@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use crate::core::config::{
     BellMode, Config, CursorStyle, LinkFileOpen, MouseZoomModifier, NewTabPosition, NotifyMode,
-    TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel, WindowBackdrop,
+    SshTabTitle, TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel, WindowBackdrop,
 };
 use crate::core::keychain::{
     CredentialRef, CredentialStore as _, OsCredentialStore, key_account_from_contents,
@@ -840,6 +840,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchDiffPreviewFromCountsKeywords,
         },
         SearchEntry {
+            section: WindowTabs,
+            title: SettingsSshTabTitle,
+            keywords: SettingsSearchSshTabTitleKeywords,
+        },
+        SearchEntry {
             section: General,
             title: SettingsNotifyOnCommandFinish,
             keywords: SettingsSearchNotifyOnCommandFinishKeywords,
@@ -898,6 +903,7 @@ impl SearchEntry {
             L10nKey::SettingsTabBarPosition => "tab_bar_position",
             L10nKey::SettingsSidebarGrouping => "sidebar_grouping",
             L10nKey::SettingsDiffPreviewFromCounts => "sidebar_diff_preview",
+            L10nKey::SettingsSshTabTitle => "ssh_tab_title",
             L10nKey::SettingsNotifyOnCommandFinish => "notify_on_command_finish",
             L10nKey::SettingsNotifyThreshold => "notify_threshold_secs",
             L10nKey::SettingsTerminalBell => "bell",
@@ -1007,6 +1013,7 @@ impl SearchEntry {
             L10nKey::SettingsTabBarPosition => t(L10nKey::SettingsTabBarPositionDesc),
             L10nKey::SettingsSidebarGrouping => t(L10nKey::SettingsSidebarGroupingDesc),
             L10nKey::SettingsDiffPreviewFromCounts => t(L10nKey::SettingsDiffPreviewFromCountsDesc),
+            L10nKey::SettingsSshTabTitle => t(L10nKey::SettingsSshTabTitleDesc),
             L10nKey::SettingsNotifyOnCommandFinish => t(L10nKey::SettingsNotifyOnCommandFinishDesc),
             L10nKey::SettingsNotifyThreshold => t(L10nKey::SettingsNotifyThresholdDesc),
             L10nKey::SettingsAppHttpProxy => t(L10nKey::SettingsAppHttpProxyDesc),
@@ -1050,6 +1057,7 @@ impl SearchEntry {
             L10nKey::SettingsDiffPreviewFromCounts => {
                 cfg.sidebar_diff_preview != defaults.sidebar_diff_preview
             }
+            L10nKey::SettingsSshTabTitle => cfg.ssh_tab_title != defaults.ssh_tab_title,
             L10nKey::SettingsNotifyOnCommandFinish => {
                 cfg.notify_on_command_finish != defaults.notify_on_command_finish
             }
@@ -7659,6 +7667,11 @@ impl Tty7App {
             TabBarPosition::Left => 1,
         };
         let sidebar_diff_preview = cfg.sidebar_diff_preview;
+        let ssh_tab_title_idx = match cfg.ssh_tab_title {
+            SshTabTitle::Dynamic => 0,
+            SshTabTitle::ProfileName => 1,
+            SshTabTitle::Hostname => 2,
+        };
         let sidebar_grouping_idx = match cfg.sidebar_grouping {
             crate::core::config::SidebarGrouping::Repo => 0,
             crate::core::config::SidebarGrouping::RepoOrDirectory => 1,
@@ -7790,6 +7803,25 @@ impl Tty7App {
             },
         );
 
+        let ssh_tab_title_radio = self.segmented(
+            "wt-ssh-tab-title",
+            &[
+                t(L10nKey::SettingsSshTabTitleDynamic),
+                t(L10nKey::SettingsSshTabTitleProfileName),
+                t(L10nKey::SettingsSshTabTitleHostname),
+            ],
+            ssh_tab_title_idx,
+            cx,
+            |this, ix, _w, cx| {
+                let mode = match ix {
+                    0 => SshTabTitle::Dynamic,
+                    1 => SshTabTitle::ProfileName,
+                    _ => SshTabTitle::Hostname,
+                };
+                this.set_ssh_tab_title(mode, cx);
+            },
+        );
+
         v_flex()
             .when(general, |v| {
                 v.child(self.section_header(t(L10nKey::SettingsWindow), cx))
@@ -7843,6 +7875,12 @@ impl Tty7App {
                         t(L10nKey::SettingsDiffPreviewFromCounts),
                         t(L10nKey::SettingsDiffPreviewFromCountsDesc),
                         sidebar_diff_switch,
+                        cx,
+                    ))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsSshTabTitle),
+                        t(L10nKey::SettingsSshTabTitleDesc),
+                        ssh_tab_title_radio,
                         cx,
                     ))
             })
