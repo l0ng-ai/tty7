@@ -78,7 +78,10 @@ use crate::ui::scm::state::RepoKey;
 /// A taller row against an unchanged [`GRAPH_LANE_W`] steepens a merge's
 /// diagonal, which is the safe direction: the failure this pitch is guarding
 /// against is an angle read as *shallower* than the jump it draws.
-const GRAPH_ROW_H: f32 = 24.;
+///
+/// Now 26, the file list's own pitch: the section reads as one more list of
+/// rows under the groups rather than as a denser instrument bolted on below.
+const GRAPH_ROW_H: f32 = 26.;
 /// Rows materialized above and below the visible band, so a fast scroll never
 /// outruns the window into blank space, and the "load more" band — laid out
 /// one row past the window's end — stays below the fold until it is real.
@@ -92,7 +95,10 @@ const GRAPH_WINDOW_MARGIN: usize = 4;
 /// `round(12 × 1.618) = 20px` — so 24 is that line plus 2px of air on each
 /// side. The resize constants below are counted against it, which is why it
 /// has to stay honest.
-const GRAPH_HEADER_H: f32 = 24.;
+///
+/// 32 since the section took the panel's own band rhythm: the header is where
+/// the section starts, and it wants more air than a row of it.
+const GRAPH_HEADER_H: f32 = 32.;
 
 /// The header's controls: the filter tile and the scope picker beside it.
 ///
@@ -101,6 +107,15 @@ const GRAPH_HEADER_H: f32 = 24.;
 /// rattling around inside its tile.
 const GRAPH_TILE: f32 = 18.;
 const GRAPH_TILE_GLYPH: f32 = 12.;
+
+/// Space after the age column, inside the section's own inset.
+const GRAPH_ROW_PAD_R: f32 = 8.;
+
+/// The section's rows sit inside this much of the panel's edge on each side,
+/// so a hovered or selected commit wears a rounded band like a file row does
+/// rather than a full-bleed stripe. Added to the row's own padding it lands on
+/// `CONTENT_INSET`.
+const GRAPH_SIDE: f32 = CONTENT_INSET - 6.;
 
 /// Horizontal distance between lane centres.
 const GRAPH_LANE_W: f32 = 12.;
@@ -118,8 +133,12 @@ const GRAPH_PAD_R: f32 = 6.;
 /// It stays 3 while the row grows, because what a bead is measured against is
 /// the string it is on — `GRAPH_LANE_W`, which has not moved. A quarter is the
 /// floor the test below holds it to.
-const GRAPH_DOT_R: f32 = 3.;
-const GRAPH_LINE_W: f32 = 1.5;
+///
+/// Since the section went hairline: a 7px node on a 1px string, and the ring a
+/// node wears is a touch heavier than the string so it closes cleanly.
+const GRAPH_DOT_R: f32 = 3.5;
+const GRAPH_LINE_W: f32 = 1.;
+const GRAPH_RING_W: f32 = 1.2;
 
 /// Most of the panel's width belongs to the message. Thirty percent is what
 /// leaves five lanes at the 260px default and still keeps a readable column.
@@ -138,17 +157,17 @@ const _: () = assert!(GRAPH_MAX_LANES <= LANE_SLOTS);
 /// file list has to keep a usable part of a short one.
 ///
 /// Both of the fixed ones are counted in rows against the header: what they
-/// mean is a number of commits, not a number of pixels. 260 is `24 + 9.8 × 24`
+/// mean is a number of commits, not a number of pixels. 287 is `32 + 9.8 × 26`
 /// — nine commits and most of a tenth, and the fraction is deliberate, because
 /// a row cut by the bottom edge is the only honest way a fixed-height list says
-/// there is more below it. 100 is `24 + 3.2 × 24`, three and a bit, which is
+/// there is more below it. 116 is `32 + 3.2 × 26`, three and a bit, which is
 /// the least that still looks like history rather than like a mistake.
 ///
-/// They grew with [`GRAPH_ROW_H`] — 220 and 88 around a 20px row — precisely
+/// They grew with [`GRAPH_ROW_H`] — 220 and 88 around a 20px row, 260 and 100 around 24 — precisely
 /// because they are counted in commits: holding the pixels would have quietly
 /// bought the file list 40px by showing two fewer commits.
-const GRAPH_H_DEFAULT: f32 = 260.;
-const GRAPH_H_MIN: f32 = 100.;
+const GRAPH_H_DEFAULT: f32 = 287.;
+const GRAPH_H_MIN: f32 = 116.;
 const GRAPH_H_MAX_RATIO: f32 = 0.65;
 
 /// The divider's grab area, matching `RESIZE_HANDLE_WIDTH` on the other axis.
@@ -343,6 +362,18 @@ struct GraphPaint {
     selected_surface: Hsla,
     /// Whether a "load more" band follows the last row.
     more: bool,
+    /// Set when the whole page is one lane. A straight line of history has no
+    /// branch identity to colour, so it is drawn in neutrals: a hairline
+    /// string and muted rings, with only HEAD filled in ink.
+    linear: Option<Neutral>,
+}
+
+/// The inks a single-lane page is painted in.
+#[derive(Clone, Copy)]
+struct Neutral {
+    line: Hsla,
+    ring: Hsla,
+    head: Hsla,
 }
 
 /// Paint the whole gutter in one pass.
@@ -369,6 +400,12 @@ fn paint_graph(p: &GraphPaint, bounds: Bounds<Pixels>, window: &mut Window) {
         .max(0) as usize;
 
     let cx_of = |column: Lane| left + lane_center_x(column, scale);
+    let line_ink = |ink: u32| -> Hsla {
+        match p.linear {
+            Some(n) => n.line,
+            None => gpui::rgb(ink).into(),
+        }
+    };
     let vline = |x: f32, y0: f32, y1: f32| {
         Bounds::from_corners(
             point(px(x - GRAPH_LINE_W / 2.), px(y0)),
@@ -388,14 +425,14 @@ fn paint_graph(p: &GraphPaint, bounds: Bounds<Pixels>, window: &mut Window) {
 
         for (column, ink) in band.top.iter().enumerate() {
             if let Some(ink) = ink {
-                window.paint_quad(fill(vline(cx_of(column as Lane), y0, mid), gpui::rgb(*ink)));
+                window.paint_quad(fill(vline(cx_of(column as Lane), y0, mid), line_ink(*ink)));
             }
         }
         for (column, ink) in band.bottom.iter().enumerate() {
             if let Some(ink) = ink {
                 window.paint_quad(fill(
                     vline(cx_of(column as Lane), mid, y0 + GRAPH_ROW_H),
-                    gpui::rgb(*ink),
+                    line_ink(*ink),
                 ));
             }
         }
@@ -420,18 +457,28 @@ fn paint_graph(p: &GraphPaint, bounds: Bounds<Pixels>, window: &mut Window) {
                         px(mid + GRAPH_LINE_W / 2.),
                     ),
                 ),
-                gpui::rgb(*ink),
+                line_ink(*ink),
             ));
         }
 
         let node = project(row.node, p.max_lanes);
-        let ink = gpui::rgb(column_ink(
-            node,
-            row.color,
-            p.max_lanes,
-            p.overflowing,
-            &p.lanes,
-        ));
+        let is_head = p
+            .page
+            .commits
+            .get(i)
+            .is_some_and(|c| c.refs.iter().any(|r| r.kind == RefKind::Head));
+        let ink: Hsla = match p.linear {
+            Some(n) if is_head => n.head,
+            Some(n) => n.ring,
+            None => gpui::rgb(column_ink(
+                node,
+                row.color,
+                p.max_lanes,
+                p.overflowing,
+                &p.lanes,
+            ))
+            .into(),
+        };
         let cx = cx_of(node);
         let dot = |r: f32| {
             Bounds::from_corners(
@@ -452,32 +499,34 @@ fn paint_graph(p: &GraphPaint, bounds: Bounds<Pixels>, window: &mut Window) {
             p.surface
         };
         if row.parents > 1 {
-            // A merge is a ring. It is the one row shape a reader scans for,
-            // and an outline reads at 8px where a second fill colour does not.
+            // A merge is the larger ring. It is the one row shape a reader
+            // scans for, and an outline reads at 9px where a second fill
+            // colour does not.
             let r = GRAPH_DOT_R + 1.;
             window.paint_quad(quad(
                 dot(r),
                 Corners::all(px(r)),
                 hole,
-                Edges::all(px(GRAPH_LINE_W)),
+                Edges::all(px(GRAPH_RING_W)),
                 ink,
                 BorderStyle::Solid,
             ));
-        } else if row.parents == 0 {
-            // A root has nothing below it; hollow says "the line stops here"
-            // without needing a second glyph.
+        } else if is_head {
+            // Where you are is the one filled bead on the string.
+            window.paint_quad(
+                fill(dot(GRAPH_DOT_R), ink).corner_radii(Corners::all(px(GRAPH_DOT_R))),
+            );
+        } else {
+            // Every other commit is a hollow bead, so HEAD is found by shape
+            // before it is found by the chip beside it.
             window.paint_quad(quad(
                 dot(GRAPH_DOT_R),
                 Corners::all(px(GRAPH_DOT_R)),
                 hole,
-                Edges::all(px(GRAPH_LINE_W)),
+                Edges::all(px(GRAPH_RING_W)),
                 ink,
                 BorderStyle::Solid,
             ));
-        } else {
-            window.paint_quad(
-                fill(dot(GRAPH_DOT_R), ink).corner_radii(Corners::all(px(GRAPH_DOT_R))),
-            );
         }
     }
 
@@ -491,21 +540,16 @@ fn paint_graph(p: &GraphPaint, bounds: Bounds<Pixels>, window: &mut Window) {
             let column = project(*lane, p.max_lanes);
             let ink = column_ink(column, *lane, p.max_lanes, p.overflowing, &p.lanes);
             let x = cx_of(column);
+            let ink = line_ink(ink);
             if p.more {
-                window.paint_quad(fill(
-                    vline(x, y0, y0 + GRAPH_ROW_H),
-                    Hsla::from(gpui::rgb(ink)).opacity(0.3),
-                ));
+                window.paint_quad(fill(vline(x, y0, y0 + GRAPH_ROW_H), ink.opacity(0.3)));
             } else {
                 // Three steps rather than a gradient: a gradient would be a
                 // second `Background` kind for four pixels of ink.
                 const STEP: f32 = 3.;
                 for (step, alpha) in [0.5f32, 0.3, 0.15].into_iter().enumerate() {
                     let a = y0 + step as f32 * STEP;
-                    window.paint_quad(fill(
-                        vline(x, a, a + STEP),
-                        Hsla::from(gpui::rgb(ink)).opacity(alpha),
-                    ));
+                    window.paint_quad(fill(vline(x, a, a + STEP), ink.opacity(alpha)));
                 }
             }
         }
@@ -537,8 +581,8 @@ impl Tty7App {
             return Some(
                 div()
                     .flex_none()
-                    .pt(px(2.))
-                    .pb(px(4.))
+                    .pt(px(4.))
+                    .pb(px(12.))
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(self.graph_header(repo, None, cx))
@@ -826,6 +870,11 @@ impl Tty7App {
                     .and_then(|oid| page.commits.iter().position(|c| c.oid == oid)),
                 selected_surface: gpui::rgb(sf.selected).into(),
                 more,
+                linear: (page.max_lanes <= 1).then(|| Neutral {
+                    line: cx.theme().border,
+                    ring: cx.theme().muted_foreground,
+                    head: cx.theme().foreground,
+                }),
             };
             stack = stack.child(
                 canvas(
@@ -846,7 +895,7 @@ impl Tty7App {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.scm.graph.scroll)
-            .child(stack);
+            .child(div().px(px(GRAPH_SIDE)).child(stack));
         crate::ui::scrollbar::with_vertical_scrollbar(
             "scm-graph-scrollbar",
             scroller,
@@ -858,9 +907,9 @@ impl Tty7App {
     ///
     /// Column order is fixed and every optional part has a hard cap, so the
     /// worst case cannot squeeze the message to nothing: type prefix, message,
-    /// ref chip, age. The age goes when a ref chip is present — a chip says
-    /// where a branch is, which is worth more here than three characters of
-    /// "3d", and the full timestamp is in the tooltip either way.
+    /// ref chip, age. The age is a fixed right-aligned column on every row,
+    /// chip or not, so the times stack into one ragged-left column down the
+    /// section and the eye can run down it.
     fn graph_row(
         &self,
         repo: &RepoKey,
@@ -883,10 +932,11 @@ impl Tty7App {
         h_flex()
             .id(SharedString::from(format!("scm-graph-row-{i}")))
             .items_center()
-            .gap(px(4.))
+            .gap(px(6.))
             .h(px(GRAPH_ROW_H))
             .pl(px(gutter))
-            .pr(px(CONTENT_INSET))
+            .pr(px(GRAPH_ROW_PAD_R))
+            .rounded(px(6.))
             .cursor_pointer()
             // The panel's own neutral selection and hover fills, the same two
             // the file list above uses. A tinted band would make this one list
@@ -903,7 +953,7 @@ impl Tty7App {
                 h_flex()
                     .flex_1()
                     .min_w(px(0.))
-                    .gap(px(2.))
+                    .gap(px(4.))
                     .children(
                         prefix.map(|(kind, breaking)| self.graph_type_prefix(kind, breaking, cx)),
                     )
@@ -924,21 +974,21 @@ impl Tty7App {
             // The age is a mono token, so its column is measured in characters:
             // the widest it ever prints is four (`12mo`), and four of the mono
             // face's advances at `META_MONO` is `4 × 11 × 0.6` = 26.4, rounded
-            // up to 27.
-            .when(deco.is_none(), |d| {
-                d.child(
-                    div()
-                        .flex_none()
-                        .min_w(px(27.))
-                        .text_size(rems(META_MONO))
-                        .font_family(mono.clone())
-                        .text_color(cx.theme().muted_foreground)
-                        .child(SharedString::from(relative_time(
-                            now,
-                            commit.author.at.unix,
-                        ))),
-                )
-            })
+            // up to 27. Right-aligned inside it, so `3d` and `12mo` end on the
+            // same edge.
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(27.))
+                    .text_right()
+                    .text_size(rems(META_MONO))
+                    .font_family(mono.clone())
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(relative_time(
+                        now,
+                        commit.author.at.unix,
+                    ))),
+            )
             .tooltip({
                 let text = commit_tooltip(commit, now);
                 move |window, cx| {
@@ -1093,10 +1143,13 @@ impl Tty7App {
             // weight; everything else is context. The fill is grey, not brand:
             // `theme.accent` is a neutral surface tint here, and the only
             // saturated colour the section spends is a lane's.
+            //
+            // A faint neutral pill in muted ink: the filled bead in the gutter
+            // already says "you are here", so the chip only has to name it.
             RefKind::Head => (
-                theme.accent.opacity(0.28),
-                theme.foreground,
-                gpui::FontWeight::SEMIBOLD,
+                theme.foreground.opacity(0.06),
+                theme.muted_foreground,
+                gpui::FontWeight::NORMAL,
             ),
             // Tags are yellow because tags are yellow — in git's own output,
             // in every other client, and in the reader's memory.
