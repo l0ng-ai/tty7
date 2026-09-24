@@ -169,14 +169,20 @@ fn settings_columns_scaled(
         only_when(ssh, SSH_LIST_W - SSH_LIST_W_MIN),
         only_when(beside, THEME_PANEL_W - THEME_PANEL_W_MIN),
     );
-    let slack = nav_slack + list_slack + panel_slack;
+    // The page's own columns give first, and the nav only once they stand on
+    // their floors. The nav is the one column every page shares: squeezed
+    // together with the host list it came out a few points narrower on SSH
+    // than on every other page, and jumped each time the reader moved there.
     let short = (nav + ssh_list + theme_panel + page - viewport).max(0.);
-    if short > 0. && slack > 0. {
-        let give = (short / slack).min(1.);
-        nav -= nav_slack * give;
+    let page_slack = list_slack + panel_slack;
+    let from_page = short.min(page_slack);
+    if from_page > 0. {
+        let give = from_page / page_slack;
         ssh_list -= list_slack * give;
         theme_panel -= panel_slack * give;
     }
+    let from_nav = (short - from_page).min(nav_slack);
+    nav -= from_nav;
     if panel_overlays {
         // Covering the page, not replacing it: leave a strip of the page in
         // view so the panel reads as something laid on top and dismissible.
@@ -256,6 +262,10 @@ const CONTROL_RADIUS: f32 = crate::ui::tab_strip::RAIL_TILE_RADIUS;
 /// One line of navigation — a nav item, a host, a section heading — at the
 /// right panel's Session row height.
 const ROW_H: f32 = 28.;
+/// A heading's row: the design's group-header height, shorter than a content
+/// row so the heading hugs the rows it names rather than floating between
+/// them and the rule above.
+const HEADING_H: f32 = 22.;
 
 /// How far a row pads its text in from its own edge, which is how far its
 /// hover fill bleeds past that text. The list around it sits `CONTENT_INSET`
@@ -272,6 +282,9 @@ const SEGMENT_INSET: f32 = 2.;
 /// every row — the Defaults row and the group headings keep the column, so
 /// every title starts on the same one.
 const SSH_DOT: f32 = 6.;
+/// Where an SSH list row's title starts: the row's padding, the dot gutter and
+/// the 8px gap after it.
+const SSH_TITLE_INSET: f32 = ROW_PAD + SSH_DOT + 8.;
 
 /// The page's type ladder, in rems: the right panel's, so a label here is the
 /// size of a label there.
@@ -2116,7 +2129,7 @@ fn heading_text(title: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .flex()
         .items_center()
-        .min_h(px(ROW_H))
+        .min_h(px(HEADING_H))
         .text_size(gpui::rems(HEADING))
         .font_weight(FontWeight::MEDIUM)
         .text_color(cx.theme().muted_foreground)
@@ -2876,15 +2889,15 @@ impl Tty7App {
                 v_flex()
                     .w_full()
                     .flex_shrink_0()
-                    .gap(px(10.))
+                    .gap(px(4.))
                     .px(px(CONTENT_INSET))
                     .pt(px(TITLE_BAR_HEIGHT))
-                    .pb(px(SECTION_GAP))
-                    .child(
-                        heading_text(t(L10nKey::SettingsHeader), cx)
-                            .min_h(px(0.))
-                            .px(px(ROW_PAD)),
-                    )
+                    .pb(px(12.))
+                    // The heading keeps its full row. Cancelling the row's
+                    // floor with a later `min_h(0)` left the column measuring
+                    // it some 46pt taller than it painted, and that phantom
+                    // height opened a hole between the search and the nav.
+                    .child(heading_text(t(L10nKey::SettingsHeader), cx).px(px(ROW_PAD)))
                     .child(nav_search),
             )
             .child(nav_body)
@@ -3013,9 +3026,10 @@ impl Tty7App {
                     // outside the scroll range. `flex_shrink_0` does not buy
                     // its way out of that; only staying a block does.
                     //
-                    // The page's title stands in the window's title-bar band,
-                    // level with the close tile at the other end, so the page
-                    // under it starts where the nav's search does.
+                    // The page's title sits under the window's title-bar band,
+                    // on the line the nav's "Settings" heading does, and keeps
+                    // a section's air from the first row. In the band itself
+                    // it was jammed against the window's top edge.
                     div().w_full().px_10().pb_8().child(
                         div()
                             .w_full()
@@ -3032,7 +3046,9 @@ impl Tty7App {
                                 )
                                 .flex()
                                 .items_center()
-                                .h(px(TITLE_BAR_HEIGHT)),
+                                .mt(px(TITLE_BAR_HEIGHT))
+                                .h(px(HEADING_H))
+                                .mb(px(SECTION_GAP)),
                             )
                             .children(no_match_note)
                             .when(self.theme_draft_dirty(), |v| {
@@ -3384,8 +3400,10 @@ impl Tty7App {
     }
 
     pub(crate) fn section_header(&self, title: &str, cx: &Context<Self>) -> Stateful<Div> {
+        // Pulled into the first row's top padding: about 9pt from its rows,
+        // against the 16 between rows and the 27 from the rule above.
         self.header_text(title, cx)
-            .mb_1()
+            .mb(px(-ROW_PAD / 4.))
             .id(settings_header_id(title))
             .anchor_scroll(self.first_hit_anchor(title, cx))
     }
@@ -3410,12 +3428,15 @@ impl Tty7App {
     }
 
     /// The seam between two sections: a half-pixel hairline in the divider
-    /// ink with `SECTION_GAP` of air either side — a pane edge's line, not a
-    /// table rule, so a page reads as one surface broken into bands.
+    /// ink with a little more than `SECTION_GAP` of air either side — a pane
+    /// edge's line, not a table rule, so a page reads as one surface broken
+    /// into bands. The heading under it sits closer to its own rows than to
+    /// this, which is what makes it read as theirs.
     pub(crate) fn section_rule(&self, cx: &Context<Self>) -> Div {
         div()
             .h(px(0.5))
-            .my(px(SECTION_GAP))
+            .mt(px(SECTION_GAP + 4.))
+            .mb(px(SECTION_GAP + 8.))
             .bg(cx.theme().sidebar_border)
     }
 
@@ -4333,7 +4354,12 @@ impl Tty7App {
             .track_scroll(&detail_scroll)
             .child(
                 div()
-                    .pt(px(crate::ui::app::TITLE_BAR_HEIGHT))
+                    // Its title row is a control row tall, for a host's
+                    // buttons; lifted by the difference so the title still
+                    // centres on the line every other page's title does.
+                    .pt(px(
+                        crate::ui::app::TITLE_BAR_HEIGHT - (ROW_H - HEADING_H) / 2.
+                    ))
                     .px_8()
                     .pb_8()
                     .child(
@@ -4387,10 +4413,14 @@ impl Tty7App {
 
         // The rail's header, rebuilt for a list of hosts: a heading with its
         // two tiles at the trailing end, then the 28px filled search well.
+        // Built to the nav's measures beside it — a heading row, 4pt, the
+        // well — so the headings and the wells run level across both columns;
+        // the tiles overhang the short heading row rather than push it down.
         let header = v_flex()
-            .gap(px(10.))
+            .gap(px(4.))
             .child(
                 h_flex()
+                    .h(px(HEADING_H))
                     .items_center()
                     .justify_between()
                     .pl(px(ROW_PAD))
@@ -4479,11 +4509,12 @@ impl Tty7App {
             list = list.child(
                 div()
                     .py_4()
-                    // px_2 is what `render_ssh_row` insets its title by: a note
-                    // standing in for the rows starts on their column, not on
-                    // the list's own edge.
-                    .px_2()
-                    .text_sm()
+                    // Where `render_ssh_row` starts its title — its padding,
+                    // then the dot gutter every row keeps: a note standing in
+                    // for the rows starts on their column, not on the list's
+                    // own edge.
+                    .px(px(SSH_TITLE_INSET))
+                    .text_size(gpui::rems(META))
                     .text_color(muted)
                     .child(t(L10nKey::SettingsNoSavedHosts)),
             );
@@ -4491,8 +4522,8 @@ impl Tty7App {
             list = list.child(
                 div()
                     .py_4()
-                    .px_2()
-                    .text_sm()
+                    .px(px(SSH_TITLE_INSET))
+                    .text_size(gpui::rems(META))
                     .text_color(muted)
                     .child(t_fmt(L10nKey::SettingsNothingMatches, &[("query", &query)])),
             );
@@ -4525,7 +4556,7 @@ impl Tty7App {
         v_flex()
             .px(px(CONTENT_INSET))
             .pb(px(CONTENT_INSET))
-            .gap(px(SECTION_GAP))
+            .gap(px(12.))
             .pt(px(crate::ui::app::TITLE_BAR_HEIGHT))
             .child(header)
             .child(list)
@@ -7355,10 +7386,11 @@ impl Tty7App {
                     ))
                 },
             )
+            // A footnote to the rows above, so it stays within a row's padding
+            // of them: 12pt out, it read as a paragraph of its own.
             .child(
                 div()
-                    .mt_3()
-                    .text_xs()
+                    .text_size(gpui::rems(META))
                     .text_color(muted_fg)
                     .child(t(L10nKey::SettingsShellFooter)),
             )
@@ -7810,7 +7842,7 @@ impl Tty7App {
         use crate::core::agent_hooks::HooksState;
 
         let theme = cx.theme();
-        let (foreground, muted_fg) = (theme.foreground, theme.muted_foreground);
+        let muted_fg = theme.muted_foreground;
         let (success, warning) = (theme.success, theme.warning);
         let (view, note, selected_host) = match self.active_settings() {
             Some(s) => (
@@ -7869,19 +7901,33 @@ impl Tty7App {
                     // `settings_row` gives the control column the whole row
                     // once it stacks, and buttons flush to the far edge of a
                     // row whose label starts at the near one read as unrelated.
+                    //
+                    // The status leads the buttons on their own line: stacked
+                    // over them it made every row two control lines tall, its
+                    // dot floating level with the label and the buttons with
+                    // nothing. It is the row's metadata, so it takes the
+                    // description's size and ink.
                     let control = v_flex()
-                        .gap_2()
+                        .gap_1()
                         .when(!stacked, |c| c.items_end())
                         .child(
                             h_flex()
                                 .gap_2()
                                 .items_center()
-                                .child(div().size(px(SSH_DOT)).rounded_full().bg(dot_color))
-                                .child(div().text_sm().text_color(foreground).child(status_text)),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
+                                .child(
+                                    h_flex()
+                                        .mr_2()
+                                        .gap(px(6.))
+                                        .items_center()
+                                        .child(div().size(px(SSH_DOT)).rounded_full().bg(dot_color))
+                                        .child(
+                                            div()
+                                                .text_size(gpui::rems(META))
+                                                .text_color(muted_fg)
+                                                .whitespace_nowrap()
+                                                .child(status_text),
+                                        ),
+                                )
                                 .child(
                                     quiet_button(
                                         Button::new(("agent-hooks-install", i))
@@ -8205,9 +8251,10 @@ impl Tty7App {
                         cx,
                     ))
             })
+            // The first thing on its own page: a rule here only divided the
+            // page title from nothing.
             .when(!general, |v| {
-                v.child(self.section_rule(cx))
-                    .child(self.section_header(t(L10nKey::SettingsTabs), cx))
+                v.child(self.section_header(t(L10nKey::SettingsTabs), cx))
                     .child(self.settings_row(
                         t(L10nKey::SettingsNewTabPosition),
                         t(L10nKey::SettingsNewTabPositionDesc),
@@ -9996,20 +10043,22 @@ mod tests {
         assert_eq!(settings_row_width(Appearance, true, REPORTED, 1.), page);
     }
 
-    /// The list that has to give the most is the one the window has the least
-    /// room for, and no list is ever asked for more than it has to spare.
+    /// The page's own lists give before the nav does, so the nav keeps one
+    /// width from page to page, and no list is ever asked for more than it has
+    /// to spare.
     #[test]
-    fn the_lists_shrink_together_and_stop_at_their_floors() {
+    fn the_page_lists_shrink_before_the_nav_and_stop_at_their_floors() {
         use SettingsSection::*;
         // Wide enough for everyone: nothing moves.
         let wide = settings_columns(Ssh, false, 1440.);
         assert_eq!((wide.nav, wide.ssh_list), (NAV_W, SSH_LIST_W));
         // The reported window — half of a 1440pt screen, three columns on SSH.
-        // Both lists give, neither past its floor, and the detail comes out at
-        // its preferred width instead of the 336 it used to be left with.
+        // The host list gives, not past its floor, the nav stays the width it
+        // is on every other page, and the detail comes out at its preferred
+        // width instead of the 336 it used to be left with.
         let half = settings_columns(Ssh, false, 900.);
-        assert!(half.nav < NAV_W && half.ssh_list < SSH_LIST_W);
-        assert!(half.nav >= NAV_W_MIN && half.ssh_list >= SSH_LIST_W_MIN);
+        assert_eq!(half.nav, settings_columns(General, false, 900.).nav);
+        assert!(half.ssh_list < SSH_LIST_W && half.ssh_list >= SSH_LIST_W_MIN);
         assert_eq!(
             settings_row_width(Ssh, false, 900., 1.).round(),
             CONTENT_W,
