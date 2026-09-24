@@ -27,7 +27,7 @@
 | `muted_foreground` | 描述、路径、快捷键 | 与主文字明确区分，但仍保持可读性 |
 | `border` / `divider` | 控件边界 / 区域分隔 | 控件边界较强，区域分隔较弱；不能把页面画成表格线框 |
 | `Interactions.input_border` | 输入框与普通按钮轮廓 | 对应组件库的 `input` 边框角色，不能误用内容背景色导致边界消失 |
-| `Interactions.primary` | 保存、连接、有效的提交等主操作 | 强调色实底，成对配置前景色；hover/pressed 保持标签对比度 |
+| `Interactions.primary` | 保存、连接等主操作 | 强调色实底，成对配置前景色；hover/pressed 保持标签对比度。Git 提交按钮例外：可提交时用反色中性（正文色底），见 Git 面板 |
 | `Surfaces.rail.selected` | 当前标签页 | 中性 selected 阶 + medium；不用强调色，蓝色留给可按的东西 |
 | `Interactions.choice` | 菜单、命令面板的键盘当前行 | 强调色浅底，区别于鼠标经过的中性 hover |
 | 中性 `secondary` | 面板页签、分段选项、普通按钮 | 次级导航不能与主要操作争夺注意力 |
