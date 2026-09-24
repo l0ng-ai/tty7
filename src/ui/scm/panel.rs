@@ -32,9 +32,9 @@ use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
 use crate::ui::host_ops::{HostId, SharedHost};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::{
-    HEADING, META, META_MONO, ROW_INSET, SEARCH_H, action_strip, git_badge, info_chip,
+    META, META_MONO, ROW_INSET, SEARCH_H, action_strip, git_badge, info_chip,
 };
-use crate::ui::rounding::{CARD_RADIUS, HAIRLINE, RoundedCorners as _, segment_corners};
+use crate::ui::rounding::{HAIRLINE, ROW_RADIUS, RoundedCorners as _, segment_corners};
 use crate::ui::scm::ScmIntent;
 use crate::ui::scm::path::split_display_path;
 use crate::ui::scm::state::{RepoKey, ScmGroup};
@@ -65,25 +65,21 @@ const BRANCHES_IN_MENU: usize = 12;
 /// changes the user came to look at.
 const UNTRACKED_AUTO_COLLAPSE: usize = 20;
 
-/// Message fields share the search field's 30px height and grow with content.
+/// The message box rests at 56px — room for a subject and the start of a body
+/// — and grows with content from there.
 const MSG_LINE: f32 = 20.;
-const MSG_PAD_X: f32 = 9.;
-const MSG_PAD_Y: f32 = 5.;
-const MSG_MIN_H: f32 = MSG_PAD_Y + MSG_LINE + MSG_PAD_Y;
+const MSG_PAD_X: f32 = 10.;
+const MSG_PAD_Y: f32 = 8.;
+const MSG_MIN_H: f32 = 56.;
 /// The ceiling, as `MSG_ROWS_MAX` bare lines. It is a rail, not a border-box
 /// sum: the wrapper's own hairline and padding are not in it, so at the very
 /// top of the box's growth the last row is clipped rather than framed.
 const MSG_MAX_H: f32 = MSG_ROWS_MAX as f32 * MSG_LINE;
 
-/// The invariant the comment above describes, made unbreakable: the resting
-/// message box and the panel's search strip are the same height, or this does
-/// not build.
-const _: () = assert!(MSG_MIN_H == SEARCH_H);
-
-/// One line at rest and it grows into the message. The box is one row in a
-/// column of rows, and a box that stands four lines tall before anything has
-/// been typed pushes the file list — the thing the panel is for — off the
-/// bottom of a 260px-wide sidebar.
+/// One line of input at rest inside the 56px box, growing into the message.
+/// The box's resting height is the wrapper's floor, not the row count: a box
+/// that stood six lines tall before anything was typed would push the file
+/// list — the thing the panel is for — off the bottom of the panel.
 const MSG_ROWS: usize = 1;
 const MSG_ROWS_MAX: usize = 6;
 
@@ -110,6 +106,27 @@ const MSG_ROWS_MAX: usize = 6;
 const COMMIT_H: f32 = ROW_H;
 const COMMIT_CHEVRON_W: f32 = COMMIT_H - 2.;
 const COMMIT_GLYPH: f32 = 11.;
+const COMMIT_RADIUS: gpui::Pixels = px(6.);
+
+/// The block pinned above the file list — branch, message, commit — reads as
+/// one unit: 8px under the tab row, 10px between its three parts and 14px
+/// before the first group.
+const PINNED_TOP: f32 = 8.;
+const PINNED_GAP: f32 = 10.;
+const PINNED_BOTTOM: f32 = 14.;
+
+/// The branch row's trailing refresh/sync tile.
+const BRANCH_TILE: f32 = 26.;
+
+/// Space between two change groups, and the height of a group's header.
+const GROUP_GAP: f32 = 16.;
+const GROUP_HEADER_H: f32 = 22.;
+/// Group headers are band labels: a half step under `META`, medium weight,
+/// muted — the file names under them are what the panel is for.
+const GROUP_HEADING: f32 = 11.5 / 16.;
+/// A file row's name keeps at least this much before the directory beside it
+/// has given up all of its width.
+const NAME_FLOOR: f32 = 40.;
 
 /// How long to wait before asking git again about a directory that answered
 /// with nothing.
@@ -316,6 +333,7 @@ impl Tty7App {
             // it is the same 24, so the row has one interior height and the
             // type sits inside it rather than setting it.
             .min_h(rems(28. / 16.))
+            .mt(px(PINNED_TOP))
             .pl(px(CONTENT_INSET))
             .pr(px(crate::ui::app::tile_trailing_inset_sm()))
             .child(
@@ -367,6 +385,7 @@ impl Tty7App {
                                 .min_w(px(0.))
                                 .line_height(relative(1.))
                                 .truncate()
+                                .font_weight(gpui::FontWeight::MEDIUM)
                                 .child(head_label(&status.head)),
                         )
                         .w_full()
@@ -409,12 +428,12 @@ impl Tty7App {
                     } else {
                         Icon::empty().path("icons/git-sync.svg")
                     }),
-                    crate::ui::app::TILE_SIZE_SM,
+                    BRANCH_TILE,
                     crate::ui::app::TILE_GLYPH_SM,
                     false,
                     cx,
                 )
-                .rounded_md()
+                .rounded(px(6.))
                 // With no branch to move the tile could only ever lose (#545):
                 // upstream is None at a detached or unborn HEAD by definition,
                 // so sync degenerates into scm_push, which has nothing to
@@ -797,7 +816,7 @@ impl Tty7App {
             .key_context(COMMIT_KEY_CONTEXT)
             .flex_none()
             .px(px(CONTENT_INSET))
-            .pt(px(6.))
+            .pt(px(PINNED_GAP))
             .child(
                 div()
                     // `MSG_MIN_H` is `panel_search`'s height and the paddings
@@ -808,7 +827,7 @@ impl Tty7App {
                     // ever measures itself differently.
                     .min_h(px(MSG_MIN_H))
                     .max_h(px(MSG_MAX_H))
-                    .rounded(CARD_RADIUS)
+                    .rounded(ROW_RADIUS)
                     // Half a rung, not a whole one. The hover step is what a
                     // row wears when the pointer is on it — a transient state —
                     // and the message box wears its fill all the time, so at
@@ -928,16 +947,15 @@ impl Tty7App {
         let repo_for_button = repo.clone();
         let live = plan.enabled;
         let staged = status.staged().count();
-        let theme = cx.theme();
-        let (muted, fg) = (theme.muted_foreground, theme.primary_foreground);
-        let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+        let muted = cx.theme().muted_foreground;
+        let paint = commit_paint(live, cx);
         h_flex()
             .flex_none()
             .items_center()
             .gap(px(8.))
             .px(px(CONTENT_INSET))
-            .pt(px(6.))
-            .pb(px(8.))
+            .pt(px(PINNED_GAP))
+            .pb(px(PINNED_BOTTOM))
             // The reading the button acts on, in the row it acts from. It
             // gives way first: a long count is still a count, and the control
             // beside it is the thing that has to keep its shape.
@@ -965,13 +983,18 @@ impl Tty7App {
                 // `segment_corners` so their own hit shapes stay inside the
                 // frame's radius — `overflow_hidden` would do that too, and
                 // would take the chevron's popup menu with it.
+                //
+                // Committable, the whole frame inverts — ink fill, surface
+                // label — which is the one prominent shape on the panel. With
+                // nothing to commit it sinks back to the message box's faint
+                // fill, so it never advertises an action that cannot run.
                 h_flex()
                     .flex_none()
                     .items_center()
                     .h(px(COMMIT_H))
-                    .rounded(CARD_RADIUS)
-                    .bg(gpui::rgb(field_fill(sf)))
-                    .hover(|s| s.bg(gpui::rgb(sf.hover)))
+                    .rounded(COMMIT_RADIUS)
+                    .bg(paint.fill)
+                    .hover(move |s| s.bg(paint.hover))
                     .child(
                         // `xsmall` is the token that sets a `Button`'s label to
                         // `META`, and a control's label is what `META` is for:
@@ -985,19 +1008,19 @@ impl Tty7App {
                             // ghost hovers to a colour close enough to it that
                             // the pointer would get no answer. This walks the
                             // same two rungs the file rows walk.
-                            .custom(commit_half(cx))
-                            .when(live, |button| button.primary())
+                            .custom(commit_half(paint.ink, cx))
                             .xsmall()
                             .label(t(plan.label))
                             .h_full()
-                            .px(px(10.))
-                            .rounded_corners(segment_corners(0, 2, CARD_RADIUS, HAIRLINE))
+                            .px(px(12.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .rounded_corners(segment_corners(0, 2, COMMIT_RADIUS, HAIRLINE))
                             // The ink is named here rather than left to the
                             // variant, so the disabled half greys out: it lands
                             // over the variant's own paint because
                             // `refine_style` runs after everything the variant
                             // does.
-                            .text_color(if live { fg } else { muted })
+                            .text_color(if live { paint.ink } else { muted })
                             .disabled(!live)
                             .when(!live, |b| b.tooltip(t(plan.reason)))
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1010,20 +1033,20 @@ impl Tty7App {
                                 );
                             })),
                     )
-                    // The seam between the halves is the panel showing through
-                    // the fill, not a line drawn on top of it — a rule would be
-                    // the one stroke left on the panel. A div rather than
+                    // The seam is a short rule in the label's own ink, inset
+                    // from both edges so it reads as a divider inside one shape
+                    // rather than a cut through it. A div rather than
                     // `border_l_1` on the chevron, because a ghost `Button`
                     // repaints its border colour transparent in every state it
                     // has and the seam would vanish under the pointer.
                     .child(
                         div()
                             .flex_none()
-                            .w(HAIRLINE)
-                            .h_full()
-                            .bg(gpui::rgb(sf.base)),
+                            .w(px(0.5))
+                            .h(px(COMMIT_H - 12.))
+                            .bg(paint.seam),
                     )
-                    .child(self.scm_commit_menu(repo, cx)),
+                    .child(self.scm_commit_menu(repo, paint.ink, cx)),
             )
             .into_any_element()
     }
@@ -1033,10 +1056,15 @@ impl Tty7App {
     /// Never disabled, whatever the button beside it is doing: stash and amend
     /// still mean something with nothing staged, and this is the only way to
     /// reach them.
-    fn scm_commit_menu(&self, repo: &RepoKey, cx: &mut Context<Self>) -> AnyElement {
+    fn scm_commit_menu(
+        &self,
+        repo: &RepoKey,
+        ink: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let amend = self.scm.amend;
         Button::new("scm-commit-menu")
-            .custom(commit_half(cx))
+            .custom(commit_half(ink, cx))
             .icon(Icon::new(IconName::ChevronDown))
             // `Button` sizes an icon off its own `Size`, so the glyph is asked
             // for by way of the size that produces it — the same conversion
@@ -1044,7 +1072,7 @@ impl Tty7App {
             .with_size(px(COMMIT_GLYPH / crate::ui::tab_strip::BUTTON_ICON_SCALE))
             .w(px(COMMIT_CHEVRON_W))
             .h_full()
-            .rounded_corners(segment_corners(1, 2, CARD_RADIUS, HAIRLINE))
+            .rounded_corners(segment_corners(1, 2, COMMIT_RADIUS, HAIRLINE))
             .dropdown_menu_with_anchor(gpui::Anchor::TopRight, {
                 let app = cx.entity().downgrade();
                 let repo = repo.clone();
@@ -1291,7 +1319,8 @@ impl Tty7App {
         status: &Arc<WorkingTreeStatus>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut list = v_flex().px(px(CONTENT_INSET - ROW_INSET)).py(px(2.));
+        let mut list = v_flex().px(px(CONTENT_INSET - ROW_INSET)).pb(px(12.));
+        let mut first = true;
         for group in ScmGroup::ORDER {
             let entries: Vec<&StatusEntry> = status
                 .entries
@@ -1302,6 +1331,12 @@ impl Tty7App {
                 continue;
             }
             let collapsed = self.scm.group_collapsed(group, entries.len());
+            // Groups are told apart by the pause before each one, not by a
+            // rule: 16px, and none above the first.
+            if !first {
+                list = list.child(div().flex_none().h(px(GROUP_GAP)));
+            }
+            first = false;
             list = list.child(self.scm_group_header(repo, group, &entries, collapsed, cx));
             if collapsed {
                 continue;
@@ -1356,7 +1391,6 @@ impl Tty7App {
     ) -> AnyElement {
         let count = entries.len();
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
-        let mono = cx.theme().mono_font_family.clone();
         let id = SharedString::from(format!("scm-group-{group:?}"));
         let actions = self.scm_group_actions(&id, repo, group, entries, sf.hover, cx);
         h_flex()
@@ -1364,10 +1398,11 @@ impl Tty7App {
             .group(id)
             .relative()
             .items_center()
-            .gap(px(8.))
-            .min_h(rems(ROW_H / 16.))
+            .gap(px(6.))
+            .min_h(rems(GROUP_HEADER_H / 16.))
+            .mb(px(1.))
             .px(px(ROW_INSET))
-            .rounded(px(5.))
+            .rounded(px(6.))
             .cursor_pointer()
             .hover(|s| s.bg(gpui::rgb(sf.hover)))
             .on_click(cx.listener(move |this, _, _window, cx| {
@@ -1388,24 +1423,25 @@ impl Tty7App {
                         } else {
                             IconName::ChevronDown
                         })
-                        .xsmall(),
+                        .size(px(COMMIT_GLYPH)),
                     ),
             )
+            // Sentence case, medium, muted: a band label over the rows rather
+            // than a heading competing with them.
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(rems(HEADING))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_size(rems(GROUP_HEADING))
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(cx.theme().muted_foreground)
-                    .child(t(group_label(group)).to_uppercase()),
+                    .child(t(group_label(group))),
             )
             .child(
                 div()
                     .flex_none()
-                    .text_size(rems(META_MONO))
-                    .font_family(mono)
+                    .text_size(rems(GROUP_HEADING))
                     .text_color(cx.theme().muted_foreground)
                     .child(count.to_string()),
             )
@@ -1449,7 +1485,7 @@ impl Tty7App {
             .min_w_0()
             .px(px(ROW_INSET))
             .py(px(3.))
-            .rounded(px(5.))
+            .rounded(px(6.))
             .cursor_pointer()
             .hover(|s| s.bg(gpui::rgb(sf.hover)))
             .when(selected, |s| s.bg(gpui::rgb(sf.selected)))
@@ -1483,10 +1519,12 @@ impl Tty7App {
             })
             .child(git_badge(letter, status_color(deco, cx), &mono))
             // Names use the same resting/selected hierarchy as sidebar rows.
+            // The name takes its own width first and only then shrinks, down
+            // to a floor; the directory beside it gets whatever is left.
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .flex_shrink(1.)
+                    .min_w(px(NAME_FLOOR))
                     .truncate()
                     .text_size(rems(crate::ui::right_panel::TEXT))
                     .text_color(if deco == DecoStatus::Conflict {
@@ -1500,21 +1538,22 @@ impl Tty7App {
                     .when(deco == DecoStatus::Deleted, |s| s.line_through())
                     .child(name.to_string()),
             )
-            // Cap the secondary directory while the filename fills the rest.
-            // A rem cap also gives short paths their intrinsic width inside
-            // the context-menu wrapper's flex layout.
-            .when(!dir.is_empty(), |this| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .max_w(rems(3.))
-                        .min_w_0()
-                        .truncate()
-                        .text_size(rems(META))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(dir.to_string()),
-                )
-            })
+            // The directory is flush right and gives way from its *start*:
+            // the folder nearest the file is the part that says where it is,
+            // and `src/ui/…` cut from the end keeps the part that says least.
+            // The row tooltip has the whole path either way.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis_start()
+                    .text_right()
+                    .text_size(rems(META))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(dir.to_string()),
+            )
             .child(actions)
             .into_any_element()
     }
@@ -1954,13 +1993,52 @@ fn field_fill(sf: crate::ui::presets::Surface) -> u32 {
 ///   `active` slot, and a dropdown marks its trigger selected for as long as
 ///   the menu is open. Anything but transparent there parks a block on the
 ///   chevron for the whole time the user is reading the menu.
-fn commit_half(cx: &gpui::App) -> ButtonCustomVariant {
+fn commit_half(ink: gpui::Hsla, cx: &gpui::App) -> ButtonCustomVariant {
     let clear = gpui::transparent_black();
     ButtonCustomVariant::new(cx)
         .color(clear)
-        .foreground(cx.theme().foreground)
+        .foreground(ink)
         .hover(clear)
         .active(clear)
+}
+
+/// How the split commit control is painted.
+#[derive(Clone, Copy)]
+struct CommitPaint {
+    fill: gpui::Hsla,
+    hover: gpui::Hsla,
+    ink: gpui::Hsla,
+    seam: gpui::Hsla,
+}
+
+/// Committable: an inverted neutral — the panel's ink as the fill and its own
+/// surface as the label, so it is the one solid shape in a panel of rows, and
+/// it stays neutral rather than borrowing the accent the sidebar and focus
+/// rings already spend. Not committable: the message box's faint fill and the
+/// panel's ink, a control that is there but is not asking for anything.
+///
+/// The label ink is the opaque surface rather than `theme.background`, which
+/// carries the window's transparency when one is configured.
+fn commit_paint(live: bool, cx: &gpui::App) -> CommitPaint {
+    let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+    let fg = cx.theme().foreground;
+    match live {
+        true => {
+            let ink: gpui::Hsla = gpui::rgb(sf.base).into();
+            CommitPaint {
+                fill: fg,
+                hover: fg.blend(ink.opacity(0.14)),
+                ink,
+                seam: ink.opacity(0.24),
+            }
+        }
+        false => CommitPaint {
+            fill: gpui::rgb(field_fill(sf)).into(),
+            hover: gpui::rgb(sf.hover).into(),
+            ink: fg,
+            seam: fg.opacity(0.18),
+        },
+    }
 }
 
 fn branch_note(text: &str, ink: gpui::Hsla, mono: &SharedString) -> AnyElement {
