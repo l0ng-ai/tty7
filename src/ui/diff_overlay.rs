@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, Background, FocusHandle, FontWeight, Hsla, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, SharedString, Window, div, prelude::*, px,
+    MouseDownEvent, MouseMoveEvent, Pixels, SharedString, Window, div, prelude::*, px, rems,
 };
 use gpui_component::button::Button;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
@@ -27,7 +27,9 @@ use crate::ui::diff_list::{DiffRow, FileHead, RowAt};
 use crate::ui::diff_rows::{DiffSelection, Side, SplitCell, SplitRow, UnifiedRow};
 use crate::ui::document_column::DocumentChrome;
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
-use crate::ui::right_panel::info_chip;
+use crate::ui::right_panel::{
+    HEADING, META, META_MONO, TAB_TEXT, TEXT, TEXT_MONO, git_badge, info_chip,
+};
 use crate::ui::rounding;
 use crate::ui::scm::path::relative_time;
 use crate::ui::scm::status::{status_color, status_glyph};
@@ -633,6 +635,7 @@ impl Tty7App {
         let subject_takes_the_slack =
             chrome.is_dock() && !subject.is_rev && subject.label.is_none();
         let menu_app = cx.entity().downgrade();
+        let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().window.hover);
         let row = h_flex().id("diff-overlay-header");
         let row = if chrome.header_is_title_strip() {
             crate::ui::app::title_bar_drag(row, "diff-overlay-header", window, cx)
@@ -642,11 +645,15 @@ impl Tty7App {
         row.flex_shrink_0()
             .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
             .pl(px(lead))
-            .pr(px(crate::ui::app::tile_trailing_inset()))
+            // The close tile is a notch smaller than the title bar's own, and
+            // is pulled in by half the difference so its glyph stays on the
+            // column every other trailing tile in the window is centred on.
+            .pr(px(crate::ui::app::tile_trailing_inset()
+                + (crate::ui::app::TILE_SIZE - CLOSE_TILE) / 2.))
             .gap_2()
             .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+            .border_b(HAIRLINE_W)
+            .border_color(hairline(cx))
             .child(
                 gpui::svg()
                     .path(subject.icon)
@@ -659,7 +666,8 @@ impl Tty7App {
                 // same monospace the patch below it is set in.
                 div()
                     .flex_shrink_0()
-                    .text_size(px(13.))
+                    .text_size(rems(TEXT_MONO))
+                    .font_weight(FontWeight::MEDIUM)
                     .font_family(self.font_family.clone())
                     .child(subject.text)
                     .into_any_element()
@@ -674,16 +682,19 @@ impl Tty7App {
                 div()
                     .when(subject_takes_the_slack, |d| d.flex_1().min_w_0().truncate())
                     .when(!subject_takes_the_slack, |d| d.flex_shrink_0())
-                    .text_sm()
+                    .text_size(rems(TEXT))
                     .font_weight(FontWeight::MEDIUM)
                     .child(subject.text)
                     .into_any_element()
             })
+            // A faint neutral pill, the one the graph gives HEAD: the chip
+            // qualifies the branch beside it rather than competing with it,
+            // and the title bar spends no accent on anything.
             .when_some(subject.chip, |bar, text| {
                 bar.child(info_chip(
                     text,
-                    cx.theme().accent.opacity(0.16),
-                    cx.theme().foreground,
+                    cx.theme().foreground.opacity(CHIP_FILL),
+                    cx.theme().muted_foreground,
                     &mono,
                 ))
             })
@@ -705,7 +716,7 @@ impl Tty7App {
                         .flex_auto()
                         .min_w_0()
                         .truncate()
-                        .text_sm()
+                        .text_size(rems(TEXT))
                         .child(SharedString::from(label.subject.clone())),
                 )
                 // Yields before the subject does, for the same reason the
@@ -717,7 +728,8 @@ impl Tty7App {
                         .min_w_0()
                         .flex_shrink(999.)
                         .truncate()
-                        .text_xs()
+                        .text_size(rems(META))
+                        .font_features(tabular())
                         .text_color(cx.theme().muted_foreground)
                         .child(label_byline(label, now_unix())),
                 )
@@ -740,11 +752,12 @@ impl Tty7App {
                             .items_center()
                             .min_w_0()
                             .gap_1()
-                            .px_1p5()
-                            .py_0p5()
-                            .rounded_md()
+                            .h(CONTROL_H)
+                            .pl(px(4.))
+                            .pr(ROW_INSET)
+                            .rounded(ROW_RADIUS)
                             .cursor_pointer()
-                            .hover(|s| s.bg(cx.theme().list_hover))
+                            .hover(|s| s.bg(hover))
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 let active = this.active;
                                 if let Some(overlay) = this
@@ -765,7 +778,7 @@ impl Tty7App {
                             .child(
                                 h_flex()
                                     .min_w_0()
-                                    .text_xs()
+                                    .text_size(rems(META_MONO))
                                     .font_family(self.font_family.clone())
                                     .child(div().min_w_0().flex_shrink(999.).truncate().child(head))
                                     .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf)),
@@ -786,7 +799,8 @@ impl Tty7App {
                     bar.when(!chrome.is_dock(), |bar| {
                         bar.child(
                             div()
-                                .text_xs()
+                                .text_size(rems(META))
+                                .font_features(tabular())
                                 .text_color(cx.theme().muted_foreground)
                                 .child(summary),
                         )
@@ -794,7 +808,8 @@ impl Tty7App {
                     .when(added > 0, |bar| {
                         bar.child(
                             div()
-                                .text_xs()
+                                .text_size(rems(META))
+                                .font_features(tabular())
                                 .text_color(cx.theme().success)
                                 .child(format!("+{added}")),
                         )
@@ -802,7 +817,8 @@ impl Tty7App {
                     .when(removed > 0, |bar| {
                         bar.child(
                             div()
-                                .text_xs()
+                                .text_size(rems(META))
+                                .font_features(tabular())
                                 .text_color(cx.theme().danger)
                                 .child(format!("−{removed}")),
                         )
@@ -814,7 +830,7 @@ impl Tty7App {
                 |bar| {
                     bar.child(
                         div()
-                            .text_xs()
+                            .text_size(rems(META))
                             .text_color(cx.theme().muted_foreground)
                             .child(t(L10nKey::Refreshing)),
                     )
@@ -833,12 +849,12 @@ impl Tty7App {
                 div().occlude().flex_shrink_0().child(
                     crate::ui::tab_strip::chrome_tile_sized(
                         Button::new("diff-overlay-close").icon(Icon::new(IconName::Close)),
-                        crate::ui::app::TILE_SIZE,
-                        crate::ui::app::TILE_GLYPH_LINE,
+                        CLOSE_TILE,
+                        crate::ui::tab_strip::RAIL_TILE_GLYPH,
                         false,
                         cx,
                     )
-                    .rounded_lg()
+                    .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
                     .tooltip(t(L10nKey::DiffCloseTooltip))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.close_diff_overlay(window, cx);
@@ -859,6 +875,10 @@ impl Tty7App {
     /// glyph, and so is every tile at the other end of the window — so it read
     /// as pasted on. Same two choices, no frame: the live one carries a soft
     /// fill, the other is quiet text that lights up under the pointer.
+    ///
+    /// The cells are the list's own row pills — row height, row radius — set
+    /// in the right panel's tab type, so the switch reads as two more rows of
+    /// the same app rather than as a widget.
     fn diff_view_switch(&self, cx: &mut Context<Self>) -> AnyElement {
         let sf = cx.global::<crate::ui::presets::Surfaces>().window;
         let current = view_mode(cx);
@@ -875,10 +895,10 @@ impl Tty7App {
                 h_flex()
                     .id(("diff-overlay-view-cell", i))
                     .items_center()
-                    .h(px(22.))
-                    .px(px(8.))
+                    .h(CONTROL_H)
+                    .px(px(10.))
                     .rounded(ROW_RADIUS)
-                    .text_sm()
+                    .text_size(rems(TAB_TEXT))
                     .cursor_pointer()
                     .when(live, |cell| {
                         cell.bg(gpui::rgb(sf.selected))
@@ -977,7 +997,7 @@ impl Tty7App {
             .flex()
             .items_center()
             .justify_center()
-            .text_sm()
+            .text_size(rems(TEXT))
             .text_color(cx.theme().muted_foreground)
             .child(text)
             .into_any_element()
@@ -1101,7 +1121,7 @@ impl Tty7App {
         // full width and puts it at its own left edge, so a horizontal
         // padding here would be silently ignored. The rows carry their own —
         // see `diff_row_element`.
-        .py_4();
+        .py(px(LIST_INSET));
         // The bar reads the list's own height, and a list only counts the
         // rows it has measured. Left at that, a patch of any length would
         // report itself as one screen long and the thumb would fill the
@@ -1281,17 +1301,61 @@ fn spliced_range(old: &[DiffRow], new: &[DiffRow]) -> (std::ops::Range<usize>, u
     (prefix..old.len() - suffix, new.len() - prefix - suffix)
 }
 
-/// The row inset every row of the list shares, matching the source control
-/// panel's — the overlay is a second view of that panel's list, and the two
-/// stopped looking like one app when this one drew cards.
-const ROW_INSET: Pixels = px(10.);
+/// How far a row's pill sits in from the edge of the list: the window's
+/// `CONTENT_INSET`, the same 12px the rail and the right panel keep, and the
+/// same inset the header's subject starts at.
+const LIST_INSET: f32 = crate::ui::app::CONTENT_INSET;
+
+/// The padding a row keeps inside its pill — the rail's 8px — so a hovered
+/// row's fill reaches past its text on both sides. The overlay is a second
+/// view of the Changes tab's list, and the two stopped looking like one app
+/// when this one drew cards.
+const ROW_INSET: Pixels = px(8.);
 
 /// The height of a row that is a *file* rather than a line of one: the same
 /// 26px the panel gives its file rows.
 const FILE_ROW_H: Pixels = px(26.);
 
-/// The radius on a row that lights up under the pointer. Matches the panel's.
-const ROW_RADIUS: Pixels = px(5.);
+/// The radius on a row that lights up under the pointer: the 6px the Changes
+/// tab's 26px rows use.
+const ROW_RADIUS: Pixels = px(6.);
+
+/// The header's pills — the view switch and the way back to the list — are
+/// one row tall, so the title bar's controls are the list's rows in another
+/// place rather than a smaller widget of their own.
+const CONTROL_H: Pixels = FILE_ROW_H;
+
+/// The header's close tile: the rail header's 26px tile, not the title bar's
+/// 32. The diff header already carries a subject, a switch and a path; the
+/// way out should be the quietest shape on it.
+const CLOSE_TILE: f32 = crate::ui::tab_strip::RAIL_TILE;
+
+/// The fill under a neutral chip, the same faint ink the graph's HEAD chip
+/// wears.
+const CHIP_FILL: f32 = 0.06;
+
+/// A section label's line in the list — the untracked heading — at the
+/// Changes tab's group-header height.
+const GROUP_HEADER_H: Pixels = px(22.);
+
+/// The width of every rule the diff views draw: the header's bottom edge,
+/// the hunk breaks, the split view's centre and the unified gutter.
+pub(crate) const HAIRLINE_W: Pixels = px(0.5);
+
+/// The ink of those rules: a hairline at 8% of the foreground, which reads as
+/// an edge on the window fill without ever drawing a box. Derived from the
+/// foreground rather than `border`, the control-edge role, because a
+/// half-pixel of a colour tuned for 1px outlines reads heavier than the rest
+/// of the v4 chrome.
+pub(crate) fn hairline(cx: &gpui::App) -> Hsla {
+    cx.theme().foreground.opacity(0.08)
+}
+
+/// Tabular figures for counts set in the interface face, so `+12 −3` and a
+/// file count keep their width as they change. Mono text needs none of this.
+pub(crate) fn tabular() -> gpui::FontFeatures {
+    gpui::FontFeatures(Arc::new(vec![("tnum".to_string(), 1)]))
+}
 
 /// The height of one line of a patch, in either view.
 ///
@@ -1307,9 +1371,9 @@ const DIFF_LINE_H: Pixels = px(19.);
 ///
 /// Barely there on purpose: with the cards gone it is the only line left in
 /// the list, and it is separating two parts of one file rather than two
-/// files.
+/// files. It is the header's hairline, so the view has one kind of line.
 fn hunk_rule(cx: &gpui::App) -> Hsla {
-    cx.theme().border.opacity(0.6)
+    hairline(cx)
 }
 
 /// One row, inset the way every row in the list is.
@@ -1334,9 +1398,9 @@ fn diff_row_element(
                 .px(ROW_INSET)
                 .py_1()
                 .when(!leads, |h| {
-                    h.mt_1().border_t_1().border_color(hunk_rule(cx))
+                    h.mt_1().border_t(HAIRLINE_W).border_color(hunk_rule(cx))
                 })
-                .text_xs()
+                .text_size(rems(META_MONO))
                 .font_family(font.clone())
                 .text_color(cx.theme().muted_foreground)
                 .truncate()
@@ -1373,15 +1437,19 @@ fn diff_row_element(
         DiffRow::MoreFiles { rest } => {
             padded(note_row(t_plural(L10nKey::DiffMoreFiles, *rest, &[]), cx))
         }
-        // A section label, in the shape the sidebar gives its group headings:
-        // small, quiet, and carried by the space around it rather than a bar
-        // of its own.
+        // A section label, in the shape the Changes tab gives its group
+        // headings: 11.5px, medium, muted, sentence case — small, quiet, and
+        // carried by the space around it rather than a bar of its own.
         DiffRow::UntrackedHeader { total } => padded(
             div()
                 .w_full()
+                .flex()
+                .items_center()
+                .h(GROUP_HEADER_H)
                 .px(ROW_INSET)
-                .py_1()
-                .text_xs()
+                .text_size(rems(HEADING))
+                .font_weight(FontWeight::MEDIUM)
+                .font_features(tabular())
                 .text_color(cx.theme().muted_foreground)
                 .child(t_plural(L10nKey::DiffUntrackedHeader, *total, &[]))
                 .into_any_element(),
@@ -1464,7 +1532,11 @@ fn diff_row_drag<E: InteractiveElement + Styled>(
 
 /// The margin the file rows keep from the edge of the list.
 fn padded(row: AnyElement) -> AnyElement {
-    div().w_full().px_2().child(row).into_any_element()
+    div()
+        .w_full()
+        .px(px(LIST_INSET))
+        .child(row)
+        .into_any_element()
 }
 
 /// An aside in the list's own voice — a cap that was hit, a tail that was not
@@ -1474,7 +1546,7 @@ fn note_row(text: String, cx: &gpui::App) -> AnyElement {
         .w_full()
         .px(ROW_INSET)
         .py_1()
-        .text_xs()
+        .text_size(rems(META))
         .text_color(cx.theme().muted_foreground)
         .child(text)
         .into_any_element()
@@ -1486,13 +1558,16 @@ fn diff_oversized_notice(snap: &DiffSnapshot, cx: &gpui::App) -> AnyElement {
         L10nKey::DiffOversizedNotice,
         &[("summary", &oversized_summary(snap, &stats))],
     );
+    // The row pill at rest, filled with the hover step: a notice sits in the
+    // list's own shape, one quiet rung off the window, rather than in a card.
+    let fill = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().window.hover);
     div()
         .w_full()
         .px(ROW_INSET)
         .py_2()
-        .rounded(rounding::CARD_RADIUS)
-        .bg(cx.theme().secondary)
-        .text_xs()
+        .rounded(rounding::ROW_RADIUS)
+        .bg(fill)
+        .text_size(rems(META))
         .text_color(cx.theme().muted_foreground)
         .child(text)
         .into_any_element()
@@ -1504,7 +1579,8 @@ fn diff_file_header(
     app: &gpui::WeakEntity<Tty7App>,
     cx: &gpui::App,
 ) -> AnyElement {
-    let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().window.hover);
+    let sf = cx.global::<crate::ui::presets::Surfaces>().window;
+    let hover = gpui::rgb(sf.hover);
     let deco = deco_status(head.status);
     let (glyph, glyph_color) = (status_glyph(deco), status_color(deco, cx));
     let mut header = h_flex()
@@ -1542,33 +1618,29 @@ fn diff_file_header(
                     } else {
                         IconName::ChevronRight
                     })
-                    .small()
+                    .size(px(crate::ui::app::TILE_GLYPH_XS))
                     .text_color(cx.theme().muted_foreground),
                 )
         })
-        .child(
-            div()
-                .flex_shrink_0()
-                .font_family(font.clone())
-                .text_xs()
-                .font_weight(FontWeight::BOLD)
-                .text_color(glyph_color)
-                .child(glyph),
-        )
+        // The status letter is the Changes tab's badge — same cell, weight
+        // and ink — so M reads amber and A/U green here exactly as it does
+        // one click away.
+        .child(git_badge(glyph, glyph_color, font))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_xs()
+                .text_size(rems(TEXT_MONO))
                 .font_family(font.clone())
+                .text_color(gpui::rgb(sf.text_resting))
                 .child(head.shown_path.clone()),
         );
     if head.binary {
         header = header.child(
             div()
                 .flex_shrink_0()
-                .text_xs()
+                .text_size(rems(META))
                 .text_color(cx.theme().muted_foreground)
                 .child(t(L10nKey::Binary)),
         );
@@ -1577,7 +1649,8 @@ fn diff_file_header(
         header = header.child(
             div()
                 .flex_shrink_0()
-                .text_xs()
+                .text_size(rems(META_MONO))
+                .font_family(font.clone())
                 .text_color(cx.theme().success)
                 .child(format!("+{}", head.added)),
         );
@@ -1586,7 +1659,8 @@ fn diff_file_header(
         header = header.child(
             div()
                 .flex_shrink_0()
-                .text_xs()
+                .text_size(rems(META_MONO))
+                .font_family(font.clone())
                 .text_color(cx.theme().danger)
                 .child(format!("−{}", head.removed)),
         );
@@ -1606,7 +1680,8 @@ fn diff_untracked_row(
     app: &gpui::WeakEntity<Tty7App>,
     cx: &gpui::App,
 ) -> AnyElement {
-    let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().window.hover);
+    let sf = cx.global::<crate::ui::presets::Surfaces>().window;
+    let hover = gpui::rgb(sf.hover);
     let for_focus = path.to_string();
     let app = app.clone();
     h_flex()
@@ -1617,8 +1692,6 @@ fn diff_untracked_row(
         .h(FILE_ROW_H)
         .px(ROW_INSET)
         .rounded(ROW_RADIUS)
-        .text_xs()
-        .font_family(font.clone())
         .cursor_pointer()
         .hover(|s| s.bg(hover))
         .on_click(move |_, window, cx| {
@@ -1636,14 +1709,21 @@ fn diff_untracked_row(
             })
             .ok();
         })
+        .child(git_badge(
+            status_glyph(DecoStatus::Untracked),
+            status_color(DecoStatus::Untracked, cx),
+            font,
+        ))
         .child(
             div()
-                .flex_shrink_0()
-                .font_weight(FontWeight::BOLD)
-                .text_color(status_color(DecoStatus::Untracked, cx))
-                .child(status_glyph(DecoStatus::Untracked)),
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(rems(TEXT_MONO))
+                .font_family(font.clone())
+                .text_color(gpui::rgb(sf.text_resting))
+                .child(path.to_string()),
         )
-        .child(div().flex_1().min_w_0().truncate().child(path.to_string()))
         .into_any_element()
 }
 
@@ -1669,7 +1749,7 @@ fn diff_split_row(
             app,
             cx,
         ))
-        .child(div().flex_shrink_0().w(px(1.)).bg(hunk_rule(cx)))
+        .child(div().flex_shrink_0().w(HAIRLINE_W).bg(hunk_rule(cx)))
         .child(diff_split_cell(
             row.right.as_ref(),
             Side::New,
@@ -1723,7 +1803,7 @@ fn diff_split_cell(
                 .w(px(42.))
                 .justify_end()
                 .pr_1p5()
-                .text_color(cx.theme().muted_foreground.opacity(0.7))
+                .text_color(cx.theme().muted_foreground)
                 .child(cell.no.map(|n| n.to_string()).unwrap_or_default()),
         )
         .child(
@@ -1768,7 +1848,7 @@ fn diff_unified_row(
             .w(px(34.))
             .justify_end()
             .pr_1p5()
-            .text_color(cx.theme().muted_foreground.opacity(0.7))
+            .text_color(cx.theme().muted_foreground)
             .child(no.map(|n| n.to_string()).unwrap_or_default())
     };
     let fill = match drag.covers(at, None) {
@@ -1787,7 +1867,13 @@ fn diff_unified_row(
         // The split view's centre rule, in the one place it still means the
         // same thing: everything left of it is a number, everything right of
         // it is the file.
-        .child(div().flex_shrink_0().w(px(1.)).h_full().bg(hunk_rule(cx)))
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(HAIRLINE_W)
+                .h_full()
+                .bg(hunk_rule(cx)),
+        )
         .child(
             div()
                 .flex_shrink_0()

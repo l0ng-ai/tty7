@@ -46,7 +46,7 @@ use tty7_core::core::git::status::DecoStatus;
 use crate::terminal::git_diff::DiffSource;
 use crate::ui::app::{CONTENT_INSET, Tty7App};
 use crate::ui::i18n::{L10nKey, t, t_plural};
-use crate::ui::right_panel::{META, META_MONO, ROW_INSET, TEXT, git_badge, info_chip};
+use crate::ui::right_panel::{HEADING, META, META_MONO, ROW_INSET, TEXT, git_badge, info_chip};
 use crate::ui::scm::path::{relative_time, split_display_path};
 use crate::ui::scm::state::{CommitDetailView, RepoKey};
 use crate::ui::scm::status::{status_color, status_glyph};
@@ -79,6 +79,26 @@ const BODY_PAD_T: f32 = 2. / 16.;
 /// of [`TEXT`] in 260px is around 78 characters — longer than every subject in
 /// this repository but a handful, and a cap for the ones that are a paragraph.
 const SUBJECT_LINES: usize = 3;
+
+/// The radius on every pill in this view — the rows, the way back, the object
+/// ids: the 6px the Changes tab's 26px rows use.
+const PILL_RADIUS: gpui::Pixels = px(6.);
+
+/// How tall the header's two affordances and the parent links are: a row's
+/// height less a couple of pixels either side, so a hovered pill reads as the
+/// target inside its row rather than as the whole row lighting up.
+const PILL_H: f32 = ROW_H - 4.;
+
+/// The pause before the file list — the one the Changes tab leaves between
+/// two groups — and the height of the summary line that heads it, which is a
+/// group header there too.
+const GROUP_GAP: f32 = 16.;
+const GROUP_HEADER_H: f32 = 22.;
+
+/// A file row's name keeps at least this much before the directory beside it
+/// has given up all of its width. `panel.rs`'s floor, restated because the
+/// two rows are the same row.
+const NAME_FLOOR: f32 = 40.;
 
 // Which step of the right panel's ramp does what in this view.
 //
@@ -159,7 +179,7 @@ impl Tty7App {
         // out a `ROW_INSET` short of it so the fill is wider than the text, and
         // an outer inset would have to be undone by every one of them.
         let mut body = v_flex()
-            .py(px(2.))
+            .pb(px(12.))
             .child(self.detail_header_row(detail, &mono, cx));
 
         match detail.commit.as_deref() {
@@ -176,8 +196,10 @@ impl Tty7App {
             None => {
                 body = body.child(
                     div()
+                        .flex()
+                        .items_center()
+                        .min_h(px(ROW_H))
                         .px(px(CONTENT_INSET))
-                        .py(px(4.))
                         .text_size(rems(META))
                         .text_color(muted)
                         .child(if detail.loaded {
@@ -268,6 +290,10 @@ impl Tty7App {
     /// reader came to read. The oid is set in the same mono at the same token
     /// size as the parent links below, so the two read as the same kind of
     /// thing.
+    ///
+    /// Both pills pad themselves by `ROW_INSET` inside a row inset by
+    /// `CONTENT_INSET - ROW_INSET`, so the chevron and the oid land on the
+    /// same 12px column as every line of text under them.
     fn detail_header_row(
         &self,
         detail: &CommitDetailView,
@@ -287,9 +313,10 @@ impl Tty7App {
                     .id("scm-detail-back")
                     .items_center()
                     .gap(px(2.))
-                    .px(px(4.))
-                    .py(px(1.))
-                    .rounded(px(4.))
+                    .h(px(PILL_H))
+                    .pl(px(ROW_INSET - 2.))
+                    .pr(px(ROW_INSET))
+                    .rounded(PILL_RADIUS)
                     .cursor_pointer()
                     .hover(|s| s.bg(hover_bg))
                     .on_click(cx.listener(|this, _, _window, cx| this.close_commit_detail(cx)))
@@ -307,12 +334,13 @@ impl Tty7App {
             )
             .child(div().flex_1().min_w_0())
             .child(
-                div()
+                h_flex()
                     .id("scm-detail-sha")
                     .flex_none()
-                    .px(px(4.))
-                    .py(px(1.))
-                    .rounded(px(4.))
+                    .items_center()
+                    .h(px(PILL_H))
+                    .px(px(ROW_INSET))
+                    .rounded(PILL_RADIUS)
                     .cursor_pointer()
                     .hover(|s| s.bg(hover_bg))
                     .text_size(rems(META_MONO))
@@ -342,17 +370,19 @@ impl Tty7App {
         let folded = !detail.body_expanded && lines > BODY_LINES;
         v_flex()
             .px(px(CONTENT_INSET))
-            .pb(px(4.))
-            .gap(px(3.))
+            .pt(px(4.))
+            .pb(px(6.))
+            .gap(px(4.))
             .child(
                 // Wrapping, not truncating: this view exists because the graph
                 // row could only show the first 26 characters. It carries the
                 // weight and the full foreground while everything under it is
                 // muted, and that is the whole of its emphasis — it sits on
-                // the same 12px step as the file rows below it.
+                // the same step as the file rows below it. Medium, the weight
+                // the rest of the panel gives a title, not semibold.
                 div()
                     .text_size(rems(TEXT))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(cx.theme().foreground)
                     .line_clamp(SUBJECT_LINES)
                     .child(SharedString::from(commit.summary.clone())),
@@ -360,6 +390,7 @@ impl Tty7App {
             .child(
                 div()
                     .text_size(rems(META))
+                    .font_features(crate::ui::diff_overlay::tabular())
                     .text_color(cx.theme().muted_foreground)
                     .child(byline(commit, now_unix())),
             )
@@ -399,7 +430,11 @@ impl Tty7App {
                             body.to_string()
                         })),
                 )
+                // A control, not a link: muted like the rest of the chrome,
+                // lifted to the foreground and medium under the pointer. The
+                // accent stays with focus rings and the primary actions.
                 .when(lines > BODY_LINES, |this| {
+                    let fg = cx.theme().foreground;
                     this.child(
                         div()
                             .id("scm-detail-body-fold")
@@ -408,7 +443,9 @@ impl Tty7App {
                             .py(px(1.))
                             .cursor_pointer()
                             .text_size(rems(META))
-                            .text_color(cx.theme().info)
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(cx.theme().muted_foreground)
+                            .hover(move |s| s.text_color(fg))
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 if let Some(open) = this.scm.detail.as_mut() {
                                     open.body_expanded = !open.body_expanded;
@@ -432,9 +469,10 @@ impl Tty7App {
     /// of them once there is a whole column to put them in.
     ///
     /// Exactly two of them get a fill, and they are the two that mean
-    /// something. HEAD is where you are, washed in `accent` under the full
-    /// foreground — one emphasised token on the row. A tag is yellow because a
-    /// tag is yellow everywhere in git. Everything else — the other local
+    /// something. HEAD is where you are: the faint neutral pill the graph
+    /// gives it, under the full foreground — one emphasised token on the row,
+    /// and no accent spent on it. A tag is yellow because a tag is yellow
+    /// everywhere in git. Everything else — the other local
     /// branches, every remote-tracking ref — is a bare muted span: no fill, and
     /// therefore no padding either, because padding exists to hold text off a
     /// background and there is no background to hold it off. A ref name is
@@ -442,10 +480,10 @@ impl Tty7App {
     /// them turns a list of names into a wall of blocks, which is what the
     /// panel's language is trying not to be.
     ///
-    /// `theme.accent` is a neutral surface tint in tty7 rather than the brand
-    /// colour, which is exactly why 0.28 of it works: it is a raised patch, not
-    /// a wash of hue, and the foreground stays legible on it. Do not substitute
-    /// `theme.ring` here and then have to drop the opacity to compensate.
+    /// The fill is the foreground at 6%, the same patch the graph's HEAD chip
+    /// wears, so one ref looks the same in both places. The foreground over
+    /// it, not the muted ink the graph uses: the graph has a filled bead in
+    /// the gutter to say "you are here", and this view has only the chip.
     ///
     /// What this must never go back to is the bug that predated all of it: the
     /// fallback arm painted `theme.accent` at *full* opacity under muted text,
@@ -461,12 +499,7 @@ impl Tty7App {
             return None;
         }
         let theme = cx.theme();
-        let (accent, warning, fg, muted) = (
-            theme.accent,
-            theme.warning,
-            theme.foreground,
-            theme.muted_foreground,
-        );
+        let (warning, fg, muted) = (theme.warning, theme.foreground, theme.muted_foreground);
         let mut row = h_flex()
             .flex_wrap()
             .items_center()
@@ -479,7 +512,7 @@ impl Tty7App {
         for deco in &commit.refs {
             row = row.child(match deco.kind {
                 RefKind::Tag => info_chip(&deco.short, warning.opacity(0.16), warning, mono),
-                _ if deco.is_head => info_chip(&deco.short, accent.opacity(0.28), fg, mono),
+                _ if deco.is_head => info_chip(&deco.short, fg.opacity(0.06), fg, mono),
                 _ => ref_span(&deco.short, muted, mono),
             });
         }
@@ -489,11 +522,11 @@ impl Tty7App {
     /// The parents, as links. Following one is the only way to walk history
     /// backwards from a commit the graph's window does not reach.
     ///
-    /// `theme.info` and nothing else at rest — the panel's link ink, the same
-    /// one the "show more" fold uses a few lines above. A filled pill would
-    /// make the parents a second block competing with the ref chips, and this
-    /// is a link, not a state. The hover fill is what says the oid is a target,
-    /// and it is the same fill, radius and inset the header's two affordances
+    /// The resting row ink and nothing else at rest — no accent, the way no
+    /// other chrome in the panel spends one. A filled pill would make the
+    /// parents a second block competing with the ref chips, and this is a
+    /// link, not a state. The hover fill is what says the oid is a target, and
+    /// it is the same fill, radius and height the header's two affordances
     /// use. The oids themselves are token-sized mono, matching the sha in the
     /// header so that every object id in this view is one recognisable shape.
     fn detail_parents(
@@ -506,19 +539,21 @@ impl Tty7App {
         if commit.parents.is_empty() {
             return None;
         }
-        let hover_bg = gpui::rgb(panel_surface(cx).hover);
-        let (muted, link) = {
-            let theme = cx.theme();
-            (theme.muted_foreground, theme.info)
-        };
+        let sf = panel_surface(cx);
+        let hover_bg = gpui::rgb(sf.hover);
+        let (muted, link) = (cx.theme().muted_foreground, gpui::rgb(sf.text_resting));
+        // The label sits on the text column and each oid's pill pads back out
+        // by `ROW_INSET`, so the row starts one inset short of it: the first
+        // link's text then lines up with the label's gap, not its pill edge.
         let mut row = h_flex()
             .flex_wrap()
             .items_center()
-            .gap(px(6.))
+            .gap(px(2.))
             .px(px(CONTENT_INSET))
             .pb(px(4.))
             .child(
                 div()
+                    .mr(px(ROW_INSET - 2.))
                     .text_size(rems(META))
                     .text_color(muted)
                     .child(t(L10nKey::ScmCommitParents)),
@@ -527,11 +562,12 @@ impl Tty7App {
             let repo = detail.repo.clone();
             let oid = parent.clone();
             row = row.child(
-                div()
+                h_flex()
                     .id(SharedString::from(format!("scm-detail-parent-{parent}")))
-                    .px(px(4.))
-                    .py(px(1.))
-                    .rounded(px(4.))
+                    .items_center()
+                    .h(px(PILL_H))
+                    .px(px(ROW_INSET))
+                    .rounded(PILL_RADIUS)
                     .cursor_pointer()
                     .hover(|s| s.bg(hover_bg))
                     .text_size(rems(META_MONO))
@@ -603,30 +639,18 @@ impl Tty7App {
     /// in the diff views: the ASCII one sits too high and too short beside a
     /// `+` of the same size.
     ///
-    /// Still not `panel_subtitle`: that helper uppercases its label and puts
-    /// anything in its trailing slot hard against the right edge, because the
-    /// slot was built for a button. Both are wrong here. "3 FILES CHANGED" is
-    /// a heading's voice and this is a sentence about the commit, and the
-    /// counts are not a control off in the corner — they qualify the words and
-    /// have to sit next to them, which is the one thing the layout round got
-    /// right and the user asked to keep.
+    /// Still not `panel_subtitle`: that helper puts anything in its trailing
+    /// slot hard against the right edge, because the slot was built for a
+    /// button. The counts are not a control off in the corner — they qualify
+    /// the words and have to sit next to them, which is the one thing the
+    /// layout round got right and the user asked to keep.
     ///
-    /// What the helper *is* copied on is its frame: the hairline and the six
-    /// above it, so the file list starts on exactly the line the working tree's
-    /// does. A rule is how this panel divides sections; the round that replaced
-    /// it with a raised card is the round being undone.
-    ///
-    /// The two paddings are that frame re-derived rather than copied, because
-    /// the tallest line in each block is a different size. gpui leads a plain
-    /// `div` at phi: the helper's 10.5px uppercase label measures
-    /// `round(10.5 × 1.618) = 17px`, and the tallest thing in this row is the
-    /// 11px file count at `round(11 × 1.618) = 18`. The helper's block is
-    /// `6 + 1 + 12 + 17 + 4 = 40px` tall, so this one has 15px of padding to
-    /// spend instead of 16 — half a pixel off each side, which keeps the total
-    /// at 40 *and* puts both lines' optical centre 27.5px below the top of the
-    /// margin, so nothing shifts when the reader opens a commit. Change either
-    /// side's type and this has to be worked out again on both, or one list
-    /// quietly starts a pixel or two below the other and nobody can see why.
+    /// What it *is* copied on is the Changes tab's group header, which is what
+    /// it is: the line that heads a list of files. 16px of air above it and no
+    /// rule — the working tree tells its groups apart by the pause before each
+    /// one, and a hairline here would be the only one left in the tab — then
+    /// 22px of 11.5px medium, muted, sentence case. "3 files changed" is a
+    /// sentence about the commit, never "3 FILES CHANGED".
     fn detail_summary(
         &self,
         files: &[CommitFile],
@@ -634,21 +658,21 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
-        let (muted, border) = (theme.muted_foreground, theme.border);
+        let muted = theme.muted_foreground;
         let (added_ink, removed_ink) = (theme.success, theme.danger);
         let counts = diff_totals(files);
         h_flex()
             .items_center()
             .gap(px(6.))
-            .mt(px(6.))
-            .border_t_1()
-            .border_color(border)
+            .mt(px(GROUP_GAP))
+            .mb(px(1.))
+            .min_h(rems(GROUP_HEADER_H / 16.))
             .px(px(CONTENT_INSET))
-            .pt(px(11.5))
-            .pb(px(3.5))
             .child(
                 div()
-                    .text_size(rems(META))
+                    .text_size(rems(HEADING))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .font_features(crate::ui::diff_overlay::tabular())
                     .text_color(muted)
                     .child(t_plural(L10nKey::ScmFilesChanged, files.len(), &[])),
             )
@@ -691,10 +715,12 @@ impl Tty7App {
             .id(SharedString::from(format!("scm-detail-file-{}", file.path)))
             .items_center()
             .gap(px(8.))
-            .h(px(ROW_H))
+            .min_h(rems(ROW_H / 16.))
+            .w_full()
+            .min_w_0()
             .px(px(ROW_INSET))
             .py(px(3.))
-            .rounded(px(5.))
+            .rounded(PILL_RADIUS)
             .cursor_pointer()
             .hover(|s| s.bg(gpui::rgb(sf.hover)))
             .when(selected, |s| s.bg(gpui::rgb(sf.selected)))
@@ -717,9 +743,13 @@ impl Tty7App {
                 })
             })
             .child(git_badge(status_glyph(deco), status_color(deco, cx), mono))
+            // The name takes its own width first and only then shrinks, down
+            // to a floor; the directory beside it gets whatever is left.
             .child(
                 div()
-                    .flex_none()
+                    .flex_shrink(1.)
+                    .min_w(px(NAME_FLOOR))
+                    .truncate()
                     // Match the working-tree list: UI names, secondary paths.
                     .text_size(rems(TEXT))
                     .text_color(if deco == DecoStatus::Conflict {
@@ -733,26 +763,34 @@ impl Tty7App {
                     .when(deco == DecoStatus::Deleted, |s| s.line_through())
                     .child(name.to_string()),
             )
-            .when(!dir.is_empty(), |this| {
-                this.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(rems(META))
-                        .text_color(cx.theme().muted_foreground.opacity(0.75))
-                        .child(dir.to_string()),
-                )
-            })
+            // Flush right, giving way from its *start*: the folder nearest the
+            // file is the part that says where it is. The same column the
+            // working tree's rows keep, in the plain caption ink — no extra
+            // transparency on top of a colour already floored for legibility.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis_start()
+                    .text_right()
+                    .text_size(rems(META))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(dir.to_string()),
+            )
             .into_any_element()
     }
 
     fn detail_note(&self, text: String, cx: &mut Context<Self>) -> AnyElement {
         div()
+            .flex()
+            .items_center()
+            .min_h(px(ROW_H))
+            .mt(px(GROUP_GAP))
             .px(px(CONTENT_INSET))
-            .py(px(3.))
             .text_size(rems(META))
-            .text_color(cx.theme().muted_foreground.opacity(0.75))
+            .text_color(cx.theme().muted_foreground)
             .child(text)
             .into_any_element()
     }
