@@ -742,7 +742,10 @@ impl Tty7App {
                         // and switch away from the name being typed, taking
                         // the focus with it.
                         .on_click(|_, _, cx| cx.stop_propagation())
-                        .child(Input::new(&input).appearance(false))
+                        // No inset of its own: the label it replaces starts
+                        // flush, and the field's 12px padding jumped the name
+                        // sideways the moment rename began.
+                        .child(Input::new(&input).appearance(false).px_0())
                         .into_any_element(),
                     None => v_flex()
                         .id(("sidebar-label", i))
@@ -1205,7 +1208,10 @@ impl Tty7App {
                             // with it.
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(|_, _, cx| cx.stop_propagation())
-                            .child(Input::new(&input).appearance(false))
+                            // No inset of its own: the label it replaces starts
+                            // flush, and the field's 12px padding jumped the name
+                            // sideways the moment rename began.
+                            .child(Input::new(&input).appearance(false).px_0())
                             .into_any_element(),
                         // Elided above, so the truncation here is only the
                         // backstop for a face that measures wider than it
