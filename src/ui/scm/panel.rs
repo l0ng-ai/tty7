@@ -39,6 +39,7 @@ use crate::ui::scm::ScmIntent;
 use crate::ui::scm::path::split_display_path;
 use crate::ui::scm::state::{RepoKey, ScmGroup};
 use crate::ui::scm::status::{status_color, status_glyph};
+use crate::ui::scm::tree::{TreeRow, normalize_query, path_matches, tree_rows};
 
 /// Shared compact pitch for working-tree and commit-detail file rows.
 pub(super) const ROW_H: f32 = 26.;
@@ -51,6 +52,10 @@ pub(super) const ROW_H: f32 = 26.;
 /// drawn from two numbers is a column that will eventually be drawn from two
 /// different numbers.
 const BADGE_W: f32 = 14.;
+
+/// One level of the tree view, the file tree's step: the Files panel and this
+/// one draw the same directories, and the same depth should read the same.
+const TREE_INDENT: f32 = 14.;
 
 /// The key context the message box installs, and the one `ScmCommit` is
 /// bound inside. The two are the same string on purpose: a binding whose
@@ -236,7 +241,12 @@ impl Tty7App {
                 Some(t(L10nKey::PanelNoChangesHint)),
                 cx,
             ),
-            None => self.scm_groups(&repo, &status, cx),
+            None => {
+                // Pinned with the rest, so the filter stays in reach however
+                // far down the list has been scrolled.
+                pinned.push(self.scm_filter_row(window, cx));
+                self.scm_groups(&repo, &status, cx)
+            }
         };
         let history = self.render_graph_section(&repo, window, cx);
         self.scm_shell_full(title, pinned, body, history)
@@ -1291,24 +1301,63 @@ impl Tty7App {
         status: &Arc<WorkingTreeStatus>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let query = self.scm_filter_query(cx);
+        let tree = cx.global::<crate::core::config::Config>().scm_changes_tree;
+        let mut matched = 0;
         let mut list = v_flex().px(px(CONTENT_INSET - ROW_INSET)).py(px(2.));
         for group in ScmGroup::ORDER {
+            // Filtered before anything else reads it, so the header's count
+            // and its stage/discard-all act on what is on screen — a
+            // "discard all" that also reached the files the filter hid would
+            // be the one surprise this panel cannot take back.
             let entries: Vec<&StatusEntry> = status
                 .entries
                 .iter()
                 .filter(|e| in_group(e, group))
+                .filter(|e| {
+                    query
+                        .as_deref()
+                        .is_none_or(|q| path_matches(e.path.as_str(), q))
+                })
                 .collect();
             if entries.is_empty() {
                 continue;
             }
+            matched += entries.len();
             let collapsed = self.scm.group_collapsed(group, entries.len());
             list = list.child(self.scm_group_header(repo, group, &entries, collapsed, cx));
             if collapsed {
                 continue;
             }
             let shown = entries.len().min(MAX_RENDERED_FILES);
-            for entry in entries.iter().take(shown) {
-                list = list.child(self.scm_file_row(repo, group, entry, cx));
+            if tree {
+                // A filter opens every directory: a match folded away under
+                // a closed row is a match the filter failed to show.
+                let filtering = query.is_some();
+                let folded = &self.scm.folded_dirs;
+                let rows = tree_rows(entries[..shown].iter().map(|e| e.path.as_str()), |key| {
+                    !filtering && folded.contains(&(group, key.to_string()))
+                });
+                for row in rows {
+                    list = list.child(match row {
+                        TreeRow::Dir {
+                            key,
+                            label,
+                            depth,
+                            files,
+                            collapsed,
+                        } => self.scm_dir_row(
+                            group, key, label, depth, files, collapsed, !filtering, cx,
+                        ),
+                        TreeRow::File { index, depth } => {
+                            self.scm_file_row(repo, group, entries[index], Some(depth), cx)
+                        }
+                    });
+                }
+            } else {
+                for entry in entries.iter().take(shown) {
+                    list = list.child(self.scm_file_row(repo, group, entry, None, cx));
+                }
             }
             if entries.len() > shown {
                 list = list.child(self.scm_note(
@@ -1316,6 +1365,9 @@ impl Tty7App {
                     cx,
                 ));
             }
+        }
+        if query.is_some() && matched == 0 {
+            list = list.child(self.scm_note(t(L10nKey::ScmNoMatchingChanges).to_string(), cx));
         }
         if status.truncated {
             list = list.child(self.scm_note(
@@ -1330,6 +1382,142 @@ impl Tty7App {
             ));
         }
         list.into_any_element()
+    }
+
+    /// The filter over the changed files, with the list/tree switch at its
+    /// end.
+    ///
+    /// A standing field, like the Files panel's, rather than one behind a
+    /// tile like the history's: the list is what this panel is for, and a
+    /// run that touched sixty files is exactly when nobody wants to go
+    /// looking for how to narrow it.
+    fn scm_filter_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let input = match self.scm.filter.clone() {
+            Some(input) => input,
+            None => {
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx).placeholder(t(L10nKey::ScmFilterChanges))
+                });
+                // An `InputState` is its own entity; without this the list
+                // would never hear about the text typed into it.
+                self.scm.filter_sub =
+                    Some(
+                        cx.subscribe_in(&input, window, |_this, _input, ev, _window, cx| {
+                            if matches!(ev, gpui_component::input::InputEvent::Change) {
+                                cx.notify();
+                            }
+                        }),
+                    );
+                self.scm.filter = Some(input.clone());
+                input
+            }
+        };
+        let tree = cx.global::<crate::core::config::Config>().scm_changes_tree;
+        // The tile shows where it goes, not where you are — the rows under it
+        // already say which view this is.
+        let (glyph, tip) = match tree {
+            true => ("icons/list-flat.svg", t(L10nKey::ScmViewAsList)),
+            false => ("icons/list-tree.svg", t(L10nKey::ScmViewAsTree)),
+        };
+        let toggle = crate::ui::tab_strip::chrome_tile_sized(
+            Button::new("scm-changes-view").icon(Icon::empty().path(glyph)),
+            crate::ui::app::TILE_SIZE_SM,
+            crate::ui::app::TILE_GLYPH_SM,
+            false,
+            cx,
+        )
+        .rounded_md()
+        .tooltip(tip)
+        .on_click(cx.listener(|this, _, _window, cx| this.scm_toggle_changes_tree(cx)))
+        .into_any_element();
+        self.panel_search_with(&input, Some(toggle), cx)
+    }
+
+    /// The filter box's text, if it has any.
+    fn scm_filter_query(&self, cx: &gpui::App) -> Option<String> {
+        normalize_query(&self.scm.filter.as_ref()?.read(cx).value())
+    }
+
+    /// A directory in the tree view: a chevron in the status letters'
+    /// column, the (possibly compacted) name, and how many changed files
+    /// are under it.
+    #[allow(clippy::too_many_arguments)]
+    fn scm_dir_row(
+        &self,
+        group: ScmGroup,
+        key: String,
+        label: String,
+        depth: usize,
+        files: usize,
+        collapsed: bool,
+        foldable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+        let mono = cx.theme().mono_font_family.clone();
+        let muted = cx.theme().muted_foreground;
+        let id = SharedString::from(format!("scm-dir-{group:?}-{key}"));
+        let selector = id.clone();
+        let toggle = cx.listener({
+            let key = key.clone();
+            move |this, _, _window, cx| {
+                this.scm.toggle_dir(group, key.clone());
+                cx.notify();
+            }
+        });
+        h_flex()
+            .id(id)
+            .debug_selector(move || selector.to_string())
+            .items_center()
+            .gap(px(8.))
+            .min_h(rems(ROW_H / 16.))
+            .w_full()
+            .min_w_0()
+            .px(px(ROW_INSET))
+            .pl(px(ROW_INSET + depth as f32 * TREE_INDENT))
+            .rounded(px(5.))
+            .when(foldable, |row| {
+                row.cursor_pointer()
+                    .hover(|s| s.bg(gpui::rgb(sf.hover)))
+                    .on_click(toggle)
+            })
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(key.clone()).build(window, cx)
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(BADGE_W))
+                    .flex()
+                    .justify_center()
+                    .text_color(muted)
+                    .child(
+                        Icon::new(if collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .xsmall(),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(rems(crate::ui::right_panel::TEXT))
+                    .text_color(gpui::rgb(sf.text_resting))
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(rems(META_MONO))
+                    .font_family(mono)
+                    .text_color(muted)
+                    .child(files.to_string()),
+            )
+            .into_any_element()
     }
 
     /// "…and 40 more", and the note about a status git had to truncate.
@@ -1413,11 +1601,15 @@ impl Tty7App {
             .into_any_element()
     }
 
+    /// One changed file. `depth` is its level in the tree view, and `None` in
+    /// the flat list — where the row carries its directory beside the name,
+    /// since there is no directory row above it to say it.
     fn scm_file_row(
         &self,
         repo: &RepoKey,
         group: ScmGroup,
         entry: &StatusEntry,
+        depth: Option<usize>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
@@ -1438,8 +1630,10 @@ impl Tty7App {
             cx,
         );
 
+        let selector = id.clone();
         h_flex()
             .id(id.clone())
+            .debug_selector(move || selector.to_string())
             .group(id)
             .relative()
             .items_center()
@@ -1448,6 +1642,9 @@ impl Tty7App {
             .w_full()
             .min_w_0()
             .px(px(ROW_INSET))
+            .when_some(depth, |row, depth| {
+                row.pl(px(ROW_INSET + depth as f32 * TREE_INDENT))
+            })
             .py(px(3.))
             .rounded(px(5.))
             .cursor_pointer()
@@ -1503,7 +1700,7 @@ impl Tty7App {
             // Cap the secondary directory while the filename fills the rest.
             // A rem cap also gives short paths their intrinsic width inside
             // the context-menu wrapper's flex layout.
-            .when(!dir.is_empty(), |this| {
+            .when(!dir.is_empty() && depth.is_none(), |this| {
                 this.child(
                     div()
                         .flex_none()
@@ -3010,6 +3207,76 @@ mod render_idle_gpui_tests {
             "and no status was ever asked for"
         );
         assert_eq!(draws_while_idle(&mut vcx), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The tree view and the filter, end to end over a real repository: the
+    /// rows that come out are the ones the pure helpers promise, drawn.
+    #[gpui::test]
+    fn the_changes_list_folds_into_a_tree_and_filters_by_path(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let root = scratch("tree");
+        git(&root, &["init", "--quiet"]);
+        std::fs::create_dir_all(root.join("src/ui")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("src/ui/a.rs"), "a\n").unwrap();
+        std::fs::write(root.join("src/ui/b.rs"), "b\n").unwrap();
+        std::fs::write(root.join("docs/readme.md"), "r\n").unwrap();
+
+        let want = root.clone();
+        let (app, mut vcx, _pane) = scm_panel_on(cx, &root, move |app, cx| {
+            app.scm.repo.as_ref().is_some_and(|r| r.root == want)
+                && crate::terminal::git_data::status_of(cx, HostId::LOCAL, &want)
+                    .is_some_and(|s| s.untracked().count() == 3)
+        });
+        let drawn = |vcx: &mut VisualTestContext, what: &'static str| {
+            app.update_in(vcx, |_, _, cx| cx.notify());
+            vcx.run_until_parked();
+            vcx.debug_bounds(what).is_some()
+        };
+        let a = "scm-row-Untracked-src/ui/a.rs";
+        let readme = "scm-row-Untracked-docs/readme.md";
+        let src_ui = "scm-dir-Untracked-src/ui";
+
+        // The flat list is the default, and it has no directory rows.
+        assert!(drawn(&mut vcx, a));
+        assert!(!drawn(&mut vcx, src_ui));
+
+        // `src` holds nothing but `ui`, so the two share one row.
+        app.update(&mut vcx, |app, cx| app.scm_toggle_changes_tree(cx));
+        assert!(vcx.update(|_, cx| cx.global::<crate::core::config::Config>().scm_changes_tree));
+        assert!(drawn(&mut vcx, src_ui));
+        assert!(!drawn(&mut vcx, "scm-dir-Untracked-src"));
+        assert!(drawn(&mut vcx, "scm-dir-Untracked-docs"));
+        assert!(drawn(&mut vcx, a));
+
+        // Folding the directory keeps its row and hides what is under it.
+        app.update(&mut vcx, |app, cx| {
+            app.scm.toggle_dir(ScmGroup::Untracked, "src/ui".into());
+            cx.notify();
+        });
+        assert!(drawn(&mut vcx, src_ui));
+        assert!(!drawn(&mut vcx, a));
+        assert!(drawn(&mut vcx, readme));
+
+        // A filter drops what does not match — and opens the folded
+        // directory the match is in.
+        app.update_in(&mut vcx, |app, window, cx| {
+            let input = app.scm.filter.clone().expect("the filter row was drawn");
+            input.update(cx, |state, cx| state.set_value("UI A", window, cx));
+        });
+        assert!(drawn(&mut vcx, a));
+        assert!(!drawn(&mut vcx, "scm-row-Untracked-src/ui/b.rs"));
+        assert!(!drawn(&mut vcx, readme));
+        assert!(!drawn(&mut vcx, "scm-dir-Untracked-docs"));
+
+        // The same filter narrows the flat list too.
+        app.update(&mut vcx, |app, cx| app.scm_toggle_changes_tree(cx));
+        assert!(drawn(&mut vcx, a));
+        assert!(!drawn(&mut vcx, readme));
+        assert!(!drawn(&mut vcx, src_ui));
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }
