@@ -1046,7 +1046,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SwitcherNoMatch => "一致するワークスペースまたはマシンがありません",
         L10nKey::AddSshHost => "SSH ホストを追加…",
-        L10nKey::ClickForNewWindow => "クリックで新しいウィンドウを開く",
         L10nKey::RestartServer => "tty7 server を再起動",
         L10nKey::OtherMachines => "その他のマシン",
         L10nKey::Ok => "OK",
@@ -1502,9 +1501,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SwitcherTabCount => "{n} 個のタブ",
         L10nKey::SwitcherTabCountOne => "1 個のタブ",
-        L10nKey::SwitcherActiveTab => "アクティブ",
+        L10nKey::SwitcherActiveTab => "現在",
         L10nKey::SwitcherHoldToSwitch => "Tab で移動 · 離して切り替え",
         L10nKey::SwitcherTabToCrossColumns => "Tab で列を移動",
+        L10nKey::SwitcherHintNavigate => "移動",
+        L10nKey::SwitcherHintOpen => "開く",
+        L10nKey::SwitcherHintNewWindow => "新しいウィンドウ",
         L10nKey::SwitcherLocalHost => "ローカル",
         L10nKey::SwitcherConnectingTo => "{machine} に接続中…",
         L10nKey::SwitcherFormName => "名前",
