@@ -44,13 +44,19 @@ use crate::ui::scm::status::{status_color, status_glyph};
 pub(super) const ROW_H: f32 = 26.;
 
 /// The status letter's column, from `git_badge`. The group chevron sits in a
-/// box of exactly this width so the two line up in one column down the panel.
+/// box no wider than this, flush with its leading edge, so the arrow stands
+/// over the letters — its centre within a pixel of theirs.
 ///
 /// This is `right_panel::BADGE_W` spelled out where the header can read it,
 /// and the test below pins the two together. They are one column, and a column
 /// drawn from two numbers is a column that will eventually be drawn from two
 /// different numbers.
-const BADGE_W: f32 = 14.;
+const BADGE_W: f32 = 10.;
+
+/// The group header's disclosure chevron: an 8px mark in an 8px box, so the
+/// label after it lands `8 + 6` = 14px past the text column.
+const GROUP_CHEVRON: f32 = 8.;
+const _: () = assert!(GROUP_CHEVRON <= BADGE_W && BADGE_W - GROUP_CHEVRON <= 2.);
 
 /// The key context the message box installs, and the one `ScmCommit` is
 /// bound inside. The two are the same string on purpose: a binding whose
@@ -111,12 +117,24 @@ const COMMIT_RADIUS: gpui::Pixels = px(6.);
 /// The block pinned above the file list — branch, message, commit — reads as
 /// one unit: 8px under the tab row, 10px between its three parts and 14px
 /// before the first group.
-const PINNED_TOP: f32 = 8.;
+///
+/// On macOS the panel already puts 8px between its tab row and every tab's
+/// body (`render_right_panel`), so the block adds nothing of its own there;
+/// adding it anyway put the branch 16px down while Info and Files started at
+/// 8. Elsewhere the tab row is inside the body and the 8 is this block's.
+const PINNED_TOP: f32 = if cfg!(target_os = "macos") { 0. } else { 8. };
 const PINNED_GAP: f32 = 10.;
 const PINNED_BOTTOM: f32 = 14.;
 
-/// The branch row's trailing refresh/sync tile.
+/// The pinned block's side inset: 2px further in than the lists' `CONTENT_INSET`, so
+/// the message box and the commit control read as a panel of their own rather
+/// than as rows of the list. The branch row pads a further `ROW_INSET`, which
+/// puts its glyph at 22 — under the first tab label.
+const PINNED_INSET: f32 = 14.;
+
+/// The branch row's trailing refresh/sync tile, and the mark in it.
 const BRANCH_TILE: f32 = 26.;
+const BRANCH_TILE_GLYPH: f32 = 12.;
 
 /// Space between two change groups, and the height of a group's header.
 const GROUP_GAP: f32 = 16.;
@@ -334,8 +352,8 @@ impl Tty7App {
             // type sits inside it rather than setting it.
             .min_h(rems(28. / 16.))
             .mt(px(PINNED_TOP))
-            .pl(px(CONTENT_INSET))
-            .pr(px(crate::ui::app::tile_trailing_inset_sm()))
+            .pl(px(PINNED_INSET + ROW_INSET))
+            .pr(px(PINNED_INSET))
             .child(
                 Icon::empty()
                     .path("icons/git-branch.svg")
@@ -429,7 +447,7 @@ impl Tty7App {
                         Icon::empty().path("icons/git-sync.svg")
                     }),
                     BRANCH_TILE,
-                    crate::ui::app::TILE_GLYPH_SM,
+                    BRANCH_TILE_GLYPH,
                     false,
                     cx,
                 )
@@ -701,7 +719,7 @@ impl Tty7App {
                 // Every input row in the panel is 30px, and the field inside
                 // it is the `.xsmall()` one that height was derived from.
                 .h(px(SEARCH_H))
-                .px(px(CONTENT_INSET))
+                .px(px(PINNED_INSET))
                 .child(div().flex_1().min_w_0().child(Input::new(&input).xsmall()))
                 .on_key_down(
                     cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
@@ -752,7 +770,7 @@ impl Tty7App {
                 .flex_none()
                 .items_center()
                 .h(px(SEARCH_H))
-                .px(px(CONTENT_INSET))
+                .px(px(PINNED_INSET))
                 .child(div().flex_1().min_w_0().child(Input::new(&input).xsmall()))
                 .on_key_down(
                     cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
@@ -815,7 +833,7 @@ impl Tty7App {
         div()
             .key_context(COMMIT_KEY_CONTEXT)
             .flex_none()
-            .px(px(CONTENT_INSET))
+            .px(px(PINNED_INSET))
             .pt(px(PINNED_GAP))
             .child(
                 div()
@@ -953,7 +971,7 @@ impl Tty7App {
             .flex_none()
             .items_center()
             .gap(px(8.))
-            .px(px(CONTENT_INSET))
+            .px(px(PINNED_INSET))
             .pt(px(PINNED_GAP))
             .pb(px(PINNED_BOTTOM))
             // The reading the button acts on, in the row it acts from. It
@@ -1319,8 +1337,14 @@ impl Tty7App {
         status: &Arc<WorkingTreeStatus>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut list = v_flex().px(px(CONTENT_INSET - ROW_INSET)).pb(px(12.));
-        let mut first = true;
+        // Groups are told apart by the pause between them, not by a rule:
+        // 16px, and none above the first. Inside a group every row — header
+        // included — sits 1px from the next, so two hovered neighbours read
+        // as two fills rather than one long one.
+        let mut list = v_flex()
+            .px(px(CONTENT_INSET))
+            .pb(px(12.))
+            .gap(px(GROUP_GAP));
         for group in ScmGroup::ORDER {
             let entries: Vec<&StatusEntry> = status
                 .entries
@@ -1331,26 +1355,22 @@ impl Tty7App {
                 continue;
             }
             let collapsed = self.scm.group_collapsed(group, entries.len());
-            // Groups are told apart by the pause before each one, not by a
-            // rule: 16px, and none above the first.
-            if !first {
-                list = list.child(div().flex_none().h(px(GROUP_GAP)));
+            let mut block = v_flex()
+                .gap(px(1.))
+                .child(self.scm_group_header(repo, group, &entries, collapsed, cx));
+            if !collapsed {
+                let shown = entries.len().min(MAX_RENDERED_FILES);
+                for entry in entries.iter().take(shown) {
+                    block = block.child(self.scm_file_row(repo, group, entry, cx));
+                }
+                if entries.len() > shown {
+                    block = block.child(self.scm_note(
+                        t_plural(L10nKey::PanelMoreChangedFiles, entries.len() - shown, &[]),
+                        cx,
+                    ));
+                }
             }
-            first = false;
-            list = list.child(self.scm_group_header(repo, group, &entries, collapsed, cx));
-            if collapsed {
-                continue;
-            }
-            let shown = entries.len().min(MAX_RENDERED_FILES);
-            for entry in entries.iter().take(shown) {
-                list = list.child(self.scm_file_row(repo, group, entry, cx));
-            }
-            if entries.len() > shown {
-                list = list.child(self.scm_note(
-                    t_plural(L10nKey::PanelMoreChangedFiles, entries.len() - shown, &[]),
-                    cx,
-                ));
-            }
+            list = list.child(block);
         }
         if status.truncated {
             list = list.child(self.scm_note(
@@ -1400,7 +1420,6 @@ impl Tty7App {
             .items_center()
             .gap(px(6.))
             .min_h(rems(GROUP_HEADER_H / 16.))
-            .mb(px(1.))
             .px(px(ROW_INSET))
             .rounded(px(6.))
             .cursor_pointer()
@@ -1408,12 +1427,14 @@ impl Tty7App {
             .on_click(cx.listener(move |this, _, _window, cx| {
                 this.scm_toggle_group(group, count, cx);
             }))
-            // The chevron's box is exactly the width of `git_badge`, so this
-            // column and the status letters below it are one straight line.
+            // The chevron starts on the text column like the status letters
+            // below it, in a box 2px narrower than their cell, so each arrow
+            // stands over the `M`s and `U`s with its centre a pixel short of
+            // theirs.
             .child(
                 div()
                     .flex_none()
-                    .w(px(BADGE_W))
+                    .w(px(GROUP_CHEVRON))
                     .flex()
                     .justify_center()
                     .text_color(cx.theme().muted_foreground)
@@ -1423,7 +1444,7 @@ impl Tty7App {
                         } else {
                             IconName::ChevronDown
                         })
-                        .size(px(COMMIT_GLYPH)),
+                        .size(px(GROUP_CHEVRON)),
                     ),
             )
             // Sentence case, medium, muted: a band label over the rows rather
@@ -2510,11 +2531,13 @@ mod tests {
     /// assembled: every group arrow sits directly above the `M`s and `A`s of
     /// the rows it heads. The two widths live in two files — `git_badge` owns
     /// the letter's cell, this module owns the chevron's box — so nothing but
-    /// this assertion stops one of them from moving on its own. They have to
-    /// keep moving together.
+    /// this assertion stops one of them from moving on its own. Both start on
+    /// the text column, so the centres agree to within a pixel as long as the
+    /// chevron's box is the cell's width or up to 2px narrower.
     #[test]
     fn the_group_chevron_stands_in_the_status_letters_column() {
         assert_eq!(BADGE_W, crate::ui::right_panel::BADGE_W);
+        assert!(GROUP_CHEVRON <= BADGE_W && BADGE_W - GROUP_CHEVRON <= 2.);
     }
 
     fn repo(root: &str) -> RepoKey {

@@ -11,7 +11,7 @@ use crate::ui::file_copy;
 use crate::ui::host_ops::{ByHost, HostId, HostOps, InFlight, SharedHost, WatchSub};
 use crate::ui::host_registry::HostRegistry;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use crate::ui::right_panel::{ROW_GLYPH, ROW_INSET, git_badge};
+use crate::ui::right_panel::{ROW_FILL_RADIUS, ROW_GLYPH, ROW_INSET, git_badge};
 use crate::ui::scm::status::{status_color, status_glyph};
 use gpui::prelude::*;
 use gpui::{
@@ -25,10 +25,12 @@ use gpui_component::{
 };
 
 // The tree is laid out the way every other list in this panel is: the column
-// sits a `ROW_INSET` short of `CONTENT_INSET` and each row pads itself back
-// out, so a depth-0 name lands on the panel's 12px rail while the row's hover
-// and selection fill bleeds past it to 8. Depth is added on top of that inset,
-// so `INDENT` is the step between levels and nothing else.
+// sits `CONTENT_INSET` in and each row pads itself a further `ROW_INSET`, so a
+// depth-0 chevron lands on the panel's 20px text column — the search glyph's —
+// while the row's hover and selection fill bleeds past it to 12. Depth is
+// added on top of that inset, so `INDENT` is the step between levels and
+// nothing else: 16, which puts a child's chevron under its parent's folder
+// glyph.
 //
 // It used to run its own pair of numbers instead — a `px_1()` column and a 6px
 // row — which put the tree's names 2px left of the search field directly above
@@ -36,7 +38,11 @@ use gpui_component::{
 // an Info or Source Control row's. Two adjacent left edges that disagree by
 // 2px is the one misalignment a reader can actually catch, because the search
 // glyph sits right there to compare against.
-const INDENT: f32 = 14.0;
+const INDENT: f32 = 16.0;
+
+/// Room under the last row, so the tree does not end flush on the window's
+/// bottom edge.
+const TREE_PAD_BOTTOM: f32 = 16.;
 
 /// How tall a tree row is.
 const TREE_ROW_H: f32 = 26.;
@@ -1639,7 +1645,7 @@ impl Tty7App {
                 false => t(L10nKey::OpenFileFromTree).to_string(),
             };
             div()
-                .px_3()
+                .px(px(ROW_INSET))
                 .py_4()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
@@ -1651,8 +1657,8 @@ impl Tty7App {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.right_panel.tree_scroll)
-            .px(px(CONTENT_INSET - ROW_INSET))
-            .pb_1()
+            .px(px(CONTENT_INSET))
+            .pb(px(TREE_PAD_BOTTOM))
             .track_focus(&self.file_tree.focus_handle)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 this.file_tree_key_down(ev, window, cx);
@@ -1898,7 +1904,7 @@ impl Tty7App {
             .h(px(TREE_ROW_H))
             .pl(px(ROW_INSET + row.depth as f32 * INDENT))
             .pr(px(ROW_INSET))
-            .rounded(px(6.))
+            .rounded(ROW_FILL_RADIUS)
             .cursor_pointer()
             .when(selected, |d| d.bg(gpui::rgb(sf.selected)))
             .when(!selected, |d| d.hover(|s| s.bg(gpui::rgb(sf.hover))))

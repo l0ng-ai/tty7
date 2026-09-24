@@ -1122,8 +1122,10 @@ impl Tty7App {
             .into_any_element()
     }
 
+    /// The app menu tile, `tile` px square with the chrome glyph in it.
     pub(crate) fn app_menu_tile(
         &self,
+        tile: f32,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -1134,8 +1136,10 @@ impl Tty7App {
             .map(|leaf| leaf.read(cx).focus_handle.clone())
             .unwrap_or_else(|| self.home_focus.clone());
         div().occlude().flex_shrink_0().child(
-            chrome_tile(
+            chrome_tile_sized(
                 Button::new("titlebar-app-menu").icon(IconName::Ellipsis),
+                tile,
+                TILE_GLYPH,
                 false,
                 cx,
             )
@@ -1159,18 +1163,38 @@ impl Tty7App {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let trailing = match cfg!(target_os = "macos") {
+            true => tile_trailing_inset(),
+            false => 4.,
+        };
+        self.window_chrome_sized(TILE_SIZE, 2., trailing, window, cx)
+    }
+
+    /// [`Self::window_chrome`] at another size: `tile` px squares, `gap` apart,
+    /// `trailing` px short of the far edge. The right panel's own tab row is
+    /// the one caller that wants other numbers — see
+    /// `right_panel::PANEL_CHROME_TILE`.
+    pub(crate) fn window_chrome_sized(
+        &self,
+        tile: f32,
+        gap: f32,
+        trailing: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let panel_open = self.right_panel_open(cx);
         h_flex()
             .flex_shrink_0()
             .items_center()
-            .gap(px(2.))
-            .pr(px(tile_trailing_inset()))
-            .when(!cfg!(target_os = "macos"), |this| this.pr_1())
+            .gap(px(gap))
+            .pr(px(trailing))
             .child(
                 div().occlude().flex_shrink_0().child(
-                    chrome_tile(
+                    chrome_tile_sized(
                         Button::new("titlebar-right-panel")
                             .icon(Icon::empty().path("icons/panel-right.svg")),
+                        tile,
+                        TILE_GLYPH,
                         false,
                         cx,
                     )
@@ -1198,7 +1222,7 @@ impl Tty7App {
                     })),
                 ),
             )
-            .child(self.app_menu_tile(window, cx))
+            .child(self.app_menu_tile(tile, window, cx))
     }
 
     /// The right panel's word tabs, laid out in `avail` px.

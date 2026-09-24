@@ -62,7 +62,7 @@ use tty7_core::core::git::ops::{GitOp, ResetMode};
 use crate::ui::app::{CONTENT_INSET, Tty7App};
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::presets::{ActiveLanes, LANE_SLOTS, Lanes};
-use crate::ui::right_panel::{META, META_MONO, TEXT, info_chip};
+use crate::ui::right_panel::{META, META_MONO, ROW_INSET, TEXT, TEXT_INSET, info_chip};
 use crate::ui::scm::path::{elide_middle, relative_time};
 use crate::ui::scm::state::RepoKey;
 
@@ -108,14 +108,45 @@ const GRAPH_HEADER_H: f32 = 32.;
 const GRAPH_TILE: f32 = 18.;
 const GRAPH_TILE_GLYPH: f32 = 12.;
 
-/// Space after the age column, inside the section's own inset.
-const GRAPH_ROW_PAD_R: f32 = 8.;
+/// Space between the header's parts: chevron, title, count, and the controls.
+const GRAPH_HEADER_GAP: f32 = 6.;
+
+/// The scope picker's own leading/trailing padding — gpui-component's
+/// `.xsmall()` button, `px_1p5`. The header's right padding gives it back so
+/// the picker's caret, not its hover box, ends on the text column.
+const GRAPH_SCOPE_PAD: f32 = 6.;
+
+/// Space after the age column, inside the section's own inset: a row's own
+/// padding, so the ages end on the text column like every other trailing
+/// number in the panel.
+const GRAPH_ROW_PAD_R: f32 = ROW_INSET;
 
 /// The section's rows sit inside this much of the panel's edge on each side,
 /// so a hovered or selected commit wears a rounded band like a file row does
-/// rather than a full-bleed stripe. Added to the row's own padding it lands on
-/// `CONTENT_INSET`.
-const GRAPH_SIDE: f32 = CONTENT_INSET - 6.;
+/// rather than a full-bleed stripe. It is the lists' inset: the fill starts
+/// where a file row's does, and the row's own padding takes the text on to
+/// `TEXT_INSET`.
+const GRAPH_SIDE: f32 = CONTENT_INSET;
+
+/// The gutter of a history with no branches in it: the row's own padding, a
+/// 9px column for the bead, and 10px to the text — a subject at
+/// `TEXT_INSET + 19`. A lane budget sized for the widest history the panel can
+/// draw put a single string of beads in a gutter five or six lanes wide, and
+/// pushed every subject 50px off the text column for nothing.
+const GRAPH_LINEAR_GUTTER: f32 = ROW_INSET + 9. + 10.;
+
+/// Space between a row's subject, its ref chip and its age.
+const GRAPH_ROW_GAP: f32 = 10.;
+
+/// The age column's floor: `12m` right-aligned in it. A floor rather than a
+/// width, because `11mo` and the CJK units run wider, and a column that clips
+/// an age is worse than one that is a few pixels ragged at its leading edge.
+const GRAPH_AGE_W: f32 = 24.;
+
+/// Air above the section's header, under its rule, and below its last row,
+/// above the window's bottom edge.
+const GRAPH_PAD_TOP: f32 = 4.;
+const GRAPH_PAD_BOTTOM: f32 = 12.;
 
 /// Horizontal distance between lane centres.
 const GRAPH_LANE_W: f32 = 12.;
@@ -141,7 +172,8 @@ const GRAPH_LINE_W: f32 = 1.;
 const GRAPH_RING_W: f32 = 1.2;
 
 /// Most of the panel's width belongs to the message. Thirty percent is what
-/// leaves five lanes at the 260px default and still keeps a readable column.
+/// leaves six lanes at the 280px default (five at 260) and still keeps a
+/// readable column.
 const GRAPH_GUTTER_SHARE: f32 = 0.30;
 
 /// Lanes are capped by what the panel can show, never by what history did.
@@ -156,18 +188,21 @@ const _: () = assert!(GRAPH_MAX_LANES <= LANE_SLOTS);
 /// through. The ceiling is a share of the window rather than a constant: the
 /// file list has to keep a usable part of a short one.
 ///
-/// Both of the fixed ones are counted in rows against the header: what they
-/// mean is a number of commits, not a number of pixels. 287 is `32 + 9.8 × 26`
-/// — nine commits and most of a tenth, and the fraction is deliberate, because
-/// a row cut by the bottom edge is the only honest way a fixed-height list says
-/// there is more below it. 116 is `32 + 3.2 × 26`, three and a bit, which is
-/// the least that still looks like history rather than like a mistake.
+/// Both of the fixed ones are counted in rows against the header and the
+/// section's padding: what they mean is a number of commits, not a number of
+/// pixels. 303 is `4 + 32 + 9.8 × 26 + 12` — nine commits and most of a tenth,
+/// and the fraction is deliberate, because a row cut by the bottom edge is the
+/// only honest way a fixed-height list says there is more below it. 132 is
+/// `4 + 32 + 3.2 × 26 + 12`, three and a bit, which is the least that still
+/// looks like history rather than like a mistake.
 ///
 /// They grew with [`GRAPH_ROW_H`] — 220 and 88 around a 20px row, 260 and 100 around 24 — precisely
 /// because they are counted in commits: holding the pixels would have quietly
-/// bought the file list 40px by showing two fewer commits.
-const GRAPH_H_DEFAULT: f32 = 287.;
-const GRAPH_H_MIN: f32 = 116.;
+/// bought the file list 40px by showing two fewer commits. They grew by 16
+/// again when the section took the 4/12 padding above its header and below its
+/// last row, for the same reason.
+const GRAPH_H_DEFAULT: f32 = 303.;
+const GRAPH_H_MIN: f32 = 132.;
 const GRAPH_H_MAX_RATIO: f32 = 0.65;
 
 /// The divider's grab area, matching `RESIZE_HANDLE_WIDTH` on the other axis.
@@ -581,8 +616,8 @@ impl Tty7App {
             return Some(
                 div()
                     .flex_none()
-                    .pt(px(4.))
-                    .pb(px(12.))
+                    .pt(px(GRAPH_PAD_TOP))
+                    .pb(px(GRAPH_PAD_BOTTOM))
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(self.graph_header(repo, None, cx))
@@ -616,6 +651,8 @@ impl Tty7App {
                 .relative()
                 .flex_none()
                 .h(px(height))
+                .pt(px(GRAPH_PAD_TOP))
+                .pb(px(GRAPH_PAD_BOTTOM))
                 .border_t_1()
                 .border_color(cx.theme().border)
                 .child(backing)
@@ -809,7 +846,12 @@ impl Tty7App {
     ) -> AnyElement {
         let panel_w = cx.global::<crate::core::config::Config>().right_panel_width;
         let cap = max_lanes(panel_w);
-        let gutter = gutter_width(cap);
+        // One string of beads needs one bead's column, not the budget for the
+        // widest history this width could draw.
+        let gutter = match page.max_lanes <= 1 {
+            true => GRAPH_LINEAR_GUTTER,
+            false => gutter_width(cap),
+        };
         let now = crate::ui::home::now_secs() as i64;
 
         // A filtered view drops rows out of the middle of history, and lanes
@@ -836,9 +878,10 @@ impl Tty7App {
         let visible = (height / GRAPH_ROW_H).ceil() as usize + GRAPH_WINDOW_MARGIN * 2;
         let last = first.saturating_add(visible).min(rows.len());
 
-        // With the gutter gone the text takes the panel's own inset, so a
-        // search result does not sit in a column of empty space.
-        let indent = if filtering { CONTENT_INSET } else { gutter };
+        // With the gutter gone the text takes a row's own padding, so a
+        // search result starts on the panel's text column rather than in a
+        // column of empty space.
+        let indent = if filtering { ROW_INSET } else { gutter };
         let list = v_flex().pt(px(first as f32 * GRAPH_ROW_H)).children(
             rows[first..last]
                 .iter()
@@ -932,7 +975,7 @@ impl Tty7App {
         h_flex()
             .id(SharedString::from(format!("scm-graph-row-{i}")))
             .items_center()
-            .gap(px(6.))
+            .gap(px(GRAPH_ROW_GAP))
             .h(px(GRAPH_ROW_H))
             .pl(px(gutter))
             .pr(px(GRAPH_ROW_PAD_R))
@@ -979,7 +1022,7 @@ impl Tty7App {
             .child(
                 div()
                     .flex_none()
-                    .w(px(27.))
+                    .min_w(px(GRAPH_AGE_W))
                     .text_right()
                     .text_size(rems(META_MONO))
                     .font_family(mono.clone())
@@ -1199,7 +1242,7 @@ impl Tty7App {
             .items_center()
             .h(px(GRAPH_ROW_H))
             .pl(px(gutter))
-            .pr(px(CONTENT_INSET))
+            .pr(px(GRAPH_ROW_PAD_R))
             .cursor_pointer()
             // A step under the subjects above it: this is a control the list
             // offers, not a commit, and it should not read as one more row of
@@ -1256,15 +1299,15 @@ impl Tty7App {
         h_flex()
             .flex_none()
             .items_center()
-            .gap(px(4.))
+            .gap(px(GRAPH_HEADER_GAP))
             .h(px(GRAPH_HEADER_H))
-            .pl(px(CONTENT_INSET))
-            .pr(px(crate::ui::app::tile_trailing_inset_sm()))
+            .pl(px(TEXT_INSET))
+            .pr(px(TEXT_INSET - GRAPH_SCOPE_PAD))
             .child(
                 h_flex()
                     .id("scm-graph-fold")
                     .items_center()
-                    .gap(px(4.))
+                    .gap(px(GRAPH_HEADER_GAP))
                     .flex_1()
                     .min_w(px(0.))
                     .cursor_pointer()
@@ -1774,7 +1817,8 @@ mod tests {
 
     #[test]
     fn the_gutter_narrows_with_the_panel() {
-        // 260px is the default panel; 216px is about as narrow as it gets.
+        // 280px is the default panel; 216px is about as narrow as it gets.
+        assert_eq!(max_lanes(280.), 6);
         assert_eq!(max_lanes(260.), 5);
         assert_eq!(max_lanes(216.), 4);
         assert_eq!(max_lanes(320.), 6);
@@ -1809,7 +1853,7 @@ mod tests {
     /// is that a real strip of that row survives at both ends.
     #[test]
     fn the_section_is_sized_in_commits() {
-        let rows = |h: f32| (h - GRAPH_HEADER_H) / GRAPH_ROW_H;
+        let rows = |h: f32| (h - GRAPH_PAD_TOP - GRAPH_HEADER_H - GRAPH_PAD_BOTTOM) / GRAPH_ROW_H;
         let resting = rows(GRAPH_H_DEFAULT);
         assert!(
             (9.5..10.0).contains(&resting),

@@ -1270,8 +1270,10 @@ pub enum DiffViewMode {
     Unified,
 }
 
+/// The detail panel's resting width: the v4 design's 280px column, which is
+/// what its insets (12px lists, 20px text) and the tab row were drawn against.
 fn default_right_panel_width() -> f32 {
-    260.
+    280.
 }
 
 /// Where the code / diff surface is drawn.
