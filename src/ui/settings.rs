@@ -262,10 +262,9 @@ const CONTROL_RADIUS: f32 = crate::ui::tab_strip::RAIL_TILE_RADIUS;
 /// One line of navigation — a nav item, a host, a section heading — at the
 /// right panel's Session row height.
 const ROW_H: f32 = 28.;
-/// A heading's row: the design's group-header height, shorter than a content
-/// row so the heading hugs the rows it names rather than floating between
-/// them and the rule above.
-const HEADING_H: f32 = 22.;
+/// A heading's row: a full row, like the nav's own "Settings" heading, so the
+/// SSH list's header and its detail title can be set level with it.
+const HEADING_H: f32 = ROW_H;
 
 /// How far a row pads its text in from its own edge, which is how far its
 /// hover fill bleeds past that text. The list around it sits `CONTENT_INSET`
@@ -3026,10 +3025,9 @@ impl Tty7App {
                     // outside the scroll range. `flex_shrink_0` does not buy
                     // its way out of that; only staying a block does.
                     //
-                    // The page's title sits under the window's title-bar band,
-                    // on the line the nav's "Settings" heading does, and keeps
-                    // a section's air from the first row. In the band itself
-                    // it was jammed against the window's top edge.
+                    // The page's title stands in the window's title-bar band,
+                    // level with the close tile at the other end, so the page
+                    // under it starts where the nav's search does.
                     div().w_full().px_10().pb_8().child(
                         div()
                             .w_full()
@@ -3046,9 +3044,7 @@ impl Tty7App {
                                 )
                                 .flex()
                                 .items_center()
-                                .mt(px(TITLE_BAR_HEIGHT))
-                                .h(px(HEADING_H))
-                                .mb(px(SECTION_GAP)),
+                                .h(px(TITLE_BAR_HEIGHT)),
                             )
                             .children(no_match_note)
                             .when(self.theme_draft_dirty(), |v| {
@@ -3400,10 +3396,8 @@ impl Tty7App {
     }
 
     pub(crate) fn section_header(&self, title: &str, cx: &Context<Self>) -> Stateful<Div> {
-        // Pulled into the first row's top padding: about 9pt from its rows,
-        // against the 16 between rows and the 27 from the rule above.
         self.header_text(title, cx)
-            .mb(px(-ROW_PAD / 4.))
+            .mb_1()
             .id(settings_header_id(title))
             .anchor_scroll(self.first_hit_anchor(title, cx))
     }
@@ -3428,15 +3422,12 @@ impl Tty7App {
     }
 
     /// The seam between two sections: a half-pixel hairline in the divider
-    /// ink with a little more than `SECTION_GAP` of air either side — a pane
-    /// edge's line, not a table rule, so a page reads as one surface broken
-    /// into bands. The heading under it sits closer to its own rows than to
-    /// this, which is what makes it read as theirs.
+    /// ink with `SECTION_GAP` of air either side — a pane edge's line, not a
+    /// table rule, so a page reads as one surface broken into bands.
     pub(crate) fn section_rule(&self, cx: &Context<Self>) -> Div {
         div()
             .h(px(0.5))
-            .mt(px(SECTION_GAP + 4.))
-            .mb(px(SECTION_GAP + 8.))
+            .my(px(SECTION_GAP))
             .bg(cx.theme().sidebar_border)
     }
 
@@ -7386,11 +7377,10 @@ impl Tty7App {
                     ))
                 },
             )
-            // A footnote to the rows above, so it stays within a row's padding
-            // of them: 12pt out, it read as a paragraph of its own.
             .child(
                 div()
-                    .text_size(gpui::rems(META))
+                    .mt_3()
+                    .text_xs()
                     .text_color(muted_fg)
                     .child(t(L10nKey::SettingsShellFooter)),
             )
