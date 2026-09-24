@@ -101,7 +101,7 @@ const PROC_ROW_H: f32 = 26.;
 const PROC_INDENT: f32 = 14.;
 
 /// The space between two sections of the Info tab.
-const SECTION_GAP: f32 = 16.;
+pub(crate) const SECTION_GAP: f32 = 16.;
 
 /// Where the Session value column starts, measured from `CONTENT_INSET` —
 /// the label cell, its `ROW_INSET` of leading padding and the gap after it —

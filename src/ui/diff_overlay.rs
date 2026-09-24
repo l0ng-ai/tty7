@@ -868,7 +868,7 @@ impl Tty7App {
 
     /// The two views, as a switch rather than a control.
     ///
-    /// Not [`Tty7App::segmented_on`]: that one is a bordered track, which is
+    /// Not [`Tty7App::segmented_on`]: that one is a filled track, which is
     /// right in a settings row, where it ends a line of prose and has to
     /// announce itself as something you operate. On a title bar it was the
     /// only bordered thing on the strip — the close tile beside it is a bare
