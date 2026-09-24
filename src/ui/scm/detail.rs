@@ -46,7 +46,9 @@ use tty7_core::core::git::status::DecoStatus;
 use crate::terminal::git_diff::DiffSource;
 use crate::ui::app::{CONTENT_INSET, Tty7App};
 use crate::ui::i18n::{L10nKey, t, t_plural};
-use crate::ui::right_panel::{HEADING, META, META_MONO, ROW_INSET, TEXT, git_badge, info_chip};
+use crate::ui::right_panel::{
+    HEADING, META, META_MONO, ROW_INSET, TEXT, TEXT_INSET, git_badge, info_chip,
+};
 use crate::ui::scm::path::{relative_time, split_display_path};
 use crate::ui::scm::state::{CommitDetailView, RepoKey};
 use crate::ui::scm::status::{status_color, status_glyph};
@@ -174,10 +176,11 @@ impl Tty7App {
         // No surface, no margin: this is the panel's body while a commit is
         // open, and it starts where every other panel body starts.
         //
-        // Each section insets itself by `CONTENT_INSET` rather than sharing one
-        // on the column, because the rows that want a hover fill lay themselves
-        // out a `ROW_INSET` short of it so the fill is wider than the text, and
-        // an outer inset would have to be undone by every one of them.
+        // Each section insets itself rather than sharing one on the column:
+        // text sits on `TEXT_INSET`, the rest of the panel's text column, while
+        // the rows that want a hover fill lay themselves out on `CONTENT_INSET`
+        // and pad back out by `ROW_INSET`, so the fill is wider than the text.
+        // An outer inset would have to be undone by every one of them.
         let mut body = v_flex()
             .pb(px(12.))
             .child(self.detail_header_row(detail, &mono, cx));
@@ -199,7 +202,7 @@ impl Tty7App {
                         .flex()
                         .items_center()
                         .min_h(px(ROW_H))
-                        .px(px(CONTENT_INSET))
+                        .px(px(TEXT_INSET))
                         .text_size(rems(META))
                         .text_color(muted)
                         .child(if detail.loaded {
@@ -292,8 +295,9 @@ impl Tty7App {
     /// thing.
     ///
     /// Both pills pad themselves by `ROW_INSET` inside a row inset by
-    /// `CONTENT_INSET - ROW_INSET`, so the chevron and the oid land on the
-    /// same 12px column as every line of text under them.
+    /// `CONTENT_INSET`, so the oid lands on the same `TEXT_INSET` column as
+    /// every line of text under them (the chevron's box, 2px wider, reaches
+    /// that much further out).
     fn detail_header_row(
         &self,
         detail: &CommitDetailView,
@@ -307,7 +311,7 @@ impl Tty7App {
             .items_center()
             .gap(px(4.))
             .h(px(ROW_H))
-            .px(px(CONTENT_INSET - ROW_INSET))
+            .px(px(CONTENT_INSET))
             .child(
                 h_flex()
                     .id("scm-detail-back")
@@ -369,7 +373,7 @@ impl Tty7App {
         let lines = body.lines().count();
         let folded = !detail.body_expanded && lines > BODY_LINES;
         v_flex()
-            .px(px(CONTENT_INSET))
+            .px(px(TEXT_INSET))
             .pt(px(4.))
             .pb(px(6.))
             .gap(px(4.))
@@ -507,7 +511,7 @@ impl Tty7App {
             // little more air between them than chips whose fills already say
             // where one ends and the next begins.
             .gap(px(6.))
-            .px(px(CONTENT_INSET))
+            .px(px(TEXT_INSET))
             .pb(px(6.));
         for deco in &commit.refs {
             row = row.child(match deco.kind {
@@ -549,7 +553,7 @@ impl Tty7App {
             .flex_wrap()
             .items_center()
             .gap(px(2.))
-            .px(px(CONTENT_INSET))
+            .px(px(TEXT_INSET))
             .pb(px(4.))
             .child(
                 div()
@@ -617,10 +621,10 @@ impl Tty7App {
                 at: commit.author.at.unix,
             }),
         };
-        // The rows sit in the working tree's own column: laid out one
-        // `ROW_INSET` short of `CONTENT_INSET` and padding themselves back out,
-        // so a hovered row's background is wider than its text.
-        let mut rows = v_flex().px(px(CONTENT_INSET - ROW_INSET));
+        // The rows sit in the working tree's own column: laid out on
+        // `CONTENT_INSET` and padding themselves out by `ROW_INSET` onto
+        // `TEXT_INSET`, so a hovered row's background is wider than its text.
+        let mut rows = v_flex().px(px(CONTENT_INSET));
         for file in files.iter() {
             rows = rows.child(self.detail_file_row(detail, &source, file, mono, cx));
         }
@@ -667,7 +671,7 @@ impl Tty7App {
             .mt(px(GROUP_GAP))
             .mb(px(1.))
             .min_h(rems(GROUP_HEADER_H / 16.))
-            .px(px(CONTENT_INSET))
+            .px(px(TEXT_INSET))
             .child(
                 div()
                     .text_size(rems(HEADING))
@@ -788,7 +792,7 @@ impl Tty7App {
             .items_center()
             .min_h(px(ROW_H))
             .mt(px(GROUP_GAP))
-            .px(px(CONTENT_INSET))
+            .px(px(TEXT_INSET))
             .text_size(rems(META))
             .text_color(cx.theme().muted_foreground)
             .child(text)
