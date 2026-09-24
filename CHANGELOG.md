@@ -5,6 +5,24 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Icons from a fallback font are drawn at the size of the cell** (#866). A
+  glyph that falls through to a fallback face is drawn at the primary's font
+  size on the fallback's own metrics, so with an icon face such as Symbols Nerd
+  Font Mono behind a wider primary, prompt icons — the Apple logo, folder, git
+  branch, the thin Powerline separators — inked about two thirds of the cell
+  and read visibly smaller than the text beside them. A lone Private Use Area
+  glyph supplied by a fallback face now grows, aspect ratio kept, until it
+  fills the width of its cells or the height of the row, and is centred in
+  them, as kitty and ghostty do. Growth stops at 2× so a glyph that is small by
+  design stays small, anything that overflows is still shrunk as before, and
+  text from a fallback face — CJK, emoji — keeps its own metrics. The primary
+  font's own icons are left alone. Not on Linux, where the text system reports
+  a glyph's advance box rather than its ink.
+
 ## [26.9.3] - 2026-09-23
 
 ### Added
