@@ -41,6 +41,9 @@ const TRACKED: &[u16] = &[
     1, 47, 1047, 1049, 1000, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016, 2004,
 ];
 
+/// Bracketed paste: whether a paste may arrive framed as `ESC[200~ … ESC[201~`.
+pub const BRACKETED_PASTE: u16 = 2004;
+
 /// A CSI longer than this is not a mode set; keep the buffer bounded.
 const MAX_PARAMS: usize = 64;
 
@@ -83,6 +86,11 @@ impl TerminalModes {
     /// The modes currently on, oldest set first.
     pub fn active(&self) -> &[u16] {
         &self.on
+    }
+
+    /// Whether `mode` is on. Only ever true for a mode in [`TRACKED`].
+    pub fn is_on(&self, mode: u16) -> bool {
+        self.on.contains(&mode)
     }
 
     /// The bytes that put a freshly reset terminal back into these modes, or
@@ -347,5 +355,17 @@ mod tests {
         modes.feed(b"\x1b[?1049h\x1b[?1006h");
         modes.feed(b"\x1bc");
         assert!(modes.is_empty());
+    }
+
+    #[test]
+    fn bracketed_paste_reads_as_the_shell_last_left_it() {
+        // zle switches it on to read a line and off again before running it,
+        // so the answer has to follow both edges rather than latch the first.
+        let mut modes = TerminalModes::new();
+        assert!(!modes.is_on(BRACKETED_PASTE));
+        modes.feed(b"\x1b[?2004h");
+        assert!(modes.is_on(BRACKETED_PASTE));
+        modes.feed(b"\x1b[?2004l");
+        assert!(!modes.is_on(BRACKETED_PASTE));
     }
 }

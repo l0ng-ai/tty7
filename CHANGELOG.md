@@ -5,6 +5,32 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`tty7 exec` runs a command in a pane that already exists and hands back its
+  result** (#839). `run` makes a new pane and `send` does not wait, so every
+  script that wanted a command's exit code from a shell it already had ended up
+  as `send`, a sleep, a `capture` and a guess, or an `echo $? > /tmp/rc` side
+  channel. `tty7 exec %3 -- cargo test` types the line at the pane's prompt,
+  follows the shell integration's marks to the command's end, prints what it
+  printed — as text, the way `capture --plain` reads it, or escapes intact with
+  `--raw` — and exits with its exit code. `--timeout` gives up with 124 and
+  leaves the command running; a pane with no prompt marks, or one that is not
+  at a prompt, is refused before anything is typed instead of waited on.
+
+- **`tty7 send` takes its text from stdin or a file, and can paste it**
+  (#838). A token passed as `send %1 "$TOKEN"` sits in the CLI's command line,
+  where any local user reads it in `ps`, and in the caller's shell history;
+  `--stdin` and `--from-file` send the bytes exactly as read and never echo
+  them in `--json`. `--paste` sends the text the way a paste into the window
+  does — in bracketed paste when the pane has switched it on, so a multi-line
+  text arrives as text instead of running line by line, with any ESC stripped
+  so the text cannot close the paste itself. A pane without the mode gets the
+  same unframed paste the GUI would send it, and `--json` says which one went.
+  The server now reports each pane's bracketed-paste mode in `tty7 procs`.
+
 ## [26.9.3] - 2026-09-23
 
 ### Added

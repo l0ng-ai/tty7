@@ -2272,6 +2272,7 @@ impl DaemonPane {
             local_pty: matches!(self.backend, PaneBackend::Pty(_)),
             at_prompt: st.shell.active.then_some(st.shell.mark_at_prompt),
             remote_prompt_seen: st.remote_prompt_seen,
+            bracketed_paste: Some(st.modes.is_on(crate::core::term_modes::BRACKETED_PASTE)),
         }
     }
 
