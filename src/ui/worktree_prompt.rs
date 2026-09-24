@@ -1,13 +1,12 @@
-use gpui::{AnyElement, Context, Entity, Subscription, Window, div, prelude::*, px};
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui::{AnyElement, Context, Entity, Subscription, Window, div, prelude::*, px, rems};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
-};
+use gpui_component::{ActiveTheme as _, WindowExt as _};
 
 use crate::core::worktree::{WorktreeDefaults, WorktreeRequest};
 use crate::ui::app::Tty7App;
+use crate::ui::dialog::{self, Tone};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::right_panel::META_MONO;
 
 pub(crate) struct WorktreePrompt {
     host: crate::ui::host_ops::SharedHost,
@@ -135,12 +134,6 @@ impl Tty7App {
     ) -> Option<AnyElement> {
         let p = self.worktree_prompt.as_ref()?;
         let muted = cx.theme().muted_foreground;
-        let field = |label: &'static str, input: &Entity<InputState>| {
-            v_flex()
-                .gap_1()
-                .child(div().text_xs().text_color(muted).child(label))
-                .child(Input::new(input).small())
-        };
         let name_now = p.name.read(cx).value().trim().to_string();
         let branch_now = p.branch.read(cx).value().trim().to_string();
         // Submitting falls back from one field to the other, so either alone
@@ -164,54 +157,59 @@ impl Tty7App {
             .display()
             .to_string();
 
-        let card = v_flex()
-            .occlude()
-            .w(px(440.))
-            .gap_4()
-            .p_5()
-            .map(|panel| crate::ui::theme::floating_surface(panel, cx))
+        let rungs = dialog::popover_rungs(cx);
+        let card = dialog::card(440., cx)
+            .child(dialog::header(t(L10nKey::WorktreePromptTitle), cx))
             .child(
-                div()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(t(L10nKey::WorktreePromptTitle)),
-            )
-            .child(field(t(L10nKey::WorktreePromptName), &p.name))
-            .child(
-                div()
-                    .text_xs()
-                    .font_family("monospace")
-                    .text_color(muted)
-                    .child(preview),
-            )
-            .child(field(t(L10nKey::WorktreePromptBranch), &p.branch))
-            .child(field(t(L10nKey::WorktreePromptBase), &p.base))
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
+                dialog::body()
+                    // The path preview hangs off the Name field it follows,
+                    // closer to it than the next field is.
                     .child(
-                        Button::new("worktree-cancel")
-                            .label(t(L10nKey::Cancel))
-                            .small()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.cancel_worktree_prompt(window, cx)
-                            })),
+                        dialog::labelled(t(L10nKey::WorktreePromptName), Input::new(&p.name), cx)
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(rems(META_MONO))
+                                    .font_family("monospace")
+                                    .text_color(muted)
+                                    .child(preview),
+                            ),
                     )
-                    .child(
-                        Button::new("worktree-create")
-                            .label(if p.busy {
-                                t(L10nKey::WorktreePromptCreating)
-                            } else {
-                                t(L10nKey::WorktreePromptCreate)
-                            })
-                            .small()
-                            .primary()
-                            .disabled(p.busy || nothing_to_name)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.submit_worktree_prompt(window, cx)
-                            })),
-                    ),
+                    .child(dialog::labelled(
+                        t(L10nKey::WorktreePromptBranch),
+                        Input::new(&p.branch),
+                        cx,
+                    ))
+                    .child(dialog::labelled(
+                        t(L10nKey::WorktreePromptBase),
+                        Input::new(&p.base),
+                        cx,
+                    )),
+            )
+            .child(
+                dialog::footer(cx)
+                    .child(dialog::button(
+                        "worktree-cancel",
+                        t(L10nKey::Cancel),
+                        Tone::Secondary,
+                        true,
+                        rungs,
+                        cx,
+                        cx.listener(|this, _, window, cx| this.cancel_worktree_prompt(window, cx)),
+                    ))
+                    .child(dialog::button(
+                        "worktree-create",
+                        if p.busy {
+                            t(L10nKey::WorktreePromptCreating)
+                        } else {
+                            t(L10nKey::WorktreePromptCreate)
+                        },
+                        Tone::Primary,
+                        !(p.busy || nothing_to_name),
+                        rungs,
+                        cx,
+                        cx.listener(|this, _, window, cx| this.submit_worktree_prompt(window, cx)),
+                    )),
             );
 
         Some(
