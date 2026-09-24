@@ -153,6 +153,16 @@ pub struct ForwardRule {
     pub bind: HostPort,
     pub target: HostPort,
     pub description: String,
+    /// Whether the rule is opened with the connection. A switched-off rule
+    /// keeps its whole configuration and simply binds nothing, so one local
+    /// port can be pointed at different targets by switching rules rather
+    /// than retyping them.
+    ///
+    /// Missing from every profile saved before the switch existed, and those
+    /// rules were all live: the container's `#[serde(default)]` fills it from
+    /// `Default`, which says `true`, or upgrading would silently turn every
+    /// saved forward off.
+    pub enabled: bool,
 }
 
 impl Default for ForwardRule {
@@ -162,6 +172,7 @@ impl Default for ForwardRule {
             bind: HostPort::default(),
             target: HostPort::default(),
             description: String::new(),
+            enabled: true,
         }
     }
 }
@@ -569,6 +580,7 @@ mod tests {
             bind: HostPort::new("127.0.0.1", 8080),
             target: HostPort::new("10.0.0.1", 80),
             description: "web".to_string(),
+            enabled: false,
         }];
         original.socks_proxy = Some(HostPort::new("proxy", 1080));
         original.algorithms.kex = vec!["curve25519-sha256".to_string()];
@@ -596,6 +608,25 @@ mod tests {
         );
         let m: AuthMode = serde_json::from_str("\"agent\"").unwrap();
         assert_eq!(m, AuthMode::Agent);
+    }
+
+    #[test]
+    fn a_forward_rule_saved_before_the_switch_existed_loads_enabled() {
+        let old = r#"{"name":"box","host":"h","forwards":[
+            {"kind":"local","bind":{"host":"127.0.0.1","port":8080},
+             "target":{"host":"srv","port":80},"description":"web"}
+        ]}"#;
+        let p: SshProfile = serde_json::from_str(old).unwrap();
+        assert_eq!(p.forwards.len(), 1);
+        assert!(p.forwards[0].enabled, "an old rule must stay live");
+        assert!(ForwardRule::default().enabled);
+
+        let mut off = p.forwards[0].clone();
+        off.enabled = false;
+        let back: ForwardRule =
+            serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
+        assert!(!back.enabled, "a switched-off rule stays off across a save");
+        assert_eq!(back, off);
     }
 }
 

@@ -3049,7 +3049,7 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         let fields = self.managed_forward_fields(cx);
-        let Some(rule) = fields.collect() else {
+        let Some(mut rule) = fields.collect() else {
             // Add is disabled while the fields do not make a rule and the form
             // already says what is missing, so there is nothing to do here and
             // nothing left to explain.
@@ -3057,6 +3057,10 @@ impl Tty7App {
         };
         let route = self.forward_route(pane_id, cx);
         let previous = self.loopback_panel.mf_editing.clone();
+        // Editing a switched-off rule edits it; it does not switch it on.
+        if let Some(old) = &previous {
+            rule.enabled = old.enabled;
+        }
         // A saved edit is a replace, and the rule being replaced has to come
         // out first: the ordinary edit keeps the bind port, and the far side
         // really does bind it, so adding first would collide with the very
@@ -3160,10 +3164,14 @@ impl Tty7App {
         let Some(list) = route.add(rule) else {
             return PlaceOutcome::Unreachable(t(L10nKey::ForwardRequestFailed).to_string());
         };
-        let broken = added_forward(&before, &list).and_then(|added| match &added.status {
-            ForwardStatus::Error(msg) => Some((added.id, msg.clone())),
-            ForwardStatus::Listening => None,
-        });
+        // A switched-off rule reports an error status because it binds
+        // nothing, and that is what it was asked to do.
+        let broken = added_forward(&before, &list)
+            .filter(|added| added.enabled)
+            .and_then(|added| match &added.status {
+                ForwardStatus::Error(msg) => Some((added.id, msg.clone())),
+                ForwardStatus::Listening => None,
+            });
         self.loopback_panel.managed = list;
         let Some((id, msg)) = broken else {
             return PlaceOutcome::Placed;
@@ -3249,6 +3257,84 @@ impl Tty7App {
             self.loopback_panel.managed = list;
         }
         cx.notify();
+    }
+
+    /// Switch one forward on or off, and carry the choice into the saved host
+    /// the rule came from, if it came from one — so the next connection opens
+    /// the same set of rules instead of the ones that were saved before.
+    pub(crate) fn set_managed_forward_enabled(
+        &mut self,
+        pane_id: u64,
+        forward_id: u64,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let route = self.forward_route(pane_id, cx);
+        let forward = self
+            .loopback_panel
+            .managed
+            .iter()
+            .find(|m| m.id == forward_id)
+            .cloned();
+        match route.set_enabled(forward_id, enabled) {
+            Ok(list) => {
+                self.loopback_panel.managed = list;
+                if let Some(forward) = forward {
+                    self.remember_forward_enabled(pane_id, &forward, enabled, cx);
+                }
+            }
+            Err(e) => {
+                window.push_notification(
+                    t_fmt(L10nKey::ForwardSwitchFailed, &[("error", &e.to_string())]),
+                    cx,
+                );
+                // The refusal changed nothing, but the panel may be behind
+                // whatever did change — ask rather than guess.
+                self.loopback_panel.managed = route.list();
+            }
+        }
+        cx.notify();
+    }
+
+    fn remember_forward_enabled(
+        &mut self,
+        pane_id: u64,
+        forward: &crate::daemon::protocol::ManagedForward,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let profile_id = self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.pane.terminals())
+            .find_map(|leaf| {
+                let view = leaf.read(cx);
+                (view.pane_id == pane_id).then(|| view.ssh_spec()?.profile_id.clone())?
+            })
+            .and_then(|id| uuid::Uuid::parse_str(&id).ok());
+        let Some(profile_id) = profile_id else {
+            return;
+        };
+        let saved = cx
+            .global::<Config>()
+            .ssh_profiles
+            .iter()
+            .find(|p| p.id == profile_id)
+            .and_then(|p| crate::ui::forwards::saved_rule_index(&p.forwards, forward, enabled));
+        let Some(idx) = saved else {
+            return;
+        };
+        self.update_config(cx, |cfg| {
+            if let Some(rule) = cfg
+                .ssh_profiles
+                .iter_mut()
+                .find(|p| p.id == profile_id)
+                .and_then(|p| p.forwards.get_mut(idx))
+            {
+                rule.enabled = enabled;
+            }
+        });
     }
 
     pub(crate) fn show_ssh_forwards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -8221,6 +8307,31 @@ impl ForwardRoute {
         }
     }
 
+    pub(crate) fn set_enabled(
+        &self,
+        forward_id: u64,
+        enabled: bool,
+    ) -> anyhow::Result<Vec<crate::daemon::protocol::ManagedForward>> {
+        let Some(req) =
+            self.workspace_op(crate::daemon::protocol::WorkspaceOp::SetForwardEnabled {
+                forward_id,
+                enabled,
+            })
+        else {
+            return crate::terminal::RemoteTerminal::set_forward_enabled(
+                self.pane_id,
+                forward_id,
+                enabled,
+            );
+        };
+        match crate::terminal::RemoteTerminal::on_workspace(req)? {
+            crate::daemon::protocol::DaemonMsg::ForwardList(list) => Ok(list),
+            other => Err(anyhow::anyhow!(
+                "unexpected reply to SetForwardEnabled: {other:?}"
+            )),
+        }
+    }
+
     pub(crate) fn remove(
         &self,
         forward_id: u64,
@@ -11837,6 +11948,7 @@ mod managed_forward_gpui_tests {
             target_port: 80,
             description: None,
             status: ForwardStatus::Listening,
+            enabled: true,
         }
     }
 

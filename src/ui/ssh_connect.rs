@@ -574,6 +574,7 @@ fn unmap_forward(rule: &SshForwardRule) -> ForwardRule {
         bind: HostPort::new(rule.bind_host.clone(), rule.bind_port),
         target: HostPort::new(rule.target_host.clone(), rule.target_port),
         description: rule.description.clone().unwrap_or_default(),
+        enabled: rule.enabled,
     }
 }
 
@@ -617,7 +618,7 @@ fn map_proxy(profile: &SshProfile) -> SshProxy {
     SshProxy::None
 }
 
-fn map_forward(rule: &ForwardRule) -> SshForwardRule {
+pub(crate) fn map_forward(rule: &ForwardRule) -> SshForwardRule {
     SshForwardRule {
         kind: match rule.kind {
             ForwardKind::Local => SshForwardKind::Local,
@@ -629,6 +630,7 @@ fn map_forward(rule: &ForwardRule) -> SshForwardRule {
         target_host: rule.target.host.clone(),
         target_port: rule.target.port,
         description: (!rule.description.is_empty()).then(|| rule.description.clone()),
+        enabled: rule.enabled,
     }
 }
 
@@ -823,7 +825,16 @@ mod tests {
             bind: HostPort::new("localhost", 8080),
             target: HostPort::new("127.0.0.1", 80),
             description: "web".into(),
+            enabled: true,
         }];
+        // A switched-off rule survives the trip through a live spec switched
+        // off, or reopening a host from its connection would turn it back on.
+        p.forwards.push(ForwardRule {
+            bind: HostPort::new("localhost", 8080),
+            target: HostPort::new("10.0.0.7", 80),
+            enabled: false,
+            ..ForwardRule::default()
+        });
 
         let spec = build_native_ssh_spec(&p, &[], &store, true);
         let back = profile_from_live_spec(&spec);

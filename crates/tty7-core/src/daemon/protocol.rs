@@ -181,6 +181,10 @@ pub enum WorkspaceOp {
     RemoveForward {
         forward_id: u64,
     },
+    SetForwardEnabled {
+        forward_id: u64,
+        enabled: bool,
+    },
     ListForwards,
     TeardownForwards,
     SftpList {
@@ -261,6 +265,13 @@ pub struct SshForwardRule {
     pub target_port: u16,
     #[serde(default)]
     pub description: Option<String>,
+    /// A switched-off rule is registered but binds nothing. Defaults to on,
+    /// and is not a `PROTOCOL_VERSION` bump: a peer that predates it never
+    /// sends it and every rule it knows is live, while one that receives it
+    /// ignores it — the worst case is an older far end opening a rule the
+    /// user switched off, which is what it always did.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,6 +431,13 @@ pub struct ManagedForward {
     #[serde(default)]
     pub description: Option<String>,
     pub status: ForwardStatus,
+    /// Whether the forward is switched on. A field rather than a
+    /// `ForwardStatus` variant for the reason `loop_exit_status` gives: an
+    /// older peer fails the whole frame on a variant it has never heard of,
+    /// but skips a field it does not know. A switched-off forward's status is
+    /// an `Error` saying so, which is what such a peer then draws.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -892,6 +910,11 @@ pub enum ClientMsg {
         pane_id: u64,
         forward_id: u64,
     },
+    SetForwardEnabled {
+        pane_id: u64,
+        forward_id: u64,
+        enabled: bool,
+    },
     ListForwards {
         pane_id: u64,
     },
@@ -987,6 +1010,7 @@ mod kind {
     pub const ADD_FORWARD: u8 = 20;
     pub const REMOVE_FORWARD: u8 = 21;
     pub const LIST_FORWARDS: u8 = 22;
+    pub const SET_FORWARD_ENABLED: u8 = 23;
     pub const VERSION: u8 = 40;
     pub const QUERY_PROCS: u8 = 50;
     pub const ON_WORKSPACE: u8 = 52;
@@ -1260,6 +1284,15 @@ impl ClientMsg {
                 pane_id,
                 forward_id,
             } => write_frame(w, kind::REMOVE_FORWARD, &to_json(&(pane_id, forward_id))?),
+            ClientMsg::SetForwardEnabled {
+                pane_id,
+                forward_id,
+                enabled,
+            } => write_frame(
+                w,
+                kind::SET_FORWARD_ENABLED,
+                &to_json(&(pane_id, forward_id, enabled))?,
+            ),
             ClientMsg::QueryProcs { pane_id } => {
                 write_frame(w, kind::QUERY_PROCS, &to_json(pane_id)?)
             }
@@ -1388,6 +1421,14 @@ impl ClientMsg {
                 ClientMsg::RemoveForward {
                     pane_id,
                     forward_id,
+                }
+            }
+            kind::SET_FORWARD_ENABLED => {
+                let (pane_id, forward_id, enabled) = from_json(&payload)?;
+                ClientMsg::SetForwardEnabled {
+                    pane_id,
+                    forward_id,
+                    enabled,
                 }
             }
             kind::LIST_FORWARDS => ClientMsg::ListForwards {
@@ -1758,6 +1799,7 @@ mod tests {
                     target_host: "10.0.0.5".into(),
                     target_port: 80,
                     description: Some("web".into()),
+                    enabled: true,
                 },
             },
             ClientMsg::AddForward {
@@ -1769,11 +1811,17 @@ mod tests {
                     target_host: String::new(),
                     target_port: 0,
                     description: None,
+                    enabled: false,
                 },
             },
             ClientMsg::RemoveForward {
                 pane_id: 7,
                 forward_id: 3,
+            },
+            ClientMsg::SetForwardEnabled {
+                pane_id: 7,
+                forward_id: 3,
+                enabled: false,
             },
             ClientMsg::ListForwards { pane_id: 7 },
             ClientMsg::Version,
@@ -1934,6 +1982,7 @@ mod tests {
                     target_port: 80,
                     description: Some("web".into()),
                     status: ForwardStatus::Listening,
+                    enabled: true,
                 },
                 ManagedForward {
                     id: 2,
@@ -1945,6 +1994,7 @@ mod tests {
                     target_port: 3000,
                     description: None,
                     status: ForwardStatus::Error("bind refused".into()),
+                    enabled: false,
                 },
             ]),
             DaemonMsg::Version(DaemonVersion {
@@ -2385,6 +2435,7 @@ mod tests {
                 target_host: "127.0.0.1".into(),
                 target_port: 80,
                 description: Some("web".into()),
+                enabled: true,
             }],
             keepalive_interval_s: Some(30),
             keepalive_count_max: Some(3),
@@ -2471,9 +2522,14 @@ mod tests {
                     target_host: "127.0.0.1".into(),
                     target_port: 5432,
                     description: Some("db".into()),
+                    enabled: true,
                 },
             },
             WorkspaceOp::RemoveForward { forward_id: 4 },
+            WorkspaceOp::SetForwardEnabled {
+                forward_id: 4,
+                enabled: true,
+            },
             WorkspaceOp::ListForwards,
             WorkspaceOp::TeardownForwards,
             WorkspaceOp::SftpList {
@@ -2701,5 +2757,40 @@ mod tests {
             !v.has_feature(crate::daemon::control::feature::CONTROL),
             "the session daemon must not advertise a dialect it cannot serve"
         );
+    }
+
+    /// `enabled` crosses the same peers as `rejected` above and gets the same
+    /// treatment: a rule or a forward from a peer that predates the switch is
+    /// a live one, and a peer that predates it reads a frame carrying it.
+    #[test]
+    fn a_forward_enabled_flag_decodes_from_a_peer_that_never_sends_it() {
+        let rule: SshForwardRule = serde_json::from_str(
+            r#"{"kind":"local","bind_host":"127.0.0.1","bind_port":8080,
+                "target_host":"srv","target_port":80}"#,
+        )
+        .unwrap();
+        assert!(rule.enabled);
+
+        let managed: ManagedForward = serde_json::from_str(
+            r#"{"id":1,"pane_id":7,"kind":"local","bind_host":"127.0.0.1",
+                "bind_port":8080,"status":"listening"}"#,
+        )
+        .unwrap();
+        assert!(managed.enabled);
+
+        #[derive(Deserialize)]
+        struct LegacyManagedForward {
+            id: u64,
+            status: ForwardStatus,
+        }
+        let off = serde_json::to_string(&ManagedForward {
+            enabled: false,
+            status: ForwardStatus::Error("disabled".into()),
+            ..managed
+        })
+        .unwrap();
+        let legacy: LegacyManagedForward = serde_json::from_str(&off).unwrap();
+        assert_eq!(legacy.id, 1);
+        assert_eq!(legacy.status, ForwardStatus::Error("disabled".into()));
     }
 }

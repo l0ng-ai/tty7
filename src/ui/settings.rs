@@ -1554,6 +1554,7 @@ pub(crate) struct ForwardRuleForm {
     pub(crate) target_host: Entity<InputState>,
     pub(crate) target_port: Entity<InputState>,
     pub(crate) description: Entity<InputState>,
+    pub(crate) enabled: bool,
 }
 
 impl ForwardRuleForm {
@@ -1576,6 +1577,7 @@ impl ForwardRuleForm {
             bind,
             target,
             description: val(&self.description),
+            enabled: self.enabled,
         })
     }
 
@@ -2019,6 +2021,7 @@ fn seed_forward_row(
             &rule.description,
             t(L10nKey::ForwardDescriptionPlaceholder),
         ),
+        enabled: rule.enabled,
     }
 }
 
@@ -6227,7 +6230,7 @@ impl Tty7App {
         let count = form
             .forwards
             .iter()
-            .filter(|r| r.collect(cx).is_some())
+            .filter(|r| r.enabled && r.collect(cx).is_some())
             .count();
         let summary = match count {
             0 => t(L10nKey::SettingsNoneSummary).to_string(),
@@ -6372,6 +6375,20 @@ impl Tty7App {
             .flex_1()
             .min_w(px(80.))
             .child(Input::new(&row.description).xsmall());
+        let enabled = div().flex_shrink_0().child(
+            crate::ui::theme::switch(("ssh-fwd-enabled", idx), cx)
+                .checked(row.enabled)
+                .xsmall()
+                .tooltip(t(L10nKey::SettingsFwdEnabled))
+                .on_click(cx.listener(move |this, on: &bool, _w, cx| {
+                    if let Some(f) = this.ssh_form_mut()
+                        && let Some(r) = f.forwards.get_mut(idx)
+                    {
+                        r.enabled = *on;
+                        cx.notify();
+                    }
+                })),
+        );
         let remove = crate::ui::tab_strip::hit_target(
             Button::new(("ssh-fwd-remove", idx))
                 .icon(Icon::new(IconName::Close))
@@ -6388,6 +6405,7 @@ impl Tty7App {
                     h_flex()
                         .gap_2()
                         .items_center()
+                        .child(enabled)
                         .child(kind_switch)
                         .child(description)
                         .child(remove),
@@ -6396,9 +6414,15 @@ impl Tty7App {
                     true => mapping(v_flex().gap_1().items_start()),
                     false => mapping(h_flex().gap_2().items_center()),
                 }),
-            false => mapping(h_flex().gap_2().items_center().child(kind_switch))
-                .child(description)
-                .child(remove),
+            false => mapping(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(enabled)
+                    .child(kind_switch),
+            )
+            .child(description)
+            .child(remove),
         };
 
         v_flex()
