@@ -947,6 +947,36 @@ pub(crate) fn floating_surface<T: Styled>(element: T, cx: &App) -> T {
         .shadow_xl()
 }
 
+/// One device pixel: the v4 hairline, 0.5px on a Retina panel and a whole
+/// pixel on a 1x one. A literal `px(0.5)` would be antialiased down to half
+/// its ink on a 1x display, under the contrast floor `divider` is held to.
+pub(crate) fn hairline(window: &Window) -> Pixels {
+    px(1. / window.scale_factor().max(1.))
+}
+
+/// Tabular figures, so a column of counts, sizes and positions keeps its
+/// digits on one grid while the numbers change under it.
+pub(crate) fn tabular_figures() -> gpui::FontFeatures {
+    gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)]))
+}
+
+/// The v4 primary button: an inverted neutral — body ink as the fill, the
+/// surface it sits on as the label — rather than the accent, which stays with
+/// focus and the things that are on. `surface` is the opaque fill under the
+/// button, so the label reads as cut out of it. Disabled, gpui-component
+/// drops the fill to 15% of itself, the faint well the rest of v4 uses.
+pub(crate) fn inverted_button(
+    surface: Hsla,
+    cx: &App,
+) -> gpui_component::button::ButtonCustomVariant {
+    let ink = cx.theme().foreground;
+    gpui_component::button::ButtonCustomVariant::new(cx)
+        .color(ink)
+        .foreground(surface)
+        .hover(ink.blend(surface.opacity(0.14)))
+        .active(ink.blend(surface.opacity(0.24)))
+}
+
 /// On-state shares the accent role with sliders and primary actions.
 pub(crate) fn switch(id: impl Into<gpui::ElementId>, cx: &App) -> gpui_component::switch::Switch {
     let accent = cx.global::<presets::ActiveAccent>().0;

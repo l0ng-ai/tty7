@@ -1360,32 +1360,44 @@ impl Tty7App {
             row
         };
         let menu_app = cx.entity().downgrade();
+        // v4 chrome: the file name in body ink at medium — the one heading the
+        // column has — a hairline in the divider tone under the bar, and the
+        // rail's 26px close tile, so the header reads as part of the plane it
+        // sits in rather than a toolbar bolted on top of it.
+        let (tile, glyph) = (
+            crate::ui::tab_strip::RAIL_TILE,
+            crate::ui::tab_strip::RAIL_TILE_GLYPH,
+        );
         row.flex_none()
             .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
             .items_center()
-            .gap_1p5()
+            .gap(px(8.))
             .pl(px(lead))
-            .pr(px(crate::ui::app::tile_trailing_inset()))
-            .border_b_1()
-            .border_color(cx.theme().border)
+            // The glyph, not the tile, lands on `CONTENT_INSET`, the column
+            // the file name starts on at the other end of the bar.
+            .pr(px(crate::ui::app::CONTENT_INSET - (tile - glyph) / 2.))
+            .border_b(crate::ui::theme::hairline(window))
+            .border_color(cx.theme().sidebar_border)
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .text_ellipsis()
-                    .text_sm()
-                    .when(name.is_none(), |d| {
-                        d.text_color(cx.theme().muted_foreground)
+                    .text_size(gpui::rems(crate::ui::right_panel::TEXT))
+                    .map(|d| match name.is_some() {
+                        true => d.font_weight(gpui::FontWeight::MEDIUM),
+                        false => d.text_color(cx.theme().muted_foreground),
                     })
                     .child(
                         name.unwrap_or_else(|| SharedString::from(t(L10nKey::EditorNoFileOpen))),
                     ),
             )
+            // Unsaved: the sidebar's 5px status dot, in the warning ink.
             .when(dirty, |d| {
                 d.child(
                     div()
                         .flex_none()
-                        .size(px(6.))
+                        .size(px(crate::ui::tab_strip::ROW_STATUS_DOT))
                         .rounded_full()
                         .bg(cx.theme().warning),
                 )
@@ -1394,12 +1406,12 @@ impl Tty7App {
                 div().occlude().flex_shrink_0().child(
                     crate::ui::tab_strip::chrome_tile_sized(
                         Button::new("editor-panel-close").icon(Icon::new(IconName::Close)),
-                        crate::ui::app::TILE_SIZE,
-                        crate::ui::app::TILE_GLYPH_LINE,
+                        tile,
+                        glyph,
                         false,
                         cx,
                     )
-                    .rounded_lg()
+                    .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
                     .tooltip(t(L10nKey::EditorBackToTerminal))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_code_panel(window, cx);
@@ -1411,7 +1423,7 @@ impl Tty7App {
             })
     }
 
-    fn render_code_status_bar(&self, _window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_code_status_bar(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         // The roots below belong to this window's own machine. A file read
         // over SFTP is on another one, where they mean nothing, so it shows
         // its own full path rather than borrowing the local repo's name.
@@ -1455,16 +1467,18 @@ impl Tty7App {
         let is_markdown = active.is_some_and(|f| language_for_path(&f.path) == "markdown");
         let preview = active.is_some_and(|f| f.preview);
 
+        // Metadata, not a toolbar: caption ink on the plane's own fill, set
+        // off by a hairline in the divider tone rather than a control border.
         h_flex()
             .flex_none()
             .w_full()
             .h(px(26.))
             .items_center()
             .gap_3()
-            .px_3()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .text_xs()
+            .px(px(crate::ui::app::CONTENT_INSET))
+            .border_t(crate::ui::theme::hairline(window))
+            .border_color(cx.theme().sidebar_border)
+            .text_size(gpui::rems(crate::ui::right_panel::META))
             .text_color(muted)
             .when_some(path_text, |this, t| {
                 this.child(div().min_w_0().text_ellipsis().child(t))
@@ -1500,7 +1514,15 @@ impl Tty7App {
                         ),
                 )
             })
-            .when_some(cursor, |this, t| this.child(div().child(t)))
+            // Tabular figures, so the position does not jitter sideways as
+            // the caret walks from line 9 to line 10.
+            .when_some(cursor, |this, t| {
+                this.child(
+                    div()
+                        .font_features(crate::ui::theme::tabular_figures())
+                        .child(t),
+                )
+            })
     }
 
     fn render_editor_empty(&self, cx: &Context<Self>) -> gpui::Div {

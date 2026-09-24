@@ -5,7 +5,7 @@ use gpui_component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _,
 
 use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind, SshForwardRule};
 use crate::terminal::view::TerminalView;
-use crate::ui::app::{CONTENT_INSET, Tty7App};
+use crate::ui::app::Tty7App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::right_panel::{META, TEXT_MONO};
 
@@ -179,6 +179,7 @@ impl Tty7App {
 
         let theme = cx.theme();
         let (danger, foreground) = (theme.danger, theme.foreground);
+        let theme_popover = theme.popover;
 
         let bar = crate::ui::notice::pill(danger, cx)
             .child(
@@ -217,9 +218,12 @@ impl Tty7App {
                     .map(|keys| div().child(format!("· {keys}"))),
             )
             .child(
+                // The strip's one action, as v4's primary: inverted neutral on
+                // the popover fill the pill floats on. The red is the edge
+                // and the reason; the button does not repeat it.
                 Button::new("ssh-reconnect")
                     .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Reconnect))
-                    .primary()
+                    .custom(crate::ui::theme::inverted_button(theme_popover, cx))
                     .small()
                     .on_click(
                         cx.listener(|this, _, window, cx| this.restart_ssh_session(window, cx)),
@@ -277,9 +281,14 @@ impl Tty7App {
             .group(group.clone())
             .items_center()
             .gap(px(8.))
-            .px(px(4.))
-            .py(px(5.))
-            .rounded(crate::ui::rounding::ROW_RADIUS)
+            // The port and process rows' box: 26px, padded `ROW_INSET` so the
+            // text lands on the panel's 20px column and the trailing tile ends
+            // 20px from the edge, on the panel's row corner. A described
+            // forward grows by its second line instead of being clipped to one.
+            .min_h(px(26.))
+            .py(px(3.))
+            .px(px(crate::ui::right_panel::ROW_INSET))
+            .rounded(crate::ui::right_panel::ROW_FILL_RADIUS)
             .cursor_pointer()
             .hover(|s| s.bg(gpui::rgb(sf.hover)))
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -342,7 +351,7 @@ impl Tty7App {
                         )
                         .w(px(crate::ui::tab_strip::MIN_TARGET))
                         .h(px(crate::ui::tab_strip::MIN_TARGET))
-                        .rounded(px(4.))
+                        .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
                         .tooltip(t(L10nKey::ForwardTooltipRemove))
                         .on_click(cx.listener(
                             move |this, _, _window, cx| {
@@ -401,8 +410,9 @@ impl Tty7App {
                 .child(div().w(px(52.)).child(Input::new(port).xsmall()))
         };
 
+        // Form text, not rows: on the panel's text column.
         v_flex()
-            .px(px(CONTENT_INSET))
+            .px(px(crate::ui::right_panel::TEXT_INSET))
             .pt(px(6.))
             .pb(px(2.))
             .gap(px(5.))
@@ -547,7 +557,12 @@ impl Tty7App {
                                     } else {
                                         t(L10nKey::ForwardAdd)
                                     })
-                                    .primary()
+                                    // v4's primary: the panel's ink as the
+                                    // fill, its opaque surface as the label.
+                                    .custom(crate::ui::theme::inverted_button(
+                                        gpui::rgb(sf.base).into(),
+                                        cx,
+                                    ))
                                     .xsmall()
                                     .disabled(!complete)
                                     .on_click(cx.listener(move |this, _, window, cx| {

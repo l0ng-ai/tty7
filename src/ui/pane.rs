@@ -1080,8 +1080,14 @@ impl Pane<PaneSlot> {
                 let row = *axis == Axis::Horizontal;
                 let r = ratio.get().clamp(MIN_RATIO, MAX_RATIO);
 
-                let idle = cx.theme().border;
+                // At rest the split is a v4 hairline in the divider tone — the
+                // line between two panes that already carry their own content,
+                // not the stronger rule that outlines a floating surface. Hover
+                // and drag keep the accent the sidebar and right-panel edges
+                // light up with, so every resize handle answers the same way.
+                let idle = cx.theme().sidebar_border;
                 let active = cx.theme().drag_border;
+                let hairline = crate::ui::theme::hairline(window);
 
                 let container: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
 
@@ -1141,6 +1147,9 @@ impl Pane<PaneSlot> {
                 .size_full();
 
                 let line_color = if dragging.get() { active } else { idle };
+                // A lit handle goes back to a whole pixel: a hairline of accent
+                // is too faint to say "this is what you are holding".
+                let line = if dragging.get() { px(1.) } else { hairline };
                 // The gutter stays 5px so the split looks the same; the target
                 // is the 8px the sidebar and right-panel edges already hand
                 // you. The extra 1.5px a side reaches into the pane's own 8px
@@ -1182,10 +1191,13 @@ impl Pane<PaneSlot> {
                     .when(!row, |d| d.h(px(DIVIDER_THICKNESS)).w_full())
                     .child(
                         div()
-                            .when(row, |d| d.w(px(1.)).h_full())
-                            .when(!row, |d| d.h(px(1.)).w_full())
+                            .when(row, |d| d.w(line).h_full())
+                            .when(!row, |d| d.h(line).w_full())
                             .bg(line_color)
-                            .group_hover("split-divider", |s| s.bg(active)),
+                            .group_hover("split-divider", move |s| match row {
+                                true => s.bg(active).w(px(1.)),
+                                false => s.bg(active).h(px(1.)),
+                            }),
                     )
                     .child(grab);
 

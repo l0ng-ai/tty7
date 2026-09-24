@@ -22,7 +22,20 @@ use crate::daemon::ssh::sftp::{remote_basename, remote_join, remote_parent, safe
 use crate::terminal::RemoteTerminal;
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_SM, TILE_SIZE_SM, Tty7App};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use crate::ui::right_panel::{META, TEXT};
+use crate::ui::right_panel::{
+    HEADING, META, ROW_FILL_RADIUS, ROW_GLYPH, ROW_INSET, TEXT, TEXT_INSET,
+};
+
+/// A remote directory row: the local file tree's 26px row, on the panel's
+/// `ROW_FILL_RADIUS`, so the Files tab keeps its rhythm whichever machine it
+/// is showing.
+const SFTP_ROW_H: f32 = 26.;
+
+/// The gap between a row's icon, name and size — the file tree's.
+const SFTP_ROW_GAP: f32 = 6.;
+
+/// The transfer tray's disclosure chevron — the file tree's.
+const TRAY_CHEVRON: f32 = 10.;
 
 #[derive(Clone, Copy)]
 enum SftpMenuAction {
@@ -1357,7 +1370,8 @@ impl Tty7App {
             .flex_wrap()
             .items_center()
             .gap_0p5()
-            .px(px(CONTENT_INSET))
+            // Text, not a row: on the panel's text column.
+            .px(px(TEXT_INSET))
             .pb(px(4.))
             .on_double_click(
                 cx.listener(|this, _, window, cx| this.sftp_begin_edit_path(window, cx)),
@@ -1395,9 +1409,10 @@ impl Tty7App {
     }
 
     fn render_sftp_edit_form(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
-        let secondary = cx.theme().secondary;
-        let border = cx.theme().border;
+        let well = cx.theme().muted;
         let foreground = cx.theme().foreground;
+        let surface: gpui::Hsla =
+            gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().sidebar.base).into();
         let (title, input): (String, _) = match self.sftp_panel.editing.as_ref()? {
             SftpEdit::NewFolder(input) => (t(L10nKey::SftpEditNewFolder).to_string(), input),
             SftpEdit::NewFile(input) => (t(L10nKey::SftpEditNewFile).to_string(), input),
@@ -1416,14 +1431,16 @@ impl Tty7App {
         Some(
             v_flex()
                 .id("panel-sftp-edit")
-                .gap(px(5.))
-                .mx(px(CONTENT_INSET - 4.))
+                .gap(px(6.))
+                // Where a row's fill would be, its text on the row's text
+                // column.
+                .mx(px(CONTENT_INSET))
                 .mb(px(4.))
-                .p(px(6.))
-                .bg(secondary)
-                .border_1()
-                .border_color(border)
-                .rounded_md()
+                .p(px(ROW_INSET))
+                // A borderless faint well, the file tree's search shape, not
+                // an outlined card: it is part of the list, not over it.
+                .bg(well)
+                .rounded(px(7.))
                 // Escape backs out of the form, the way it backs out of the
                 // path editor above it and every sheet the app puts up.
                 .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
@@ -1433,7 +1450,7 @@ impl Tty7App {
                 }))
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(rems(HEADING))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(foreground)
                         .child(title),
@@ -1456,7 +1473,7 @@ impl Tty7App {
                             Button::new("sftp-edit-ok")
                                 .label(t(L10nKey::Ok))
                                 .xsmall()
-                                .primary()
+                                .custom(crate::ui::theme::inverted_button(surface, cx))
                                 .disabled(!can_commit)
                                 .on_click(
                                     cx.listener(|this, _, w, cx| this.sftp_commit_edit(w, cx)),
@@ -1475,12 +1492,12 @@ impl Tty7App {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.sftp_panel.scroll)
-            .px(px(CONTENT_INSET - 6.))
+            .px(px(CONTENT_INSET))
             .pb(px(4.));
 
         let note = |text: gpui::SharedString, color| {
             div()
-                .px(px(6.))
+                .px(px(ROW_INSET))
                 .py(px(4.))
                 .text_size(rems(TEXT))
                 .text_color(color)
@@ -1521,33 +1538,41 @@ impl Tty7App {
     }
 
     fn render_sftp_go_up_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let foreground = cx.theme().foreground;
+        let theme = cx.theme();
+        let (name_ink, muted) = (theme.sidebar_foreground, theme.muted_foreground);
         let sf = cx.global::<crate::ui::presets::Surfaces>().popover;
         h_flex()
             .id("sftp-go-up")
             .items_center()
-            .gap_1()
-            .pl(px(6.))
-            .pr_1()
-            .py_1()
-            .rounded(cx.theme().radius)
+            .gap(px(SFTP_ROW_GAP))
+            .h(px(SFTP_ROW_H))
+            .px(px(ROW_INSET))
+            .rounded(ROW_FILL_RADIUS)
             .cursor_pointer()
             .hover(|s| s.bg(gpui::rgb(sf.hover)))
             .child(
                 Icon::new(IconName::FolderOpen)
-                    .xsmall()
-                    .text_color(foreground),
+                    .size(px(ROW_GLYPH))
+                    .text_color(muted),
             )
-            .child(div().flex_1().min_w_0().text_sm().child(".."))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(rems(TEXT))
+                    .text_color(name_ink)
+                    .child(".."),
+            )
             .on_click(cx.listener(|this, _, _w, cx| this.sftp_up(cx)))
             .into_any_element()
     }
 
     fn render_sftp_row(&self, entry: &SftpEntry, cx: &mut Context<Self>) -> AnyElement {
-        let foreground = cx.theme().foreground;
+        // The file tree's row: every glyph in caption ink, the name in the
+        // rail's title ink, the size a tabular caption at the trailing end.
+        let name_ink = cx.theme().sidebar_foreground;
         let muted = cx.theme().muted_foreground;
-        let dir_color = foreground;
-        let list_hover = cx.theme().list_hover;
+        let list_hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().popover.hover);
         let entry = entry.clone();
         let dir_like = is_dir_like(&entry);
         let icon = if dir_like {
@@ -1575,13 +1600,12 @@ impl Tty7App {
         h_flex()
             .id(row_id)
             .items_center()
-            .gap_1()
-            .pl(px(6.))
-            .pr_1()
-            .py_1()
-            .rounded(cx.theme().radius)
+            .gap(px(SFTP_ROW_GAP))
+            .h(px(SFTP_ROW_H))
+            .px(px(ROW_INSET))
+            .rounded(ROW_FILL_RADIUS)
             .cursor_pointer()
-            .hover(|s| s.bg(list_hover))
+            .hover(move |s| s.bg(list_hover))
             // Single click, the same gesture the local file tree answers —
             // this panel used to demand a double click because its open
             // action was a download, and that caution outlived the download.
@@ -1591,21 +1615,24 @@ impl Tty7App {
                     this.sftp_open_entry(open_entry.clone(), window, cx)
                 }),
             )
-            .child(
-                Icon::new(icon)
-                    .xsmall()
-                    .text_color(if dir_like { dir_color } else { muted }),
-            )
+            .child(Icon::new(icon).size(px(ROW_GLYPH)).text_color(muted))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_sm()
-                    .text_color(foreground)
+                    .text_size(rems(TEXT))
+                    .text_color(name_ink)
                     .truncate()
                     .child(name_label),
             )
-            .child(div().flex_none().text_xs().text_color(muted).child(size))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(rems(META))
+                    .font_features(crate::ui::theme::tabular_figures())
+                    .text_color(muted)
+                    .child(size),
+            )
             .context_menu(move |menu, _window, cx| {
                 let danger = cx.theme().danger;
                 Self::sftp_row_context_menu(menu, &menu_entry, dir_like, is_symlink, danger, &app)
@@ -1716,8 +1743,10 @@ impl Tty7App {
 
         let muted = cx.theme().muted_foreground;
         let danger = cx.theme().danger;
-        let accent = cx.theme().accent;
-        let border = cx.theme().border;
+        // Progress in v4 is ink on a faint track, not the accent: the bar is a
+        // reading, and blue is kept for the things you can press.
+        let (ink, track) = (cx.theme().foreground, cx.theme().muted);
+        let divider = cx.theme().sidebar_border;
         let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().sidebar.hover);
         let expanded = self.sftp_panel.tray_expanded || history;
 
@@ -1769,16 +1798,21 @@ impl Tty7App {
             .id("sftp-transfers-summary")
             .items_center()
             .gap(px(6.))
-            .px(px(CONTENT_INSET))
+            // The disclosure hangs in the gutter so the summary's text starts
+            // on the panel's text column, the way a tree row's chevron does.
+            .pl(px(TEXT_INSET - TRAY_CHEVRON - 6.))
+            .pr(px(CONTENT_INSET))
             .h(px(28.))
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
             .on_click(cx.listener(|this, _, _w, cx| this.sftp_toggle_tray(cx)))
             .child(
-                div()
-                    .text_size(rems(META))
-                    .text_color(muted)
-                    .child(if expanded { "⌄" } else { "›" }),
+                Icon::new(match expanded {
+                    true => IconName::ChevronDown,
+                    false => IconName::ChevronRight,
+                })
+                .size(px(TRAY_CHEVRON))
+                .text_color(muted),
             )
             .child(
                 div()
@@ -1786,6 +1820,7 @@ impl Tty7App {
                     .min_w_0()
                     .truncate()
                     .text_size(rems(META))
+                    .font_features(crate::ui::theme::tabular_figures())
                     .text_color(summary_color)
                     .child(summary),
             )
@@ -1803,17 +1838,17 @@ impl Tty7App {
                         )
                         .w(px(crate::ui::tab_strip::MIN_TARGET))
                         .h(px(crate::ui::tab_strip::MIN_TARGET))
-                        .rounded(px(4.))
+                        .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
                         .tooltip(t(L10nKey::Dismiss))
                         .on_click(cx.listener(|this, _, _w, cx| this.sftp_dismiss_tray(cx))),
                     ),
             );
 
-        let underline = div().h(px(2.)).w_full().bg(border).child(
+        let underline = div().h(px(2.)).w_full().bg(track).child(
             div()
                 .h_full()
                 .w(gpui::relative((pct / 100.0) as f32))
-                .bg(if failed > 0 { danger } else { accent }),
+                .bg(if failed > 0 { danger } else { ink }),
         );
 
         let body = expanded.then(|| {
@@ -1830,14 +1865,14 @@ impl Tty7App {
                 };
                 v_flex().child(
                     div()
-                        .px(px(CONTENT_INSET))
+                        .px(px(TEXT_INSET))
                         .py(px(3.))
                         .text_size(rems(META))
                         .text_color(color)
                         .child(text),
                 )
             } else {
-                let mut list = v_flex().px(px(CONTENT_INSET)).pb(px(6.)).gap(px(6.));
+                let mut list = v_flex().px(px(TEXT_INSET)).pb(px(8.)).gap(px(8.));
                 for job in jobs {
                     list = list.child(self.render_sftp_job(job, cx));
                 }
@@ -1866,7 +1901,7 @@ impl Tty7App {
             v_flex()
                 .flex_none()
                 .border_t_1()
-                .border_color(border)
+                .border_color(divider)
                 .child(head)
                 .when(running > 0 && !expanded, |this| this.child(underline))
                 .children(body)
@@ -1876,11 +1911,10 @@ impl Tty7App {
 
     fn render_sftp_job(&self, job: &SftpJobProgress, cx: &mut Context<Self>) -> Div {
         let foreground = cx.theme().foreground;
-        let border = cx.theme().border;
+        let track = cx.theme().muted;
         let danger = cx.theme().danger;
         let success = cx.theme().success;
         let muted = cx.theme().muted_foreground;
-        let accent = cx.theme().accent;
         let arrow = match job.kind {
             SftpTransferKind::Upload => "↑",
             SftpTransferKind::Download => "↓",
@@ -1912,10 +1946,11 @@ impl Tty7App {
             SftpJobState::Done => success,
             _ => muted,
         };
+        // The tray's own bar: body ink on the faint track, red once it fails.
         let bar_color = if matches!(job.state, SftpJobState::Error) {
             danger
         } else {
-            accent
+            foreground
         };
         let job_id = job.job_id;
         let running = matches!(job.state, SftpJobState::Running);
@@ -1934,7 +1969,7 @@ impl Tty7App {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_xs()
+                            .text_size(rems(META))
                             .text_color(foreground)
                             .truncate()
                             .child(format!("{arrow} {name}")),
@@ -1971,7 +2006,7 @@ impl Tty7App {
                     }),
             )
             .child(
-                div().h(px(3.)).w_full().rounded_full().bg(border).child(
+                div().h(px(3.)).w_full().rounded_full().bg(track).child(
                     div()
                         .h_full()
                         .w(gpui::relative((pct / 100.0) as f32))
@@ -1979,7 +2014,13 @@ impl Tty7App {
                         .bg(bar_color),
                 ),
             )
-            .child(div().text_xs().text_color(status_color).child(status))
+            .child(
+                div()
+                    .text_size(rems(META))
+                    .font_features(crate::ui::theme::tabular_figures())
+                    .text_color(status_color)
+                    .child(status),
+            )
     }
 }
 
