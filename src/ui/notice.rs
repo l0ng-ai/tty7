@@ -14,28 +14,43 @@
 //! anchor is a column: a second notice stacks above the first instead of
 //! landing on it.
 
-use gpui::{AnyElement, App, Div, Hsla, div, prelude::*};
+use gpui::{AnyElement, App, Div, Hsla, div, prelude::*, px};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
-/// Chrome for one floating notice. `accent` is the border, and is the only
-/// thing that says how bad this one is; the rest of the pill is the same
+/// Chrome for one floating notice. `accent` is the leading dot, and is the
+/// only thing that says how bad this one is; the rest of the pill is the same
 /// whatever went wrong.
+///
+/// The severity used to tint the pill's whole edge. A coloured outline is
+/// chrome wearing a status, and at 40% it was too faint to read as one — a
+/// dot is the shape the rail and the switcher already use for "this state,
+/// in this colour", and it leaves the edge the same hairline every other
+/// floating surface has.
 pub(crate) fn pill(accent: Hsla, cx: &App) -> Div {
     let theme = cx.theme();
     h_flex()
         .occlude()
         .items_center()
-        .gap_2()
-        .px_4()
-        .py_2()
+        .gap(px(8.))
+        .min_h(px(PILL_H))
+        .pl(px(12.))
+        .pr(px(14.))
+        .py(px(6.))
         .map(|panel| crate::ui::theme::floating_surface(panel, cx))
-        .border_color(accent.opacity(0.4))
         // Off the right panel's ramp on purpose: these float over the
         // terminal, not inside a panel, and are sized against the terminal's
         // own text.
         .text_xs()
         .text_color(theme.muted_foreground)
+        .child(div().flex_none().size(px(DOT)).rounded_full().bg(accent))
 }
+
+/// A one-line pill's floor. A longer reason still wraps it taller; this only
+/// stops a short one from shrinking to a sliver around 12px text.
+const PILL_H: f32 = 32.;
+
+/// The severity dot, the rail's status-dot size.
+const DOT: f32 = 6.;
 
 /// Anchors whatever notices are up as one bottom-centred column, so two of
 /// them stack rather than collide. `None` when there is nothing to show, which
