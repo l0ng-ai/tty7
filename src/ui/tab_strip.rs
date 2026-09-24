@@ -479,6 +479,13 @@ pub(crate) fn elide_tail_clusters(
     text: &str,
     max_width: f32,
 ) -> SharedString {
+    // Nothing to cut. The search below is bounded by the budget *after* the
+    // ellipsis, so without this a branch that fit came back as "…" plus the
+    // whole of itself — the rail's group header printed `…feat/v4-redesign`
+    // with room to spare.
+    if measure_text(text_system, font, size, text) <= max_width {
+        return SharedString::from(text.to_string());
+    }
     let budget = max_width - measure_text(text_system, font, size, "…");
     if budget <= 0. {
         return SharedString::from("…");

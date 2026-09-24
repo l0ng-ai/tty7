@@ -386,7 +386,7 @@ impl Tty7App {
             // branch name is wider than the row, and what got pushed off the
             // end was the sync tile: gone entirely, with no way to reach it.
             .child(
-                div().flex_1().min_w(rems(3.)).child(
+                div().flex_1().min_w(rems(3.)).ml(px(-6.)).child(
                     Button::new("scm-branch")
                         .ghost()
                         .small()
@@ -409,6 +409,13 @@ impl Tty7App {
                         )
                         .w_full()
                         .h(rems(24. / 16.))
+                        // The glyph's gap is the row's 6px. A small button's own
+                        // padding stacked another 10 on it and set the name
+                        // off the text column the file names below keep. It
+                        // keeps 4 so the hover fill clears the text, and the
+                        // wrapper takes 6 back, which lands the name on the
+                        // file names' column.
+                        .pl(px(4.))
                         .rounded(px(5.))
                         .text_color(fg)
                         .when(detached, |s| s.font_family(mono.clone()))

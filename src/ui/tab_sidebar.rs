@@ -96,11 +96,12 @@ mod row_metrics {
         width - BORDER - 2. * LIST_PAD - 2. * ROW_PAD - AVATAR - GAP
     }
 
-    /// What a group header can spend on its name and the branch beside it,
-    /// with the chevron and its gap already taken out. The pin and the folded
-    /// row count come off at the call site, which knows whether they are drawn.
+    /// What a group header can spend on its name and the branch beside it.
+    /// The chevron, the pin and the folded row count come off at the call
+    /// site, which knows whether they are drawn — an open group draws no
+    /// chevron, and reserving one anyway elided its branch with 18px to spare.
     pub(super) const fn header_budget(width: f32) -> f32 {
-        width - BORDER - 2. * LIST_PAD - HEADER_PAD - HEADER_ICON - META_GAP
+        width - BORDER - 2. * LIST_PAD - HEADER_PAD
     }
 }
 
@@ -1108,6 +1109,9 @@ impl Tty7App {
                 // row already elides its own.
                 let ts = window.text_system();
                 let mut avail = row_metrics::header_budget(width);
+                if folded {
+                    avail -= row_metrics::HEADER_ICON + row_metrics::META_GAP;
+                }
                 if pinned {
                     avail -= row_metrics::HEADER_ICON + row_metrics::META_GAP;
                 }
