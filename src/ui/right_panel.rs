@@ -86,7 +86,7 @@ const PROC_ROW_H: f32 = 26.;
 const PROC_INDENT: f32 = 14.;
 
 /// The space between two sections of the Info tab.
-const SECTION_GAP: f32 = 16.;
+pub(crate) const SECTION_GAP: f32 = 16.;
 
 /// The Session label column's floor, gap included, at the default 16px rem.
 const INFO_LABEL_MIN: f32 = 76.;
