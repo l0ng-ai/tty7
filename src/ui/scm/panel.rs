@@ -118,10 +118,11 @@ const COMMIT_RADIUS: gpui::Pixels = px(6.);
 /// one unit: 8px under the tab row, 10px between its three parts and 14px
 /// before the first group.
 ///
-/// On macOS the panel already puts 8px between its tab row and every tab's
-/// body (`render_right_panel`), so the block adds nothing of its own there;
-/// adding it anyway put the branch 16px down while Info and Files started at
-/// 8. Elsewhere the tab row is inside the body and the 8 is this block's.
+/// On macOS the block starts flush under the tab row, the way Info does: the
+/// branch is text centred in a 28px row, so it already sits ~7px down, level
+/// with the top edge of the Files tab's search well (which does get an 8px
+/// step, see `render_right_panel`). Elsewhere the tab row is inside the body
+/// and the 8 is this block's.
 const PINNED_TOP: f32 = if cfg!(target_os = "macos") { 0. } else { 8. };
 const PINNED_GAP: f32 = 10.;
 const PINNED_BOTTOM: f32 = 14.;

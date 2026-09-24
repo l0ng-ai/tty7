@@ -589,7 +589,16 @@ impl Tty7App {
                         cx,
                     ))
                 }))
-                .children(cfg!(target_os = "macos").then(|| div().flex_none().h(px(8.))))
+                // Only the Files tab steps down 8px. Its first row is a filled
+                // search well whose top edge is the first thing you see, so it
+                // wants air under the tab row. Info and Source Control open on
+                // bare text centred in a 28px row, which already sits ~7px
+                // under the row's top; adding 8 more put their first line a
+                // visible step lower than the Files well beside them.
+                .children(
+                    (cfg!(target_os = "macos") && tab == RightPanelTab::Files)
+                        .then(|| div().flex_none().h(px(8.))),
+                )
                 .child(body)
                 .children(self.sftp_transfers_footer(cx))
                 .child(handle)
