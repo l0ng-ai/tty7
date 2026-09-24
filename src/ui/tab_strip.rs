@@ -618,7 +618,7 @@ const RIGHT_PANEL_TABS: [(RightPanelTab, L10nKey); 3] = [
 ];
 
 fn right_panel_tab_size(window: &Window) -> f32 {
-    window.rem_size().as_f32() * crate::ui::right_panel::META
+    window.rem_size().as_f32() * crate::ui::right_panel::TAB_TEXT
 }
 
 fn right_panel_tab_font(cx: &gpui::App) -> gpui::Font {
@@ -626,7 +626,8 @@ fn right_panel_tab_font(cx: &gpui::App) -> gpui::Font {
         family: cx.theme().font_family.clone(),
         features: Default::default(),
         fallbacks: None,
-        weight: FontWeight::SEMIBOLD,
+        // The current tab's weight, which is the widest any label is drawn at.
+        weight: FontWeight::MEDIUM,
         style: Default::default(),
     }
 }
@@ -646,10 +647,11 @@ pub(crate) fn right_panel_tab_labels_w(window: &Window, cx: &gpui::App) -> f32 {
         .sum()
 }
 
-/// Right panel tab geometry: the gap between two tabs' hover pills, the pill's
-/// own inset around its label, and the gap before the Changes count.
-const TAB_OUTER_PAD: f32 = 2.;
-const TAB_INNER_PAD: f32 = 8.;
+/// Right panel tab geometry: each label's click target reaches half the 18px
+/// gap to its neighbour, there is no pill inside it, and the Changes count
+/// hangs 5px off its label.
+pub(crate) const TAB_OUTER_PAD: f32 = 9.;
+const TAB_INNER_PAD: f32 = 0.;
 const TAB_COUNT_GAP: f32 = 5.;
 
 /// How wide the two chrome tiles at the trailing end of the title bar are, with
@@ -1223,7 +1225,6 @@ impl Tty7App {
             .and_then(|repo| crate::terminal::git_data::status_of(cx, repo.host, &repo.root))
             .map(|status| status.entries.len())
             .filter(|n| *n > 0);
-        let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().sidebar.hover);
         let size = right_panel_tab_size(window);
         let font = right_panel_tab_font(cx);
         let ts = window.text_system();
@@ -1235,16 +1236,18 @@ impl Tty7App {
             };
             labels_w + TAB_COUNT_GAP + measure_text(ts, &regular, size, &n.to_string()) <= avail
         });
+        let body_ink = cx.theme().foreground;
         RIGHT_PANEL_TABS
             .into_iter()
             .map(|(tab, label_key)| {
                 let current = active_tab == tab;
                 // Words, not glyphs: three tabs is few enough to name, and a name
                 // is what a new user has to guess at when the tab is an icon. The
-                // current one is told apart by ink and the bar under it, both
-                // neutral — this is secondary navigation, not an action.
+                // current one is told apart by ink and weight alone — this is
+                // secondary navigation, not an action, so it gets neither a
+                // pill nor a bar.
                 let ink = match current {
-                    true => cx.theme().foreground,
+                    true => body_ink,
                     false => cx.theme().muted_foreground,
                 };
                 let count = match tab {
@@ -1257,11 +1260,7 @@ impl Tty7App {
                     // the tabs sit in.
                     .occlude()
                     .flex_shrink_0()
-                    // Full height and `relative` so the bar below can be pinned to
-                    // the row's own bottom edge, where it lands on the hairline
-                    // that closes the row rather than floating under the label.
                     .h_full()
-                    .relative()
                     .flex()
                     .items_center()
                     .px(px(TAB_OUTER_PAD))
@@ -1269,15 +1268,16 @@ impl Tty7App {
                     .child(
                         h_flex()
                             .flex_shrink_0()
-                            .h(px(crate::ui::app::TILE_SIZE_SM + 2.))
                             .px(px(TAB_INNER_PAD))
                             .gap(px(TAB_COUNT_GAP))
                             .items_center()
-                            .rounded_full()
-                            .hover(|s| s.bg(hover))
-                            .text_size(gpui::rems(crate::ui::right_panel::META))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(gpui::rems(crate::ui::right_panel::TAB_TEXT))
+                            .font_weight(match current {
+                                true => FontWeight::MEDIUM,
+                                false => FontWeight::NORMAL,
+                            })
                             .text_color(ink)
+                            .hover(move |s| s.text_color(body_ink))
                             .child(div().flex_shrink_0().child(t(label_key)))
                             .when_some(count, |row, n| {
                                 row.child(
@@ -1288,16 +1288,6 @@ impl Tty7App {
                                         .child(n.to_string()),
                                 )
                             }),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .bottom(px(-1.))
-                            .left(px(TAB_OUTER_PAD + TAB_INNER_PAD))
-                            .right(px(TAB_OUTER_PAD + TAB_INNER_PAD))
-                            .h(px(2.))
-                            .rounded_full()
-                            .when(current, |bar| bar.bg(cx.theme().foreground)),
                     )
                     // Another tab switches to it; the current one puts the panel
                     // away, the way an activity bar behaves everywhere else.

@@ -1069,6 +1069,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelLatency => "延迟",
         L10nKey::PanelPortsUnsupported => "对端的 tty7-server 太旧，列不出端口。",
         L10nKey::PanelPortsProbeFailed => "没能查出这个窗格在监听什么。",
+        L10nKey::PanelPortsEmpty => "没有转发的端口",
         L10nKey::PanelPortsRestricted => "这里有以其他用户身份运行的进程，看不到它们的端口。",
         L10nKey::PortAutoForwarded => "远程 :{port} 现在是 http://localhost:{local}",
         L10nKey::PanelCwd => "工作目录",
