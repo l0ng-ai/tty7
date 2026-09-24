@@ -3224,11 +3224,15 @@ mod render_idle_gpui_tests {
         std::fs::write(root.join("src/ui/b.rs"), "b\n").unwrap();
         std::fs::write(root.join("docs/readme.md"), "r\n").unwrap();
 
-        let want = root.clone();
-        let (app, mut vcx, _pane) = scm_panel_on(cx, &root, move |app, cx| {
-            app.scm.repo.as_ref().is_some_and(|r| r.root == want)
-                && crate::terminal::git_data::status_of(cx, HostId::LOCAL, &want)
+        // Keyed off the root the panel resolved, not off `root`: on Windows
+        // `scratch` hands back a `\\?\` verbatim path that never compares
+        // equal to git's spelling of the same directory — see the note on
+        // `a_settled_source_control_panel_reaches_render_idle`.
+        let (app, mut vcx, _pane) = scm_panel_on(cx, &root, |app, cx| {
+            app.scm.repo.as_ref().is_some_and(|r| {
+                crate::terminal::git_data::status_of(cx, r.host, &r.root)
                     .is_some_and(|s| s.untracked().count() == 3)
+            })
         });
         let drawn = |vcx: &mut VisualTestContext, what: &'static str| {
             app.update_in(vcx, |_, _, cx| cx.notify());
