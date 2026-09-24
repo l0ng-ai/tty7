@@ -9,19 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Icons from a fallback font are drawn at the size of the cell** (#866). A
-  glyph that falls through to a fallback face is drawn at the primary's font
-  size on the fallback's own metrics, so with an icon face such as Symbols Nerd
-  Font Mono behind a wider primary, prompt icons — the Apple logo, folder, git
-  branch, the thin Powerline separators — inked about two thirds of the cell
-  and read visibly smaller than the text beside them. A lone Private Use Area
-  glyph supplied by a fallback face now grows, aspect ratio kept, until it
-  fills the width of its cells or the height of the row, and is centred in
-  them, as kitty and ghostty do. Growth stops at 2× so a glyph that is small by
-  design stays small, anything that overflows is still shrunk as before, and
-  text from a fallback face — CJK, emoji — keeps its own metrics. The primary
-  font's own icons are left alone. Not on Linux, where the text system reports
-  a glyph's advance box rather than its ink.
+- **Nerd Font icons from a fallback font come out at the text's size** (#866).
+  With a Nerd Font icon face such as Symbols Nerd Font Mono behind a primary
+  that lacks the icons, an icon followed by a space on the same background —
+  every icon in a coloured Powerline or p10k segment — was held to one cell
+  and shrunk to about two thirds of the text's height. Icons with a plain
+  space after them were already drawn full size, so one prompt had icons in
+  two sizes. A lone Private Use Area glyph supplied by a fallback face is now
+  fitted, aspect ratio kept, to its cells and one em of height, taking the
+  blank after it when that blank paints no background or the icon's own and
+  when doing so makes it bigger, and centred in the row; a face whose icons
+  ink less than a cell grows (at most 2×). The Powerline separators, CJK,
+  emoji, other text and the primary font's own icons are drawn as before.
+  Not on Linux, where the text system reports a glyph's advance box rather
+  than its ink.
 
 ## [26.9.3] - 2026-09-23
 
