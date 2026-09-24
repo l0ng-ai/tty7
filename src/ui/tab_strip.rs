@@ -1656,6 +1656,37 @@ impl Tty7App {
         label_of(&view, index, home.as_deref())
     }
 
+    /// The same ladder as [`tab_label`](Self::tab_label), left whole: a path
+    /// is only abbreviated under the home and stripped of its `user@host:`,
+    /// never cut down to its last segments. For the surfaces with room to
+    /// spare — the rail's rows and the centred title — where only the width
+    /// they have may decide what gets elided, not a segment count picked for
+    /// the chips. `None` when there is nothing to say and the caller should
+    /// fall back to its own placeholder.
+    pub(crate) fn full_tab_label(
+        &self,
+        tab: &Tab,
+        window: Option<&Window>,
+        cx: &App,
+    ) -> Option<String> {
+        use crate::ui::machine_mirror::TabLabel;
+
+        if let Some(name) = tab.name.as_ref().filter(|n| !n.trim().is_empty()) {
+            return Some(name.trim().to_string());
+        }
+        let (view, home) = tab.label_view(window, cx);
+        let raw = match view.label() {
+            TabLabel::Osc(title) | TabLabel::Cwd(title) => {
+                abbreviate_home(strip_host_prefix(title.trim()), home.as_deref()).into_owned()
+            }
+            TabLabel::Agent(agent) => agent.display_name().to_string(),
+            TabLabel::Named(name) => name.to_string(),
+            TabLabel::Process(title) => title.to_string(),
+            TabLabel::Unknown => String::new(),
+        };
+        (!raw.trim().is_empty()).then_some(raw)
+    }
+
     /// The New Tab control: one `+` that drops the list of everything it could
     /// open — the installed shells, and the saved SSH hosts.
     ///
@@ -2384,10 +2415,12 @@ impl Tty7App {
             .then(|| self.tabs.get(active))
             .flatten()
             .map(|tab| {
-                let title = match tab.name.as_ref().filter(|n| !n.trim().is_empty()) {
-                    Some(name) => name.trim().to_string(),
-                    None => self.tab_label(tab, active, Some(window), cx),
-                };
+                // Whole, not `tab_label`'s three segments: the bar has half the
+                // window to spend, and the rail beside it spells the same tab
+                // out in full.
+                let title = self
+                    .full_tab_label(tab, Some(window), cx)
+                    .unwrap_or_else(|| self.tab_label(tab, active, Some(window), cx));
                 div()
                     .absolute()
                     .inset_0()

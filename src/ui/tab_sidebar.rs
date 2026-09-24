@@ -22,7 +22,7 @@ use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::right_panel::RESIZE_HANDLE_WIDTH;
 use crate::ui::tab_strip::{
     DragTab, REORDER_SLIDE_MS, abbreviate_home, elide_label, elide_path_keep_tail,
-    elide_tail_clusters, measure_text, strip_host_prefix,
+    elide_tail_clusters, measure_text,
 };
 
 pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.;
@@ -537,44 +537,28 @@ impl Tty7App {
                 // `full_title` is the unelided string the card can expand
                 // back to; `None` means the row is showing a placeholder that
                 // no card can improve on.
-                let (title_text, full_title) =
-                    if let Some(name) = tab.name.as_ref().filter(|n| !n.trim().is_empty()) {
-                        // A renamed tab is elided like anything else — and so
-                        // the card has to be able to spell the name back out.
-                        let full = SharedString::from(name.trim().to_string());
+                //
+                // The ladder the strip and the switcher climb, read here for
+                // the name and not for the shortening: this column measures in
+                // pixels and lets a card expand the row back to the whole
+                // string, so it wants what `label_of` would have cut down
+                // rather than the cut. A renamed tab is elided like anything
+                // else — and so the card has to be able to spell it back out.
+                let (title_text, full_title) = match self.full_tab_label(tab, Some(window), cx) {
+                    Some(raw) => {
+                        let full = SharedString::from(raw);
                         (full.clone(), Some(full))
-                    } else {
-                        // The ladder the strip and the switcher climb, read
-                        // here for the name and not for the shortening: this
-                        // column measures in pixels and lets a card expand the
-                        // row back to the whole string, so it wants what
-                        // `label_of` would have cut down rather than the cut.
-                        use crate::ui::machine_mirror::TabLabel;
-                        let (view, home) = tab.label_view(Some(window), cx);
-                        let raw = match view.label() {
-                            TabLabel::Osc(title) | TabLabel::Cwd(title) => {
-                                abbreviate_home(strip_host_prefix(title.trim()), home.as_deref())
-                                    .into_owned()
-                            }
-                            TabLabel::Agent(agent) => agent.display_name().to_string(),
-                            // A tab holding a name got one above.
-                            TabLabel::Named(name) => name.to_string(),
-                            TabLabel::Process(title) => title.to_string(),
-                            TabLabel::Unknown => String::new(),
-                        };
-                        if raw.trim().is_empty() {
-                            // Nothing to expand: the row is naming an unnamed
-                            // shell, not hiding a title behind an ellipsis.
-                            let placeholder = SharedString::from(t_fmt(
-                                L10nKey::TabUnnamedShell,
-                                &[("n", &((i + 1).to_string()))],
-                            ));
-                            (placeholder, None)
-                        } else {
-                            let full = SharedString::from(raw);
-                            (full.clone(), Some(full))
-                        }
-                    };
+                    }
+                    // Nothing to expand: the row is naming an unnamed shell,
+                    // not hiding a title behind an ellipsis.
+                    None => {
+                        let placeholder = SharedString::from(t_fmt(
+                            L10nKey::TabUnnamedShell,
+                            &[("n", &((i + 1).to_string()))],
+                        ));
+                        (placeholder, None)
+                    }
+                };
                 let mut branch_shown: Option<(SharedString, SharedString, u32, u32)> = None;
                 let mut cwd_shown: Option<(SharedString, SharedString)> = None;
                 let git_line = match shared_git.is_some() {
