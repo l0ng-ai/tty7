@@ -1417,6 +1417,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdForkSession => "Fork 会话",
         L10nKey::CmdForkSessionSubtitle => "将此 agent 会话 fork 到新标签页",
         L10nKey::CmdMarkTabAsUnread => "将标签页标记为未读",
+        L10nKey::CmdHibernateTab => "休眠标签页",
+        L10nKey::CmdHibernateTabSubtitle => "停止其中的进程以释放内存，选中即可唤醒",
         L10nKey::CmdClosePaneTab => "关闭窗格/标签页",
         L10nKey::CmdCloseWindow => "关闭窗口",
         L10nKey::CmdCloseWindowSubtitle => "shell 保持运行",
@@ -1798,6 +1800,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNoneLower => "无",
         L10nKey::SettingsSearchCommandLineToolTitle => "命令行工具",
         L10nKey::TabContextMarkUnread => "标记为未读",
+        L10nKey::TabContextHibernate => "休眠",
+        L10nKey::TabContextWake => "唤醒",
+        L10nKey::TabTooltipAsleep => "已休眠 — 选中即可唤醒",
+        L10nKey::TabWakeFailed => "无法唤醒标签页：其中的窗格都无法启动",
     })
 }
 

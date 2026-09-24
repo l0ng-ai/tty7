@@ -49,6 +49,15 @@ impl LocalLink {
         link.client.as_ref().filter(|c| c.is_connected()).cloned()
     }
 
+    /// Whether the local daemon advertised `feature` on its control hello —
+    /// [`HostLinks::peer_supports`](crate::ui::remote_connect::HostLinks::peer_supports)
+    /// for this machine. `false` while the link is down, for the same reason.
+    pub fn supports(cx: &App, feature: &str) -> bool {
+        cx.try_global::<LocalLink>()
+            .and_then(|link| link.client.as_ref())
+            .is_some_and(|c| c.is_connected() && c.hello().has_feature(feature))
+    }
+
     /// Drops the cached client without waiting for its reader to notice.
     ///
     /// `ControlClient::is_connected` only flips once the reader sees EOF, so

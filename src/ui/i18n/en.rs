@@ -1510,6 +1510,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdForkSession => "Fork Session",
         L10nKey::CmdForkSessionSubtitle => "branch this agent session into a new tab",
         L10nKey::CmdMarkTabAsUnread => "Mark Tab as Unread",
+        L10nKey::CmdHibernateTab => "Hibernate Tab",
+        L10nKey::CmdHibernateTabSubtitle => {
+            "stop its processes to free memory; selecting it wakes it"
+        }
         L10nKey::CmdClosePaneTab => "Close Pane / Tab",
         L10nKey::CmdCloseWindow => "Close Window",
         L10nKey::CmdCloseWindowSubtitle => "shells keep running",
@@ -1903,6 +1907,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsNoneLower => "none",
         L10nKey::SettingsSearchCommandLineToolTitle => "Command line tool",
         L10nKey::TabContextMarkUnread => "Mark as Unread",
+        L10nKey::TabContextHibernate => "Hibernate",
+        L10nKey::TabContextWake => "Wake",
+        L10nKey::TabTooltipAsleep => "Hibernated — select to wake",
+        L10nKey::TabWakeFailed => "Could not wake the tab: none of its panes could be started",
     }
 }
 

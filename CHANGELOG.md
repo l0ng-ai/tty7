@@ -5,6 +5,23 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Tabs can be put to sleep, and woken where they were** (#762). Right-click a
+  tab → Hibernate, or "Hibernate Tab" in the command palette, stops every
+  process in the tab to give its memory back while the tab keeps its place in
+  the sidebar, faded and marked with a moon. Selecting it wakes it — or
+  right-click → Wake to warm it up without switching. Waking is the restore a
+  reboot already runs: each pane comes back in its old directory and shell,
+  opens on the screen it left, and a supported agent with a captured session
+  is resumed. A sleeping tab stays asleep across app and daemon restarts; the
+  tab on screen is always awake, so the last awake tab cannot be put to sleep.
+  `tty7 pane ls` shows a sleeping tab's panes as `asleep`, and `tab ls`/`pane
+  ls --json` carry a `hibernated` flag. Offered only where the machine's server
+  can do it (this build or newer).
+
 ## [26.9.3] - 2026-09-23
 
 ### Added

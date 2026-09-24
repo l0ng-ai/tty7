@@ -1574,6 +1574,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdForkSession => "セッションをフォーク",
         L10nKey::CmdForkSessionSubtitle => "このエージェントのセッションを新しいタブにフォーク",
         L10nKey::CmdMarkTabAsUnread => "タブを未読としてマーク",
+        L10nKey::CmdHibernateTab => "タブを休止",
+        L10nKey::CmdHibernateTabSubtitle => "プロセスを停止してメモリを解放。選択すると復帰",
         L10nKey::CmdClosePaneTab => "ペイン / タブを閉じる",
         L10nKey::CmdCloseWindow => "ウィンドウを閉じる",
         L10nKey::CmdCloseWindowSubtitle => "シェルは実行を継続",
@@ -1979,6 +1981,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNoneLower => "なし",
         L10nKey::SettingsSearchCommandLineToolTitle => "コマンドラインツール",
         L10nKey::TabContextMarkUnread => "未読としてマーク",
+        L10nKey::TabContextHibernate => "休止",
+        L10nKey::TabContextWake => "復帰",
+        L10nKey::TabTooltipAsleep => "休止中 — 選択すると復帰",
+        L10nKey::TabWakeFailed => "タブを復帰できませんでした：どのペインも起動できません",
     })
 }
 

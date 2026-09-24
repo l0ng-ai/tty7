@@ -463,7 +463,8 @@ impl Tty7App {
                 let tab = &self.tabs[i];
                 let is_active = i == active;
                 let ssh_dot = self.tab_ssh_dot(tab, cx);
-                let agent = tab.agent(cx);
+                let asleep = tab.is_asleep();
+                let agent = tab.agent(cx).or_else(|| tab.asleep_agent());
                 let agent_status = tab.agent_status(cx);
                 let agent_unread = tab.agent_unread_count(cx);
                 let git_cwd = git_click(tab, window, cx);
@@ -477,6 +478,13 @@ impl Tty7App {
                     row_metrics::ZOOM + row_metrics::GAP
                 } else {
                     0.
+                };
+                // The sleep mark takes the zoom mark's size; a sleeping tab
+                // has no panes on screen to zoom, so the two never share a row.
+                let zoom_extra = if asleep {
+                    zoom_extra + row_metrics::ZOOM + row_metrics::GAP
+                } else {
+                    zoom_extra
                 };
                 // Elision is measured against this budget so the label and
                 // branch never wrap or overflow into CSS truncation.
@@ -889,6 +897,9 @@ impl Tty7App {
                         s.text_color(cx.theme().sidebar_foreground)
                             .hover(|s| s.bg(gpui::rgb(sf.hover)))
                     })
+                    // Faded as well as marked, the way the strip's chip is: the
+                    // tabs holding nothing should be the quiet ones in the column.
+                    .when(asleep, |s| s.opacity(0.6))
                     .when(row_preview.as_ref().is_some_and(|p| p.from == slot), |s| {
                         s.opacity(0.75)
                     })
@@ -936,6 +947,9 @@ impl Tty7App {
                     // the badge's, and the close button fades in over it.
                     .when(zoomed, |row| {
                         row.child(self.zoom_mark(("sidebar-zoom", i), cx))
+                    })
+                    .when(asleep, |row| {
+                        row.child(self.sleep_mark(("sidebar-asleep", i), cx))
                     })
                     .child(label_region)
                     .when(show_badges && badge_pos < 9, |row| {

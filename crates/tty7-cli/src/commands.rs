@@ -704,6 +704,7 @@ fn tab_ls(explicit: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> R
                 "agent": view.agent.map(|a| a.display_name()),
                 "group": tab.sidebar_group,
                 "panes": tab.root.pane_ids(),
+                "hibernated": tab.hibernated,
             })
         })
         .collect();
@@ -907,6 +908,7 @@ fn pane_ls(explicit: Option<&str>, all: bool, backend: &mut dyn Backend) -> Resu
                     "tab": tab.id.to_string(),
                     "cwd": record.and_then(|r| r.cwd.clone()),
                     "live": record.map(|r| r.live),
+                    "hibernated": tab.hibernated,
                 }));
             }
         }
@@ -4471,5 +4473,37 @@ mod tests {
             "{:?}",
             backend.control_calls
         );
+    }
+
+    #[test]
+    fn tab_ls_and_pane_ls_say_which_tabs_are_asleep() {
+        let mut backend = mock();
+        backend.machine.workspaces[0].tabs[1].hibernated = true;
+
+        let Outcome::Report(tabs) = run_cli(
+            &["tty7", "tab", "ls", "api"],
+            &Context::default(),
+            &mut backend,
+        ) else {
+            panic!("tab ls must report");
+        };
+        let tabs = tabs.json["tabs"].as_array().expect("tabs").clone();
+        assert_eq!(tabs[0]["hibernated"], false);
+        assert_eq!(tabs[1]["hibernated"], true);
+
+        let Outcome::Report(panes) = run_cli(
+            &["tty7", "pane", "ls", "api"],
+            &Context::default(),
+            &mut backend,
+        ) else {
+            panic!("pane ls must report");
+        };
+        let panes = panes.json["panes"].as_array().expect("panes").clone();
+        let asleep: Vec<u64> = panes
+            .iter()
+            .filter(|p| p["hibernated"] == true)
+            .map(|p| p["pane"].as_u64().unwrap())
+            .collect();
+        assert_eq!(asleep, vec![2, 3]);
     }
 }

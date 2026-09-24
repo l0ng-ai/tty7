@@ -141,6 +141,10 @@ pub mod feature {
     /// simply unknown here: the pane lives in the peer's registry, and the
     /// local daemon this client would otherwise ask has never heard of it.
     pub const PANE_PROCS: &str = "pane-procs";
+    /// The peer can put a tab to sleep: mark it in the tree and stop its panes
+    /// while keeping their screens (#762). Needs both a tree and panes, so a
+    /// peer serving either alone does not say it.
+    pub const TAB_HIBERNATE: &str = "tab-hibernate";
 }
 
 pub use crate::host::{Entry, MTime, Meta, Output, SearchHit};
@@ -292,6 +296,16 @@ pub enum ControlRequest {
         tab: TabId,
         group: Option<String>,
     },
+    /// Put a tab to sleep or mark it awake. Going to sleep, the peer also
+    /// stops every pane the tab holds, keeping each one's screen on disk for
+    /// the wake to restore; waking only clears the mark, because the panes a
+    /// wake brings up are spawned by the client like any restored pane.
+    /// Answers the tab's panes. Gated on [`feature::TAB_HIBERNATE`].
+    TabSetHibernated {
+        workspace: WorkspaceId,
+        tab: TabId,
+        hibernated: bool,
+    },
     PaneSplit {
         workspace: WorkspaceId,
         pane: u64,
@@ -399,6 +413,7 @@ impl ControlRequest {
             | TabRename { .. }
             | TabMove { .. }
             | TabSetGroup { .. }
+            | TabSetHibernated { .. }
             | PaneSplit { .. }
             | PaneClose { .. }
             | PaneSetRatio { .. }

@@ -439,6 +439,25 @@ pub struct Tab {
     /// the tab no longer holds are dropped as the next one is written, so a
     /// closed pane leaves nothing behind either.
     focus_origin: std::collections::HashMap<(gpui::EntityId, Dir), gpui::EntityId>,
+    /// Set while the tab is asleep (#762): its panes were stopped and `pane`
+    /// is `Pane::Empty`. What is kept instead is what it takes to bring them
+    /// back — see [`Asleep`].
+    pub(crate) asleep: Option<Asleep>,
+}
+
+/// A sleeping tab: nothing of it runs, and everything a wake needs is here.
+///
+/// `layout` is the tab as the restore path reads a tab — pane ids, cwds,
+/// shells, agent sessions — so waking is that restore, run on one tab: each
+/// pane's id asks the daemon for the screen it stored when the pane was
+/// stopped, and an agent with a known session is resumed the way a reboot
+/// resumes it. `view` is what the tab is called in the meantime, read off
+/// the panes as they went to sleep (or off the tree's records, after a
+/// restart), since there is no terminal left to ask.
+pub(crate) struct Asleep {
+    pub(crate) layout: SessionPane,
+    pub(crate) view: tty7_core::core::tab_view::TabView,
+    pub(crate) home: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -463,6 +482,7 @@ impl Tab {
             tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
             last_used: std::cell::Cell::new(0),
             focus_origin: Default::default(),
+            asleep: None,
         }
     }
 
@@ -484,7 +504,23 @@ impl Tab {
             tree_id: std::cell::Cell::new(tree.id),
             last_used: std::cell::Cell::new(0),
             focus_origin: Default::default(),
+            asleep: None,
         }
+    }
+
+    pub(crate) fn is_asleep(&self) -> bool {
+        self.asleep.is_some()
+    }
+
+    /// The layout a sleeping tab will wake into; `None` for a tab that is awake.
+    pub(crate) fn asleep_layout(&self) -> Option<&SessionPane> {
+        self.asleep.as_ref().map(|a| &a.layout)
+    }
+
+    /// The agent a sleeping tab was running when it went to sleep, so its row
+    /// still says what it is while nothing in it can.
+    pub(crate) fn asleep_agent(&self) -> Option<crate::core::cli_agent::CLIAgent> {
+        self.asleep.as_ref().and_then(|a| a.view.agent)
     }
 
     fn focus_target(&self) -> Option<crate::ui::pane::PaneSlot> {
@@ -585,6 +621,14 @@ impl Tab {
         Option<std::path::PathBuf>,
     ) {
         let name = self.name.clone();
+        if let Some(asleep) = &self.asleep {
+            let view = tty7_core::core::tab_view::TabView {
+                id: self.tree_id.get(),
+                name,
+                ..asleep.view.clone()
+            };
+            return (view, asleep.home.clone());
+        }
         let Some(leaf) = self.title_leaf(window, cx) else {
             return (
                 tty7_core::core::tab_view::TabView {
@@ -1851,6 +1895,7 @@ impl Tty7App {
         self.tabs = tabs;
         self.active = active;
         self.maximized = None;
+        self.wake_active_if_asleep(window, cx);
         self.save_session(cx);
         crate::ui::windows::refresh_menu(cx);
         self.focus_active(window, cx);
@@ -1894,6 +1939,7 @@ impl Tty7App {
                 tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
                 last_used: std::cell::Cell::new(0),
                 focus_origin: Default::default(),
+                asleep: None,
             },
         );
         self.active = insert_at;
@@ -4702,6 +4748,13 @@ impl Tty7App {
     }
 
     pub(crate) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // A tab is woken by being looked at, the way a browser reloads a
+        // discarded tab when it is selected: a tab on screen is always a
+        // running one, so there is no third state to draw. A wake that fails
+        // leaves the tab asleep and the window where it was.
+        if self.tabs.get(index).is_some_and(Tab::is_asleep) && !self.wake_tab(index, window, cx) {
+            return;
+        }
         if index < self.tabs.len() && index != self.active {
             self.remember_active_pane(window, cx);
             // Zoom rides with its tab (#599): stash the outgoing tab's zoom
@@ -4731,6 +4784,146 @@ impl Tty7App {
             }
             self.save_session(cx);
             cx.notify();
+        }
+    }
+
+    /// Whether tab `index` can be put to sleep right now (#762).
+    ///
+    /// Not while it is connecting: a pane still on its way has no id the
+    /// machine knows, so it would be lost rather than stopped. Not with a
+    /// native SSH pane in a remote window either — that pane runs on this
+    /// computer, beyond the reach of the machine asked to stop the tab. Not on
+    /// a machine whose server cannot do it. And not the one tab left awake:
+    /// the window has to have something on screen, and looking at a tab is
+    /// what wakes it.
+    pub(crate) fn can_hibernate_tab(&self, index: usize, cx: &App) -> bool {
+        let Some(tab) = self.tabs.get(index) else {
+            return false;
+        };
+        if tab.is_asleep() || !crate::ui::tree_sync::can_hibernate_on(cx, self.workspace) {
+            return false;
+        }
+        let remote = WorkspaceStore::all(cx)
+            .get(self.workspace)
+            .is_some_and(|w| w.is_remote());
+        let leaves = tab.pane.leaves();
+        let all_hibernatable = !leaves.is_empty()
+            && leaves.iter().all(|leaf| match leaf {
+                PaneSlot::Ready(view) => !(remote && view.read(cx).ssh_spec().is_some()),
+                PaneSlot::Connecting(_) => false,
+            });
+        all_hibernatable && self.awake_tab_besides(index).is_some()
+    }
+
+    /// The tab to show instead of `index` when that one goes to sleep: the
+    /// awake tab used most recently, the nearest one on a tie.
+    fn awake_tab_besides(&self, index: usize) -> Option<usize> {
+        (0..self.tabs.len())
+            .filter(|&i| i != index && !self.tabs[i].is_asleep())
+            .max_by_key(|&i| {
+                (
+                    self.tabs[i].last_used.get(),
+                    std::cmp::Reverse(i.abs_diff(index)),
+                )
+            })
+    }
+
+    /// Put tab `index` to sleep: stop its panes, keep its place (#762).
+    ///
+    /// The window lets go of the panes first and the machine stops them after,
+    /// from the sync this ends with. That order is what keeps a stopped pane
+    /// from reading as one that died: by the time its shell exits there is no
+    /// view left here to take the exit as a reason to close the pane, or the
+    /// tab with it. The machine, for its part, marks the tab before it stops
+    /// anything, so a restore reading the tree in between never takes the
+    /// panes for dead ones and spawns them straight back.
+    pub(crate) fn hibernate_tab(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_hibernate_tab(index, cx) {
+            return;
+        }
+        if index == self.active {
+            let Some(next) = self.awake_tab_besides(index) else {
+                return;
+            };
+            self.activate(next, window, cx);
+        }
+        self.put_to_sleep(index, window, cx);
+    }
+
+    /// The part of [`Self::hibernate_tab`] that does not ask whether it may:
+    /// the tab lets go of its panes and keeps what a wake needs instead.
+    fn put_to_sleep(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index).filter(|t| !t.is_asleep()) else {
+            return;
+        };
+        let (mut view, home) = tab.label_view(Some(window), cx);
+        view.live = false;
+        view.status = None;
+        let layout = pane_to_session(&tab.pane, cx);
+        let tab = &mut self.tabs[index];
+        let panes = std::mem::replace(&mut tab.pane, Pane::Empty);
+        tab.zoomed = None;
+        tab.last_focused = None;
+        tab.focus_origin.clear();
+        tab.asleep = Some(Asleep { layout, view, home });
+        drop(panes);
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Bring a sleeping tab back, through the restore every pane takes after a
+    /// reboot: each pane is spawned in its old one's place, opens on the screen
+    /// that one left behind, and resumes its agent session when it had one.
+    /// Returns whether the tab is awake now; a tab none of whose panes could
+    /// be started stays asleep, and says so.
+    pub(crate) fn wake_tab(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(asleep) = self.tabs.get_mut(index).and_then(|t| t.asleep.take()) else {
+            return true;
+        };
+        let pane_ws = self.window_workspace(cx);
+        let layout = redial_native_ssh(&asleep.layout);
+        // No listing: every pane in here was stopped on purpose, so the attach
+        // each one tries first fails and falls through to the fresh spawn —
+        // unless the stop never landed, in which case attaching to the pane
+        // that is still running is exactly right.
+        let pane = session_to_pane(
+            pane_ws.as_ref(),
+            self.workspace,
+            &layout,
+            None,
+            self.font_size,
+            window,
+            cx,
+        );
+        let tab = &mut self.tabs[index];
+        let Some(pane) = pane else {
+            tab.asleep = Some(asleep);
+            window.push_notification(t(L10nKey::TabWakeFailed), cx);
+            return false;
+        };
+        tab.pane = pane;
+        tab.last_focused = None;
+        self.save_session(cx);
+        cx.notify();
+        true
+    }
+
+    /// Wake the tab on screen if it is asleep — for the paths that land on a
+    /// tab without going through [`Self::activate`]: a neighbour taking over
+    /// from a closed tab, a window restored onto a sleeping one.
+    pub(crate) fn wake_active_if_asleep(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.get(self.active).is_some_and(Tab::is_asleep) {
+            self.wake_tab(self.active, window, cx);
         }
     }
 
@@ -4838,6 +5031,7 @@ impl Tty7App {
         } else if index < self.active {
             self.active -= 1;
         }
+        self.wake_active_if_asleep(window, cx);
         self.focus_active(window, cx);
         self.save_session(cx);
         cx.notify();
@@ -5633,6 +5827,7 @@ impl Tty7App {
             CloseTabsToTheRight => self.close_tabs_right_of(self.active, window, cx),
             CopyWorkingDirectory => self.copy_active_cwd(window, cx),
             MarkTabUnread => self.mark_tab_unread(self.active, cx),
+            HibernateTab => self.hibernate_tab(self.active, window, cx),
             ForkAgentSession => self.fork_active_pane_session(ForkPlacement::NewTab, window, cx),
             CopyAgentSessionId => self.copy_agent_session_id(self.active, window, cx),
             RenameWorkspace => self.start_workspace_rename(window, cx),
@@ -8919,6 +9114,9 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &MarkTabUnread, _window, cx| {
                     this.mark_tab_unread(this.active, cx)
                 }))
+                .on_action(cx.listener(|this, _: &HibernateTab, window, cx| {
+                    this.hibernate_tab(this.active, window, cx)
+                }))
                 .on_action(cx.listener(|this, _: &ForkAgentSession, window, cx| {
                     this.fork_active_pane_session(ForkPlacement::NewTab, window, cx)
                 }))
@@ -9027,9 +9225,14 @@ fn mru_order(stamps: &[u64], active: usize) -> Vec<usize> {
 fn tab_to_session(tab: &Tab, cx: &App) -> SessionTab {
     SessionTab {
         name: tab.name.clone(),
-        pane: pane_to_session(&tab.pane, cx),
+        pane: match tab.asleep_layout() {
+            Some(layout) => layout.clone(),
+            None => pane_to_session(&tab.pane, cx),
+        },
         sidebar_group: tab.sidebar_group.borrow().clone(),
         tree_id: None,
+        hibernated: false,
+        asleep_view: None,
     }
 }
 
@@ -9204,7 +9407,19 @@ fn tabs_from_session(
     let alive = alive_panes_on(&crate::terminal::PaneRoute::for_workspace(workspace));
     let mut tabs: Vec<Tab> = Vec::with_capacity(session.tabs.len());
     let mut dropped = 0usize;
-    for st in &session.tabs {
+    let home = crate::ui::path_display::home_for_host(
+        cx,
+        workspace.map_or(HostId::LOCAL, |w| w.target.host_id()),
+    );
+    for (index, st) in session.tabs.iter().enumerate() {
+        // Asleep stays asleep: nothing is spawned or attached for it, which is
+        // the point. The one exception is the tab the window opens onto — a
+        // tab on screen is awake, so that one is woken here, by the same
+        // restore every other tab is getting.
+        if st.hibernated && index != session.active {
+            tabs.push(asleep_tab(st, home.clone()));
+            continue;
+        }
         let Some(pane) = session_to_pane(
             workspace,
             owner,
@@ -9236,10 +9451,94 @@ fn tabs_from_session(
             ),
             last_used: std::cell::Cell::new(0),
             focus_origin: Default::default(),
+            asleep: None,
         });
     }
     let active = session.active.min(tabs.len().saturating_sub(1));
     (tabs, active, dropped)
+}
+
+/// A tab restored asleep: its place, its name and its group, and nothing
+/// running behind them.
+fn asleep_tab(st: &SessionTab, home: Option<std::path::PathBuf>) -> Tab {
+    let mut tab = Tab::new(Pane::Empty);
+    tab.name = st.name.clone();
+    *tab.sidebar_group.borrow_mut() = st.sidebar_group.clone();
+    if let Some(id) = st.tree_id {
+        tab.tree_id.set(id);
+    }
+    tab.asleep = Some(Asleep {
+        layout: st.pane.clone(),
+        view: st
+            .asleep_view
+            .clone()
+            .unwrap_or_else(|| view_of_layout(tab.tree_id.get(), &st.pane)),
+        home,
+    });
+    tab
+}
+
+/// What to call a sleeping tab when the tree had nothing better to say: the
+/// first directory in its layout, and the agent in it if there was one.
+fn view_of_layout(
+    id: tty7_core::core::machine::TabId,
+    layout: &SessionPane,
+) -> tty7_core::core::tab_view::TabView {
+    fn leaves<'a>(pane: &'a SessionPane, out: &mut Vec<&'a SessionPane>) {
+        match pane {
+            SessionPane::Leaf { .. } => out.push(pane),
+            SessionPane::Split { a, b, .. } => {
+                leaves(a, out);
+                leaves(b, out);
+            }
+        }
+    }
+    let mut all = Vec::new();
+    leaves(layout, &mut all);
+    let cwd = all.iter().find_map(|leaf| match leaf {
+        SessionPane::Leaf { cwd, .. } => cwd.as_ref().map(|p| p.display().to_string()),
+        SessionPane::Split { .. } => None,
+    });
+    let agent = all.iter().find_map(|leaf| match leaf {
+        SessionPane::Leaf { agent, .. } => *agent,
+        SessionPane::Split { .. } => None,
+    });
+    tty7_core::core::tab_view::TabView {
+        id,
+        name: None,
+        title: String::new(),
+        osc_title: None,
+        cwd,
+        agent,
+        status: None,
+        live: false,
+        panes: all.len(),
+    }
+}
+
+/// A sleeping layout as a wake should read it: a native SSH pane dials its
+/// host again rather than standing on its old id. That id belongs to a pane
+/// whose connection is gone, and the restore reading it would put a local
+/// shell in its place.
+fn redial_native_ssh(layout: &SessionPane) -> SessionPane {
+    match layout {
+        SessionPane::Leaf {
+            ssh_spec: Some(_), ..
+        } => {
+            let mut leaf = layout.clone();
+            if let SessionPane::Leaf { pane_id, .. } = &mut leaf {
+                *pane_id = None;
+            }
+            leaf
+        }
+        SessionPane::Leaf { .. } => layout.clone(),
+        SessionPane::Split { axis, ratio, a, b } => SessionPane::Split {
+            axis: *axis,
+            ratio: *ratio,
+            a: Box::new(redial_native_ssh(a)),
+            b: Box::new(redial_native_ssh(b)),
+        },
+    }
 }
 
 fn leaf_shares_the_window_daemon(window_is_remote: bool, leaf_is_native_ssh: bool) -> bool {
@@ -11033,6 +11332,7 @@ mod ssh_rebuild_gpui_tests {
                 name: None,
                 sidebar_group: None,
                 root: PaneNode::Leaf { pane: 1 },
+                hibernated: false,
             };
             app.apply_layout_delta(
                 &LayoutDelta::TabRestructured { tab, pane: None },
@@ -12541,6 +12841,115 @@ mod tab_focus_memory_tests {
                 "the zoom lands on the pane the reader was last in"
             );
             assert!(right.read(cx).focus_handle.is_focused(window));
+        });
+    }
+}
+
+#[cfg(test)]
+mod hibernate_gpui_tests {
+    use gpui::TestAppContext;
+
+    use crate::core::session::SessionPane;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::pane::Pane;
+
+    fn leaf_pane_id(pane: &SessionPane) -> Option<u64> {
+        match pane {
+            SessionPane::Leaf { pane_id, .. } => *pane_id,
+            SessionPane::Split { .. } => None,
+        }
+    }
+
+    /// Asleep, a tab holds nothing running and still holds its place: the
+    /// pane id the wake restores from, the name it had on screen, and a seat in
+    /// the sync that tells the machine it is asleep rather than gone.
+    #[gpui::test]
+    fn a_sleeping_tab_keeps_its_place_its_pane_and_its_name(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let pane_id = app.tabs[1]
+                .pane
+                .first_leaf()
+                .and_then(|slot| slot.terminal().cloned())
+                .expect("tab 1 has a pane")
+                .read(cx)
+                .pane_id;
+            let (before, _) = app.tabs[1].label_view(Some(window), cx);
+
+            app.put_to_sleep(1, window, cx);
+
+            assert_eq!(app.tabs.len(), 2, "sleeping is not closing");
+            let tab = &app.tabs[1];
+            assert!(tab.is_asleep());
+            assert!(matches!(tab.pane, Pane::Empty));
+            assert!(tab.pane.terminals().is_empty(), "nothing is left running");
+            assert_eq!(tab.asleep_layout().and_then(leaf_pane_id), Some(pane_id));
+            let (after, _) = tab.label_view(Some(window), cx);
+            assert_eq!(
+                format!("{:?}", after.label()),
+                format!("{:?}", before.label()),
+                "it is called what it was called while awake"
+            );
+            assert!(!after.live);
+
+            let (desired, _, held) = crate::ui::tree_sync::desired_tabs(app, cx);
+            assert!(held.is_empty(), "a sleeping tab is not a tab gone missing");
+            assert_eq!(desired.len(), 2);
+            assert!(!desired[0].hibernated);
+            assert!(desired[1].hibernated);
+            match &desired[1].root {
+                crate::ui::tree_sync::DesiredNode::Leaf { pane, .. } => assert_eq!(*pane, pane_id),
+                other => panic!("expected the one leaf, got {other:?}"),
+            }
+        });
+    }
+
+    /// Looking at a tab is what wakes it, so the window has to keep one awake
+    /// to look at; the tab shown in a sleeping one's place is the awake tab
+    /// used last.
+    #[gpui::test]
+    fn the_last_awake_tab_has_nothing_to_hand_the_window_to(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.tabs[1].last_used.set(5);
+            app.tabs[2].last_used.set(9);
+            assert_eq!(app.awake_tab_besides(0), Some(2), "the one used last");
+
+            app.put_to_sleep(2, window, cx);
+            assert_eq!(app.awake_tab_besides(0), Some(1));
+
+            app.put_to_sleep(1, window, cx);
+            assert_eq!(app.awake_tab_besides(0), None);
+            assert!(
+                !app.can_hibernate_tab(0, cx),
+                "the last awake tab stays awake"
+            );
+            assert!(
+                !app.can_hibernate_tab(1, cx),
+                "nor is a sleeping tab put to sleep twice"
+            );
+        });
+    }
+
+    /// Closing a sleeping tab closes it like any other, and what Reopen Closed
+    /// Tab gets back is the layout it slept with — not the empty stand-in.
+    #[gpui::test]
+    fn a_sleeping_tab_closes_into_what_it_would_have_woken_as(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.put_to_sleep(1, window, cx);
+            let layout_id = app.tabs[1].asleep_layout().and_then(leaf_pane_id);
+            assert!(layout_id.is_some());
+
+            app.close_tab(1, window, cx);
+
+            assert_eq!(app.tabs.len(), 1);
+            let closed = app.closed.last().expect("the closed tab is remembered");
+            assert_eq!(leaf_pane_id(&closed.pane), layout_id);
+            assert!(!closed.hibernated, "reopening brings it back awake");
         });
     }
 }
