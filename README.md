@@ -52,7 +52,7 @@ Native builds for macOS, Windows, and Linux on [**Releases**](https://github.com
 
 | | |
 |---|---|
-| **Agent-aware** | per-pane detection (23 CLIs) · status dot · notifications · branch + diff · tray icon when input is needed · resume after reboot · tab sidebar grouped by repository |
+| **Agent-aware** | per-pane detection (23 CLIs) · status dot · notifications · branch + diff · tray icon when input is needed · resume after reboot · tab sidebar grouped by repository, with pinned groups |
 | **CLI + Skills** | bundled `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · `run` streams a command and exits with its code · `split` · `send` · `wait --until free` · `capture` |
 | **Editor-grade input** | ghost suggestions from history · explained tab completion · syntax highlighting · multi-line editing · click places the caret · <kbd>⌃ R</kbd> fuzzy history |
 | **Window** | tabs & splits · <kbd>⌘ P</kbd> palette · <kbd>⌘ F</kbd> scrollback search · <kbd>⌘ J</kbd> panel with process tree and listening ports · 13 themes, your own YAML, iTerm2 import · IME |

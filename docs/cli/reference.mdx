@@ -295,7 +295,7 @@ candidates.
 | Command | Effect | JSON |
 |---|---|---|
 | `ws ls` | Every workspace | `{"workspaces":[...]}` |
-| `ws tree [WORKSPACE]` | One workspace as a tree: tabs, split axes and ratios, panes with cwds | The whole workspace object: `{"id","name","last_active","active_tab","tabs":[{"id","name","sidebar_group","root",…}]}` |
+| `ws tree [WORKSPACE]` | One workspace as a tree: tabs, split axes and ratios, panes with cwds | The whole workspace object: `{"id","name","last_active","active_tab","groups":{"pinned":[…]},"tabs":[{"id","name","group","root",…}]}` |
 | `ws new [NAME]` | An empty workspace (no tab, no pane) | `{"id","name"}` |
 | `ws rename WORKSPACE NAME` | Name or rename | `{"id","name"}` |
 | `ws rm WORKSPACE` | Delete the workspace and hang up its panes | `{"removed"}` |
@@ -342,9 +342,11 @@ tree drops a pane's record when the tab holding it closes, and the registry is
 what is left. That only matters if the shell later dies, since a restore would
 then have nothing to restore from.
 
-`GROUP` is the heading the GUI's sidebar files the tab under, shown by its last
-segment. Read-only from here: with the default repo grouping the GUI recomputes
-it from the tab's working directory.
+`GROUP` is the pinned sidebar group the tab is kept in — its name, or the last
+segment of its folder — and `-` for a tab the GUI groups automatically. The JSON
+carries the group's `id`, `name` and `folder` (or `null`). Auto groups are not
+listed: the GUI works them out from each tab's working directory and stores
+nothing about them.
 
 `label` falls back through the best evidence available — the name if someone set
 one, else the agent running there, else the last segment of the cwd, else the

@@ -1,6 +1,6 @@
 ---
 title: "The sidebar"
-description: "Tabs grouped by repository, with branch, diff counts, and agent status on every row."
+description: "Tabs grouped by repository automatically, groups you pin kept above them, and branch, diff counts, and agent status on every row."
 ---
 
 The left sidebar is tty7's tab bar, and it is the default because a vertical row
@@ -14,18 +14,54 @@ is doing.
   <img src="/images/sidebar.webp" alt="The tty7 tab sidebar" />
 </Frame>
 
-## Grouped by repository
+## Groups
 
-Rows sit under a header per git repository, with everything else collected in a
-trailing **Scratch** section. The grouping follows the tab's working directory,
-not its history — switching branches or `cd`-ing around inside a repository
-never moves a row out from under its header.
+The sidebar groups tabs by repository automatically. Pin what you want to keep.
 
-**Settings → Window & Tabs → Sidebar grouping** switches between *By repo* (the
-default), *By repo or folder*, and *Flat*. The default collects every non-repo
-tab in Scratch; *By repo or folder* groups those tabs under their working
-directory instead — for agents running in plain folders — leaving Scratch to
-tabs whose shell has not reported a directory yet.
+**Auto groups** sit below a divider. Every tab you have not pinned is filed
+under the git repository its working directory is in — a linked worktree under
+the repository it belongs to, a submodule under itself — and an SSH tab under
+the host it is connected to, so `/home/ubuntu` on two machines is two groups.
+Everything else collects in a trailing **Ungrouped** section. An auto group
+follows the tab's working directory, not its history: `cd` into another
+repository and the row moves; switching branches never does. When its last tab
+leaves, the group is gone.
+
+**Pinned groups** sit above the divider, in the order you put them, and stay
+until you delete them — an empty one keeps its place with a **+ New Tab** row.
+A tab in a pinned group never leaves it on its own. There are two kinds:
+
+- A **folder group** keeps a directory. A tab whose working directory *enters*
+  the folder joins it — a tab opened there, a `cd` into it, or a worktree of the
+  repository the folder is. When folders nest, the deepest one wins, so pinning
+  a monorepo and one package in it files the package's tabs under the package.
+  A tab you drag out while it is still inside stays out until it leaves the
+  folder and comes back. Hover the header for the folder's path; click its pin
+  to unpin it, and its tabs go back to auto groups.
+- A **label group** is just a name, for tabs that belong together for a reason
+  no directory shows. Tabs go in and out of it by hand.
+
+Ways to pin:
+
+| To get | Do this |
+|---|---|
+| A folder group from an auto group | Click the pin on its header, or drag the header above the divider |
+| A folder group from a folder | Drop it from Finder onto the sidebar, choose **Pin as Group** on it in the Files panel, or run **Open Folder as Group…** from the command palette |
+| A label group | Right-click a tab → **Move to Group → New Group…**, or run **New Group** from the command palette |
+
+Right-click a pinned group's header to rename it, point it at a folder (**Set
+Folder…**, or **Use Current Tab's Folder**), clear its folder, open a tab in it,
+or delete it. Deleting a group closes nothing: its tabs go back to auto
+grouping. An auto group has no rename — pin it first. The **+** on a header
+opens a tab in that group's folder (a label group's opens where <kbd>⌘ T</kbd>
+would), and <kbd>⌘ T</kbd> itself joins the group of the tab you are in.
+
+Groups, their order, and which ones are folded are kept with the workspace, so
+every window onto it — and the next launch — shows the same thing.
+
+**Settings → Window & Tabs → Auto grouping** turns auto groups off. The tabs you
+have not pinned then sit in one flat list below your pinned groups, which show
+either way.
 
 ## What a row tells you
 
@@ -54,9 +90,11 @@ they simply stop opening the overlay.
 
 ## Rearranging
 
-Drag a row to reorder it within its group, or drag a whole group header to move
-the group. A row cannot be dragged into a different group: a tab's group comes
-from its working directory, so `cd` is what moves it.
+Drag a row to reorder it within its group, or drag a group header to move the
+group — pinned groups among pinned groups, auto groups among auto groups. Drag
+a row onto a pinned group to put it there, or anywhere below the divider to
+hand it back to auto grouping. A row cannot be dragged into an auto group: its
+membership comes from the working directory, so `cd` is what moves it.
 
 Drag a row out over the panes instead and it stops being a session of its own:
 it lands as a pane of the tab on screen, wherever the highlight says. Dragging a
