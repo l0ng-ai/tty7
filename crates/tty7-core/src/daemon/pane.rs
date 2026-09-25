@@ -839,6 +839,10 @@ enum PaneBackend {
 }
 
 struct ForegroundProbes {
+    /// The pty's foreground process group: one ioctl, cheap enough to ask on
+    /// every read, and a change in it is what says the probes below would now
+    /// answer differently.
+    group: Box<dyn Fn() -> Option<i32> + Send>,
     remote: Box<dyn Fn() -> Option<RemoteContext> + Send>,
     agent: Box<dyn Fn() -> Option<Option<(crate::core::cli_agent::CLIAgent, Vec<String>)>> + Send>,
     cwd: Box<dyn Fn() -> Option<PathBuf> + Send>,
@@ -1680,6 +1684,7 @@ impl DaemonPane {
         );
 
         let fg_master = master.clone();
+        let group_master = master.clone();
         let remote_master = master.clone();
         let agent_master = master.clone();
         let cwd_master = master.clone();
@@ -1691,6 +1696,7 @@ impl DaemonPane {
             writer.clone(),
             move || foreground_command_running(&fg_master, shell_pid),
             ForegroundProbes {
+                group: Box::new(move || pty_foreground_pgid(&group_master)),
                 remote: Box::new(move || foreground_remote_context(&remote_master)),
                 agent: Box::new(move || foreground_agent(&agent_master)),
                 cwd: Box::new(move || foreground_cwd(&cwd_master, shell_pid)),
@@ -1914,6 +1920,7 @@ impl DaemonPane {
             writer.clone(),
             || false,
             ForegroundProbes {
+                group: Box::new(|| None),
                 remote: Box::new(|| None),
                 agent: Box::new(|| None),
                 cwd: Box::new(|| None),
@@ -1963,6 +1970,7 @@ impl DaemonPane {
         death: Arc<DeathReporter>,
     ) -> JoinHandle<()> {
         let ForegroundProbes {
+            group: foreground_group,
             remote: foreground_remote,
             agent: foreground_agent_fn,
             cwd: foreground_cwd_fn,
@@ -1996,6 +2004,7 @@ impl DaemonPane {
                 let mut tr_read_t = std::time::Duration::ZERO;
                 let mut tr_disp_t = std::time::Duration::ZERO;
                 let mut next_remote_check = std::time::Instant::now();
+                let mut last_group = None;
 
                 loop {
                     if trace && tr_last.elapsed() >= std::time::Duration::from_secs(1) {
@@ -2073,8 +2082,21 @@ impl DaemonPane {
                             // reads, most visibly) stayed on the far end until
                             // some unrelated output arrived (#817).
                             let back_at_prompt = signals.shell.iter().any(|s| s.at_prompt);
-                            let poll_now =
-                                back_at_prompt || std::time::Instant::now() >= next_remote_check;
+                            // A new foreground group is a new program in front
+                            // — probe for it on its first output. The interval
+                            // alone missed an agent that drew its whole first
+                            // screen within it of the prompt it was typed at
+                            // and then sat waiting for a key: a launch that
+                            // types the command the moment the shell is up
+                            // did that every time, and the pane never learned
+                            // it was running an agent until something else
+                            // printed.
+                            let group = foreground_group();
+                            let group_changed = group != last_group;
+                            last_group = group;
+                            let poll_now = back_at_prompt
+                                || group_changed
+                                || std::time::Instant::now() >= next_remote_check;
                             if poll_now {
                                 next_remote_check =
                                     std::time::Instant::now() + REMOTE_CONTEXT_POLL_INTERVAL;
@@ -5238,6 +5260,7 @@ mod tests {
                 null_writer(),
                 || false,
                 ForegroundProbes {
+                    group: Box::new(|| None),
                     remote: Box::new(|| None),
                     agent: Box::new(|| Some(None)),
                     cwd: Box::new(|| None),
@@ -5299,6 +5322,7 @@ mod tests {
                 null_writer(),
                 || false,
                 ForegroundProbes {
+                    group: Box::new(|| None),
                     remote: Box::new(|| None),
                     agent: Box::new(|| Some(None)),
                     cwd: Box::new(|| None),
@@ -6060,6 +6084,7 @@ mod tests {
             null_writer(),
             || false,
             ForegroundProbes {
+                group: Box::new(|| None),
                 remote,
                 agent: Box::new(|| None),
                 cwd: Box::new(|| None),
@@ -6107,6 +6132,7 @@ mod tests {
             null_writer(),
             || false,
             ForegroundProbes {
+                group: Box::new(|| None),
                 remote: Box::new(|| None),
                 agent: Box::new(|| None),
                 cwd: Box::new(|| None),
@@ -6211,6 +6237,7 @@ mod tests {
             null_writer(),
             || false,
             ForegroundProbes {
+                group: Box::new(|| None),
                 remote: Box::new(|| None),
                 agent: Box::new(|| None),
                 cwd: Box::new(|| None),
@@ -6308,6 +6335,7 @@ mod tests {
             null_writer(),
             || false,
             ForegroundProbes {
+                group: Box::new(|| None),
                 remote: Box::new(|| None),
                 agent: Box::new(|| None),
                 cwd: Box::new(|| None),
@@ -6345,6 +6373,7 @@ mod tests {
             null_writer(),
             || false,
             ForegroundProbes {
+                group: Box::new(|| None),
                 remote: Box::new(|| None),
                 agent: Box::new(|| None),
                 cwd: Box::new(|| None),
@@ -6415,6 +6444,7 @@ mod tests {
             writer,
             || false,
             ForegroundProbes {
+                group: Box::new(|| None),
                 remote: Box::new(|| None),
                 agent: Box::new(|| None),
                 cwd: Box::new(|| None),
@@ -6508,6 +6538,7 @@ mod tests {
             null_writer(),
             || false,
             ForegroundProbes {
+                group: Box::new(|| None),
                 remote: Box::new(|| None),
                 agent: Box::new(|| None),
                 cwd: Box::new(|| None),
@@ -6589,6 +6620,7 @@ mod tests {
             writer,
             || false,
             ForegroundProbes {
+                group: Box::new(|| None),
                 remote: Box::new(|| None),
                 agent: Box::new(|| None),
                 cwd: Box::new(|| None),
@@ -6626,6 +6658,7 @@ mod tests {
             null_writer(),
             || false,
             ForegroundProbes {
+                group: Box::new(|| None),
                 remote: Box::new(|| None),
                 agent: Box::new(|| None),
                 cwd: Box::new(|| None),
@@ -6677,6 +6710,7 @@ mod tests {
             null_writer(),
             || false,
             ForegroundProbes {
+                group: Box::new(|| None),
                 remote: Box::new(|| None),
                 agent: Box::new(|| None),
                 cwd: Box::new(|| Some(PathBuf::from("/Users/alice/dev/tty7"))),
@@ -6708,6 +6742,7 @@ mod tests {
             null_writer(),
             || false,
             ForegroundProbes {
+                group: Box::new(|| None),
                 remote: Box::new(|| None),
                 agent: Box::new(|| None),
                 cwd: Box::new(|| None),
@@ -6734,6 +6769,7 @@ mod tests {
             null_writer(),
             || false,
             ForegroundProbes {
+                group: Box::new(|| None),
                 remote: Box::new(|| None),
                 agent: Box::new(|| None),
                 cwd: Box::new(|| None),
@@ -7296,5 +7332,71 @@ mod tests {
 
         apply_signals(&mut st, SniffSignals::default());
         assert_eq!(st.cwd, Some(PathBuf::from("/tmp/x")));
+    }
+
+    /// A quick launch types the agent's command the moment the shell is up, so
+    /// the agent's whole first screen can land inside the poll interval of the
+    /// prompt it was typed at — and then it waits for a key, printing nothing
+    /// more. Probing only on the interval, the pane never found out an agent
+    /// was running. A change of foreground process group now probes at once.
+    #[test]
+    fn a_new_foreground_group_is_probed_inside_the_poll_interval() {
+        struct Chunks(std::collections::VecDeque<Vec<u8>>);
+
+        impl Read for Chunks {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                match self.0.pop_front() {
+                    Some(chunk) => {
+                        buf[..chunk.len()].copy_from_slice(&chunk);
+                        Ok(chunk.len())
+                    }
+                    None => Ok(0),
+                }
+            }
+        }
+
+        let probes_for = |groups: Vec<i32>| {
+            let state = Arc::new(Mutex::new(test_state(true)));
+            let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = probes.clone();
+            let groups = Mutex::new(groups.into_iter());
+            let handle = DaemonPane::spawn_reader(
+                state,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(OutputGate::new()),
+                // Plain output, no prompt marks: only the interval or the
+                // group can trigger a probe.
+                Box::new(Chunks(
+                    [b"$ ".to_vec(), b"agent screen".to_vec()]
+                        .into_iter()
+                        .collect(),
+                )),
+                null_writer(),
+                || false,
+                ForegroundProbes {
+                    group: Box::new(move || groups.lock().unwrap().next()),
+                    remote: Box::new(|| None),
+                    agent: Box::new(move || {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        None
+                    }),
+                    cwd: Box::new(|| None),
+                },
+                Arc::new(DeathReporter::new(|| {})),
+            );
+            handle.join().unwrap();
+            probes.load(Ordering::SeqCst)
+        };
+
+        assert_eq!(
+            probes_for(vec![10, 10]),
+            1,
+            "same program: the interval rules"
+        );
+        assert_eq!(
+            probes_for(vec![10, 11]),
+            2,
+            "a new program is probed at once"
+        );
     }
 }
