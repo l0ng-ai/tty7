@@ -2131,8 +2131,10 @@ mod tests {
             .tab_create(ws, None, seed(2, "/b"), None, None)
             .unwrap();
         let (keep, drop) = (PinnedGroup::label("keep"), PinnedGroup::label("drop"));
-        let mut groups = WorkspaceGroups::default();
-        groups.pinned = vec![keep.clone(), drop.clone()];
+        let groups = WorkspaceGroups {
+            pinned: vec![keep.clone(), drop.clone()],
+            ..Default::default()
+        };
         store.workspace_set_groups(ws, groups, None).unwrap();
         store
             .tab_set_group(ws, first.id, Some(drop.id), None)
@@ -2142,8 +2144,10 @@ mod tests {
             .unwrap();
 
         let (_sub, heard) = recorded(&store);
-        let mut kept = WorkspaceGroups::default();
-        kept.pinned = vec![keep.clone()];
+        let kept = WorkspaceGroups {
+            pinned: vec![keep.clone()],
+            ..Default::default()
+        };
         store.workspace_set_groups(ws, kept.clone(), None).unwrap();
 
         let workspace = store.workspace(ws).unwrap();
