@@ -1166,6 +1166,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmShowMore => "展开",
         L10nKey::ScmShowLess => "收起",
         L10nKey::ScmCommitNotFound => "本仓库中没有这个提交。",
+        L10nKey::ScmFilterChanges => "筛选变更文件…",
+        L10nKey::ScmViewAsTree => "以树形显示",
+        L10nKey::ScmViewAsList => "以列表显示",
+        L10nKey::ScmNoMatchingChanges => "没有匹配筛选的变更文件。",
         L10nKey::ScmTooManyChanges => "改动过多，仅显示前 {shown} 项（共 {total} 项）。",
         L10nKey::ScmOpenChanges => "查看改动",
         L10nKey::ScmDiscardAllConfirm => {

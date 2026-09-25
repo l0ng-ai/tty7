@@ -13,6 +13,7 @@ use tty7_core::daemon::protocol::{DaemonMsg, PaneInfo, PaneProcs, ShellSpec, Win
 use tty7_core::daemon::router::RouteTarget;
 
 use super::{Backend, CaptureSegment, RunSpec};
+use crate::exec::{ExecEnd, ExecRun, Transcript};
 
 const SESSION_SIZE: WinSize = WinSize {
     cols: 120,
@@ -23,6 +24,9 @@ const SESSION_SIZE: WinSize = WinSize {
 
 const REPLAY_FIRST_WAIT: Duration = Duration::from_secs(10);
 const REPLAY_SETTLE: Duration = Duration::from_millis(300);
+/// A backstop on reading the replay: it ends on the first live output or a
+/// quiet spell, and this only bounds a daemon that keeps sending status.
+const EXEC_REPLAY_MAX: Duration = Duration::from_secs(10);
 
 const NOT_RUNNING: &str =
     "could not reach the tty7 server on this machine — `tty7 server start` brings one up";
@@ -273,6 +277,113 @@ impl Backend for RealBackend {
             session.kill()?;
         }
         Ok(code)
+    }
+
+    fn exec(&mut self, pane: u64, line: Vec<u8>, timeout: Option<Duration>) -> Result<ExecRun> {
+        let deadline = timeout.and_then(|t| std::time::Instant::now().checked_add(t));
+        // Watching starts before anything is typed, so no byte the command
+        // prints can go past unseen. The replay that comes first is only read
+        // for the pane's state — the daemon sends its prompt report last.
+        let mut session = self
+            .pane_client()?
+            .observe(pane, SESSION_SIZE)
+            .with_context(|| format!("observing pane %{pane}"))?;
+        let mut size = SESSION_SIZE;
+        // (integration active, at a prompt), as the daemon last reported them.
+        let mut prompt: Option<(bool, bool)> = None;
+        let until = std::time::Instant::now() + EXEC_REPLAY_MAX;
+        let _ = session.set_recv_timeout(Some(REPLAY_FIRST_WAIT));
+        let finish = |session: PaneSession, end, size| -> Result<ExecRun> {
+            let _ = session.detach();
+            Ok(ExecRun {
+                end,
+                output: Vec::new(),
+                dropped: 0,
+                size,
+            })
+        };
+        loop {
+            match session.recv() {
+                Ok(DaemonMsg::Size(seen)) => size = seen,
+                Ok(DaemonMsg::Prompt {
+                    active, at_prompt, ..
+                }) => prompt = Some((active, at_prompt)),
+                Ok(DaemonMsg::Exited { code }) => {
+                    return finish(session, ExecEnd::PaneExited(code), size);
+                }
+                // Live output: the replay is over, and so is `capture`'s
+                // reading of it. A pane still printing is not at a prompt,
+                // and its report has already said so.
+                Ok(DaemonMsg::Output(_)) => break,
+                Ok(_) => {}
+                Err(e) if timed_out(&e) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return finish(session, ExecEnd::PaneExited(None), size);
+                }
+                Err(e) => return Err(anyhow!(e).context("reading the pane replay")),
+            }
+            if std::time::Instant::now() >= until {
+                break;
+            }
+            let _ = session.set_recv_timeout(Some(REPLAY_SETTLE));
+        }
+        match prompt {
+            Some((true, true)) => {}
+            Some((true, false)) => return finish(session, ExecEnd::Busy, size),
+            _ => return finish(session, ExecEnd::NoIntegration, size),
+        }
+
+        self.send_input(pane, line)?;
+        let mut transcript = Transcript::new();
+        let end = loop {
+            let wait = match deadline {
+                Some(d) => {
+                    let left = d.saturating_duration_since(std::time::Instant::now());
+                    if left.is_zero() {
+                        break ExecEnd::TimedOut {
+                            started: transcript.started(),
+                        };
+                    }
+                    Some(left)
+                }
+                None => None,
+            };
+            let _ = session.set_recv_timeout(wait);
+            match session.recv() {
+                Ok(DaemonMsg::Output(bytes)) => {
+                    transcript.output(&bytes);
+                    transcript.compact();
+                }
+                Ok(DaemonMsg::Size(seen)) => size = seen,
+                Ok(DaemonMsg::Prompt {
+                    at_prompt,
+                    last_exit,
+                    ..
+                }) => {
+                    if let Some(done) = transcript.prompt(at_prompt, last_exit) {
+                        break ExecEnd::Finished {
+                            exit: done.exit,
+                            ran: done.ran,
+                        };
+                    }
+                }
+                Ok(DaemonMsg::Exited { code }) => break ExecEnd::PaneExited(code),
+                Ok(_) => {}
+                Err(e) if timed_out(&e) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    break ExecEnd::PaneExited(None);
+                }
+                Err(e) => return Err(anyhow!(e).context("following the command's output")),
+            }
+        };
+        let _ = session.detach();
+        let (output, dropped) = transcript.take();
+        Ok(ExecRun {
+            end,
+            output,
+            dropped,
+            size,
+        })
     }
 
     fn events(&mut self, on_event: &mut dyn FnMut(ControlEvent) -> Result<()>) -> Result<()> {

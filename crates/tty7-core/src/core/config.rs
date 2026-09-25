@@ -251,6 +251,12 @@ pub struct Config {
     /// impression than one they asked for.
     #[serde(default)]
     pub scm_graph_expanded: bool,
+    /// Whether the source control panel lists changed files as a directory
+    /// tree rather than one flat run per group. Off by default: the flat list
+    /// is what a handful of changes reads best as, and the tree is for the
+    /// agent run that touched sixty files across a dozen modules.
+    #[serde(default)]
+    pub scm_changes_tree: bool,
     /// Whether a file opens in the code panel with soft wrap on. Not a
     /// setting anyone picks up front: it is whatever the status bar's Wrap
     /// toggle (or `ToggleDocumentWrap`) was last left at, so the next file
@@ -744,6 +750,7 @@ impl Default for Config {
             document_layout: DocumentLayout::default(),
             document_ratio: default_document_ratio(),
             scm_graph_expanded: false,
+            scm_changes_tree: false,
             editor_soft_wrap: false,
             editor_markdown_preview: false,
             sidebar_grouping: SidebarGrouping::Repo,

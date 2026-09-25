@@ -61,6 +61,17 @@ pub trait Backend {
 
     fn run_wait(&mut self) -> Result<Option<i32>>;
 
+    /// Type `line` at the pane's shell prompt and follow the pane until its
+    /// prompt comes back, the deadline passes, or it exits. Refuses — sending
+    /// nothing — a pane with no shell integration or one that is not at a
+    /// prompt; see [`ExecEnd`](crate::exec::ExecEnd).
+    fn exec(
+        &mut self,
+        pane: u64,
+        line: Vec<u8>,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<crate::exec::ExecRun>;
+
     fn events(&mut self, on_event: &mut dyn FnMut(ControlEvent) -> Result<()>) -> Result<()>;
 }
 
@@ -78,6 +89,7 @@ pub mod mock {
     use tty7_core::daemon::protocol::{PROTOCOL_VERSION, PaneInfo, PaneProcs};
 
     use super::{Backend, CaptureSegment, RunSpec};
+    use crate::exec::{ExecEnd, ExecRun};
 
     pub struct MockBackend {
         pub machine: Machine,
@@ -103,6 +115,8 @@ pub mod mock {
         pub events: Vec<ControlEvent>,
         /// Set to make `hello` fail — doctor's unreachable-server branch.
         pub unreachable: bool,
+        pub execs: Vec<(u64, Vec<u8>, Option<std::time::Duration>)>,
+        pub exec_run: ExecRun,
     }
 
     impl Default for MockBackend {
@@ -127,6 +141,21 @@ pub mod mock {
                 run_exit: Some(0),
                 events: Vec::new(),
                 unreachable: false,
+                execs: Vec::new(),
+                exec_run: ExecRun {
+                    end: ExecEnd::Finished {
+                        exit: Some(0),
+                        ran: true,
+                    },
+                    output: Vec::new(),
+                    dropped: 0,
+                    size: tty7_core::daemon::protocol::WinSize {
+                        cols: 80,
+                        rows: 24,
+                        cell_w: 8,
+                        cell_h: 16,
+                    },
+                },
             }
         }
     }
@@ -217,6 +246,16 @@ pub mod mock {
 
         fn run_wait(&mut self) -> Result<Option<i32>> {
             Ok(self.run_exit)
+        }
+
+        fn exec(
+            &mut self,
+            pane: u64,
+            line: Vec<u8>,
+            timeout: Option<std::time::Duration>,
+        ) -> Result<ExecRun> {
+            self.execs.push((pane, line, timeout));
+            Ok(self.exec_run.clone())
         }
 
         fn events(&mut self, on_event: &mut dyn FnMut(ControlEvent) -> Result<()>) -> Result<()> {

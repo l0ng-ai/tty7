@@ -850,15 +850,7 @@ fn ring_system_bell() -> bool {
 }
 
 fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
-    if bracketed {
-        let text = text.replace("\r\n", "\n");
-        let mut bytes = b"\x1b[200~".to_vec();
-        bytes.extend(text.bytes().filter(|&b| b != 0x1b));
-        bytes.extend_from_slice(b"\x1b[201~");
-        bytes
-    } else {
-        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
-    }
+    tty7_core::core::paste::paste_bytes(text.as_bytes(), bracketed)
 }
 
 /// A line the shell can be handed byte for byte, as if it had been typed at its

@@ -1300,6 +1300,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmShowMore => "続きを表示",
         L10nKey::ScmShowLess => "折りたたむ",
         L10nKey::ScmCommitNotFound => "このリポジトリにそのコミットはありません。",
+        L10nKey::ScmFilterChanges => "変更ファイルを絞り込む…",
+        L10nKey::ScmViewAsTree => "ツリーで表示",
+        L10nKey::ScmViewAsList => "リストで表示",
+        L10nKey::ScmNoMatchingChanges => "条件に一致する変更ファイルはありません。",
         L10nKey::ScmTooManyChanges => {
             "変更が多いため、{total} 件のうち先頭 {shown} 件のみ表示しています。"
         }

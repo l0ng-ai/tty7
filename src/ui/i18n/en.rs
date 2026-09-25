@@ -1226,6 +1226,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ScmShowMore => "Show more",
         L10nKey::ScmShowLess => "Show less",
         L10nKey::ScmCommitNotFound => "This commit is not in this repository.",
+        L10nKey::ScmFilterChanges => "Filter changed files…",
+        L10nKey::ScmViewAsTree => "View as Tree",
+        L10nKey::ScmViewAsList => "View as List",
+        L10nKey::ScmNoMatchingChanges => "No changed files match the filter.",
         L10nKey::ScmTooManyChanges => "Showing the first {shown} of {total} changes.",
         L10nKey::ScmOpenChanges => "Open Changes",
         L10nKey::ScmDiscardAllConfirm => {
