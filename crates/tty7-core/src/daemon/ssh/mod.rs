@@ -115,6 +115,19 @@ impl SshManager {
             .block_on(self.forwards.remove(pane_id, forward_id))
     }
 
+    pub fn set_forward_enabled(
+        &self,
+        pane_id: u64,
+        conn: Option<Arc<SshConnection>>,
+        forward_id: u64,
+        enabled: bool,
+    ) -> Result<Vec<ManagedForward>, String> {
+        self.runtime.block_on(
+            self.forwards
+                .set_enabled(pane_id, conn, forward_id, enabled),
+        )
+    }
+
     pub fn list_forwards(&self, pane_id: u64) -> Vec<ManagedForward> {
         self.forwards.list(pane_id)
     }

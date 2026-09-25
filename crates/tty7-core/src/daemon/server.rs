@@ -1055,6 +1055,31 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             Ok(())
         }
 
+        ClientMsg::SetForwardEnabled {
+            pane_id,
+            forward_id,
+            enabled,
+        } => {
+            let mut w = write_stream;
+            // Only switching on needs the connection; switching off has to
+            // work on a pane whose connection is already gone.
+            let conn = match forward_pane_connection(&registry, pane_id) {
+                Ok(conn) => Some(conn),
+                Err(e) if enabled => {
+                    DaemonMsg::Error(e).encode(&mut w)?;
+                    return Ok(());
+                }
+                Err(_) => None,
+            };
+            match crate::daemon::ssh::SshManager::global()
+                .set_forward_enabled(pane_id, conn, forward_id, enabled)
+            {
+                Ok(list) => DaemonMsg::ForwardList(list).encode(&mut w)?,
+                Err(e) => DaemonMsg::Error(e).encode(&mut w)?,
+            }
+            Ok(())
+        }
+
         ClientMsg::QueryProcs { pane_id } => {
             let mut w = write_stream;
             let procs = registry.get(pane_id).map(|p| p.procs()).unwrap_or_default();

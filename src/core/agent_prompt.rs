@@ -51,9 +51,8 @@ pub fn build_diff_review_prompt(diff: &str, cwd: Option<&str>) -> Option<String>
 }
 
 pub fn submit_bytes(prompt: &str) -> Vec<u8> {
-    let mut bytes = b"\x1b[200~".to_vec();
-    bytes.extend(prompt.bytes().filter(|&b| b != 0x1b));
-    bytes.extend_from_slice(b"\x1b[201~\r");
+    let mut bytes = tty7_core::core::paste::bracket(prompt.as_bytes());
+    bytes.push(b'\r');
     bytes
 }
 

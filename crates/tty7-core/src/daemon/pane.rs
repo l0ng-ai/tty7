@@ -2272,6 +2272,7 @@ impl DaemonPane {
             local_pty: matches!(self.backend, PaneBackend::Pty(_)),
             at_prompt: st.shell.active.then_some(st.shell.mark_at_prompt),
             remote_prompt_seen: st.remote_prompt_seen,
+            bracketed_paste: Some(st.modes.is_on(crate::core::term_modes::BRACKETED_PASTE)),
         }
     }
 
@@ -3057,6 +3058,14 @@ fn apply_agent_signals(
     let before = st.agent_session.clone();
 
     for event in &events {
+        // A hook names the agent that emitted it. Once this pane has a
+        // foreground agent, a different one's session id must not land here:
+        // omp forking with a Claude UUID is "session not found".
+        if let (Some(current), Some(from)) = (st.agent, event.agent)
+            && current != from
+        {
+            continue;
+        }
         if st.agent.is_none() && event.agent.is_some() {
             st.agent = event.agent;
             notify(st, DaemonMsg::Agent(st.agent));
@@ -3183,7 +3192,9 @@ fn apply_agent(
         stamp_launch_argv(st, argv);
         return;
     }
-    if agent.is_none() && st.agent_session.is_some() {
+    // The session belongs to whoever was in the foreground. Switching from
+    // Claude to omp (or back to the shell) must not keep the previous id.
+    if st.agent_session.is_some() {
         st.agent_session = None;
         notify(st, DaemonMsg::AgentStatus(None));
     }
@@ -5376,6 +5387,39 @@ mod tests {
         assert!(st.agent_session.is_none());
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::AgentStatus(None))));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Agent(None))));
+    }
+
+    #[test]
+    fn a_foreign_agent_hook_does_not_replace_the_foreground_session() {
+        use crate::core::cli_agent::CLIAgent;
+
+        let mut st = test_state(true);
+        let mut sniffer = OscSniffer::new();
+        let omp = concat!(
+            "\x1b]777;notify;tty7://cli-agent;",
+            r#"{"v":1,"agent":"omp","event":"session-start","session_id":"01a0d21f-2f79-72e0-bb16-d6d908aaa6e0"}"#,
+            "\x07",
+        );
+        apply_signals(&mut st, sniffer.feed(omp.as_bytes()));
+        assert_eq!(st.agent, Some(CLIAgent::OhMyPi));
+
+        let claude = concat!(
+            "\x1b]777;notify;tty7://cli-agent;",
+            r#"{"v":1,"agent":"claude","event":"session-start","session_id":"e18a20ff-4c8c-4b94-867b-dd4b79032a6c"}"#,
+            "\x07",
+        );
+        apply_signals(&mut st, sniffer.feed(claude.as_bytes()));
+        assert_eq!(
+            st.agent_session.as_ref().unwrap().session_id.as_deref(),
+            Some("01a0d21f-2f79-72e0-bb16-d6d908aaa6e0"),
+            "a Claude hook on an omp pane must not steal the session id"
+        );
+
+        apply_agent(&mut st, Some((CLIAgent::Claude, vec!["claude".into()])));
+        assert!(
+            st.agent_session.is_none(),
+            "switching the foreground agent drops the previous session"
+        );
     }
 
     #[test]

@@ -549,6 +549,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
             "点击行上的 +N −N 在浮层中打开 worktree diff。关闭后计数仍显示，只是不可点击。"
         }
+        L10nKey::SettingsSshTabTitle => "SSH 标签页标题",
+        L10nKey::SettingsSshTabTitleDesc => {
+            "SSH 标签页显示的名字。“动态”跟随远端设置的标题；另外两项把标签页固定为主机。手动重命名过的标签页保留其名字。"
+        }
+        L10nKey::SettingsSshTabTitleDynamic => "动态",
+        L10nKey::SettingsSshTabTitleProfileName => "配置名称",
+        L10nKey::SettingsSshTabTitleHostname => "主机名",
         L10nKey::DocumentDock => "停靠在终端旁",
         L10nKey::DocumentFill => "铺满窗口",
         L10nKey::SettingsNotifications => "通知",
@@ -896,6 +903,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "侧栏分组 标签页 分组 仓库 git 侧栏 文件夹 目录 sidebar grouping tabs repo repository folder directory"
         }
+        L10nKey::SettingsSearchSshTabTitleKeywords => {
+            "SSH 标签页 标题 名称 主机 主机名 配置 别名 固定 ssh tab title name host hostname profile alias pin"
+        }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "智能选择 双击 选择 单词 URL 路径 邮箱 括号 smart selection double click"
         }
@@ -977,6 +987,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SshEditProfile => "编辑连接…",
         L10nKey::ForwardTooltipAdd => "添加转发",
         L10nKey::ForwardTooltipRemove => "移除",
+        L10nKey::ForwardTooltipTurnOn => "开启",
+        L10nKey::ForwardTooltipTurnOff => "关闭——规则会保留",
+        L10nKey::ForwardSwitchFailed => "无法切换这条转发——{error}",
+        L10nKey::SettingsFwdEnabled => "连接时开启这条规则",
         L10nKey::ForwardLocal => "本地",
         L10nKey::ForwardRemote => "远程",
         L10nKey::ForwardDynamic => "动态",
@@ -1156,6 +1170,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmShowMore => "展开",
         L10nKey::ScmShowLess => "收起",
         L10nKey::ScmCommitNotFound => "本仓库中没有这个提交。",
+        L10nKey::ScmFilterChanges => "筛选变更文件…",
+        L10nKey::ScmViewAsTree => "以树形显示",
+        L10nKey::ScmViewAsList => "以列表显示",
+        L10nKey::ScmNoMatchingChanges => "没有匹配筛选的变更文件。",
         L10nKey::ScmTooManyChanges => "改动过多，仅显示前 {shown} 项（共 {total} 项）。",
         L10nKey::ScmOpenChanges => "查看改动",
         L10nKey::ScmDiscardAllConfirm => {
