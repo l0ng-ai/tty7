@@ -24,7 +24,8 @@ use uuid::Uuid;
 
 use crate::core::config::{
     BellMode, Config, CursorStyle, LinkFileOpen, MouseZoomModifier, NewTabPosition, NotifyMode,
-    SshTabTitle, TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel, WindowBackdrop,
+    PromptCursorStyle, SshTabTitle, TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel,
+    WindowBackdrop,
 };
 use crate::core::keychain::{
     CredentialRef, CredentialStore as _, OsCredentialStore, key_account_from_contents,
@@ -575,6 +576,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Appearance,
+            title: SettingsPromptCursorShape,
+            keywords: SettingsSearchPromptCursorShapeKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
             title: SettingsCursorBlink,
             keywords: SettingsSearchCursorBlinkKeywords,
         },
@@ -892,12 +898,43 @@ fn settings_search_entries() -> &'static [SearchEntry] {
     ]
 }
 
+/// The rows of the cursor shape dropdown, in `CURSOR_SHAPES` order.
+pub(crate) fn cursor_shape_labels() -> Vec<String> {
+    [
+        L10nKey::CursorShapeBlock,
+        L10nKey::CursorShapeBar,
+        L10nKey::CursorShapeUnderline,
+    ]
+    .into_iter()
+    .map(|key| t(key).to_string())
+    .collect()
+}
+
+pub(crate) const CURSOR_SHAPES: [CursorStyle; 3] =
+    [CursorStyle::Block, CursorStyle::Bar, CursorStyle::Underline];
+
+/// The rows of the prompt cursor shape dropdown, in `PROMPT_CURSOR_SHAPES`
+/// order: follow, then the shapes.
+pub(crate) fn prompt_cursor_shape_labels() -> Vec<String> {
+    let mut rows = vec![t(L10nKey::PromptCursorShapeFollow).to_string()];
+    rows.extend(cursor_shape_labels());
+    rows
+}
+
+pub(crate) const PROMPT_CURSOR_SHAPES: [PromptCursorStyle; 4] = [
+    PromptCursorStyle::Follow,
+    PromptCursorStyle::Block,
+    PromptCursorStyle::Bar,
+    PromptCursorStyle::Underline,
+];
+
 impl SearchEntry {
     fn config_key(&self) -> &'static str {
         match self.title {
             L10nKey::SettingsDimInactivePanes => "dim_inactive_panes",
             L10nKey::SettingsCursorBlink => "cursor_blink",
             L10nKey::SettingsCursorShape => "cursor_style",
+            L10nKey::SettingsPromptCursorShape => "prompt_cursor_style",
             L10nKey::SettingsScrollback => "scrollback_limit",
             L10nKey::SettingsNewTabPosition => "new_tab_position",
             L10nKey::SettingsTabBarPosition => "tab_bar_position",
@@ -984,6 +1021,7 @@ impl SearchEntry {
             L10nKey::SettingsFontLigatures => t(L10nKey::SettingsFontLigaturesDesc),
             L10nKey::SettingsFontThicken => t(L10nKey::SettingsFontThickenDesc),
             L10nKey::SettingsCursorShape => t(L10nKey::SettingsCursorShapeDesc),
+            L10nKey::SettingsPromptCursorShape => t(L10nKey::SettingsPromptCursorShapeDesc),
             L10nKey::SettingsCursorBlink => t(L10nKey::SettingsCursorBlinkDesc),
             L10nKey::SettingsBackgroundImage => t(L10nKey::SettingsBackgroundImageDesc),
             L10nKey::SettingsImageOpacity => t(L10nKey::SettingsImageOpacityDesc),
@@ -1050,6 +1088,9 @@ impl SearchEntry {
             }
             L10nKey::SettingsCursorBlink => cfg.cursor_blink != defaults.cursor_blink,
             L10nKey::SettingsCursorShape => cfg.cursor_style != defaults.cursor_style,
+            L10nKey::SettingsPromptCursorShape => {
+                cfg.prompt_cursor_style != defaults.prompt_cursor_style
+            }
             L10nKey::SettingsScrollback => cfg.scrollback_limit != defaults.scrollback_limit,
             L10nKey::SettingsNewTabPosition => cfg.new_tab_position != defaults.new_tab_position,
             L10nKey::SettingsTabBarPosition => cfg.tab_bar_position != defaults.tab_bar_position,
@@ -1301,6 +1342,8 @@ pub(crate) struct SettingsState {
     pub(crate) font_italic_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) ui_font_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) language_select: Entity<SelectState<SearchableVec<String>>>,
+    pub(crate) cursor_style_select: Entity<SelectState<SearchableVec<String>>>,
+    pub(crate) prompt_cursor_style_select: Entity<SelectState<SearchableVec<String>>>,
     #[cfg(target_os = "windows")]
     pub(crate) window_backdrop_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) shell_program_input: Entity<InputState>,
@@ -3525,8 +3568,14 @@ impl Tty7App {
                 ),
                 None => return div().into_any_element(),
             };
+        let (cursor_style_select, prompt_cursor_style_select) = match self.active_settings() {
+            Some(s) => (
+                s.cursor_style_select.clone(),
+                s.prompt_cursor_style_select.clone(),
+            ),
+            None => return div().into_any_element(),
+        };
         let cfg = cx.global::<Config>();
-        let cursor_style = cfg.cursor_style;
         let cursor_blink = cfg.cursor_blink;
         let font_thicken = cfg.font_thicken;
         let font_ligatures = cfg.font_features.as_ref().is_some_and(|features| {
@@ -3646,29 +3695,15 @@ impl Tty7App {
             )
         });
 
-        let cursor_idx = match cursor_style {
-            CursorStyle::Block => 0,
-            CursorStyle::Bar => 1,
-            CursorStyle::Underline => 2,
+        let cursor_dropdown = |state: &Entity<SelectState<SearchableVec<String>>>| {
+            Select::new(state)
+                .small()
+                .w(px(FIELD_W))
+                .h(px(24.))
+                .into_any_element()
         };
-        let cursor_style_control = self.segmented(
-            "cursor-style",
-            &[
-                t(L10nKey::CursorShapeBlock),
-                t(L10nKey::CursorShapeBar),
-                t(L10nKey::CursorShapeUnderline),
-            ],
-            cursor_idx,
-            cx,
-            |this, ix, _w, cx| {
-                let style = match ix {
-                    0 => CursorStyle::Block,
-                    1 => CursorStyle::Bar,
-                    _ => CursorStyle::Underline,
-                };
-                this.set_cursor_style(style, cx);
-            },
-        );
+        let cursor_style_control = cursor_dropdown(&cursor_style_select);
+        let prompt_cursor_style_control = cursor_dropdown(&prompt_cursor_style_select);
         let blink_switch = crate::ui::theme::switch("cursor-blink", cx)
             .checked(cursor_blink)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_cursor_blink(*on, cx)))
@@ -3743,6 +3778,12 @@ impl Tty7App {
                 t(L10nKey::SettingsCursorShape),
                 t(L10nKey::SettingsCursorShapeDesc),
                 cursor_style_control,
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsPromptCursorShape),
+                t(L10nKey::SettingsPromptCursorShapeDesc),
+                prompt_cursor_style_control,
                 cx,
             ))
             .child(self.settings_row(

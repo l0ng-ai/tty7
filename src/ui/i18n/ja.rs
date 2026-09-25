@@ -142,6 +142,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCursor => "カーソル",
         L10nKey::SettingsCursorShape => "カーソルの形状",
         L10nKey::SettingsCursorShapeDesc => "ターミナルカーソルの描画方法",
+        L10nKey::SettingsPromptCursorShape => "プロンプトのカーソル形状",
+        L10nKey::SettingsPromptCursorShapeDesc => {
+            "シェルプロンプトでのカーソル。「追従」は上のカーソル形状をどこでも使う"
+        }
         L10nKey::SettingsCursorBlink => "カーソルの点滅",
         L10nKey::SettingsCursorBlinkDesc => {
             "ターミナルがフォーカスされている間、カーソルを点滅させる"
@@ -862,6 +866,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchCursorShapeKeywords => {
             "カーソル 形状 ブロック バー アンダーライン ビーム cursor shape caret block bar underline beam"
+        }
+        L10nKey::SettingsSearchPromptCursorShapeKeywords => {
+            "プロンプト カーソル 形状 ブロック バー 下線 prompt cursor shape caret block bar underline beam"
         }
         L10nKey::SettingsSearchCustomThemesKeywords => {
             "テーマ 複製 編集 色 フォルダ 背景画像 壁紙 yaml インポート custom themes duplicate edit colors folder import background image wallpaper"
@@ -1887,6 +1894,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CursorShapeBlock => "ブロック",
         L10nKey::CursorShapeBar => "バー",
         L10nKey::CursorShapeUnderline => "下線",
+        L10nKey::PromptCursorShapeFollow => "追従",
         L10nKey::PaletteTryDifferentSearch => "別のキーワードを試してください。",
         L10nKey::CompletionListingRemote => "リモートを一覧しています…",
         L10nKey::CompletionRemoteListingFailed => "リモートの一覧に失敗しました — {error}",

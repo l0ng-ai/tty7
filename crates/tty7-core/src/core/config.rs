@@ -331,6 +331,13 @@ pub struct Config {
 
     #[serde(default, deserialize_with = "de_lenient")]
     pub cursor_style: CursorStyle,
+    /// The caret's shape while the shell waits at a prompt, whether tty7's
+    /// inline editor or the shell's own line editor draws it. `follow` keeps
+    /// `cursor_style` everywhere; any other value leaves `cursor_style` to the
+    /// programs the shell runs, which is how kitty and ghostty put a bar at
+    /// the prompt and a block inside a TUI that never sets a shape itself.
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub prompt_cursor_style: PromptCursorStyle,
 
     pub macos_option_as_alt: bool,
     pub mouse_hide_while_typing: bool,
@@ -534,6 +541,28 @@ pub enum CursorStyle {
     Block,
     Bar,
     Underline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PromptCursorStyle {
+    #[default]
+    Follow,
+    Block,
+    Bar,
+    Underline,
+}
+
+impl PromptCursorStyle {
+    /// The shape this names, or `None` when the prompt follows `cursor_style`.
+    pub fn shape(self) -> Option<CursorStyle> {
+        match self {
+            Self::Follow => None,
+            Self::Block => Some(CursorStyle::Block),
+            Self::Bar => Some(CursorStyle::Bar),
+            Self::Underline => Some(CursorStyle::Underline),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -763,6 +792,7 @@ impl Default for Config {
             tab_completion: true,
             history_search: true,
             cursor_style: CursorStyle::Block,
+            prompt_cursor_style: PromptCursorStyle::Follow,
             macos_option_as_alt: false,
             mouse_hide_while_typing: true,
             focus_follows_mouse: false,
@@ -3056,5 +3086,25 @@ mod tests {
             let back: Config = serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
             assert_eq!(back.ssh_tab_title, mode);
         }
+    }
+
+    #[test]
+    fn prompt_cursor_style_defaults_to_following_cursor_style() {
+        assert_eq!(
+            Config::default().prompt_cursor_style,
+            PromptCursorStyle::Follow
+        );
+        assert_eq!(PromptCursorStyle::Follow.shape(), None);
+
+        let cfg: Config =
+            serde_json::from_str(r#"{"cursor_style": "block", "prompt_cursor_style": "bar"}"#)
+                .unwrap();
+        assert_eq!(cfg.cursor_style, CursorStyle::Block);
+        assert_eq!(cfg.prompt_cursor_style.shape(), Some(CursorStyle::Bar));
+
+        // A value this build does not know falls back rather than failing the
+        // whole config.
+        let cfg: Config = serde_json::from_str(r#"{"prompt_cursor_style": "beam"}"#).unwrap();
+        assert_eq!(cfg.prompt_cursor_style, PromptCursorStyle::Follow);
     }
 }

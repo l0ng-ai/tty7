@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::index::{Column as AlacColumn, Line as AlacLine, Point as AlacPoint};
 use alacritty_terminal::selection::SelectionRange;
+use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Rgb};
 use gpui::{
@@ -1801,6 +1802,17 @@ impl GridSnapshot {
 }
 
 impl TerminalElement {
+    /// The shape `prompt_cursor_style` puts on the grid cursor while the shell
+    /// waits at a prompt with its own line editor — `prompt_editor` off, or a
+    /// line handed back to ZLE/readline. Shell integration has no mark for "a
+    /// prompt plugin set this shape", so the one it does report, vi mode, keeps
+    /// the shell's own insert/normal shapes.
+    pub(super) fn prompt_cursor_shape(&self, cx: &App) -> Option<crate::core::config::CursorStyle> {
+        let shape = cx.global::<Config>().prompt_cursor_style.shape()?;
+        let terminal = &self.view.read(cx).terminal;
+        (terminal.at_prompt() && !terminal.shell_vi_mode()).then_some(shape)
+    }
+
     pub(super) fn build_grid(
         &self,
         colors: &PaintColors,
@@ -1818,6 +1830,7 @@ impl TerminalElement {
         let mut any_selected = false;
         let display_offset;
         let history_size;
+        let prompt_shape = self.prompt_cursor_shape(cx);
         {
             let mut palette = self.view.read(cx).terminal.palette;
             if let Some(active) = cx.try_global::<crate::terminal::palette::ActivePalette>() {
@@ -1933,7 +1946,11 @@ impl TerminalElement {
                     col,
                     ime_col,
                     hidden: cursor_hidden,
-                    style: cursor_style_from_shape(cur.shape),
+                    // Checked under the grid lock: `on_alt_screen` would take
+                    // it a second time.
+                    style: prompt_shape
+                        .filter(|_| !term.mode().contains(TermMode::ALT_SCREEN))
+                        .unwrap_or_else(|| cursor_style_from_shape(cur.shape)),
                 });
             }
         }
