@@ -851,6 +851,19 @@ impl NewTabMenu {
                 });
             }
         }));
+        // The agents' seam into the palette, the same way the row above is the
+        // hosts': the menu names none of them, the palette holds them all.
+        let app = self.app.clone();
+        menu = menu.item(PopupMenuItem::new(t(L10nKey::TabMenuLaunchAgent)).on_click(
+            move |_, window, cx| {
+                if let Some(app) = app.upgrade() {
+                    app.update(cx, |this, cx| {
+                        let query = crate::ui::agent_launch::PALETTE_AGENT_QUERY;
+                        this.open_palette(query, window, cx);
+                    });
+                }
+            },
+        ));
 
         // The one place ⌥ is spelled out. Nothing else in the app teaches it,
         // and a modifier nobody is told about is a feature nobody has. No rule

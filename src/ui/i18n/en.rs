@@ -1507,6 +1507,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdCopyWorkingDirectory => "Copy Working Directory",
         L10nKey::CmdCopySessionId => "Copy Session ID",
         L10nKey::CmdCopySessionIdSubtitle => "the coding agent's own session id",
+        L10nKey::CmdNewAgentTab => "New Agent Tab",
+        L10nKey::CmdNewAgentTabSubtitle => "open the coding agent you used last in a new tab",
         L10nKey::CmdForkSession => "Fork Session",
         L10nKey::CmdForkSessionSubtitle => "branch this agent session into a new tab",
         L10nKey::CmdMarkTabAsUnread => "Mark Tab as Unread",
@@ -1668,6 +1670,15 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "No uncommitted changes in {cwd} (or not a git repository)."
         }
         L10nKey::AppCmdSshProfileTitle => "SSH: {title}",
+        L10nKey::AppCmdAgentLaunchTitle => "Agent: {name}",
+        L10nKey::AppNoAgentOnPath => "No coding agent was found on this machine's PATH",
+        L10nKey::AppNoAgentSeenHere => {
+            "No coding agent has run in this workspace yet — start one by hand once and it will be offered here"
+        }
+        L10nKey::AppAgentLaunchSaved => "{name} will now launch as: {command}",
+        L10nKey::AppAgentLaunchArgsUnknown => {
+            "{name} did not report the arguments it was started with"
+        }
         L10nKey::AppCmdSwitchToTab => "Switch to Tab: {label}",
         L10nKey::AppPlaceholderDescription => "description",
         L10nKey::AppPlaceholderSshQuickConnect => "user@host  or  user@host:port",
@@ -1826,6 +1837,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppMenuCopyWorkingDirectory => "Copy Working Directory",
         L10nKey::AppMenuCopySessionId => "Copy Session ID",
         L10nKey::AppMenuForkSession => "Fork Session",
+        L10nKey::AppMenuSaveAgentLaunchArgs => "Set Current Launch Args as Default",
         L10nKey::AppMenuClosePaneTab => "Close",
         L10nKey::AppMenuCloseOtherTabs => "Close Other Tabs",
         L10nKey::AppMenuCloseTabsRight => "Close Tabs to the Right",
@@ -1884,6 +1896,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TabMenuLocalShells => "Local",
         L10nKey::TabMenuAddHost => "Add SSH Host…",
         L10nKey::TabMenuAllHosts => "All SSH Hosts…",
+        L10nKey::TabMenuLaunchAgent => "Launch Agent…",
         L10nKey::TabMenuSplitHint => "Hold {key} to split",
         L10nKey::TabUnnamedShell => "Shell {n}",
         L10nKey::ShellDefault => "default",

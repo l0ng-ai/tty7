@@ -3774,6 +3774,7 @@ impl Tty7App {
                     spawn.agent_launch_argv.as_deref(),
                     cx,
                 )
+                .or_else(|| spawn.run_on_land.clone())
             })
             .flatten();
         let view = build_terminal_view(parts, font_size, window, cx);
@@ -3888,8 +3889,21 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.new_tab_slot(cwd, shell, window, cx);
+    }
+
+    /// [`Self::new_tab_with_cwd`], answering with the pane it opened — `None`
+    /// when nothing opened, so a caller about to type into the new pane has
+    /// nothing to type into rather than whatever was focused before.
+    pub(crate) fn new_tab_slot(
+        &mut self,
+        cwd: Option<std::path::PathBuf>,
+        shell: Option<ShellSpec>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<PaneSlot> {
         if !self.guard_local_spawn(window, cx) {
-            return;
+            return None;
         }
         let group = self.spawn_group(cwd.as_deref(), cx);
         let tab = match new_terminal(
@@ -3911,7 +3925,7 @@ impl Tty7App {
                 self.startup_error = Some(gpui::SharedString::from(text.clone()));
                 window.push_notification(text, cx);
                 cx.notify();
-                return;
+                return None;
             }
         };
         // Something opened, so whatever the last failure was is stale.
@@ -3919,7 +3933,7 @@ impl Tty7App {
         self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
-        let new_tab = Tab::new(Pane::leaf(tab));
+        let new_tab = Tab::new(Pane::leaf(tab.clone()));
         if let Some(group) = group {
             *new_tab.sidebar_group.borrow_mut() = group;
         }
@@ -3928,6 +3942,7 @@ impl Tty7App {
         self.focus_active(window, cx);
         self.save_session(cx);
         cx.notify();
+        Some(tab)
     }
 
     pub(crate) fn open_native_ssh_tab(
@@ -4011,15 +4026,24 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(target) = self
+        self.split_slot(axis, spawn, window, cx);
+    }
+
+    /// [`Self::split_into`], answering with the pane it placed, or `None`
+    /// when nothing was placed.
+    pub(crate) fn split_slot(
+        &mut self,
+        axis: Axis,
+        spawn: Option<SpawnAs>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<PaneSlot> {
+        let target = self
             .tabs
             .get(self.active)
-            .and_then(|t| t.pane.focused_or_first(window, cx))
-        else {
-            return;
-        };
+            .and_then(|t| t.pane.focused_or_first(window, cx))?;
         if !self.guard_local_spawn(window, cx) {
-            return;
+            return None;
         }
         let cwd = target.read(cx).spawnable_cwd();
         let spawn = match spawn {
@@ -4047,7 +4071,7 @@ impl Tty7App {
                             ),
                             cx,
                         );
-                        return;
+                        return None;
                     }
                 }
             }
@@ -4069,22 +4093,23 @@ impl Tty7App {
                             t_fmt(L10nKey::AppSplitPaneFailed, &[("error", &e.to_string())]),
                             cx,
                         );
-                        return;
+                        return None;
                     }
                 }
             }
         };
-        if let Some(tab) = self.tabs.get_mut(self.active) {
-            if tab
-                .pane
-                .split_leaf(target.entity_id(), axis, false, new.clone())
-            {
-                self.maximized = None;
-                self.focus_leaf(&new, window, cx);
-                self.save_session(cx);
-                cx.notify();
-            }
+        let tab = self.tabs.get_mut(self.active)?;
+        if !tab
+            .pane
+            .split_leaf(target.entity_id(), axis, false, new.clone())
+        {
+            return None;
         }
+        self.maximized = None;
+        self.focus_leaf(&new, window, cx);
+        self.save_session(cx);
+        cx.notify();
+        Some(new)
     }
 
     fn close_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5452,6 +5477,20 @@ impl Tty7App {
             );
         }
 
+        for agent in self.offered_agents(cx) {
+            commands.push(
+                Command::new(
+                    t_fmt(
+                        L10nKey::AppCmdAgentLaunchTitle,
+                        &[("name", agent.display_name())],
+                    ),
+                    CommandKind::LaunchAgent(agent),
+                )
+                .with_subtitle(agent.launch_command(&cx.global::<Config>().agent_launch))
+                .in_group(CommandGroup::Agents),
+            );
+        }
+
         for (i, tab) in self.tabs.iter().enumerate() {
             if i == self.active {
                 continue;
@@ -5634,6 +5673,13 @@ impl Tty7App {
             CopyWorkingDirectory => self.copy_active_cwd(window, cx),
             MarkTabUnread => self.mark_tab_unread(self.active, cx),
             ForkAgentSession => self.fork_active_pane_session(ForkPlacement::NewTab, window, cx),
+            NewAgentTab => self.new_agent_tab(window, cx),
+            // Picked from the palette with ⌥ held, the way a New Tab menu row
+            // is: a split beside the focused pane instead of a tab.
+            LaunchAgent(agent) => {
+                let at = SpawnWhere::from_modifiers(window.modifiers());
+                self.launch_agent(agent, at, window, cx)
+            }
             CopyAgentSessionId => self.copy_agent_session_id(self.active, window, cx),
             RenameWorkspace => self.start_workspace_rename(window, cx),
             OpenSettings => self.toggle_settings(window, cx),
@@ -8937,6 +8983,15 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &CopyAgentSessionId, window, cx| {
                     this.copy_agent_session_id(this.active, window, cx)
                 }))
+                .on_action(
+                    cx.listener(|this, _: &NewAgentTab, window, cx| this.new_agent_tab(window, cx)),
+                )
+                .on_action(cx.listener(|this, action: &LaunchAgent, window, cx| {
+                    this.launch_agent(action.agent, SpawnWhere::NewTab, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SaveAgentLaunchArgs, window, cx| {
+                    this.save_agent_launch_args(window, cx)
+                }))
                 .on_action(cx.listener(|this, _: &ShowKeyboardShortcuts, window, cx| {
                     this.open_settings_section(SettingsSection::Keybindings, window, cx)
                 }))
@@ -9372,6 +9427,7 @@ pub(crate) fn new_terminal(
         agent: None,
         agent_session_id: None,
         agent_launch_argv: None,
+        run_on_land: None,
         owner,
         font_size,
     };
@@ -9448,6 +9504,14 @@ fn build_terminal_view(
         window,
         |app, _view, _: &crate::terminal::view::AgentSessionChanged, _window, cx| {
             app.save_session(cx);
+        },
+    )
+    .detach();
+    cx.subscribe_in(
+        &view,
+        window,
+        |app, _view, ev: &crate::terminal::view::AgentDetected, _window, cx| {
+            app.note_agent_detected(ev.0, cx);
         },
     )
     .detach();
@@ -10581,6 +10645,7 @@ mod tests {
                         agent: Some(CLIAgent::Claude),
                         agent_session_id: Some("sid-abc".to_string()),
                         agent_launch_argv: Some(vec!["claude".to_string()]),
+                        run_on_land: None,
                         owner: None,
                         font_size: 14.0,
                     },
@@ -12196,6 +12261,7 @@ mod tab_focus_memory_tests {
                     agent: None,
                     agent_session_id: None,
                     agent_launch_argv: None,
+                    run_on_land: None,
                     owner: None,
                     font_size: 14.,
                 },

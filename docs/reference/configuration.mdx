@@ -177,6 +177,8 @@ angle brackets, and a tab:
 | Key | Type | Default | |
 |---|---|---|---|
 | `agent_commands` | object | `{}` | Map a wrapper command to an agent slug: `{"cc": "claude"}`. |
+| `agent_launch` | object | `{}` | The command line quick launch types for an agent, by slug: `{"claude": "claude --dangerously-skip-permissions"}`. Unset agents launch as their bare binary. [More →](/agents/overview#quick-launch) |
+| `agent_frecency` | object | `{}` | Written by tty7: how often and how recently each agent ran, to order quick launch. |
 | `restore_agent_sessions` | bool | `true` | Relaunch an agent conversation when a lost pane is restored. |
 | `install_cli_on_path` | bool | `true` | Put the bundled `tty7` command on PATH at launch. |
 

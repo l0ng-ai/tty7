@@ -27,8 +27,8 @@ use super::typeahead::{RawInput, Typeahead};
 use crate::core::actions::{
     CloseActiveTab, CopyLinkPathUnderPointer, DecreaseFontSize, ForkAgentSessionDown,
     ForkAgentSessionLeft, ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab,
-    OpenLinkUnderPointer, RevealLinkUnderPointer, SendBackTab, SendTab, SplitDown, SplitRight,
-    ToggleMaximizePane,
+    OpenLinkUnderPointer, RevealLinkUnderPointer, SaveAgentLaunchArgs, SendBackTab, SendTab,
+    SplitDown, SplitRight, ToggleMaximizePane,
 };
 use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier, NotifyMode};
 use crate::core::shell_quote::quote_for_shell;
@@ -139,6 +139,12 @@ impl gpui::EventEmitter<AuthPromptReady> for TerminalView {}
 pub struct AgentSessionChanged;
 
 impl gpui::EventEmitter<AgentSessionChanged> for TerminalView {}
+
+/// A coding agent started running in this pane: its foreground went from no
+/// agent to this one. What quick launch counts as the agent being used.
+pub struct AgentDetected(pub crate::core::cli_agent::CLIAgent);
+
+impl gpui::EventEmitter<AgentDetected> for TerminalView {}
 
 /// A file link the user clicked, on its way to whoever can show it. The
 /// terminal resolves the path — it is the only thing that knows the pane's
@@ -436,6 +442,9 @@ pub struct TerminalView {
     running_since: Option<std::time::Instant>,
     running_title: String,
     running_agent: Option<crate::core::cli_agent::CLIAgent>,
+    /// The foreground agent as of the last poll, so a new one is reported
+    /// once ([`AgentDetected`]) rather than on every frame it keeps running.
+    seen_agent: Option<crate::core::cli_agent::CLIAgent>,
     last_agent_status: Option<crate::core::cli_agent::AgentStatus>,
     last_agent_session: (Option<String>, Option<Vec<String>>),
     agent_turn_started: Option<std::time::Instant>,
@@ -1666,6 +1675,7 @@ impl TerminalView {
             running_since: None,
             running_title: String::new(),
             running_agent: None,
+            seen_agent: None,
             last_agent_status: None,
             last_agent_session: (None, None),
             agent_turn_started: None,
@@ -3772,6 +3782,14 @@ impl TerminalView {
                 }
             }
             _ => {}
+        }
+
+        let agent = self.terminal.foreground_agent();
+        if agent != self.seen_agent {
+            self.seen_agent = agent;
+            if let Some(agent) = agent {
+                cx.emit(AgentDetected(agent));
+            }
         }
 
         let turn_finished = self.poll_agent_status(notify_allowed, window, cx);
@@ -7328,6 +7346,12 @@ impl Render for TerminalView {
                 let fork_ready = can_fork
                     && view.remote_context().is_none()
                     && view.agent_session().is_some_and(|s| s.session_id.is_some());
+                // `None` over a pane with no agent; otherwise whether it knows
+                // the command line it was started with.
+                let launch_argv_known = view.agent().map(|_| {
+                    view.agent_session()
+                        .is_some_and(|s| s.launch_argv.is_some())
+                });
 
                 let menu = match (can_fork, fork_ready) {
                     (true, true) => {
@@ -7359,6 +7383,21 @@ impl Render for TerminalView {
                         .separator()
                         .item(PopupMenuItem::new(t(L10nKey::AppMenuForkSession)).disabled(true)),
                     (false, _) => menu,
+                };
+
+                // Only over a running agent, and only live when the pane knows
+                // the command line it was started with — there is nothing to
+                // save otherwise. Beside Fork when both are there.
+                let menu = match launch_argv_known {
+                    Some(known) => {
+                        let menu = if can_fork { menu } else { menu.separator() };
+                        menu.menu_with_disabled(
+                            t(L10nKey::AppMenuSaveAgentLaunchArgs),
+                            Box::new(SaveAgentLaunchArgs),
+                            !known,
+                        )
+                    }
+                    None => menu,
                 };
 
                 menu.separator()

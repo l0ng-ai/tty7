@@ -391,6 +391,17 @@ pub struct Config {
 
     #[serde(default)]
     pub agent_commands: HashMap<String, String>,
+    /// The command line a quick launch types for an agent, keyed by its slug:
+    /// `{"claude": "claude --dangerously-skip-permissions"}`. An agent with no
+    /// entry is launched as its bare binary. A wrapper named here is detected
+    /// as that agent without an `agent_commands` entry of its own.
+    #[serde(default)]
+    pub agent_launch: HashMap<String, String>,
+    /// How often and how recently each agent (by slug) was launched or seen
+    /// running — what orders the quick-launch commands and picks the agent
+    /// "New Agent Tab" opens.
+    #[serde(default)]
+    pub agent_frecency: HashMap<String, ProfileUsage>,
     #[serde(default = "default_true")]
     pub restore_agent_sessions: bool,
     /// Give each pane its own shell history instead of one file every pane
@@ -717,6 +728,8 @@ impl Default for Config {
             ssh_profile_frecency: HashMap::new(),
             command_frecency: HashMap::new(),
             agent_commands: HashMap::new(),
+            agent_launch: HashMap::new(),
+            agent_frecency: HashMap::new(),
             restore_agent_sessions: true,
             per_pane_history: false,
             quarantined: false,
@@ -1194,15 +1207,44 @@ pub fn extra_env() -> HashMap<String, String> {
     Config::load().env
 }
 
-pub fn agent_commands_cached() -> &'static HashMap<String, String> {
-    static CACHE: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| {
-        Config::load()
-            .agent_commands
-            .into_iter()
-            .map(|(k, v)| (k.to_ascii_lowercase(), v))
-            .collect()
-    })
+/// Every wrapper name the daemon should read as an agent: `agent_commands`,
+/// plus the programs `agent_launch` entries run (see
+/// [`crate::core::cli_agent::launch_aliases`]). An explicit `agent_commands`
+/// entry wins over an implied one.
+///
+/// Read again whenever `config.json` changes rather than once per process: the
+/// daemon outlives any number of edits, and a launch override added while it
+/// runs has to be recognised by the very next launch that uses it.
+pub fn agent_detection_aliases() -> std::sync::Arc<HashMap<String, String>> {
+    type Stamp = Option<(std::time::SystemTime, u64)>;
+    static CACHE: std::sync::Mutex<Option<(Stamp, std::sync::Arc<HashMap<String, String>>)>> =
+        std::sync::Mutex::new(None);
+    let stamp: Stamp = Config::path()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| Some((m.modified().ok()?, m.len())));
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((seen, aliases)) = cache.as_ref()
+        && *seen == stamp
+    {
+        return aliases.clone();
+    }
+    let cfg = Config::load();
+    let aliases = std::sync::Arc::new(detection_aliases(&cfg.agent_commands, &cfg.agent_launch));
+    *cache = Some((stamp, aliases.clone()));
+    aliases
+}
+
+/// [`agent_detection_aliases`] over the two maps it reads, for a caller that
+/// already holds them.
+pub fn detection_aliases(
+    commands: &HashMap<String, String>,
+    launch: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut aliases = crate::core::cli_agent::launch_aliases(launch);
+    for (name, slug) in commands {
+        aliases.insert(name.to_ascii_lowercase(), slug.clone());
+    }
+    aliases
 }
 
 fn default_preset() -> String {
@@ -2551,5 +2593,32 @@ mod tests {
         std::fs::write(exe_dir.path().join(PORTABLE_MARKER), "portable-v1").unwrap();
         std::fs::write(exe_dir.path().join(PORTABLE_DATA_DIR), "").unwrap();
         assert_eq!(portable_data_dir(exe_dir.path()), None);
+    }
+
+    #[test]
+    fn launch_overrides_teach_the_daemon_their_wrappers_as_the_file_changes() {
+        let _guard = lock_config_file();
+        pin_config_dir();
+        let mut cfg = Config::default();
+        cfg.agent_launch
+            .insert("claude".to_string(), "cc --fast".to_string());
+        cfg.save();
+        let aliases = agent_detection_aliases();
+        assert_eq!(aliases.get("cc").map(String::as_str), Some("claude"));
+
+        // An edit made while the daemon runs is picked up on the next read,
+        // and an explicit `agent_commands` entry outranks an implied one.
+        cfg.agent_launch
+            .insert("codex".to_string(), "/opt/bin/cx".to_string());
+        cfg.agent_commands
+            .insert("CC".to_string(), "gemini".to_string());
+        cfg.save();
+        let aliases = agent_detection_aliases();
+        assert_eq!(aliases.get("cc").map(String::as_str), Some("gemini"));
+        assert_eq!(aliases.get("cx").map(String::as_str), Some("codex"));
+
+        let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.agent_launch, cfg.agent_launch);
+        Config::default().save();
     }
 }

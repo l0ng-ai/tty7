@@ -304,6 +304,32 @@ impl CLIAgent {
     }
 
     fn replay_flags(self, argv: &[String]) -> Option<Vec<String>> {
+        let tail = self.session_free_tail(argv)?;
+        let safe = |t: &str| {
+            !t.is_empty()
+                && t.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_=./,:@+~".contains(&b))
+        };
+        if !tail.iter().all(|t| safe(t)) {
+            return None;
+        }
+        let mut prev_was_flag = false;
+        for t in &tail {
+            let is_flag = t.starts_with('-');
+            if !is_flag && !prev_was_flag {
+                return None;
+            }
+            prev_was_flag = is_flag;
+        }
+        Some(tail.into_iter().map(String::from).collect())
+    }
+
+    /// What follows the agent's own name in `argv`, with everything that names
+    /// a session taken out: the resume/fork subcommands and the flags listed as
+    /// stale for this agent, each with its value. `None` when no token in
+    /// `argv` names this agent — a wrapper, where there is no telling which
+    /// arguments are the agent's.
+    fn session_free_tail(self, argv: &[String]) -> Option<Vec<&str>> {
         let names_self = |token: &str| {
             token.split(['/', '\\']).any(|seg| {
                 CLIAgent::match_token(&base_stem(seg).to_ascii_lowercase()) == Some(self)
@@ -490,24 +516,7 @@ impl CLIAgent {
                 i += 1;
             }
         }
-
-        let safe = |t: &str| {
-            !t.is_empty()
-                && t.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-_=./,:@+~".contains(&b))
-        };
-        if !tail.iter().all(|t| safe(t)) {
-            return None;
-        }
-        let mut prev_was_flag = false;
-        for t in &tail {
-            let is_flag = t.starts_with('-');
-            if !is_flag && !prev_was_flag {
-                return None;
-            }
-            prev_was_flag = is_flag;
-        }
-        Some(tail.into_iter().map(String::from).collect())
+        Some(tail)
     }
 
     pub fn accent_rgb(self) -> u32 {
@@ -598,6 +607,58 @@ impl CLIAgent {
             .find(|a| a.aliases().contains(&token))
     }
 
+    /// The program a launch with no override runs: the first name the agent
+    /// is detected by, which is the one its installer puts on `PATH`.
+    pub fn binary(self) -> &'static str {
+        self.aliases()[0]
+    }
+
+    /// The command line a quick launch types for this agent: the user's
+    /// `agent_launch` entry when there is one, the bare binary otherwise.
+    ///
+    /// Keys are matched the way [`CLIAgent::from_slug`] reads them, so a
+    /// hand-written `"Claude"` still counts. A blank entry is no override.
+    pub fn launch_command(self, overrides: &HashMap<String, String>) -> String {
+        overrides
+            .iter()
+            .find(|(slug, _)| CLIAgent::from_slug(slug) == Some(self))
+            .map(|(_, line)| line.trim())
+            .filter(|line| !line.is_empty())
+            .map_or_else(|| self.binary().to_string(), str::to_string)
+    }
+
+    /// `argv` as a command line worth launching this agent with again: its
+    /// binary followed by the flags it ran with, minus everything that names
+    /// one particular session (a resume, a fork, a session id) and minus
+    /// positional arguments such as a prompt, which belong to that one run.
+    ///
+    /// A run that went through something that does not name the agent — a
+    /// wrapper script mapped by `agent_commands` — cannot be taken apart, so
+    /// it comes back whole: it is what was typed, and it launched the agent.
+    pub fn launch_argv_for_default(self, argv: &[String]) -> Option<Vec<String>> {
+        let env = argv.iter().take_while(|t| is_env_assignment(t)).count();
+        if argv.len() == env {
+            return None;
+        }
+        let Some(tail) = self.session_free_tail(argv) else {
+            return Some(argv.to_vec());
+        };
+        let mut out: Vec<String> = argv[..env].to_vec();
+        out.push(self.binary().to_string());
+        let mut takes_value = false;
+        for t in tail {
+            let is_flag = t.starts_with('-') && t.len() > 1;
+            if is_flag {
+                out.push(t.to_string());
+                takes_value = !t.contains('=');
+            } else if takes_value {
+                out.push(t.to_string());
+                takes_value = false;
+            }
+        }
+        Some(out)
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn detect_from_argv(argv: &[String]) -> Option<CLIAgent> {
         Self::detect_from_argv_with(argv, &HashMap::new())
@@ -621,6 +682,20 @@ impl CLIAgent {
         if let Some(agent) = custom
             .get(&launcher_stem.to_ascii_lowercase())
             .and_then(|slug| CLIAgent::from_slug(slug))
+        {
+            return Some(agent);
+        }
+
+        // A wrapper that is a script runs as its interpreter, so the name the
+        // user mapped is the script's, one token in: `bash ~/bin/cc`,
+        // `node ~/bin/cc.js`. Only the mapped names are looked for there — the
+        // built-in ones already have the scan below.
+        if (is_interpreter(launcher_stem) || is_shell(launcher_stem))
+            && let Some(agent) = rest
+                .clone()
+                .find(|a| !a.starts_with('-') && !is_env_assignment(a))
+                .and_then(|script| custom.get(&base_stem(script).to_ascii_lowercase()))
+                .and_then(|slug| CLIAgent::from_slug(slug))
         {
             return Some(agent);
         }
@@ -717,6 +792,99 @@ fn is_interpreter(stem: &str) -> bool {
             | "uvx"
             | "env"
     )
+}
+
+fn is_shell(stem: &str) -> bool {
+    matches!(
+        stem.to_ascii_lowercase().as_str(),
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish"
+    )
+}
+
+/// The program a launch command line runs: its first word that is not an
+/// environment assignment.
+pub fn launch_program(command: &str) -> Option<String> {
+    command_argv(command)
+        .into_iter()
+        .find(|t| !is_env_assignment(t))
+}
+
+/// The wrapper names `agent_launch` implies, in the shape `agent_commands`
+/// takes: `{"claude": "cc --fast"}` means a `cc` in a pane is Claude Code.
+///
+/// This is how a pane opened by a quick launch through a wrapper is still
+/// recognised without the user also writing an `agent_commands` entry: the
+/// launch typed exactly this command, so its program is known to be that
+/// agent. A program that is already an agent's own name needs no entry, and
+/// an interpreter (`npx`, `node`, `env`, …) or a shell is never mapped
+/// wholesale — `npx` is not Claude Code just because Claude Code is one of the
+/// things it can run.
+pub fn launch_aliases(overrides: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for (slug, line) in overrides {
+        let Some(agent) = CLIAgent::from_slug(slug) else {
+            continue;
+        };
+        let Some(program) = launch_program(line) else {
+            continue;
+        };
+        let stem = base_stem(&program).to_ascii_lowercase();
+        if stem.is_empty()
+            || CLIAgent::match_token(&stem).is_some()
+            || is_interpreter(&stem)
+            || is_shell(&stem)
+        {
+            continue;
+        }
+        out.insert(stem, agent.slug().to_string());
+    }
+    out
+}
+
+/// Whether `program` names an executable file, either directly (it has a
+/// directory in it) or through one of the directories in `path`.
+///
+/// On Windows a bare name is also tried with the extensions an npm or winget
+/// install leaves behind, since `claude` there is really `claude.cmd`.
+pub fn program_on_path(program: &str, path: &std::ffi::OsStr) -> bool {
+    let program = program.trim();
+    if program.is_empty() {
+        return false;
+    }
+    if program.contains(['/', '\\']) {
+        // The launch is typed into a shell, which expands a leading `~/`.
+        let home = program
+            .strip_prefix("~/")
+            .and_then(|rest| Some(std::path::PathBuf::from(std::env::var_os("HOME")?).join(rest)));
+        return is_executable(home.as_deref().unwrap_or(std::path::Path::new(program)));
+    }
+    let exts: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".cmd", ".bat", ".ps1"]
+    } else {
+        &[""]
+    };
+    std::env::split_paths(path).any(|dir| {
+        exts.iter()
+            .any(|ext| is_executable(&dir.join(format!("{program}{ext}"))))
+    })
+}
+
+fn is_executable(path: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 pub const AGENT_EVENT_SENTINEL: &str = "tty7://cli-agent";
@@ -2252,5 +2420,161 @@ mod tests {
             serde_json::to_string(&AgentStatus::Waiting).unwrap(),
             "\"waiting\""
         );
+    }
+
+    fn overrides(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_launch_is_the_bare_binary_unless_overridden() {
+        let none = HashMap::new();
+        assert_eq!(CLIAgent::Claude.launch_command(&none), "claude");
+        assert_eq!(CLIAgent::Codex.launch_command(&none), "codex");
+        assert_eq!(CLIAgent::Cursor.launch_command(&none), "cursor-agent");
+        assert_eq!(CLIAgent::Antigravity.launch_command(&none), "agy");
+        assert_eq!(CLIAgent::QoderCLI.launch_command(&none), "qoder");
+
+        let set = overrides(&[
+            ("claude", "  claude --dangerously-skip-permissions "),
+            // Keys are read the way `from_slug` reads them.
+            ("Codex", "codex --model o3"),
+            // A blank entry is no override at all.
+            ("gemini", "   "),
+        ]);
+        assert_eq!(
+            CLIAgent::Claude.launch_command(&set),
+            "claude --dangerously-skip-permissions"
+        );
+        assert_eq!(CLIAgent::Codex.launch_command(&set), "codex --model o3");
+        assert_eq!(CLIAgent::Gemini.launch_command(&set), "gemini");
+        assert_eq!(CLIAgent::Aider.launch_command(&set), "aider");
+    }
+
+    #[test]
+    fn every_agent_launches_as_a_name_it_is_detected_by() {
+        let none = HashMap::new();
+        for agent in CLIAgent::ALL {
+            let argv = command_argv(&agent.launch_command(&none));
+            assert_eq!(
+                CLIAgent::detect_from_argv(&argv),
+                Some(agent),
+                "{agent:?} would launch as something detection does not know"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapper_named_by_a_launch_override_is_detected_as_its_agent() {
+        let aliases = launch_aliases(&overrides(&[("claude", "FOO=1 cc --fast")]));
+        // Run as a binary, and run as a script under its interpreter.
+        for run in [
+            argv(&["cc", "--fast"]),
+            argv(&["/Users/me/bin/cc", "--fast"]),
+            argv(&["/bin/bash", "/Users/me/bin/cc", "--fast"]),
+            argv(&["node", "/Users/me/bin/cc.js", "--fast"]),
+        ] {
+            assert_eq!(
+                CLIAgent::detect_from_argv_with(&run, &aliases),
+                Some(CLIAgent::Claude),
+                "{run:?}"
+            );
+        }
+        // Without the override the same wrapper is nobody.
+        assert_eq!(
+            CLIAgent::detect_from_argv_with(&argv(&["cc", "--fast"]), &HashMap::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_launch_override_never_maps_an_interpreter_or_a_real_agent_name() {
+        let aliases = launch_aliases(&overrides(&[
+            ("claude", "npx @anthropic-ai/claude-code"),
+            ("codex", "bash -lc codex"),
+            // Already detected as itself; mapping it would add nothing.
+            ("gemini", "gemini --yolo"),
+            ("not-an-agent", "cc"),
+        ]));
+        assert!(aliases.is_empty(), "{aliases:?}");
+        // A shell running something else is still nobody.
+        assert_eq!(
+            CLIAgent::detect_from_argv_with(
+                &argv(&["bash", "./build.sh"]),
+                &launch_aliases(&overrides(&[("claude", "cc")]))
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn launch_args_drop_the_session_and_the_prompt_but_keep_the_flags() {
+        assert_eq!(
+            CLIAgent::Claude.launch_argv_for_default(&argv(&[
+                "node",
+                "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+                "--model",
+                "opus",
+                "--resume",
+                "abc-123",
+                "--append-system-prompt",
+                "be terse",
+                "fix the bug",
+            ])),
+            Some(argv(&[
+                "claude",
+                "--model",
+                "opus",
+                "--append-system-prompt",
+                "be terse",
+            ]))
+        );
+        assert_eq!(
+            CLIAgent::Codex.launch_argv_for_default(&argv(&[
+                "codex",
+                "resume",
+                "019a",
+                "--model=o3",
+                "prompt",
+            ])),
+            Some(argv(&["codex", "--model=o3"]))
+        );
+        // A wrapper cannot be taken apart; what was typed is what launched it.
+        assert_eq!(
+            CLIAgent::Claude.launch_argv_for_default(&argv(&["cc", "--fast", "x"])),
+            Some(argv(&["cc", "--fast", "x"]))
+        );
+        assert_eq!(CLIAgent::Claude.launch_argv_for_default(&[]), None);
+    }
+
+    #[test]
+    fn program_on_path_finds_only_executables() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let bin = dir.path().join("claude");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::write(dir.path().join("codex"), "not executable").unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(!program_on_path("codex", dir.path().as_os_str()));
+        }
+        std::fs::create_dir(dir.path().join("gemini")).unwrap();
+        let path =
+            std::env::join_paths([std::path::Path::new("/nonexistent"), dir.path()]).unwrap();
+        assert!(program_on_path("claude", &path));
+        assert!(
+            !program_on_path("gemini", &path),
+            "a directory is not a program"
+        );
+        assert!(!program_on_path("aider", &path));
+        assert!(program_on_path(
+            bin.to_str().unwrap(),
+            std::ffi::OsStr::new("")
+        ));
+        assert!(!program_on_path("", &path));
     }
 }

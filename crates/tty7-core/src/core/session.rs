@@ -374,6 +374,11 @@ pub struct WindowView {
     /// is another client's activity, not ours); opening one clears the mark.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub synced: bool,
+    /// Slugs of the coding agents seen running in this workspace, most recent
+    /// last. A remote workspace cannot be asked what is on its `PATH`, so
+    /// this is what its quick-launch list is made of.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seen_agents: Vec<String>,
 }
 
 impl Default for WindowView {
@@ -387,6 +392,7 @@ impl Default for WindowView {
             label: None,
             subject: None,
             synced: false,
+            seen_agents: Vec::new(),
         }
     }
 }
@@ -405,6 +411,17 @@ impl WindowView {
 
     pub fn is_remote(&self) -> bool {
         self.host.is_some()
+    }
+
+    /// Remember `slug` as running here, moving it to the end if it was
+    /// already known. Answers whether anything changed.
+    pub fn saw_agent(&mut self, slug: &str) -> bool {
+        if self.seen_agents.last().is_some_and(|s| s == slug) {
+            return false;
+        }
+        self.seen_agents.retain(|s| s != slug);
+        self.seen_agents.push(slug.to_string());
+        true
     }
 
     pub fn host_id(&self) -> crate::host::HostId {

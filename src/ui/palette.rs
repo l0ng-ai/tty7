@@ -35,6 +35,8 @@ pub enum CommandKind {
     MarkTabUnread,
     ForkAgentSession,
     CopyAgentSessionId,
+    NewAgentTab,
+    LaunchAgent(crate::core::cli_agent::CLIAgent),
     ResetFontSize,
     NextPane,
     PrevPane,
@@ -143,6 +145,7 @@ impl CommandKind {
             MarkTabUnread => "mark-tab-unread",
             ForkAgentSession => "fork-agent-session",
             CopyAgentSessionId => "copy-agent-session-id",
+            NewAgentTab => "new-agent-tab",
             ResetFontSize => "reset-font-size",
             NextPane => "next-pane",
             PrevPane => "prev-pane",
@@ -221,7 +224,8 @@ impl CommandKind {
             | ConnectSavedProfile(_)
             | EditSavedProfile(_)
             | QuickConnect(_)
-            | SaveQuickConnect(_) => return None,
+            | SaveQuickConnect(_)
+            | LaunchAgent(_) => return None,
         })
     }
 
@@ -234,6 +238,12 @@ impl CommandKind {
             CutText => return inline("secondary-x"),
             PasteText => return inline("secondary-v"),
             SelectAllText => return inline("secondary-a"),
+            LaunchAgent(agent) => {
+                return crate::ui::keymap::effective_key(
+                    crate::ui::agent_launch::launch_action_name(*agent),
+                    cx,
+                );
+            }
             _ => {}
         }
         let action = match self {
@@ -255,6 +265,7 @@ impl CommandKind {
             MarkTabUnread => "MarkTabUnread",
             ForkAgentSession => "ForkAgentSession",
             CopyAgentSessionId => "CopyAgentSessionId",
+            NewAgentTab => "NewAgentTab",
             ResetFontSize => "ResetFontSize",
             NextPane => "FocusNextPane",
             PrevPane => "FocusPrevPane",
@@ -336,7 +347,8 @@ impl CommandKind {
             | EditSavedProfile(_)
             | SaveSshSessionAsHost
             | QuickConnect(_)
-            | SaveQuickConnect(_) => return None,
+            | SaveQuickConnect(_)
+            | LaunchAgent(_) => return None,
         };
         crate::ui::keymap::effective_key(action, cx)
     }
@@ -584,6 +596,8 @@ impl Command {
         ];
 
         let agents = [
+            Command::localized(L10nKey::CmdNewAgentTab, NewAgentTab)
+                .with_subtitle(t(L10nKey::CmdNewAgentTabSubtitle)),
             Command::localized(L10nKey::CmdAgentSendSelection, SendSelectionToAgent)
                 .with_subtitle(t(L10nKey::CmdAgentSendSelectionSubtitle)),
             Command::localized(L10nKey::CmdAgentSendGitDiffForReview, SendGitDiffToAgent)

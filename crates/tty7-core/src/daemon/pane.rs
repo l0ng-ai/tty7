@@ -3013,7 +3013,7 @@ fn apply_signals(st: &mut PaneState, signals: SniffSignals) {
         if shell_mark_capture_changed(&st.shell, &shell) {
             apply_agent(
                 st,
-                agent_from_shell_mark(&shell, crate::core::config::agent_commands_cached()),
+                agent_from_shell_mark(&shell, &crate::core::config::agent_detection_aliases()),
             );
         }
         st.shell = shell.clone();
@@ -3335,7 +3335,7 @@ fn foreground_agent(
         let argv = crate::daemon::remote::foreground_argv(pid)?;
         let agent = crate::core::cli_agent::CLIAgent::detect_from_argv_with(
             &argv,
-            crate::core::config::agent_commands_cached(),
+            &crate::core::config::agent_detection_aliases(),
         )?;
         Some((agent, argv))
     };

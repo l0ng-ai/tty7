@@ -96,6 +96,7 @@ macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/
 
 tty7 不包装、不代理其中任何一个 —— 你启动的就是那个 agent 本身，运行在普通 PTY 中，界面仍然是它自己的。
 如果你通过 wrapper 脚本启动 agent，在 `config.json` 的 `agent_commands` 里把脚本名映射到对应 agent 即可。
+PATH 上的每个 agent 也都是一条命令面板命令（**Agent：Claude Code** 等），会在新标签页中启动它；`agent_launch` 可以设置它的启动命令行。
 
 ## 文档
 

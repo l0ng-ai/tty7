@@ -1414,6 +1414,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdCopyWorkingDirectory => "复制工作目录",
         L10nKey::CmdCopySessionId => "复制会话 ID",
         L10nKey::CmdCopySessionIdSubtitle => "编码 agent 自身的会话 ID",
+        L10nKey::CmdNewAgentTab => "新建 Agent 标签页",
+        L10nKey::CmdNewAgentTabSubtitle => "在新标签页中打开上次使用的编码 agent",
         L10nKey::CmdForkSession => "Fork 会话",
         L10nKey::CmdForkSessionSubtitle => "将此 agent 会话 fork 到新标签页",
         L10nKey::CmdMarkTabAsUnread => "将标签页标记为未读",
@@ -1569,6 +1571,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppPaneNoKnownDirectory => "此窗格没有已知的目录。",
         L10nKey::AppNoUncommittedChanges => "{cwd} 中没有未提交的更改（或不是 git 仓库）。",
         L10nKey::AppCmdSshProfileTitle => "SSH：{title}",
+        L10nKey::AppCmdAgentLaunchTitle => "Agent：{name}",
+        L10nKey::AppNoAgentOnPath => "在本机 PATH 中未找到编码 agent",
+        L10nKey::AppNoAgentSeenHere => {
+            "此工作区还没有运行过编码 agent——手动启动一次后，这里就会列出它"
+        }
+        L10nKey::AppAgentLaunchSaved => "{name} 以后将以此命令启动：{command}",
+        L10nKey::AppAgentLaunchArgsUnknown => "{name} 未报告其启动参数",
         L10nKey::AppCmdSwitchToTab => "切换到标签页：{label}",
         L10nKey::AppPlaceholderDescription => "描述",
         L10nKey::AppPlaceholderSshQuickConnect => "user@host  或  user@host:port",
@@ -1721,6 +1730,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuCopyWorkingDirectory => "复制工作目录",
         L10nKey::AppMenuCopySessionId => "复制会话 ID",
         L10nKey::AppMenuForkSession => "Fork 会话",
+        L10nKey::AppMenuSaveAgentLaunchArgs => "将当前启动参数设为默认",
         L10nKey::AppMenuClosePaneTab => "关闭",
         L10nKey::AppMenuCloseOtherTabs => "关闭其他标签页",
         L10nKey::AppMenuCloseTabsRight => "关闭右侧标签页",
@@ -1779,6 +1789,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabMenuLocalShells => "本地",
         L10nKey::TabMenuAddHost => "添加 SSH 主机…",
         L10nKey::TabMenuAllHosts => "所有 SSH 主机…",
+        L10nKey::TabMenuLaunchAgent => "启动 Agent…",
         L10nKey::TabMenuSplitHint => "按住 {key} 可分屏打开",
         L10nKey::TabUnnamedShell => "终端 {n}",
         L10nKey::ShellDefault => "默认",

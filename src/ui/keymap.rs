@@ -301,6 +301,24 @@ fn per_platform(mac: &'static str, other: &'static str) -> &'static str {
 }
 
 pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
+    let mut bindings = shipped_bindings();
+    // One slot per agent, unbound: the palette's `Agent: …` rows are what these
+    // run, and each takes a key the same way any other action does. Right
+    // after the other agent actions, so the Keybindings page keeps them together.
+    let at = bindings
+        .iter()
+        .position(|(action, _)| *action == "NewAgentTab")
+        .map_or(bindings.len(), |i| i + 1);
+    bindings.splice(
+        at..at,
+        crate::ui::agent_launch::launch_action_names()
+            .iter()
+            .map(|(_, name)| (name.as_str(), "")),
+    );
+    bindings
+}
+
+fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
     vec![
         ("NewTab", per_platform("secondary-t", "secondary-shift-t")),
         ("NewWorkspace", "secondary-shift-n"),
@@ -331,6 +349,11 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
         ("ForkAgentSessionDown", ""),
         ("ForkAgentSessionUp", ""),
         ("CopyAgentSessionId", ""),
+        // ⌘⇧A for "agent" on macOS, where nothing else in the table or the
+        // terminal holds it. Off macOS Ctrl+Shift+A is select-all in every
+        // Linux terminal and in this prompt editor's Ctrl+A family, so it ships
+        // unbound there rather than on a chord nobody would guess.
+        ("NewAgentTab", per_platform("secondary-shift-a", "")),
         ("StopWorkspace", ""),
         ("DeleteWorkspace", ""),
         ("RenameWorkspace", ""),
@@ -576,6 +599,15 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         return Some((
             CommandGroup::TabsPanes,
             t_fmt(L10nKey::KeybindGoToTab, &[("n", n)]),
+        ));
+    }
+    if let Some(agent) = crate::ui::agent_launch::agent_for_launch_action(action) {
+        return Some((
+            CommandGroup::Agents,
+            t_fmt(
+                L10nKey::AppCmdAgentLaunchTitle,
+                &[("name", agent.display_name())],
+            ),
         ));
     }
     if let Some(n) = action.strip_prefix("SelectWorkspace") {
@@ -826,6 +858,7 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             CommandGroup::Agents,
             t(L10nKey::CmdCopySessionId).to_string(),
         ),
+        "NewAgentTab" => (CommandGroup::Agents, t(L10nKey::CmdNewAgentTab).to_string()),
         "TogglePalette" => (
             CommandGroup::Application,
             t(L10nKey::AppMenuCommandPalette).to_string(),
@@ -1343,6 +1376,9 @@ fn action_context(action: &str) -> Option<&'static str> {
 }
 
 fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
+    if let Some(agent) = crate::ui::agent_launch::agent_for_launch_action(action) {
+        return Some(KeyBinding::new(keystroke, LaunchAgent { agent }, None));
+    }
     Some(match action {
         "NewTab" => KeyBinding::new(keystroke, NewTab, None),
         "NewWorkspace" => KeyBinding::new(keystroke, NewWorkspace, None),
@@ -1365,6 +1401,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ForkAgentSessionDown" => KeyBinding::new(keystroke, ForkAgentSessionDown, None),
         "ForkAgentSessionUp" => KeyBinding::new(keystroke, ForkAgentSessionUp, None),
         "CopyAgentSessionId" => KeyBinding::new(keystroke, CopyAgentSessionId, None),
+        "NewAgentTab" => KeyBinding::new(keystroke, NewAgentTab, None),
         "SplitRight" => KeyBinding::new(keystroke, SplitRight, None),
         "SplitDown" => KeyBinding::new(keystroke, SplitDown, None),
         "FocusNextPane" => KeyBinding::new(keystroke, FocusNextPane, None),
@@ -2314,6 +2351,50 @@ mod tests {
     fn spec_from_keystroke_ignores_a_lone_modifier() {
         let ks = Keystroke::parse("secondary").unwrap();
         assert_eq!(spec_from_keystroke(&ks), None);
+    }
+
+    #[test]
+    fn new_agent_tab_ships_a_chord_only_where_one_is_free() {
+        let mut effective: Vec<(String, String)> = default_bindings()
+            .into_iter()
+            .map(|(a, k)| (a.to_string(), k.to_string()))
+            .collect();
+        let default = effective
+            .iter()
+            .find(|(action, _)| action == "NewAgentTab")
+            .map(|(_, key)| key.clone())
+            .expect("NewAgentTab has to be listed or it cannot be bound");
+        if cfg!(target_os = "macos") {
+            assert_eq!(default, "secondary-shift-a");
+            assert_eq!(
+                dispatched(&effective, &default, "Terminal"),
+                vec![NewAgentTab::name_for_type()],
+                "{default} must reach NewAgentTab, and nothing else may answer it"
+            );
+        } else {
+            assert_eq!(default, "", "Ctrl+Shift+A is select-all off macOS");
+        }
+
+        // Each agent's own launch is a slot of its own, and a key bound to it
+        // dispatches that agent.
+        let name = crate::ui::agent_launch::launch_action_name(
+            tty7_core::core::cli_agent::CLIAgent::Codex,
+        );
+        effective
+            .iter_mut()
+            .find(|(action, _)| action == name)
+            .expect("every agent has a keymap slot")
+            .1 = "ctrl-alt-shift-c".to_string();
+        let mut keymap = gpui::Keymap::default();
+        keymap.add_bindings(action_bindings(&effective));
+        let typed = [Keystroke::parse("ctrl-alt-shift-c").unwrap()];
+        let context = [gpui::KeyContext::parse("Terminal").unwrap()];
+        let hits = keymap.bindings_for_input(&typed, &context).0;
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].action().partial_eq(&LaunchAgent {
+            agent: tty7_core::core::cli_agent::CLIAgent::Codex,
+        }));
+        assert_eq!(action_entry(name).0, CommandGroup::Agents);
     }
 }
 

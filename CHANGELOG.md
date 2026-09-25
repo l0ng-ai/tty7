@@ -5,6 +5,30 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Quick launch for the coding agents on your PATH** (#955). Every agent tty7
+  recognises whose binary is on `PATH` is a palette command — "Agent: Claude
+  Code", "Agent: Codex", … — ordered by how often and how recently it was
+  launched or seen running, and each is bindable as `LaunchAgent:<slug>`. "New
+  Agent Tab" (⌘⇧A on macOS, unbound elsewhere, where Ctrl+Shift+A is
+  select-all) starts the one used last, and the New Tab menu's "Launch Agent…"
+  row opens the palette on the list. A launch always opens a new tab in the
+  current tab's directory and types the agent's command into its shell once the
+  pane exists, never into a pane that was already there, so detection, status
+  and resume work as for a hand-typed agent and quitting it returns to the
+  shell. The command is the agent's bare binary unless `agent_launch` in
+  `config.json` gives it one (`"claude": "claude --dangerously-skip-permissions"`);
+  a wrapper named there is detected as that agent without an `agent_commands`
+  entry, including a script run under its interpreter, and the daemon picks up
+  an edit without a restart. A running agent's pane menu has "Set Current Launch
+  Args as Default", which writes the flags it was started with — minus the
+  session it resumed and any prompt — into `agent_launch`. A remote workspace
+  cannot be asked for its `PATH`, so there the list is the agents already seen
+  running in that workspace.
+
 ## [26.9.3] - 2026-09-23
 
 ### Added

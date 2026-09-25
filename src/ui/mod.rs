@@ -1,3 +1,4 @@
+pub mod agent_launch;
 pub mod app;
 pub mod assets;
 pub mod code_editor;
