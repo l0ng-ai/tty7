@@ -71,6 +71,16 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Switch the changed-file list between flat and tree, and remember it.
+    ///
+    /// Global like `diff_view`: someone who reads changes by directory reads
+    /// every repository's that way.
+    pub(crate) fn scm_toggle_changes_tree(&mut self, cx: &mut Context<Self>) {
+        let next = !cx.global::<crate::core::config::Config>().scm_changes_tree;
+        self.update_config(cx, |cfg| cfg.scm_changes_tree = next);
+        cx.notify();
+    }
+
     /// Flip the diff overlay between side-by-side and unified.
     ///
     /// Global rather than per-overlay, matching `diffEditor.renderSideBySide`:

@@ -324,7 +324,7 @@ resolve it immediately before use. A full tab UUID also works: `@<uuid>`.
 
 | Command | Effect | JSON |
 |---|---|---|
-| `tab ls [WORKSPACE]` | Tabs of a workspace | `{"workspace","tabs":[{"ordinal","id","name","label","agent","group","panes":[…]}]}` |
+| `tab ls [WORKSPACE]` | Tabs of a workspace | `{"workspace","tabs":[{"ordinal","id","name","label","agent","group","panes":[…],"hibernated"}]}` |
 | `tab new [WORKSPACE] [--cwd DIR]` | Add a tab with a fresh shell | `{"tab","pane"}` |
 | `tab new [WORKSPACE] --pane %PANE` | Add a tab around a pane already running | `{"tab","pane"}` |
 | `tab close @TAB` | Close the tab and every pane in it | `{"closed"}` |
@@ -357,7 +357,7 @@ a stand-in.
 
 | Command | Effect | JSON |
 |---|---|---|
-| `pane ls [WORKSPACE]` | Panes with their workspace, tab, cwd, live flag | `{"panes":[…]}` |
+| `pane ls [WORKSPACE]` | Panes with their workspace, tab, cwd, live flag (`asleep` for a hibernated tab's panes) | `{"panes":[…]}` |
 | `pane ls --all` | The server's whole pane registry, including orphans | `{"panes":[…],"orphans":N}` |
 | `pane split …` | Identical to top-level `split` | `{"pane"}` |
 | `pane close [%PANE…]` | Close panes; their shells are hung up | `{"closed":[…]}` |

@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use crate::core::config::{
     BellMode, Config, CursorStyle, LinkFileOpen, MouseZoomModifier, NewTabPosition, NotifyMode,
-    TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel, WindowBackdrop,
+    SshTabTitle, TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel, WindowBackdrop,
 };
 use crate::core::keychain::{
     CredentialRef, CredentialStore as _, OsCredentialStore, key_account_from_contents,
@@ -840,6 +840,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             keywords: SettingsSearchDiffPreviewFromCountsKeywords,
         },
         SearchEntry {
+            section: WindowTabs,
+            title: SettingsSshTabTitle,
+            keywords: SettingsSearchSshTabTitleKeywords,
+        },
+        SearchEntry {
             section: General,
             title: SettingsNotifyOnCommandFinish,
             keywords: SettingsSearchNotifyOnCommandFinishKeywords,
@@ -898,6 +903,7 @@ impl SearchEntry {
             L10nKey::SettingsTabBarPosition => "tab_bar_position",
             L10nKey::SettingsSidebarGrouping => "sidebar_auto_grouping",
             L10nKey::SettingsDiffPreviewFromCounts => "sidebar_diff_preview",
+            L10nKey::SettingsSshTabTitle => "ssh_tab_title",
             L10nKey::SettingsNotifyOnCommandFinish => "notify_on_command_finish",
             L10nKey::SettingsNotifyThreshold => "notify_threshold_secs",
             L10nKey::SettingsTerminalBell => "bell",
@@ -1007,6 +1013,7 @@ impl SearchEntry {
             L10nKey::SettingsTabBarPosition => t(L10nKey::SettingsTabBarPositionDesc),
             L10nKey::SettingsSidebarGrouping => t(L10nKey::SettingsSidebarGroupingDesc),
             L10nKey::SettingsDiffPreviewFromCounts => t(L10nKey::SettingsDiffPreviewFromCountsDesc),
+            L10nKey::SettingsSshTabTitle => t(L10nKey::SettingsSshTabTitleDesc),
             L10nKey::SettingsNotifyOnCommandFinish => t(L10nKey::SettingsNotifyOnCommandFinishDesc),
             L10nKey::SettingsNotifyThreshold => t(L10nKey::SettingsNotifyThresholdDesc),
             L10nKey::SettingsAppHttpProxy => t(L10nKey::SettingsAppHttpProxyDesc),
@@ -1052,6 +1059,7 @@ impl SearchEntry {
             L10nKey::SettingsDiffPreviewFromCounts => {
                 cfg.sidebar_diff_preview != defaults.sidebar_diff_preview
             }
+            L10nKey::SettingsSshTabTitle => cfg.ssh_tab_title != defaults.ssh_tab_title,
             L10nKey::SettingsNotifyOnCommandFinish => {
                 cfg.notify_on_command_finish != defaults.notify_on_command_finish
             }
@@ -1556,6 +1564,7 @@ pub(crate) struct ForwardRuleForm {
     pub(crate) target_host: Entity<InputState>,
     pub(crate) target_port: Entity<InputState>,
     pub(crate) description: Entity<InputState>,
+    pub(crate) enabled: bool,
 }
 
 impl ForwardRuleForm {
@@ -1578,6 +1587,7 @@ impl ForwardRuleForm {
             bind,
             target,
             description: val(&self.description),
+            enabled: self.enabled,
         })
     }
 
@@ -2021,6 +2031,7 @@ fn seed_forward_row(
             &rule.description,
             t(L10nKey::ForwardDescriptionPlaceholder),
         ),
+        enabled: rule.enabled,
     }
 }
 
@@ -6229,7 +6240,7 @@ impl Tty7App {
         let count = form
             .forwards
             .iter()
-            .filter(|r| r.collect(cx).is_some())
+            .filter(|r| r.enabled && r.collect(cx).is_some())
             .count();
         let summary = match count {
             0 => t(L10nKey::SettingsNoneSummary).to_string(),
@@ -6374,6 +6385,20 @@ impl Tty7App {
             .flex_1()
             .min_w(px(80.))
             .child(Input::new(&row.description).xsmall());
+        let enabled = div().flex_shrink_0().child(
+            crate::ui::theme::switch(("ssh-fwd-enabled", idx), cx)
+                .checked(row.enabled)
+                .xsmall()
+                .tooltip(t(L10nKey::SettingsFwdEnabled))
+                .on_click(cx.listener(move |this, on: &bool, _w, cx| {
+                    if let Some(f) = this.ssh_form_mut()
+                        && let Some(r) = f.forwards.get_mut(idx)
+                    {
+                        r.enabled = *on;
+                        cx.notify();
+                    }
+                })),
+        );
         let remove = crate::ui::tab_strip::hit_target(
             Button::new(("ssh-fwd-remove", idx))
                 .icon(Icon::new(IconName::Close))
@@ -6390,6 +6415,7 @@ impl Tty7App {
                     h_flex()
                         .gap_2()
                         .items_center()
+                        .child(enabled)
                         .child(kind_switch)
                         .child(description)
                         .child(remove),
@@ -6398,9 +6424,15 @@ impl Tty7App {
                     true => mapping(v_flex().gap_1().items_start()),
                     false => mapping(h_flex().gap_2().items_center()),
                 }),
-            false => mapping(h_flex().gap_2().items_center().child(kind_switch))
-                .child(description)
-                .child(remove),
+            false => mapping(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(enabled)
+                    .child(kind_switch),
+            )
+            .child(description)
+            .child(remove),
         };
 
         v_flex()
@@ -7662,6 +7694,11 @@ impl Tty7App {
         };
         let sidebar_diff_preview = cfg.sidebar_diff_preview;
         let sidebar_auto_grouping = cfg.sidebar_auto_grouping;
+        let ssh_tab_title_idx = match cfg.ssh_tab_title {
+            SshTabTitle::Dynamic => 0,
+            SshTabTitle::ProfileName => 1,
+            SshTabTitle::Hostname => 2,
+        };
         let notify_idx = match cfg.notify_on_command_finish {
             NotifyMode::Never => 0,
             NotifyMode::Unfocused => 1,
@@ -7776,6 +7813,25 @@ impl Tty7App {
             )
             .into_any_element();
 
+        let ssh_tab_title_radio = self.segmented(
+            "wt-ssh-tab-title",
+            &[
+                t(L10nKey::SettingsSshTabTitleDynamic),
+                t(L10nKey::SettingsSshTabTitleProfileName),
+                t(L10nKey::SettingsSshTabTitleHostname),
+            ],
+            ssh_tab_title_idx,
+            cx,
+            |this, ix, _w, cx| {
+                let mode = match ix {
+                    0 => SshTabTitle::Dynamic,
+                    1 => SshTabTitle::ProfileName,
+                    _ => SshTabTitle::Hostname,
+                };
+                this.set_ssh_tab_title(mode, cx);
+            },
+        );
+
         v_flex()
             .when(general, |v| {
                 v.child(self.section_header(t(L10nKey::SettingsWindow), cx))
@@ -7829,6 +7885,12 @@ impl Tty7App {
                         t(L10nKey::SettingsDiffPreviewFromCounts),
                         t(L10nKey::SettingsDiffPreviewFromCountsDesc),
                         sidebar_diff_switch,
+                        cx,
+                    ))
+                    .child(self.settings_row(
+                        t(L10nKey::SettingsSshTabTitle),
+                        t(L10nKey::SettingsSshTabTitleDesc),
+                        ssh_tab_title_radio,
                         cx,
                     ))
             })

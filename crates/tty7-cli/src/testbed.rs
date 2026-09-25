@@ -13,6 +13,7 @@ pub fn two_workspace_machine() -> Machine {
                 group: None,
                 last_auto: None,
                 root: PaneNode::Leaf { pane: 1 },
+                hibernated: false,
             },
             Tab {
                 id: TabId::new(),
@@ -25,6 +26,7 @@ pub fn two_workspace_machine() -> Machine {
                     a: Box::new(PaneNode::Leaf { pane: 2 }),
                     b: Box::new(PaneNode::Leaf { pane: 3 }),
                 },
+                hibernated: false,
             },
         ],
         active_tab: None,
@@ -41,6 +43,7 @@ pub fn two_workspace_machine() -> Machine {
             group: None,
             last_auto: None,
             root: PaneNode::Leaf { pane: 5 },
+            hibernated: false,
         }],
         active_tab: None,
         attachment: None,

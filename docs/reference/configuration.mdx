@@ -92,6 +92,7 @@ their id from the file name. [More about themes →](/customization/themes)
 |---|---|---|---|
 | `tab_bar_position` | enum | `"left"` | `left` (sidebar) or `top` (strip). |
 | `new_tab_position` | enum | `"after-current"` | Or `end`. |
+| `ssh_tab_title` | enum | `"dynamic"` | What an SSH tab is called: `dynamic` (the title the remote side sets), `profile-name` (the saved host's name, a `~/.ssh/config` alias, or the address typed for a quick connect), or `hostname` (the address dialled). A tab you renamed keeps its name. |
 | `sidebar_auto_grouping` | bool | `true` | Groups unpinned tabs by repository (SSH tabs by host). Off: a flat list below the pinned groups, which show either way. Pinned groups and folds are stored with the workspace, not here. |
 | `sidebar_diff_preview` | bool | `true` | Clicking a row's `+N −M` opens the diff overlay. |
 | `sidebar_width` | number | `220` | Pixels (100–2000). |
@@ -112,7 +113,7 @@ their id from the file name. [More about themes →](/customization/themes)
 | Key | Type | Default | |
 |---|---|---|---|
 | `shell` | object | — | `{"program": "fish", "args": ["-l"]}`. Unset uses the platform default. `args` you write are launched verbatim, which also turns off [shell integration](/reference/shell-integration) for that shell — leave them out to keep it. |
-| `custom_shells` | array | `[]` | Extra entries for the new-tab menu: `[{"label": "Ubuntu", "program": "wsl.exe", "args": ["-d", "Ubuntu"]}]`. Launched exactly as written, listed after the detected shells. Give an entry arguments and tty7 also skips [shell integration](/reference/shell-integration) for it, so it has no prompt marks, working-directory tracking, or command-finished notifications; an entry with no arguments, on a shell tty7 recognizes, is integrated like the detected row beside it. An entry with no `program` is skipped; with no `label` it is named after its program. |
+| `custom_shells` | array | `[]` | Extra entries for the new-tab menu: `[{"label": "Ubuntu", "program": "wsl.exe", "args": ["-d", "Ubuntu"]}]`. Launched exactly as written, listed after the detected shells — in the menu's **Other Shells…** list until you have opened it, and in the palette as *Shell:* followed by its label. Give an entry arguments and tty7 also skips [shell integration](/reference/shell-integration) for it, so it has no prompt marks, working-directory tracking, or command-finished notifications; an entry with no arguments, on a shell tty7 recognizes, is integrated like the detected row beside it. An entry with no `program` is skipped; with no `label` it is named after its program. |
 | `working_directory` | object | `{"strategy":"inherit"}` | `strategy` is `inherit`, `home`, or `custom`; `path` is used when custom. |
 | `env` | object | `{}` | Extra environment variables for every pane. |
 | `scrollback_limit` | number | `10000` | Lines per pane (100–100,000). New panes only. |
@@ -177,6 +178,8 @@ angle brackets, and a tab:
 | Key | Type | Default | |
 |---|---|---|---|
 | `agent_commands` | object | `{}` | Map a wrapper command to an agent slug: `{"cc": "claude"}`. |
+| `agent_launch` | object | `{}` | The command line quick launch types for an agent, by slug: `{"claude": "claude --dangerously-skip-permissions"}`. Unset agents launch as their bare binary. [More →](/agents/overview#quick-launch) |
+| `agent_frecency` | object | `{}` | Written by tty7: how often and how recently each agent ran, to order quick launch. |
 | `restore_agent_sessions` | bool | `true` | Relaunch an agent conversation when a lost pane is restored. |
 | `install_cli_on_path` | bool | `true` | Put the bundled `tty7` command on PATH at launch. |
 
@@ -186,9 +189,27 @@ angle brackets, and a tab:
 
 | Key | Type | Default | |
 |---|---|---|---|
-| `ssh_profiles` | array | `[]` | Managed from **Settings → SSH**. Secrets live in the OS keychain, never here. |
 | `verify_host_keys` | bool | `true` | |
 | `ssh_warn_on_close` | bool | `false` | Confirm before closing a live connection. |
+
+### servers.json
+
+The saved hosts are not in `config.json`: they live in `servers.json` in the
+same directory, so `config.json` can be synced between machines without taking
+your list of servers along. The file is written with mode `0600` and read as
+forgivingly as `config.json`; if it cannot be parsed, tty7 keeps a copy at
+`servers.json.corrupt` and saves nothing until it is repaired.
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `ssh_profiles` | array | `[]` | Managed from **Settings → SSH**. Secrets live in the OS keychain, never here. |
+| `ssh_profile_frecency` | object | `{}` | How often and how recently each host is used, for ranking. Written by the app. |
+
+An older `config.json` that still holds `ssh_profiles` is split the first time
+a newer tty7 reads it: `servers.json` is written first, and only then are the
+two keys removed from `config.json`, leaving the rest of it as it was. If both
+files hold hosts, `servers.json` wins, and the copy in `config.json` is dropped
+the next time settings are saved.
 
 Each object in `ssh_profiles` can also set:
 
@@ -209,9 +230,9 @@ Each object in `ssh_profiles` can also set:
 
 ## Keys tty7 manages itself
 
-`ssh_profile_frecency` and `command_frecency` record how often and how recently
-you use a profile or command, so the pickers can rank them. They are written by
-the app; there is no reason to edit them.
+`shell_frecency` and `command_frecency` record how often and how recently you
+open a shell or run a command, so the new-tab menu and the palette can rank
+them. They are written by the app; there is no reason to edit them.
 
 <Note>
   If the file cannot be parsed, tty7 starts on defaults, keeps your original at

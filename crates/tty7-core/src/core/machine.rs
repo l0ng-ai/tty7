@@ -177,6 +177,19 @@ pub struct Tab {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_auto: Option<AutoKey>,
     pub root: PaneNode,
+    /// The tab was put to sleep: its panes were stopped to give their memory
+    /// back, and it stays in the workspace to be woken later (#762).
+    ///
+    /// The panes keep their ids in `root` and their records in
+    /// [`Machine::panes`] — cwd, shell, agent session — because waking is a
+    /// restore of exactly those panes, through the same path a reboot takes.
+    /// That is also what keeps the sweeps off them: a pane the tree still
+    /// names is one whose stored screen and history are kept.
+    ///
+    /// Left out of the document while false, so a tree written by this build
+    /// reads the same to one that predates the field.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hibernated: bool,
 }
 
 impl Tab {
@@ -187,6 +200,7 @@ impl Tab {
             group: None,
             last_auto: None,
             root: PaneNode::Leaf { pane },
+            hibernated: false,
         }
     }
 }
@@ -769,6 +783,43 @@ impl MachineStore {
             let to = to.min(ws.tabs.len());
             ws.tabs.insert(to, moved);
             Ok(((), vec![(workspace, LayoutDelta::TabMoved { tab, to })]))
+        })
+    }
+
+    /// Put a tab to sleep, or mark it awake again. Answers the panes the tab
+    /// holds, which for a tab going to sleep are the ones whoever asked is now
+    /// expected to stop — see [`ControlRequest::TabSetHibernated`].
+    ///
+    /// Only the mark changes here. The panes stay in the tab and in the pane
+    /// list, so the facts a wake needs survive the processes: waking hands the
+    /// same ids to the ordinary restore, which spawns successors and swaps
+    /// them in with `pane_replace`. Setting the mark a tab already has is not
+    /// a change and raises no delta.
+    ///
+    /// The delta is `TabRestructured` carrying the whole tab rather than a
+    /// variant of its own, so a client that predates the mark still decodes
+    /// it — it reads the same tab back, minus a field it does not know.
+    ///
+    /// [`ControlRequest::TabSetHibernated`]: crate::daemon::control::ControlRequest::TabSetHibernated
+    pub fn tab_set_hibernated(
+        &self,
+        workspace: WorkspaceId,
+        tab: TabId,
+        hibernated: bool,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<Vec<u64>> {
+        self.mutate(origin, |m| {
+            let t = find_tab(m, workspace, tab)?;
+            let panes = t.root.pane_ids();
+            if t.hibernated == hibernated {
+                return Ok((panes, Vec::new()));
+            }
+            t.hibernated = hibernated;
+            let delta = LayoutDelta::TabRestructured {
+                tab: t.clone(),
+                pane: None,
+            };
+            Ok((panes, vec![(workspace, delta)]))
         })
     }
 
@@ -2920,5 +2971,102 @@ mod tests {
         assert_eq!(machine.workspaces.len(), 1);
         assert_eq!(machine.workspaces[0].tabs[0].root.pane_ids(), vec![3]);
         assert!(machine.panes.is_empty());
+    }
+
+    /// A tab put to sleep keeps its panes — ids in the layout, records in the
+    /// pane list — because waking is a restore of exactly those. Only the
+    /// orphan collection a close runs could take them, and a sleeping tab
+    /// still names them.
+    #[test]
+    fn a_sleeping_tab_keeps_its_panes_and_says_so_in_a_delta() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        store
+            .pane_split(ws, 1, Axis::Horizontal, 0.5, seed(2, "/work"), false, None)
+            .unwrap();
+        let (_sub, heard) = recorded(&store);
+
+        let panes = store.tab_set_hibernated(ws, tab.id, true, None).unwrap();
+
+        assert_eq!(panes, vec![1, 2]);
+        let m = store.machine();
+        let asleep = &m.workspaces[0].tabs[0];
+        assert!(asleep.hibernated);
+        assert_eq!(asleep.root.pane_ids(), vec![1, 2]);
+        assert!(m.panes.iter().any(|p| p.id == 1) && m.panes.iter().any(|p| p.id == 2));
+        let heard = heard.lock().unwrap();
+        assert_eq!(heard.len(), 1);
+        match &heard[0].1 {
+            LayoutDelta::TabRestructured { tab: t, pane: None } => {
+                assert_eq!(t.id, tab.id);
+                assert!(t.hibernated, "the delta carries the mark");
+            }
+            other => panic!("expected TabRestructured, heard {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setting_the_mark_a_tab_already_has_raises_nothing() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        let (_sub, heard) = recorded(&store);
+        store.tab_set_hibernated(ws, tab.id, false, None).unwrap();
+        assert!(heard.lock().unwrap().is_empty());
+
+        store.tab_set_hibernated(ws, tab.id, true, None).unwrap();
+        store.tab_set_hibernated(ws, tab.id, true, None).unwrap();
+        assert_eq!(heard.lock().unwrap().len(), 1);
+
+        store.tab_set_hibernated(ws, tab.id, false, None).unwrap();
+        assert!(!store.machine().workspaces[0].tabs[0].hibernated);
+        assert_eq!(heard.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn hibernating_a_tab_that_is_not_there_is_refused() {
+        let (store, _dir, ws, _tab) = store_with_tab();
+        let err = store
+            .tab_set_hibernated(ws, TabId::new(), true, None)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// Asleep has to outlive the daemon: a restart reads the tree back from
+    /// disk, and a tab that came back awake would be respawned on the spot —
+    /// every process the user put to sleep, started again unasked.
+    #[test]
+    fn a_sleeping_tab_is_still_asleep_after_the_tree_is_read_back() {
+        let (store, dir, ws, tab) = store_with_tab();
+        let other = store
+            .tab_create(ws, None, seed(5, "/else"), None, None)
+            .unwrap();
+        store.tab_set_hibernated(ws, tab.id, true, None).unwrap();
+        drop(store);
+
+        let reopened = MachineStore::open(dir.path().join(MACHINE_FILE));
+        let m = reopened.machine();
+        let tabs = &m.workspaces[0].tabs;
+        assert!(tabs.iter().find(|t| t.id == tab.id).unwrap().hibernated);
+        assert!(!tabs.iter().find(|t| t.id == other.id).unwrap().hibernated);
+        let record = m.panes.iter().find(|p| p.id == 1).unwrap();
+        assert_eq!(record.cwd.as_deref(), Some("/work"));
+        assert!(!record.live);
+    }
+
+    /// Awake is the default and stays out of the document, so a tree this
+    /// build writes for a tab that never slept reads the same to one that
+    /// predates the mark, and a tree from before it decodes as awake.
+    #[test]
+    fn the_mark_is_only_written_while_it_is_set() {
+        let tab = Tab::leaf(4);
+        let json = serde_json::to_string(&tab).unwrap();
+        assert!(!json.contains("hibernated"), "{json}");
+        let back: Tab = serde_json::from_str(&json).unwrap();
+        assert!(!back.hibernated);
+
+        let asleep = Tab {
+            hibernated: true,
+            ..Tab::leaf(4)
+        };
+        let back: Tab = serde_json::from_str(&serde_json::to_string(&asleep).unwrap()).unwrap();
+        assert!(back.hibernated);
     }
 }

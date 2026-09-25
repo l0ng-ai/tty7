@@ -1,3 +1,4 @@
+pub mod agent_launch;
 pub mod app;
 pub mod assets;
 pub mod code_editor;
@@ -27,6 +28,7 @@ pub mod pending_pane;
 pub mod perf;
 pub mod prefill;
 pub mod presets;
+pub mod prompt;
 pub mod remote_connect;
 pub mod remote_workspace;
 pub mod reorder;

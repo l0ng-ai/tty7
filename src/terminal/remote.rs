@@ -571,6 +571,10 @@ pub struct RemoteTerminal {
     pub exited: bool,
     size: TermSize,
     synced_size: bool,
+    /// This link reattached to a pane that was already running rather than
+    /// spawning a fresh one, so whatever it reports first — an agent in the
+    /// foreground included — predates this client.
+    reattached: bool,
     /// The `(cell_w, cell_h)` last sent to the daemon, in device pixels. Tracked
     /// alongside `size` so a display-scale change still reaches the child even
     /// when the grid dimensions are unchanged.
@@ -1087,6 +1091,7 @@ impl RemoteTerminal {
             exited: false,
             size,
             synced_size: false,
+            reattached: awaiting_replay,
             synced_cell: (0, 0),
             resize_sent_at: None,
             link,
@@ -1878,6 +1883,11 @@ impl RemoteTerminal {
         self.remote_context.lock().ok().and_then(|g| g.clone())
     }
 
+    /// See the field: an attach to a running pane, not a fresh spawn.
+    pub fn reattached(&self) -> bool {
+        self.reattached
+    }
+
     pub fn at_prompt(&self) -> bool {
         self.shell_state
             .lock()
@@ -2294,6 +2304,29 @@ impl RemoteTerminal {
         query(pane_id, forward_id)
             .inspect_err(|e| log::warn!("RemoveForward failed: {e}"))
             .ok()
+    }
+
+    /// The list after switching one forward on or off, or why it was not
+    /// switched — the daemon's own refusal, which names what is in the way.
+    pub fn set_forward_enabled(
+        pane_id: u64,
+        forward_id: u64,
+        enabled: bool,
+    ) -> anyhow::Result<Vec<ManagedForward>> {
+        let mut stream = connect()?;
+        ClientMsg::SetForwardEnabled {
+            pane_id,
+            forward_id,
+            enabled,
+        }
+        .encode(&mut stream)?;
+        match DaemonMsg::read(&mut stream)? {
+            DaemonMsg::ForwardList(list) => Ok(list),
+            DaemonMsg::Error(msg) => Err(anyhow::anyhow!(msg)),
+            other => Err(anyhow::anyhow!(
+                "unexpected reply to SetForwardEnabled: {other:?}"
+            )),
+        }
     }
 
     pub fn list_forwards(pane_id: u64) -> Vec<ManagedForward> {

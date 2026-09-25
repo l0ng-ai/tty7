@@ -225,23 +225,15 @@ fn walk(table: &HashMap<u32, Row>, shell_pid: u32, fg_pgid: Option<i32>) -> Vec<
 #[cfg(target_os = "macos")]
 fn process_table() -> HashMap<u32, Row> {
     let mut table = HashMap::new();
-    let bytes = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    if bytes <= 0 {
-        return table;
-    }
-    let cap = (bytes as usize / std::mem::size_of::<libc::c_int>()) + 64;
-    let mut pids = vec![0 as libc::c_int; cap];
-    let written = unsafe {
-        libc::proc_listallpids(
-            pids.as_mut_ptr() as *mut libc::c_void,
-            (cap * std::mem::size_of::<libc::c_int>()) as libc::c_int,
-        )
-    };
-    if written <= 0 {
-        return table;
-    }
-    let n = written as usize / std::mem::size_of::<libc::c_int>();
-    for &pid in pids.iter().take(n.min(cap)) {
+    let pids = list_all_pids(|buf| {
+        let ptr = match buf.is_empty() {
+            true => std::ptr::null_mut(),
+            false => buf.as_mut_ptr() as *mut libc::c_void,
+        };
+        let bytes = std::mem::size_of_val(buf) as libc::c_int;
+        unsafe { libc::proc_listallpids(ptr, bytes) }
+    });
+    for &pid in &pids {
         if pid <= 0 {
             continue;
         }
@@ -274,6 +266,37 @@ fn process_table() -> HashMap<u32, Row> {
         );
     }
     table
+}
+
+/// Every pid on the machine, by way of `list`, which has the calling
+/// convention of libproc's `proc_listallpids`: handed a buffer, it fills as
+/// much of it as it can, and it answers with a *count of pids* — not a byte
+/// count, although the size it is given is in bytes. An empty buffer asks
+/// only for the count, padded by the kernel for processes born in between.
+///
+/// Reading that count as bytes was #731. It divided the answer by four twice
+/// over, once sizing the buffer and once reading back how much was filled, so
+/// only about one pid in sixteen made it into the table — and since the kernel
+/// lists its newest processes first, the ones kept were whatever had started
+/// most recently. A `go run` server just launched was in; the pane's shell,
+/// started long before, was not, and a walk from a root the table has never
+/// heard of comes back empty: no processes, no ports, and nothing to say why.
+/// A process tree built moments earlier, which is what a quick check of the
+/// probe builds, is exactly the case that happened to work.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn list_all_pids(mut list: impl FnMut(&mut [i32]) -> i32) -> Vec<i32> {
+    let count = list(&mut []);
+    if count <= 0 {
+        return Vec::new();
+    }
+    let mut pids = vec![0; count as usize + 64];
+    let written = list(&mut pids);
+    if written <= 0 {
+        return Vec::new();
+    }
+    pids.truncate(written as usize);
+    pids.retain(|&pid| pid > 0);
+    pids
 }
 
 #[cfg(target_os = "macos")]
@@ -966,6 +989,40 @@ mod tests {
             Some(8080),
             "and the port survives the trim that dropped its owner's row"
         );
+    }
+
+    /// `proc_listallpids` as libproc implements it: the kernel's newest
+    /// processes first, a padded estimate when asked with no buffer, and
+    /// always a count of pids back, never bytes.
+    fn fake_listallpids(live: &[i32]) -> impl FnMut(&mut [i32]) -> i32 + '_ {
+        move |buf: &mut [i32]| {
+            if buf.is_empty() {
+                return live.len() as i32 + 20;
+            }
+            let n = live.len().min(buf.len());
+            buf[..n].copy_from_slice(&live[..n]);
+            n as i32
+        }
+    }
+
+    /// #731 on macOS: a busy Mac has hundreds of processes, and the pane's
+    /// shell is an old one. Every pid has to reach the table, or the walk
+    /// starts from a root it cannot find and the pane shows no processes and
+    /// no ports at all.
+    #[test]
+    fn every_pid_is_listed_not_the_newest_sixteenth() {
+        // Newest first, the way the kernel lists them: the `go run` server
+        // just started, and the shell it runs under from an hour ago.
+        let live: Vec<i32> = (1..=700).rev().collect();
+        let got = list_all_pids(fake_listallpids(&live));
+        assert_eq!(got.len(), 700, "the whole machine, not the newest few");
+        assert!(got.contains(&1), "the oldest process is still there");
+    }
+
+    #[test]
+    fn a_pid_list_that_cannot_be_read_is_empty() {
+        assert!(list_all_pids(|_| -1).is_empty());
+        assert!(list_all_pids(|_| 0).is_empty());
     }
 
     #[test]

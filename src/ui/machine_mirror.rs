@@ -969,6 +969,7 @@ mod tests {
                 a: Box::new(PaneNode::Leaf { pane: 1 }),
                 b: Box::new(PaneNode::Leaf { pane: 2 }),
             },
+            hibernated: false,
         };
         assert!(apply(
             &mut machine,

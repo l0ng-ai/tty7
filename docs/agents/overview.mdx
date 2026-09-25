@@ -66,6 +66,41 @@ The key is your command's name; the value is one of the slugs above (`claude`,
 `droid`, `pi`, `auggie`, `hermes`, `vibe`, `antigravity`, `grok`, `qwen`,
 `omp`, `kimi`, `qodercli`, `crush`, `codebuddy`).
 
+## Quick launch
+
+Every agent tty7 finds on your `PATH` is one palette command away: **Agent:
+Claude Code**, **Agent: Codex**, and so on, most-used first. The New Tab menu's
+**Launch Agent…** row opens the palette on that list, and **New Agent Tab**
+(<kbd>⌘ ⇧ A</kbd> on macOS, unbound elsewhere) starts whichever agent you used
+last.
+
+A launch always opens a new tab in the current tab's directory and types the
+agent's command into its shell, so the agent is detected, tracked and resumed
+exactly as if you had typed it — and quitting it leaves you at the prompt. Each
+`Agent: …` command is bindable too, as `LaunchAgent:<slug>`.
+
+By default an agent launches as its bare binary (`claude`, `codex`,
+`cursor-agent`, …). Give it a command line of its own with `agent_launch`:
+
+```json
+{
+  "agent_launch": {
+    "claude": "claude --dangerously-skip-permissions",
+    "codex": "cx --profile work"
+  }
+}
+```
+
+A wrapper named there (`cx` above) is recognised as that agent without an
+`agent_commands` entry. To keep the flags a running agent was started with,
+right-click its pane and choose **Set Current Launch Args as Default**; tty7
+writes them into `agent_launch`, minus the session they resumed and any prompt.
+
+In a remote workspace tty7 cannot read the far machine's `PATH`, so it offers
+the agents it has already seen running there: start one by hand once and it
+joins the list. A wrapper named in your local `agent_launch` is only recognised
+over there if the remote `config.json` names it too.
+
 ## What you get for free
 
 Just by running an agent in a pane:

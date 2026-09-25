@@ -11,9 +11,10 @@ use tty7_core::daemon::protocol::PROTOCOL_VERSION;
 use crate::address::{self, Context, WorkspaceAddress};
 use crate::backend::{Backend, RunSpec};
 use crate::cli::{
-    CaptureArgs, Cli, Command, MachineCmd, PaneCmd, RunArgs, SendArgs, ServerCmd, SplitArgs,
-    TabCmd, WaitArgs, WaitState, WsCmd,
+    CaptureArgs, Cli, Command, ExecArgs, MachineCmd, PaneCmd, RunArgs, SendArgs, ServerCmd,
+    SplitArgs, TabCmd, WaitArgs, WaitState, WsCmd,
 };
+use crate::exec::ExecEnd;
 use crate::output;
 use crate::resolve;
 use crate::screen;
@@ -78,6 +79,7 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
             pane_split(args, ctx, backend)
         }
         Some(Command::Send(args)) => send(args, ctx, backend),
+        Some(Command::Exec(args)) => exec(args, ctx, backend),
         Some(Command::Capture(args)) => capture(args, ctx, backend),
         Some(Command::Procs { target }) => procs(target.as_deref(), ctx, backend),
         Some(Command::Tab(TabCmd::Ls { ws })) => tab_ls(ws.as_deref(), ctx, backend),
@@ -486,8 +488,6 @@ fn pane_split(args: SplitArgs, ctx: &Context, backend: &mut dyn Backend) -> Resu
 }
 
 fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
-    const KEY_GAP: Duration = Duration::from_millis(200);
-
     // `--enter` is the same thing as `--key enter`, and predates it. Keeping it
     // as sugar rather than deprecating it: it reads better for the overwhelming
     // case, which is typing one command and running it. Going through the same
@@ -498,6 +498,43 @@ fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
     let mut pressed = args.keys.clone();
     if args.enter {
         pressed.push(crate::keys::parse("enter").expect("enter is in the vocabulary"));
+    }
+
+    // Text from stdin or a file has no positional of its own, so the one
+    // positional there is can only be an address — and a word that is not one
+    // is a mistake, not text to type into the caller's own pane.
+    if args.stdin || args.from_file.is_some() {
+        let source = if args.stdin { "--stdin" } else { "--from-file" };
+        if let Some(first) = &args.first {
+            address::parse_pane(first).with_context(|| {
+                format!(
+                    "with {source} the text comes from there, so '{first}' has to be the \
+                     pane to send it to"
+                )
+            })?;
+        }
+        let pane = address::pane_or_context(args.first.as_deref(), ctx)?;
+        let payload = match &args.from_file {
+            Some(path) => {
+                std::fs::read(path).with_context(|| format!("reading {}", path.display()))?
+            }
+            None => {
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)
+                    .context("reading stdin")?;
+                bytes
+            }
+        };
+        return deliver(
+            pane,
+            Payload::Piped {
+                source: if args.stdin { "stdin" } else { "file" },
+                bytes: payload,
+            },
+            &args,
+            pressed,
+            backend,
+        );
     }
 
     // Three shapes reach here, and only the address is ever ambiguous:
@@ -555,9 +592,75 @@ fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
     };
 
     let pane = address::pane_or_context(target, ctx)?;
+    let payload = match text {
+        Some(text) => Payload::Typed(text.to_string()),
+        None => Payload::None,
+    };
+    deliver(pane, payload, &args, pressed, backend)
+}
+
+/// What `send` has to put in front of the keys.
+enum Payload {
+    None,
+    /// From the command line — echoed back in `--json`, as it always was.
+    Typed(String),
+    /// From stdin or a file. Never echoed: the reason to use these is to keep
+    /// the bytes out of places other people can read, and a JSON line in a
+    /// log is one of them.
+    Piped {
+        source: &'static str,
+        bytes: Vec<u8>,
+    },
+}
+
+fn deliver(
+    pane: u64,
+    payload: Payload,
+    args: &SendArgs,
+    pressed: Vec<crate::keys::Key>,
+    backend: &mut dyn Backend,
+) -> Result<Outcome> {
+    const KEY_GAP: Duration = Duration::from_millis(200);
+
+    let (source, bytes) = match &payload {
+        Payload::None => ("none", &[][..]),
+        Payload::Typed(text) => ("argument", text.as_bytes()),
+        Payload::Piped { source, bytes } => (*source, &bytes[..]),
+    };
+    if args.paste && bytes.is_empty() {
+        bail!("--paste needs text to paste — TEXT, --stdin or --from-file");
+    }
+    // `--paste` frames the way the GUI's paste does, which is to ask the pane
+    // first: brackets for a pane that switched mode 2004 on, and for one that
+    // did not, the line breaks a keyboard would send. Forcing the brackets on
+    // a pane that never asked for them would put `ESC[200~` in front of a
+    // program that reads it as keystrokes. `None` is a server that cannot say.
+    let mode = if args.paste {
+        backend.procs(pane)?.context.and_then(|c| c.bracketed_paste)
+    } else {
+        None
+    };
+    let bracketed = mode == Some(true);
+    if args.paste && !bracketed {
+        eprintln!(
+            "tty7: pane %{pane} {} bracketed paste, so the text went unframed — each line \
+             break was sent as Enter",
+            if mode.is_none() {
+                "is on a server too old to say whether it has"
+            } else {
+                "has not switched on"
+            }
+        );
+    }
+    let wire = if args.paste {
+        tty7_core::core::paste::paste_bytes(bytes, bracketed)
+    } else {
+        bytes.to_vec()
+    };
+
     let mut already_wrote = false;
-    if let Some(text) = text {
-        backend.send_input(pane, text.as_bytes().to_vec())?;
+    if !wire.is_empty() {
+        backend.send_input(pane, wire)?;
         already_wrote = true;
     }
     for key in &pressed {
@@ -576,7 +679,18 @@ fn send(args: SendArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
         "",
         json!({
             "pane": pane,
-            "sent": text.unwrap_or_default(),
+            "sent": match &payload {
+                Payload::Typed(text) => Some(text.as_str()),
+                Payload::None => Some(""),
+                Payload::Piped { .. } => None,
+            },
+            "source": source,
+            "bytes": bytes.len(),
+            "paste": args.paste,
+            // Whether the paste went framed, and what the pane said about the
+            // mode — `null` when nothing was asked or the server cannot say.
+            "bracketed": bracketed,
+            "bracketed_paste_mode": mode,
             "enter": args.enter,
             "keys": pressed.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
         }),
@@ -592,6 +706,132 @@ fn tried_to_write_an_address(s: &str) -> bool {
     s.strip_prefix('%')
         .and_then(|rest| rest.chars().next())
         .is_some_and(|c| c.is_ascii_digit())
+}
+
+fn exec(args: ExecArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
+    let pane = address::pane_or_context(args.target.as_deref(), ctx)?;
+    let line = args.cmd.join(" ");
+    if line.trim().is_empty() {
+        bail!("exec needs a command after `--`");
+    }
+    // The line is typed, so every byte of it goes through the shell's line
+    // editor: a newline would submit half of it and a Tab would complete. One
+    // line of printable text is the only thing that runs as written — the same
+    // test the GUI applies before it types a line rather than pasting it.
+    if line.chars().any(char::is_control) {
+        bail!(
+            "exec types one line at the shell's prompt, and this one holds a control \
+             character (a newline, a tab, an escape) the line editor would act on — join \
+             the commands with `;` or `&&`, or put them in a script and exec that"
+        );
+    }
+    let mut wire = line.clone().into_bytes();
+    wire.push(b'\r');
+    let started = std::time::Instant::now();
+    let run = backend.exec(pane, wire, args.timeout.map(Duration::from_secs))?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    // The caller's own pane is the one pane that can never be at a prompt
+    // while this runs: its shell is busy running `tty7 exec`.
+    let own = ctx
+        .pane
+        .as_deref()
+        .and_then(|p| address::parse_pane(p).ok())
+        == Some(pane);
+    match run.end {
+        ExecEnd::NoIntegration => bail!(
+            "pane %{pane} has sent no shell-integration prompt marks, so nothing would say \
+             when a command there ends — exec needs tty7's shell integration loaded in the \
+             pane's shell (`tty7 doctor`); without it, `send … --enter` and \
+             `wait --until free` are the way"
+        ),
+        ExecEnd::Busy if own => bail!(
+            "pane %{pane} is this shell, and it is busy running this very command — exec \
+             into another pane"
+        ),
+        ExecEnd::Busy => bail!(
+            "pane %{pane} is not at a shell prompt — something is already running there. \
+             `tty7 wait %{pane} --until free` waits for it"
+        ),
+        _ => {}
+    }
+
+    let text = if args.raw {
+        String::from_utf8_lossy(&run.output).into_owned()
+    } else {
+        screen::render(&[crate::backend::CaptureSegment {
+            size: run.size,
+            bytes: run.output.clone(),
+        }])
+    };
+    if run.dropped > 0 {
+        eprintln!(
+            "tty7: exec %{pane}: the first {} bytes of output were dropped to keep the rest \
+             in memory — the pane's own scrollback may still hold them",
+            run.dropped
+        );
+    }
+    let (code, known, timed_out) = match run.end {
+        ExecEnd::Finished {
+            exit: Some(code),
+            ran: true,
+        } => (code, true, false),
+        ExecEnd::Finished {
+            exit: None,
+            ran: true,
+        } => {
+            eprintln!("tty7: {EXIT_CODE_UNKNOWN}");
+            (1, false, false)
+        }
+        ExecEnd::Finished { ran: false, .. } => {
+            eprintln!(
+                "tty7: pane %{pane}: the shell came back to its prompt without running the \
+                 line — a syntax error, most likely; what it printed is the output"
+            );
+            (1, false, false)
+        }
+        ExecEnd::TimedOut { started: true } => {
+            eprintln!(
+                "tty7: pane %{pane}: still running after {}s — timed out, and left running \
+                 (`tty7 send %{pane} --key C-c` interrupts it)",
+                args.timeout.unwrap_or_default()
+            );
+            (124, false, true)
+        }
+        ExecEnd::TimedOut { started: false } => {
+            eprintln!(
+                "tty7: pane %{pane}: timed out after {}s, and the shell never started the \
+                 line — it is most likely waiting on a continuation prompt (an unclosed \
+                 quote or bracket); `tty7 send %{pane} --key C-c` abandons it",
+                args.timeout.unwrap_or_default()
+            );
+            (124, false, true)
+        }
+        ExecEnd::PaneExited(_) => {
+            eprintln!("tty7: pane %{pane} exited before its shell came back to a prompt");
+            (1, false, false)
+        }
+        ExecEnd::NoIntegration | ExecEnd::Busy => unreachable!("refused above"),
+    };
+    // `-q` keeps the exit code and drops the output, which is what the global
+    // flag already does to any report.
+    Ok(Outcome::Exit(
+        code,
+        Report {
+            human: text.clone(),
+            json: json!({
+                "pane": pane,
+                "command": line,
+                "exit": code,
+                "exit_code_known": known,
+                "timed_out": timed_out,
+                "pane_exited": matches!(run.end, ExecEnd::PaneExited(_)),
+                "output": text,
+                "bytes": run.output.len(),
+                "elapsed_ms": elapsed_ms,
+            }),
+        },
+    ))
 }
 
 fn capture(args: CaptureArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
@@ -707,6 +947,7 @@ fn tab_ls(explicit: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> R
                     "folder": g.folder,
                 })),
                 "panes": tab.root.pane_ids(),
+                "hibernated": tab.hibernated,
             })
         })
         .collect();
@@ -920,6 +1161,7 @@ fn pane_ls(explicit: Option<&str>, all: bool, backend: &mut dyn Backend) -> Resu
                     "tab": tab.id.to_string(),
                     "cwd": record.and_then(|r| r.cwd.clone()),
                     "live": record.map(|r| r.live),
+                    "hibernated": tab.hibernated,
                 }));
             }
         }
@@ -3511,6 +3753,7 @@ mod tests {
             local_pty: true,
             at_prompt,
             remote_prompt_seen: false,
+            bracketed_paste: None,
         }
     }
 
@@ -3537,6 +3780,7 @@ mod tests {
                 local_pty: true,
                 at_prompt,
                 remote_prompt_seen,
+                bracketed_paste: None,
             }),
         }
     }
@@ -3558,6 +3802,7 @@ mod tests {
                 local_pty: false,
                 at_prompt,
                 remote_prompt_seen: at_prompt == Some(true),
+                bracketed_paste: None,
             }),
         }
     }
@@ -4536,5 +4781,376 @@ mod tests {
             "{:?}",
             backend.control_calls
         );
+    }
+
+    #[test]
+    fn tab_ls_and_pane_ls_say_which_tabs_are_asleep() {
+        let mut backend = mock();
+        backend.machine.workspaces[0].tabs[1].hibernated = true;
+
+        let Outcome::Report(tabs) = run_cli(
+            &["tty7", "tab", "ls", "api"],
+            &Context::default(),
+            &mut backend,
+        ) else {
+            panic!("tab ls must report");
+        };
+        let tabs = tabs.json["tabs"].as_array().expect("tabs").clone();
+        assert_eq!(tabs[0]["hibernated"], false);
+        assert_eq!(tabs[1]["hibernated"], true);
+
+        let Outcome::Report(panes) = run_cli(
+            &["tty7", "pane", "ls", "api"],
+            &Context::default(),
+            &mut backend,
+        ) else {
+            panic!("pane ls must report");
+        };
+        let panes = panes.json["panes"].as_array().expect("panes").clone();
+        let asleep: Vec<u64> = panes
+            .iter()
+            .filter(|p| p["hibernated"] == true)
+            .map(|p| p["pane"].as_u64().unwrap())
+            .collect();
+        assert_eq!(asleep, vec![2, 3]);
+    }
+
+    fn exec_run(end: ExecEnd, output: &[u8]) -> crate::exec::ExecRun {
+        crate::exec::ExecRun {
+            end,
+            output: output.to_vec(),
+            dropped: 0,
+            size: segment(b"").size,
+        }
+    }
+
+    fn exec_outcome(args: &[&str], ctx: &Context, backend: &mut MockBackend) -> (i32, Report) {
+        match execute(cli(args), ctx, backend) {
+            Ok(Outcome::Exit(code, report)) => (code, report),
+            other => panic!("exec stands in for the command, so it exits: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_types_one_line_and_passes_the_exit_code_through() {
+        let mut backend = mock();
+        backend.exec_run = exec_run(
+            ExecEnd::Finished {
+                exit: Some(3),
+                ran: true,
+            },
+            b"built\r\n",
+        );
+        let (code, report) = exec_outcome(
+            &[
+                "tty7",
+                "exec",
+                "%1",
+                "--raw",
+                "--timeout",
+                "30",
+                "--",
+                "make",
+                "&&",
+                "ls",
+            ],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(code, 3, "the command's own code, not ours");
+        assert_eq!(
+            backend.execs,
+            vec![(1, b"make && ls\r".to_vec(), Some(Duration::from_secs(30)))],
+            "the words are one shell line, typed and submitted"
+        );
+        assert_eq!(report.human, "built\r\n");
+        assert_eq!(report.json["exit"], 3);
+        assert_eq!(report.json["exit_code_known"], true);
+        assert_eq!(report.json["command"], "make && ls");
+        assert_eq!(report.json["output"], "built\r\n");
+        assert_eq!(report.json["timed_out"], false);
+        // Nothing was sent anywhere but through the exec seam.
+        assert!(backend.sent.is_empty());
+    }
+
+    #[test]
+    fn exec_renders_the_output_the_way_capture_plain_does() {
+        let mut backend = mock();
+        backend.exec_run = exec_run(
+            ExecEnd::Finished {
+                exit: Some(0),
+                ran: true,
+            },
+            b"\x1b[31mred\x1b[0m\r\nprogress 10%\rprogress 100%\r\n",
+        );
+        let (code, report) = exec_outcome(
+            &["tty7", "exec", "%1", "--", "x"],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(code, 0);
+        assert!(!report.human.contains('\u{1b}'), "{:?}", report.human);
+        assert!(report.human.contains("red"), "{:?}", report.human);
+        assert!(report.human.contains("progress 100%"), "{:?}", report.human);
+        assert!(
+            !report.human.contains("progress 10%\n"),
+            "{:?}",
+            report.human
+        );
+    }
+
+    #[test]
+    fn exec_refuses_a_pane_it_cannot_follow_before_typing_anything() {
+        // The backend sends nothing on these; the verb has to turn them into
+        // an error that says what to do instead of an exit code that says
+        // nothing.
+        let mut backend = mock();
+        backend.exec_run = exec_run(ExecEnd::NoIntegration, b"");
+        let err = execute(
+            cli(&["tty7", "exec", "%1", "--", "ls"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("shell-integration"), "{err}");
+        assert!(err.contains("wait --until free"), "{err}");
+
+        let mut backend = mock();
+        backend.exec_run = exec_run(ExecEnd::Busy, b"");
+        let err = execute(
+            cli(&["tty7", "exec", "%1", "--", "ls"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not at a shell prompt"), "{err}");
+
+        // The caller's own pane can only ever be busy — running this.
+        let ctx = Context {
+            pane: Some("%1".into()),
+            ..Context::default()
+        };
+        let err = execute(cli(&["tty7", "exec", "--", "ls"]), &ctx, &mut backend)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("this shell"), "{err}");
+    }
+
+    #[test]
+    fn exec_refuses_a_line_the_editor_would_act_on() {
+        for line in ["make\nrm -rf build", "ls\tx", "a\u{1b}b"] {
+            let mut backend = mock();
+            let err = execute(
+                cli(&["tty7", "exec", "%1", "--", line]),
+                &Context::default(),
+                &mut backend,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("control"), "{line:?}: {err}");
+            assert!(backend.execs.is_empty(), "nothing may be typed: {line:?}");
+        }
+    }
+
+    #[test]
+    fn exec_reports_every_way_it_can_end_without_an_exit_code() {
+        let cases = [
+            (ExecEnd::TimedOut { started: true }, 124, true, false),
+            (ExecEnd::TimedOut { started: false }, 124, true, false),
+            (ExecEnd::PaneExited(Some(0)), 1, false, true),
+            (
+                ExecEnd::Finished {
+                    exit: None,
+                    ran: true,
+                },
+                1,
+                false,
+                false,
+            ),
+            (
+                ExecEnd::Finished {
+                    exit: None,
+                    ran: false,
+                },
+                1,
+                false,
+                false,
+            ),
+        ];
+        for (end, want, timed_out, pane_exited) in cases {
+            let mut backend = mock();
+            backend.exec_run = exec_run(end.clone(), b"partial\r\n");
+            let (code, report) = exec_outcome(
+                &["tty7", "exec", "%1", "--raw", "--timeout", "1", "--", "x"],
+                &Context::default(),
+                &mut backend,
+            );
+            assert_eq!(code, want, "{end:?}");
+            assert_eq!(report.json["exit_code_known"], false, "{end:?}");
+            assert_eq!(report.json["timed_out"], timed_out, "{end:?}");
+            assert_eq!(report.json["pane_exited"], pane_exited, "{end:?}");
+            assert_eq!(
+                report.human, "partial\r\n",
+                "what did arrive is still the answer: {end:?}"
+            );
+        }
+    }
+
+    fn procs_with_paste_mode(mode: Option<bool>) -> tty7_core::daemon::protocol::PaneProcs {
+        tty7_core::daemon::protocol::PaneProcs {
+            context: Some(tty7_core::daemon::protocol::PaneContext {
+                local_pty: true,
+                bracketed_paste: mode,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn send_from_file_sends_the_bytes_verbatim_and_never_echoes_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token");
+        std::fs::write(&path, b"s3cr\\et\n\xff").unwrap();
+        let mut backend = mock();
+        let json = json_of(run_cli(
+            &["tty7", "send", "%1", "--from-file", path.to_str().unwrap()],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(backend.sent, vec![(1, b"s3cr\\et\n\xff".to_vec())]);
+        assert!(
+            json["sent"].is_null(),
+            "the secret must not be echoed: {json}"
+        );
+        assert!(!json.to_string().contains("s3cr"), "{json}");
+        assert_eq!(json["source"], "file");
+        assert_eq!(json["bytes"], 9);
+        assert!(
+            backend.procs_calls.is_empty(),
+            "without --paste the pane is not asked anything"
+        );
+
+        // Keys still follow the payload, the way they follow typed text.
+        let mut backend = mock();
+        run_cli(
+            &[
+                "tty7",
+                "send",
+                "%1",
+                "--from-file",
+                path.to_str().unwrap(),
+                "--enter",
+            ],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(
+            backend.sent,
+            vec![(1, b"s3cr\\et\n\xff".to_vec()), (1, b"\r".to_vec())]
+        );
+    }
+
+    #[test]
+    fn send_from_file_takes_its_positional_as_an_address_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload");
+        std::fs::write(&path, b"x").unwrap();
+        let mut backend = mock();
+        let err = execute(
+            cli(&[
+                "tty7",
+                "send",
+                "echo",
+                "--from-file",
+                path.to_str().unwrap(),
+            ]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("has to be the pane"), "{err}");
+        assert!(backend.sent.is_empty(), "nothing may be typed");
+
+        // With no address it is this pane, as it is for text.
+        let ctx = Context {
+            pane: Some("%3".into()),
+            ..Context::default()
+        };
+        run_cli(
+            &["tty7", "send", "--from-file", path.to_str().unwrap()],
+            &ctx,
+            &mut backend,
+        );
+        assert_eq!(backend.sent, vec![(3, b"x".to_vec())]);
+    }
+
+    #[test]
+    fn send_paste_frames_only_for_a_pane_that_switched_bracketed_paste_on() {
+        let mut backend = mock();
+        backend.procs_reply = procs_with_paste_mode(Some(true));
+        let json = json_of(run_cli(
+            &[
+                "tty7",
+                "send",
+                "%1",
+                "a\r\nb\x1b[201~c",
+                "--paste",
+                "--enter",
+            ],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(
+            backend.sent,
+            vec![
+                (1, b"\x1b[200~a\nb[201~c\x1b[201~".to_vec()),
+                (1, b"\r".to_vec())
+            ],
+            "the GUI's framing: CRLF folded, ESC stripped so the text cannot close the paste"
+        );
+        assert_eq!(json["bracketed"], true);
+        assert_eq!(json["bracketed_paste_mode"], true);
+
+        // Off: brackets would reach the program as keystrokes, so the text goes
+        // the way a paste into such a pane always has — a CR per line break.
+        let mut backend = mock();
+        backend.procs_reply = procs_with_paste_mode(Some(false));
+        let json = json_of(run_cli(
+            &["tty7", "send", "%1", "a\nb", "--paste"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(backend.sent, vec![(1, b"a\rb".to_vec())]);
+        assert_eq!(json["bracketed"], false);
+        assert_eq!(json["bracketed_paste_mode"], false);
+
+        // A server that cannot say is not taken as a yes.
+        let mut backend = mock();
+        backend.procs_reply = procs_with_paste_mode(None);
+        let json = json_of(run_cli(
+            &["tty7", "send", "%1", "a\nb", "--paste"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(backend.sent, vec![(1, b"a\rb".to_vec())]);
+        assert!(json["bracketed_paste_mode"].is_null(), "{json}");
+    }
+
+    #[test]
+    fn send_paste_needs_something_to_paste() {
+        let mut backend = mock();
+        let err = execute(
+            cli(&["tty7", "send", "%1", "--paste", "--enter"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--paste needs text"), "{err}");
+        assert!(backend.sent.is_empty());
     }
 }

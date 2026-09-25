@@ -105,6 +105,10 @@ impl crate::host::server::PaneDirectory for Registry {
         self.get(pane_id).map(|p| p.procs()).unwrap_or_default()
     }
 
+    fn hibernate_pane(&self, pane_id: u64) {
+        hibernate_pane(self, pane_id);
+    }
+
     fn agent_states(&self) -> Vec<crate::daemon::control::PaneAgentState> {
         let panes: Vec<Arc<DaemonPane>> = self.panes.lock().unwrap().values().cloned().collect();
         let mut states: Vec<_> = panes.iter().filter_map(|p| p.agent_state()).collect();
@@ -274,6 +278,22 @@ fn kill_pane(registry: &Registry, pane_id: u64) {
         pane.kill();
     }
     crate::daemon::scrollback::forget(pane_id);
+}
+
+/// Stop a pane whose tab is going to sleep, keeping its screen.
+///
+/// [`kill_pane`] with the other half of the bargain: the screen is written one
+/// last time, exactly, and left on disk rather than dropped, so the pane that
+/// wakes in this one's place opens showing it — the same restore a daemon that
+/// died unannounced gets, asked for the same way. The tree still names this
+/// pane, which is what keeps the sweeps off the file until then.
+fn hibernate_pane(registry: &Registry, pane_id: u64) {
+    let Some(pane) = registry.remove(pane_id) else {
+        return;
+    };
+    let (segments, title, _) = pane.scrollback_snapshot();
+    crate::daemon::scrollback::save(pane_id, &segments, title.as_deref());
+    pane.kill();
 }
 
 fn ssh_connection_for(
@@ -1032,6 +1052,31 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             let mut w = write_stream;
             let list = crate::daemon::ssh::SshManager::global().remove_forward(pane_id, forward_id);
             DaemonMsg::ForwardList(list).encode(&mut w)?;
+            Ok(())
+        }
+
+        ClientMsg::SetForwardEnabled {
+            pane_id,
+            forward_id,
+            enabled,
+        } => {
+            let mut w = write_stream;
+            // Only switching on needs the connection; switching off has to
+            // work on a pane whose connection is already gone.
+            let conn = match forward_pane_connection(&registry, pane_id) {
+                Ok(conn) => Some(conn),
+                Err(e) if enabled => {
+                    DaemonMsg::Error(e).encode(&mut w)?;
+                    return Ok(());
+                }
+                Err(_) => None,
+            };
+            match crate::daemon::ssh::SshManager::global()
+                .set_forward_enabled(pane_id, conn, forward_id, enabled)
+            {
+                Ok(list) => DaemonMsg::ForwardList(list).encode(&mut w)?,
+                Err(e) => DaemonMsg::Error(e).encode(&mut w)?,
+            }
             Ok(())
         }
 

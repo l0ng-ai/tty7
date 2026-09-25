@@ -34,6 +34,10 @@ pub trait PaneDirectory: Send + Sync {
     /// is this process and not the client's own daemon: the client asks over
     /// the control link precisely because the processes are here.
     fn pane_procs(&self, pane_id: u64) -> crate::daemon::protocol::PaneProcs;
+    /// Stop a pane for a tab going to sleep: the processes go, the pane's last
+    /// screen stays on disk for the wake to open with. Unlike closing a pane,
+    /// which drops that screen because nobody will ask for it again.
+    fn hibernate_pane(&self, pane_id: u64);
 }
 
 #[derive(Clone, Default)]
@@ -382,6 +386,12 @@ fn handshake<R: Read>(
     }
     if services.machine.is_some() {
         features.push(feature::MACHINE_TREE.to_string());
+    }
+    // A sleeping tab is a mark in the tree *and* stopped panes; a peer that can
+    // do only half of that would leave a tab asleep with its shells running,
+    // or its shells stopped with nothing saying the tab is meant to wake.
+    if services.machine.is_some() && services.panes.is_some() {
+        features.push(feature::TAB_HIBERNATE.to_string());
     }
     // The pane daemon's features ride along, same as `protocol_version` above:
     // a pane connection answers exactly one message, so a client that wanted
@@ -782,6 +792,34 @@ fn run_request(
             conn.machine()?
                 .workspace_set_groups(workspace, groups, conn.machine_origin)?;
             (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::TabSetHibernated {
+            workspace,
+            tab,
+            hibernated,
+        } => {
+            let Some(directory) = conn.panes.as_ref() else {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "this peer serves no panes, so it cannot put a tab to sleep",
+                ));
+            };
+            let panes = conn.machine()?.tab_set_hibernated(
+                workspace,
+                tab,
+                hibernated,
+                conn.machine_origin,
+            )?;
+            // After the mark, not before: a pane stopped under a tab the tree
+            // does not yet call asleep is, to anyone reading the tree in
+            // between, a pane that died — and a restore reading it that way
+            // would spawn it straight back.
+            if hibernated {
+                for pane in &panes {
+                    directory.hibernate_pane(*pane);
+                }
+            }
+            (ReplyOk::Panes(panes), Vec::new())
         }
         ControlRequest::PaneSplit {
             workspace,
@@ -1722,6 +1760,8 @@ mod aggregate_tests {
             }
         }
 
+        fn hibernate_pane(&self, _pane_id: u64) {}
+
         fn agent_states(&self) -> Vec<PaneAgentState> {
             vec![PaneAgentState {
                 pane_id: 7,
@@ -1901,6 +1941,151 @@ mod aggregate_tests {
             routes.iter().all(|r| !r.key.is_empty()),
             "whatever links exist are named; none are blank"
         );
+    }
+
+    /// Records which panes were stopped for a sleeping tab, and in what order
+    /// relative to the tree: each entry carries whether the tree already
+    /// called the tab asleep when the pane was stopped.
+    struct SleepRecorder {
+        store: Arc<MachineStore>,
+        stopped: std::sync::Mutex<Vec<(u64, bool)>>,
+    }
+
+    impl PaneDirectory for SleepRecorder {
+        fn pane_count(&self) -> u64 {
+            0
+        }
+
+        fn panes(&self) -> Vec<PaneInfo> {
+            Vec::new()
+        }
+
+        fn pane_procs(&self, _pane_id: u64) -> crate::daemon::protocol::PaneProcs {
+            Default::default()
+        }
+
+        fn agent_states(&self) -> Vec<PaneAgentState> {
+            Vec::new()
+        }
+
+        fn hibernate_pane(&self, pane_id: u64) {
+            let asleep = self.store.machine().workspaces.iter().any(|w| {
+                w.tabs
+                    .iter()
+                    .any(|t| t.hibernated && t.root.contains(pane_id))
+            });
+            self.stopped.lock().unwrap().push((pane_id, asleep));
+        }
+    }
+
+    fn seed(pane: u64) -> machine::PaneSeed {
+        machine::PaneSeed {
+            pane,
+            cwd: Some("/repo".into()),
+            ssh_spec: None,
+            agent: None,
+            shell: None,
+        }
+    }
+
+    /// Going to sleep stops every pane of the tab — after the tree says the
+    /// tab is asleep, so nobody reading the tree in between takes the stopped
+    /// panes for dead ones — and keeps them in the tree for the wake. Waking
+    /// only clears the mark: the client brings the panes back.
+    #[test]
+    fn a_tab_put_to_sleep_stops_its_panes_and_keeps_them_in_the_tree() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = MachineStore::open(dir.path().join(machine::MACHINE_FILE));
+        let ws = store.workspace_create(None, None, None).unwrap();
+        let tab = store.tab_create(ws.id, None, seed(7), None, None).unwrap();
+        store
+            .pane_split(
+                ws.id,
+                7,
+                machine::Axis::Horizontal,
+                0.5,
+                seed(8),
+                false,
+                None,
+            )
+            .unwrap();
+        let other = store.tab_create(ws.id, None, seed(9), None, None).unwrap();
+        let recorder = Arc::new(SleepRecorder {
+            store: Arc::clone(&store),
+            stopped: std::sync::Mutex::new(Vec::new()),
+        });
+        let client = client_with(Services {
+            machine: Some(Arc::clone(&store)),
+            attachments: Arc::new(AttachRegistry::default()),
+            panes: Some(recorder.clone()),
+        });
+        assert!(client.hello().has_feature(feature::TAB_HIBERNATE));
+
+        let ReplyOk::Panes(panes) = client
+            .call(ControlRequest::TabSetHibernated {
+                workspace: ws.id,
+                tab: tab.id,
+                hibernated: true,
+            })
+            .unwrap()
+        else {
+            panic!("TabSetHibernated must answer with the tab's panes");
+        };
+        assert_eq!(panes, vec![7, 8]);
+        assert_eq!(
+            *recorder.stopped.lock().unwrap(),
+            vec![(7, true), (8, true)],
+            "both panes stopped, each after the tree marked the tab"
+        );
+        let machine = store.machine();
+        let asleep = &machine.workspaces[0].tabs;
+        assert!(asleep.iter().find(|t| t.id == tab.id).unwrap().hibernated);
+        assert!(!asleep.iter().find(|t| t.id == other.id).unwrap().hibernated);
+        for pane in [7, 8] {
+            assert!(
+                machine.panes.iter().any(|p| p.id == pane),
+                "pane {pane}'s record is what the wake restores from"
+            );
+        }
+
+        recorder.stopped.lock().unwrap().clear();
+        let ReplyOk::Panes(_) = client
+            .call(ControlRequest::TabSetHibernated {
+                workspace: ws.id,
+                tab: tab.id,
+                hibernated: false,
+            })
+            .unwrap()
+        else {
+            panic!("TabSetHibernated must answer with the tab's panes");
+        };
+        assert!(recorder.stopped.lock().unwrap().is_empty());
+        assert!(!store.machine().workspaces[0].tabs[0].hibernated);
+    }
+
+    /// A peer with a tree and no panes could mark a tab asleep and leave its
+    /// shells running. It does not offer to, and refuses if asked anyway —
+    /// before the mark, so the tree is not left claiming a sleep that never
+    /// happened.
+    #[test]
+    fn a_peer_serving_no_panes_cannot_put_a_tab_to_sleep() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = MachineStore::open(dir.path().join(machine::MACHINE_FILE));
+        let ws = store.workspace_create(None, None, None).unwrap();
+        let tab = store.tab_create(ws.id, None, seed(7), None, None).unwrap();
+        let client = client_with(Services::with_machine(Arc::clone(&store)));
+        assert!(client.hello().has_feature(feature::MACHINE_TREE));
+        assert!(!client.hello().has_feature(feature::TAB_HIBERNATE));
+        assert!(
+            client
+                .call(ControlRequest::TabSetHibernated {
+                    workspace: ws.id,
+                    tab: tab.id,
+                    hibernated: true,
+                })
+                .is_err()
+        );
+        assert!(!store.machine().workspaces[0].tabs[0].hibernated);
     }
 }
 

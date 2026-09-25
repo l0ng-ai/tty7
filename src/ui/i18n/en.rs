@@ -620,6 +620,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
             "Click a row's +N −N to open the working-tree diff in an overlay. Off leaves the counts visible, just not clickable."
         }
+        L10nKey::SettingsSshTabTitle => "SSH tab title",
+        L10nKey::SettingsSshTabTitleDesc => {
+            "What an SSH tab is called. Dynamic follows the title the remote side sets; the other two pin the tab to the host. A tab you renamed keeps its name."
+        }
+        L10nKey::SettingsSshTabTitleDynamic => "Dynamic",
+        L10nKey::SettingsSshTabTitleProfileName => "Profile name",
+        L10nKey::SettingsSshTabTitleHostname => "Hostname",
         L10nKey::DocumentDock => "Dock beside terminal",
         L10nKey::DocumentFill => "Fill window",
         L10nKey::SettingsNotifications => "Notifications",
@@ -940,6 +947,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "tabs group grouping auto repo repository git ssh host pinned pin ungrouped header sidebar flat folder"
         }
+        L10nKey::SettingsSearchSshTabTitleKeywords => {
+            "ssh tab title name host hostname profile alias pin fixed osc remote"
+        }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "double click word url path select semantic bracket email"
         }
@@ -1019,6 +1029,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SshEditProfile => "Edit connection…",
         L10nKey::ForwardTooltipAdd => "Add forward",
         L10nKey::ForwardTooltipRemove => "Remove",
+        L10nKey::ForwardTooltipTurnOn => "Turn on",
+        L10nKey::ForwardTooltipTurnOff => "Turn off — the rule is kept",
+        L10nKey::ForwardSwitchFailed => "Couldn't switch the forward — {error}",
+        L10nKey::SettingsFwdEnabled => "Open this rule with the connection",
         L10nKey::ForwardLocal => "Local",
         L10nKey::ForwardRemote => "Remote",
         L10nKey::ForwardDynamic => "Dynamic",
@@ -1214,6 +1228,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ScmShowMore => "Show more",
         L10nKey::ScmShowLess => "Show less",
         L10nKey::ScmCommitNotFound => "This commit is not in this repository.",
+        L10nKey::ScmFilterChanges => "Filter changed files…",
+        L10nKey::ScmViewAsTree => "View as Tree",
+        L10nKey::ScmViewAsList => "View as List",
+        L10nKey::ScmNoMatchingChanges => "No changed files match the filter.",
         L10nKey::ScmTooManyChanges => "Showing the first {shown} of {total} changes.",
         L10nKey::ScmOpenChanges => "Open Changes",
         L10nKey::ScmDiscardAllConfirm => {
@@ -1509,9 +1527,15 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdCopyWorkingDirectory => "Copy Working Directory",
         L10nKey::CmdCopySessionId => "Copy Session ID",
         L10nKey::CmdCopySessionIdSubtitle => "the coding agent's own session id",
+        L10nKey::CmdNewAgentTab => "New Agent Tab",
+        L10nKey::CmdNewAgentTabSubtitle => "open the coding agent you used last in a new tab",
         L10nKey::CmdForkSession => "Fork Session",
         L10nKey::CmdForkSessionSubtitle => "branch this agent session into a new tab",
         L10nKey::CmdMarkTabAsUnread => "Mark Tab as Unread",
+        L10nKey::CmdHibernateTab => "Hibernate Tab",
+        L10nKey::CmdHibernateTabSubtitle => {
+            "stop its processes to free memory; selecting it wakes it"
+        }
         L10nKey::CmdClosePaneTab => "Close Pane / Tab",
         L10nKey::CmdCloseWindow => "Close Window",
         L10nKey::CmdCloseWindowSubtitle => "shells keep running",
@@ -1670,6 +1694,16 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "No uncommitted changes in {cwd} (or not a git repository)."
         }
         L10nKey::AppCmdSshProfileTitle => "SSH: {title}",
+        L10nKey::AppCmdAgentLaunchTitle => "Agent: {name}",
+        L10nKey::AppNoAgentOnPath => "No coding agent was found on this machine's PATH",
+        L10nKey::AppNoAgentSeenHere => {
+            "No coding agent has run in this workspace yet — start one by hand once and it will be offered here"
+        }
+        L10nKey::AppAgentLaunchSaved => "{name} will now launch as: {command}",
+        L10nKey::AppAgentLaunchArgsUnknown => {
+            "{name} did not report the arguments it was started with"
+        }
+        L10nKey::AppCmdShellTitle => "Shell: {title}",
         L10nKey::AppCmdSwitchToTab => "Switch to Tab: {label}",
         L10nKey::AppPlaceholderDescription => "description",
         L10nKey::AppPlaceholderSshQuickConnect => "user@host  or  user@host:port",
@@ -1828,6 +1862,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppMenuCopyWorkingDirectory => "Copy Working Directory",
         L10nKey::AppMenuCopySessionId => "Copy Session ID",
         L10nKey::AppMenuForkSession => "Fork Session",
+        L10nKey::AppMenuSaveAgentLaunchArgs => "Set Current Launch Args as Default",
         L10nKey::AppMenuClosePaneTab => "Close",
         L10nKey::AppMenuCloseOtherTabs => "Close Other Tabs",
         L10nKey::AppMenuCloseTabsRight => "Close Tabs to the Right",
@@ -1886,6 +1921,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TabMenuLocalShells => "Local",
         L10nKey::TabMenuAddHost => "Add SSH Host…",
         L10nKey::TabMenuAllHosts => "All SSH Hosts…",
+        L10nKey::TabMenuLaunchAgent => "Launch Agent…",
+        L10nKey::TabMenuOtherShells => "Other Shells…",
         L10nKey::TabMenuSplitHint => "Hold {key} to split",
         L10nKey::TabUnnamedShell => "Shell {n}",
         L10nKey::ShellDefault => "default",
@@ -1912,6 +1949,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsNoneLower => "none",
         L10nKey::SettingsSearchCommandLineToolTitle => "Command line tool",
         L10nKey::TabContextMarkUnread => "Mark as Unread",
+        L10nKey::TabContextHibernate => "Hibernate",
+        L10nKey::TabContextWake => "Wake",
+        L10nKey::TabTooltipAsleep => "Hibernated — select to wake",
+        L10nKey::TabWakeFailed => "Could not wake the tab: none of its panes could be started",
     }
 }
 

@@ -27,8 +27,8 @@ use super::typeahead::{RawInput, Typeahead};
 use crate::core::actions::{
     CloseActiveTab, CopyLinkPathUnderPointer, DecreaseFontSize, ForkAgentSessionDown,
     ForkAgentSessionLeft, ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab,
-    OpenLinkUnderPointer, RevealLinkUnderPointer, SendBackTab, SendTab, SplitDown, SplitRight,
-    ToggleMaximizePane,
+    OpenLinkUnderPointer, RevealLinkUnderPointer, SaveAgentLaunchArgs, SendBackTab, SendTab,
+    SplitDown, SplitRight, ToggleMaximizePane,
 };
 use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier, NotifyMode};
 use crate::core::shell_quote::quote_for_shell;
@@ -139,6 +139,12 @@ impl gpui::EventEmitter<AuthPromptReady> for TerminalView {}
 pub struct AgentSessionChanged;
 
 impl gpui::EventEmitter<AgentSessionChanged> for TerminalView {}
+
+/// A coding agent started running in this pane: its foreground went from no
+/// agent to this one. What quick launch counts as the agent being used.
+pub struct AgentDetected(pub crate::core::cli_agent::CLIAgent);
+
+impl gpui::EventEmitter<AgentDetected> for TerminalView {}
 
 /// A file link the user clicked, on its way to whoever can show it. The
 /// terminal resolves the path — it is the only thing that knows the pane's
@@ -419,6 +425,15 @@ pub struct TerminalView {
     running_since: Option<std::time::Instant>,
     running_title: String,
     running_agent: Option<crate::core::cli_agent::CLIAgent>,
+    /// The foreground agent as of the last poll, so a new one is reported
+    /// once ([`AgentDetected`]) rather than on every frame it keeps running.
+    seen_agent: Option<crate::core::cli_agent::CLIAgent>,
+    /// Whether an agent appearing here is news. A pane this view spawned is
+    /// armed from the start; one it reattached to — an app restart, a
+    /// workspace switched back to — may already be running an agent that was
+    /// counted when it started, so it arms only once its shell is seen back
+    /// at the prompt with no agent in front.
+    agent_detection_armed: bool,
     last_agent_status: Option<crate::core::cli_agent::AgentStatus>,
     last_agent_session: (Option<String>, Option<Vec<String>>),
     agent_turn_started: Option<std::time::Instant>,
@@ -833,15 +848,7 @@ fn ring_system_bell() -> bool {
 }
 
 fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
-    if bracketed {
-        let text = text.replace("\r\n", "\n");
-        let mut bytes = b"\x1b[200~".to_vec();
-        bytes.extend(text.bytes().filter(|&b| b != 0x1b));
-        bytes.extend_from_slice(b"\x1b[201~");
-        bytes
-    } else {
-        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
-    }
+    tty7_core::core::paste::paste_bytes(text.as_bytes(), bracketed)
 }
 
 /// A line the shell can be handed byte for byte, as if it had been typed at its
@@ -1435,6 +1442,7 @@ impl TerminalView {
             .map(crate::core::config::gpui_font_features);
         let report_mouse = config.mouse_reporting;
         let prompt_editor = config.prompt_editor;
+        let agent_detection_armed = !terminal.reattached();
         let mut font = gpui::font(font_family);
         font.fallbacks = Some(gpui::FontFallbacks::from_fonts(fallbacks.clone()));
         if let Some(features) = &font_features {
@@ -1649,6 +1657,8 @@ impl TerminalView {
             running_since: None,
             running_title: String::new(),
             running_agent: None,
+            seen_agent: None,
+            agent_detection_armed,
             last_agent_status: None,
             last_agent_session: (None, None),
             agent_turn_started: None,
@@ -1755,6 +1765,35 @@ impl TerminalView {
     /// way.
     pub(crate) fn stated_title(&self) -> Option<&str> {
         stated_title(&self.title)
+    }
+
+    /// The title this pane gives its tab: [`Self::stated_title`], unless this
+    /// is an SSH pane and Settings pins its tab to the host's name instead
+    /// (#726). The pane's own title is untouched either way — OSC 0/2 keep
+    /// landing in it, and it is back on the tab the moment the setting is.
+    ///
+    /// A pane that has ended still says so: the pinned name takes the same
+    /// suffix the pane's own title would have.
+    pub(crate) fn tab_title(&self, cx: &App) -> Option<String> {
+        let pinned = self.ssh_spec.as_deref().and_then(|spec| {
+            let cfg = cx.try_global::<Config>()?;
+            crate::ui::ssh_connect::pinned_ssh_title(cfg.ssh_tab_title, spec, &cfg.ssh_profiles)
+        });
+        match pinned {
+            Some(name) if self.terminal.exited => Some(self.ended_title(&name)),
+            Some(name) => Some(name),
+            None => self.stated_title().map(str::to_string),
+        }
+    }
+
+    /// `name` with the suffix that says how this pane ended.
+    fn ended_title(&self, name: &str) -> String {
+        let key = if self.workspace().is_some() && !self.terminal.child_exited() {
+            L10nKey::PaneTitleDisconnected
+        } else {
+            L10nKey::PaneTitleProcessExited
+        };
+        t_fmt(key, &[("title", name)])
     }
 
     /// Sets how opaque the pane wants this terminal painted; the pane leaf
@@ -2234,17 +2273,7 @@ impl TerminalView {
                 self.pending_title = None;
                 // The pane keeps answering to its own name (an SSH pane's
                 // host, #438) — only the state suffix is localized (#602).
-                self.title = if self.workspace().is_some() && !self.terminal.child_exited() {
-                    t_fmt(
-                        L10nKey::PaneTitleDisconnected,
-                        &[("title", &self.default_title)],
-                    )
-                } else {
-                    t_fmt(
-                        L10nKey::PaneTitleProcessExited,
-                        &[("title", &self.default_title)],
-                    )
-                };
+                self.title = self.ended_title(&self.default_title);
                 if self.terminal.child_exited() {
                     cx.emit(ChildExited);
                 }
@@ -3751,6 +3780,8 @@ impl TerminalView {
             _ => {}
         }
 
+        self.poll_agent_detection(at_prompt, cx);
+
         let turn_finished = self.poll_agent_status(notify_allowed, window, cx);
 
         let session = self.terminal.agent_session();
@@ -4009,6 +4040,24 @@ impl TerminalView {
                 }
             },
         );
+    }
+
+    /// Report an agent that has just started in this pane ([`AgentDetected`]),
+    /// once per start, and never one that was already running when this view
+    /// reattached to the pane.
+    fn poll_agent_detection(&mut self, at_prompt: bool, cx: &mut Context<Self>) {
+        let agent = self.terminal.foreground_agent();
+        if agent != self.seen_agent {
+            self.seen_agent = agent;
+            if let Some(agent) = agent
+                && self.agent_detection_armed
+            {
+                cx.emit(AgentDetected(agent));
+            }
+        }
+        if agent.is_none() && at_prompt {
+            self.agent_detection_armed = true;
+        }
     }
 
     fn poll_agent_status(
@@ -7305,6 +7354,12 @@ impl Render for TerminalView {
                 let fork_ready = can_fork
                     && view.remote_context().is_none()
                     && view.agent_session().is_some_and(|s| s.session_id.is_some());
+                // `None` over a pane with no agent; otherwise whether it knows
+                // the command line it was started with.
+                let launch_argv_known = view.agent().map(|_| {
+                    view.agent_session()
+                        .is_some_and(|s| s.launch_argv.is_some())
+                });
 
                 let menu = match (can_fork, fork_ready) {
                     (true, true) => {
@@ -7336,6 +7391,21 @@ impl Render for TerminalView {
                         .separator()
                         .item(PopupMenuItem::new(t(L10nKey::AppMenuForkSession)).disabled(true)),
                     (false, _) => menu,
+                };
+
+                // Only over a running agent, and only live when the pane knows
+                // the command line it was started with — there is nothing to
+                // save otherwise. Beside Fork when both are there.
+                let menu = match launch_argv_known {
+                    Some(known) => {
+                        let menu = if can_fork { menu } else { menu.separator() };
+                        menu.menu_with_disabled(
+                            t(L10nKey::AppMenuSaveAgentLaunchArgs),
+                            Box::new(SaveAgentLaunchArgs),
+                            !known,
+                        )
+                    }
+                    None => menu,
                 };
 
                 menu.separator()
@@ -16207,6 +16277,96 @@ mod gpui_tests {
                 );
             })
             .unwrap();
+    }
+
+    /// Quick launch counts an agent each time one starts. Reattaching to a pane
+    /// whose agent was already running — every agent tab after an app restart
+    /// — is not a start, and counting it bumped every agent once per launch of
+    /// the app. Once that pane's agent exits, the next one is a start again.
+    #[gpui::test]
+    fn only_an_agent_that_starts_under_this_view_counts_as_detected(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::CLIAgent;
+
+        crate::core::config::pin_test_config_dir();
+        let (window, _root_daemon) = harness(cx);
+        let detected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let pane = |reattached: bool, cx: &mut TestAppContext| {
+            let (pane, daemon) = window
+                .update(cx, |_, window, cx| {
+                    if reattached {
+                        super::quiet_reattached_test_pane(2, window, cx)
+                    } else {
+                        super::quiet_test_pane(3, window, cx)
+                    }
+                })
+                .unwrap();
+            let seen = detected.clone();
+            cx.update(|cx| {
+                cx.subscribe(&pane, move |_, ev: &AgentDetected, _| {
+                    seen.borrow_mut().push(ev.0)
+                })
+                .detach()
+            });
+            (pane, daemon)
+        };
+        let report = |agent: Option<CLIAgent>,
+                      at_prompt: bool,
+                      pane: &Entity<TerminalView>,
+                      daemon: &mut Stream,
+                      cx: &mut TestAppContext| {
+            DaemonMsg::Agent(agent).encode(daemon).unwrap();
+            for _ in 0..200 {
+                if pane.read_with(cx, |p, _| p.terminal.foreground_agent()) == agent {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            pane.update(cx, |p, cx| p.poll_agent_detection(at_prompt, cx));
+            cx.run_until_parked();
+        };
+
+        let (restored, mut restored_daemon) = pane(true, cx);
+        report(
+            Some(CLIAgent::Claude),
+            false,
+            &restored,
+            &mut restored_daemon,
+            cx,
+        );
+        report(
+            Some(CLIAgent::Claude),
+            false,
+            &restored,
+            &mut restored_daemon,
+            cx,
+        );
+        assert_eq!(
+            *detected.borrow(),
+            vec![],
+            "already running when reattached"
+        );
+        report(None, true, &restored, &mut restored_daemon, cx);
+        report(
+            Some(CLIAgent::Codex),
+            false,
+            &restored,
+            &mut restored_daemon,
+            cx,
+        );
+        assert_eq!(
+            *detected.borrow(),
+            vec![CLIAgent::Codex],
+            "started after the reattach"
+        );
+
+        let (fresh, mut fresh_daemon) = pane(false, cx);
+        report(Some(CLIAgent::Claude), false, &fresh, &mut fresh_daemon, cx);
+        report(Some(CLIAgent::Claude), false, &fresh, &mut fresh_daemon, cx);
+        assert_eq!(
+            *detected.borrow(),
+            vec![CLIAgent::Codex, CLIAgent::Claude],
+            "a spawned pane counts its first agent, once"
+        );
     }
 }
 

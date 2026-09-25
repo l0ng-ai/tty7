@@ -883,6 +883,7 @@ fn parse_forward_rule(kind: ForwardKind, value: &str) -> Option<ForwardRule> {
         bind,
         target,
         description: String::new(),
+        enabled: true,
     })
 }
 

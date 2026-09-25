@@ -59,6 +59,16 @@ pub struct SessionTab {
     pub last_auto: Option<crate::core::group_key::AutoKey>,
     #[serde(skip)]
     pub tree_id: Option<crate::core::machine::TabId>,
+    /// Asleep in the tree: comes back as a placeholder holding `pane`, and
+    /// nothing is spawned for it until it is woken. See
+    /// [`Tab::hibernated`](crate::core::machine::Tab::hibernated).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hibernated: bool,
+    /// What a sleeping tab is called while nothing in it runs to say — read
+    /// off the tree's pane records, the same way the switcher names a tab of
+    /// a window it does not own.
+    #[serde(skip)]
+    pub asleep_view: Option<crate::core::tab_view::TabView>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -379,6 +389,11 @@ pub struct WindowView {
     /// is another client's activity, not ours); opening one clears the mark.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub synced: bool,
+    /// Slugs of the coding agents seen running in this workspace, most recent
+    /// last. A remote workspace cannot be asked what is on its `PATH`, so
+    /// this is what its quick-launch list is made of.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seen_agents: Vec<String>,
 }
 
 impl Default for WindowView {
@@ -392,6 +407,7 @@ impl Default for WindowView {
             label: None,
             subject: None,
             synced: false,
+            seen_agents: Vec::new(),
         }
     }
 }
@@ -410,6 +426,17 @@ impl WindowView {
 
     pub fn is_remote(&self) -> bool {
         self.host.is_some()
+    }
+
+    /// Remember `slug` as running here, moving it to the end if it was
+    /// already known. Answers whether anything changed.
+    pub fn saw_agent(&mut self, slug: &str) -> bool {
+        if self.seen_agents.last().is_some_and(|s| s == slug) {
+            return false;
+        }
+        self.seen_agents.retain(|s| s != slug);
+        self.seen_agents.push(slug.to_string());
+        true
     }
 
     pub fn host_id(&self) -> crate::host::HostId {
@@ -1166,5 +1193,30 @@ mod tests {
         };
         views.views.retain(|w| w.id != b_id);
         assert_eq!(numbers(&views), vec![a_id, c_id]);
+    }
+
+    /// A remote workspace's quick-launch list is the agents seen running in
+    /// it, so the list has to be in `views.json` with the rest of the
+    /// workspace — an in-memory one would be empty after every restart.
+    #[test]
+    fn agents_seen_in_a_workspace_survive_a_restart() {
+        let _file = lock_session_file();
+        pin_config_dir();
+        let mut entry = remote_view("build-box");
+        assert!(entry.saw_agent("claude"));
+        assert!(entry.saw_agent("codex"));
+        assert!(!entry.saw_agent("codex"), "already the most recent");
+        assert!(entry.saw_agent("claude"), "moves to the end");
+        let id = entry.id;
+        WindowViews {
+            active: Some(id),
+            views: vec![entry, view()],
+        }
+        .save();
+        let loaded = WindowViews::load().expect("a saved views file should load back");
+        assert_eq!(loaded.get(id).unwrap().seen_agents, vec!["codex", "claude"]);
+        // A workspace that has seen nothing writes nothing for it.
+        let text = std::fs::read_to_string(WindowViews::path().unwrap()).unwrap();
+        assert_eq!(text.matches("seen_agents").count(), 1);
     }
 }
