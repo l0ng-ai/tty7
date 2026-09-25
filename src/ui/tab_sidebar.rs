@@ -63,7 +63,7 @@ mod row_metrics {
     pub(super) const BRANCH_ICON: f32 = 11.;
     /// `pl_2` + `pr_1p5` on a group header.
     pub(super) const HEADER_PAD: f32 = 8. + 6.;
-    /// The chevron a header opens with, and the asterisk that marks a custom
+    /// The chevron a header opens with, and the pin that marks a folder
     /// group: both `xsmall` icons, which resolve to 12px.
     pub(super) const HEADER_ICON: f32 = 12.;
 
@@ -94,7 +94,7 @@ const ROW_CWD_FLOOR: f32 = 24.;
 /// rows share. The branch takes what it wants up to half the line, and the
 /// heading keeps the rest — so a long branch can no longer crush the name
 /// (flex used to hand the overflow to them in proportion to what each asked
-/// for, which gave the longer string the smaller cut), and a long custom name
+/// for, which gave the longer string the smaller cut), and a long group name
 /// cannot crush the branch in return. `git_want` is `None` for a header with
 /// no shared branch on it, which then owns the whole line.
 fn header_name_avail(avail: f32, git_want: Option<f32>) -> f32 {
@@ -2059,6 +2059,28 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Take the workspace's groups as another window, or the machine, has them.
+    ///
+    /// Every tab's [`EntryWatch`](crate::core::group_key::EntryWatch) starts
+    /// over from where it is. A folder that arrives from elsewhere is not one
+    /// this window's tabs walked into — and in particular, a window that drew
+    /// a frame before its copy of the groups landed saw no folders at all, so
+    /// without this every tab sitting in a pinned folder at launch would read
+    /// the groups landing as an entry, and a tab dragged out of its folder
+    /// group would be pulled back in on every start. The window that pinned
+    /// the folder gathers the tabs itself and says so tab by tab.
+    pub(crate) fn adopt_sidebar_groups(&mut self, groups: WorkspaceGroups, cx: &mut Context<Self>) {
+        if self.sidebar_groups == groups {
+            return;
+        }
+        self.sidebar_groups = groups;
+        for tab in &self.tabs {
+            tab.folder_watch
+                .set(crate::core::group_key::EntryWatch::baseline());
+        }
+        cx.notify();
+    }
+
     /// Put the dragged tab where it was dropped.
     ///
     /// By id rather than index: a drag is several frames long, and a tab
@@ -3911,6 +3933,32 @@ mod fold_tests {
                 kinds.contains(&crate::ui::palette::CommandKind::OpenFolderAsGroup),
                 "a workspace on this computer can pick a folder"
             );
+        });
+    }
+
+    /// Groups that arrive from another window, or from the machine at launch,
+    /// are not folders this window's tabs walked into. A tab sitting in one —
+    /// here, one that was dragged out of it — stays where it is.
+    #[gpui::test]
+    fn groups_arriving_from_elsewhere_pull_no_tab_in(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        app.update(&mut vcx, |app, cx| {
+            plant_repo(app, 0, "/w/probed/sub", "/w/probed", cx);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        app.update(&mut vcx, |app, cx| {
+            let mut groups = WorkspaceGroups::default();
+            groups
+                .pinned
+                .push(PinnedGroup::folder(Path::new("/w/probed")));
+            app.adopt_sidebar_groups(groups, cx);
+        });
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, _| {
+            assert_eq!(app.tabs[0].group.get(), None);
         });
     }
 }

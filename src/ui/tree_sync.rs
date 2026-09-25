@@ -133,9 +133,11 @@ pub(crate) fn desired_tabs(
         out.push(DesiredTab {
             id,
             name: tab.name.clone(),
-            // A tab still naming a group this window has deleted is an auto
-            // tab, and goes up as one.
-            group: tab.group.get().filter(|g| app.sidebar_groups.contains(*g)),
+            // As the tab has it, even when this window does not know the
+            // group: a window whose copy of the groups has not landed yet
+            // would otherwise send every tab it holds back to auto grouping.
+            // A group that really is gone was already cleared by the machine.
+            group: tab.group.get(),
             root,
         });
     }
@@ -1599,12 +1601,7 @@ fn adopt_groups(cx: &mut App, client_ws: WorkspaceId) {
         else {
             return;
         };
-        app.update(cx, |app, cx| {
-            if app.sidebar_groups != groups {
-                app.sidebar_groups = groups;
-                cx.notify();
-            }
-        });
+        app.update(cx, |app, cx| app.adopt_sidebar_groups(groups, cx));
     });
 }
 
@@ -2777,7 +2774,7 @@ impl Tty7App {
                 true
             }
             LayoutDelta::GroupsChanged { groups } => {
-                self.sidebar_groups = groups.clone();
+                self.adopt_sidebar_groups(groups.clone(), cx);
                 true
             }
             LayoutDelta::TabMoved { tab, to } => {
