@@ -491,7 +491,7 @@ impl Tab {
             overlay_top: OverlayTop::default(),
             document_layout: None,
             group: std::cell::Cell::new(tree.group),
-            auto_group: std::cell::RefCell::new(None),
+            auto_group: std::cell::RefCell::new(tree.last_auto.clone()),
             // Only ever built for a tab that was just created elsewhere — by
             // `tty7 tab new`, or another window — so it is as new as one
             // opened here: opened inside a pinned folder, it joins it. Every
@@ -1914,7 +1914,7 @@ impl Tty7App {
                 overlay_top: OverlayTop::default(),
                 document_layout: None,
                 group: std::cell::Cell::new(st.group),
-                auto_group: std::cell::RefCell::new(None),
+                auto_group: std::cell::RefCell::new(st.last_auto),
                 // Reopened here, so it is this window's new tab: walking into
                 // a pinned folder files it there like any other.
                 folder_watch: std::cell::Cell::new(crate::core::group_key::EntryWatch::fresh()),
@@ -9086,6 +9086,7 @@ fn tab_to_session(tab: &Tab, cx: &App) -> SessionTab {
         name: tab.name.clone(),
         pane: pane_to_session(&tab.pane, cx),
         group: tab.group.get(),
+        last_auto: tab.auto_group.borrow().clone(),
         tree_id: None,
     }
 }
@@ -9287,7 +9288,9 @@ fn tabs_from_session(
             overlay_top: OverlayTop::default(),
             document_layout: None,
             group: std::cell::Cell::new(st.group),
-            auto_group: std::cell::RefCell::new(None),
+            // The hint the tree kept: the tab is drawn in its auto group from
+            // the first frame, not parked in Ungrouped until its probe lands.
+            auto_group: std::cell::RefCell::new(st.last_auto.clone()),
             folder_watch: std::cell::Cell::new(crate::core::group_key::EntryWatch::baseline()),
             tree_id: std::cell::Cell::new(
                 st.tree_id
@@ -11091,6 +11094,7 @@ mod ssh_rebuild_gpui_tests {
                 id: app.tabs[0].tree_id.get(),
                 name: None,
                 group: None,
+                last_auto: None,
                 root: PaneNode::Leaf { pane: 1 },
             };
             app.apply_layout_delta(

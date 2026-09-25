@@ -11,12 +11,14 @@ pub fn two_workspace_machine() -> Machine {
                 id: TabId::new(),
                 name: Some("build".into()),
                 group: None,
+                last_auto: None,
                 root: PaneNode::Leaf { pane: 1 },
             },
             Tab {
                 id: TabId::new(),
                 name: None,
                 group: None,
+                last_auto: None,
                 root: PaneNode::Split {
                     axis: Axis::Horizontal,
                     ratio: 0.5,
@@ -37,6 +39,7 @@ pub fn two_workspace_machine() -> Machine {
             id: TabId::new(),
             name: None,
             group: None,
+            last_auto: None,
             root: PaneNode::Leaf { pane: 5 },
         }],
         active_tab: None,

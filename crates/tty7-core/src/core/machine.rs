@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::core::cli_agent::CLIAgent;
-use crate::core::group_key::{GroupId, WorkspaceGroups};
+use crate::core::group_key::{AutoKey, GroupId, WorkspaceGroups};
 use crate::core::session::WorkspaceId;
 use crate::daemon::protocol::{NativeSshSpec, ShellSpec};
 
@@ -167,6 +167,15 @@ pub struct Tab {
     /// worked out from the tab's cwd every time it is drawn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<GroupId>,
+    /// The auto group this tab last resolved to — a hint, not a membership.
+    ///
+    /// Auto groups are worked out from a repo probe, and at launch no probe
+    /// has answered yet: without this every restored tab sat in Ungrouped
+    /// until its own came back, then jumped. The GUI draws the tab here until
+    /// the live answer lands, and the live answer always wins and rewrites
+    /// it. It never outranks `group`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_auto: Option<AutoKey>,
     pub root: PaneNode,
 }
 
@@ -176,6 +185,7 @@ impl Tab {
             id: TabId::new(),
             name: None,
             group: None,
+            last_auto: None,
             root: PaneNode::Leaf { pane },
         }
     }
@@ -439,6 +449,8 @@ pub enum LayoutDelta {
     TabRegrouped {
         tab: TabId,
         group: Option<GroupId>,
+        #[serde(default)]
+        last_auto: Option<AutoKey>,
     },
     GroupsChanged {
         groups: WorkspaceGroups,
@@ -765,14 +777,23 @@ impl MachineStore {
         workspace: WorkspaceId,
         tab: TabId,
         group: Option<GroupId>,
+        last_auto: Option<AutoKey>,
         origin: Option<SubscriberId>,
     ) -> io::Result<()> {
         self.mutate(origin, |m| {
             let t = find_tab(m, workspace, tab)?;
             t.group = group;
+            t.last_auto = last_auto.clone();
             Ok((
                 (),
-                vec![(workspace, LayoutDelta::TabRegrouped { tab, group })],
+                vec![(
+                    workspace,
+                    LayoutDelta::TabRegrouped {
+                        tab,
+                        group,
+                        last_auto,
+                    },
+                )],
             ))
         })
     }
@@ -806,6 +827,7 @@ impl MachineStore {
                         LayoutDelta::TabRegrouped {
                             tab: t.id,
                             group: None,
+                            last_auto: t.last_auto.clone(),
                         },
                     ));
                 }
@@ -2110,7 +2132,7 @@ mod tests {
             .unwrap();
         let group = GroupId::new();
         store
-            .tab_set_group(ws, first.id, Some(group), None)
+            .tab_set_group(ws, first.id, Some(group), None, None)
             .unwrap();
         store.tab_move(ws, first.id, 1, None).unwrap();
 
@@ -2137,10 +2159,10 @@ mod tests {
         };
         store.workspace_set_groups(ws, groups, None).unwrap();
         store
-            .tab_set_group(ws, first.id, Some(drop.id), None)
+            .tab_set_group(ws, first.id, Some(drop.id), None, None)
             .unwrap();
         store
-            .tab_set_group(ws, second.id, Some(keep.id), None)
+            .tab_set_group(ws, second.id, Some(keep.id), None, None)
             .unwrap();
 
         let (_sub, heard) = recorded(&store);
@@ -2160,7 +2182,8 @@ mod tests {
             vec![
                 LayoutDelta::TabRegrouped {
                     tab: first.id,
-                    group: None
+                    group: None,
+                    last_auto: None,
                 },
                 LayoutDelta::GroupsChanged { groups: kept },
             ]

@@ -11,7 +11,7 @@ use tty7_core::core::machine::{
 use tty7_core::daemon::control::{ControlClient, ControlRequest, ReplyOk};
 use tty7_core::host::HostId;
 
-use crate::core::group_key::{GroupId, WorkspaceGroups};
+use crate::core::group_key::{AutoKey, GroupId, WorkspaceGroups};
 use crate::core::session::{Session, SessionPane, SessionTab, WorkspaceId, WorkspaceStore};
 use crate::ui::app::Tty7App;
 use crate::ui::i18n::{L10nKey, t};
@@ -64,6 +64,7 @@ pub(crate) struct DesiredTab {
     pub id: TabId,
     pub name: Option<String>,
     pub group: Option<GroupId>,
+    pub last_auto: Option<AutoKey>,
     pub root: DesiredNode,
 }
 
@@ -138,6 +139,7 @@ pub(crate) fn desired_tabs(
             // would otherwise send every tab it holds back to auto grouping.
             // A group that really is gone was already cleared by the machine.
             group: tab.group.get(),
+            last_auto: tab.auto_group.borrow().clone(),
             root,
         });
     }
@@ -502,11 +504,12 @@ fn create_tab(
             name: want.name.clone(),
         });
     }
-    if want.group.is_some() {
+    if want.group.is_some() || want.last_auto.is_some() {
         ops.push(ControlRequest::TabSetGroup {
             workspace,
             tab: want.id,
             group: want.group,
+            last_auto: want.last_auto.clone(),
         });
     }
     mirror.tabs.insert(
@@ -515,6 +518,7 @@ fn create_tab(
             id: want.id,
             name: want.name.clone(),
             group: want.group,
+            last_auto: want.last_auto.clone(),
             root,
         },
     );
@@ -562,12 +566,17 @@ fn reconcile_tab(
                 name: want.name.clone(),
             });
         }
-        if tab.group != want.group {
+        // One op for both: the hint rides with the membership, so a tab
+        // whose repo changed costs one message, and the machine never holds
+        // a hint and a group that came from two different moments.
+        if tab.group != want.group || tab.last_auto != want.last_auto {
             tab.group = want.group;
+            tab.last_auto = want.last_auto.clone();
             ops.push(ControlRequest::TabSetGroup {
                 workspace,
                 tab: want.id,
                 group: want.group,
+                last_auto: want.last_auto.clone(),
             });
         }
     }
@@ -1683,6 +1692,7 @@ pub(crate) fn session_from_tree(
             name: tab.name.clone(),
             tree_id: Some(tab.id),
             group: tab.group,
+            last_auto: tab.last_auto.clone(),
             pane: session_pane_from_node(&tab.root, panes),
         })
         .collect();
@@ -2613,11 +2623,16 @@ fn apply_to_mirror(mirror: &mut WsMirror, delta: &LayoutDelta) -> bool {
             t.name = name.clone();
             true
         }
-        LayoutDelta::TabRegrouped { tab, group } => {
+        LayoutDelta::TabRegrouped {
+            tab,
+            group,
+            last_auto,
+        } => {
             let Some(t) = mirror.tabs.iter_mut().find(|t| t.id == *tab) else {
                 return false;
             };
             t.group = *group;
+            t.last_auto = last_auto.clone();
             true
         }
         LayoutDelta::GroupsChanged { groups } => {
@@ -2767,9 +2782,22 @@ impl Tty7App {
                 }
                 true
             }
-            LayoutDelta::TabRegrouped { tab, group } => {
+            LayoutDelta::TabRegrouped {
+                tab,
+                group,
+                last_auto,
+            } => {
                 if let Some(index) = index_of(&self.tabs, *tab) {
-                    self.tabs[index].group.set(*group);
+                    let gui = &self.tabs[index];
+                    gui.group.set(*group);
+                    // Another window's hint only fills a gap. Where this
+                    // window has an answer of its own it keeps it: the two
+                    // probe the same cwd and agree, and letting each
+                    // overwrite the other would bounce a disagreement between
+                    // them for as long as it lasted.
+                    if gui.auto_group.borrow().is_none() {
+                        *gui.auto_group.borrow_mut() = last_auto.clone();
+                    }
                 }
                 true
             }
@@ -2877,6 +2905,9 @@ impl Tty7App {
         gui.pane = pane;
         gui.name = tab.name.clone();
         gui.group.set(tab.group);
+        if gui.auto_group.borrow().is_none() {
+            *gui.auto_group.borrow_mut() = tab.last_auto.clone();
+        }
         self.maximized = None;
         true
     }
@@ -3545,6 +3576,7 @@ mod tests {
                 id: TabId::new(),
                 name: None,
                 group: None,
+                last_auto: None,
                 root: PaneNode::Leaf { pane: 1 },
             };
 
@@ -4180,12 +4212,14 @@ mod tests {
                             id: put_up,
                             name: None,
                             group: None,
+                            last_auto: None,
                             root: PaneNode::Leaf { pane: 1 },
                         },
                         TreeTab {
                             id: failed,
                             name: None,
                             group: None,
+                            last_auto: None,
                             root: PaneNode::Leaf { pane: 2 },
                         },
                     ],
@@ -4271,12 +4305,14 @@ mod tests {
                             id: theirs.0,
                             name: None,
                             group: None,
+                            last_auto: None,
                             root: PaneNode::Leaf { pane: 11 },
                         },
                         TreeTab {
                             id: theirs.1,
                             name: None,
                             group: None,
+                            last_auto: None,
                             root: PaneNode::Leaf { pane: 12 },
                         },
                     ],
@@ -4412,6 +4448,7 @@ mod tests {
             id,
             name: None,
             group: None,
+            last_auto: None,
             root,
         }
     }
@@ -4921,6 +4958,7 @@ mod tests {
                     workspace: ws,
                     tab: id,
                     group: Some(group),
+                    last_auto: None,
                 },
             ]
         );
@@ -5077,6 +5115,7 @@ mod tests {
             id,
             name: None,
             group: None,
+            last_auto: None,
             root: PaneNode::Leaf { pane: 1 },
         };
         assert!(apply_to_mirror(
@@ -5097,6 +5136,7 @@ mod tests {
                     id,
                     name: None,
                     group: None,
+                    last_auto: None,
                     root: PaneNode::Split {
                         axis: TreeAxis::Vertical,
                         ratio: 0.5,
@@ -5166,6 +5206,7 @@ mod tests {
                 id: tab_id,
                 name: Some("build".into()),
                 group: Some(GroupId::new()),
+                last_auto: Some(AutoKey::Repo("/work".into())),
                 root: PaneNode::Split {
                     axis: TreeAxis::Vertical,
                     ratio: 0.3,
@@ -5207,6 +5248,11 @@ mod tests {
             "the daemon tab's identity rides along"
         );
         assert_eq!(tab.name.as_deref(), Some("build"));
+        assert_eq!(
+            tab.last_auto,
+            Some(AutoKey::Repo("/work".into())),
+            "the auto-group hint rides along, so the tab is drawn in its group at once"
+        );
         let SessionPane::Split { ratio, a, b, .. } = &tab.pane else {
             panic!("the split survives the lowering");
         };
@@ -5261,6 +5307,7 @@ mod tests {
                 id: tab_id,
                 name: None,
                 group: None,
+                last_auto: None,
                 root: PaneNode::Leaf { pane: 7 },
             }],
             active_tab: Some(tab_id),
@@ -5290,6 +5337,7 @@ mod tests {
                 id: TabId::new(),
                 name: None,
                 group: None,
+                last_auto: None,
                 root: PaneNode::Leaf { pane: 1 },
             }],
             active_tab: Some(TabId::new()),

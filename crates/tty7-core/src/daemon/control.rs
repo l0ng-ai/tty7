@@ -296,6 +296,9 @@ pub enum ControlRequest {
         workspace: WorkspaceId,
         tab: TabId,
         group: Option<crate::core::group_key::GroupId>,
+        /// The auto group the tab last resolved to — see `Tab::last_auto`.
+        #[serde(default)]
+        last_auto: Option<crate::core::group_key::AutoKey>,
     },
     /// The workspace's pinned sidebar groups and folds, replaced whole.
     WorkspaceSetGroups {

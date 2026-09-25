@@ -54,6 +54,9 @@ pub struct SessionTab {
     /// with ⌘⇧T goes back where it was, when that group is still there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<crate::core::group_key::GroupId>,
+    /// The auto group the tab last resolved to, drawn until a probe answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_auto: Option<crate::core::group_key::AutoKey>,
     #[serde(skip)]
     pub tree_id: Option<crate::core::machine::TabId>,
 }

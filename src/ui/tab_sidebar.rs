@@ -2479,11 +2479,23 @@ impl Tty7App {
     ///
     /// SSH panes are never looked at: their cwd is on another machine, and a
     /// folder pinned in this workspace names a directory on this one.
+    ///
+    /// Also where a tab's auto-group hint is refreshed from the live answer
+    /// and, when that answer moved, sent up with the tab — so the next launch
+    /// draws the tab where it last was instead of in Ungrouped.
     pub(crate) fn settle_sidebar_groups(&mut self, cx: &mut Context<Self>) {
+        let mut changed = false;
+        for tab in &self.tabs {
+            let before = tab.auto_group.borrow().clone();
+            changed |= self.tab_auto_group(tab, cx) != before;
+        }
         let Some(cache) = cx.try_global::<GitStatusCache>() else {
+            if changed {
+                self.save_session(cx);
+            }
             return;
         };
-        let mut joined = false;
+        let mut joined = changed;
         for tab in &self.tabs {
             let Some(leaf) = tab.pane.first_leaf() else {
                 continue;
@@ -3959,6 +3971,59 @@ mod fold_tests {
 
         app.update(&mut vcx, |app, _| {
             assert_eq!(app.tabs[0].group.get(), None);
+        });
+    }
+
+    /// A tab restored from the tree is drawn in the auto group it last had
+    /// before any probe has answered — the launch no longer parks every tab
+    /// in Ungrouped — and the live answer, once it lands, wins and becomes
+    /// the new hint. A hint never outranks a pinned group.
+    #[gpui::test]
+    fn a_restored_tab_is_drawn_from_its_hint_until_a_probe_answers(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+
+        app.update(&mut vcx, |app, cx| {
+            for i in 0..2 {
+                let pane = std::mem::replace(&mut app.tabs[i].pane, crate::ui::pane::Pane::Empty);
+                let tree = tty7_core::core::machine::Tab {
+                    id: app.tabs[i].tree_id.get(),
+                    name: None,
+                    group: None,
+                    last_auto: Some(AutoKey::Repo(PathBuf::from("/w/alpha"))),
+                    root: tty7_core::core::machine::PaneNode::Leaf { pane: 1 },
+                };
+                app.tabs[i] = crate::ui::app::Tab::from_tree(&tree, pane);
+            }
+            let work = label(app, "work", cx);
+            app.tabs[1].group.set(Some(work));
+            let keys = app.sidebar_group_keys(cx);
+            assert_eq!(
+                keys[0],
+                repo("/w/alpha"),
+                "drawn from the hint, no probe yet"
+            );
+            assert_eq!(
+                keys[1],
+                Some(GroupKey::Pinned(work)),
+                "a pinned group outranks any hint"
+            );
+            plant_repo(app, 0, "/w/beta/src", "/w/beta", cx);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, cx| {
+            assert_eq!(
+                app.sidebar_group_keys(cx)[0],
+                repo("/w/beta"),
+                "the probe wins"
+            );
+            let (desired, _, _) = crate::ui::tree_sync::desired_tabs(app, cx);
+            assert_eq!(
+                desired[0].last_auto,
+                Some(AutoKey::Repo(PathBuf::from("/w/beta"))),
+                "and is what goes up as the next launch's hint"
+            );
         });
     }
 }

@@ -295,7 +295,7 @@ candidates.
 | Command | Effect | JSON |
 |---|---|---|
 | `ws ls` | Every workspace | `{"workspaces":[...]}` |
-| `ws tree [WORKSPACE]` | One workspace as a tree: tabs, split axes and ratios, panes with cwds | The whole workspace object: `{"id","name","last_active","active_tab","groups":{"pinned":[…]},"tabs":[{"id","name","group","root",…}]}` |
+| `ws tree [WORKSPACE]` | One workspace as a tree: tabs, split axes and ratios, panes with cwds | The whole workspace object: `{"id","name","last_active","active_tab","groups":{"pinned":[…]},"tabs":[{"id","name","group","last_auto","root",…}]}` |
 | `ws new [NAME]` | An empty workspace (no tab, no pane) | `{"id","name"}` |
 | `ws rename WORKSPACE NAME` | Name or rename | `{"id","name"}` |
 | `ws rm WORKSPACE` | Delete the workspace and hang up its panes | `{"removed"}` |
