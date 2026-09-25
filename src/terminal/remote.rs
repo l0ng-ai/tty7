@@ -571,6 +571,10 @@ pub struct RemoteTerminal {
     pub exited: bool,
     size: TermSize,
     synced_size: bool,
+    /// This link reattached to a pane that was already running rather than
+    /// spawning a fresh one, so whatever it reports first — an agent in the
+    /// foreground included — predates this client.
+    reattached: bool,
     /// The `(cell_w, cell_h)` last sent to the daemon, in device pixels. Tracked
     /// alongside `size` so a display-scale change still reaches the child even
     /// when the grid dimensions are unchanged.
@@ -1087,6 +1091,7 @@ impl RemoteTerminal {
             exited: false,
             size,
             synced_size: false,
+            reattached: awaiting_replay,
             synced_cell: (0, 0),
             resize_sent_at: None,
             link,
@@ -1876,6 +1881,11 @@ impl RemoteTerminal {
 
     pub fn remote_context(&self) -> Option<RemoteContext> {
         self.remote_context.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// See the field: an attach to a running pane, not a fresh spawn.
+    pub fn reattached(&self) -> bool {
+        self.reattached
     }
 
     pub fn at_prompt(&self) -> bool {

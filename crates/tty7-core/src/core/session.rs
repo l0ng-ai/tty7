@@ -1179,4 +1179,29 @@ mod tests {
         views.views.retain(|w| w.id != b_id);
         assert_eq!(numbers(&views), vec![a_id, c_id]);
     }
+
+    /// A remote workspace's quick-launch list is the agents seen running in
+    /// it, so the list has to be in `views.json` with the rest of the
+    /// workspace — an in-memory one would be empty after every restart.
+    #[test]
+    fn agents_seen_in_a_workspace_survive_a_restart() {
+        let _file = lock_session_file();
+        pin_config_dir();
+        let mut entry = remote_view("build-box");
+        assert!(entry.saw_agent("claude"));
+        assert!(entry.saw_agent("codex"));
+        assert!(!entry.saw_agent("codex"), "already the most recent");
+        assert!(entry.saw_agent("claude"), "moves to the end");
+        let id = entry.id;
+        WindowViews {
+            active: Some(id),
+            views: vec![entry, view()],
+        }
+        .save();
+        let loaded = WindowViews::load().expect("a saved views file should load back");
+        assert_eq!(loaded.get(id).unwrap().seen_agents, vec!["codex", "claude"]);
+        // A workspace that has seen nothing writes nothing for it.
+        let text = std::fs::read_to_string(WindowViews::path().unwrap()).unwrap();
+        assert_eq!(text.matches("seen_agents").count(), 1);
+    }
 }
