@@ -13,6 +13,7 @@ pub mod kitty_graphics;
 pub mod logfile;
 pub mod machine;
 pub mod osc;
+pub mod paste;
 pub mod path_spelling;
 pub mod proc;
 pub mod session;

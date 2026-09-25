@@ -90,6 +90,12 @@ pub fn send_long_help() -> String {
          when there is none, so `send %42 --enter` runs whatever is already typed in pane 42. \
          An unmarked id is not a target for it — `send 83 --enter` is refused, because it \
          reads just as much like typing 83 into your own pane; write %83 to mean the pane.\n\n\
+         --stdin and --from-file take the text from there instead, byte for byte — the way \
+         to send a secret, which as TEXT is visible to every local user in `ps` and lands in \
+         your shell history. The one positional is then the pane.\n\n\
+         --paste sends the text the way the GUI pastes: framed in bracketed paste when the \
+         pane has switched it on, so a multi-line text arrives as one block of text instead \
+         of running line by line. --json reports whether it was framed.\n\n\
          Keys: {}. Aliases: {}.",
         vocabulary(),
         aliases.join(", ")

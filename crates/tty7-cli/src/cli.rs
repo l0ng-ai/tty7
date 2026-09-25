@@ -72,10 +72,34 @@ pub enum Command {
     // written out here: a hand-copied vocabulary drifts the first time a key
     // is added, and this is the text a caller reaches for to learn the names.
     #[command(
-        about = "Type text into a pane, or send it keystrokes with --key",
+        about = "Type text into a pane — from an argument, --stdin or --from-file — or send \
+                 it keystrokes with --key",
         long_about = crate::keys::send_long_help()
     )]
     Send(SendArgs),
+
+    // `run` is the other half of this pair, and the split is docker's: `run`
+    // makes a new place for a command, `exec` uses one that already exists.
+    // Not a flag on `run` — that verb execs an argv in a fresh pty, while this
+    // types a line into a shell that is already sitting at its prompt, and
+    // none of `run`'s flags (`--keep`, `--cwd`, `--ws`) mean anything here.
+    #[command(
+        about = "Run a command line in an existing pane's shell, wait for its prompt to \
+                 come back, print what the command printed, and exit with its exit code",
+        long_about = "Run a command line in an existing pane's shell, wait for its prompt to \
+                      come back, print what the command printed, and exit with its exit code.\n\n\
+                      The line is typed at the shell's prompt, exactly as `send … --enter` \
+                      would, so it runs with that shell's cwd, environment and history. The \
+                      pane's shell integration is what says where the command's output starts \
+                      and ends and what its exit code was: a pane with none (no OSC 133 prompt \
+                      marks yet) is refused rather than waited on, and so is a pane that is not \
+                      at a prompt. The output is what the pane printed between the command \
+                      starting and the prompt coming back, replayed through a terminal to \
+                      text the way `capture --plain` does — or as raw bytes with `--raw`.\n\n\
+                      A line the shell never runs — an unclosed quote waiting on a continuation \
+                      prompt — has no end to wait for; pass --timeout in anything unattended."
+    )]
+    Exec(ExecArgs),
 
     #[command(
         about = "Print a pane's output — as text with `--plain`, otherwise with its ANSI \
@@ -159,6 +183,47 @@ pub struct RunArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct ExecArgs {
+    #[arg(
+        value_name = "%PANE",
+        help = "Pane whose shell runs the command; defaults to $TTY7_PANE inside a tty7 shell"
+    )]
+    pub target: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "SECS",
+        help = "Give up after this many seconds, with exit code 124; the command is left \
+                running in the pane"
+    )]
+    pub timeout: Option<u64>,
+
+    // Text is the default here, unlike `capture`: what a caller of this verb
+    // wants is the answer, and the raw bytes between the marks are not only
+    // the command's — zsh draws its PROMPT_SP (the `%` that marks a missing
+    // newline, then a row of spaces and a CR) *before* its precmd hooks run,
+    // so before the `D` mark. Replayed through a grid that erases itself, as
+    // it does on screen; left raw it is a line of noise after every command.
+    #[arg(
+        long,
+        help = "Print the output as the pane received it, escapes intact, instead of \
+                replaying it through a terminal to text (the `capture` default)"
+    )]
+    pub raw: bool,
+
+    // Joined with spaces and handed to the pane's shell as one line, which is
+    // what separates this from `run`: `tty7 exec %3 -- 'make && ls'` means the
+    // shell's `&&`, where `run` would look for a program called `make && ls`.
+    #[arg(
+        last = true,
+        required = true,
+        value_name = "CMD",
+        help = "The command line, after `--`: tty7 exec %3 -- cargo test"
+    )]
+    pub cmd: Vec<String>,
+}
+
+#[derive(Debug, Args)]
 #[command(group = ArgGroup::new("axis").required(true))]
 pub struct SplitArgs {
     #[arg(
@@ -221,6 +286,34 @@ pub struct SendArgs {
                 (C-c, escape, up, enter, …). See `tty7 send --help`"
     )]
     pub keys: Vec<crate::keys::Key>,
+
+    // The other place the text can come from. A secret in an argument is in
+    // this process's command line, where every local user can read it in
+    // `ps`, and in the caller's own shell history; reading it from a pipe or a
+    // file keeps it out of both. The bytes go to the pty exactly as read.
+    #[arg(
+        long,
+        conflicts_with_all = ["from_file", "second"],
+        help = "Send what stdin holds, byte for byte, instead of TEXT — keeps a secret \
+                out of `ps` and your shell history"
+    )]
+    pub stdin: bool,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "second",
+        help = "Send the file's contents, byte for byte, instead of TEXT"
+    )]
+    pub from_file: Option<std::path::PathBuf>,
+
+    #[arg(
+        long,
+        help = "Send the text as a paste, the way the GUI pastes: framed in bracketed \
+                paste when the pane has switched it on, so the lines of a multi-line text \
+                arrive as text rather than each running on its own"
+    )]
+    pub paste: bool,
 }
 
 /// One resting place a `wait` can end on. Three ontologies meet here, which is
@@ -944,5 +1037,55 @@ mod tests {
         );
         let err = Cli::try_parse_from(["tty7", "tab", "move", "@7", "not-a-number"]).unwrap_err();
         assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn exec_takes_an_address_then_the_command_after_the_separator() {
+        let Some(Command::Exec(args)) = parse(&[
+            "tty7",
+            "exec",
+            "%3",
+            "--timeout",
+            "5",
+            "--",
+            "make",
+            "--raw",
+        ])
+        .command
+        else {
+            panic!("exec did not parse");
+        };
+        assert_eq!(args.target.as_deref(), Some("%3"));
+        assert_eq!(args.timeout, Some(5));
+        assert!(!args.raw, "after `--` a flag belongs to the command");
+        assert_eq!(args.cmd, ["make", "--raw"]);
+
+        let Some(Command::Exec(args)) = parse(&["tty7", "exec", "--", "ls"]).command else {
+            panic!("exec without an address did not parse");
+        };
+        assert_eq!(args.target, None, "the pane then comes from $TTY7_PANE");
+
+        let err = Cli::try_parse_from(["tty7", "exec", "%3"]).unwrap_err();
+        assert_eq!(err.exit_code(), 2, "a command is required");
+    }
+
+    #[test]
+    fn send_reads_its_text_from_one_place() {
+        let Some(Command::Send(args)) =
+            parse(&["tty7", "send", "%3", "--stdin", "--paste", "--enter"]).command
+        else {
+            panic!("send --stdin did not parse");
+        };
+        assert!(args.stdin && args.paste && args.enter);
+        assert_eq!(args.first.as_deref(), Some("%3"));
+
+        for bad in [
+            vec!["tty7", "send", "%3", "text", "--stdin"],
+            vec!["tty7", "send", "%3", "text", "--from-file", "f"],
+            vec!["tty7", "send", "%3", "--stdin", "--from-file", "f"],
+        ] {
+            let err = Cli::try_parse_from(&bad).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{bad:?} should be a usage error");
+        }
     }
 }

@@ -13,9 +13,10 @@ use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::core::actions::{
     CloseActiveTab, CloseOtherTabs, CloseTabsToTheRight, CopyAgentSessionId, CopyWorkingDirectory,
-    ForkAgentSession, MarkTabUnread, NewWorktreeTab, OpenSettings, RenameTab, SelectWorkspace1,
-    SelectWorkspace2, SelectWorkspace3, SelectWorkspace4, SelectWorkspace5, SelectWorkspace6,
-    SelectWorkspace7, SelectWorkspace8, SelectWorkspace9, SplitDown, SplitRight, TogglePalette,
+    ForkAgentSession, HibernateTab, MarkTabUnread, NewWorktreeTab, OpenSettings, RenameTab,
+    SelectWorkspace1, SelectWorkspace2, SelectWorkspace3, SelectWorkspace4, SelectWorkspace5,
+    SelectWorkspace6, SelectWorkspace7, SelectWorkspace8, SelectWorkspace9, SplitDown, SplitRight,
+    TogglePalette,
 };
 use crate::core::config::{Config, RightPanelTab, SidebarGrouping};
 use crate::core::group_key::GroupKey;
@@ -1567,6 +1568,24 @@ impl Tty7App {
     /// Drawn in the tab entry rather than on the pane so it reads from either
     /// tab surface, and so it says something about the tabs you are *not*
     /// looking at — the zoom outlives a switch away from them.
+    /// The mark a sleeping tab carries (#762), in the slot the zoom mark uses:
+    /// leading, beside the other state marks, where the pointer that comes to
+    /// read it does not cover it.
+    pub(crate) fn sleep_mark(&self, id: impl Into<gpui::ElementId>, cx: &App) -> gpui::AnyElement {
+        let tip = SharedString::from(t(L10nKey::TabTooltipAsleep));
+        div()
+            .id(id)
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(16.))
+            .text_color(cx.theme().muted_foreground)
+            .child(Icon::new(IconName::Moon).size(px(11.)))
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .into_any_element()
+    }
+
     pub(crate) fn zoom_mark(&self, id: impl Into<gpui::ElementId>, cx: &App) -> gpui::AnyElement {
         let tip = chord_tooltip(t(L10nKey::TabTooltipZoomed), "ToggleMaximizePane", cx);
         div()
@@ -1754,6 +1773,34 @@ impl Tty7App {
                         let app = app.clone();
                         move |_, _window, cx| {
                             let _ = app.update(cx, |this, cx| this.mark_tab_unread(index, cx));
+                        }
+                    }),
+            );
+        }
+
+        // Sleep and wake (#762). Waking is also what selecting the tab does;
+        // the item is here for waking one without leaving the tab on screen.
+        // Hibernate is offered only where the machine can do it, and greyed
+        // out for a tab it cannot be done to right now — the last one awake,
+        // or one still connecting — rather than vanishing from under the
+        // pointer that came looking for it.
+        if tab.is_some_and(|t| t.is_asleep()) {
+            menu = menu.item(PopupMenuItem::new(t(L10nKey::TabContextWake)).on_click({
+                let app = app.clone();
+                move |_, window, cx| {
+                    let _ = app.update(cx, |this, cx| this.wake_tab(index, window, cx));
+                }
+            }));
+        } else if crate::ui::tree_sync::can_hibernate_on(cx, this.workspace) {
+            menu = menu.item(
+                PopupMenuItem::new(t(L10nKey::TabContextHibernate))
+                    .action(Box::new(HibernateTab))
+                    .disabled(!this.can_hibernate_tab(index, cx))
+                    .on_click({
+                        let app = app.clone();
+                        move |_, window, cx| {
+                            let _ =
+                                app.update(cx, |this, cx| this.hibernate_tab(index, window, cx));
                         }
                     }),
             );
@@ -2070,7 +2117,8 @@ impl Tty7App {
             let label = self.tab_label(tab, i, Some(window), cx);
             let full_title = self.tab_title_tooltip(tab, i, Some(window), cx);
             let ssh_dot = self.tab_ssh_dot(tab, cx);
-            let agent = tab.agent(cx);
+            let asleep = tab.is_asleep();
+            let agent = tab.agent(cx).or_else(|| tab.asleep_agent());
             let agent_status = tab.agent_status(cx);
             let agent_unread = tab.agent_unread_count(cx);
             let zoomed = self.tab_is_zoomed(i);
@@ -2150,6 +2198,9 @@ impl Tty7App {
                     s.text_color(cx.theme().muted_foreground)
                         .hover(|s| s.bg(cx.theme().muted))
                 })
+                // Faded as well as marked: a row of chips is read at a glance,
+                // and the tabs holding nothing should be the quiet ones.
+                .when(asleep, |s| s.opacity(0.6))
                 .when(dragged, |s| s.opacity(0.75))
                 .child(
                     canvas(
@@ -2207,6 +2258,9 @@ impl Tty7App {
                 // pointer that came to read it.
                 .when(zoomed, |chip| {
                     chip.child(self.zoom_mark(("tab-zoom", i), cx))
+                })
+                .when(asleep, |chip| {
+                    chip.child(self.sleep_mark(("tab-asleep", i), cx))
                 })
                 .child(label_region)
                 .when(show_badges && i < 9, |chip| {
@@ -2544,6 +2598,84 @@ mod ssh_host_row_tests {
             assert_eq!(spec.identity_files, vec!["/keys/id_ed25519".to_string()]);
             assert_eq!(spec.login_script, vec!["tmux attach".to_string()]);
             assert_eq!(spec.port, 2222, "a non-default port is part of the address");
+        });
+    }
+
+    /// #726 end to end: the setting reaches the name the strip draws, on the
+    /// title's rung — below a name the user gave the tab, above whatever the
+    /// remote shell titled itself — and only for an SSH pane.
+    #[gpui::test]
+    fn the_ssh_tab_title_setting_pins_only_ssh_tabs_and_only_their_label(cx: &mut TestAppContext) {
+        use crate::core::config::SshTabTitle;
+
+        set_locale("en");
+        let (app, mut vcx) = harness(cx);
+        let saved = uuid::Uuid::new_v4();
+        let set_mode = |cx: &mut gpui::App, mode: SshTabTitle| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.ssh_tab_title = mode;
+            cx.set_global(cfg);
+        };
+
+        let (_ends, ssh) = app.update_in(&mut vcx, |app, window, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            let mut profile = SshProfile::new("prod-web");
+            profile.id = saved;
+            profile.user = "me".to_string();
+            profile.host = "build-box".to_string();
+            cfg.ssh_profiles = vec![profile];
+            cx.set_global(cfg);
+
+            let (local, a) = quiet_test_pane(1, window, cx);
+            let (ssh, b) = quiet_test_ssh_pane_of(2, Some(saved), window, cx);
+            // Both have titled themselves over OSC 0/2 the way a shell does.
+            local.update(cx, |v, _| v.title = "me@laptop:/work/here".into());
+            ssh.update(cx, |v, _| v.title = "me@build-box:/srv/app".into());
+            for view in [local, ssh.clone()] {
+                app.tabs.push(Tab::new(Pane::leaf(PaneSlot::Ready(view))));
+            }
+            app.active = 0;
+            ((a, b), ssh)
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let label =
+                |app: &crate::ui::app::Tty7App, i: usize, window: &gpui::Window, cx: &gpui::App| {
+                    app.tab_label(&app.tabs[i], i, Some(window), cx)
+                };
+            let dynamic_local = label(app, 0, window, cx);
+            let dynamic_ssh = label(app, 1, window, cx);
+            assert_eq!(dynamic_ssh, "/srv/app", "Dynamic is what tty7 always did");
+
+            set_mode(cx, SshTabTitle::ProfileName);
+            assert_eq!(label(app, 1, window, cx), "prod-web");
+            assert_eq!(
+                label(app, 0, window, cx),
+                dynamic_local,
+                "a local tab is untouched"
+            );
+            assert_eq!(
+                ssh.read(cx).title,
+                "me@build-box:/srv/app",
+                "the remote title is still tracked underneath"
+            );
+
+            set_mode(cx, SshTabTitle::Hostname);
+            assert_eq!(label(app, 1, window, cx), "build-box");
+
+            // A name the user gave the tab outranks the setting.
+            app.tabs[1].name = Some("mine".into());
+            assert_eq!(label(app, 1, window, cx), "mine");
+            app.tabs[1].name = None;
+
+            // An ended session keeps saying so under the pinned name.
+            ssh.update(cx, |v, _| v.terminal.exited = true);
+            assert_eq!(label(app, 1, window, cx), "build-box — process exited");
+            ssh.update(cx, |v, _| v.terminal.exited = false);
+
+            set_mode(cx, SshTabTitle::Dynamic);
+            assert_eq!(label(app, 1, window, cx), dynamic_ssh);
         });
     }
 }

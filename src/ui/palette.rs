@@ -33,6 +33,7 @@ pub enum CommandKind {
     CloseTabsToTheRight,
     CopyWorkingDirectory,
     MarkTabUnread,
+    HibernateTab,
     ForkAgentSession,
     CopyAgentSessionId,
     ResetFontSize,
@@ -144,6 +145,7 @@ impl CommandKind {
             CloseTabsToTheRight => "close-tabs-right",
             CopyWorkingDirectory => "copy-cwd",
             MarkTabUnread => "mark-tab-unread",
+            HibernateTab => "hibernate-tab",
             ForkAgentSession => "fork-agent-session",
             CopyAgentSessionId => "copy-agent-session-id",
             ResetFontSize => "reset-font-size",
@@ -257,6 +259,7 @@ impl CommandKind {
             CloseTabsToTheRight => "CloseTabsToTheRight",
             CopyWorkingDirectory => "CopyWorkingDirectory",
             MarkTabUnread => "MarkTabUnread",
+            HibernateTab => "HibernateTab",
             ForkAgentSession => "ForkAgentSession",
             CopyAgentSessionId => "CopyAgentSessionId",
             ResetFontSize => "ResetFontSize",
@@ -479,6 +482,8 @@ impl Command {
             Command::localized(L10nKey::CmdForkSession, ForkAgentSession)
                 .with_subtitle(t(L10nKey::CmdForkSessionSubtitle)),
             Command::localized(L10nKey::CmdMarkTabAsUnread, MarkTabUnread),
+            Command::localized(L10nKey::CmdHibernateTab, HibernateTab)
+                .with_subtitle(t(L10nKey::CmdHibernateTabSubtitle)),
             Command::localized(L10nKey::CmdClosePaneTab, ClosePane),
             Command::localized(L10nKey::CmdCloseOtherTabs, CloseOtherTabs),
             Command::localized(L10nKey::CmdCloseTabsToTheRight, CloseTabsToTheRight),

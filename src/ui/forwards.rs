@@ -3,6 +3,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex};
 
+use crate::core::ssh_profile::ForwardRule;
 use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind, SshForwardRule};
 use crate::terminal::view::TerminalView;
 use crate::ui::app::{CONTENT_INSET, Tty7App};
@@ -70,6 +71,7 @@ impl ForwardFields {
             target_host,
             target_port,
             description: (!description.is_empty()).then(|| description.to_string()),
+            enabled: true,
         })
     }
 
@@ -93,6 +95,7 @@ impl ForwardFields {
             // left over from a trip through the advanced form is not something
             // this rule was given.
             description: None,
+            enabled: true,
         })
     }
 
@@ -140,7 +143,32 @@ pub(crate) fn rule_of(forward: &ManagedForward) -> SshForwardRule {
         target_host: forward.target_host.clone(),
         target_port: forward.target_port,
         description: forward.description.clone(),
+        enabled: forward.enabled,
     }
+}
+
+/// Which of a saved host's rules a live forward was opened from, among
+/// those not already switched to `enabled` — the one a switch in the panel
+/// has to be written back to.
+///
+/// Matched on the whole mapping, since a live forward carries no reference to
+/// the rule it came from. A saved rule always names its port, so the port the
+/// forward bound is the one the rule asked for. A forward added in the panel
+/// matches nothing and stays as temporary as it always was.
+pub(crate) fn saved_rule_index(
+    rules: &[ForwardRule],
+    forward: &ManagedForward,
+    enabled: bool,
+) -> Option<usize> {
+    rules.iter().position(|r| {
+        let saved = crate::ui::ssh_connect::map_forward(r);
+        saved.enabled != enabled
+            && saved.kind == forward.kind
+            && saved.bind_host == forward.bind_host
+            && saved.bind_port == forward.bind_port
+            && saved.target_host == forward.target_host
+            && saved.target_port == forward.target_port
+    })
 }
 
 impl Tty7App {
@@ -254,18 +282,23 @@ impl Tty7App {
             SshForwardKind::Remote => "R",
             SshForwardKind::Dynamic => "D",
         };
-        let errored = matches!(forward.status, ForwardStatus::Error(_));
+        // A switched-off forward has an error status only because it binds
+        // nothing; it is drawn faded, not red.
+        let off = !forward.enabled;
+        let errored = !off && matches!(forward.status, ForwardStatus::Error(_));
         let bind = if matches!(forward.bind_host.as_str(), "127.0.0.1" | "localhost" | "") {
             forward.bind_port.to_string()
         } else {
             format!("{}:{}", forward.bind_host, forward.bind_port)
         };
+        let mapping = match forward.kind {
+            SshForwardKind::Dynamic => "SOCKS".to_string(),
+            _ => format!("→ {}:{}", forward.target_host, forward.target_port),
+        };
         let tail = match &forward.status {
+            _ if off => mapping,
             ForwardStatus::Error(msg) => msg.clone(),
-            ForwardStatus::Listening => match forward.kind {
-                SshForwardKind::Dynamic => "SOCKS".to_string(),
-                _ => format!("→ {}:{}", forward.target_host, forward.target_port),
-            },
+            ForwardStatus::Listening => mapping,
         };
         let pane_id = forward.pane_id;
         let forward_id = forward.id;
@@ -295,6 +328,7 @@ impl Tty7App {
                     .flex_1()
                     .min_w_0()
                     .gap(px(1.))
+                    .when(off, |col| col.opacity(0.5))
                     .child(
                         h_flex()
                             .items_center()
@@ -325,6 +359,33 @@ impl Tty7App {
                                 .child(desc),
                         )
                     }),
+            )
+            // Always shown, unlike Remove beside it: whether a forward is on is
+            // state to read at a glance, not an action to go looking for.
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        crate::ui::theme::switch(
+                            ("panel-forward-enabled", forward_id as usize),
+                            cx,
+                        )
+                        .checked(forward.enabled)
+                        .xsmall()
+                        .tooltip(if off {
+                            t(L10nKey::ForwardTooltipTurnOn)
+                        } else {
+                            t(L10nKey::ForwardTooltipTurnOff)
+                        })
+                        .on_click(cx.listener(
+                            move |this, on: &bool, window, cx| {
+                                this.set_managed_forward_enabled(
+                                    pane_id, forward_id, *on, window, cx,
+                                )
+                            },
+                        )),
+                    ),
             )
             .child(
                 div()
@@ -586,6 +647,7 @@ mod tests {
             target_port: 80,
             description: Some("the staging box".to_string()),
             status: ForwardStatus::Listening,
+            enabled: true,
         }
     }
 
@@ -717,5 +779,44 @@ mod tests {
             added_forward(&[1, 4], &list).is_none(),
             "nothing was added, so there is nothing to point at"
         );
+    }
+
+    #[test]
+    fn a_switched_off_forward_keeps_its_switch_through_an_edit() {
+        let mut off = managed(3, 8080);
+        off.enabled = false;
+        assert!(!rule_of(&off).enabled);
+        assert!(rule_of(&managed(3, 8080)).enabled);
+    }
+
+    /// The panel's switch is written back to the saved host only for the rule
+    /// the forward was opened from, and a rule added in the panel — which no
+    /// saved rule describes — is left as temporary as it always was.
+    #[test]
+    fn a_switch_is_written_back_to_the_saved_rule_it_came_from() {
+        use crate::core::ssh_profile::{ForwardKind, HostPort};
+        let saved = |target: &str, enabled: bool| ForwardRule {
+            kind: ForwardKind::Local,
+            bind: HostPort::new("127.0.0.1", 8080),
+            target: HostPort::new(target, 80),
+            description: "the staging box".to_string(),
+            enabled,
+        };
+        let rules = vec![saved("10.0.0.9", true), saved("10.0.0.5", true)];
+        let live = managed(3, 8080);
+        assert_eq!(saved_rule_index(&rules, &live, false), Some(1));
+        assert_eq!(
+            saved_rule_index(&rules, &live, true),
+            None,
+            "already on: nothing to write"
+        );
+
+        let mut elsewhere = managed(3, 8081);
+        elsewhere.description = None;
+        assert_eq!(saved_rule_index(&rules, &elsewhere, false), None);
+
+        let mut remote = managed(3, 8080);
+        remote.kind = SshForwardKind::Remote;
+        assert_eq!(saved_rule_index(&rules, &remote, false), None);
     }
 }
