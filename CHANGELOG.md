@@ -5,6 +5,21 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The New Tab menu names three shells, not every one the machine has.** A
+  stock macOS box reports nine, so the `+` menu opened on a column of `csh`,
+  `tcsh` and `ksh` that almost nobody runs, above the SSH hosts people came for.
+  The Local section now lists the default shell, always first, and then only
+  shells that have actually been opened, by frecency — three rows at most, the
+  way the SSH section already caps its hosts. The rest sit behind an "Other
+  Shells…" row that opens the command palette filtered to them: every shell is
+  now a palette command, "Shell: {name}", and running one does what its menu
+  row does, splitting instead when ⌥ (Alt) is held. The row is left out when
+  the menu already names the whole list.
+
 ## [26.9.3] - 2026-09-23
 
 ### Added

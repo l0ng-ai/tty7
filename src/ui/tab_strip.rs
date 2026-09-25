@@ -685,17 +685,27 @@ pub(crate) fn chrome_tile_sized(
 /// closes the section is where the rest are.
 const MENU_HOSTS: usize = 6;
 
+/// How many shells the New Tab menu names, the default among them.
+///
+/// The same reasoning as [`MENU_HOSTS`], at a smaller number: a stock macOS box
+/// reports nine shells and almost nobody opens more than one or two of them.
+/// The default always leads — it is the answer to "what do I get if I just
+/// click" — and the rest of the rows go to whatever has actually been opened,
+/// by frecency. Everything else is one row away, in the palette.
+const MENU_SHELLS: usize = 3;
+
 /// How wide the New Tab menu is allowed to get.
 const MENU_W: Pixels = px(360.);
 
 /// How tall, before it starts scrolling.
 ///
-/// Enough for the menu's own full hand — the nine shells a stock macOS box
-/// reports, both headings, [`MENU_HOSTS`] hosts and the two rows that close the
-/// list, at the 26px a row occupies — so the shape everyone actually sees
-/// arrives whole. Past that (a pile of custom shells) it scrolls, and it is
-/// capped again against the window in [`NewTabMenu::build`], since a menu taller
-/// than what it hangs off is worse than one that scrolls.
+/// Both lists are capped — [`MENU_SHELLS`] shells and [`MENU_HOSTS`] hosts —
+/// so the menu's full hand is a fixed number of rows: those, both headings, the
+/// row closing each section and the modifier hint, at the 26px a row occupies.
+/// This leaves room above that for a seam row or two more, so the full hand
+/// always arrives whole and never scrolls on its own. It is capped again
+/// against the window in [`NewTabMenu::build`], since a menu taller than what
+/// it hangs off is worse than one that scrolls.
 const MENU_H: Pixels = px(560.);
 
 /// What the row closing the SSH section types into the palette for you.
@@ -716,6 +726,14 @@ const MENU_H: Pixels = px(560.);
 /// and opens the unfiltered command list has made the reader ask twice.
 const PALETTE_SSH_QUERY: &str = "ssh";
 
+/// What the row closing the Local section types into the palette for you.
+///
+/// Every shell in the window's inventory is a palette command titled
+/// `Shell: {label}` ([`L10nKey::AppCmdShellTitle`], the same word in every
+/// language we ship, for the reason [`PALETTE_SSH_QUERY`] gives), so this one
+/// word lands on exactly the shells, default first and then by frecency.
+const PALETTE_SHELL_QUERY: &str = "shell";
+
 /// How this platform spells the key that turns a New Tab row into a split.
 fn split_modifier() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -734,8 +752,12 @@ fn split_modifier() -> &'static str {
 /// the window sat still is in the list the next time the `+` is pressed.
 struct NewTabMenu {
     app: gpui::WeakEntity<Tty7App>,
-    shells: Vec<(SharedString, ShellSpec)>,
+    /// The shells the menu names, by label — at most [`MENU_SHELLS`].
+    shells: Vec<SharedString>,
     default_shell: SharedString,
+    /// The inventory holds shells the menu does not name, so the section
+    /// closes with a row into the palette.
+    more_shells: bool,
     /// Saved host, its display name, and the `user@host:port` beside it —
     /// empty when the name already says it.
     hosts: Vec<(uuid::Uuid, SharedString, SharedString)>,
@@ -761,21 +783,17 @@ impl NewTabMenu {
             // host with a descriptive name and a long `user@host` drags every
             // other row out with it and the menu stops looking like chrome.
             .max_w(MENU_W)
-            // Shells are whatever this machine has plus whatever the user
-            // added by hand, so the row count has no ceiling. Past the height
+            // Both lists are capped, but a short window is not. Past the height
             // of the window an un-scrollable menu simply loses its last rows —
             // and the last rows here are the SSH section.
             .scrollable(true)
-            // Only the overflow case should scroll, and the default ceiling is
-            // too low to tell the two apart: a stock macOS box has nine shells,
-            // which with both headings, the hosts and the two closing rows
-            // already runs past `PopupMenu`'s built-in 450px. The menu would
-            // arrive scrolled on every machine, with `Local` cut off above.
+            // Our own ceiling rather than `PopupMenu`'s built-in 450px, so the
+            // one that applies is the one [`MENU_H`] reasons about.
             .max_h(ceiling)
             .item(PopupMenuItem::label(t(L10nKey::TabMenuLocalShells)));
-        for (label, spec) in &self.shells {
-            let spec = spec.clone();
+        for label in &self.shells {
             let app = self.app.clone();
+            let open = label.clone();
             let row = if *label == self.default_shell {
                 let label = label.clone();
                 PopupMenuItem::element(move |_window, cx| {
@@ -787,9 +805,7 @@ impl NewTabMenu {
             menu = menu.item(row.on_click(move |_, window, cx| {
                 let at = SpawnWhere::from_modifiers(window.modifiers());
                 if let Some(app) = app.upgrade() {
-                    app.update(cx, |this, cx| {
-                        this.open_shell(Some(spec.clone()), at, window, cx)
-                    });
+                    app.update(cx, |this, cx| this.open_listed_shell(&open, at, window, cx));
                 }
             }));
         }
@@ -802,6 +818,22 @@ impl NewTabMenu {
                     let at = SpawnWhere::from_modifiers(window.modifiers());
                     if let Some(app) = app.upgrade() {
                         app.update(cx, |this, cx| this.open_shell(None, at, window, cx));
+                    }
+                },
+            ));
+        }
+        // The rest of the inventory is in the palette, already filtered to
+        // it — the same seam the SSH section closes with. Absent when the
+        // rows above are the whole inventory: a row into a list of nothing
+        // new would be one more thing to read for no gain.
+        if self.more_shells {
+            let app = self.app.clone();
+            menu = menu.item(PopupMenuItem::new(t(L10nKey::TabMenuOtherShells)).on_click(
+                move |_, window, cx| {
+                    if let Some(app) = app.upgrade() {
+                        app.update(cx, |this, cx| {
+                            this.open_palette(PALETTE_SHELL_QUERY, window, cx)
+                        });
                     }
                 },
             ));
@@ -861,6 +893,55 @@ impl NewTabMenu {
             &[("key", split_modifier())],
         )))
     }
+}
+
+/// Every shell in the inventory, most likely first: the default, then whatever
+/// has been opened often and recently, then the rest in the inventory's own
+/// order. Shared by the palette and the New Tab menu so the same shell leads
+/// both lists.
+pub(crate) fn shells_by_frecency<'a>(
+    shells: &'a [DetectedShell],
+    default: &str,
+    usage: &std::collections::HashMap<String, crate::core::config::ProfileUsage>,
+    now: u64,
+) -> Vec<&'a DetectedShell> {
+    let score = |s: &DetectedShell| usage.get(&s.label).map_or(0.0, |u| u.score(now));
+    let mut sorted: Vec<&DetectedShell> = shells.iter().collect();
+    // Stable, so shells nobody has opened keep the order the inventory chose.
+    sorted.sort_by(|a, b| {
+        (b.label == default)
+            .cmp(&(a.label == default))
+            .then_with(|| {
+                score(b)
+                    .partial_cmp(&score(a))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    sorted
+}
+
+/// The shells the menu names, off the front of [`shells_by_frecency`]'s list:
+/// its head — the default, whenever the inventory has it — and then only
+/// shells that have actually been opened, [`MENU_SHELLS`] rows in all.
+///
+/// A shell nobody has opened is not named just because there is room: a menu
+/// that filled its spare rows with `csh` and `tcsh` would be the nine-row list
+/// again, only shorter.
+fn menu_shells<'a>(
+    sorted: &[&'a DetectedShell],
+    default: &str,
+    usage: &std::collections::HashMap<String, crate::core::config::ProfileUsage>,
+    now: u64,
+) -> Vec<&'a DetectedShell> {
+    sorted
+        .iter()
+        .take(MENU_SHELLS)
+        .enumerate()
+        .filter(|(i, s)| {
+            *i == 0 || s.label == default || usage.get(&s.label).is_some_and(|u| u.score(now) > 0.0)
+        })
+        .map(|(_, s)| *s)
+        .collect()
 }
 
 /// The hosts the menu names, in the order they were handed over — frecency,
@@ -1583,17 +1664,48 @@ impl Tty7App {
     /// What the menu offers, read off the app as the menu opens — the builder
     /// runs on the popup's own entity, so the rows carry a weak handle back.
     fn new_tab_menu_rows(&self, app: gpui::WeakEntity<Self>, cx: &App) -> NewTabMenu {
+        let default_shell = self.default_shell_label(cx);
+        let usage = &cx.global::<Config>().shell_frecency;
+        let now = crate::core::config::unix_now();
+        let sorted = shells_by_frecency(&self.shells.shells, &default_shell, usage, now);
+        let shells = menu_shells(&sorted, &default_shell, usage, now);
         NewTabMenu {
             app,
-            shells: self
-                .shells
-                .shells
-                .iter()
-                .map(|s| (SharedString::from(s.label.clone()), shell_spec(s)))
+            more_shells: shells.len() < sorted.len(),
+            shells: shells
+                .into_iter()
+                .map(|s| SharedString::from(s.label.clone()))
                 .collect(),
-            default_shell: SharedString::from(self.default_shell_label(cx)),
+            default_shell: SharedString::from(default_shell),
             hosts: menu_hosts(crate::ui::ssh_connect::ssh_profiles_by_frecency(cx)),
         }
+    }
+
+    /// Open the inventory's shell by the label it is listed under, wherever
+    /// `at` says — the New Tab menu's rows and the palette's `Shell:` commands
+    /// both land here, so both count toward the frecency that orders them.
+    pub(crate) fn open_listed_shell(
+        &mut self,
+        label: &str,
+        at: SpawnWhere,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(spec) = self
+            .shells
+            .shells
+            .iter()
+            .find(|s| s.label == label)
+            .map(shell_spec)
+        else {
+            return;
+        };
+        self.update_config(cx, |cfg| {
+            let entry = cfg.shell_frecency.entry(label.to_string()).or_default();
+            entry.count = entry.count.saturating_add(1);
+            entry.last_used = crate::core::config::unix_now();
+        });
+        self.open_shell(Some(spec), at, window, cx);
     }
 
     pub(crate) fn tab_context_menu(
@@ -3288,5 +3400,132 @@ mod tests {
         root.cwd = Some("/".into());
         assert_eq!(label_of(&root, 0, Some(home())), "/");
         assert_eq!(tooltip_of(&root, 0, Some(home())), None);
+    }
+
+    fn inventory(labels: &[&str]) -> Vec<DetectedShell> {
+        labels
+            .iter()
+            .map(|l| DetectedShell {
+                label: l.to_string(),
+                program: format!("/bin/{l}"),
+                args: Vec::new(),
+                args_are_tty7_defaults: true,
+                user_authored: false,
+            })
+            .collect()
+    }
+
+    fn used(
+        entries: &[(&str, u32, u64)],
+    ) -> std::collections::HashMap<String, crate::core::config::ProfileUsage> {
+        entries
+            .iter()
+            .map(|(l, count, last_used)| {
+                (
+                    l.to_string(),
+                    crate::core::config::ProfileUsage {
+                        count: *count,
+                        last_used: *last_used,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn labels(shells: &[&DetectedShell]) -> Vec<String> {
+        shells.iter().map(|s| s.label.clone()).collect()
+    }
+
+    const STOCK_MAC: &[&str] = &["zsh", "bash", "sh", "csh", "tcsh", "ksh", "dash"];
+
+    #[test]
+    fn the_new_tab_menu_names_the_default_and_what_has_been_opened_by_frecency() {
+        let now = 100_000_000u64;
+        let day = 86_400u64;
+        let shells = inventory(STOCK_MAC);
+        // `bash` used often and lately; `dash` used more but a year ago;
+        // `ksh` once, two months back; and the default opened too.
+        let usage = used(&[
+            ("zsh", 50, now),
+            ("ksh", 1, now - 60 * day),
+            ("bash", 9, now - day),
+            ("dash", 20, now - 365 * day),
+        ]);
+        let sorted = shells_by_frecency(&shells, "zsh", &usage, now);
+        assert_eq!(
+            labels(&sorted),
+            ["zsh", "bash", "dash", "ksh", "sh", "csh", "tcsh"],
+            "default first, then by frecency, then the inventory's own order"
+        );
+        let menu = menu_shells(&sorted, "zsh", &usage, now);
+        assert_eq!(menu.len(), MENU_SHELLS);
+        assert_eq!(labels(&menu), ["zsh", "bash", "dash"]);
+    }
+
+    #[test]
+    fn the_default_shell_leads_the_menu_even_when_it_has_never_been_opened() {
+        let now = 100_000_000u64;
+        let shells = inventory(STOCK_MAC);
+        let usage = used(&[("tcsh", 3, now), ("sh", 7, now), ("ksh", 5, now)]);
+        let sorted = shells_by_frecency(&shells, "bash", &usage, now);
+        let menu = menu_shells(&sorted, "bash", &usage, now);
+        assert_eq!(labels(&menu), ["bash", "sh", "ksh"]);
+    }
+
+    #[test]
+    fn a_shell_nobody_has_opened_is_not_named_just_because_there_is_room() {
+        // A fresh install: nothing has been opened, so the menu names the
+        // default alone and leaves the rest to the palette.
+        let now = 100_000_000u64;
+        let shells = inventory(STOCK_MAC);
+        let none = used(&[]);
+        let sorted = shells_by_frecency(&shells, "zsh", &none, now);
+        assert_eq!(labels(&menu_shells(&sorted, "zsh", &none, now)), ["zsh"]);
+
+        // A usage record at zero counts as never opened.
+        let zeroed = used(&[("bash", 0, now)]);
+        let sorted = shells_by_frecency(&shells, "zsh", &zeroed, now);
+        assert_eq!(labels(&menu_shells(&sorted, "zsh", &zeroed, now)), ["zsh"]);
+
+        // An inventory that does not list the default still offers its head,
+        // which is the shell a new tab opens with.
+        let sorted = shells_by_frecency(&shells, "fish", &none, now);
+        assert_eq!(labels(&menu_shells(&sorted, "fish", &none, now)), ["zsh"]);
+    }
+
+    #[test]
+    fn other_shells_is_offered_only_when_the_inventory_holds_more_than_the_menu_names() {
+        let now = 100_000_000u64;
+        let more = |inv: &[&str], usage: &[(&str, u32, u64)]| {
+            let shells = inventory(inv);
+            let usage = used(usage);
+            let default = inv.first().copied().unwrap_or("");
+            let sorted = shells_by_frecency(&shells, default, &usage, now);
+            menu_shells(&sorted, default, &usage, now).len() < sorted.len()
+        };
+        assert!(more(STOCK_MAC, &[]), "a stock box names one of seven");
+        assert!(
+            !more(&["pwsh"], &[]),
+            "the default alone is the whole inventory"
+        );
+        assert!(
+            !more(&["zsh", "bash"], &[("bash", 1, now)]),
+            "every shell is already a row"
+        );
+        assert!(
+            !more(
+                &["zsh", "bash", "fish"],
+                &[("bash", 1, now), ("fish", 2, now)]
+            ),
+            "three shells, all named"
+        );
+        assert!(
+            more(&["zsh", "bash", "fish"], &[("bash", 1, now)]),
+            "`fish` has never been opened, so it is left to the palette"
+        );
+        assert!(
+            !more(&[], &[]),
+            "no inventory: the fallback row, nothing more"
+        );
     }
 }

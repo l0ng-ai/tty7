@@ -385,6 +385,12 @@ pub struct Config {
     pub ssh_warn_on_close: bool,
     #[serde(default)]
     pub ssh_profile_frecency: HashMap<uuid::Uuid, ProfileUsage>,
+    /// How often and how lately each shell was opened from the New Tab menu
+    /// or its palette command, keyed by the label the inventory shows it
+    /// under. Orders the menu's short list of shells the way
+    /// `ssh_profile_frecency` orders its hosts.
+    #[serde(default)]
+    pub shell_frecency: HashMap<String, ProfileUsage>,
 
     #[serde(default)]
     pub command_frecency: HashMap<String, ProfileUsage>,
@@ -715,6 +721,7 @@ impl Default for Config {
             verify_host_keys: true,
             ssh_warn_on_close: false,
             ssh_profile_frecency: HashMap::new(),
+            shell_frecency: HashMap::new(),
             command_frecency: HashMap::new(),
             agent_commands: HashMap::new(),
             restore_agent_sessions: true,

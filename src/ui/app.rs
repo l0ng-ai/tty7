@@ -5420,6 +5420,31 @@ impl Tty7App {
             },
         );
 
+        // Every shell the window's machine has, named alike in every language
+        // so the New Tab menu's "Other Shells…" row can land on exactly these
+        // by typing one word. Listed in the order that menu uses.
+        {
+            let default_shell = self.default_shell_label(cx);
+            let usage = &cx.global::<Config>().shell_frecency;
+            let now = crate::core::config::unix_now();
+            for s in crate::ui::tab_strip::shells_by_frecency(
+                &self.shells.shells,
+                &default_shell,
+                usage,
+                now,
+            ) {
+                let mut cmd = Command::new(
+                    t_fmt(L10nKey::AppCmdShellTitle, &[("title", &s.label)]),
+                    CommandKind::OpenShell(s.label.clone()),
+                )
+                .in_group(CommandGroup::TabsPanes);
+                if s.label == default_shell {
+                    cmd = cmd.with_subtitle(t(L10nKey::ShellDefault));
+                }
+                commands.push(cmd);
+            }
+        }
+
         // Offered only where it would do something. A connection opened from a
         // saved host has nothing to save, and a pane that is not an SSH one has
         // no connection at all — either would be a row that quietly did nothing
@@ -5675,6 +5700,11 @@ impl Tty7App {
             }
             OpenSshConnect(input) => self.open_typed_ssh_connect(&input, window, cx),
             ConnectSavedProfile(id) => self.connect_ssh_profile(id, window, cx),
+            // ⌥ held as the row is taken splits, as it does on the menu's row.
+            OpenShell(label) => {
+                let at = SpawnWhere::from_modifiers(window.modifiers());
+                self.open_listed_shell(&label, at, window, cx)
+            }
             EditSavedProfile(id) => self.open_ssh_profile_in_settings(id, window, cx),
             QuickConnect(target) => {
                 if let Some(qc) = crate::core::ssh_profile::parse_quick_connect(&target) {

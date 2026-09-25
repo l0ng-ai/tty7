@@ -1059,6 +1059,7 @@ l10n_keys! {
     TabMenuLocalShells,
     TabMenuAddHost,
     TabMenuAllHosts,
+    TabMenuOtherShells,
     TabMenuSplitHint,
     TabUnnamedShell,
     ShellDefault,
@@ -1342,6 +1343,7 @@ l10n_keys! {
     AppPaneNoKnownDirectory,
     AppNoUncommittedChanges,
     AppCmdSshProfileTitle,
+    AppCmdShellTitle,
     AppCmdSwitchToTab,
     AppPlaceholderDescription,
     AppPlaceholderSshQuickConnect,
@@ -1602,6 +1604,7 @@ mod tests {
             L10nKey::Ok,
             // Pure templates: every word in them is a placeholder.
             L10nKey::AppCmdSshProfileTitle,
+            L10nKey::AppCmdShellTitle,
             L10nKey::HostOpsError,
             L10nKey::SftpTransferProgress,
             // Product names.

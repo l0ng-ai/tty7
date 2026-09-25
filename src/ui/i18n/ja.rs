@@ -1740,6 +1740,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "{cwd} に未コミットの変更はありません（または git リポジトリではありません）"
         }
         L10nKey::AppCmdSshProfileTitle => "SSH: {title}",
+        L10nKey::AppCmdShellTitle => "Shell: {title}",
         L10nKey::AppCmdSwitchToTab => "タブに切り替え: {label}",
         L10nKey::AppPlaceholderDescription => "説明",
         L10nKey::AppPlaceholderSshQuickConnect => "user@host  または  user@host:port",
@@ -1960,6 +1961,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabMenuLocalShells => "ローカル",
         L10nKey::TabMenuAddHost => "SSH ホストを追加…",
         L10nKey::TabMenuAllHosts => "すべての SSH ホスト…",
+        L10nKey::TabMenuOtherShells => "その他のシェル…",
         L10nKey::TabMenuSplitHint => "{key} を押しながら選ぶと分割",
         L10nKey::TabUnnamedShell => "シェル {n}",
         L10nKey::ShellDefault => "デフォルト",

@@ -1668,6 +1668,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "No uncommitted changes in {cwd} (or not a git repository)."
         }
         L10nKey::AppCmdSshProfileTitle => "SSH: {title}",
+        L10nKey::AppCmdShellTitle => "Shell: {title}",
         L10nKey::AppCmdSwitchToTab => "Switch to Tab: {label}",
         L10nKey::AppPlaceholderDescription => "description",
         L10nKey::AppPlaceholderSshQuickConnect => "user@host  or  user@host:port",
@@ -1884,6 +1885,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TabMenuLocalShells => "Local",
         L10nKey::TabMenuAddHost => "Add SSH Host…",
         L10nKey::TabMenuAllHosts => "All SSH Hosts…",
+        L10nKey::TabMenuOtherShells => "Other Shells…",
         L10nKey::TabMenuSplitHint => "Hold {key} to split",
         L10nKey::TabUnnamedShell => "Shell {n}",
         L10nKey::ShellDefault => "default",
