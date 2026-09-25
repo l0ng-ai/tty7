@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The source control panel's changed files can be filtered and shown as a
+  tree** (#473). A filter field sits above the list: every word typed has to
+  appear somewhere in a file's path, in any order and any case, and the group
+  headers' counts and their stage/unstage/discard-all buttons follow what the
+  filter leaves on screen. The tile at its end switches the list to a
+  directory tree — directories before files, a chain of directories that hold
+  nothing but the next one compacted into a single row (`crates/core/src`),
+  each directory row foldable and counting the files beneath it. A filter
+  opens every folded directory while it is set. The choice between list and
+  tree is remembered in the config. Both are built from the status the host
+  already sends, so a remote repository gets them unchanged. Searching the
+  diff text itself is not part of this.
+
 ### Fixed
 
 - **Nerd Font icons from a fallback font come out at the text's size** (#866).
