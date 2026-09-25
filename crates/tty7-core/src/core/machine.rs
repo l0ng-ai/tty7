@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::core::cli_agent::CLIAgent;
+use crate::core::group_key::{GroupId, WorkspaceGroups};
 use crate::core::session::WorkspaceId;
 use crate::daemon::protocol::{NativeSshSpec, ShellSpec};
 
@@ -134,6 +135,11 @@ pub struct Workspace {
     /// one read back at boot would name a holder that no longer exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment: Option<Attachment>,
+    /// The workspace's pinned sidebar groups and which groups are folded.
+    /// Kept here, beside the tabs that point into it, so every window onto
+    /// the workspace draws the same groups in the same order.
+    #[serde(default, skip_serializing_if = "WorkspaceGroups::is_empty")]
+    pub groups: WorkspaceGroups,
 }
 
 impl Default for Workspace {
@@ -145,6 +151,7 @@ impl Default for Workspace {
             tabs: Vec::new(),
             active_tab: None,
             attachment: None,
+            groups: WorkspaceGroups::default(),
         }
     }
 }
@@ -155,8 +162,11 @@ pub struct Tab {
     pub id: TabId,
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
-    pub sidebar_group: Option<String>,
+    /// The pinned group this tab was put in, or `None` for one the sidebar
+    /// files by itself. Only pinned groups are stored: an auto group is
+    /// worked out from the tab's cwd every time it is drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<GroupId>,
     pub root: PaneNode,
 }
 
@@ -165,7 +175,7 @@ impl Tab {
         Tab {
             id: TabId::new(),
             name: None,
-            sidebar_group: None,
+            group: None,
             root: PaneNode::Leaf { pane },
         }
     }
@@ -428,7 +438,10 @@ pub enum LayoutDelta {
     },
     TabRegrouped {
         tab: TabId,
-        group: Option<String>,
+        group: Option<GroupId>,
+    },
+    GroupsChanged {
+        groups: WorkspaceGroups,
     },
     TabRestructured {
         tab: Tab,
@@ -751,16 +764,55 @@ impl MachineStore {
         &self,
         workspace: WorkspaceId,
         tab: TabId,
-        group: Option<String>,
+        group: Option<GroupId>,
         origin: Option<SubscriberId>,
     ) -> io::Result<()> {
         self.mutate(origin, |m| {
             let t = find_tab(m, workspace, tab)?;
-            t.sidebar_group = group.clone();
+            t.group = group;
             Ok((
                 (),
                 vec![(workspace, LayoutDelta::TabRegrouped { tab, group })],
             ))
+        })
+    }
+
+    /// Replaces the workspace's sidebar groups whole.
+    ///
+    /// Whole rather than one verb per edit: the set is small, edited by hand,
+    /// and every edit to it — a pin, a rename, a drag that reorders — is
+    /// "this is the list now". Last writer wins, which for two windows racing
+    /// to fold the same header is the answer either of them would have given.
+    ///
+    /// A tab still pointing at a group this drops is handed back to auto
+    /// grouping here, in the same mutation, so the tree never holds a tab
+    /// filed under a group nobody can see. Each such tab is announced like any
+    /// other regroup; the client that sent the new set is left out of those
+    /// deltas as usual and has already cleared the tabs itself.
+    pub fn workspace_set_groups(
+        &self,
+        workspace: WorkspaceId,
+        groups: WorkspaceGroups,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, workspace)?;
+            let mut deltas = Vec::new();
+            for t in &mut ws.tabs {
+                if t.group.is_some_and(|g| !groups.contains(g)) {
+                    t.group = None;
+                    deltas.push((
+                        workspace,
+                        LayoutDelta::TabRegrouped {
+                            tab: t.id,
+                            group: None,
+                        },
+                    ));
+                }
+            }
+            ws.groups = groups.clone();
+            deltas.push((workspace, LayoutDelta::GroupsChanged { groups }));
+            Ok(((), deltas))
         })
     }
 
@@ -2056,17 +2108,58 @@ mod tests {
         store
             .tab_rename(ws, first.id, Some("build".into()), None)
             .unwrap();
+        let group = GroupId::new();
         store
-            .tab_set_group(ws, first.id, Some("/repo/tty7".into()), None)
+            .tab_set_group(ws, first.id, Some(group), None)
             .unwrap();
         store.tab_move(ws, first.id, 1, None).unwrap();
 
         let workspace = store.workspace(ws).unwrap();
         assert_eq!(workspace.tabs[0].id, second.id);
         assert_eq!(workspace.tabs[1].name.as_deref(), Some("build"));
+        assert_eq!(workspace.tabs[1].group, Some(group));
+    }
+
+    /// Dropping a group hands its tabs back to auto grouping in the same
+    /// mutation, and says so — a window that only heard `GroupsChanged` would
+    /// otherwise keep a tab filed under a group it can no longer draw.
+    #[test]
+    fn dropping_a_group_returns_its_tabs_to_auto_grouping() {
+        use crate::core::group_key::PinnedGroup;
+        let (store, _dir, ws, first) = store_with_tab();
+        let second = store
+            .tab_create(ws, None, seed(2, "/b"), None, None)
+            .unwrap();
+        let (keep, drop) = (PinnedGroup::label("keep"), PinnedGroup::label("drop"));
+        let mut groups = WorkspaceGroups::default();
+        groups.pinned = vec![keep.clone(), drop.clone()];
+        store.workspace_set_groups(ws, groups, None).unwrap();
+        store
+            .tab_set_group(ws, first.id, Some(drop.id), None)
+            .unwrap();
+        store
+            .tab_set_group(ws, second.id, Some(keep.id), None)
+            .unwrap();
+
+        let (_sub, heard) = recorded(&store);
+        let mut kept = WorkspaceGroups::default();
+        kept.pinned = vec![keep.clone()];
+        store.workspace_set_groups(ws, kept.clone(), None).unwrap();
+
+        let workspace = store.workspace(ws).unwrap();
+        assert_eq!(workspace.groups, kept);
+        assert_eq!(workspace.tabs[0].group, None, "back to auto grouping");
+        assert_eq!(workspace.tabs[1].group, Some(keep.id), "untouched");
+        let heard = heard.lock().unwrap();
         assert_eq!(
-            workspace.tabs[1].sidebar_group.as_deref(),
-            Some("/repo/tty7")
+            heard.iter().map(|(_, d)| d.clone()).collect::<Vec<_>>(),
+            vec![
+                LayoutDelta::TabRegrouped {
+                    tab: first.id,
+                    group: None
+                },
+                LayoutDelta::GroupsChanged { groups: kept },
+            ]
         );
     }
 

@@ -53,7 +53,12 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 /// half (#857) — would have stayed on this machine and never reached a remote
 /// one. A new filename is what gets them uploaded, at the price of one Update
 /// Server per host, which ends the sessions on it.
-pub const CONTROL_VERSION: u32 = 10;
+///
+/// v11 replaces the sidebar's hand-made groups. A tab now names a pinned group
+/// by id (`TabSetGroup` carries a `GroupId`, not a string), the groups
+/// themselves live on the workspace and move as `WorkspaceSetGroups` and
+/// `LayoutDelta::GroupsChanged`, and a v10 peer can decode none of that.
+pub const CONTROL_VERSION: u32 = 11;
 
 const DIALECT_MARKER: &str = "speaks control v";
 
@@ -290,7 +295,12 @@ pub enum ControlRequest {
     TabSetGroup {
         workspace: WorkspaceId,
         tab: TabId,
-        group: Option<String>,
+        group: Option<crate::core::group_key::GroupId>,
+    },
+    /// The workspace's pinned sidebar groups and folds, replaced whole.
+    WorkspaceSetGroups {
+        workspace: WorkspaceId,
+        groups: crate::core::group_key::WorkspaceGroups,
     },
     PaneSplit {
         workspace: WorkspaceId,
@@ -399,6 +409,7 @@ impl ControlRequest {
             | TabRename { .. }
             | TabMove { .. }
             | TabSetGroup { .. }
+            | WorkspaceSetGroups { .. }
             | PaneSplit { .. }
             | PaneClose { .. }
             | PaneSetRatio { .. }

@@ -95,7 +95,7 @@ impl Instance {
         {{
           "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
           "name": null,
-          "sidebar_group": null,
+          "group": null,
           "root": {{ "Leaf": {{ "pane": {pane_id} }} }}
         }}
       ],

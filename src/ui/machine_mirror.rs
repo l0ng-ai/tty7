@@ -5,7 +5,6 @@ use tty7_core::core::machine::{LayoutDelta, Machine, PaneRecord, Tab, TabId, Wor
 use tty7_core::daemon::control::{ControlRequest, ReplyOk};
 use tty7_core::host::HostId;
 
-use crate::core::group_key::GroupKey;
 use crate::core::session::WorkspaceId;
 use crate::ui::i18n::{L10nKey, t};
 
@@ -304,7 +303,11 @@ fn apply(machine: &mut Machine, workspace: WorkspaceId, delta: &LayoutDelta) -> 
             let Some(t) = ws.tabs.iter_mut().find(|t| t.id == *tab) else {
                 return false;
             };
-            t.sidebar_group = group.clone();
+            t.group = *group;
+            true
+        }
+        LayoutDelta::GroupsChanged { groups } => {
+            ws.groups = groups.clone();
             true
         }
         LayoutDelta::TabMoved { tab, to } => {
@@ -376,15 +379,15 @@ pub fn display_name_of(ws: &Workspace, panes: &[PaneRecord]) -> String {
 
 pub fn subject_path_of(ws: &Workspace, panes: &[PaneRecord]) -> Option<String> {
     let mut counts: Vec<(String, usize)> = Vec::new();
-    // Repo groups only. This answers with a *path*, and its callers treat it
-    // as one — `display_name_of` names the window after its last component.
-    // A custom group is a name the user typed, so putting one here would
-    // title a window `custom:work`, or chop `work/urgent` down to `urgent`.
-    // A workspace grouped entirely by hand falls through to a pane's cwd,
-    // which is a real path and is what the window showed before any of this.
+    // Pinned folder groups only: they are the groups the tree holds (an
+    // auto group is worked out by the GUI and never stored), and this answers
+    // with a *path* — `display_name_of` names the window after its last
+    // component. A label group is a name the user typed, so putting one here
+    // would chop `work/urgent` down to `urgent`. A workspace with no folder
+    // group falls through to a pane's cwd, which is a real path.
     for group in ws.tabs.iter().filter_map(|t| {
-        let key = GroupKey::decode(t.sidebar_group.as_deref()?)?;
-        Some(key.repo_root()?.to_string_lossy().into_owned())
+        let group = ws.groups.get(t.group?)?;
+        group.folder.clone()
     }) {
         match counts.iter_mut().find(|(g, _)| *g == group) {
             Some((_, n)) => *n += 1,
@@ -506,6 +509,7 @@ pub fn pane_count(cx: &App, entry: &crate::core::session::WindowView) -> Option<
 
 #[cfg(test)]
 mod tests {
+    use tty7_core::core::group_key::PinnedGroup;
     use tty7_core::core::machine::{Axis, PaneNode, PaneSeed, Tab, TabId};
 
     use super::*;
@@ -928,7 +932,7 @@ mod tests {
         let restructured = Tab {
             id: tab_id,
             name: None,
-            sidebar_group: None,
+            group: None,
             root: PaneNode::Split {
                 axis: Axis::Vertical,
                 ratio: 0.5,
@@ -1033,11 +1037,13 @@ mod tests {
             "a pane's process title must not rename its workspace"
         );
 
-        ws.tabs[0].sidebar_group = Some("/repo/tty7".into());
+        let tty7 = PinnedGroup::folder(std::path::Path::new("/repo/tty7"));
+        ws.tabs[0].group = Some(tty7.id);
+        ws.groups.pinned.push(tty7);
         assert_eq!(
             display_name_of(&ws, &panes),
             "tty7",
-            "the repo group wins over the raw cwd"
+            "a pinned folder group wins over the raw cwd"
         );
 
         ws.name = Some("  Release prep  ".into());
@@ -1046,12 +1052,11 @@ mod tests {
         assert_eq!(display_name_of(&Workspace::default(), &[]), "Untitled");
     }
 
-    /// A custom group is a name, not a path, and this answers with a path —
+    /// A label group is a name, not a path, and this answers with a path —
     /// its caller names the window after the last component. Left in, a
-    /// workspace grouped by hand would be titled `custom:work`, and one
-    /// grouped as `work/urgent` would be titled `urgent`.
+    /// workspace grouped as `work/urgent` would be titled `urgent`.
     #[test]
-    fn a_custom_group_is_not_a_subject_path() {
+    fn a_label_group_is_not_a_subject_path() {
         let mut ws = Workspace::default();
         let panes = vec![PaneRecord {
             cwd: Some("/home/me/scratch".into()),
@@ -1059,18 +1064,22 @@ mod tests {
         }];
         ws.tabs = vec![leaf_tab(1)];
 
-        ws.tabs[0].sidebar_group = Some("custom:work/urgent".into());
+        let work = PinnedGroup::label("work/urgent");
+        ws.tabs[0].group = Some(work.id);
+        ws.groups.pinned.push(work);
         assert_eq!(
             display_name_of(&ws, &panes),
             "scratch",
             "the cwd answers instead, the way it did before groups existed"
         );
 
-        ws.tabs[0].sidebar_group = Some("/repo/tty7".into());
+        let tty7 = PinnedGroup::folder(std::path::Path::new("/repo/tty7"));
+        ws.tabs[0].group = Some(tty7.id);
+        ws.groups.pinned.push(tty7);
         assert_eq!(
             display_name_of(&ws, &panes),
             "tty7",
-            "and a repo group still outranks the cwd"
+            "and a folder group still outranks the cwd"
         );
     }
 }

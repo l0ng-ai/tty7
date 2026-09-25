@@ -541,9 +541,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNewTabPositionDesc => "新打开的标签页插入的位置。",
         L10nKey::SettingsTabBarPosition => "标签栏位置",
         L10nKey::SettingsTabBarPositionDesc => "将标签页显示为顶部横向条或左侧垂直侧栏。",
-        L10nKey::SettingsSidebarGrouping => "侧栏分组",
+        L10nKey::SettingsSidebarGrouping => "自动分组",
         L10nKey::SettingsSidebarGroupingDesc => {
-            "按 git 仓库给侧栏标签页分组。仓库外的标签页归到“草稿”，选“按仓库或文件夹”时则按工作目录分。仅左侧栏。"
+            "把未固定的侧栏标签页按 git 仓库分组，SSH 标签页按主机分组。固定的分组始终显示。仅左侧栏。"
         }
         L10nKey::SettingsDiffPreviewFromCounts => "从侧栏计数打开 diff 预览",
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
@@ -567,9 +567,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAtEnd => "末尾",
         L10nKey::SettingsTop => "顶部",
         L10nKey::SettingsLeft => "左侧",
-        L10nKey::SettingsByRepo => "按仓库",
-        L10nKey::SettingsByRepoOrFolder => "按仓库或文件夹",
-        L10nKey::SettingsFlat => "平铺",
         L10nKey::SettingsPreset => "预设",
         L10nKey::SettingsPresetDesc => {
             "tmux 预设把窗格/标签页操作映射为前缀序列（例如 Ctrl-B 后按 C）。"
@@ -894,7 +891,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "显示托盘图标 托盘 菜单栏 状态 图标 show tray icon menu bar status"
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
-            "侧栏分组 标签页 分组 仓库 git 侧栏 文件夹 目录 sidebar grouping tabs repo repository folder directory"
+            "自动分组 标签页 分组 仓库 git ssh 主机 固定 未分组 侧栏 sidebar auto grouping tabs repo repository pinned pin host ungrouped"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "智能选择 双击 选择 单词 URL 路径 邮箱 括号 smart selection double click"
@@ -1008,6 +1005,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeDownloadTooLarge => "超过 {limit} MB，请改用 scp 或 rsync 下载。",
         L10nKey::FileTreeContextOpen => "打开",
         L10nKey::FileTreeContextCdHere => "cd 到此处",
+        L10nKey::FileTreeContextPinAsGroup => "固定为分组",
         L10nKey::FileTreeContextInsertPath => "在终端中插入路径",
         L10nKey::FileTreeContextAttachAgent => "附加到 agent",
         L10nKey::FileTreeContextNewFile => "新建文件",
@@ -1391,6 +1389,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdNewWindow => "新建窗口",
         L10nKey::CmdNewWorktreeTab => "新建 worktree 标签页…",
         L10nKey::CmdNewWorktreeTabSubtitle => "在全新分支上独立检出",
+        L10nKey::CmdNewGroup => "新建分组",
+        L10nKey::CmdNewGroupSubtitle => "在侧栏新建一个空的固定分组",
+        L10nKey::CmdOpenFolderAsGroup => "将文件夹作为分组打开…",
+        L10nKey::CmdOpenFolderAsGroupSubtitle => "固定一个文件夹；在其中打开的标签页会加入",
         L10nKey::CmdRenameTab => "重命名标签页…",
         L10nKey::CmdSplitRight => "向右分屏",
         L10nKey::CmdSplitDown => "向下分屏",
@@ -1782,12 +1784,19 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabMenuSplitHint => "按住 {key} 可分屏打开",
         L10nKey::TabUnnamedShell => "终端 {n}",
         L10nKey::ShellDefault => "默认",
-        L10nKey::SidebarScratchGroup => "草稿",
+        L10nKey::SidebarUngroupedGroup => "未分组",
         L10nKey::SidebarMoveToGroup => "移到分组",
         L10nKey::SidebarNewGroup => "新建分组…",
-        L10nKey::SidebarAutoGroup => "恢复自动分组",
         L10nKey::SidebarNewGroupName => "新建分组",
         L10nKey::SidebarRenameGroup => "重命名分组",
+        L10nKey::SidebarPinGroup => "固定分组",
+        L10nKey::SidebarUnpinGroup => "取消固定",
+        L10nKey::SidebarGroupNewTab => "新建标签页",
+        L10nKey::SidebarSetGroupFolder => "设置文件夹…",
+        L10nKey::SidebarUseCurrentTabFolder => "使用当前标签页的文件夹",
+        L10nKey::SidebarClearGroupFolder => "清除文件夹",
+        L10nKey::SidebarDeleteGroup => "删除分组",
+        L10nKey::SidebarDropToPin => "拖到此处固定",
         L10nKey::TabContextCloseTab => "关闭标签页",
         L10nKey::TabContextCloseTabsBelow => "关闭下方标签页",
         L10nKey::AppAgentHooksOpFailed => "失败：{error}",

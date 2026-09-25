@@ -777,6 +777,11 @@ fn run_request(
                 .tab_set_group(workspace, tab, group, conn.machine_origin)?;
             (ReplyOk::Unit, Vec::new())
         }
+        ControlRequest::WorkspaceSetGroups { workspace, groups } => {
+            conn.machine()?
+                .workspace_set_groups(workspace, groups, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
         ControlRequest::PaneSplit {
             workspace,
             pane,

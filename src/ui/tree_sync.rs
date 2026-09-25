@@ -11,7 +11,7 @@ use tty7_core::core::machine::{
 use tty7_core::daemon::control::{ControlClient, ControlRequest, ReplyOk};
 use tty7_core::host::HostId;
 
-use crate::core::group_key::GroupKey;
+use crate::core::group_key::{GroupId, WorkspaceGroups};
 use crate::core::session::{Session, SessionPane, SessionTab, WorkspaceId, WorkspaceStore};
 use crate::ui::app::Tty7App;
 use crate::ui::i18n::{L10nKey, t};
@@ -63,7 +63,7 @@ fn tree_workspace_id(cx: &App, client_ws: WorkspaceId) -> WorkspaceId {
 pub(crate) struct DesiredTab {
     pub id: TabId,
     pub name: Option<String>,
-    pub group: Option<String>,
+    pub group: Option<GroupId>,
     pub root: DesiredNode,
 }
 
@@ -133,7 +133,9 @@ pub(crate) fn desired_tabs(
         out.push(DesiredTab {
             id,
             name: tab.name.clone(),
-            group: tab.sidebar_group.borrow().as_ref().map(GroupKey::encode),
+            // A tab still naming a group this window has deleted is an auto
+            // tab, and goes up as one.
+            group: tab.group.get().filter(|g| app.sidebar_groups.contains(*g)),
             root,
         });
     }
@@ -255,6 +257,7 @@ fn seeded_records(desired: &[DesiredTab], live: impl Fn(u64) -> bool) -> Vec<Pan
 pub(crate) struct WsMirror {
     pub tabs: Vec<TreeTab>,
     pub active: Option<TabId>,
+    pub groups: WorkspaceGroups,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -501,7 +504,7 @@ fn create_tab(
         ops.push(ControlRequest::TabSetGroup {
             workspace,
             tab: want.id,
-            group: want.group.clone(),
+            group: want.group,
         });
     }
     mirror.tabs.insert(
@@ -509,7 +512,7 @@ fn create_tab(
         TreeTab {
             id: want.id,
             name: want.name.clone(),
-            sidebar_group: want.group.clone(),
+            group: want.group,
             root,
         },
     );
@@ -557,12 +560,12 @@ fn reconcile_tab(
                 name: want.name.clone(),
             });
         }
-        if tab.sidebar_group != want.group {
-            tab.sidebar_group = want.group.clone();
+        if tab.group != want.group {
+            tab.group = want.group;
             ops.push(ControlRequest::TabSetGroup {
                 workspace,
                 tab: want.id,
-                group: want.group.clone(),
+                group: want.group,
             });
         }
     }
@@ -950,6 +953,9 @@ struct WsState {
     /// `start_prime`, which spends it instead of the generated name, and
     /// cleared by `finish_prime` once the machine has confirmed a name.
     chosen_name: Option<ChosenName>,
+    /// An edit to the workspace's sidebar groups made before this window's
+    /// pull landed, sent on when it does — see [`push_groups`].
+    unsent_groups: Option<WorkspaceGroups>,
     /// Whether this window has already been told why it opened empty.
     ///
     /// The retry is as quiet as the failure was, so a window whose machine
@@ -977,6 +983,7 @@ impl Default for WsState {
             rehydrate_attempts: 0,
             then_open: Vec::new(),
             chosen_name: None,
+            unsent_groups: None,
             said_why_empty: false,
         }
     }
@@ -1454,6 +1461,7 @@ fn primed(ws: Workspace, arrival: Arrival) -> (WsMirror, Option<String>, Arrival
         WsMirror {
             tabs: ws.tabs,
             active: ws.active_tab,
+            groups: ws.groups,
         },
         ws.name,
         arrival,
@@ -1493,6 +1501,7 @@ fn finish_prime(
             return;
         }
     };
+    adopt_groups(cx, client_ws);
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
     crate::ui::machine_mirror::MachineMirrors::note_synced_workspace(
@@ -1511,6 +1520,92 @@ fn finish_prime(
         return;
     };
     app.update(cx, |app, cx| sync_window(app, cx));
+}
+
+/// Sends a window's edit to its workspace's sidebar groups up to the machine.
+///
+/// Not part of the diff [`sync_window`] runs, on purpose. Groups have nothing
+/// a window can know better than the machine: a fresh window holds none at
+/// all, and diffing that emptiness against the tree would unpin every group
+/// the workspace had. So they only ever go up as what they are — an edit
+/// someone just made — and come down from every pull and every
+/// `GroupsChanged`.
+///
+/// Queued with the tab ops rather than fired beside them, and ahead of the
+/// ones the same edit raises (the caller pushes this before it saves): a tab
+/// filed into a group that was just made must not reach the machine before
+/// the group does, or `workspace_set_groups`, which hands tabs naming unknown
+/// groups back to auto grouping, would see a tab pointing at nothing.
+///
+/// A window whose pull has not landed parks the edit, and the pull sends it
+/// on instead of overwriting it — otherwise a pin made in the first moments
+/// of a window's life would be undone by the tree that arrives after it.
+pub(crate) fn push_groups(cx: &mut App, client_ws: WorkspaceId, groups: WorkspaceGroups) {
+    if !cx.has_global::<crate::core::session::WorkspaceStore>() {
+        return;
+    }
+    let machine_ws = tree_workspace_id(cx, client_ws);
+    let state = cx
+        .default_global::<TreeSync>()
+        .windows
+        .entry(client_ws)
+        .or_default();
+    match &mut state.sync {
+        SyncPhase::Primed(mirror) => {
+            if mirror.groups == groups {
+                return;
+            }
+            mirror.groups = groups.clone();
+            state.queue.push_back(ControlRequest::WorkspaceSetGroups {
+                workspace: machine_ws,
+                groups,
+            });
+            pump(cx, client_ws);
+        }
+        SyncPhase::Unprimed { .. } => state.unsent_groups = Some(groups),
+    }
+}
+
+/// Hands the window the sidebar groups a pull just brought in — or, when the
+/// window edited them before the pull landed, sends that edit up instead.
+///
+/// Deferred: a pull can land while the window is itself mid-update (its own
+/// `sync_window` started it), and the window is only updated once that is
+/// over. Nothing in between can push the window's stale copy, because groups
+/// only ever go up from an edit — see [`push_groups`].
+fn adopt_groups(cx: &mut App, client_ws: WorkspaceId) {
+    let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
+        return;
+    };
+    if let Some(unsent) = state.unsent_groups.take() {
+        push_groups(cx, client_ws, unsent);
+        return;
+    }
+    cx.defer(move |cx| {
+        let groups = match cx
+            .default_global::<TreeSync>()
+            .windows
+            .get(&client_ws)
+            .map(|s| &s.sync)
+        {
+            Some(SyncPhase::Primed(mirror)) => mirror.groups.clone(),
+            _ => return,
+        };
+        if !cx.has_global::<crate::ui::windows::WindowRegistry>() {
+            return;
+        }
+        let Some(app) =
+            crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|a| a.upgrade())
+        else {
+            return;
+        };
+        app.update(cx, |app, cx| {
+            if app.sidebar_groups != groups {
+                app.sidebar_groups = groups;
+                cx.notify();
+            }
+        });
+    });
 }
 
 fn pump(cx: &mut App, client_ws: WorkspaceId) {
@@ -1590,7 +1685,7 @@ pub(crate) fn session_from_tree(
         .map(|tab| SessionTab {
             name: tab.name.clone(),
             tree_id: Some(tab.id),
-            sidebar_group: tab.sidebar_group.as_deref().and_then(GroupKey::decode),
+            group: tab.group,
             pane: session_pane_from_node(&tab.root, panes),
         })
         .collect();
@@ -2174,6 +2269,7 @@ fn layout_of(
     let mirror = WsMirror {
         tabs: ws.tabs.clone(),
         active: ws.active_tab,
+        groups: ws.groups.clone(),
     };
     let session = session_from_tree(ws, &machine.panes);
     Ok((machine, mirror, session))
@@ -2254,6 +2350,7 @@ fn settle_hydration(
         state.said_why_empty = false;
         dirty
     };
+    adopt_groups(cx, client_ws);
     let Some(app) =
         crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|app| app.upgrade())
     else {
@@ -2523,7 +2620,11 @@ fn apply_to_mirror(mirror: &mut WsMirror, delta: &LayoutDelta) -> bool {
             let Some(t) = mirror.tabs.iter_mut().find(|t| t.id == *tab) else {
                 return false;
             };
-            t.sidebar_group = group.clone();
+            t.group = *group;
+            true
+        }
+        LayoutDelta::GroupsChanged { groups } => {
+            mirror.groups = groups.clone();
             true
         }
         LayoutDelta::TabMoved { tab, to } => {
@@ -2671,9 +2772,12 @@ impl Tty7App {
             }
             LayoutDelta::TabRegrouped { tab, group } => {
                 if let Some(index) = index_of(&self.tabs, *tab) {
-                    *self.tabs[index].sidebar_group.borrow_mut() =
-                        group.as_deref().and_then(GroupKey::decode);
+                    self.tabs[index].group.set(*group);
                 }
+                true
+            }
+            LayoutDelta::GroupsChanged { groups } => {
+                self.sidebar_groups = groups.clone();
                 true
             }
             LayoutDelta::TabMoved { tab, to } => {
@@ -2775,7 +2879,7 @@ impl Tty7App {
         let gui = &mut self.tabs[index];
         gui.pane = pane;
         gui.name = tab.name.clone();
-        *gui.sidebar_group.borrow_mut() = tab.sidebar_group.as_deref().and_then(GroupKey::decode);
+        gui.group.set(tab.group);
         self.maximized = None;
         true
     }
@@ -3434,12 +3538,16 @@ mod tests {
                 dirty: false,
                 priming: false,
             };
-            let primed_with =
-                |tabs: Vec<TreeTab>| SyncPhase::Primed(WsMirror { tabs, active: None });
+            let primed_with = |tabs: Vec<TreeTab>| {
+                SyncPhase::Primed(WsMirror {
+                    tabs,
+                    ..Default::default()
+                })
+            };
             let a_tab = || TreeTab {
                 id: TabId::new(),
                 name: None,
-                sidebar_group: None,
+                group: None,
                 root: PaneNode::Leaf { pane: 1 },
             };
 
@@ -3508,10 +3616,7 @@ mod tests {
                 // The mirror the emptied window would have been diffed against,
                 // already drained the way `save_session` drains it on the way
                 // out of a window that has no tabs left.
-                state.sync = SyncPhase::Primed(WsMirror {
-                    tabs: vec![],
-                    active: None,
-                });
+                state.sync = SyncPhase::Primed(WsMirror::default());
                 state
                     .queue
                     .push_back(ControlRequest::TabClose { workspace: ws, tab });
@@ -3948,7 +4053,7 @@ mod tests {
                 state.rehydrate = None;
                 state.sync = SyncPhase::Primed(WsMirror {
                     tabs: vec![TreeTab::leaf(1), TreeTab::leaf(2)],
-                    active: None,
+                    ..Default::default()
                 });
             }
             assert!(
@@ -4077,17 +4182,18 @@ mod tests {
                         TreeTab {
                             id: put_up,
                             name: None,
-                            sidebar_group: None,
+                            group: None,
                             root: PaneNode::Leaf { pane: 1 },
                         },
                         TreeTab {
                             id: failed,
                             name: None,
-                            sidebar_group: None,
+                            group: None,
                             root: PaneNode::Leaf { pane: 2 },
                         },
                     ],
                     active: Some(put_up),
+                    ..Default::default()
                 });
                 // Keeps whatever the sync queues where the test can read it:
                 // with no link, `pump` would otherwise clear the queue and drop
@@ -4167,17 +4273,18 @@ mod tests {
                         TreeTab {
                             id: theirs.0,
                             name: None,
-                            sidebar_group: None,
+                            group: None,
                             root: PaneNode::Leaf { pane: 11 },
                         },
                         TreeTab {
                             id: theirs.1,
                             name: None,
-                            sidebar_group: None,
+                            group: None,
                             root: PaneNode::Leaf { pane: 12 },
                         },
                     ],
                     active: Some(theirs.0),
+                    ..Default::default()
                 });
                 state.informed = true;
                 // Keeps whatever the switch queues where the test can read it.
@@ -4248,7 +4355,7 @@ mod tests {
             };
             let advanced = WsMirror {
                 tabs: vec![TreeTab::leaf(7)],
-                active: None,
+                ..Default::default()
             };
             {
                 let state = cx
@@ -4337,7 +4444,7 @@ mod tests {
         for (m, d) in mirror.tabs.iter().zip(desired) {
             assert_eq!(m.id, d.id);
             assert_eq!(m.name, d.name);
-            assert_eq!(m.sidebar_group, d.group);
+            assert_eq!(m.group, d.group);
             assert_eq!(m.root, d.root.to_pane_node());
         }
     }
@@ -4801,7 +4908,8 @@ mod tests {
 
         let mut named = tab(id, leaf(1));
         named.name = Some("build".into());
-        named.group = Some("/repo".into());
+        let group = GroupId::new();
+        named.group = Some(group);
         let want = vec![named];
         let ops = diff(ws, &mut mirror, &want, Some(id), SyncScope::Full, &[]);
         assert_eq!(
@@ -4815,7 +4923,7 @@ mod tests {
                 ControlRequest::TabSetGroup {
                     workspace: ws,
                     tab: id,
-                    group: Some("/repo".into()),
+                    group: Some(group),
                 },
             ]
         );
@@ -4971,7 +5079,7 @@ mod tests {
         let tree_tab = TreeTab {
             id,
             name: None,
-            sidebar_group: None,
+            group: None,
             root: PaneNode::Leaf { pane: 1 },
         };
         assert!(apply_to_mirror(
@@ -4991,7 +5099,7 @@ mod tests {
                 tab: TreeTab {
                     id,
                     name: None,
-                    sidebar_group: None,
+                    group: None,
                     root: PaneNode::Split {
                         axis: TreeAxis::Vertical,
                         ratio: 0.5,
@@ -5060,7 +5168,7 @@ mod tests {
             tabs: vec![TreeTab {
                 id: tab_id,
                 name: Some("build".into()),
-                sidebar_group: Some("/repo".into()),
+                group: Some(GroupId::new()),
                 root: PaneNode::Split {
                     axis: TreeAxis::Vertical,
                     ratio: 0.3,
@@ -5155,7 +5263,7 @@ mod tests {
             tabs: vec![TreeTab {
                 id: tab_id,
                 name: None,
-                sidebar_group: None,
+                group: None,
                 root: PaneNode::Leaf { pane: 7 },
             }],
             active_tab: Some(tab_id),
@@ -5184,7 +5292,7 @@ mod tests {
             tabs: vec![TreeTab {
                 id: TabId::new(),
                 name: None,
-                sidebar_group: None,
+                group: None,
                 root: PaneNode::Leaf { pane: 1 },
             }],
             active_tab: Some(TabId::new()),

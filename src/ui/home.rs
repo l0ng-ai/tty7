@@ -494,7 +494,7 @@ mod tests {
         let tab = SessionTab {
             name: Some("build".into()),
             tree_id: None,
-            sidebar_group: None,
+            group: None,
             pane: leaf(Some("/work/getty")),
         };
         assert_eq!(closed_tab_label(&tab).as_deref(), Some("build"));
@@ -505,7 +505,7 @@ mod tests {
         let tab = SessionTab {
             name: None,
             tree_id: None,
-            sidebar_group: None,
+            group: None,
             pane: leaf(Some("/work/getty")),
         };
         assert_eq!(closed_tab_label(&tab).as_deref(), Some("getty"));
@@ -513,7 +513,7 @@ mod tests {
         let tab = SessionTab {
             name: Some("   ".into()),
             tree_id: None,
-            sidebar_group: None,
+            group: None,
             pane: leaf(Some("/work/getty")),
         };
         assert_eq!(closed_tab_label(&tab).as_deref(), Some("getty"));
@@ -524,7 +524,7 @@ mod tests {
         let tab = SessionTab {
             name: None,
             tree_id: None,
-            sidebar_group: None,
+            group: None,
             pane: SessionPane::Split {
                 axis: crate::core::session::SessionAxis::Horizontal,
                 ratio: 0.5,
@@ -540,14 +540,14 @@ mod tests {
         let unnamed = SessionTab {
             name: None,
             tree_id: None,
-            sidebar_group: None,
+            group: None,
             pane: leaf(None),
         };
         assert_eq!(closed_tab_label(&unnamed), None);
         let root = SessionTab {
             name: None,
             tree_id: None,
-            sidebar_group: None,
+            group: None,
             pane: leaf(Some("/")),
         };
         assert_eq!(closed_tab_label(&root), None);
@@ -558,7 +558,7 @@ mod tests {
         let tab = SessionTab {
             name: Some("a".repeat(40)),
             tree_id: None,
-            sidebar_group: None,
+            group: None,
             pane: leaf(None),
         };
         let label = closed_tab_label(&tab).unwrap();

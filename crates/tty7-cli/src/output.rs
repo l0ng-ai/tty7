@@ -47,6 +47,17 @@ fn clamp(s: &str, max: usize) -> String {
 /// The last segment of a path, for columns that have room for a word and not
 /// for a path. Both separators: the same server answers a Windows client, and
 /// `C:\proj` has to lose its head too.
+/// What the sidebar's header for a pinned group reads: the name the user gave
+/// it, or the last segment of its folder — the full path would be the widest
+/// column in the table for no gain.
+pub fn pinned_group_label(group: &tty7_core::core::group_key::PinnedGroup) -> String {
+    group
+        .given_name()
+        .map(str::to_string)
+        .or_else(|| group.folder.as_deref().map(|f| path_leaf(f).to_string()))
+        .unwrap_or_else(|| "-".to_string())
+}
+
 pub fn path_leaf(path: &str) -> &str {
     let trimmed = path.trim_end_matches(['/', '\\']);
     match trimmed.rsplit(['/', '\\']).next() {

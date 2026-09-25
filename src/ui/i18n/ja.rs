@@ -620,9 +620,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsTabBarPositionDesc => {
             "タブを上部の横一列または左側の縦サイドバーとして表示"
         }
-        L10nKey::SettingsSidebarGrouping => "サイドバーのグループ化",
+        L10nKey::SettingsSidebarGrouping => "自動グループ化",
         L10nKey::SettingsSidebarGroupingDesc => {
-            "サイドバータブを git リポジトリごとにまとめます。リポジトリ外のタブはスクラッチに、「リポジトリ／フォルダ別」なら作業ディレクトリごとに。左サイドバーのみ"
+            "固定していないサイドバータブを git リポジトリごとに、SSH タブをホストごとにまとめます。固定したグループは常に表示されます。左サイドバーのみ"
         }
         L10nKey::SettingsDiffPreviewFromCounts => "サイドバーのカウントから Diff プレビューを開く",
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
@@ -650,9 +650,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAtEnd => "末尾",
         L10nKey::SettingsTop => "上部",
         L10nKey::SettingsLeft => "左側",
-        L10nKey::SettingsByRepo => "リポジトリ別",
-        L10nKey::SettingsByRepoOrFolder => "リポジトリ／フォルダ別",
-        L10nKey::SettingsFlat => "フラット表示",
         L10nKey::SettingsPreset => "プリセット",
         L10nKey::SettingsPresetDesc => {
             "tmux では、ペイン/タブの操作をプレフィックスキーの後に行います（例: Ctrl-B の後に C）"
@@ -1003,7 +1000,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "トレイ メニューバー ステータス アイコン エージェント 通知 システム tray icon menu bar status system attention"
         }
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
-            "タブ グループ リポジトリ git スクラッチ ヘッダー サイドバー フラット フォルダ ディレクトリ sidebar grouping tabs repo repository git scratch header flat folder directory"
+            "タブ グループ 自動 リポジトリ git ssh ホスト 固定 未分類 サイドバー sidebar auto grouping tabs repo repository pinned pin host ungrouped"
         }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "ダブルクリック 単語 url パス 選択 セマンティック 括弧 メール smart selection double click word url path bracket email"
@@ -1123,6 +1120,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::FileTreeContextOpen => "開く",
         L10nKey::FileTreeContextCdHere => "ここで cd",
+        L10nKey::FileTreeContextPinAsGroup => "グループとして固定",
         L10nKey::FileTreeContextInsertPath => "ターミナルにパスを挿入",
         L10nKey::FileTreeContextAttachAgent => "エージェントをアタッチ",
         L10nKey::FileTreeContextNewFile => "新しいファイル",
@@ -1548,6 +1546,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdNewWindow => "新しいウィンドウ",
         L10nKey::CmdNewWorktreeTab => "新しいワークツリータブ…",
         L10nKey::CmdNewWorktreeTabSubtitle => "新しいブランチでの独立したチェックアウト",
+        L10nKey::CmdNewGroup => "新規グループ",
+        L10nKey::CmdNewGroupSubtitle => "サイドバーに空の固定グループを作成",
+        L10nKey::CmdOpenFolderAsGroup => "フォルダをグループとして開く…",
+        L10nKey::CmdOpenFolderAsGroupSubtitle => "フォルダを固定し、そこで開いたタブをまとめる",
         L10nKey::CmdRenameTab => "タブの名前を変更…",
         L10nKey::CmdSplitRight => "右に分割",
         L10nKey::CmdSplitDown => "下に分割",
@@ -1963,12 +1965,19 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabMenuSplitHint => "{key} を押しながら選ぶと分割",
         L10nKey::TabUnnamedShell => "シェル {n}",
         L10nKey::ShellDefault => "デフォルト",
-        L10nKey::SidebarScratchGroup => "スクラッチ",
+        L10nKey::SidebarUngroupedGroup => "未分類",
         L10nKey::SidebarMoveToGroup => "グループへ移動",
         L10nKey::SidebarNewGroup => "新規グループ…",
-        L10nKey::SidebarAutoGroup => "自動グループ化に戻す",
         L10nKey::SidebarNewGroupName => "新規グループ",
         L10nKey::SidebarRenameGroup => "グループ名を変更",
+        L10nKey::SidebarPinGroup => "グループを固定",
+        L10nKey::SidebarUnpinGroup => "固定を解除",
+        L10nKey::SidebarGroupNewTab => "新規タブ",
+        L10nKey::SidebarSetGroupFolder => "フォルダを設定…",
+        L10nKey::SidebarUseCurrentTabFolder => "現在のタブのフォルダを使用",
+        L10nKey::SidebarClearGroupFolder => "フォルダを解除",
+        L10nKey::SidebarDeleteGroup => "グループを削除",
+        L10nKey::SidebarDropToPin => "ここにドロップして固定",
         L10nKey::TabContextCloseTab => "タブを閉じる",
         L10nKey::TabContextCloseTabsBelow => "下のタブを閉じる",
         L10nKey::AppAgentHooksOpFailed => "失敗: {error}",

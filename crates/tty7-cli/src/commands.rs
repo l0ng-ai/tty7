@@ -678,12 +678,11 @@ fn tab_ls(explicit: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> R
             vec![
                 format!("@{}", resolve::ordinal_of(&machine, tab.id).unwrap_or(0)),
                 output::tab_label(view),
-                // The GUI files tabs under a directory and shows its last
-                // segment as the heading; the full path would be the widest
-                // column in the table for no gain.
-                tab.sidebar_group
-                    .as_deref()
-                    .map(|g| output::path_leaf(g).to_string())
+                // Only a pinned group is the workspace's to report: an auto
+                // group is worked out by the GUI from a probe of the tab's
+                // cwd, which the tree does not hold.
+                pinned_group_of(ws, tab)
+                    .map(output::pinned_group_label)
                     .unwrap_or_else(|| "-".to_string()),
                 tab.root.pane_ids().len().to_string(),
             ]
@@ -702,7 +701,11 @@ fn tab_ls(explicit: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> R
                 "name": tab.name,
                 "label": output::tab_label(view),
                 "agent": view.agent.map(|a| a.display_name()),
-                "group": tab.sidebar_group,
+                "group": pinned_group_of(ws, tab).map(|g| json!({
+                    "id": g.id.to_string(),
+                    "name": g.given_name(),
+                    "folder": g.folder,
+                })),
                 "panes": tab.root.pane_ids(),
             })
         })
@@ -711,6 +714,16 @@ fn tab_ls(explicit: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> R
         output::table(&["TAB", "NAME", "GROUP", "PANES"], &rows),
         json!({ "workspace": id.to_string(), "tabs": tabs }),
     )
+}
+
+/// The pinned group `tab` is filed under, when it names one the workspace
+/// still has. A tab naming a deleted group is an auto tab, the same way the
+/// sidebar draws it.
+fn pinned_group_of<'a>(
+    ws: &'a tty7_core::core::machine::Workspace,
+    tab: &tty7_core::core::machine::Tab,
+) -> Option<&'a tty7_core::core::group_key::PinnedGroup> {
+    ws.groups.get(tab.group?)
 }
 
 fn tab_new(
@@ -2229,10 +2242,22 @@ mod tests {
         );
     }
 
+    /// File tab @2 under a pinned folder group, the way the GUI would.
+    fn pin_second_tab(backend: &mut MockBackend, name: Option<&str>) -> String {
+        use tty7_core::core::group_key::PinnedGroup;
+        let mut group = PinnedGroup::folder(std::path::Path::new("C:\\proj\\sub"));
+        group.name = name.map(str::to_string);
+        let id = group.id;
+        let ws = &mut backend.machine.workspaces[0];
+        ws.groups.pinned.push(group);
+        ws.tabs[1].group = Some(id);
+        id.to_string()
+    }
+
     #[test]
     fn tab_ls_names_an_unnamed_tab_and_shows_the_leaf_of_its_group() {
         let mut backend = mock();
-        backend.machine.workspaces[0].tabs[1].sidebar_group = Some("C:\\proj\\sub".into());
+        pin_second_tab(&mut backend, None);
 
         let out = run_cli(
             &["tty7", "tab", "ls", "api"],
@@ -2241,7 +2266,8 @@ mod tests {
         );
 
         // @1 was named; @2 was not, so it borrows the leaf of its cwd. The
-        // GROUP column is the heading's last segment, not the whole path.
+        // GROUP column is what the header reads — the folder's last segment
+        // for a group nobody renamed, not the whole path.
         assert_eq!(
             human(out),
             "TAB  NAME   GROUP  PANES\n@1   build  -      1\n@2   proj   sub    2\n"
@@ -2249,9 +2275,46 @@ mod tests {
     }
 
     #[test]
+    fn tab_ls_shows_a_renamed_group_by_its_name() {
+        let mut backend = mock();
+        pin_second_tab(&mut backend, Some("work"));
+
+        let out = run_cli(
+            &["tty7", "tab", "ls", "api"],
+            &Context::default(),
+            &mut backend,
+        );
+
+        assert_eq!(
+            human(out),
+            "TAB  NAME   GROUP  PANES\n@1   build  -      1\n@2   proj   work   2\n"
+        );
+    }
+
+    /// A tab naming a group the workspace no longer has is an auto tab, as
+    /// the sidebar draws it.
+    #[test]
+    fn tab_ls_shows_no_group_for_a_tab_naming_a_deleted_one() {
+        let mut backend = mock();
+        pin_second_tab(&mut backend, None);
+        backend.machine.workspaces[0].groups.pinned.clear();
+
+        let out = run_cli(
+            &["tty7", "tab", "ls", "api"],
+            &Context::default(),
+            &mut backend,
+        );
+
+        assert_eq!(
+            human(out),
+            "TAB  NAME   GROUP  PANES\n@1   build  -      1\n@2   proj   -      2\n"
+        );
+    }
+
+    #[test]
     fn tab_ls_json_keeps_the_literal_name_beside_the_label() {
         let mut backend = mock();
-        backend.machine.workspaces[0].tabs[1].sidebar_group = Some("C:\\proj\\sub".into());
+        let id = pin_second_tab(&mut backend, None);
 
         let out = run_cli(
             &["tty7", "tab", "ls", "api"],
@@ -2266,9 +2329,11 @@ mod tests {
         assert_eq!(tabs[1]["name"], Value::Null, "nobody named this tab");
         assert_eq!(tabs[1]["label"], "proj", "the table's stand-in travels too");
         assert_eq!(
-            tabs[1]["group"], "C:\\proj\\sub",
-            "the JSON keeps the whole heading the table abbreviates"
+            tabs[1]["group"],
+            json!({ "id": id, "name": null, "folder": "C:\\proj\\sub" }),
+            "the JSON keeps the whole folder the table abbreviates"
         );
+        assert_eq!(tabs[0]["group"], Value::Null, "an auto tab names no group");
     }
 
     #[test]

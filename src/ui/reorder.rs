@@ -1,7 +1,7 @@
 use gpui::{Axis, Bounds, Pixels, Point, Styled, px};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use tty7_core::core::group_key::GroupKey;
+use tty7_core::core::group_key::{AutoKey, GroupId, GroupKey};
 use tty7_core::core::machine::TabId;
 
 pub(crate) type ReorderState = Rc<RefCell<Option<Reorder>>>;
@@ -63,28 +63,53 @@ pub(crate) fn clear_pending(state: &ReorderState) {
     if let Some(r) = state.borrow().as_ref() {
         r.pending.borrow_mut().take();
         r.regroup.borrow_mut().take();
+        r.pin.set(false);
     }
 }
 
-/// Offer the custom group the pointer is currently over.
+/// Where a tab being dragged in the sidebar would go if it were let go now,
+/// when that is somewhere other than a new place in its own group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Regroup {
+    /// Into this pinned group.
+    Into(GroupId),
+    /// Below the divider: out of its pinned group, back to auto grouping.
+    ToAuto,
+}
+
+/// Offer the group the pointer is currently over.
 ///
 /// Reordering answers "where in this group", and this answers "which group" —
 /// two questions one drag can ask, so they are recorded side by side and
 /// resolved together when it lands. A drag held over a group it did not come
 /// from stops reordering (the surface it belongs to no longer sees the
 /// pointer) and starts offering this instead.
-pub(crate) fn set_regroup(state: &ReorderState, key: GroupKey) {
+pub(crate) fn set_regroup(state: &ReorderState, target: Regroup) {
     if let Some(r) = state.borrow().as_ref().filter(|r| !r.suspended.get()) {
-        *r.regroup.borrow_mut() = Some(key);
+        *r.regroup.borrow_mut() = Some(target);
+    }
+}
+
+/// Offer to pin the auto group being dragged — its header is above the
+/// divider. Cleared with everything else each frame, so a header carried back
+/// down before it is let go reorders instead.
+pub(crate) fn set_pin(state: &ReorderState) {
+    if let Some(r) = state.borrow().as_ref().filter(|r| !r.suspended.get()) {
+        r.pin.set(r.auto.is_some());
     }
 }
 
 /// What a finished drag asks for.
 pub(crate) struct Landed {
-    /// A new order for the tabs, from the surface the drag ran over.
+    /// A new order, from the surface the drag ran over — of the tabs, or for
+    /// [`Surface::PinnedGroups`] of the pinned groups.
     pub(crate) order: Option<Vec<usize>>,
+    /// The surface `order` is an order of.
+    pub(crate) surface: Option<Surface>,
     /// A tab to put in another group, from the group it was held over.
-    pub(crate) regroup: Option<(TabId, GroupKey)>,
+    pub(crate) regroup: Option<(TabId, Regroup)>,
+    /// An auto group to pin, from its header being let go above the divider.
+    pub(crate) pin: Option<AutoKey>,
 }
 
 /// Ends the drag and answers what it was asking for when it ended.
@@ -92,13 +117,18 @@ pub(crate) fn take_landed(state: &ReorderState) -> Landed {
     let Some(r) = state.borrow_mut().take() else {
         return Landed {
             order: None,
+            surface: None,
             regroup: None,
+            pin: None,
         };
     };
     let regroup = r.regroup.into_inner();
+    let pin = r.pin.get().then_some(r.auto).flatten();
     Landed {
         order: r.pending.into_inner(),
+        surface: Some(r.surface),
         regroup: r.tab.zip(regroup),
+        pin,
     }
 }
 
@@ -109,6 +139,12 @@ pub(crate) fn take_landed(state: &ReorderState) -> Landed {
 /// the reorder is where the answer to "which tab is in the air" lives.
 pub(crate) fn dragged_tab(state: &ReorderState) -> Option<TabId> {
     state.borrow().as_ref()?.tab
+}
+
+/// The auto group a *sidebar header* drag picked up, if it is one.
+pub(crate) fn dragged_auto_group(state: &ReorderState) -> Option<AutoKey> {
+    let state = state.borrow();
+    state.as_ref().filter(|r| !r.suspended.get())?.auto.clone()
 }
 
 /// The tab a *sidebar row* drag picked up.
@@ -142,7 +178,13 @@ pub(crate) fn suspend(state: &ReorderState, yes: bool) {
 pub(crate) enum Surface {
     Strip,
     SidebarRows(Option<GroupKey>),
+    /// The auto groups' headers, below the divider.
     SidebarGroups,
+    /// The pinned groups' headers, above it. A surface of its own so a
+    /// pinned header can only be dropped among the pinned ones: the two
+    /// halves of the sidebar are ordered by different things — the user's
+    /// hand above, first appearance below.
+    PinnedGroups,
 }
 
 pub(crate) struct Reorder {
@@ -155,9 +197,14 @@ pub(crate) struct Reorder {
     prev: Cell<usize>,
     generation: Cell<usize>,
     pending: RefCell<Option<Vec<usize>>>,
-    /// The custom group this drag is being held over, when the pointer has
-    /// left the group the tab came from.
-    regroup: RefCell<Option<GroupKey>>,
+    /// The group this drag is being held over, when the pointer has left the
+    /// group the tab came from.
+    regroup: RefCell<Option<Regroup>>,
+    /// The auto group whose header this drag picked up, for the one gesture
+    /// that pins: carrying it above the divider.
+    auto: Option<AutoKey>,
+    /// Set on the frames the carried auto header is above the divider.
+    pin: Cell<bool>,
     /// The tab this drag picked up, for the surfaces that drag tabs. `None` on
     /// a surface that drags something else — a sidebar group, say, which is
     /// several tabs and cannot be merged into one.
@@ -185,6 +232,8 @@ impl Reorder {
             generation: Cell::new(0),
             pending: RefCell::new(None),
             regroup: RefCell::new(None),
+            auto: None,
+            pin: Cell::new(false),
             tab: None,
             suspended: Cell::new(false),
         }
@@ -193,6 +242,12 @@ impl Reorder {
     /// Names the tab this drag is carrying.
     pub(crate) fn of_tab(mut self, tab: TabId) -> Self {
         self.tab = Some(tab);
+        self
+    }
+
+    /// Names the auto group whose header this drag is carrying.
+    pub(crate) fn of_auto(mut self, key: AutoKey) -> Self {
+        self.auto = Some(key);
         self
     }
 
@@ -448,18 +503,18 @@ mod tests {
     #[test]
     fn a_regroup_lasts_only_as_long_as_the_pointer_is_over_the_group() {
         let tab = TabId::new();
-        let work = GroupKey::custom("work").expect("non-blank");
+        let work = Regroup::Into(GroupId::new());
         let fresh = || Some(column(3, 30., 2., 0).of_tab(tab));
 
         let state: ReorderState = Rc::new(RefCell::new(fresh()));
         clear_pending(&state);
-        set_regroup(&state, work.clone());
+        set_regroup(&state, work);
         clear_pending(&state);
         assert_eq!(take_landed(&state).regroup, None, "the frame moved on");
 
         *state.borrow_mut() = fresh();
         clear_pending(&state);
-        set_regroup(&state, work.clone());
+        set_regroup(&state, work);
         assert_eq!(take_landed(&state).regroup, Some((tab, work)));
     }
 
@@ -469,8 +524,37 @@ mod tests {
     fn a_drag_with_no_tab_never_lands_in_a_group() {
         let state: ReorderState = Rc::new(RefCell::new(Some(column(3, 30., 2., 0))));
         clear_pending(&state);
-        set_regroup(&state, GroupKey::custom("work").expect("non-blank"));
+        set_regroup(&state, Regroup::Into(GroupId::new()));
         assert_eq!(take_landed(&state).regroup, None);
+    }
+
+    /// Pinning is offered frame by frame, like a regroup: a header carried
+    /// above the divider and back down before it is let go only reorders.
+    #[test]
+    fn a_pin_lasts_only_as_long_as_the_header_is_above_the_divider() {
+        let key = AutoKey::Repo("/w/r".into());
+        let fresh = || Some(column(3, 30., 2., 0).of_auto(key.clone()));
+
+        let state: ReorderState = Rc::new(RefCell::new(fresh()));
+        clear_pending(&state);
+        set_pin(&state);
+        clear_pending(&state);
+        assert_eq!(take_landed(&state).pin, None, "carried back down");
+
+        *state.borrow_mut() = fresh();
+        clear_pending(&state);
+        set_pin(&state);
+        assert_eq!(take_landed(&state).pin, Some(key));
+    }
+
+    /// Only an auto header can be pinned by dragging; a drag carrying
+    /// anything else offers nothing.
+    #[test]
+    fn a_drag_with_no_auto_group_never_pins() {
+        let state: ReorderState = Rc::new(RefCell::new(Some(column(3, 30., 2., 0))));
+        clear_pending(&state);
+        set_pin(&state);
+        assert_eq!(take_landed(&state).pin, None);
     }
 
     #[test]

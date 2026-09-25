@@ -257,24 +257,12 @@ pub struct Config {
     /// [`Self::editor_soft_wrap`]. Files that are not Markdown ignore it.
     #[serde(default)]
     pub editor_markdown_preview: bool,
-    #[serde(default, deserialize_with = "de_lenient")]
-    pub sidebar_grouping: SidebarGrouping,
-    /// Which sidebar groups are folded shut, by group key: the repo root the
-    /// group is named after, or the empty string for the scratch group, which
-    /// has no root of its own and no real key can ever collide with.
-    ///
-    /// Kept as a list of the folded ones rather than a flag per group because
-    /// groups come and go with the tabs — a group nobody has opened yet has to
-    /// start expanded, and an entry for a repo that is no longer around costs
-    /// one dead path in the file.
-    ///
-    /// `String`, not `PathBuf`: serde refuses to serialize a non-UTF-8
-    /// `PathBuf`, and `Config::save` turns that refusal into one `warn!` and
-    /// a return — so a single repo root with odd bytes in it would silently
-    /// stop the *whole* config being written from then on. A lossy spelling
-    /// of such a root at worst folds two of them together.
-    #[serde(default, deserialize_with = "de_lenient")]
-    pub sidebar_collapsed_groups: Vec<String>,
+    /// Whether the sidebar files tabs nobody pinned into groups of its own —
+    /// by repository, and by host for an SSH pane. Off, those tabs sit in one
+    /// flat list below the pinned groups, which are the user's and show
+    /// either way.
+    #[serde(default = "default_true")]
+    pub sidebar_auto_grouping: bool,
     #[serde(default = "default_true")]
     pub sidebar_diff_preview: bool,
     #[serde(default, deserialize_with = "de_lenient")]
@@ -509,17 +497,6 @@ pub enum WindowBackdrop {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum SidebarGrouping {
-    #[default]
-    Repo,
-    /// By repository where there is one; a tab whose cwd is known not to be
-    /// in a repo groups under that cwd instead of falling to Scratch.
-    RepoOrDirectory,
-    None,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum NotifyMode {
     Never,
     #[default]
@@ -678,8 +655,7 @@ impl Default for Config {
             scm_graph_expanded: false,
             editor_soft_wrap: false,
             editor_markdown_preview: false,
-            sidebar_grouping: SidebarGrouping::Repo,
-            sidebar_collapsed_groups: Vec::new(),
+            sidebar_auto_grouping: true,
             sidebar_diff_preview: true,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,
@@ -1507,24 +1483,13 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_grouping_defaults_and_round_trips_leniently() {
-        assert_eq!(Config::default().sidebar_grouping, SidebarGrouping::Repo);
-
-        let text = serde_json::to_string(&Config {
-            sidebar_grouping: SidebarGrouping::RepoOrDirectory,
-            ..Config::default()
-        })
-        .unwrap();
-        assert!(text.contains("\"sidebar_grouping\":\"repo-or-directory\""));
-        let back: Config = serde_json::from_str(&text).unwrap();
-        assert_eq!(back.sidebar_grouping, SidebarGrouping::RepoOrDirectory);
-
-        let flat: Config = serde_json::from_str(r#"{"sidebar_grouping":"none"}"#).unwrap();
-        assert_eq!(flat.sidebar_grouping, SidebarGrouping::None);
-
-        // Unknown values fall back to Repo instead of rejecting the whole config.
-        let lenient: Config = serde_json::from_str(r#"{"sidebar_grouping":"folders"}"#).unwrap();
-        assert_eq!(lenient.sidebar_grouping, SidebarGrouping::Repo);
+    fn sidebar_auto_grouping_defaults_on_and_round_trips() {
+        assert!(Config::default().sidebar_auto_grouping);
+        let off: Config = serde_json::from_str(r#"{"sidebar_auto_grouping":false}"#).unwrap();
+        assert!(!off.sidebar_auto_grouping);
+        let json = serde_json::to_string(&off).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert!(!back.sidebar_auto_grouping, "persisted");
     }
 
     #[test]
