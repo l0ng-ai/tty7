@@ -1147,8 +1147,10 @@ mod tests {
     /// A pinned folder outranks any number of repo hints.
     #[test]
     fn a_pinned_folder_outranks_the_repo_majority() {
-        let mut ws = Workspace::default();
-        ws.tabs = vec![leaf_tab(1), leaf_tab(2), leaf_tab(3)];
+        let mut ws = Workspace {
+            tabs: vec![leaf_tab(1), leaf_tab(2), leaf_tab(3)],
+            ..Default::default()
+        };
         for t in &mut ws.tabs {
             t.last_auto = Some(AutoKey::Repo("/repo/tty7".into()));
         }

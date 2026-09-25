@@ -263,23 +263,6 @@ fn cwd_is_on_host(pane_runs_remotely: bool, host_is_local: bool) -> bool {
     }
 }
 
-/// The cwd a native SSH pane's remote shell reported, for the few readers that
-/// only need a name for it and not a host to act on it.
-///
-/// Such a pane belongs to this machine's daemon, so [`cwd_is_on_host`] rightly
-/// turns its paths away from every `Host` call — there is no host to hand them
-/// to. But the shell on the far end states them itself (OSC 7), unlike a shell
-/// that ssh'd onward from a local prompt, whose directory is only ever a guess.
-/// Only an absolute POSIX path counts: that is what a remote sshd's shell
-/// reports, and anything else is not a directory worth naming.
-fn native_ssh_cwd(
-    remote: Option<&RemoteContext>,
-    cwd: Option<std::path::PathBuf>,
-) -> Option<std::path::PathBuf> {
-    remote.filter(|r| r.kind == crate::daemon::protocol::RemoteKind::NativeSsh)?;
-    cwd.filter(|c| c.to_string_lossy().starts_with('/'))
-}
-
 /// Which path dialect a pane's output is written in.
 ///
 /// A pane running on this machine spells paths the way this OS does, and that
@@ -1994,12 +1977,6 @@ impl TerminalView {
 
     pub fn git_status_cwd(&self) -> Option<&std::path::Path> {
         self.git_status_cwd.as_deref()
-    }
-
-    /// See [`native_ssh_cwd`]. `None` for every pane that is not a native SSH
-    /// one — those either have a `git_status_cwd` or have no cwd to name.
-    pub fn native_ssh_cwd(&self) -> Option<std::path::PathBuf> {
-        native_ssh_cwd(self.remote_context().as_ref(), self.cwd())
     }
 
     /// Plant the cwd the git-status poll would have found. For tests that
@@ -10017,37 +9994,6 @@ mod tests {
 
         assert!(!cwd_is_on_host(true, true));
         assert!(!cwd_is_on_host(false, false));
-    }
-
-    #[test]
-    fn only_a_native_ssh_pane_names_its_remote_cwd() {
-        use super::{RemoteContext, native_ssh_cwd};
-        use std::path::PathBuf;
-        let native = RemoteContext {
-            kind: RemoteKind::NativeSsh,
-            argv: Vec::new(),
-            target: "ubuntu@box".into(),
-        };
-        let home = || Some(PathBuf::from("/home/ubuntu"));
-        assert_eq!(native_ssh_cwd(Some(&native), home()), home());
-
-        // `ssh` typed at a local prompt: the directory is a guess, not a
-        // report from the far end.
-        let typed = RemoteContext {
-            kind: RemoteKind::Ssh,
-            ..native.clone()
-        };
-        assert_eq!(native_ssh_cwd(Some(&typed), home()), None);
-        assert_eq!(native_ssh_cwd(Some(&wsl_context("Ubuntu")), home()), None);
-        // A local pane has its own path through `git_status_cwd`.
-        assert_eq!(native_ssh_cwd(None, home()), None);
-
-        assert_eq!(native_ssh_cwd(Some(&native), None), None);
-        assert_eq!(
-            native_ssh_cwd(Some(&native), Some(PathBuf::from("~"))),
-            None,
-            "only an absolute path names a directory"
-        );
     }
 
     /// Which machine's spelling a pane's paths are read in. Ungated on

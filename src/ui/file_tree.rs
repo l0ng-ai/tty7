@@ -1962,11 +1962,6 @@ impl Tty7App {
                 let show_hidden = self.file_tree.show_hidden;
                 let paths_are_local = self.spawn_host(cx).is_local();
                 move |menu, _window, cx| {
-                    let danger = cx.theme().danger;
-                    // A group is something the sidebar draws; with the tabs
-                    // along the top there is nowhere to show one.
-                    let groups_shown = cx.global::<crate::core::config::Config>().tab_bar_position
-                        == crate::core::config::TabBarPosition::Left;
                     Self::tree_row_context_menu(
                         menu,
                         &path,
@@ -1974,9 +1969,8 @@ impl Tty7App {
                         is_root,
                         show_hidden,
                         paths_are_local,
-                        groups_shown,
-                        danger,
                         &app,
+                        cx,
                     )
                 }
             });
@@ -2017,13 +2011,16 @@ impl Tty7App {
         // here — silently opening nothing, or the wrong thing if a local path
         // happens to collide.
         paths_are_local: bool,
-        // Whether "Pin as Group" has a sidebar to put the group in. Offered
-        // on a remote workspace too, unlike the file manager above: the tree
-        // and a pinned folder are both on the workspace's own host.
-        groups_shown: bool,
-        danger: gpui::Hsla,
         app: &gpui::WeakEntity<Self>,
+        cx: &App,
     ) -> PopupMenu {
+        let danger = cx.theme().danger;
+        // Whether "Pin as Group" has a sidebar to put the group in: with the
+        // tabs along the top there is nowhere to show one. Offered on a remote
+        // workspace too, unlike the file manager above — the tree and a pinned
+        // folder are both on the workspace's own host.
+        let groups_shown = cx.global::<crate::core::config::Config>().tab_bar_position
+            == crate::core::config::TabBarPosition::Left;
         let mut menu = menu.min_w(px(200.));
         let p = path.to_path_buf();
 
