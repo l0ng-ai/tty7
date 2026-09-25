@@ -118,6 +118,7 @@ their id from the file name. [More about themes →](/customization/themes)
 | `env` | object | `{}` | Extra environment variables for every pane. |
 | `scrollback_limit` | number | `10000` | Lines per pane (100–100,000). New panes only. |
 | `cursor_style` | enum | `"block"` | `block`, `bar`, `underline`. |
+| `prompt_cursor_style` | enum | `"follow"` | The cursor at the shell prompt: `follow`, `block`, `bar`, `underline`. `follow` uses `cursor_style` everywhere; any other value leaves `cursor_style` to the programs the shell runs, e.g. `bar` here with `cursor_style: "block"` gives a bar at the prompt and a block in a TUI that sets no shape of its own. A shell prompt in vi mode keeps its own shapes. |
 | `cursor_blink` | bool | `true` | |
 | `bell` | enum | `"visual"` | `none`, `visual`, `audible`, `both`. |
 | `per_pane_history` | bool | `false` | Give each pane its own shell history file. |

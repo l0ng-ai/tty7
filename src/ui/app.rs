@@ -3015,6 +3015,19 @@ impl Tty7App {
         self.apply_terminal_config_to_panes(&cfg, cx);
     }
 
+    pub(crate) fn set_prompt_cursor_style(
+        &mut self,
+        style: crate::core::config::PromptCursorStyle,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.prompt_cursor_style = style);
+        for tab in &self.tabs {
+            for leaf in tab.pane.terminals() {
+                leaf.update(cx, |_, cx| cx.notify());
+            }
+        }
+    }
+
     pub(crate) fn persist_settings_config(&mut self, cx: &mut Context<Self>) {
         let config = cx.global::<Config>().clone();
         let error = config.try_save().err().map(|error| error.to_string());
@@ -6219,6 +6232,9 @@ impl Tty7App {
             }
             L10nKey::SettingsCursorBlink => self.set_cursor_blink(defaults.cursor_blink, cx),
             L10nKey::SettingsCursorShape => self.set_cursor_style(defaults.cursor_style, cx),
+            L10nKey::SettingsPromptCursorShape => {
+                self.set_prompt_cursor_style(defaults.prompt_cursor_style, cx)
+            }
             L10nKey::SettingsScrollback => self.set_scrollback_limit(defaults.scrollback_limit, cx),
             L10nKey::SettingsNewTabPosition => {
                 self.set_new_tab_position(defaults.new_tab_position, cx)
@@ -6394,6 +6410,9 @@ impl Tty7App {
                     s.ui_font_select = ui;
                 }
             }
+            L10nKey::SettingsCursorShape | L10nKey::SettingsPromptCursorShape => {
+                self.sync_cursor_selects(window, cx)
+            }
             L10nKey::SettingsLanguage => {
                 let value = self.build_language_select(&mut subs, window, cx);
                 if let Some(s) = self.active_settings_mut() {
@@ -6521,6 +6540,8 @@ impl Tty7App {
         let (font_select, font_bold_select, font_italic_select, ui_font_select) =
             self.build_font_selects(&mut subs, window, cx);
         let language_select = self.build_language_select(&mut subs, window, cx);
+        let (cursor_style_select, prompt_cursor_style_select) =
+            self.build_cursor_selects(&mut subs, window, cx);
         #[cfg(target_os = "windows")]
         let window_backdrop_select = self.build_window_backdrop_select(&mut subs, window, cx);
         let (shell_program_input, shell_args_input, wd_path_input) =
@@ -6612,6 +6633,8 @@ impl Tty7App {
             font_italic_select,
             ui_font_select,
             language_select,
+            cursor_style_select,
+            prompt_cursor_style_select,
             #[cfg(target_os = "windows")]
             window_backdrop_select,
             shell_program_input,
@@ -6817,6 +6840,98 @@ impl Tty7App {
         language_select
     }
 
+    /// The cursor shape and prompt cursor shape dropdowns. Each resolves the
+    /// picked label back through the row list it was built from.
+    fn build_cursor_selects(
+        &mut self,
+        subs: &mut Vec<Subscription>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (
+        Entity<SelectState<SearchableVec<String>>>,
+        Entity<SelectState<SearchableVec<String>>>,
+    ) {
+        use crate::ui::settings::{
+            CURSOR_SHAPES, PROMPT_CURSOR_SHAPES, cursor_shape_labels, prompt_cursor_shape_labels,
+        };
+        let (shape_ix, prompt_ix) = Self::cursor_select_rows(cx);
+        let shape = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(cursor_shape_labels()),
+                Some(IndexPath::default().row(shape_ix)),
+                window,
+                cx,
+            )
+        });
+        let prompt = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(prompt_cursor_shape_labels()),
+                Some(IndexPath::default().row(prompt_ix)),
+                window,
+                cx,
+            )
+        });
+        subs.push(cx.subscribe_in(
+            &shape,
+            window,
+            |this, _select, ev: &SelectEvent<SearchableVec<String>>, _window, cx| {
+                if let SelectEvent::Confirm(Some(label)) = ev {
+                    if let Some(ix) = cursor_shape_labels().iter().position(|r| r == label) {
+                        this.set_cursor_style(CURSOR_SHAPES[ix], cx);
+                    }
+                }
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &prompt,
+            window,
+            |this, _select, ev: &SelectEvent<SearchableVec<String>>, _window, cx| {
+                if let SelectEvent::Confirm(Some(label)) = ev {
+                    if let Some(ix) = prompt_cursor_shape_labels().iter().position(|r| r == label) {
+                        this.set_prompt_cursor_style(PROMPT_CURSOR_SHAPES[ix], cx);
+                    }
+                }
+            },
+        ));
+        (shape, prompt)
+    }
+
+    /// The dropdown rows the config's two cursor shapes sit on.
+    fn cursor_select_rows(cx: &App) -> (usize, usize) {
+        use crate::ui::settings::{CURSOR_SHAPES, PROMPT_CURSOR_SHAPES};
+        let cfg = cx.global::<Config>();
+        let shape = CURSOR_SHAPES.iter().position(|s| *s == cfg.cursor_style);
+        let prompt = PROMPT_CURSOR_SHAPES
+            .iter()
+            .position(|s| *s == cfg.prompt_cursor_style);
+        (shape.unwrap_or(0), prompt.unwrap_or(0))
+    }
+
+    /// Puts both cursor dropdowns back on the config's values, relabelled in
+    /// the current language — after a reset, a language switch, or a config
+    /// edit made outside this window.
+    fn sync_cursor_selects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ui::settings::{cursor_shape_labels, prompt_cursor_shape_labels};
+        let Some((shape, prompt)) = self.active_settings().map(|s| {
+            (
+                s.cursor_style_select.clone(),
+                s.prompt_cursor_style_select.clone(),
+            )
+        }) else {
+            return;
+        };
+        let (shape_ix, prompt_ix) = Self::cursor_select_rows(cx);
+        for (select, rows, ix) in [
+            (shape, cursor_shape_labels(), shape_ix),
+            (prompt, prompt_cursor_shape_labels(), prompt_ix),
+        ] {
+            select.update(cx, |state, cx| {
+                state.set_items(SearchableVec::new(rows), window, cx);
+                state.set_selected_index(Some(IndexPath::default().row(ix)), window, cx);
+            });
+        }
+    }
+
     fn normalize_gui_language(code: &str) -> &'static str {
         crate::ui::i18n::find_language(code)
             .map(|lang| lang.code)
@@ -6886,6 +7001,7 @@ impl Tty7App {
     }
 
     pub(crate) fn refresh_locale_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_cursor_selects(window, cx);
         self.sidebar_search.update(cx, |state, cx| {
             state.set_placeholder(t(L10nKey::SearchTabs), window, cx)
         });
@@ -7414,6 +7530,7 @@ impl Tty7App {
             self.terminal_scrollback_limit = config.scrollback_limit;
             self.apply_terminal_config_to_panes(&config, cx);
         }
+        self.sync_cursor_selects(window, cx);
         let (font_size, line_height, font_family, font_fallbacks, font_features) = {
             let cfg = cx.global::<Config>();
             (

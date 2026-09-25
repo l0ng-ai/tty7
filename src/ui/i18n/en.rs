@@ -140,6 +140,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsCursor => "Cursor",
         L10nKey::SettingsCursorShape => "Cursor shape",
         L10nKey::SettingsCursorShapeDesc => "How the terminal cursor is drawn.",
+        L10nKey::SettingsPromptCursorShape => "Prompt cursor shape",
+        L10nKey::SettingsPromptCursorShapeDesc => {
+            "The cursor at the shell prompt. Follow uses the cursor shape above everywhere."
+        }
         L10nKey::SettingsCursorBlink => "Cursor blink",
         L10nKey::SettingsCursorBlinkDesc => "Pulse the cursor while the terminal is focused.",
         L10nKey::SettingsLanguage => "Language",
@@ -837,6 +841,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchCopyOnSelectKeywords => "clipboard selection yank mouse",
         L10nKey::SettingsSearchCursorBlinkKeywords => "caret blinking flash",
         L10nKey::SettingsSearchCursorShapeKeywords => "caret block bar underline beam",
+        L10nKey::SettingsSearchPromptCursorShapeKeywords => {
+            "prompt cursor shape caret block bar underline beam shell integration"
+        }
         L10nKey::SettingsSearchCustomThemesKeywords => {
             "theme duplicate edit colors folder yaml import background image wallpaper"
         }
@@ -1815,6 +1822,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CursorShapeBlock => "Block",
         L10nKey::CursorShapeBar => "Bar",
         L10nKey::CursorShapeUnderline => "Underline",
+        L10nKey::PromptCursorShapeFollow => "Follow",
         L10nKey::PaletteTryDifferentSearch => "Try a different search.",
         L10nKey::CompletionListingRemote => "listing remote…",
         L10nKey::CompletionRemoteListingFailed => "remote listing failed — {error}",

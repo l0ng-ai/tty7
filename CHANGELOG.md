@@ -144,6 +144,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tree is remembered in the config. Both are built from the status the host
   already sends, so a remote repository gets them unchanged. Searching the
   diff text itself is not part of this.
+- **The cursor at the shell prompt can have its own shape** (#958). A new
+  `prompt_cursor_style` setting (Settings → Appearance → Cursor) takes
+  `follow`, `block`, `bar` or `underline`. `follow`, the default, keeps
+  `cursor_style` everywhere, exactly as before. Any other value is used at the
+  prompt, drawn by tty7's inline editor or by the shell's own line editor, and
+  leaves `cursor_style` to the programs the shell runs — so `bar` with
+  `cursor_style: "block"` gives kitty and ghostty's bar-at-the-prompt, block in
+  a TUI that never sets a shape itself, such as Claude Code. A shell prompt in
+  vi mode keeps its own insert/normal shapes.
 
 ### Removed
 

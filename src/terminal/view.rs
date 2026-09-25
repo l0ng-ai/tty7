@@ -6566,7 +6566,11 @@ impl TerminalView {
             }
         }
 
-        let cursor_style = cx.global::<Config>().cursor_style;
+        // This caret only exists at a prompt, so the prompt's own shape wins.
+        let cursor_style = {
+            let cfg = cx.global::<Config>();
+            cfg.prompt_cursor_style.shape().unwrap_or(cfg.cursor_style)
+        };
         let cursor_paint = input_caret_paint(focused, self.cursor_visible, cursor_style);
         let cursor_on = cursor_paint.is_some();
         let block_cursor = cursor_paint == Some(InputCaretPaint::Block);
@@ -16367,6 +16371,73 @@ mod gpui_tests {
             vec![CLIAgent::Codex, CLIAgent::Claude],
             "a spawned pane counts its first agent, once"
         );
+    }
+
+    /// #958: `prompt_cursor_style` shapes the shell's own caret at a prompt,
+    /// leaves the running program's cursor alone, and steps aside for a vi-mode
+    /// prompt, whose insert/normal shapes are the shell's to set.
+    #[gpui::test]
+    fn prompt_cursor_style_shapes_only_the_prompt(cx: &mut TestAppContext) {
+        use crate::core::config::{CursorStyle, PromptCursorStyle};
+
+        let (window, mut daemon) = harness(cx);
+        let shape = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                let view = window.entity(cx).unwrap();
+                TerminalElement::new(view).prompt_cursor_shape(cx)
+            })
+        };
+        let wait_for = |cx: &mut TestAppContext, want: &dyn Fn(&TerminalView) -> bool| {
+            for _ in 0..200 {
+                cx.run_until_parked();
+                if window.update(cx, |view, _, _| want(view)).unwrap() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            panic!("the pane never reached the expected prompt state");
+        };
+        cx.update(|cx| cx.global_mut::<Config>().prompt_cursor_style = PromptCursorStyle::Bar);
+
+        assert_eq!(
+            shape(cx),
+            None,
+            "no prompt reported yet: a program owns the cursor"
+        );
+
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: true,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for(cx, &|view| view.terminal.at_prompt());
+        assert_eq!(shape(cx), Some(CursorStyle::Bar));
+
+        cx.update(|cx| cx.global_mut::<Config>().prompt_cursor_style = PromptCursorStyle::Follow);
+        assert_eq!(shape(cx), None, "follow leaves the prompt on cursor_style");
+        cx.update(|cx| cx.global_mut::<Config>().prompt_cursor_style = PromptCursorStyle::Bar);
+
+        DaemonMsg::Output(b"\x1b]133;V;1\x07\x1b]133;B\x07".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        wait_for(cx, &|view| view.terminal.shell_vi_mode());
+        assert_eq!(
+            shape(cx),
+            None,
+            "a vi-mode prompt keeps the shell's own shapes"
+        );
+
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: false,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        wait_for(cx, &|view| !view.terminal.at_prompt());
+        assert_eq!(shape(cx), None, "a running command gets cursor_style back");
     }
 }
 

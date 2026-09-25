@@ -126,6 +126,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCursor => "光标",
         L10nKey::SettingsCursorShape => "光标形状",
         L10nKey::SettingsCursorShapeDesc => "终端光标的绘制方式。",
+        L10nKey::SettingsPromptCursorShape => "提示符光标形状",
+        L10nKey::SettingsPromptCursorShapeDesc => {
+            "shell 提示符处的光标。跟随表示各处都用上面的光标形状。"
+        }
         L10nKey::SettingsCursorBlink => "光标闪烁",
         L10nKey::SettingsCursorBlinkDesc => "终端获得焦点时让光标闪烁。",
         L10nKey::SettingsLanguage => "语言",
@@ -757,6 +761,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchCursorShapeKeywords => {
             "光标形状 光标 块 竖线 下划线 cursor shape caret block bar underline beam"
+        }
+        L10nKey::SettingsSearchPromptCursorShapeKeywords => {
+            "提示符 光标形状 光标 块 竖线 下划线 prompt cursor shape caret block bar underline beam"
         }
         L10nKey::SettingsSearchCustomThemesKeywords => {
             "自定义主题 复制 编辑 颜色 文件夹 背景图片 壁纸 yaml 导入 theme custom edit duplicate colors import background image wallpaper"
@@ -1710,6 +1717,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CursorShapeBlock => "块状",
         L10nKey::CursorShapeBar => "竖线",
         L10nKey::CursorShapeUnderline => "下划线",
+        L10nKey::PromptCursorShapeFollow => "跟随",
         L10nKey::PaletteTryDifferentSearch => "换个关键词试试。",
         L10nKey::CompletionListingRemote => "正在列出远程目录…",
         L10nKey::CompletionRemoteListingFailed => "远程目录列表失败——{error}",
