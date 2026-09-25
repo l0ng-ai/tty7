@@ -492,7 +492,11 @@ impl Tab {
             document_layout: None,
             group: std::cell::Cell::new(tree.group),
             auto_group: std::cell::RefCell::new(None),
-            folder_watch: std::cell::Cell::new(crate::core::group_key::EntryWatch::baseline()),
+            // Only ever built for a tab that was just created elsewhere — by
+            // `tty7 tab new`, or another window — so it is as new as one
+            // opened here: opened inside a pinned folder, it joins it. Every
+            // window that hears of it reaches the same answer.
+            folder_watch: std::cell::Cell::new(crate::core::group_key::EntryWatch::fresh()),
             tree_id: std::cell::Cell::new(tree.id),
             last_used: std::cell::Cell::new(0),
             focus_origin: Default::default(),

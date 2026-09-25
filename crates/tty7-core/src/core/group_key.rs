@@ -332,16 +332,17 @@ pub struct EntryWatch {
 
 impl EntryWatch {
     /// For a tab that already existed when this window met it — restored from
-    /// the machine tree, or created by another window. The first look only
+    /// the machine tree at launch, or on a pull. The first look only
     /// records where it is: whatever it is sitting in, it was already there,
     /// and whoever last had it decided its group.
     pub fn baseline() -> Self {
         Self { last: None }
     }
 
-    /// For a tab this window just opened. It starts outside every folder, so
-    /// the first cwd it reports inside one is an entry — which is what makes a
-    /// tab opened in a pinned folder land in that group.
+    /// For a tab that was just opened, here or by another client. It starts
+    /// outside every folder, so the first cwd it reports inside one is an
+    /// entry — which is what makes a tab opened in a pinned folder land in
+    /// that group.
     pub fn fresh() -> Self {
         Self { last: Some(None) }
     }
