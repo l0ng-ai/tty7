@@ -2841,7 +2841,7 @@ mod tests {
         assert_eq!(fit_scale(px(19.2), budget), 15. / 19.2);
         // Whatever already fits keeps its own size, including a glyph that
         // lands exactly on the edge and a run that measured as empty. Making
-        // a small glyph bigger is `icon_growth`'s rule, not this one's.
+        // a small glyph bigger is `icon_fit`'s rule, not this one's.
         assert_eq!(fit_scale(px(15.), budget), 1.);
         assert_eq!(fit_scale(px(12.), budget), 1.);
         assert_eq!(fit_scale(px(0.), budget), 1.);
