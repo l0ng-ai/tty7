@@ -5437,6 +5437,32 @@ impl Tty7App {
         // saved host has nothing to save, and a pane that is not an SSH one has
         // no connection at all — either would be a row that quietly did nothing
         // (#549).
+        // Groups are something the sidebar draws, so they are offered only
+        // while the tabs are in it. Opening a folder as a group asks the
+        // system picker, which browses this computer: a path picked there
+        // names nothing on a remote workspace's machine, where "Pin as
+        // Group" in the file tree is the way in instead.
+        if cx.global::<Config>().tab_bar_position == TabBarPosition::Left {
+            commands.push(
+                Command::localized(L10nKey::CmdNewGroup, CommandKind::NewGroup)
+                    .with_subtitle(t(L10nKey::CmdNewGroupSubtitle))
+                    .in_group(CommandGroup::TabsPanes),
+            );
+            if !WorkspaceStore::all(cx)
+                .get(self.workspace)
+                .is_some_and(|w| w.is_remote())
+            {
+                commands.push(
+                    Command::localized(
+                        L10nKey::CmdOpenFolderAsGroup,
+                        CommandKind::OpenFolderAsGroup,
+                    )
+                    .with_subtitle(t(L10nKey::CmdOpenFolderAsGroupSubtitle))
+                    .in_group(CommandGroup::TabsPanes),
+                );
+            }
+        }
+
         if self.unsaved_ssh_session(window, cx).is_some() {
             commands.push(
                 Command::localized(
@@ -5642,6 +5668,8 @@ impl Tty7App {
             ReopenClosedTab => self.reopen_closed_tab(window, cx),
             RenameTab => self.start_rename(self.active, window, cx),
             NewWorktreeTab => self.new_worktree_tab(self.active, window, cx),
+            NewGroup => self.new_empty_group(window, cx),
+            OpenFolderAsGroup => self.open_folder_as_group(cx),
             CloseOtherTabs => self.close_other_tabs(self.active, window, cx),
             CloseTabsToTheRight => self.close_tabs_right_of(self.active, window, cx),
             CopyWorkingDirectory => self.copy_active_cwd(window, cx),

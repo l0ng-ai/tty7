@@ -1,7 +1,8 @@
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Axis, Bounds, Context, Div, FontWeight, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, SharedString, Stateful, Window, canvas,
-    deferred, div, ease_out_quint, linear_color_stop, linear_gradient, prelude::*, px,
+    Animation, AnimationExt as _, AnyElement, Axis, Bounds, Context, Div, ExternalPaths,
+    FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, SharedString,
+    Stateful, Window, canvas, deferred, div, ease_out_quint, linear_color_stop, linear_gradient,
+    prelude::*, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent};
@@ -249,6 +250,11 @@ impl Tty7App {
 
         let mut list = v_flex()
             .id("tab-sidebar-list")
+            // A folder dragged in from Finder is pinned as a group of its own.
+            .drag_over::<ExternalPaths>(|s, _, _, cx| s.bg(cx.theme().drag_border.opacity(0.06)))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                this.pin_dropped_folders(paths.paths(), cx)
+            }))
             .track_scroll(&self.sidebar_scroll)
             .flex_1()
             .min_h_0()
@@ -2179,18 +2185,63 @@ impl Tty7App {
     /// Tabs already sitting in the folder are gathered in on the next frame,
     /// the way a tab walking in would be: the folder is new, so each of them
     /// has just "entered" it as far as [`EntryWatch`](crate::core::group_key::EntryWatch) can tell.
-    pub(crate) fn pin_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn pin_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) -> GroupId {
         let spelled = folder.to_string_lossy();
-        if self
+        if let Some(kept) = self
             .sidebar_groups
             .pinned
             .iter()
-            .any(|g| g.folder.as_deref() == Some(&*spelled))
+            .find(|g| g.folder.as_deref() == Some(&*spelled))
+        {
+            return kept.id;
+        }
+        let group = PinnedGroup::folder(&folder);
+        let id = group.id;
+        self.edit_groups(cx, |groups| groups.pinned.push(group));
+        id
+    }
+
+    /// The palette's "Open Folder as Group…": pick a folder on this computer,
+    /// pin it, and open a tab in it — "open" is the promise, and an empty group
+    /// with nothing in it would not keep it.
+    pub(crate) fn open_folder_as_group(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    let id = this.pin_folder(path, cx);
+                    this.new_tab_in_group(GroupKey::Pinned(id), window, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Folders dropped on the sidebar from Finder or Explorer, pinned as
+    /// groups. Anything that is not a directory is let fall: a file names no
+    /// group, and guessing its parent would pin something nobody pointed at.
+    ///
+    /// Only on a workspace on this computer. A dropped path is this
+    /// machine's, and a folder group keeps a directory on the workspace's
+    /// host — on a remote one the same spelling names something else, or
+    /// nothing at all.
+    pub(crate) fn pin_dropped_folders(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if crate::core::session::WorkspaceStore::all(cx)
+            .get(self.workspace)
+            .is_some_and(|w| w.is_remote())
         {
             return;
         }
-        let group = PinnedGroup::folder(&folder);
-        self.edit_groups(cx, |groups| groups.pinned.push(group));
+        for path in paths.iter().filter(|p| p.is_dir()) {
+            self.pin_folder(path.clone(), cx);
+        }
     }
 
     /// Delete pinned group `id`. Its tabs are not closed — they go back to
@@ -3811,6 +3862,55 @@ mod fold_tests {
             let group = app.sidebar_groups.get(tty7).expect("still pinned");
             assert_eq!(group.folder.as_deref(), Some("/w/else"));
             assert_eq!(group.given_name(), Some("tty7"), "a set name stays");
+        });
+    }
+    /// A folder dropped from Finder is pinned; a file is let fall, and a
+    /// folder already pinned is not pinned twice.
+    #[gpui::test]
+    fn a_dropped_folder_is_pinned_and_a_dropped_file_is_not(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "x").expect("write");
+
+        app.update(&mut vcx, |app, cx| {
+            let paths = [dir.path().to_path_buf(), file.clone()];
+            app.pin_dropped_folders(&paths, cx);
+            app.pin_dropped_folders(&paths, cx);
+            let folders: Vec<_> = app
+                .sidebar_groups
+                .pinned
+                .iter()
+                .map(|g| g.folder.clone())
+                .collect();
+            assert_eq!(
+                folders,
+                vec![Some(dir.path().to_string_lossy().into_owned())]
+            );
+        });
+    }
+
+    /// The palette's "New Group" makes an empty pinned group and opens its
+    /// name for typing.
+    #[gpui::test]
+    fn the_palette_makes_an_empty_group_ready_to_name(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.new_empty_group(window, cx);
+            let id = app.sidebar_groups.pinned[0].id;
+            assert_eq!(app.group_rename.as_ref().map(|r| r.group), Some(id));
+            assert!(app.tabs.iter().all(|t| t.group.get().is_none()));
+            let kinds: Vec<_> = app
+                .palette_commands(window, cx)
+                .into_iter()
+                .map(|c| c.kind)
+                .collect();
+            assert!(kinds.contains(&crate::ui::palette::CommandKind::NewGroup));
+            assert!(
+                kinds.contains(&crate::ui::palette::CommandKind::OpenFolderAsGroup),
+                "a workspace on this computer can pick a folder"
+            );
         });
     }
 }
