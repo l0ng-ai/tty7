@@ -461,6 +461,38 @@ fn build_spec_inner(
     }
 }
 
+/// The name an SSH pane's tab is pinned to under `mode` (#726), or `None` for
+/// [`SshTabTitle::Dynamic`], which leaves the tab to the title the pane is
+/// showing.
+///
+/// Built on the same evidence as the name the pane wears before the remote
+/// side speaks — [`NativeSshSpec::display_name`], set above — so the pinned
+/// name and that one only ever differ where the saved host has been renamed
+/// since the pane dialled: the live name wins there, looked up by
+/// `profile_id`. An alias from `~/.ssh/config` and a quick connect are not
+/// saved hosts, and their `display_name` is the alias and the address typed.
+pub(crate) fn pinned_ssh_title(
+    mode: crate::core::config::SshTabTitle,
+    spec: &NativeSshSpec,
+    profiles: &[SshProfile],
+) -> Option<String> {
+    use crate::core::config::SshTabTitle;
+
+    let non_blank = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+    match mode {
+        SshTabTitle::Dynamic => None,
+        SshTabTitle::ProfileName => spec
+            .profile_id
+            .as_deref()
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .and_then(|id| profiles.iter().find(|p| p.id == id))
+            .and_then(|p| non_blank(&p.name))
+            .or_else(|| spec.display_name.as_deref().and_then(non_blank))
+            .or_else(|| non_blank(&spec.host)),
+        SshTabTitle::Hostname => non_blank(&spec.host),
+    }
+}
+
 /// What a tab's host row opens when it is taken.
 ///
 /// The two halves are not the same form. A saved host is already a record, so
@@ -1071,5 +1103,84 @@ mod tests {
             build_native_ssh_spec(&p, &[], &store, true).proxy,
             SshProxy::Http { .. }
         ));
+    }
+
+    /// #726's three sources under each mode: the saved host's own name, the
+    /// alias for a `~/.ssh/config` host, and the address for a quick connect;
+    /// `Hostname` always the address dialled, and `Dynamic` nothing at all.
+    #[test]
+    fn a_pinned_ssh_title_comes_from_the_source_the_pane_was_opened_from() {
+        use crate::core::config::SshTabTitle::{Dynamic, Hostname, ProfileName};
+        let store = InMemoryCredentialStore::new();
+
+        let mut saved = profile("prod-web", "10.0.0.5", "deploy");
+        let spec = build_native_ssh_spec(&saved, std::slice::from_ref(&saved), &store, true);
+        let profiles = vec![saved.clone()];
+        assert_eq!(pinned_ssh_title(Dynamic, &spec, &profiles), None);
+        assert_eq!(
+            pinned_ssh_title(ProfileName, &spec, &profiles).as_deref(),
+            Some("prod-web")
+        );
+        assert_eq!(
+            pinned_ssh_title(Hostname, &spec, &profiles).as_deref(),
+            Some("10.0.0.5")
+        );
+        // Renamed after it dialled: the tab follows the saved host.
+        saved.name = "prod-api".into();
+        assert_eq!(
+            pinned_ssh_title(ProfileName, &spec, &[saved.clone()]).as_deref(),
+            Some("prod-api")
+        );
+        // A saved host nobody named reads as its address.
+        saved.name = "  ".into();
+        let spec = build_native_ssh_spec(&saved, std::slice::from_ref(&saved), &store, true);
+        assert_eq!(
+            pinned_ssh_title(ProfileName, &spec, &[saved]).as_deref(),
+            Some("deploy@10.0.0.5")
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let ssh = root.path().join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            "Host bastion\n  HostName 192.168.1.9\n  User ops\n",
+        )
+        .unwrap();
+        let alias = crate::core::ssh_config::resolve_alias_to_profile_from(
+            ssh.join("config"),
+            root.path(),
+            "bastion",
+        )
+        .unwrap();
+        let spec = native_spec_from_transient_profile(
+            &alias.profile,
+            alias.proxy_jump,
+            &store,
+            true,
+            &|_| None,
+        );
+        assert_eq!(
+            pinned_ssh_title(ProfileName, &spec, &profiles).as_deref(),
+            Some("bastion")
+        );
+        assert_eq!(
+            pinned_ssh_title(Hostname, &spec, &profiles).as_deref(),
+            Some("192.168.1.9")
+        );
+
+        // What `quick_connect` builds for an address that is no alias.
+        let mut typed = SshProfile::new("10.0.0.7");
+        typed.host = "10.0.0.7".into();
+        typed.user = "root".into();
+        let spec = build_native_ssh_spec(&typed, &profiles, &store, true);
+        assert_eq!(
+            pinned_ssh_title(ProfileName, &spec, &profiles).as_deref(),
+            Some("10.0.0.7")
+        );
+        assert_eq!(
+            pinned_ssh_title(Hostname, &spec, &profiles).as_deref(),
+            Some("10.0.0.7")
+        );
     }
 }

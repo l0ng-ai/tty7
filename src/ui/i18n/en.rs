@@ -620,6 +620,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsDiffPreviewFromCountsDesc => {
             "Click a row's +N −N to open the working-tree diff in an overlay. Off leaves the counts visible, just not clickable."
         }
+        L10nKey::SettingsSshTabTitle => "SSH tab title",
+        L10nKey::SettingsSshTabTitleDesc => {
+            "What an SSH tab is called. Dynamic follows the title the remote side sets; the other two pin the tab to the host. A tab you renamed keeps its name."
+        }
+        L10nKey::SettingsSshTabTitleDynamic => "Dynamic",
+        L10nKey::SettingsSshTabTitleProfileName => "Profile name",
+        L10nKey::SettingsSshTabTitleHostname => "Hostname",
         L10nKey::DocumentDock => "Dock beside terminal",
         L10nKey::DocumentFill => "Fill window",
         L10nKey::SettingsNotifications => "Notifications",
@@ -943,6 +950,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchSidebarGroupingKeywords => {
             "tabs group repo repository git scratch header sidebar flat folder directory cwd"
         }
+        L10nKey::SettingsSearchSshTabTitleKeywords => {
+            "ssh tab title name host hostname profile alias pin fixed osc remote"
+        }
         L10nKey::SettingsSearchSmartSelectionKeywords => {
             "double click word url path select semantic bracket email"
         }
@@ -1220,6 +1230,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ScmShowMore => "Show more",
         L10nKey::ScmShowLess => "Show less",
         L10nKey::ScmCommitNotFound => "This commit is not in this repository.",
+        L10nKey::ScmFilterChanges => "Filter changed files…",
+        L10nKey::ScmViewAsTree => "View as Tree",
+        L10nKey::ScmViewAsList => "View as List",
+        L10nKey::ScmNoMatchingChanges => "No changed files match the filter.",
         L10nKey::ScmTooManyChanges => "Showing the first {shown} of {total} changes.",
         L10nKey::ScmOpenChanges => "Open Changes",
         L10nKey::ScmDiscardAllConfirm => {

@@ -92,6 +92,7 @@ their id from the file name. [More about themes →](/customization/themes)
 |---|---|---|---|
 | `tab_bar_position` | enum | `"left"` | `left` (sidebar) or `top` (strip). |
 | `new_tab_position` | enum | `"after-current"` | Or `end`. |
+| `ssh_tab_title` | enum | `"dynamic"` | What an SSH tab is called: `dynamic` (the title the remote side sets), `profile-name` (the saved host's name, a `~/.ssh/config` alias, or the address typed for a quick connect), or `hostname` (the address dialled). A tab you renamed keeps its name. |
 | `sidebar_grouping` | enum | `"repo"` | Or `repo-or-directory` to group non-repo tabs by their folder, or `none` for a flat list. |
 | `sidebar_diff_preview` | bool | `true` | Clicking a row's `+N −M` opens the diff overlay. |
 | `sidebar_width` | number | `220` | Pixels (100–2000). |
@@ -186,9 +187,27 @@ angle brackets, and a tab:
 
 | Key | Type | Default | |
 |---|---|---|---|
-| `ssh_profiles` | array | `[]` | Managed from **Settings → SSH**. Secrets live in the OS keychain, never here. |
 | `verify_host_keys` | bool | `true` | |
 | `ssh_warn_on_close` | bool | `false` | Confirm before closing a live connection. |
+
+### servers.json
+
+The saved hosts are not in `config.json`: they live in `servers.json` in the
+same directory, so `config.json` can be synced between machines without taking
+your list of servers along. The file is written with mode `0600` and read as
+forgivingly as `config.json`; if it cannot be parsed, tty7 keeps a copy at
+`servers.json.corrupt` and saves nothing until it is repaired.
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `ssh_profiles` | array | `[]` | Managed from **Settings → SSH**. Secrets live in the OS keychain, never here. |
+| `ssh_profile_frecency` | object | `{}` | How often and how recently each host is used, for ranking. Written by the app. |
+
+An older `config.json` that still holds `ssh_profiles` is split the first time
+a newer tty7 reads it: `servers.json` is written first, and only then are the
+two keys removed from `config.json`, leaving the rest of it as it was. If both
+files hold hosts, `servers.json` wins, and the copy in `config.json` is dropped
+the next time settings are saved.
 
 Each object in `ssh_profiles` can also set:
 
@@ -209,9 +228,8 @@ Each object in `ssh_profiles` can also set:
 
 ## Keys tty7 manages itself
 
-`ssh_profile_frecency` and `command_frecency` record how often and how recently
-you use a profile or command, so the pickers can rank them. They are written by
-the app; there is no reason to edit them.
+`command_frecency` records how often and how recently you run a command, so the
+palette can rank it. It is written by the app; there is no reason to edit it.
 
 <Note>
   If the file cannot be parsed, tty7 starts on defaults, keeps your original at

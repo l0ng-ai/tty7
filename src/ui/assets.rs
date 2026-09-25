@@ -48,6 +48,8 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/machine-remote.svg" => include_bytes!("../../assets/icons/machine-remote.svg"),
         "icons/refresh.svg" => include_bytes!("../../assets/icons/refresh.svg"),
         "icons/power.svg" => include_bytes!("../../assets/icons/power.svg"),
+        "icons/list-tree.svg" => include_bytes!("../../assets/icons/list-tree.svg"),
+        "icons/list-flat.svg" => include_bytes!("../../assets/icons/list-flat.svg"),
         "icons/agents/claude.svg" => include_bytes!("../../assets/icons/agents/claude.svg"),
         "icons/agents/codex.svg" => include_bytes!("../../assets/icons/agents/codex.svg"),
         "icons/agents/traecli.svg" => include_bytes!("../../assets/icons/agents/traecli.svg"),
@@ -115,6 +117,8 @@ mod tests {
             "icons/git-branch.svg",
             "icons/git-sync.svg",
             "icons/git-commit.svg",
+            "icons/list-tree.svg",
+            "icons/list-flat.svg",
         ] {
             assert!(
                 Assets.load(path).unwrap().is_some(),

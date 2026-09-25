@@ -732,6 +732,18 @@ impl Tty7App {
         input: &gpui::Entity<gpui_component::input::InputState>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.panel_search_with(input, None, cx)
+    }
+
+    /// [`Self::panel_search`] with a tile at its far end, inset the way the
+    /// branch row's tile is so the two stack in one column.
+    pub(crate) fn panel_search_with(
+        &self,
+        input: &gpui::Entity<gpui_component::input::InputState>,
+        trailing: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let has_trailing = trailing.is_some();
         h_flex()
             .flex_none()
             .items_center()
@@ -756,6 +768,8 @@ impl Tty7App {
                     // still reads as one line of chrome.
                     .child(Input::new(input).appearance(false).xsmall().cleanable(true)),
             )
+            .when(has_trailing, |row| row.pr(px(tile_trailing_inset_sm())))
+            .children(trailing)
             .into_any_element()
     }
 

@@ -75,8 +75,10 @@ on the tab it was opened on, not on whichever pane is focused. Saving one opens
 on the whole live connection — its proxy, keys and forwards as well as its
 address — so the host that lands is the one you were already on.
 
-Passwords and key passphrases go in the **OS keychain**, never in
-`config.json` and never on disk in plain text. **Forget Password** in a
+Saved hosts are kept in `servers.json`, beside `config.json` rather than in
+it, so a `config.json` you sync between machines does not carry them.
+Passwords and key passphrases go in the **OS keychain**, never in either file
+and never on disk in plain text. **Forget Password** in a
 profile's menu removes the stored one.
 
 Deleting a profile drops its keychain credentials and forgets the remote

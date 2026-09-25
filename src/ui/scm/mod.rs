@@ -14,6 +14,7 @@ pub(crate) mod path;
 pub(crate) mod state;
 #[allow(dead_code)]
 pub(crate) mod status;
+pub(crate) mod tree;
 
 pub(crate) use actions::ScmIntent;
 pub(crate) use state::{GraphState, ScmPanelState};

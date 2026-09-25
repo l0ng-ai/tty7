@@ -30,7 +30,7 @@ Set inside every tty7 pane, inherited by anything you launch from one.
 
 | Variable | Meaning |
 |---|---|
-| `TTY7_PANE` | This pane's id, e.g. `71` or `%71` (both forms are accepted). The default target of `split`, `send`, `capture`, `procs`, `wait`, `pane close`. |
+| `TTY7_PANE` | This pane's id, e.g. `71` or `%71` (both forms are accepted). The default target of `split`, `send`, `exec`, `capture`, `procs`, `wait`, `pane close`. |
 | `TTY7_WS` | This pane's workspace id. The default for `run --keep`, `tab new`, `tab ls`, `ws tree`. |
 | `TTY7_CONFIG_DIR` | The server's config dir. How the CLI finds the right server's sockets — you never pass a socket path. |
 
@@ -44,13 +44,13 @@ Outside a tty7 shell the address-taking verbs fail with
 | 0 | success |
 | 1 | the command failed; the reason is one line on stderr, prefixed `tty7:` |
 | 2 | usage error (clap) — unknown verb, missing argument, bad type |
-| 124 | `tty7 wait` gave up — the `timeout(1)` convention, so "not yet" is distinguishable from "broken" |
+| 124 | `tty7 wait` or `tty7 exec` gave up — the `timeout(1)` convention, so "not yet" is distinguishable from "broken" |
 | 141 | Unix only: the reader hung up (`| head -1`) and SIGPIPE ended it, exactly as it ends `cat`. Not a failure. Windows reports 0 for the same thing, having no signal to imitate. |
-| *other* | only from `tty7 run`, which passes the child's exit code through |
+| *other* | only from `tty7 run` and `tty7 exec`, which pass the command's exit code through |
 
-If `run` cannot learn the child's code it prints a note to stderr and exits 1
-with `"exit_code_known": false` in the JSON — that is how you tell a real 1
-from a stand-in.
+If `run` or `exec` cannot learn the command's code it prints a note to stderr
+and exits 1 with `"exit_code_known": false` in the JSON — that is how you tell
+a real 1 from a stand-in.
 
 ## Top-level verbs
 
@@ -85,6 +85,41 @@ the child, so `tty7 run -- cargo test --keep` passes `--keep` to cargo.
 JSON: `{"pane","exit","exit_code_known","kept"}`, printed **after** the streamed
 output. The combined stream is not valid JSON; read the last line.
 
+### `tty7 exec [%PANE] [--timeout SECS] [--raw] -- CMD...`
+Runs `CMD` in an existing pane's shell and blocks until its prompt comes back:
+the words after `--` are joined with spaces and typed at the prompt as one line
+followed by Enter, so the shell interprets them — quote `&&`, `|` and `>` to
+keep them from your own shell. Prints what the command printed and exits with
+its exit code. The pane (default `$TTY7_PANE`) keeps its cwd, environment and
+history, which is the difference from `run`: `run` makes a new pane for an
+argv, `exec` uses a shell you already have.
+
+The shell integration's OSC 133 marks bound the command: the output is what the
+pane printed between the command starting (`C`) and finishing (`D`, which also
+carries the exit code). Refused, with nothing typed:
+
+- a pane whose shell has sent no prompt mark — no integration, so nothing would
+  ever say the command ended; `tty7 doctor`, or fall back to `send` + `wait
+  --until free`
+- a pane that is not at a prompt — something already runs there (your own pane
+  always is: it is running `tty7 exec`)
+- a line holding a control character (newline, tab, ESC), which the line editor
+  would act on rather than type — join commands with `;` / `&&`
+
+| Flag | |
+|---|---|
+| `--timeout SECS` | Give up after SECS, exit 124. The command is left running; `send %N --key C-c` stops it. With no timeout it waits for as long as the command runs |
+| `--raw` | The output as the pane received it, escapes intact. By default it is replayed through a terminal to text, the way `capture --plain` reads it — which also erases zsh's PROMPT_SP, drawn before the finish mark |
+
+A line the shell never starts — an unclosed quote waiting on a continuation
+prompt — never finishes; the timeout message says that is the likely cause.
+A line the shell rejects outright (a syntax error) exits 1 with
+`"exit_code_known": false` and the shell's complaint as the output. Output past
+8 MiB is dropped from the front, with a note on stderr.
+
+JSON: `{"pane","command","exit","exit_code_known","timed_out","pane_exited","output","bytes","elapsed_ms"}`
+— `output` is the printed form, `bytes` the raw length.
+
 ### `tty7 new [PATH] [--open]`
 Creates a workspace plus its first tab and shell, at `PATH` if given. Prints
 the workspace id. JSON: `{"id","pane","opened"}`.
@@ -100,7 +135,7 @@ pane below, `--h`/`--horizontal` to the right. `--ratio` (default 0.5) is the
 share kept by the *existing* pane, clamped to 0.05–0.95 — a `--ratio 70`
 silently becomes 0.95, not an error. Prints `%NN`. JSON: `{"pane"}`.
 
-### `tty7 send [%PANE] [TEXT] [--enter] [--key KEY]…`
+### `tty7 send [%PANE] [TEXT | --stdin | --from-file PATH] [--paste] [--enter] [--key KEY]…`
 Types `TEXT` into the pane as keystrokes; `--enter` is shorthand for `--key
 enter` — it appends CR to the text, or presses Enter on its own when there is
 none, so `tty7 send %42 --enter` runs whatever pane 42 already has typed. With
@@ -115,7 +150,28 @@ that still doesn't parse (`%3x`) is an address error, never text for your own
 pane — while text that merely starts with `%` (`%s/foo/bar/`, `%!sort`) types
 as given, as does anything unmarked that is not a plain number (`3x`, `+5`). To
 type an address-shaped string, name the pane as well: `tty7 send %42 %3x`.
-JSON: `{"pane","sent","enter","keys"}`.
+JSON: `{"pane","sent","source","bytes","paste","bracketed","bracketed_paste_mode","enter","keys"}`
+— `source` is `argument`, `stdin`, `file` or `none`.
+
+`--stdin` / `--from-file PATH` take the text from there instead of an argument
+— for a secret, which as an argument sits in `ps` for every local user and in
+your shell history. The bytes go to the pane exactly as read (no escape
+interpretation, no newline conversion, not required to be UTF-8), and `sent` is
+`null` in the JSON so they are not echoed into a log either. With either, the
+one positional is the pane and must be a valid address. Use `printf %s`, not
+`echo`, unless you mean the trailing newline — on a pty that newline is Enter.
+Whether the far side echoes the secret is up to the program reading it, not
+tty7: `docker login --password-stdin`, `ssh-add` and `gpg` turn echo off.
+
+`--paste` sends the text as the GUI sends a paste. When the pane has switched on
+bracketed paste (mode 2004 — shells at their prompt and most TUIs do), the text
+is wrapped in `ESC[200~ … ESC[201~` with CRLF folded to LF and every ESC byte
+stripped, so the text cannot end the paste early; multi-line text then lands as
+one block instead of running a line at a time. When the pane has not, the text
+goes unframed with each line break sent as Enter — what a paste into such a pane
+has always done — and a note goes to stderr. `bracketed` says which was sent;
+`bracketed_paste_mode` is what the pane reported (`null` from a server too old
+to say). `--enter` after `--paste` submits the pasted block.
 
 `--key` presses a key instead of typing characters — the arrow keys a
 permission prompt wants, the `escape` that closes a TUI, the `C-c` that stops a
@@ -196,9 +252,13 @@ The process tree inside the pane, indented by depth, `*` on the foreground
 process — then a second table of ports those processes are listening on.
 Prints `nothing running in this pane` when both are empty.
 
-JSON: `{"procs":[{"pid","name","depth","foreground"}],"ports":[{"port","pid","name","addr"}]}`,
+JSON: `{"procs":[{"pid","name","depth","foreground"}],"ports":[{"port","pid","name","addr"}],"context":{…}}`,
 where `addr` is the address the socket is bound to (`*`, `0.0.0.0`, `127.0.0.1`,
-`[::1]`, or a specific interface).
+`[::1]`, or a specific interface). `context` is what the pane says about itself:
+`local_pty`, `remote` (the host it is pointed at), `at_prompt` (from its shell
+integration's marks; absent until the first one), `remote_prompt_seen`, and
+`bracketed_paste` (whether the pane has mode 2004 on — what `send --paste`
+reads).
 
 Nothing below the depth-0 shell means the foreground command has exited — but
 you rarely need to check that by hand, because that is exactly what

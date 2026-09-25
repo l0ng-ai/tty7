@@ -884,8 +884,8 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
 thread_local! {
                             static CHAR_STRINGS: RefCell<HashMap<char, SharedString>> = RefCell::new(HashMap::new());
 
-                        /// Measured ink extents and the font size they were measured at.
-                        static INK_EXTENTS: RefCell<(Pixels, HashMap<(gpui::FontId, char), Option<Pixels>>)> =
+                        /// Measured ink bounds and the font size they were measured at.
+                        static INK_BOUNDS: RefCell<(Pixels, HashMap<(gpui::FontId, char), Option<Bounds<Pixels>>>)> =
                             RefCell::new((px(0.), HashMap::new()));
 }
 
@@ -1089,6 +1089,9 @@ fn seg_budget(solo: bool, measured: bool, cells: usize, room: bool, cell_width: 
 }
 
 /// How much to shrink a segment so its glyph stops inside its budget.
+///
+/// Never more than 1. A fallback icon is not held to this at all:
+/// [`icon_fit`] sizes it, up or down.
 fn fit_scale(ink: Pixels, budget: Pixels) -> f32 {
     if ink <= budget || ink <= px(0.) {
         1.
@@ -1097,22 +1100,157 @@ fn fit_scale(ink: Pixels, budget: Pixels) -> f32 {
     }
 }
 
-/// Where a segment's ink ends, measured from the left edge of its first cell.
+/// Whether the platform's `typographic_bounds` is the glyph's ink.
+///
+/// CoreText and DirectWrite answer with the ink box. cosmic-text answers with
+/// the advance box pinned to the baseline, which says nothing about where an
+/// icon's ink sits; sizing and centring on that would misplace it, so the
+/// Linux build keeps the shrink-only rule for icons too.
+const INK_BOUNDS_ARE_INK: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+
+/// The most an icon is ever enlarged by.
+///
+/// The cap keeps a glyph that is small by design — a dot, a bullet — from
+/// being blown up to a cell-sized blob.
+const MAX_ICON_GROWTH: f32 = 2.;
+
+/// Whether a character is an icon: a code point in one of Unicode's Private
+/// Use Areas, where Nerd Fonts, Font Awesome, Codicons and Material Design
+/// icons all live.
+///
+/// Nothing in these ranges is text, so sizing one to its cells cannot change
+/// how prose reads — the reason the rule is keyed on the code point and not
+/// on the face: a CJK or emoji fallback keeps its own metrics.
+///
+/// The Powerline separators (`U+E0B0`–`U+E0D7`) are not icons. They are
+/// shapes meant to abut the cells around them, the solid ones are painted
+/// natively, and the thin ones already reach the row's full height, so
+/// fitting them to an em and centring them would only pull them away from
+/// the segments they join.
+fn is_icon(c: char) -> bool {
+    matches!(
+        c as u32,
+        0xE000..=0xE0AF | 0xE0D8..=0xF8FF | 0xF_0000..=0xF_FFFD | 0x10_0000..=0x10_FFFD
+    )
+}
+
+/// Whether the cell after an icon can lend it room, the way kitty lets a
+/// Private Use Area glyph followed by a space take two cells.
+///
+/// Everything [`has_room_after`] lends, and one thing more: a blank that
+/// paints the *same* background as the icon's own cell. That is the space
+/// after every icon in a coloured prompt segment, and backgrounds are painted
+/// before any glyph, so the icon lands on its own colour. Held back to one
+/// cell there, a Nerd Font icon is shrunk to about two thirds of the text's
+/// height, which is #866.
+fn lends_to_icon(row: &[RenderCell], start: usize, cells: usize) -> bool {
+    if has_room_after(row, start, cells) {
+        return true;
+    }
+    let (Some(icon), Some(next)) = (row.get(start), row.get(start + cells)) else {
+        return false;
+    };
+    is_blank(next)
+        && !next.selected
+        && icon.draw_bg
+        && next.draw_bg
+        && next.bg == icon.bg
+        && next.match_hit == icon.match_hit
+        && next.match_current == icon.match_current
+        && !GlyphStyle::of(next).draws_on_blanks()
+}
+
+/// How to size an icon a fallback face supplied, and how many cells it spans.
+///
+/// A fallback face is drawn at the primary's font size on its own metrics, so
+/// what an icon looks like beside the text depends on how the two faces'
+/// cells compare. Symbols Nerd Font Mono inks a full em per icon, which is
+/// 1.6 cells of a 0.6em primary; a face with a narrower cell than the
+/// primary's inks less than one. Neither is the icon at the text's size.
+///
+/// So fit the ink, aspect ratio kept, to the cells it is given and one em of
+/// height — the size the icon was drawn at in its own face, and never taller
+/// than the text's line. That may shrink or grow it, growth capped at
+/// [`MAX_ICON_GROWTH`] and ignored under 2%, which is not worth a reshape.
+/// When `lend` says the next cell is free the icon may take it too, but only
+/// if that lets it come out bigger: a narrow glyph that already fits one cell
+/// keeps to it and stays beside what follows.
+fn icon_fit(
+    ink: Bounds<Pixels>,
+    cell_width: Pixels,
+    cells: usize,
+    lend: bool,
+    height: Pixels,
+) -> (f32, usize) {
+    let (w, h) = (ink.size.width.as_f32(), ink.size.height.as_f32());
+    if !(w > 0. && h > 0.) {
+        return (1., cells);
+    }
+    let fit = |cells: usize| {
+        let scale = (cell_width.as_f32() * cells as f32 / w)
+            .min(height.as_f32() / h)
+            .min(MAX_ICON_GROWTH);
+        if (1. ..=1.02).contains(&scale) {
+            1.
+        } else {
+            scale
+        }
+    };
+    let own = fit(cells);
+    if lend && fit(cells + 1) > own {
+        (fit(cells + 1), cells + 1)
+    } else {
+        (own, cells)
+    }
+}
+
+/// Where to paint a fitted icon, relative to its cell's top-left corner, so
+/// its ink sits centred in `room` — vertically always, and horizontally only
+/// when `centre_x`. An icon spilling into a borrowed cell stays where its
+/// face put it instead, as it would unfitted, so the gap before the text
+/// after it is the one its face drew.
+///
+/// `ink` is the glyph's bounds at its native size (y up from the baseline);
+/// `ascent` and `descent` are the line's as shaped at the fitted size, which
+/// is what gpui centres the baseline in the row with.
+fn icon_offset(
+    ink: Bounds<Pixels>,
+    scale: f32,
+    room: gpui::Size<Pixels>,
+    centre_x: bool,
+    ascent: Pixels,
+    descent: Pixels,
+) -> Point<Pixels> {
+    let baseline = (room.height - ascent - descent) / 2. + ascent;
+    let ink_top = baseline - (ink.origin.y + ink.size.height) * scale;
+    let x = if centre_x {
+        (room.width - ink.size.width * scale) / 2. - ink.origin.x * scale
+    } else {
+        // Nudged only as far as it takes to keep the ink inside the room.
+        px(0.)
+            .min(room.width - (ink.origin.x + ink.size.width) * scale)
+            .max(-ink.origin.x * scale)
+    };
+    point(x, (room.height - ink.size.height * scale) / 2. - ink_top)
+}
+
+/// The ink bounds of a segment's first glyph, relative to its pen position,
+/// y up from the baseline.
 ///
 /// Advance is the wrong yardstick: Apple Color Emoji advances 1.31em but only
 /// inks 1.25em, so going by advance shrinks glyphs that would have fit. Ask
 /// for the glyph's own bounds instead, cached per (face, char) because the
 /// lookup is a font query a screenful of CJK would otherwise repeat on every
 /// cell of every frame.
-fn ink_extent(
+fn ink_bounds(
     cx: &App,
     shaped: &gpui::ShapedLine,
     text: &str,
     font_size: Pixels,
-) -> Option<Pixels> {
+) -> Option<Bounds<Pixels>> {
     let font_id = shaped.runs.first()?.font_id;
     let c = text.chars().next()?;
-    INK_EXTENTS.with(|cache| {
+    INK_BOUNDS.with(|cache| {
         let hit = {
             let mut cache = cache.borrow_mut();
             if cache.0 != font_size {
@@ -1127,13 +1265,12 @@ fn ink_extent(
         if let Some(extent) = hit {
             return extent;
         }
-        let extent = cx
+        let bounds = cx
             .text_system()
             .typographic_bounds(font_id, font_size, c)
-            .ok()
-            .map(|bounds| bounds.origin.x + bounds.size.width);
-        cache.borrow_mut().1.insert((font_id, c), extent);
-        extent
+            .ok();
+        cache.borrow_mut().1.insert((font_id, c), bounds);
+        bounds
     })
 }
 
@@ -1234,7 +1371,7 @@ fn shape_piece(
         .shape_line(piece, font_size, run_buf, force_width)
 }
 
-/// Whether [`ink_extent`]'s answer speaks for the whole segment.
+/// Whether [`ink_bounds`]'s answer speaks for the whole segment.
 ///
 /// It measures the segment's first character in the run's first face. That is
 /// all of a one-character segment and only part of anything longer: a
@@ -1283,6 +1420,9 @@ fn paint_glyphs(
         build_font(italic_font.unwrap_or(base_font), false, true),
         build_font(bold_font.unwrap_or(base_font), true, true),
     ];
+
+    // Resolved only once an icon asks, so a pane without one pays nothing.
+    let mut primary_ids: [Option<gpui::FontId>; 4] = [None; 4];
 
     let run_buf = &mut [TextRun {
         len: 0,
@@ -1435,17 +1575,40 @@ fn paint_glyphs(
                     .shape_line(text.clone(), font_size, run_buf, force_width);
             // Measured before the budget is set, because how far a solo glyph
             // may reach turns on whether its ink is known at all.
-            let ink = ink_extent(cx, &shaped, &text, font_size);
+            let bounds = ink_bounds(cx, &shaped, &text, font_size);
+            let ink = bounds.map(|b| b.origin.x + b.size.width);
+            let measured = ink_covers_segment(ink, &text);
             let budget = seg_budget(
                 solo,
-                ink_covers_segment(ink, &text),
+                measured,
                 cells,
                 has_room_after(row_cells, start, cells),
                 geom.cell_width,
             );
-            if let Some(ink) = ink {
-                let scale = fit_scale(ink, budget);
-                if scale < 1. {
+            let mut origin = point(x, y);
+            let mut clip_width = budget;
+            if let (Some(ink), Some(bounds)) = (ink, bounds) {
+                // Only a lone icon that a fallback face supplied is fitted:
+                // the primary's own icons were drawn for its cell already.
+                let icon = INK_BOUNDS_ARE_INK
+                    && measured
+                    && text.chars().next().is_some_and(is_icon)
+                    && shaped.runs.first().is_some_and(|r| {
+                        r.font_id
+                            != *primary_ids[face_ix].get_or_insert_with(|| {
+                                window.text_system().resolve_font(&faces[face_ix])
+                            })
+                    });
+                let (scale, room) = if icon {
+                    let lend = lends_to_icon(row_cells, start, cells);
+                    let height = font_size.min(geom.line_height);
+                    let (scale, spans) = icon_fit(bounds, geom.cell_width, cells, lend, height);
+                    let room = size(geom.cell_width * spans as f32, geom.line_height);
+                    (scale, Some((room, spans == cells)))
+                } else {
+                    (fit_scale(ink, budget), None)
+                };
+                if scale != 1. {
                     shaped = window.text_system().shape_line(
                         text.clone(),
                         font_size * scale,
@@ -1453,18 +1616,16 @@ fn paint_glyphs(
                         force_width,
                     );
                 }
+                if let Some((room, centre_x)) = room {
+                    origin +=
+                        icon_offset(bounds, scale, room, centre_x, shaped.ascent, shaped.descent);
+                    clip_width = room.width;
+                }
             }
 
-            let clip = Bounds::new(point(x, y), size(budget, geom.line_height));
+            let clip = Bounds::new(point(x, y), size(clip_width, geom.line_height));
             window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-                _ = shaped.paint(
-                    point(x, y),
-                    geom.line_height,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                );
+                _ = shaped.paint(origin, geom.line_height, TextAlign::Left, None, window, cx);
             });
         }
     }
@@ -2675,11 +2836,12 @@ mod tests {
     }
 
     #[test]
-    fn fit_scale_only_shrinks_glyphs_that_overflow_their_budget() {
+    fn fit_scale_shrinks_what_overflows_and_never_enlarges() {
         let budget = px(15.);
         assert_eq!(fit_scale(px(19.2), budget), 15. / 19.2);
         // Whatever already fits keeps its own size, including a glyph that
-        // lands exactly on the edge and a run that measured as empty.
+        // lands exactly on the edge and a run that measured as empty. Making
+        // a small glyph bigger is `icon_fit`'s rule, not this one's.
         assert_eq!(fit_scale(px(15.), budget), 1.);
         assert_eq!(fit_scale(px(12.), budget), 1.);
         assert_eq!(fit_scale(px(0.), budget), 1.);
@@ -4451,5 +4613,177 @@ mod tests {
                 .as_deref(),
             Some(&['\u{FE0F}'][..]),
         );
+    }
+
+    fn ink(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(y)), size(px(w), px(h)))
+    }
+
+    /// Menlo at 22px: a 13.2px cell in a 30.8px row (line height 1.4).
+    const CELL: f32 = 13.2;
+    const EM: f32 = 22.;
+
+    fn fit(ink: Bounds<Pixels>, cells: usize, lend: bool) -> (f32, usize) {
+        icon_fit(ink, px(CELL), cells, lend, px(EM))
+    }
+
+    #[test]
+    fn only_private_use_code_points_count_as_icons() {
+        for c in [
+            '\u{e000}',   // first of the BMP Private Use Area
+            '\u{e0a0}',   // Powerline branch
+            '\u{e0d8}',   // first past the Powerline separators
+            '\u{f179}',   // Font Awesome apple
+            '\u{f8ff}',   // last of the BMP Private Use Area
+            '\u{f0001}',  // Material Design icon, Supplementary PUA-A
+            '\u{10fffd}', // end of Supplementary PUA-B
+        ] {
+            assert!(is_icon(c), "U+{:04X}", c as u32);
+        }
+        // Text a fallback face supplies keeps its own metrics: CJK, emoji,
+        // Latin, and the drawing characters painted natively anyway.
+        for c in [
+            '中',
+            'あ',
+            '한',
+            '\u{1F600}',
+            '\u{2764}',
+            'M',
+            '─',
+            '█',
+            '\u{f900}',
+        ] {
+            assert!(!is_icon(c), "U+{:04X}", c as u32);
+        }
+        // Nor do the Powerline separators, which are shapes, not icons.
+        for c in ['\u{e0b0}', '\u{e0b1}', '\u{e0b3}', '\u{e0d7}'] {
+            assert!(!is_icon(c), "U+{:04X}", c as u32);
+        }
+    }
+
+    #[test]
+    fn a_nerd_font_icon_before_a_space_takes_two_cells_at_full_size() {
+        // Symbols Nerd Font Mono's apple, as CoreText measures it at 22px: a
+        // full em tall and 1.4 cells wide. Held to one cell it is shrunk to
+        // 0.71 of the text's size, which is what #866 saw; with the space
+        // after it lent, it keeps its whole em.
+        let apple = ink(1.76, -4.43, 18.48, 22.03);
+        let (held, cells) = fit(apple, 1, false);
+        assert_eq!(cells, 1);
+        assert!((apple.size.width.as_f32() * held - CELL).abs() < 1e-3);
+        let (lent, cells) = fit(apple, 1, true);
+        assert_eq!(cells, 2);
+        assert!((apple.size.height.as_f32() * lent - EM).abs() < 1e-3);
+        assert!(apple.size.width.as_f32() * lent <= 2. * CELL);
+    }
+
+    #[test]
+    fn a_narrow_icon_keeps_to_its_own_cell_even_when_the_next_is_free() {
+        // The branch symbol is an em tall and 0.4em wide: one cell already
+        // holds it at full height, so borrowing would only push it off
+        // towards the text after it.
+        let branch = ink(6.52, -4.4, 8.96, 22.);
+        assert_eq!(fit(branch, 1, true), (1., 1));
+    }
+
+    #[test]
+    fn a_small_icon_from_a_narrow_face_grows_to_fill_its_cell() {
+        // A face with a narrower cell than the primary inks well under it.
+        let icon = ink(0.5, -1., 8.8, 9.);
+        let (scale, cells) = fit(icon, 1, false);
+        assert_eq!(cells, 1);
+        assert!(scale > 1.);
+        assert!((icon.size.width.as_f32() * scale - CELL).abs() < 1e-3);
+        // The same icon two cells wide may use both.
+        let (two, cells) = fit(icon, 2, false);
+        assert_eq!(cells, 2);
+        assert!(two > scale);
+    }
+
+    #[test]
+    fn a_fitted_icon_is_centred_in_its_room() {
+        let icon = ink(0.4, -0.6, 5.3, 6.);
+        let room = size(px(CELL), px(30.8));
+        let (scale, _) = fit(icon, 1, false);
+        let (ascent, descent) = (px(20.4 * scale), px(5.2 * scale));
+        let at = icon_offset(icon, scale, room, true, ascent, descent);
+        // Spilling into a borrowed cell, it stays where its face put it,
+        // unless that would take its ink past either edge of the room.
+        assert_eq!(
+            icon_offset(icon, scale, room, false, ascent, descent).x,
+            px(0.)
+        );
+        let lent = size(px(2. * CELL), px(30.8));
+        let overhang = ink(-1., 0., 20., 20.);
+        assert_eq!(
+            icon_offset(overhang, 1., lent, false, ascent, descent).x,
+            px(1.)
+        );
+        let pushed = ink(8., 0., 20., 20.);
+        let x = icon_offset(pushed, 1., lent, false, ascent, descent).x;
+        assert!((x.as_f32() - (2. * CELL - 28.)).abs() < 1e-4, "{x:?}");
+        let left = at.x.as_f32() + icon.origin.x.as_f32() * scale;
+        let right = left + icon.size.width.as_f32() * scale;
+        assert!((left - (CELL - right)).abs() < 1e-3, "{left}..{right}");
+        let baseline = at.y + (room.height - ascent - descent) / 2. + ascent;
+        let top = (baseline - (icon.origin.y + icon.size.height) * scale).as_f32();
+        let bottom = (baseline - icon.origin.y * scale).as_f32();
+        assert!((top - (30.8 - bottom)).abs() < 1e-3, "{top}..{bottom}");
+    }
+
+    #[test]
+    fn icon_fit_leaves_what_is_already_the_right_size_alone() {
+        // Within 2% of the cell: not worth shaping the glyph again.
+        assert_eq!(fit(ink(0., 0., 13., 13.), 1, false), (1., 1));
+        // Nothing measured, nothing to scale by.
+        assert_eq!(fit(ink(0., 0., 0., 0.), 1, true), (1., 1));
+        // A dot is small by design and grows no more than the cap.
+        assert_eq!(fit(ink(1., 2., 2., 2.), 1, false).0, MAX_ICON_GROWTH);
+    }
+
+    fn icon_row(next: RenderCell) -> Vec<RenderCell> {
+        let icon = RenderCell {
+            c: '\u{f179}',
+            ..RenderCell::default()
+        };
+        vec![icon, next]
+    }
+
+    #[test]
+    fn a_blank_in_the_same_colour_lends_an_icon_its_cell() {
+        let blank = RenderCell::default();
+        assert!(lends_to_icon(&icon_row(blank.clone()), 0, 1));
+        // Whatever `has_room_after` lends, the end of the row included.
+        assert!(lends_to_icon(&icon_row(blank.clone())[..1], 0, 1));
+        // A prompt segment: icon and the space after it on one background.
+        let bg = Hsla::blue();
+        let mut row = icon_row(RenderCell {
+            bg,
+            draw_bg: true,
+            ..RenderCell::default()
+        });
+        row[0].bg = bg;
+        row[0].draw_bg = true;
+        assert!(lends_to_icon(&row, 0, 1));
+        // The next segment's colour, a glyph or a selection do not.
+        row[1].bg = Hsla::red();
+        assert!(!lends_to_icon(&row, 0, 1));
+        let letter = RenderCell {
+            c: 'x',
+            ..RenderCell::default()
+        };
+        assert!(!lends_to_icon(&icon_row(letter), 0, 1));
+        let selected = RenderCell {
+            selected: true,
+            ..RenderCell::default()
+        };
+        assert!(!lends_to_icon(&icon_row(selected), 0, 1));
+        // Nor does a coloured blank after an icon on the default background.
+        let coloured = RenderCell {
+            bg,
+            draw_bg: true,
+            ..blank
+        };
+        assert!(!lends_to_icon(&icon_row(coloured), 0, 1));
     }
 }

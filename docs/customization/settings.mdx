@@ -31,7 +31,8 @@ section something is in.
     Keyboard shortcuts, Option as Meta, mouse behavior, selection, and clipboard.
   </Card>
   <Card title="Window & Tabs" icon="window-maximize">
-    Tab position and placement, sidebar grouping, and diff previews.
+    Tab position and placement, sidebar grouping, diff previews, and what SSH
+    tabs are called.
   </Card>
   <Card title="SSH" icon="server" href="/remote/ssh">
     Hosts, connection defaults, security, authentication, proxies, and forwarding.
@@ -68,6 +69,10 @@ Everything the Settings window writes goes to one file:
 |---|---|
 | macOS / Linux | `~/.config/tty7/config.json` |
 | Windows | `%APPDATA%\tty7\config.json` |
+
+The one exception is your saved SSH hosts, which live beside it in
+`servers.json` — so `config.json` can be synced between machines without
+carrying your servers. [servers.json →](/reference/configuration#ssh)
 
 Set `TTY7_CONFIG_DIR` to point the whole directory — config, themes, state —
 somewhere else.

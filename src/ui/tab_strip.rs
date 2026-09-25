@@ -2434,6 +2434,84 @@ mod ssh_host_row_tests {
             assert_eq!(spec.port, 2222, "a non-default port is part of the address");
         });
     }
+
+    /// #726 end to end: the setting reaches the name the strip draws, on the
+    /// title's rung — below a name the user gave the tab, above whatever the
+    /// remote shell titled itself — and only for an SSH pane.
+    #[gpui::test]
+    fn the_ssh_tab_title_setting_pins_only_ssh_tabs_and_only_their_label(cx: &mut TestAppContext) {
+        use crate::core::config::SshTabTitle;
+
+        set_locale("en");
+        let (app, mut vcx) = harness(cx);
+        let saved = uuid::Uuid::new_v4();
+        let set_mode = |cx: &mut gpui::App, mode: SshTabTitle| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.ssh_tab_title = mode;
+            cx.set_global(cfg);
+        };
+
+        let (_ends, ssh) = app.update_in(&mut vcx, |app, window, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            let mut profile = SshProfile::new("prod-web");
+            profile.id = saved;
+            profile.user = "me".to_string();
+            profile.host = "build-box".to_string();
+            cfg.ssh_profiles = vec![profile];
+            cx.set_global(cfg);
+
+            let (local, a) = quiet_test_pane(1, window, cx);
+            let (ssh, b) = quiet_test_ssh_pane_of(2, Some(saved), window, cx);
+            // Both have titled themselves over OSC 0/2 the way a shell does.
+            local.update(cx, |v, _| v.title = "me@laptop:/work/here".into());
+            ssh.update(cx, |v, _| v.title = "me@build-box:/srv/app".into());
+            for view in [local, ssh.clone()] {
+                app.tabs.push(Tab::new(Pane::leaf(PaneSlot::Ready(view))));
+            }
+            app.active = 0;
+            ((a, b), ssh)
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let label =
+                |app: &crate::ui::app::Tty7App, i: usize, window: &gpui::Window, cx: &gpui::App| {
+                    app.tab_label(&app.tabs[i], i, Some(window), cx)
+                };
+            let dynamic_local = label(app, 0, window, cx);
+            let dynamic_ssh = label(app, 1, window, cx);
+            assert_eq!(dynamic_ssh, "/srv/app", "Dynamic is what tty7 always did");
+
+            set_mode(cx, SshTabTitle::ProfileName);
+            assert_eq!(label(app, 1, window, cx), "prod-web");
+            assert_eq!(
+                label(app, 0, window, cx),
+                dynamic_local,
+                "a local tab is untouched"
+            );
+            assert_eq!(
+                ssh.read(cx).title,
+                "me@build-box:/srv/app",
+                "the remote title is still tracked underneath"
+            );
+
+            set_mode(cx, SshTabTitle::Hostname);
+            assert_eq!(label(app, 1, window, cx), "build-box");
+
+            // A name the user gave the tab outranks the setting.
+            app.tabs[1].name = Some("mine".into());
+            assert_eq!(label(app, 1, window, cx), "mine");
+            app.tabs[1].name = None;
+
+            // An ended session keeps saying so under the pinned name.
+            ssh.update(cx, |v, _| v.terminal.exited = true);
+            assert_eq!(label(app, 1, window, cx), "build-box — process exited");
+            ssh.update(cx, |v, _| v.terminal.exited = false);
+
+            set_mode(cx, SshTabTitle::Dynamic);
+            assert_eq!(label(app, 1, window, cx), dynamic_ssh);
+        });
+    }
 }
 
 #[cfg(test)]

@@ -569,6 +569,15 @@ pub struct PaneContext {
     /// prompt" on a remote pane means nothing: the newest mark is then the
     /// near shell's own "I started `ssh`", and it will never be replaced.
     pub remote_prompt_seen: bool,
+    /// Whether the pane's output has switched bracketed paste (mode 2004) on,
+    /// from the same fold the replay restores modes from. `None` from a daemon
+    /// built before the field existed — "cannot say", not "off".
+    ///
+    /// It is here so a client with no terminal of its own — `tty7 send
+    /// --paste` — can frame a paste the way the GUI does, by asking the pane
+    /// rather than assuming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bracketed_paste: Option<bool>,
 }
 
 fn default_term() -> String {
