@@ -343,6 +343,7 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         ("CloseTabsToTheRight", ""),
         ("CopyWorkingDirectory", ""),
         ("MarkTabUnread", ""),
+        ("HibernateTab", ""),
         ("ForkAgentSession", ""),
         ("ForkAgentSessionRight", ""),
         ("ForkAgentSessionLeft", ""),
@@ -645,6 +646,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         "MarkTabUnread" => (
             CommandGroup::TabsPanes,
             t(L10nKey::CmdMarkTabAsUnread).to_string(),
+        ),
+        "HibernateTab" => (
+            CommandGroup::TabsPanes,
+            t(L10nKey::CmdHibernateTab).to_string(),
         ),
         "ReopenClosedTab" => (
             CommandGroup::TabsPanes,
@@ -1395,6 +1400,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "CloseTabsToTheRight" => KeyBinding::new(keystroke, CloseTabsToTheRight, None),
         "CopyWorkingDirectory" => KeyBinding::new(keystroke, CopyWorkingDirectory, None),
         "MarkTabUnread" => KeyBinding::new(keystroke, MarkTabUnread, None),
+        "HibernateTab" => KeyBinding::new(keystroke, HibernateTab, None),
         "ForkAgentSession" => KeyBinding::new(keystroke, ForkAgentSession, None),
         "ForkAgentSessionRight" => KeyBinding::new(keystroke, ForkAgentSessionRight, None),
         "ForkAgentSessionLeft" => KeyBinding::new(keystroke, ForkAgentSessionLeft, None),

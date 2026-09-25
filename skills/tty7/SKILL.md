@@ -1,7 +1,7 @@
 ---
 name: tty7
 description: >-
-  Drive the tty7 terminal workbench from the shell with the `tty7` binary — list workspaces/tabs/panes, split a pane, send text or keystrokes into one, capture what is on a pane's screen, run a command in a real PTY and pass its exit code through, block until a pane finishes or needs input, see which coding agents are running and which ports a pane is listening on. Use this whenever tty7, panes, workspaces, or `%42`/`@7`/"the other pane"/"the other agent" come up; whenever you want to hand work to another agent and collect the result ("get Claude/Codex to do X", "派个活", "let another agent handle this", running several agents in parallel and merging what they produce); whenever you need to start something long-running or interactive (dev server, REPL, ssh session, `tail -f`, a TUI) that should not sit blocking your Bash tool; whenever a program needs a real terminal to behave the way the user sees it; and whenever you need to look at or report on what is running in some *other* terminal on this machine. Cheap to check: if `$TTY7_PANE` is set you are already inside tty7 and every command here works with no setup.
+  Drive the tty7 terminal workbench from the shell with the `tty7` binary — list workspaces/tabs/panes, split a pane, send text or keystrokes into one, capture what is on a pane's screen, run a command in a real PTY and pass its exit code through, run a command in a shell pane you already have and get back its output and exit code, block until a pane finishes or needs input, see which coding agents are running and which ports a pane is listening on. Use this whenever tty7, panes, workspaces, or `%42`/`@7`/"the other pane"/"the other agent" come up; whenever you want to hand work to another agent and collect the result ("get Claude/Codex to do X", "派个活", "let another agent handle this", running several agents in parallel and merging what they produce); whenever you need to start something long-running or interactive (dev server, REPL, ssh session, `tail -f`, a TUI) that should not sit blocking your Bash tool; whenever a program needs a real terminal to behave the way the user sees it; and whenever you need to look at or report on what is running in some *other* terminal on this machine. Cheap to check: if `$TTY7_PANE` is set you are already inside tty7 and every command here works with no setup.
 ---
 
 # Driving tty7 from the command line
@@ -22,7 +22,7 @@ status hooks are installed, and whether `TTY7_CONFIG_DIR` / `TTY7_WS` /
 `TTY7_PANE` are set — i.e. whether you are running *inside* a tty7 pane.
 
 Being inside a pane matters for two reasons: the address-taking verbs
-(`split`, `send`, `capture`, `procs`, `wait`, `pane close`) default to
+(`split`, `send`, `exec`, `capture`, `procs`, `wait`, `pane close`) default to
 `$TTY7_PANE`, and `run --keep` files its pane into `$TTY7_WS`. Outside a tty7
 shell you must name a target explicitly, and the error will say so rather than
 guessing.
@@ -75,7 +75,7 @@ back in.
 Omitting the address inside a tty7 shell means "this pane" / "this workspace".
 An explicit address always wins over the environment.
 
-## Running a command: two shapes
+## Running a command: three shapes
 
 ### Blocking, with a real exit code
 
@@ -94,6 +94,28 @@ shell or with `--ws <workspace>`. With `--json`, the streamed output comes first
 and the JSON object last — the combined stream is *not* parseable as JSON, so
 read the last line. And the pane is 120 columns wide with no way to change it,
 so output that assumes a wider terminal wraps.
+
+### Blocking, in a pane you already have
+
+```bash
+tty7 exec "$PANE" --timeout 900 -- cargo test   # prints its output, exits with its code
+```
+
+`exec` types the line at the pane's shell prompt — its cwd, its environment,
+its history — waits for the prompt to come back, prints what the command
+printed (as text, like `capture --plain`; `--raw` keeps the escapes) and exits
+with the command's own code. It is how you run the next command in a pane you
+set up earlier (a `cd`, an activated venv, an `ssh` session with tty7's shell
+integration on the far end) without the send / wait / capture / guess dance.
+
+What it needs, and says when it doesn't have: the pane's shell must have tty7's
+shell integration (a pane that has never sent a prompt mark is refused), and
+the pane must be sitting at a prompt (a busy one is refused — `wait --until
+free` first). The words after `--` become one shell line, so `&&`, pipes and
+redirections work if you quote them: `tty7 exec %3 -- 'make && ./run'`. Always
+give `--timeout` when nobody is watching: a line the shell never runs — an
+unclosed quote waiting on `dquote>` — has no end to wait for. On timeout it
+exits 124 and leaves the command running.
 
 ### Non-blocking: a pane you talk to over time
 
@@ -134,6 +156,18 @@ right left home end pageup pagedown`, plus `C-<char>` for Ctrl and `M-<char>`
 for Alt. Repeat it for a sequence; text and keys compose, text first. Typing
 `^C` as text does nothing — it arrives as two characters; `--key C-c` is the
 real interrupt.
+
+Two things text on the command line cannot do. **Secrets**: `tty7 send %3
+"$TOKEN"` puts the token in `ps` for every local user and in your shell
+history — pipe it instead, `printf %s "$TOKEN" | tty7 send %3 --stdin --enter`
+(or `--from-file PATH`); the bytes go to the pane exactly as read and are never
+echoed in `--json`. Echo on the far side is the program's business: `docker
+login --password-stdin`, `ssh-add` and `gpg` turn it off themselves.
+**Multi-line text**: a newline on a pty *is* Enter, so each line runs as it
+arrives. `--paste` sends it the way a paste into the window does — framed in
+bracketed paste when the pane has switched that on, so a shell or an agent's
+input box takes the whole block as text; `--json` reports `"bracketed"` so you
+know which it got.
 
 **A brand-new pane can swallow the Enter.** A shell still working through its
 startup files — a prompt framework, `fastfetch`, anything that paints on login —
@@ -176,8 +210,9 @@ whole ring, which for a pane that was never resized is the same thing.
 
 `--plain` gives you the screen, and a screen is a rectangle: whatever scrolled
 past the top of a long build log is gone, and the exit code was never on screen
-at all. So when what you want is the *answer* rather than the view, have the
-shell write it somewhere clean:
+at all. When the pane is a shell sitting at its prompt, `tty7 exec` (above)
+hands back both. Otherwise — the pane is busy, or its shell has no tty7
+integration — have the shell write the answer somewhere clean:
 
 ```bash
 tty7 send "$PANE" 'cargo test > /tmp/t.log 2>&1; echo $? > /tmp/t.rc' --enter
@@ -278,7 +313,7 @@ output on success but never suppresses errors.
 The panes on this machine are the user's real work, and some of them are other
 coding agents mid-task. Treat anything you did not create as read-only:
 
-- **Never `send` into a pane you didn't open.** Keystrokes into another agent's
+- **Never `send` or `exec` into a pane you didn't open.** Keystrokes into another agent's
   pane, or into a shell the user is typing in, land in the middle of whatever
   is happening there. Check `tty7 agents` before you touch a pane. This goes
   double for `--key`: a stray `C-c` kills somebody's work.

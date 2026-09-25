@@ -96,6 +96,14 @@ pub(crate) struct ScmPanelState {
     /// opening one by hand has to outlast the next file landing in it.
     pub(crate) collapsed: HashSet<ScmGroup>,
     pub(crate) toggled: HashSet<ScmGroup>,
+    /// Directories folded shut in the tree view, per group — the same
+    /// directory can be open under Changes and shut under Staged. Keyed by
+    /// the full repo-relative path of the (possibly compacted) row.
+    pub(crate) folded_dirs: HashSet<(ScmGroup, String)>,
+    /// The filter over the changed files. Created on first render like
+    /// `commit_input`, with the subscription that turns typing into a repaint.
+    pub(crate) filter: Option<Entity<InputState>>,
+    pub(crate) filter_sub: Option<gpui::Subscription>,
     /// Working directory → the repository root containing it, or `None` when
     /// there is none, with when the answer was given. The root is what every
     /// write runs from and what every cache is keyed by, so it is resolved
@@ -162,6 +170,14 @@ impl ScmPanelState {
             self.collapsed.contains(&group)
         } else {
             crate::ui::scm::panel::starts_collapsed(group, count)
+        }
+    }
+
+    /// Fold a tree directory shut, or open it again.
+    pub(crate) fn toggle_dir(&mut self, group: ScmGroup, key: String) {
+        let entry = (group, key);
+        if !self.folded_dirs.remove(&entry) {
+            self.folded_dirs.insert(entry);
         }
     }
 

@@ -30,6 +30,7 @@ actions!(
         RevealLinkUnderPointer,
         CopyLinkPathUnderPointer,
         MarkTabUnread,
+        HibernateTab,
         ForkAgentSession,
         ForkAgentSessionRight,
         ForkAgentSessionLeft,

@@ -213,6 +213,11 @@ pub struct Config {
     pub new_tab_position: NewTabPosition,
     #[serde(default, deserialize_with = "de_lenient")]
     pub tab_bar_position: TabBarPosition,
+    /// What an SSH pane's tab is called (#726). Only the name the tab shows:
+    /// the titles the remote side sets are still read and kept, and win again
+    /// the moment this is back on [`SshTabTitle::Dynamic`].
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub ssh_tab_title: SshTabTitle,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
     #[serde(default)]
@@ -246,6 +251,12 @@ pub struct Config {
     /// impression than one they asked for.
     #[serde(default)]
     pub scm_graph_expanded: bool,
+    /// Whether the source control panel lists changed files as a directory
+    /// tree rather than one flat run per group. Off by default: the flat list
+    /// is what a handful of changes reads best as, and the tree is for the
+    /// agent run that touched sixty files across a dozen modules.
+    #[serde(default)]
+    pub scm_changes_tree: bool,
     /// Whether a file opens in the code panel with soft wrap on. Not a
     /// setting anyone picks up front: it is whatever the status bar's Wrap
     /// toggle (or `ToggleDocumentWrap`) was last left at, so the next file
@@ -377,14 +388,28 @@ pub struct Config {
     #[serde(default)]
     pub env: HashMap<String, String>,
 
-    #[serde(default)]
+    /// The saved SSH hosts. They live in [`SERVERS_FILE`], not in
+    /// `config.json` (#911): people sync `config.json` between machines for its
+    /// colours and keys, and a list of servers is not something every machine
+    /// should carry. Still read from `config.json` so [`Config::load`] can
+    /// move an older file's hosts across, never written back to it.
+    #[serde(default, skip_serializing)]
     pub ssh_profiles: Vec<crate::core::ssh_profile::SshProfile>,
     #[serde(default = "default_true")]
     pub verify_host_keys: bool,
     #[serde(default)]
     pub ssh_warn_on_close: bool,
-    #[serde(default)]
+    /// How often each saved host is used, keyed by its id — which means
+    /// nothing without the hosts it counts, so it lives in [`SERVERS_FILE`]
+    /// beside them.
+    #[serde(default, skip_serializing)]
     pub ssh_profile_frecency: HashMap<uuid::Uuid, ProfileUsage>,
+    /// How often and how lately each shell was opened from the New Tab menu
+    /// or its palette command, keyed by the label the inventory shows it
+    /// under. Orders the menu's short list of shells the way
+    /// `ssh_profile_frecency` orders its hosts.
+    #[serde(default)]
+    pub shell_frecency: HashMap<String, ProfileUsage>,
 
     #[serde(default)]
     pub command_frecency: HashMap<String, ProfileUsage>,
@@ -423,6 +448,45 @@ pub struct Config {
     /// permanent data loss (#537). Cleared only by a load that parses.
     #[serde(skip)]
     pub quarantined: bool,
+    /// [`SERVERS_FILE`] is there but could not be read or parsed. The hosts
+    /// in hand are not the ones in it, so [`Config::save`] refuses to run
+    /// rather than write them over it — the same rule, for the same reason,
+    /// as [`Self::quarantined`].
+    #[serde(skip)]
+    pub servers_unreadable: bool,
+}
+
+/// Where the saved SSH hosts live, beside `config.json` (#911).
+pub const SERVERS_FILE: &str = "servers.json";
+
+/// What [`SERVERS_FILE`] holds. The keys are the ones `config.json` used to
+/// carry, so a hand-moved block pastes straight across.
+#[derive(Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
+struct ServersFile {
+    ssh_profiles: Vec<crate::core::ssh_profile::SshProfile>,
+    ssh_profile_frecency: HashMap<uuid::Uuid, ProfileUsage>,
+}
+
+#[derive(Serialize)]
+struct ServersFileRef<'a> {
+    ssh_profiles: &'a [crate::core::ssh_profile::SshProfile],
+    ssh_profile_frecency: &'a HashMap<uuid::Uuid, ProfileUsage>,
+}
+
+/// Whether a `config.json` still carries the keys that moved to
+/// [`SERVERS_FILE`] — the cue for the one-time move.
+#[derive(Deserialize)]
+struct LegacyServerKeys {
+    #[serde(default)]
+    ssh_profiles: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    ssh_profile_frecency: Option<serde::de::IgnoredAny>,
+}
+
+fn has_legacy_server_keys(text: &str) -> bool {
+    serde_json::from_str::<LegacyServerKeys>(strip_bom(text))
+        .is_ok_and(|keys| keys.ssh_profiles.is_some() || keys.ssh_profile_frecency.is_some())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -498,6 +562,21 @@ pub enum TabBarPosition {
     Top,
     #[default]
     Left,
+}
+
+/// Where an SSH pane's tab takes its name from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SshTabTitle {
+    /// Whatever the remote shell or program titles itself, falling back to
+    /// the host's name until it says anything — what tty7 always did.
+    #[default]
+    Dynamic,
+    /// The saved host's name, the alias for a `~/.ssh/config` host, the
+    /// address typed for a quick connect.
+    ProfileName,
+    /// The address the connection dialled.
+    Hostname,
 }
 
 /// Native window backdrop material for the Windows GUI. Other platforms retain
@@ -678,6 +757,7 @@ impl Default for Config {
             scrollback_limit: 10_000,
             new_tab_position: NewTabPosition::AfterCurrent,
             tab_bar_position: TabBarPosition::Left,
+            ssh_tab_title: SshTabTitle::Dynamic,
             sidebar_width: default_sidebar_width(),
             sidebar_collapsed: false,
             right_panel_visible: false,
@@ -687,6 +767,7 @@ impl Default for Config {
             document_layout: DocumentLayout::default(),
             document_ratio: default_document_ratio(),
             scm_graph_expanded: false,
+            scm_changes_tree: false,
             editor_soft_wrap: false,
             editor_markdown_preview: false,
             sidebar_grouping: SidebarGrouping::Repo,
@@ -726,6 +807,7 @@ impl Default for Config {
             verify_host_keys: true,
             ssh_warn_on_close: false,
             ssh_profile_frecency: HashMap::new(),
+            shell_frecency: HashMap::new(),
             command_frecency: HashMap::new(),
             agent_commands: HashMap::new(),
             agent_launch: HashMap::new(),
@@ -733,6 +815,7 @@ impl Default for Config {
             restore_agent_sessions: true,
             per_pane_history: false,
             quarantined: false,
+            servers_unreadable: false,
         }
     }
 }
@@ -779,13 +862,42 @@ impl Config {
     /// app onto the result needs the outcome to keep a broken file from
     /// evicting the settings the app is running on.
     pub fn load_with_outcome() -> (Self, LoadOutcome) {
-        let Some(path) = Self::path() else {
-            return (Config::default(), LoadOutcome::Absent);
-        };
-        let text = match std::fs::read_to_string(&path) {
+        match Self::path() {
+            Some(path) => Self::load_from(&path),
+            None => (Config::default(), LoadOutcome::Absent),
+        }
+    }
+
+    /// [`Config::load_with_outcome`] for the `config.json` at `path`, with the
+    /// saved hosts read from the [`SERVERS_FILE`] beside it.
+    ///
+    /// A `config.json` from before the split still holds the hosts itself.
+    /// When there is no [`SERVERS_FILE`] yet they are moved into one, once:
+    /// the new file is written first and `config.json` rewritten without them
+    /// only after that has landed, so a failure anywhere leaves them where
+    /// they were. When both files are there the new one wins and the copy in
+    /// `config.json` is not read — it is what an older tty7 wrote after the
+    /// move, or a synced file brought in, and it falls out of `config.json`
+    /// at its next save.
+    pub(crate) fn load_from(path: &Path) -> (Self, LoadOutcome) {
+        let (mut cfg, outcome, text) = Self::load_config_file(path);
+        let servers = path.with_file_name(SERVERS_FILE);
+        let found = cfg.load_servers(&servers);
+        if !found
+            && let Some(text) = text
+            && has_legacy_server_keys(&text)
+        {
+            cfg.move_servers_out(&text, path, &servers);
+        }
+        (cfg, outcome)
+    }
+
+    /// `config.json` alone, with the text it parsed from.
+    fn load_config_file(path: &Path) -> (Self, LoadOutcome, Option<String>) {
+        let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return (Config::default(), LoadOutcome::Absent);
+                return (Config::default(), LoadOutcome::Absent, None);
             }
             Err(e) => {
                 // Unreadable is not unparseable, but the rule is the same:
@@ -798,13 +910,13 @@ impl Config {
                 );
                 let mut cfg = Config::default();
                 cfg.quarantined = true;
-                return (cfg, LoadOutcome::Unreadable);
+                return (cfg, LoadOutcome::Unreadable, None);
             }
         };
         match serde_json::from_str::<Config>(strip_bom(&text)) {
             Ok(mut cfg) => {
                 cfg.sanitize();
-                (cfg, LoadOutcome::Parsed)
+                (cfg, LoadOutcome::Parsed, Some(text))
             }
             Err(e) => {
                 // The next `save` overwrites this file wholesale, so handing
@@ -816,11 +928,80 @@ impl Config {
                     "failed to parse config at {}: {e}; keeping it aside and using defaults",
                     path.display()
                 );
-                quarantine(&path);
+                quarantine(path);
                 let mut cfg = Config::default();
                 cfg.quarantined = true;
-                (cfg, LoadOutcome::Quarantined)
+                (cfg, LoadOutcome::Quarantined, None)
             }
+        }
+    }
+
+    /// Takes the hosts from the [`SERVERS_FILE`] at `path`, if there is one.
+    /// Returns whether there was — a file that is there but broken counts, so
+    /// that nothing is moved over the top of it.
+    fn load_servers(&mut self, path: &Path) -> bool {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(e) => {
+                log::warn!(
+                    "failed to read {}: {e}; saved SSH hosts unavailable, writes suppressed",
+                    path.display()
+                );
+                self.servers_unreadable = true;
+                return true;
+            }
+        };
+        match serde_json::from_str::<ServersFile>(strip_bom(&text)) {
+            Ok(servers) => {
+                self.ssh_profiles = servers.ssh_profiles;
+                self.ssh_profile_frecency = servers.ssh_profile_frecency;
+            }
+            Err(e) => {
+                log::warn!(
+                    "failed to parse {}: {e}; keeping it aside, writes suppressed",
+                    path.display()
+                );
+                quarantine(path);
+                self.servers_unreadable = true;
+            }
+        }
+        true
+    }
+
+    /// The one-time move of the hosts out of `config.json` (#911). New file
+    /// first: until it has landed, `config.json` is the only copy.
+    ///
+    /// `config.json` is then rewritten from its own `text` with just those
+    /// two keys taken out, not from `self` the way a save writes it. Nobody
+    /// asked for this write, so it should change nothing else: a hand-kept
+    /// file stays the handful of keys it was rather than growing every
+    /// default, and a key this build does not know — one a newer tty7 on a
+    /// synced machine wrote — survives.
+    fn move_servers_out(&self, text: &str, config: &Path, servers: &Path) {
+        if let Err(e) = self.write_servers(servers) {
+            log::warn!(
+                "could not move SSH hosts to {}: {e}; leaving them in config.json",
+                servers.display()
+            );
+            return;
+        }
+        let rewrite = || -> std::io::Result<()> {
+            let mut value: serde_json::Value =
+                serde_json::from_str(strip_bom(text)).map_err(std::io::Error::other)?;
+            if let Some(object) = value.as_object_mut() {
+                object.remove("ssh_profiles");
+                object.remove("ssh_profile_frecency");
+            }
+            let text = serde_json::to_string_pretty(&value).map_err(std::io::Error::other)?;
+            write_atomic(config, text.as_bytes())
+        };
+        match rewrite() {
+            Ok(()) => log::info!("moved SSH hosts from config.json to {}", servers.display()),
+            Err(e) => log::warn!(
+                "moved SSH hosts to {}, but could not rewrite config.json: {e}",
+                servers.display()
+            ),
         }
     }
 
@@ -911,18 +1092,62 @@ impl Config {
 
     /// Persist without hiding a failure from an interactive settings editor.
     pub fn try_save(&self) -> std::io::Result<()> {
+        let path = Self::path()
+            .ok_or_else(|| std::io::Error::other("configuration directory is unavailable"))?;
+        self.try_save_to(&path)
+    }
+
+    /// [`Config::try_save`] for the `config.json` at `path`, and the
+    /// [`SERVERS_FILE`] beside it.
+    pub(crate) fn try_save_to(&self, path: &Path) -> std::io::Result<()> {
         if self.quarantined {
             return Err(std::io::Error::other(
                 "the existing configuration could not be read; repair it before saving",
             ));
         }
-        let path = Self::path()
-            .ok_or_else(|| std::io::Error::other("configuration directory is unavailable"))?;
+        if self.servers_unreadable {
+            return Err(std::io::Error::other(format!(
+                "{SERVERS_FILE} could not be read; repair it before saving"
+            )));
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // Hosts first, for the same reason the move out of `config.json`
+        // writes them first: a `config.json` that lands without them while
+        // their own file failed to would have dropped them.
+        self.write_servers(&path.with_file_name(SERVERS_FILE))?;
+        self.write_config(path)
+    }
+
+    fn write_config(&self, path: &Path) -> std::io::Result<()> {
         let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        write_atomic(&path, text.as_bytes())
+        write_atomic(path, text.as_bytes())
+    }
+
+    /// Writes the hosts to their own file — unless it already says exactly
+    /// this, which is nearly every save: a dragged divider has nothing to do
+    /// with the hosts, and rewriting the file anyway would wake the watcher a
+    /// second time. No hosts and no file stays no file.
+    fn write_servers(&self, path: &Path) -> std::io::Result<()> {
+        let on_disk = match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str::<ServersFile>(strip_bom(&text)).ok(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(ServersFile::default()),
+            Err(_) => None,
+        };
+        if on_disk.as_ref().is_some_and(|held| {
+            held.ssh_profiles == self.ssh_profiles
+                && held.ssh_profile_frecency == self.ssh_profile_frecency
+        }) {
+            return Ok(());
+        }
+        let text = serde_json::to_string_pretty(&ServersFileRef {
+            ssh_profiles: &self.ssh_profiles,
+            ssh_profile_frecency: &self.ssh_profile_frecency,
+        })
+        .map_err(std::io::Error::other)?;
+        // Host names, users and key paths: nobody else's business.
+        write_atomic_private(path, text.as_bytes())
     }
 
     fn path() -> Option<PathBuf> {
@@ -1471,8 +1696,12 @@ mod tests {
                 last_used: 42,
             },
         );
-        let json = serde_json::to_string(&cfg).unwrap();
-        let back: Config = serde_json::from_str(&json).unwrap();
+        // The count travels in the servers file now (#911), so the round
+        // trip is through disk rather than through `config.json`'s serde.
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        cfg.try_save_to(&config).unwrap();
+        let (back, _) = Config::load_from(&config);
         assert!(back.ssh_warn_on_close);
         assert_eq!(back.ssh_profile_frecency.get(&id).unwrap().count, 4);
     }
@@ -2620,5 +2849,247 @@ mod tests {
         let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back.agent_launch, cfg.agent_launch);
         Config::default().save();
+    }
+
+    fn host(name: &str, address: &str) -> crate::core::ssh_profile::SshProfile {
+        let mut profile = crate::core::ssh_profile::SshProfile::new(name);
+        profile.host = address.to_string();
+        profile.user = "deploy".to_string();
+        profile
+    }
+
+    /// A `config.json` from before #911, holding hosts, a usage count, a key
+    /// this build has never heard of, and the handful of settings the user
+    /// actually wrote.
+    fn legacy_config(profile: &crate::core::ssh_profile::SshProfile) -> String {
+        let usage = serde_json::json!({ profile.id.to_string(): { "count": 3, "last_used": 5 } });
+        serde_json::to_string_pretty(&serde_json::json!({
+            "font_size": 18.0,
+            "a_key_from_a_newer_build": { "x": 1 },
+            "ssh_profiles": [profile],
+            "ssh_profile_frecency": usage,
+            "keybindings": { "SplitRight": "cmd-d" },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_hosts_move_out_of_config_json_once_and_nothing_else_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        let servers = dir.path().join(SERVERS_FILE);
+        let profile = host("prod-web", "10.0.0.5");
+        std::fs::write(&config, legacy_config(&profile)).unwrap();
+
+        let (cfg, outcome) = Config::load_from(&config);
+        assert_eq!(outcome, LoadOutcome::Parsed);
+        assert_eq!(cfg.ssh_profiles, vec![profile.clone()]);
+        assert_eq!(cfg.ssh_profile_frecency[&profile.id].count, 3);
+        assert_eq!(cfg.font_size, 18.0);
+
+        let moved: ServersFile =
+            serde_json::from_str(&std::fs::read_to_string(&servers).unwrap()).unwrap();
+        assert_eq!(moved.ssh_profiles, vec![profile.clone()]);
+        assert_eq!(moved.ssh_profile_frecency[&profile.id].count, 3);
+
+        let left: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        let left = left.as_object().unwrap();
+        assert!(!left.contains_key("ssh_profiles"));
+        assert!(!left.contains_key("ssh_profile_frecency"));
+        // The rest of the file is exactly what it was: nothing the user did
+        // not write appears, and nothing this build cannot read disappears.
+        assert_eq!(left["font_size"], serde_json::json!(18.0));
+        assert_eq!(
+            left["a_key_from_a_newer_build"],
+            serde_json::json!({ "x": 1 })
+        );
+        assert_eq!(
+            left["keybindings"],
+            serde_json::json!({ "SplitRight": "cmd-d" })
+        );
+        assert_eq!(left.len(), 3, "the move must not expand the file: {left:?}");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&servers).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        // Once is once: a second load reads the new file and writes nothing.
+        let config_after = std::fs::read(&config).unwrap();
+        let servers_after = std::fs::read(&servers).unwrap();
+        let (again, _) = Config::load_from(&config);
+        assert_eq!(again.ssh_profiles, vec![profile]);
+        assert_eq!(std::fs::read(&config).unwrap(), config_after);
+        assert_eq!(std::fs::read(&servers).unwrap(), servers_after);
+    }
+
+    #[test]
+    fn with_both_files_present_the_servers_file_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        let servers = dir.path().join(SERVERS_FILE);
+        let current = host("current", "10.0.0.1");
+        let stale = host("stale", "10.0.0.2");
+        let cfg = Config {
+            ssh_profiles: vec![current.clone()],
+            ..Config::default()
+        };
+        cfg.try_save_to(&config).unwrap();
+        // An older tty7, or a synced file, puts hosts back in config.json.
+        std::fs::write(&config, legacy_config(&stale)).unwrap();
+        let servers_before = std::fs::read(&servers).unwrap();
+
+        let (loaded, _) = Config::load_from(&config);
+        assert_eq!(loaded.ssh_profiles, vec![current.clone()]);
+        assert!(loaded.ssh_profile_frecency.is_empty());
+        assert_eq!(std::fs::read(&servers).unwrap(), servers_before);
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            legacy_config(&stale),
+            "loading is not the moment to rewrite config.json"
+        );
+
+        // The stale copy falls out at the next ordinary save.
+        loaded.try_save_to(&config).unwrap();
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(!text.contains("ssh_profiles"), "{text}");
+        assert_eq!(Config::load_from(&config).0.ssh_profiles, vec![current]);
+    }
+
+    #[test]
+    fn a_config_json_without_hosts_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, "{\"font_size\": 18}").unwrap();
+
+        let (cfg, _) = Config::load_from(&config);
+        assert!(cfg.ssh_profiles.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "{\"font_size\": 18}"
+        );
+        assert!(!dir.path().join(SERVERS_FILE).exists());
+    }
+
+    #[test]
+    fn an_empty_hosts_key_is_dropped_without_making_a_servers_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, "{\"font_size\": 18, \"ssh_profiles\": []}").unwrap();
+
+        Config::load_from(&config);
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(!text.contains("ssh_profiles"), "{text}");
+        assert!(text.contains("font_size"), "{text}");
+        assert!(!dir.path().join(SERVERS_FILE).exists());
+    }
+
+    #[test]
+    fn saving_writes_the_hosts_to_their_own_file_and_nowhere_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        let servers = dir.path().join(SERVERS_FILE);
+
+        // No hosts, no file.
+        Config::default().try_save_to(&config).unwrap();
+        assert!(!servers.exists());
+
+        let profile = host("prod-web", "10.0.0.5");
+        let mut cfg = Config {
+            ssh_profiles: vec![profile.clone()],
+            ..Config::default()
+        };
+        cfg.ssh_profile_frecency.insert(
+            profile.id,
+            ProfileUsage {
+                count: 2,
+                last_used: 9,
+            },
+        );
+        cfg.try_save_to(&config).unwrap();
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(!text.contains("ssh_profile"), "{text}");
+        assert!(!text.contains("10.0.0.5"), "{text}");
+
+        let (loaded, _) = Config::load_from(&config);
+        assert_eq!(loaded.ssh_profiles, vec![profile]);
+        assert_eq!(loaded.ssh_profile_frecency, cfg.ssh_profile_frecency);
+
+        // Deleting the last host empties the file rather than leaving it be.
+        let mut emptied = loaded.clone();
+        emptied.ssh_profiles.clear();
+        emptied.ssh_profile_frecency.clear();
+        emptied.try_save_to(&config).unwrap();
+        assert!(Config::load_from(&config).0.ssh_profiles.is_empty());
+    }
+
+    #[test]
+    fn a_broken_servers_file_is_kept_aside_and_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        let servers = dir.path().join(SERVERS_FILE);
+        let profile = host("prod-web", "10.0.0.5");
+        std::fs::write(&config, legacy_config(&profile)).unwrap();
+        std::fs::write(&servers, "{ nope").unwrap();
+
+        let (cfg, outcome) = Config::load_from(&config);
+        assert_eq!(outcome, LoadOutcome::Parsed, "config.json itself is fine");
+        assert!(cfg.servers_unreadable);
+        assert_eq!(
+            std::fs::read_to_string(servers.with_extension("json.corrupt")).unwrap(),
+            "{ nope"
+        );
+        // Nothing moved on top of it, and nothing saves over either file.
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            legacy_config(&profile)
+        );
+        assert!(cfg.try_save_to(&config).is_err());
+        assert_eq!(std::fs::read_to_string(&servers).unwrap(), "{ nope");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            legacy_config(&profile)
+        );
+    }
+
+    #[test]
+    fn the_hosts_never_serialize_into_config_json_but_an_old_file_still_reads() {
+        let mut cfg: Config = serde_json::from_str(
+            r#"{"ssh_profiles":[{"name":"a","host":"h"}],"verify_host_keys":false}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.ssh_profiles.len(), 1);
+        assert!(!cfg.verify_host_keys);
+        cfg.ssh_profile_frecency
+            .insert(cfg.ssh_profiles[0].id, ProfileUsage::default());
+        let value = serde_json::to_value(&cfg).unwrap();
+        assert!(value.get("ssh_profiles").is_none());
+        assert!(value.get("ssh_profile_frecency").is_none());
+        // The SSH preferences are settings like any other and stay put.
+        assert_eq!(value["verify_host_keys"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn ssh_tab_title_defaults_to_dynamic_and_round_trips_leniently() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.ssh_tab_title, SshTabTitle::Dynamic);
+        for (raw, mode) in [
+            ("\"dynamic\"", SshTabTitle::Dynamic),
+            ("\"profile-name\"", SshTabTitle::ProfileName),
+            ("\"hostname\"", SshTabTitle::Hostname),
+            ("\"sideways\"", SshTabTitle::Dynamic),
+            ("7", SshTabTitle::Dynamic),
+        ] {
+            let cfg: Config =
+                serde_json::from_str(&format!("{{\"ssh_tab_title\": {raw}, \"font_size\": 20}}"))
+                    .unwrap();
+            assert_eq!(cfg.ssh_tab_title, mode, "{raw}");
+            assert_eq!(cfg.font_size, 20.0, "a bad value must not cost the file");
+            let back: Config = serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
+            assert_eq!(back.ssh_tab_title, mode);
+        }
     }
 }

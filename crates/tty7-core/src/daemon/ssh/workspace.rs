@@ -33,6 +33,13 @@ pub fn handle(req: &WorkspaceRequest) -> DaemonMsg {
         WorkspaceOp::RemoveForward { forward_id } => {
             DaemonMsg::ForwardList(mgr.remove_workspace_forward(ws, view, *forward_id))
         }
+        WorkspaceOp::SetForwardEnabled {
+            forward_id,
+            enabled,
+        } => match mgr.set_workspace_forward_enabled(ws, view, conn, *forward_id, *enabled) {
+            Ok(list) => DaemonMsg::ForwardList(list),
+            Err(e) => DaemonMsg::Error(e),
+        },
         WorkspaceOp::ListForwards => DaemonMsg::ForwardList(mgr.list_workspace_forwards(ws, view)),
         WorkspaceOp::TeardownForwards => {
             mgr.teardown_workspace_forwards(ws);

@@ -2306,6 +2306,29 @@ impl RemoteTerminal {
             .ok()
     }
 
+    /// The list after switching one forward on or off, or why it was not
+    /// switched — the daemon's own refusal, which names what is in the way.
+    pub fn set_forward_enabled(
+        pane_id: u64,
+        forward_id: u64,
+        enabled: bool,
+    ) -> anyhow::Result<Vec<ManagedForward>> {
+        let mut stream = connect()?;
+        ClientMsg::SetForwardEnabled {
+            pane_id,
+            forward_id,
+            enabled,
+        }
+        .encode(&mut stream)?;
+        match DaemonMsg::read(&mut stream)? {
+            DaemonMsg::ForwardList(list) => Ok(list),
+            DaemonMsg::Error(msg) => Err(anyhow::anyhow!(msg)),
+            other => Err(anyhow::anyhow!(
+                "unexpected reply to SetForwardEnabled: {other:?}"
+            )),
+        }
+    }
+
     pub fn list_forwards(pane_id: u64) -> Vec<ManagedForward> {
         fn query(pane_id: u64) -> anyhow::Result<Vec<ManagedForward>> {
             let mut stream = connect()?;

@@ -54,6 +54,16 @@ pub struct SessionTab {
     pub sidebar_group: Option<crate::core::group_key::GroupKey>,
     #[serde(skip)]
     pub tree_id: Option<crate::core::machine::TabId>,
+    /// Asleep in the tree: comes back as a placeholder holding `pane`, and
+    /// nothing is spawned for it until it is woken. See
+    /// [`Tab::hibernated`](crate::core::machine::Tab::hibernated).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hibernated: bool,
+    /// What a sleeping tab is called while nothing in it runs to say — read
+    /// off the tree's pane records, the same way the switcher names a tab of
+    /// a window it does not own.
+    #[serde(skip)]
+    pub asleep_view: Option<crate::core::tab_view::TabView>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

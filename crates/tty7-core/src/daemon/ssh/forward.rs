@@ -257,17 +257,39 @@ fn bind_failed(rule: &SshForwardRule, e: io::Error) -> SharedStatus {
     ))))
 }
 
+/// What a switched-off forward reports. An `Error` for the same reason as
+/// `loop_exit_status`, so an older peer reading it draws a stopped forward
+/// with a word of explanation; a current one reads `enabled` instead.
+fn disabled_status() -> SharedStatus {
+    Arc::new(Mutex::new(ForwardStatus::Error("disabled".to_string())))
+}
+
+/// Whether two forwards would want the same listening socket: the same port,
+/// on the same side of the connection. Local and dynamic forwards both listen
+/// here; a remote forward listens on the far host.
+fn same_socket(a: SshForwardKind, a_port: u16, b: SshForwardKind, b_port: u16) -> bool {
+    let far = |k| k == SshForwardKind::Remote;
+    a_port != 0 && a_port == b_port && far(a) == far(b)
+}
+
 struct ForwardEntry {
     id: u64,
     kind: SshForwardKind,
     bind_host: String,
     bind_port: u16,
+    /// The port the rule asked for, which `bind_port` is not when that was 0
+    /// and the OS picked one. Switching the forward back on asks again for
+    /// this, not for whatever it happened to get last time.
+    requested_port: u16,
     target_host: String,
     target_port: u16,
     description: Option<String>,
     status: SharedStatus,
     cancel: ForwardCancel,
     auto_local: bool,
+    /// Switched off: the entry, and the rule in it, stay listed, but nothing
+    /// is bound and `cancel` is `None`.
+    enabled: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -288,6 +310,19 @@ impl ForwardEntry {
             target_port: self.target_port,
             description: self.description.clone(),
             status: self.status.lock().unwrap().clone(),
+            enabled: self.enabled,
+        }
+    }
+
+    fn rule(&self) -> SshForwardRule {
+        SshForwardRule {
+            kind: self.kind,
+            bind_host: self.bind_host.clone(),
+            bind_port: self.requested_port,
+            target_host: self.target_host.clone(),
+            target_port: self.target_port,
+            description: self.description.clone(),
+            enabled: self.enabled,
         }
     }
 }
@@ -316,6 +351,23 @@ impl SshForwardRegistry {
     pub async fn remove(&self, pane_id: u64, forward_id: u64) -> Vec<ManagedForward> {
         self.remove_owned(&ForwardOwner::Pane(pane_id), pane_id, forward_id)
             .await
+    }
+
+    pub async fn set_enabled(
+        &self,
+        pane_id: u64,
+        conn: Option<Arc<SshConnection>>,
+        forward_id: u64,
+        enabled: bool,
+    ) -> Result<Vec<ManagedForward>, String> {
+        self.set_enabled_owned(
+            &ForwardOwner::Pane(pane_id),
+            pane_id,
+            conn,
+            forward_id,
+            enabled,
+        )
+        .await
     }
 
     pub async fn teardown_pane(&self, pane_id: u64) {
@@ -347,6 +399,24 @@ impl SshForwardRegistry {
             .await
     }
 
+    pub async fn set_enabled_workspace(
+        &self,
+        workspace: WorkspaceId,
+        view_pane: u64,
+        conn: Arc<SshConnection>,
+        forward_id: u64,
+        enabled: bool,
+    ) -> Result<Vec<ManagedForward>, String> {
+        self.set_enabled_owned(
+            &ForwardOwner::Workspace(workspace),
+            view_pane,
+            Some(conn),
+            forward_id,
+            enabled,
+        )
+        .await
+    }
+
     pub async fn teardown_workspace(&self, workspace: WorkspaceId) {
         self.teardown_owned(&ForwardOwner::Workspace(workspace))
             .await;
@@ -360,22 +430,24 @@ impl SshForwardRegistry {
         rule: &SshForwardRule,
     ) -> ManagedForward {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (bind_port, status, cancel) = match rule.kind {
-            SshForwardKind::Local => self.start_local(&conn, rule).await,
-            SshForwardKind::Dynamic => self.start_dynamic(&conn, rule).await,
-            SshForwardKind::Remote => self.start_remote(&conn, rule).await,
+        let (bind_port, status, cancel) = if rule.enabled {
+            self.start(&conn, rule).await
+        } else {
+            (rule.bind_port, disabled_status(), ForwardCancel::None)
         };
         let entry = ForwardEntry {
             id,
             kind: rule.kind,
             bind_host: rule.bind_host.clone(),
             bind_port,
+            requested_port: rule.bind_port,
             target_host: rule.target_host.clone(),
             target_port: rule.target_port,
             description: rule.description.clone(),
             status,
             cancel,
             auto_local: false,
+            enabled: rule.enabled,
         };
         let managed = entry.to_managed(view_pane);
         self.owners
@@ -413,20 +485,145 @@ impl SshForwardRegistry {
             })
         };
         if let Some(entry) = removed {
-            Self::cancel_entry(entry).await;
+            Self::cancel(entry.cancel).await;
         }
         self.list_owned(owner, view_pane)
+    }
+
+    /// Switch one forward off or back on, keeping its entry — and so its
+    /// place in the list and the rule it was made from — either way.
+    ///
+    /// Switching on refuses, rather than fails at bind time with whatever the
+    /// OS says, when another switched-on forward of the same owner already
+    /// holds the port: the answer then names that forward, which is the one
+    /// the user has to switch off first. A forward that cannot be started for
+    /// any other reason stays off, with the reason as the error.
+    async fn set_enabled_owned(
+        &self,
+        owner: &ForwardOwner,
+        view_pane: u64,
+        conn: Option<Arc<SshConnection>>,
+        forward_id: u64,
+        enabled: bool,
+    ) -> Result<Vec<ManagedForward>, String> {
+        if !enabled {
+            let cancel = {
+                let mut owners = self.owners.lock().unwrap();
+                let entry = Self::entry_mut(&mut owners, owner, forward_id)?;
+                entry.enabled = false;
+                entry.status = disabled_status();
+                std::mem::replace(&mut entry.cancel, ForwardCancel::None)
+            };
+            Self::cancel(cancel).await;
+            return Ok(self.list_owned(owner, view_pane));
+        }
+
+        let Some(rule) = self.enable_plan(owner, forward_id)? else {
+            return Ok(self.list_owned(owner, view_pane));
+        };
+        let Some(conn) = conn else {
+            return Err("the SSH connection is gone — reconnect and try again".to_string());
+        };
+        let (bound, status, cancel) = self.start(&conn, &rule).await;
+        if let Some(e) = bind_error(&status) {
+            Self::cancel(cancel).await;
+            return Err(e);
+        }
+        if let Some(cancel) = self.finish_enable(owner, forward_id, bound, status, cancel) {
+            // Removed while it was being started: nobody wants what was bound.
+            Self::cancel(cancel).await;
+        }
+        Ok(self.list_owned(owner, view_pane))
+    }
+
+    fn entry_mut<'a>(
+        owners: &'a mut HashMap<ForwardOwner, Vec<ForwardEntry>>,
+        owner: &ForwardOwner,
+        forward_id: u64,
+    ) -> Result<&'a mut ForwardEntry, String> {
+        owners
+            .get_mut(owner)
+            .and_then(|entries| entries.iter_mut().find(|e| e.id == forward_id))
+            .ok_or_else(|| format!("no forward {forward_id}"))
+    }
+
+    /// The rule to start for switching `forward_id` on, `None` when it is on
+    /// already, or why it may not be switched on.
+    fn enable_plan(
+        &self,
+        owner: &ForwardOwner,
+        forward_id: u64,
+    ) -> Result<Option<SshForwardRule>, String> {
+        let mut owners = self.owners.lock().unwrap();
+        let entry = Self::entry_mut(&mut owners, owner, forward_id)?;
+        if entry.enabled {
+            return Ok(None);
+        }
+        let rule = SshForwardRule {
+            enabled: true,
+            ..entry.rule()
+        };
+        let holder = owners.get(owner).into_iter().flatten().find(|e| {
+            e.id != forward_id
+                && e.enabled
+                && same_socket(e.kind, e.bind_port, rule.kind, rule.bind_port)
+        });
+        if let Some(h) = holder {
+            let what = match h.kind {
+                SshForwardKind::Dynamic => "a SOCKS forward".to_string(),
+                _ => format!("the forward to {}:{}", h.target_host, h.target_port),
+            };
+            return Err(format!(
+                "port {} is already used by {what}; switch that one off first",
+                rule.bind_port
+            ));
+        }
+        Ok(Some(rule))
+    }
+
+    /// Record a started forward as switched on. Hands `cancel` back when the
+    /// entry is no longer there to take it.
+    fn finish_enable(
+        &self,
+        owner: &ForwardOwner,
+        forward_id: u64,
+        bound: u16,
+        status: SharedStatus,
+        cancel: ForwardCancel,
+    ) -> Option<ForwardCancel> {
+        let mut owners = self.owners.lock().unwrap();
+        let Ok(entry) = Self::entry_mut(&mut owners, owner, forward_id) else {
+            return Some(cancel);
+        };
+        entry.enabled = true;
+        entry.bind_port = bound;
+        entry.status = status;
+        // Anything already in the slot is a second switch-on that raced this
+        // one; it is replaced, and has to be stopped rather than leaked.
+        Some(std::mem::replace(&mut entry.cancel, cancel))
+    }
+
+    async fn start(
+        &self,
+        conn: &Arc<SshConnection>,
+        rule: &SshForwardRule,
+    ) -> (u16, SharedStatus, ForwardCancel) {
+        match rule.kind {
+            SshForwardKind::Local => self.start_local(conn, rule).await,
+            SshForwardKind::Dynamic => self.start_dynamic(conn, rule).await,
+            SshForwardKind::Remote => self.start_remote(conn, rule).await,
+        }
     }
 
     async fn teardown_owned(&self, owner: &ForwardOwner) {
         let entries = self.owners.lock().unwrap().remove(owner);
         for entry in entries.into_iter().flatten() {
-            Self::cancel_entry(entry).await;
+            Self::cancel(entry.cancel).await;
         }
     }
 
-    async fn cancel_entry(entry: ForwardEntry) {
-        match entry.cancel {
+    async fn cancel(cancel: ForwardCancel) {
+        match cancel {
             ForwardCancel::Task(handle) => {
                 handle.abort();
                 let _ = handle.await;
@@ -634,6 +831,7 @@ impl SshForwardRegistry {
             target_host: remote_host.to_string(),
             target_port: remote_port,
             description: Some(format!("localhost link → :{remote_port}")),
+            enabled: true,
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (mut bind_port, mut status, mut cancel) = self.start_local(&conn, &rule).await;
@@ -658,12 +856,14 @@ impl SshForwardRegistry {
             kind: SshForwardKind::Local,
             bind_host: rule.bind_host.clone(),
             bind_port,
+            requested_port: rule.bind_port,
             target_host: rule.target_host.clone(),
             target_port: rule.target_port,
             description: rule.description.clone(),
             status,
             cancel,
             auto_local: true,
+            enabled: true,
         };
         self.owners
             .lock()
@@ -732,6 +932,20 @@ impl SshManager {
         self.runtime.block_on(
             self.forwards
                 .remove_workspace(workspace, view_pane, forward_id),
+        )
+    }
+
+    pub fn set_workspace_forward_enabled(
+        &self,
+        workspace: WorkspaceId,
+        view_pane: u64,
+        conn: Arc<SshConnection>,
+        forward_id: u64,
+        enabled: bool,
+    ) -> Result<Vec<ManagedForward>, String> {
+        self.runtime.block_on(
+            self.forwards
+                .set_enabled_workspace(workspace, view_pane, conn, forward_id, enabled),
         )
     }
 
@@ -941,12 +1155,14 @@ mod tests {
                 kind: SshForwardKind::Local,
                 bind_host: "127.0.0.1".into(),
                 bind_port: port,
+                requested_port: port,
                 target_host: "h".into(),
                 target_port: 80,
                 description: None,
                 status: Arc::new(Mutex::new(ForwardStatus::Listening)),
                 cancel: ForwardCancel::Task(task),
                 auto_local: false,
+                enabled: true,
             }
         };
         {
@@ -986,12 +1202,14 @@ mod tests {
                 kind: SshForwardKind::Local,
                 bind_host: "127.0.0.1".into(),
                 bind_port: port,
+                requested_port: port,
                 target_host: "h".into(),
                 target_port: 80,
                 description: None,
                 status: Arc::new(Mutex::new(ForwardStatus::Listening)),
                 cancel: ForwardCancel::Task(handle),
                 auto_local: false,
+                enabled: true,
             }
         }
 
@@ -1047,12 +1265,14 @@ mod tests {
             kind: SshForwardKind::Local,
             bind_host: "127.0.0.1".into(),
             bind_port: port,
+            requested_port: port,
             target_host: "127.0.0.1".into(),
             target_port: 3000,
             description: None,
             status: Arc::new(Mutex::new(ForwardStatus::Listening)),
             cancel: ForwardCancel::Task(handle),
             auto_local: true,
+            enabled: true,
         };
         reg.owners
             .lock()
@@ -1142,5 +1362,171 @@ mod tests {
             Some(("127.0.0.1".to_string(), 3000))
         );
         assert_eq!(table.lookup("", 0), None);
+    }
+
+    fn push_disabled(
+        reg: &SshForwardRegistry,
+        owner: ForwardOwner,
+        id: u64,
+        kind: SshForwardKind,
+        port: u16,
+    ) {
+        reg.owners
+            .lock()
+            .unwrap()
+            .entry(owner)
+            .or_default()
+            .push(ForwardEntry {
+                id,
+                kind,
+                bind_host: "127.0.0.1".into(),
+                bind_port: port,
+                requested_port: port,
+                target_host: "srv-b".into(),
+                target_port: 80,
+                description: None,
+                status: disabled_status(),
+                cancel: ForwardCancel::None,
+                auto_local: false,
+                enabled: false,
+            });
+    }
+
+    /// Switching a forward off has to release what it bound — that is the
+    /// point, so the port can be taken by another rule — while leaving the
+    /// entry, and the rule in it, exactly where it was.
+    #[tokio::test]
+    async fn switching_a_forward_off_frees_its_socket_and_keeps_its_rule() {
+        let reg = SshForwardRegistry::default();
+        let guard = push_listener(&reg, ForwardOwner::Pane(7), 3).await;
+        let port = reg.list(7)[0].bind_port;
+
+        let list = reg.set_enabled(7, None, 3, false).await.unwrap();
+        assert_eq!(list.len(), 1, "the forward is still listed");
+        assert_eq!(list[0].id, 3);
+        assert!(!list[0].enabled);
+        assert_eq!(list[0].bind_port, port);
+        assert_eq!(
+            (list[0].target_host.as_str(), list[0].target_port),
+            ("127.0.0.1", 3000)
+        );
+        assert!(matches!(list[0].status, ForwardStatus::Error(_)));
+        assert_eq!(Arc::strong_count(&guard), 1, "…and its listener is gone");
+        TcpListener::bind(("127.0.0.1", port))
+            .await
+            .expect("the port is free for someone else");
+
+        // Twice is the same as once, and a forward nobody has is an error.
+        assert_eq!(reg.set_enabled(7, None, 3, false).await.unwrap(), list);
+        assert!(reg.set_enabled(7, None, 99, false).await.is_err());
+
+        reg.teardown_pane(7).await;
+        assert!(reg.list(7).is_empty());
+    }
+
+    /// Two rules on one local port, pointed at different targets, is the
+    /// whole use of the switch. Turning the second on while the first still
+    /// holds the port is refused by name, not left to fail at bind time.
+    #[tokio::test]
+    async fn switching_on_a_forward_whose_port_is_held_is_refused_by_name() {
+        let reg = SshForwardRegistry::default();
+        push_listener(&reg, ForwardOwner::Pane(7), 0).await;
+        let port = reg.list(7)[0].bind_port;
+        push_disabled(&reg, ForwardOwner::Pane(7), 1, SshForwardKind::Local, port);
+
+        let err = reg.set_enabled(7, None, 1, true).await.unwrap_err();
+        assert!(err.contains(&port.to_string()), "{err}");
+        assert!(err.contains("127.0.0.1:3000"), "names the holder: {err}");
+        assert!(!reg.list(7)[1].enabled, "the refused forward stays off");
+
+        // A SOCKS forward listens here too, so it collides the same way.
+        push_disabled(
+            &reg,
+            ForwardOwner::Pane(7),
+            2,
+            SshForwardKind::Dynamic,
+            port,
+        );
+        assert!(reg.set_enabled(7, None, 2, true).await.is_err());
+
+        // Once the holder is off, the only thing left in the way is the
+        // missing connection — which is said, and changes nothing.
+        reg.set_enabled(7, None, 0, false).await.unwrap();
+        let err = reg.set_enabled(7, None, 1, true).await.unwrap_err();
+        assert!(err.contains("connection"), "{err}");
+        assert!(reg.list(7).iter().all(|m| !m.enabled));
+
+        // Another owner's forwards are not this one's business.
+        push_disabled(&reg, ForwardOwner::Pane(8), 0, SshForwardKind::Local, port);
+        assert!(
+            reg.enable_plan(&ForwardOwner::Pane(8), 0)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn only_the_same_port_on_the_same_side_collides() {
+        use SshForwardKind::{Dynamic, Local, Remote};
+        assert!(same_socket(Local, 8080, Local, 8080));
+        assert!(same_socket(Local, 8080, Dynamic, 8080));
+        assert!(same_socket(Remote, 8080, Remote, 8080));
+        assert!(!same_socket(Local, 8080, Remote, 8080), "different hosts");
+        assert!(!same_socket(Local, 8080, Local, 8081));
+        assert!(
+            !same_socket(Local, 0, Local, 0),
+            "0 asks the OS for a fresh one"
+        );
+    }
+
+    /// Switching back on asks for the port the rule asked for, not the one
+    /// the OS last picked for it, and records what it got this time.
+    #[tokio::test]
+    async fn switching_on_starts_from_the_rule_and_records_the_new_listener() {
+        let reg = SshForwardRegistry::default();
+        push_disabled(&reg, ForwardOwner::Pane(7), 0, SshForwardKind::Local, 0);
+        reg.owners
+            .lock()
+            .unwrap()
+            .get_mut(&ForwardOwner::Pane(7))
+            .unwrap()[0]
+            .bind_port = 41000;
+
+        let rule = reg
+            .enable_plan(&ForwardOwner::Pane(7), 0)
+            .unwrap()
+            .expect("an off forward has something to start");
+        assert_eq!(rule.bind_port, 0);
+        assert!(rule.enabled);
+        assert_eq!((rule.target_host.as_str(), rule.target_port), ("srv-b", 80));
+
+        let guard = Arc::new(());
+        let held = guard.clone();
+        let task = tokio::spawn(async move {
+            let _held = held;
+            std::future::pending::<()>().await
+        });
+        let status: SharedStatus = Arc::new(Mutex::new(ForwardStatus::Listening));
+        let leftover = reg.finish_enable(
+            &ForwardOwner::Pane(7),
+            0,
+            42000,
+            status,
+            ForwardCancel::Task(task),
+        );
+        assert!(matches!(leftover, Some(ForwardCancel::None)));
+        let now = &reg.list(7)[0];
+        assert!(now.enabled);
+        assert_eq!(now.bind_port, 42000);
+        assert_eq!(now.status, ForwardStatus::Listening);
+        assert!(
+            reg.enable_plan(&ForwardOwner::Pane(7), 0)
+                .unwrap()
+                .is_none(),
+            "an on forward has nothing to start"
+        );
+
+        reg.teardown_pane(7).await;
+        assert_eq!(Arc::strong_count(&guard), 1, "the new listener is owned");
     }
 }

@@ -33,6 +33,7 @@ pub enum CommandKind {
     CloseTabsToTheRight,
     CopyWorkingDirectory,
     MarkTabUnread,
+    HibernateTab,
     ForkAgentSession,
     CopyAgentSessionId,
     NewAgentTab,
@@ -108,6 +109,9 @@ pub enum CommandKind {
     ActivateTab(usize),
     ConnectSavedProfile(Uuid),
     EditSavedProfile(Uuid),
+    /// Open the shell the window's inventory lists under this label, as the
+    /// New Tab menu's row for it would.
+    OpenShell(String),
     SaveSshSessionAsHost,
     QuickConnect(String),
     SaveQuickConnect(String),
@@ -143,6 +147,7 @@ impl CommandKind {
             CloseTabsToTheRight => "close-tabs-right",
             CopyWorkingDirectory => "copy-cwd",
             MarkTabUnread => "mark-tab-unread",
+            HibernateTab => "hibernate-tab",
             ForkAgentSession => "fork-agent-session",
             CopyAgentSessionId => "copy-agent-session-id",
             NewAgentTab => "new-agent-tab",
@@ -223,6 +228,7 @@ impl CommandKind {
             | ActivateTab(_)
             | ConnectSavedProfile(_)
             | EditSavedProfile(_)
+            | OpenShell(_)
             | QuickConnect(_)
             | SaveQuickConnect(_)
             | LaunchAgent(_) => return None,
@@ -263,6 +269,7 @@ impl CommandKind {
             CloseTabsToTheRight => "CloseTabsToTheRight",
             CopyWorkingDirectory => "CopyWorkingDirectory",
             MarkTabUnread => "MarkTabUnread",
+            HibernateTab => "HibernateTab",
             ForkAgentSession => "ForkAgentSession",
             CopyAgentSessionId => "CopyAgentSessionId",
             NewAgentTab => "NewAgentTab",
@@ -345,6 +352,7 @@ impl CommandKind {
             | ActivateTab(_)
             | ConnectSavedProfile(_)
             | EditSavedProfile(_)
+            | OpenShell(_)
             | SaveSshSessionAsHost
             | QuickConnect(_)
             | SaveQuickConnect(_)
@@ -486,6 +494,8 @@ impl Command {
             Command::localized(L10nKey::CmdForkSession, ForkAgentSession)
                 .with_subtitle(t(L10nKey::CmdForkSessionSubtitle)),
             Command::localized(L10nKey::CmdMarkTabAsUnread, MarkTabUnread),
+            Command::localized(L10nKey::CmdHibernateTab, HibernateTab)
+                .with_subtitle(t(L10nKey::CmdHibernateTabSubtitle)),
             Command::localized(L10nKey::CmdClosePaneTab, ClosePane),
             Command::localized(L10nKey::CmdCloseOtherTabs, CloseOtherTabs),
             Command::localized(L10nKey::CmdCloseTabsToTheRight, CloseTabsToTheRight),
