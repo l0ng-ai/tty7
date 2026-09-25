@@ -547,6 +547,26 @@ mod tests {
         assert_eq!(take_landed(&state).pin, Some(key));
     }
 
+    /// A finished drag says which surface its order is for: the pinned
+    /// headers' order is the list's, not the tabs'.
+    #[test]
+    fn a_landing_names_the_surface_its_order_is_for() {
+        let r = Reorder::new(
+            Surface::PinnedGroups,
+            0,
+            column(3, 30., 2., 0).rects,
+            Axis::Vertical,
+            px(2.),
+            point(px(0.), px(0.)),
+        );
+        let state: ReorderState = Rc::new(RefCell::new(Some(r)));
+        clear_pending(&state);
+        set_pending(&state, &Surface::PinnedGroups, vec![1, 0, 2]);
+        let landed = take_landed(&state);
+        assert_eq!(landed.surface, Some(Surface::PinnedGroups));
+        assert_eq!(landed.order, Some(vec![1, 0, 2]));
+    }
+
     /// Only an auto header can be pinned by dragging; a drag carrying
     /// anything else offers nothing.
     #[test]
