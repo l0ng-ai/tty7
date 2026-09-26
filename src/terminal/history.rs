@@ -190,23 +190,6 @@ pub fn frecency_scores(
         .collect()
 }
 
-pub fn rank_by_frecency(
-    entries: &[String],
-    counts: &HashMap<String, u32>,
-    cwds: &HashMap<String, HashSet<String>>,
-    cwd: Option<&str>,
-) -> Vec<String> {
-    let scores = frecency_scores(entries, counts, cwds, cwd);
-    let mut idx: Vec<usize> = (0..entries.len()).collect();
-    idx.sort_by(|&a, &b| {
-        scores[b]
-            .partial_cmp(&scores[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(b.cmp(&a))
-    });
-    idx.into_iter().map(|i| entries[i].clone()).collect()
-}
-
 pub fn format_ago(now: u64, ts: u64) -> String {
     let s = now.saturating_sub(ts);
     let (n, unit) = if s < 60 {
@@ -904,12 +887,9 @@ mod tests {
         counts.insert("git status".to_string(), 40);
         counts.insert("ls".to_string(), 5);
         counts.insert("oops typo".to_string(), 1);
-        let ranked = rank_by_frecency(&entries, &counts, &HashMap::new(), None);
-        assert_eq!(ranked[0], "git status");
-        assert!(
-            ranked.iter().position(|e| e == "git status").unwrap()
-                < ranked.iter().position(|e| e == "oops typo").unwrap()
-        );
+        let scores = frecency_scores(&entries, &counts, &HashMap::new(), None);
+        assert!(scores[0] > scores[1], "frequent beats newer: {scores:?}");
+        assert!(scores[0] > scores[2], "frequent beats newest: {scores:?}");
     }
 
     #[test]
@@ -920,15 +900,17 @@ mod tests {
         cwds.entry("cargo build".to_string())
             .or_default()
             .insert("/work/proj".to_string());
-        let ranked = rank_by_frecency(&entries, &counts, &cwds, Some("/work/proj"));
-        assert_eq!(ranked[0], "cargo build");
-        let neutral = rank_by_frecency(&entries, &counts, &cwds, None);
-        assert_eq!(neutral[0], "cargo build");
-        assert_eq!(neutral[1], "npm test");
+        let here = frecency_scores(&entries, &counts, &cwds, Some("/work/proj"));
+        let neutral = frecency_scores(&entries, &counts, &cwds, None);
+        assert!(here[1] > here[0]);
+        assert!(
+            here[1] - here[0] > neutral[1] - neutral[0],
+            "running here widens the lead: {here:?} vs {neutral:?}"
+        );
     }
 
     #[test]
-    fn frecency_scores_align_with_the_ranking() {
+    fn frecency_scores_favour_the_newer_of_two_equals() {
         let entries = vec!["a".to_string(), "b".to_string()];
         let scores = frecency_scores(&entries, &HashMap::new(), &HashMap::new(), None);
         assert_eq!(scores.len(), 2);
