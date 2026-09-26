@@ -66,6 +66,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The command-line ghost suggests what you ran last, not what you ran
+  most.** It was the top prefix match by frecency, where run count and the
+  current-directory bonus outweighed recency, so after `git commit -m x`
+  typing `git c` still offered `git checkout main` because that had run 20
+  times here. The ghost is now the newest entry that extends the line,
+  preferring one run in the current directory and falling back to the newest
+  anywhere, and it skips commands whose last run exited non-zero, so it names
+  what ↑ recalls. Ctrl+R still ranks by frecency. Re-running a command now
+  moves it to the newest history entry instead of adding a second copy
+  (before, only an immediate repeat was collapsed), so ↑ steps onto each
+  command once, the same as after a restart.
+
 - **The sidebar groups tabs by repo automatically; pin what you want to keep**
   (#955). Groups now come in two halves, split by a divider. Below it, every
   tab you have not pinned is filed under its git repository, and an SSH tab
