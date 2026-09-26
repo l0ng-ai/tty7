@@ -57,6 +57,8 @@ actions!(
         PrevTab,
         SelectNextTab,
         SelectPrevTab,
+        MoveTabLeft,
+        MoveTabRight,
         ActivateTab1,
         ActivateTab2,
         ActivateTab3,
