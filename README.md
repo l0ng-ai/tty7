@@ -90,13 +90,13 @@ that tells tty7 which session to fork.
 | **Kimi Code** | ✓ | ✓ | |
 | **Pi** | ✓ | ✓ | |
 | **Crush** | ✓ | ✓ | |
+| **Antigravity** | ✓ | ✓ | |
 | **Cursor** | ✓ | ✓ | |
 | Aider | ✓ | | |
 | Amp | ✓ | | |
 | Auggie | ✓ | | |
 | Hermes | ✓ | | |
 | Vibe | ✓ | | |
-| Antigravity | ✓ | | |
 | Empryo | ✓ | | |
 
 </details>

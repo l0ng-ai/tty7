@@ -14,8 +14,8 @@ the agent say which one it is.
 
 | Agent | |
 |---|---|
-| Claude Code · Codex · TraeCode · Copilot CLI · OpenCode · Pi · Grok Build · Oh My Pi · Gemini · Droid · Qwen Code · Goose · Kimi Code · Qoder CLI · Crush · CodeBuddy · Cursor CLI · Prime Agent | Hooks available |
-| Aider · Amp · Auggie · Hermes · Vibe · Antigravity · Empryo | Detected and labelled, but no status channel yet |
+| Claude Code · Codex · TraeCode · Copilot CLI · OpenCode · Pi · Grok Build · Oh My Pi · Gemini · Droid · Qwen Code · Goose · Kimi Code · Qoder CLI · Crush · CodeBuddy · Cursor CLI · Prime Agent · Antigravity | Hooks available |
+| Aider · Amp · Auggie · Hermes · Vibe · Empryo | Detected and labelled, but no status channel yet |
 
 Installing writes into that agent's own configuration directory. Once installed
 the row grows a second **Uninstall** button beside the first, which itself
@@ -26,6 +26,13 @@ ships a newer hook.
   Crush ships only a `PreToolUse` hook today. It is enough to remember the
   session for resume, but there is no turn boundary behind it, so a Crush pane
   carries no status dot and `tty7 wait` times out rather than returning.
+</Note>
+
+<Note>
+  Antigravity has no session-start or permission event, so its pane goes
+  straight from no dot to working on the first model call, and a pending
+  permission prompt shows as working rather than amber. Its hooks live in a
+  `tty7` set inside `~/.gemini/config/hooks.json`, beside any sets of your own.
 </Note>
 
 <Note>
