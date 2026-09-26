@@ -113,7 +113,7 @@ their id from the file name. [More about themes →](/customization/themes)
 | Key | Type | Default | |
 |---|---|---|---|
 | `shell` | object | — | `{"program": "fish", "args": ["-l"]}`. Unset uses the platform default. `args` you write are launched verbatim, which also turns off [shell integration](/reference/shell-integration) for that shell — leave them out to keep it. |
-| `custom_shells` | array | `[]` | Extra entries for the new-tab menu: `[{"label": "Ubuntu", "program": "wsl.exe", "args": ["-d", "Ubuntu"]}]`. Launched exactly as written, listed after the detected shells — in the menu's **Other Shells…** list until you have opened it, and in the palette as *Shell:* followed by its label. Give an entry arguments and tty7 also skips [shell integration](/reference/shell-integration) for it, so it has no prompt marks, working-directory tracking, or command-finished notifications; an entry with no arguments, on a shell tty7 recognizes, is integrated like the detected row beside it. An entry with no `program` is skipped; with no `label` it is named after its program. |
+| `custom_shells` | array | `[]` | Extra entries for the new-tab menu: `[{"label": "Ubuntu", "program": "wsl.exe", "args": ["-d", "Ubuntu"]}]`. Launched exactly as written, listed after the detected shells — in the menu's **Other Shells…** list until you have opened it, and in Search Everywhere's Terminals tab as *Shell:* followed by its label. Give an entry arguments and tty7 also skips [shell integration](/reference/shell-integration) for it, so it has no prompt marks, working-directory tracking, or command-finished notifications; an entry with no arguments, on a shell tty7 recognizes, is integrated like the detected row beside it. An entry with no `program` is skipped; with no `label` it is named after its program. |
 | `working_directory` | object | `{"strategy":"inherit"}` | `strategy` is `inherit`, `home`, or `custom`; `path` is used when custom. |
 | `env` | object | `{}` | Extra environment variables for every pane. |
 | `scrollback_limit` | number | `10000` | Lines per pane (100–100,000). New panes only. |
@@ -231,7 +231,7 @@ Each object in `ssh_profiles` can also set:
 ## Keys tty7 manages itself
 
 `shell_frecency` and `command_frecency` record how often and how recently you
-open a shell or run a command, so the new-tab menu and the palette can rank
+open a shell or run a command, so the new-tab menu and Search Everywhere can rank
 them. They are written by the app; there is no reason to edit them.
 
 <Note>

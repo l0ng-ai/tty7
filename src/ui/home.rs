@@ -162,7 +162,7 @@ fn home_shortcut_label(action: &str, closed: Option<&str>) -> String {
         "NewTab" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeNewTab),
         "ReopenClosedTab" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeReopenClosedTab),
         "ToggleSwitcher" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSwitchWorkspace),
-        "TogglePalette" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeCommandPalette),
+        "TogglePalette" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSearchEverywhere),
         "SplitRight" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSplitRight),
         "SplitDown" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSplitDown),
         "OpenSettings" => crate::ui::i18n::t(crate::ui::i18n::L10nKey::HomeSettings),

@@ -157,8 +157,8 @@ pub fn filter_hosts(hosts: &[HostChoice], query: &str) -> Vec<HostChoice> {
 }
 
 fn host_score(query: &str, host: &HostChoice) -> Option<i32> {
-    let label = crate::ui::palette::fuzzy_score(query, &host.label);
-    let detail = crate::ui::palette::fuzzy_score(query, &host.detail).map(|score| score - 3);
+    let label = crate::ui::search::fuzzy_score(query, &host.label);
+    let detail = crate::ui::search::fuzzy_score(query, &host.detail).map(|score| score - 3);
     label.into_iter().chain(detail).max()
 }
 

@@ -155,26 +155,27 @@ struct Row {
 
 /// One tab in the right-hand column. Built once per frame for every workspace
 /// on the left, so the search can match tab names and the column can render
-/// without a second pass over the machine tree.
+/// without a second pass over the machine tree. Search Everywhere's Terminals
+/// tab is built from the same rows.
 #[derive(Clone)]
-struct TabRow {
-    id: TabId,
+pub(crate) struct TabRow {
+    pub(crate) id: TabId,
     /// Position in the owning workspace's tab order — what `activate` wants.
-    index: usize,
-    label: String,
-    path: String,
+    pub(crate) index: usize,
+    pub(crate) label: String,
+    pub(crate) path: String,
     /// Whether `label` is a name someone gave the tab. When it is not, the
     /// label is already derived from the working directory and showing `path`
     /// next to it just prints the same place twice.
-    named: bool,
-    agent: Option<crate::core::cli_agent::CLIAgent>,
-    status: Option<crate::core::cli_agent::AgentStatus>,
-    unread: usize,
-    ssh: Option<u32>,
-    active: bool,
+    pub(crate) named: bool,
+    pub(crate) agent: Option<crate::core::cli_agent::CLIAgent>,
+    pub(crate) status: Option<crate::core::cli_agent::AgentStatus>,
+    pub(crate) unread: usize,
+    pub(crate) ssh: Option<u32>,
+    pub(crate) active: bool,
     /// Branch and diff counts, the same line the tab sidebar shows. Only this
     /// window's own tabs have it — the machine tree carries no git state.
-    git: Option<tty7_core::core::git::GitStatus>,
+    pub(crate) git: Option<tty7_core::core::git::GitStatus>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -420,7 +421,7 @@ fn default_workspace_name(chosen: Option<&HostChoice>, cx: &App) -> String {
 fn host_items(hosts: Vec<HostChoice>, query: &str, local_label: &str) -> Vec<HostItem> {
     let query = query.trim();
     let mut items: Vec<HostItem> = Vec::new();
-    if query.is_empty() || crate::ui::palette::fuzzy_score(query, local_label).is_some() {
+    if query.is_empty() || crate::ui::search::fuzzy_score(query, local_label).is_some() {
         items.push(HostItem::Local);
     }
     items.extend(
@@ -755,7 +756,7 @@ impl Tty7App {
                     adopt: None,
                     remote_id: w.host.as_ref().map(|r| r.workspace),
                     slot: slot_of(w.id),
-                    tabs: self.tab_rows_for(w.id, app),
+                    tabs: self.tab_rows_for(w.id, self.switcher_mru(), app),
                 });
             }
         }
@@ -834,7 +835,7 @@ impl Tty7App {
                     adopt: None,
                     remote_id: None,
                     slot: slot_of(current),
-                    tabs: self.tab_rows_for(current, app),
+                    tabs: self.tab_rows_for(current, self.switcher_mru(), app),
                 },
             );
         }
@@ -883,7 +884,7 @@ impl Tty7App {
                     adopt: None,
                     remote_id: None,
                     slot: None,
-                    tabs: self.tab_rows_for(ws.id, app),
+                    tabs: self.tab_rows_for(ws.id, self.switcher_mru(), app),
                 })
                 .collect();
             groups[slot].rows.extend(rows);
@@ -956,13 +957,22 @@ impl Tty7App {
         groups
     }
 
+    /// Whether the open switcher lists this window's tabs most recently used
+    /// first — the Ctrl-Tab gesture — rather than in strip order.
+    fn switcher_mru(&self) -> bool {
+        self.switcher.as_ref().is_some_and(|sw| sw.mru)
+    }
+
     /// The tab column's rows for one workspace. This window's own workspace has
     /// live in-memory tabs (agent status, unread counts, MRU order); every other
     /// workspace comes out of the machine mirror, which is the only view this
     /// process has of windows it does not own.
-    fn tab_rows_for(&self, id: WorkspaceId, cx: &App) -> Vec<TabRow> {
+    ///
+    /// `mru` orders this window's own tabs most recently used first instead of
+    /// in strip order; other workspaces' tabs come in the order they have.
+    pub(crate) fn tab_rows_for(&self, id: WorkspaceId, mru: bool, cx: &App) -> Vec<TabRow> {
         if id == self.workspace {
-            let order = match self.switcher.as_ref().is_some_and(|sw| sw.mru) {
+            let order = match mru {
                 true => self.tabs_by_mru(),
                 false => (0..self.tabs.len()).collect(),
             };
@@ -1625,8 +1635,8 @@ impl Tty7App {
             else {
                 return;
             };
-            let (ws, id, index) = (row.id, tab.id, tab.index);
-            self.switcher_open_tab(ws, id, index, new_window, window, cx);
+            let (ws, id) = (row.id, tab.id);
+            self.switcher_open_tab(ws, id, new_window, window, cx);
             return;
         }
         if let Some(&(g, r)) = layout.nav.get(sel) {
@@ -1636,23 +1646,33 @@ impl Tty7App {
         }
     }
 
-    /// Activates one tab of `ws`, wherever that workspace happens to live.
     fn switcher_open_tab(
         &mut self,
         ws: WorkspaceId,
         tab: TabId,
-        index: usize,
         new_window: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.close_switcher(window, cx);
+        self.go_to_tab(ws, tab, new_window, window, cx);
+    }
+
+    /// Activates one tab of `ws`, wherever that workspace happens to live.
+    pub(crate) fn go_to_tab(
+        &mut self,
+        ws: WorkspaceId,
+        tab: TabId,
+        new_window: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if new_window {
             crate::ui::windows::open_at_tab(cx, ws, tab);
             return;
         }
         if ws == self.workspace {
-            self.activate(index, window, cx);
+            self.activate_tree_tab(tab, window, cx);
             return;
         }
         // A workspace that already has a window belongs to that window; anything
@@ -2968,14 +2988,7 @@ impl Tty7App {
                         )
                     })
                     .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
-                        this.switcher_open_tab(
-                            ws,
-                            id,
-                            index,
-                            ev.modifiers().secondary(),
-                            window,
-                            cx,
-                        )
+                        this.switcher_open_tab(ws, id, ev.modifiers().secondary(), window, cx)
                     }))
                     // Mid-gesture a click arrives as a right press on macOS. It
                     // aims the cursor; releasing Ctrl is what commits.

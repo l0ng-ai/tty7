@@ -55,7 +55,7 @@ Native builds for macOS, Windows, and Linux on [**Releases**](https://github.com
 | **Agent-aware** | per-pane detection (23 CLIs) · status dot · notifications · branch + diff · tray icon when input is needed · resume after reboot · tab sidebar grouped by repository, with pinned groups |
 | **CLI + Skills** | bundled `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · `run` streams a command and exits with its code · `split` · `send` · `wait --until free` · `capture` |
 | **Editor-grade input** | ghost suggestions from history · explained tab completion · syntax highlighting · multi-line editing · click places the caret · <kbd>⌃ R</kbd> fuzzy history |
-| **Window** | tabs & splits · <kbd>⌘ P</kbd> palette · <kbd>⌘ F</kbd> scrollback search · <kbd>⌘ J</kbd> panel with process tree and listening ports · 13 themes, your own YAML, iTerm2 import · IME |
+| **Window** | tabs & splits · <kbd>⌘ P</kbd> Search Everywhere · <kbd>⌘ F</kbd> scrollback search · <kbd>⌘ J</kbd> panel with process tree and listening ports · 13 themes, your own YAML, iTerm2 import · IME |
 | **Shell integration** | injected when a pane starts, nothing to install · prompt marks · working directory · exit codes · command-finished notifications · zsh, bash, fish, PowerShell, WSL, remote panes |
 | **Remote workspaces** | remote files, repos, changes, diffs, worktrees, tabs, and panes · reconnect from any client and continue where you left off |
 | **SSH** | native russh stack: profiles with keychain secrets · SFTP panel · port forwarding · jump hosts · one-time, unprivileged `tty7-server` install |
@@ -102,7 +102,7 @@ that tells tty7 which session to fork.
 None of them are wrapped or proxied — the agent you start is the agent you get,
 in a normal PTY, with its own interface. An agent launched through a wrapper
 script can be mapped to one by name with `agent_commands` in `config.json`.
-Every agent on your `PATH` is also a palette command (**Agent: Claude Code**, …)
+Every agent on your `PATH` is also a row in Search Everywhere (**Agent: Claude Code**, …)
 that opens it in a new tab; `agent_launch` sets the command line it starts with.
 
 ## Documentation

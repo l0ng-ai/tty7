@@ -66,6 +66,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The command palette is now Search Everywhere, with tabs.** <kbd>⌘ P</kbd>
+  (<kbd>Ctrl ⇧ P</kbd> elsewhere) opens one search over four tabs — **All**,
+  **Actions**, **Terminals** and **Hosts** — walked with <kbd>⇥</kbd> /
+  <kbd>⇧ ⇥</kbd>, keeping what is typed. **Terminals** lists every open tab of
+  every workspace, this window's most recently used first, and jumps to it
+  wherever it lives; the shells and agents it can open follow. **Hosts** holds
+  the saved SSH hosts and whatever address or `ssh …` command line is typed,
+  which replaces the separate input *SSH: Add Connection…* used to open. **All**
+  shows the best few rows of each, the tab with the best match first, and folds
+  the rest into a row that opens its tab. With nothing typed, <kbd>⌘ P</kbd>
+  <kbd>⏎</kbd> goes back to the tab you were just in. The keybinding action is
+  still `TogglePalette`, so a custom binding keeps working.
+- **Resume a past agent session from Search Everywhere.** Its **Sessions** tab
+  lists the Claude Code and Codex sessions on this computer — those that ran in
+  the focused tab's directory first — by the title the agent gave them, with
+  directory, branch and age, and <kbd>⏎</kbd> resumes one in a new tab in the
+  directory it ran in, with the agent's configured launch flags. Only the ends
+  of each transcript are read, in the background, and remembered until the file
+  changes.
+
 - **The sidebar groups tabs by repo automatically; pin what you want to keep**
   (#955). Groups now come in two halves, split by a divider. Below it, every
   tab you have not pinned is filed under its git repository, and an SSH tab
@@ -155,6 +175,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sessions on it.
 
 ### Fixed
+
+- **Return runs the top row after a search that found nothing.** Backspacing
+  from a query with no results to one with some — or opening the search
+  already filtered, as the New Tab menu's *Other Shells…* and *Launch Agent…*
+  rows do — left no row selected, so Return did nothing until an arrow key was
+  pressed.
+- **A typed `ssh -p 2222 me@box` is no longer offered as an address.** The
+  address parser read everything before the `@` as the user name and offered
+  to connect as `ssh -p 2222 me`; a line with spaces is now always taken as an
+  `ssh` command line.
 
 - **Nerd Font icons from a fallback font come out at the text's size** (#866).
   With a Nerd Font icon face such as Symbols Nerd Font Mono behind a primary

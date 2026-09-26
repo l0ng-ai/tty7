@@ -722,16 +722,16 @@ mod gpui_tests {
     #[gpui::test]
     fn the_palette_offers_the_active_tabs_layout_not_the_configs(cx: &mut TestAppContext) {
         use crate::ui::i18n::L10nKey;
-        use crate::ui::palette::CommandKind;
+        use crate::ui::search::CommandKind;
 
         let (app, mut vcx) = window_with(cx, 1440., 2);
         crate::ui::i18n::set_locale("en");
         let row = |app: &Entity<Tty7App>, vcx: &mut VisualTestContext| {
             app.update_in(vcx, |app, window, cx| {
-                app.palette_commands(window, cx)
+                app.search_actions(window, cx)
                     .into_iter()
                     .find(|c| c.kind == CommandKind::ToggleDocumentFill)
-                    .expect("the palette offers the fill toggle")
+                    .expect("the search offers the fill toggle")
                     .title
             })
         };

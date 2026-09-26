@@ -3950,13 +3950,13 @@ mod fold_tests {
             assert_eq!(app.group_rename.as_ref().map(|r| r.group), Some(id));
             assert!(app.tabs.iter().all(|t| t.group.get().is_none()));
             let kinds: Vec<_> = app
-                .palette_commands(window, cx)
+                .search_actions(window, cx)
                 .into_iter()
                 .map(|c| c.kind)
                 .collect();
-            assert!(kinds.contains(&crate::ui::palette::CommandKind::NewGroup));
+            assert!(kinds.contains(&crate::ui::search::CommandKind::NewGroup));
             assert!(
-                kinds.contains(&crate::ui::palette::CommandKind::OpenFolderAsGroup),
+                kinds.contains(&crate::ui::search::CommandKind::OpenFolderAsGroup),
                 "a workspace on this computer can pick a folder"
             );
         });

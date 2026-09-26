@@ -25,8 +25,27 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SearchThemes => "Search themes…",
         L10nKey::SearchSettings => "Search settings…",
         L10nKey::FilterHosts => "Filter hosts…",
-        L10nKey::SearchCommandsOrHost => "Search or type user@host to connect…",
         L10nKey::SearchTheme => "Search…",
+        L10nKey::SearchTabAll => "All",
+        L10nKey::SearchTabActions => "Actions",
+        L10nKey::SearchTabTerminals => "Terminals",
+        L10nKey::SearchTabHosts => "Hosts",
+        L10nKey::SearchPlaceholderAll => "Search actions, terminals and hosts…",
+        L10nKey::SearchPlaceholderActions => "Search actions…",
+        L10nKey::SearchPlaceholderTerminals => "Search open tabs, shells and agents…",
+        L10nKey::SearchPlaceholderHosts => "Search hosts, or type user@host to connect…",
+        L10nKey::SearchTabSessions => "Sessions",
+        L10nKey::SearchPlaceholderSessions => "Search past agent sessions…",
+        L10nKey::SearchSessionsEmptyHint => {
+            "Claude Code and Codex sessions on this computer are listed here."
+        }
+        L10nKey::SearchSectionSessionsHere => "In {dir}",
+        L10nKey::SearchSectionSessionsRecent => "Recent",
+        L10nKey::AppSessionNotResumable => "{name} cannot resume a session by id.",
+        L10nKey::AppSessionDirectoryGone => "The session's directory no longer exists: {path}",
+        L10nKey::SearchMoreIn => "{count} more in {tab}",
+        L10nKey::SearchNoResults => "No results",
+        L10nKey::SearchSectionNewTerminal => "New Terminal",
         L10nKey::SearchWorkspacesAndMachines => "Search workspaces, tabs, and machines…",
         L10nKey::SearchFonts => "Search fonts…",
         L10nKey::SearchFind => "Find…",
@@ -37,7 +56,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::HomeNewTab => "New Tab",
         L10nKey::HomeReopenClosedTab => "Reopen Closed Tab",
         L10nKey::HomeSwitchWorkspace => "Switch Workspace…",
-        L10nKey::HomeCommandPalette => "Command Palette…",
+        L10nKey::HomeSearchEverywhere => "Search Everywhere…",
         L10nKey::HomeSplitRight => "Split Right",
         L10nKey::HomeSplitDown => "Split Down",
         L10nKey::HomeSettings => "Settings…",
@@ -48,7 +67,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::Refreshing => "refreshing…",
         L10nKey::Binary => "binary",
         L10nKey::Delete => "Delete",
-        L10nKey::NoMatchingCommands => "No matching commands",
         L10nKey::ConnectSshHint => "Type user@host to connect over SSH instead.",
         L10nKey::EditHint => "edit",
         L10nKey::OpenFileFromTree => "Open a file from the file tree",
@@ -1693,7 +1711,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppNoUncommittedChanges => {
             "No uncommitted changes in {cwd} (or not a git repository)."
         }
-        L10nKey::AppCmdSshProfileTitle => "SSH: {title}",
         L10nKey::AppCmdAgentLaunchTitle => "Agent: {name}",
         L10nKey::AppNoAgentOnPath => "No coding agent was found on this machine's PATH",
         L10nKey::AppNoAgentSeenHere => {
@@ -1704,7 +1721,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "{name} did not report the arguments it was started with"
         }
         L10nKey::AppCmdShellTitle => "Shell: {title}",
-        L10nKey::AppCmdSwitchToTab => "Switch to Tab: {label}",
         L10nKey::AppPlaceholderDescription => "description",
         L10nKey::AppPlaceholderSshQuickConnect => "user@host  or  user@host:port",
         L10nKey::AppPlaceholderLoginShell => "login shell",
@@ -1879,7 +1895,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppMenuFind => "Find…",
         L10nKey::AppMenuFindNext => "Find Next",
         L10nKey::AppMenuFindPrevious => "Find Previous",
-        L10nKey::AppMenuCommandPalette => "Command Palette…",
+        L10nKey::AppMenuSearchEverywhere => "Search Everywhere…",
         L10nKey::AppMenuIncreaseFontSize => "Increase Font Size",
         L10nKey::AppMenuDecreaseFontSize => "Decrease Font Size",
         L10nKey::AppMenuResetFontSize => "Reset Font Size",
