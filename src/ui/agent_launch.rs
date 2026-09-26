@@ -27,11 +27,11 @@ use crate::ui::app::{SpawnAs, SpawnWhere, Tty7App, join_shell_args};
 use crate::ui::i18n::{L10nKey, t_fmt};
 use crate::ui::pane::PaneSlot;
 
-/// What the New Tab menu's "Launch Agent…" row types into the palette: every
-/// quick-launch command is titled `Agent: {name}` (the same word in every
-/// language we ship), so this lands on the list with the cursor ready to
-/// narrow it — the same seam `PALETTE_SSH_QUERY` is for hosts.
-pub(crate) const PALETTE_AGENT_QUERY: &str = "agent";
+/// What the New Tab menu's "Launch Agent…" row types into the search's
+/// Terminals tab: every quick-launch row is titled `Agent: {name}` (the same
+/// word in every language we ship), so this lands on the list with the cursor
+/// ready to narrow it — the same seam `SEARCH_SHELL_QUERY` is for shells.
+pub(crate) const SEARCH_AGENT_QUERY: &str = "agent";
 
 /// How the keymap spells "launch this agent": `LaunchAgent:claude`.
 const LAUNCH_ACTION_PREFIX: &str = "LaunchAgent:";

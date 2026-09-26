@@ -54,7 +54,7 @@ macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/
 | **Agent 感知** | 逐 pane 识别 20 个 CLI agent · 状态点 · 通知 · 分支 + diff · 需要输入时托盘图标提醒 · 重启后续上会话 · 侧边栏按仓库分组 |
 | **CLI + Skills** | 安装包自带 `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · `run` 转发命令输出并原样返回退出码 · `split` · `send` · `wait --until free` · `capture` |
 | **编辑器级输入** | 从历史推出影子建议 · Tab 补全附带说明 · 语法高亮 · 多行编辑 · 点击定位光标 · <kbd>⌃ R</kbd> 模糊搜索历史 |
-| **窗口** | 标签页与分屏 · <kbd>⌘ P</kbd> 命令面板 · <kbd>⌘ F</kbd> 回滚搜索 · <kbd>⌘ J</kbd> 侧栏列出进程树和监听端口 · 13 套主题，也能写自己的 YAML 或导入 iTerm2 配色 · 输入法 |
+| **窗口** | 标签页与分屏 · <kbd>⌘ P</kbd> 随处搜索 · <kbd>⌘ F</kbd> 回滚搜索 · <kbd>⌘ J</kbd> 侧栏列出进程树和监听端口 · 13 套主题，也能写自己的 YAML 或导入 iTerm2 配色 · 输入法 |
 | **Shell 集成** | pane 启动时自动注入，不用你装什么 · 提示符边界 · 工作目录 · 退出码 · 命令跑完发通知 · 覆盖 zsh、bash、fish、PowerShell、WSL 和远程 pane |
 | **远程工作区** | 远端的文件、仓库、改动、diff、worktree、标签页和 pane · 从任意客户端重连，接着离开时的位置继续 |
 | **SSH** | 自带 russh 实现，不依赖外部 ssh：profile 凭据存入 keychain · SFTP 面板 · 端口转发 · 跳板机 · `tty7-server` 只需安装一次，无需 root |
@@ -96,7 +96,7 @@ macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/
 
 tty7 不包装、不代理其中任何一个 —— 你启动的就是那个 agent 本身，运行在普通 PTY 中，界面仍然是它自己的。
 如果你通过 wrapper 脚本启动 agent，在 `config.json` 的 `agent_commands` 里把脚本名映射到对应 agent 即可。
-PATH 上的每个 agent 也都是一条命令面板命令（**Agent：Claude Code** 等），会在新标签页中启动它；`agent_launch` 可以设置它的启动命令行。
+PATH 上的每个 agent 也都能在随处搜索里找到（**Agent：Claude Code** 等），会在新标签页中启动它；`agent_launch` 可以设置它的启动命令行。
 
 ## 文档
 

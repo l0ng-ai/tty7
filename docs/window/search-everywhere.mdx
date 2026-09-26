@@ -1,0 +1,80 @@
+---
+title: "Search Everywhere"
+description: "One key for every action, every open tab and every host — each in a tab of its own."
+---
+
+<kbd>⌘ P</kbd> (<kbd>Ctrl ⇧ P</kbd> on Linux and Windows) opens Search
+Everywhere. Type to filter, <kbd>↑</kbd> <kbd>↓</kbd> to move, <kbd>⏎</kbd> to
+run, <kbd>⇥</kbd> / <kbd>⇧ ⇥</kbd> to move between its tabs. Press the key again
+or <kbd>Esc</kbd> to close it.
+
+## Tabs
+
+| Tab | What it holds |
+|---|---|
+| **All** | The best few rows from each tab below, each under the tab's name. The tab holding the best match comes first, so <kbd>⏎</kbd> always runs the best answer anywhere. When a tab has more rows than fit, a *N more in …* row opens that tab with your query still typed. |
+| **Actions** | Every action tty7 can perform, whether or not it has a keybinding — the fastest way to reach the ones that deliberately ship unbound, like pane resize and swap. |
+| **Terminals** | Every open tab of every workspace, this window's first and most recently used first, then every way to open a new one: the shells this machine has (*Shell: zsh*) and the coding agents on your `PATH` (*Agent: Claude Code*). |
+| **Hosts** | Your saved SSH hosts, most used first — and whatever address you type. |
+
+With nothing typed, **All** leads with this window's other tabs, most recent
+first, so <kbd>⌘ P</kbd> <kbd>⏎</kbd> takes you back to the tab you were just
+in. The actions you run most follow under *Actions*.
+
+## Actions
+
+With nothing typed, the Actions tab lists what you use most under *Recent*,
+then everything else in groups — the groups are the map of the app:
+
+| Group | Examples |
+|---|---|
+| **Tabs & Panes** | New Tab · New Worktree Tab… · Split Right · Zoom Pane · Focus Pane Left · Resize Pane Up · Swap Pane Next · Reopen Closed Tab · Copy Working Directory · Fork Session |
+| **Workspaces** | New Workspace… · Switch Workspace… · Rename Workspace… · Stop Workspace… · Delete Workspace… |
+| **View** | Show/Hide Left Sidebar · Show/Hide Right Panel · Show Code Panel · Tab Bar: Move to Top · Right Panel: Info / Changes / Files · Change Theme… · Enter Full Screen · Toggle Unified / Side-by-Side Diff |
+| **Git** | Commit · Stage All Changes · Unstage All · Discard All · Create Branch… · Sync · Push · Pull · Fetch |
+| **Terminal** | Clear Scrollback · Find in Terminal… · Find Next / Previous · Copy · Cut · Paste · Select All |
+| **SSH** | Add Connection… · Manage Profiles… · Reconnect · Remote Files · Port Forwarding |
+| **Agents** | New Agent Tab · Send Selection · Send Git Diff for Review · Copy Session ID |
+| **Application** | Settings… · Keyboard Shortcuts · Check for Updates… · Documentation · Join the Discord · Report an Issue… · Restart Server… |
+
+Entries that do something destructive say so under the name — *Delete
+Workspace…* is subtitled "ends its shells and forgets the layout", *Restart
+Server…* is "ends every running shell; layout is kept".
+
+Every action is found by its name in any language tty7 ships, so an English
+query finds a Chinese or Japanese label.
+
+**Change Theme…** opens the theme list in place: moving through it previews
+each theme on the window, <kbd>⏎</kbd> keeps it, <kbd>Esc</kbd> puts the old one
+back and returns to where you were.
+
+## Connecting to a host
+
+Type an SSH address — in the **Hosts** tab, or straight into **All** — and it
+offers to connect to it, or to save it as a host:
+
+```
+me@devbox
+me@devbox:2222
+[::1]:22
+```
+
+A full command line works too — `ssh -p 2222 -J jump me@devbox` connects with
+exactly those options, and `ssh devbox` resolves an alias from
+`~/.ssh/config` the way `ssh` would. A bare word on its own is a search, not
+an address.
+
+Saved hosts are listed by name; <kbd>⌘ E</kbd> on one opens it for editing
+instead of connecting. **SSH: Add Connection…** in the Actions tab takes you to
+the Hosts tab. [SSH →](/remote/ssh)
+
+## Sending context to an agent
+
+Two actions hand what is in front of you to the coding agent running in the
+pane, as a ready-made prompt:
+
+- **Agent: Send Selection** — the current selection.
+- **Agent: Send Git Diff for Review** — the repository's `git diff`.
+
+If no agent is running, tty7 says so rather than typing into your shell.
+[Agents →](/agents/overview)

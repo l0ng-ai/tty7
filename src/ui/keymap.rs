@@ -1,4 +1,4 @@
-use gpui::{App, Global, KeyBinding, Keystroke, NoAction};
+use gpui::{App, Global, KeyBinding, Keystroke};
 
 use crate::core::actions::*;
 use crate::core::config::{Config, KeybindingOverride};
@@ -7,7 +7,7 @@ use crate::terminal::view::{
     InsertNewline, InsertNewlineFallback, PasteText,
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use crate::ui::palette::CommandGroup;
+use crate::ui::search::CommandGroup;
 use crate::ui::settings::humanize_action;
 use crate::ui::theme::set_menus;
 
@@ -64,11 +64,12 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         SwitcherAcrossBack,
         Some("Switcher"),
     ));
-    // The palette has nowhere for Tab to go — the arrows walk the list and
-    // Enter runs it — but Root's focus walker still had somewhere to send it:
-    // out of the modal, onto whichever chrome tile is behind it, ring and all.
-    bindings.push(KeyBinding::new("tab", NoAction {}, Some("Palette")));
-    bindings.push(KeyBinding::new("shift-tab", NoAction {}, Some("Palette")));
+    // Tab walks the search's tabs. Bound on the search's own context for the
+    // switcher's reason: Root's focus walker would otherwise take it out of
+    // the modal, onto whichever chrome tile is behind it, ring and all.
+    let search = Some(crate::ui::search::KEY_CONTEXT);
+    bindings.push(KeyBinding::new("tab", SearchNextTab, search));
+    bindings.push(KeyBinding::new("shift-tab", SearchPrevTab, search));
     bindings
 }
 
@@ -866,7 +867,7 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         "NewAgentTab" => (CommandGroup::Agents, t(L10nKey::CmdNewAgentTab).to_string()),
         "TogglePalette" => (
             CommandGroup::Application,
-            t(L10nKey::AppMenuCommandPalette).to_string(),
+            t(L10nKey::AppMenuSearchEverywhere).to_string(),
         ),
         "NewWindow" => (
             CommandGroup::Application,
@@ -1611,7 +1612,7 @@ mod tests {
         assert_eq!(action_entry("NewWindow").1, "New Window");
         assert_eq!(action_entry("CloseWindow").1, "Close Window");
         assert_eq!(action_entry("ClearScrollback").1, "Clear Scrollback");
-        assert_eq!(action_entry("TogglePalette").1, "Command Palette…");
+        assert_eq!(action_entry("TogglePalette").1, "Search Everywhere…");
         assert_eq!(action_entry("ToggleSwitcher").1, "Switch Workspace…");
         // The numbered families are templated, not nine strings per locale.
         assert_eq!(action_entry("ActivateTab3").1, "Go to Tab 3");

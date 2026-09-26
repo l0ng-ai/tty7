@@ -30,12 +30,13 @@ use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::forwards::{ForwardFields, added_forward, rule_of};
 use crate::ui::host_registry::HostId;
 use crate::ui::i18n::{L10nKey, set_locale, t, t_fmt, t_plural};
-use crate::ui::palette::{
-    ChromeState, Command, CommandGroup, CommandKind, PaletteEvent, PaletteView,
-};
 use crate::ui::pane::{CloseOutcome, Dir, Pane, PaneSlot};
 use crate::ui::presets::Fill;
 use crate::ui::scm::ScmIntent;
+use crate::ui::search::{
+    Avatar, Catalog, ChromeState, CommandGroup, CommandKind, Item, SearchEvent, SearchTab,
+    SearchView,
+};
 use crate::ui::settings::{Recording, SettingsSection, SettingsState, ThemeEditor};
 use crate::ui::theme::{apply_theme, set_menus};
 
@@ -874,11 +875,11 @@ pub struct Tty7App {
     _git_status_watch: Subscription,
     _pane_liveness_watch: Subscription,
     _appearance_watch: Subscription,
-    palette: Option<Entity<PaletteView>>,
-    palette_sub: Option<Subscription>,
-    /// Preset that was live when the palette's theme picker started previewing.
+    pub(crate) search: Option<Entity<SearchView>>,
+    search_sub: Option<Subscription>,
+    /// Preset that was live when the search's theme picker started previewing.
     /// `Some` means the theme on screen is a preview that was never written to
-    /// disk, and closing the palette without confirming puts this one back.
+    /// disk, and closing the search without confirming puts this one back.
     theme_preview_restore: Option<String>,
     pub(crate) closed: Vec<SessionTab>,
     pub(crate) renaming: Option<Renaming>,
@@ -1536,8 +1537,8 @@ impl Tty7App {
             _git_status_watch: git_status_watch,
             _pane_liveness_watch: pane_liveness_watch,
             _appearance_watch: appearance_watch,
-            palette: None,
-            palette_sub: None,
+            search: None,
+            search_sub: None,
             theme_preview_restore: None,
             closed: Vec::new(),
             renaming: None,
@@ -5739,8 +5740,19 @@ impl Tty7App {
         cx.notify();
     }
 
-    pub(crate) fn palette_commands(&self, window: &Window, cx: &App) -> Vec<Command> {
-        let mut commands = Command::base_commands(
+    /// Everything the search offers from this window, gathered when it opens.
+    pub(crate) fn search_catalog(&self, window: &Window, cx: &App) -> Catalog {
+        Catalog::new(
+            self.search_actions(window, cx),
+            self.search_terminals(cx),
+            crate::ui::search::host_items(cx),
+        )
+    }
+
+    /// The Actions tab: the fixed set, plus the rows only this window can
+    /// judge are worth offering.
+    pub(crate) fn search_actions(&self, window: &Window, cx: &App) -> Vec<Item> {
+        let mut actions = Item::actions(
             cx,
             ChromeState {
                 rail_collapsed: self.sidebar_collapsed,
@@ -5753,43 +5765,14 @@ impl Tty7App {
             },
         );
 
-        // Every shell the window's machine has, named alike in every language
-        // so the New Tab menu's "Other Shells…" row can land on exactly these
-        // by typing one word. Listed in the order that menu uses.
-        {
-            let default_shell = self.default_shell_label(cx);
-            let usage = &cx.global::<Config>().shell_frecency;
-            let now = crate::core::config::unix_now();
-            for s in crate::ui::tab_strip::shells_by_frecency(
-                &self.shells.shells,
-                &default_shell,
-                usage,
-                now,
-            ) {
-                let mut cmd = Command::new(
-                    t_fmt(L10nKey::AppCmdShellTitle, &[("title", &s.label)]),
-                    CommandKind::OpenShell(s.label.clone()),
-                )
-                .in_group(CommandGroup::TabsPanes);
-                if s.label == default_shell {
-                    cmd = cmd.with_subtitle(t(L10nKey::ShellDefault));
-                }
-                commands.push(cmd);
-            }
-        }
-
-        // Offered only where it would do something. A connection opened from a
-        // saved host has nothing to save, and a pane that is not an SSH one has
-        // no connection at all — either would be a row that quietly did nothing
-        // (#549).
         // Groups are something the sidebar draws, so they are offered only
         // while the tabs are in it. Opening a folder as a group asks the
         // system picker, which browses this computer: a path picked there
         // names nothing on a remote workspace's machine, where "Pin as
         // Group" in the file tree is the way in instead.
         if cx.global::<Config>().tab_bar_position == TabBarPosition::Left {
-            commands.push(
-                Command::localized(L10nKey::CmdNewGroup, CommandKind::NewGroup)
+            actions.push(
+                Item::localized(L10nKey::CmdNewGroup, CommandKind::NewGroup)
                     .with_subtitle(t(L10nKey::CmdNewGroupSubtitle))
                     .in_group(CommandGroup::TabsPanes),
             );
@@ -5797,8 +5780,8 @@ impl Tty7App {
                 .get(self.workspace)
                 .is_some_and(|w| w.is_remote())
             {
-                commands.push(
-                    Command::localized(
+                actions.push(
+                    Item::localized(
                         L10nKey::CmdOpenFolderAsGroup,
                         CommandKind::OpenFolderAsGroup,
                     )
@@ -5808,9 +5791,13 @@ impl Tty7App {
             }
         }
 
+        // Offered only where it would do something. A connection opened from a
+        // saved host has nothing to save, and a pane that is not an SSH one has
+        // no connection at all — either would be a row that quietly did nothing
+        // (#549).
         if self.unsaved_ssh_session(window, cx).is_some() {
-            commands.push(
-                Command::localized(
+            actions.push(
+                Item::localized(
                     L10nKey::CmdSshSaveConnection,
                     CommandKind::SaveSshSessionAsHost,
                 )
@@ -5818,27 +5805,95 @@ impl Tty7App {
                 .in_group(CommandGroup::Ssh),
             );
         }
+        actions
+    }
 
-        for p in crate::ui::ssh_connect::ssh_profiles_by_frecency(cx) {
-            let subtitle = crate::core::ssh_profile::to_connect_string(&p);
-            let title = if p.name.is_empty() {
-                subtitle.clone()
-            } else {
-                p.name.clone()
-            };
-            commands.push(
-                Command::new(
-                    t_fmt(L10nKey::AppCmdSshProfileTitle, &[("title", &title)]),
-                    CommandKind::ConnectSavedProfile(p.id),
+    /// The Terminals tab: every open tab of every workspace this process
+    /// knows — this window's first, most recently used first and without the
+    /// one you are in — then every way to open a new one.
+    pub(crate) fn search_terminals(&self, cx: &App) -> Vec<Item> {
+        let mut out = Vec::new();
+        let store = WorkspaceStore::all(cx);
+        let name_of = |id: WorkspaceId| {
+            store
+                .get(id)
+                .and_then(|w| crate::ui::machine_mirror::display_name(cx, w))
+                .unwrap_or_else(|| t(L10nKey::WindowUntitled).to_string())
+        };
+        // This window's own workspace leads, and is listed whether or not the
+        // store has caught up with it: its tabs are right here in the window.
+        let mut others: Vec<_> = store
+            .views
+            .iter()
+            .filter(|w| w.id != self.workspace)
+            .collect();
+        others.sort_by_key(|w| std::cmp::Reverse(w.last_active));
+        let workspaces = std::iter::once(self.workspace).chain(others.into_iter().map(|w| w.id));
+        for id in workspaces {
+            let name = name_of(id);
+            let here = id == self.workspace;
+            for tab in self.tab_rows_for(id, true, cx) {
+                if here && tab.active {
+                    continue;
+                }
+                let mut item = Item::new(
+                    tab.label.clone(),
+                    CommandKind::GoToTab {
+                        workspace: id,
+                        tab: tab.id,
+                    },
                 )
-                .with_subtitle(subtitle)
-                .in_group(CommandGroup::Ssh),
-            );
+                .with_avatar(Avatar {
+                    agent: tab.agent,
+                    status: tab.status,
+                    unread: tab.unread,
+                    ssh: tab.ssh,
+                })
+                .with_alias(name.clone())
+                .in_section(name.clone());
+                // A label derived from the path already says where; one that
+                // is a name or an agent leaves the place worth printing.
+                if tab.named && !tab.path.is_empty() {
+                    item = item.with_subtitle(tab.path.clone());
+                } else if !tab.path.is_empty() {
+                    item = item.with_alias(tab.path.clone());
+                }
+                if let Some(agent) = tab.agent {
+                    item = item.with_alias(agent.display_name());
+                }
+                if !here {
+                    item = item.with_note(name.clone());
+                }
+                out.push(item);
+            }
         }
 
+        let new_terminal: gpui::SharedString = t(L10nKey::SearchSectionNewTerminal).into();
+        // Every shell the window's machine has, named alike in every language
+        // so the New Tab menu's "Other Shells…" row can land on exactly these
+        // by typing one word. Listed in the order that menu uses.
+        let default_shell = self.default_shell_label(cx);
+        let usage = &cx.global::<Config>().shell_frecency;
+        let now = crate::core::config::unix_now();
+        for s in crate::ui::tab_strip::shells_by_frecency(
+            &self.shells.shells,
+            &default_shell,
+            usage,
+            now,
+        ) {
+            let mut item = Item::new(
+                t_fmt(L10nKey::AppCmdShellTitle, &[("title", &s.label)]),
+                CommandKind::OpenShell(s.label.clone()),
+            )
+            .in_section(new_terminal.clone());
+            if s.label == default_shell {
+                item = item.with_subtitle(t(L10nKey::ShellDefault));
+            }
+            out.push(item);
+        }
         for agent in self.offered_agents(cx) {
-            commands.push(
-                Command::new(
+            out.push(
+                Item::new(
                     t_fmt(
                         L10nKey::AppCmdAgentLaunchTitle,
                         &[("name", agent.display_name())],
@@ -5846,84 +5901,75 @@ impl Tty7App {
                     CommandKind::LaunchAgent(agent),
                 )
                 .with_subtitle(agent.launch_command(&cx.global::<Config>().agent_launch))
-                .in_group(CommandGroup::Agents),
+                .with_avatar(Avatar {
+                    agent: Some(agent),
+                    ..Avatar::default()
+                })
+                .in_section(new_terminal.clone()),
             );
         }
-
-        for (i, tab) in self.tabs.iter().enumerate() {
-            if i == self.active {
-                continue;
-            }
-            let label = self.tab_label(tab, i, None, cx);
-            commands.push(
-                Command::new(
-                    t_fmt(L10nKey::AppCmdSwitchToTab, &[("label", &label)]),
-                    CommandKind::ActivateTab(i),
-                )
-                .in_group(CommandGroup::TabsPanes),
-            );
-        }
-        commands
+        out
     }
 
-    fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.is_some() {
-            self.close_palette(window, cx);
+    fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_some() {
+            self.close_search(window, cx);
             return;
         }
-        self.open_palette("", window, cx);
+        self.open_search(SearchTab::All, "", window, cx);
     }
 
-    /// Open the palette with `query` already in its search field.
+    /// Open the search on `tab` with `query` already in its field.
     ///
-    /// Unlike [`Self::toggle_palette`] this always opens. A row that names
+    /// Unlike [`Self::toggle_search`] this always opens. A row that names
     /// what it will show cannot also be the thing that dismisses it, and the
     /// only ways in here are rows like that.
-    pub(crate) fn open_palette(
+    pub(crate) fn open_search(
         &mut self,
+        tab: SearchTab,
         query: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let commands = self.palette_commands(window, cx);
-        let view = cx.new(|cx| PaletteView::seeded(commands, query, window, cx));
-        self.palette_sub = Some(cx.subscribe_in(&view, window, Self::on_palette_event));
-        self.palette = Some(view);
+        let catalog = self.search_catalog(window, cx);
+        let view = cx.new(|cx| SearchView::new(catalog, tab, query, window, cx));
+        self.search_sub = Some(cx.subscribe_in(&view, window, Self::on_search_event));
+        self.search = Some(view);
         cx.notify();
     }
 
-    fn on_palette_event(
+    fn on_search_event(
         &mut self,
-        _view: &Entity<PaletteView>,
-        ev: &PaletteEvent,
+        _view: &Entity<SearchView>,
+        ev: &SearchEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match ev {
-            PaletteEvent::Confirm(kind) => {
+            SearchEvent::Confirm(kind) => {
                 let kind = kind.clone();
                 // The picker is already showing this theme; keep it through the
                 // close instead of reverting and re-applying it.
                 if matches!(kind, CommandKind::SetTheme(_)) {
                     self.theme_preview_restore = None;
                 }
-                self.close_palette(window, cx);
+                self.close_search(window, cx);
                 self.run_command(kind, window, cx);
             }
-            PaletteEvent::Dismiss => self.close_palette(window, cx),
-            PaletteEvent::PreviewTheme(i) => {
+            SearchEvent::Dismiss => self.close_search(window, cx),
+            SearchEvent::PreviewTheme(i) => {
                 if let Some(id) = crate::ui::presets::all(cx).get(*i).map(|t| t.id.clone()) {
                     self.preview_preset(&id, window, cx);
                 }
             }
-            PaletteEvent::CancelThemePreview => self.cancel_preset_preview(window, cx),
+            SearchEvent::CancelThemePreview => self.cancel_preset_preview(window, cx),
         }
     }
 
-    pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette = None;
-        self.palette_sub = None;
-        // A previewed theme was never persisted: closing the palette any way
+    pub(crate) fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search = None;
+        self.search_sub = None;
+        // A previewed theme was never persisted: closing the search any way
         // other than confirming the pick puts the old one back.
         self.cancel_preset_preview(window, cx);
         self.focus_active(window, cx);
@@ -6110,8 +6156,10 @@ impl Tty7App {
             ScmCreateBranch => self.run_scm_action(ScmIntent::CreateBranch, window, cx),
             OpenBranchPicker => self.run_scm_action(ScmIntent::CheckoutBranch, window, cx),
             ToggleDiffViewMode => self.toggle_diff_view_mode(cx),
-            OpenThemePicker | OpenSshConnectInput => {}
-            ActivateTab(i) => self.activate(i, window, cx),
+            // Both are the search's own, and handled inside it.
+            OpenThemePicker => {}
+            SearchHosts => self.open_search(SearchTab::Hosts, "", window, cx),
+            GoToTab { workspace, tab } => self.go_to_tab(workspace, tab, false, window, cx),
         }
     }
 
@@ -9227,9 +9275,11 @@ impl Render for Tty7App {
                 .on_action(
                     cx.listener(|this, _: &ResetFontSize, _window, cx| this.reset_font_size(cx)),
                 )
-                .on_action(cx.listener(|this, _: &TogglePalette, window, cx| {
-                    this.toggle_palette(window, cx)
-                }))
+                .on_action(
+                    cx.listener(|this, _: &TogglePalette, window, cx| {
+                        this.toggle_search(window, cx)
+                    }),
+                )
                 .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
                     this.reopen_closed_tab(window, cx)
                 }))
@@ -9445,7 +9495,7 @@ impl Render for Tty7App {
                     this.child(el)
                 })
                 .children(self.render_switcher(window, cx))
-                .when_some(self.palette.clone(), |this, palette| this.child(palette))
+                .when_some(self.search.clone(), |this, search| this.child(search))
                 .children(gpui_component::Root::render_notification_layer(window, cx));
 
         if let Some(start) = prof {

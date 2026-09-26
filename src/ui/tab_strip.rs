@@ -25,6 +25,7 @@ use crate::ui::app::{SpawnWhere, TILE_GLYPH, TILE_SIZE, Tab, Tty7App, tile_trail
 use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
+use crate::ui::search::SearchTab;
 
 /// One duration and one curve for every transition the app runs, so a fade and
 /// a slide read as the same hand. Long enough to be seen as movement, short
@@ -681,7 +682,7 @@ pub(crate) fn chrome_tile_sized(
 ///
 /// Sorted by frecency, so the ones actually used are the ones that fit. A menu
 /// is not a search field — past a handful the list stops being scannable, and
-/// the command palette already lists every host and can filter. The row that
+/// the search's Hosts tab already lists every host and can filter. The row that
 /// closes the section is where the rest are.
 const MENU_HOSTS: usize = 6;
 
@@ -691,7 +692,7 @@ const MENU_HOSTS: usize = 6;
 /// reports nine shells and almost nobody opens more than one or two of them.
 /// The default always leads — it is the answer to "what do I get if I just
 /// click" — and the rest of the rows go to whatever has actually been opened,
-/// by frecency. Everything else is one row away, in the palette.
+/// by frecency. Everything else is one row away, in the search.
 const MENU_SHELLS: usize = 3;
 
 /// How wide the New Tab menu is allowed to get.
@@ -708,31 +709,24 @@ const MENU_W: Pixels = px(360.);
 /// it hangs off is worse than one that scrolls.
 const MENU_H: Pixels = px(560.);
 
-/// What the row closing the SSH section types into the palette for you.
-///
-/// Every saved host is a palette command titled `SSH: {name}`
-/// ([`L10nKey::AppCmdSshProfileTitle`], and the same in every language we
-/// ship), so this one word is the whole list, frecency-ordered, with the
-/// cursor left where the next keystroke narrows it further.
+/// What the row closing the Local section types into the search's Terminals
+/// tab for you.
 ///
 /// This is where filtering lives, and the reason the menu does not do any.
 /// A search field inside a [`PopupMenu`] is not possible — the menu holds the
 /// keyboard for its own navigation — and the branch that tried it had to
 /// become a popover carrying the palette's own list, which read as far too
 /// heavy hanging off a button in the chrome. The menu names the few worth
-/// naming; the palette, which already filters better than a menu could, holds
-/// the rest. This row is the seam between the two, and it only works if it
-/// lands in the palette *already filtered*: a row that says "all SSH hosts"
-/// and opens the unfiltered command list has made the reader ask twice.
-const PALETTE_SSH_QUERY: &str = "ssh";
-
-/// What the row closing the Local section types into the palette for you.
+/// naming; the search, which already filters better than a menu could, holds
+/// the rest. The rows closing each section are the seam between the two, and
+/// they only work if they land *already filtered*: a row that says "other
+/// shells" and opens every terminal has made the reader ask twice.
 ///
-/// Every shell in the window's inventory is a palette command titled
-/// `Shell: {label}` ([`L10nKey::AppCmdShellTitle`], the same word in every
-/// language we ship, for the reason [`PALETTE_SSH_QUERY`] gives), so this one
-/// word lands on exactly the shells, default first and then by frecency.
-const PALETTE_SHELL_QUERY: &str = "shell";
+/// The Terminals tab holds open tabs as well as ways to open one, so the
+/// shells are narrowed to by word: every one is titled `Shell: {label}`
+/// ([`L10nKey::AppCmdShellTitle`], the same word in every language we ship),
+/// so this lands on exactly the shells, default first and then by frecency.
+const SEARCH_SHELL_QUERY: &str = "shell";
 
 /// How this platform spells the key that turns a New Tab row into a split.
 fn split_modifier() -> &'static str {
@@ -822,7 +816,7 @@ impl NewTabMenu {
                 },
             ));
         }
-        // The rest of the inventory is in the palette, already filtered to
+        // The rest of the inventory is in the search, already filtered to
         // it — the same seam the SSH section closes with. Absent when the
         // rows above are the whole inventory: a row into a list of nothing
         // new would be one more thing to read for no gain.
@@ -832,7 +826,7 @@ impl NewTabMenu {
                 move |_, window, cx| {
                     if let Some(app) = app.upgrade() {
                         app.update(cx, |this, cx| {
-                            this.open_palette(PALETTE_SHELL_QUERY, window, cx)
+                            this.open_search(SearchTab::Terminals, SEARCH_SHELL_QUERY, window, cx)
                         });
                     }
                 },
@@ -878,20 +872,20 @@ impl NewTabMenu {
                     if empty {
                         this.open_new_ssh_host(window, cx);
                     } else {
-                        this.open_palette(PALETTE_SSH_QUERY, window, cx);
+                        this.open_search(SearchTab::Hosts, "", window, cx);
                     }
                 });
             }
         }));
-        // The agents' seam into the palette, the same way the row above is the
-        // hosts': the menu names none of them, the palette holds them all.
+        // The agents' seam into the search, the same way the row above is the
+        // hosts': the menu names none of them, the search holds them all.
         let app = self.app.clone();
         menu = menu.item(PopupMenuItem::new(t(L10nKey::TabMenuLaunchAgent)).on_click(
             move |_, window, cx| {
                 if let Some(app) = app.upgrade() {
                     app.update(cx, |this, cx| {
-                        let query = crate::ui::agent_launch::PALETTE_AGENT_QUERY;
-                        this.open_palette(query, window, cx);
+                        let query = crate::ui::agent_launch::SEARCH_AGENT_QUERY;
+                        this.open_search(SearchTab::Terminals, query, window, cx);
                     });
                 }
             },
@@ -1227,7 +1221,7 @@ impl Tty7App {
                 move |menu, _window, _cx| {
                     menu.min_w(px(200.))
                         .action_context(action_ctx.clone())
-                        .menu(t(L10nKey::AppMenuCommandPalette), Box::new(TogglePalette))
+                        .menu(t(L10nKey::AppMenuSearchEverywhere), Box::new(TogglePalette))
                         .menu(t(L10nKey::AppMenuSettings), Box::new(OpenSettings))
                 },
             ),
@@ -1485,92 +1479,18 @@ impl Tty7App {
         size: f32,
         cx: &App,
     ) -> gpui::AnyElement {
-        // The wrapper positions; the disc below carries the radius.
-        // `status_dot` hangs itself off the edge with negative offsets — that
-        // overhang is what makes it a badge on the avatar rather than a notch
-        // in it — and as a child of the rounded element the overhang was
-        // clipped along the arc, leaving a crescent.
-        let base = div().id(id).flex_shrink_0().relative().size(px(size));
-        // Fill, hairline and mark all live here, so the radius only ever clips
-        // the disc's own paint.
-        let disc = || {
-            div()
-                .size(px(size))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-        };
-        match agent {
-            Some(agent) => {
-                let hollow = status == Some(crate::core::cli_agent::AgentStatus::Waiting);
-                let dot = status.and_then(|s| s.dot_rgb()).map(|rgb| {
-                    // A working agent's dot blinks, so a column of tabs
-                    // says at a glance which ones are still going.
-                    let faded = status == Some(crate::core::cli_agent::AgentStatus::Working)
-                        && !self.working_dot_on;
-                    Self::status_dot(rgb, unread, size, cx.theme().background, hollow, faded)
-                });
-                // Which agent this is, and what it wants, were carried entirely
-                // by a brand hue and a nine-pixel dot. Say it in words too.
-                let tip = match agent_status_label(status) {
-                    Some(state) => format!("{} — {state}", agent.display_name()),
-                    None => agent.display_name().to_string(),
-                };
-                // The disc is a solid fill of the agent's brand on every
-                // row, lit or not: a tint reads as a disabled tab, and the
-                // colour is how the eye tells one agent from another down a
-                // column of twenty.
-                let accent = agent.accent_rgb();
-                let surface = cx.theme().background;
-                base.child(
-                    disc()
-                        .bg(gpui::rgb(accent))
-                        // Codex and Grok are both pure black, which is the
-                        // window fill on a dark theme — the disc dissolves and
-                        // leaves the glyph floating. A hairline keeps it a disc
-                        // in any theme.
-                        .when(crate::ui::presets::needs_edge(accent, surface), |d| {
-                            d.border_1().border_color(cx.theme().border)
-                        })
-                        .child(
-                            gpui::svg()
-                                .path(agent.icon_path())
-                                .size(px(size * 0.54))
-                                // SVG assets render as a single-colour mask, so
-                                // the mark's colour comes from the agent rather
-                                // than from the file. The tray icon reads the
-                                // same answer.
-                                .text_color(gpui::rgb(agent.icon_rgb())),
-                        ),
-                )
-                .when_some(dot, |b, dot| b.child(dot))
-                .tooltip(move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                })
-                .into_any_element()
-            }
-            None => base
-                .child(
-                    disc().bg(cx.theme().muted).child(
-                        gpui::svg()
-                            .path("icons/terminal.svg")
-                            .size(px(size * 0.56))
-                            .text_color(cx.theme().foreground.opacity(0.65)),
-                    ),
-                )
-                .when_some(ssh, |b, rgb| {
-                    b.child(Self::status_dot(
-                        rgb,
-                        0,
-                        size,
-                        cx.theme().background,
-                        false,
-                        false,
-                    ))
-                })
-                .into_any_element(),
-        }
+        avatar_disc(
+            id,
+            crate::ui::search::Avatar {
+                agent,
+                status,
+                unread,
+                ssh,
+            },
+            size,
+            self.working_dot_on,
+            cx,
+        )
     }
 
     /// The mark a tab wears while one of its panes is zoomed over the others
@@ -2441,6 +2361,118 @@ impl Tty7App {
 ///
 /// Ungated: `test_window::harness` and `quiet_test_pane` both run on Windows,
 /// and a `unix` gate here would skip the one platform this was written on.
+/// A tab's avatar — agent disc and status dot, or the terminal glyph — for
+/// surfaces that draw a tab without owning the strip. It does not blink: a
+/// working agent's dot holds steady outside the strip's own clock.
+pub(crate) fn avatar(
+    id: impl Into<gpui::ElementId>,
+    avatar: crate::ui::search::Avatar,
+    size: f32,
+    cx: &App,
+) -> gpui::AnyElement {
+    avatar_disc(id, avatar, size, true, cx)
+}
+
+fn avatar_disc(
+    id: impl Into<gpui::ElementId>,
+    crate::ui::search::Avatar {
+        agent,
+        status,
+        unread,
+        ssh,
+    }: crate::ui::search::Avatar,
+    size: f32,
+    blink_on: bool,
+    cx: &App,
+) -> gpui::AnyElement {
+    // The wrapper positions; the disc below carries the radius.
+    // `status_dot` hangs itself off the edge with negative offsets — that
+    // overhang is what makes it a badge on the avatar rather than a notch
+    // in it — and as a child of the rounded element the overhang was
+    // clipped along the arc, leaving a crescent.
+    let base = div().id(id).flex_shrink_0().relative().size(px(size));
+    // Fill, hairline and mark all live here, so the radius only ever clips
+    // the disc's own paint.
+    let disc = || {
+        div()
+            .size(px(size))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+    };
+    match agent {
+        Some(agent) => {
+            let hollow = status == Some(crate::core::cli_agent::AgentStatus::Waiting);
+            let dot = status.and_then(|s| s.dot_rgb()).map(|rgb| {
+                // A working agent's dot blinks, so a column of tabs
+                // says at a glance which ones are still going.
+                let faded =
+                    status == Some(crate::core::cli_agent::AgentStatus::Working) && !blink_on;
+                Tty7App::status_dot(rgb, unread, size, cx.theme().background, hollow, faded)
+            });
+            // Which agent this is, and what it wants, were carried entirely
+            // by a brand hue and a nine-pixel dot. Say it in words too.
+            let tip = match agent_status_label(status) {
+                Some(state) => format!("{} — {state}", agent.display_name()),
+                None => agent.display_name().to_string(),
+            };
+            // The disc is a solid fill of the agent's brand on every
+            // row, lit or not: a tint reads as a disabled tab, and the
+            // colour is how the eye tells one agent from another down a
+            // column of twenty.
+            let accent = agent.accent_rgb();
+            let surface = cx.theme().background;
+            base.child(
+                disc()
+                    .bg(gpui::rgb(accent))
+                    // Codex and Grok are both pure black, which is the
+                    // window fill on a dark theme — the disc dissolves and
+                    // leaves the glyph floating. A hairline keeps it a disc
+                    // in any theme.
+                    .when(crate::ui::presets::needs_edge(accent, surface), |d| {
+                        d.border_1().border_color(cx.theme().border)
+                    })
+                    .child(
+                        gpui::svg()
+                            .path(agent.icon_path())
+                            .size(px(size * 0.54))
+                            // SVG assets render as a single-colour mask, so
+                            // the mark's colour comes from the agent rather
+                            // than from the file. The tray icon reads the
+                            // same answer.
+                            .text_color(gpui::rgb(agent.icon_rgb())),
+                    ),
+            )
+            .when_some(dot, |b, dot| b.child(dot))
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            })
+            .into_any_element()
+        }
+        None => base
+            .child(
+                disc().bg(cx.theme().muted).child(
+                    gpui::svg()
+                        .path("icons/terminal.svg")
+                        .size(px(size * 0.56))
+                        .text_color(cx.theme().foreground.opacity(0.65)),
+                ),
+            )
+            .when_some(ssh, |b, rgb| {
+                b.child(Tty7App::status_dot(
+                    rgb,
+                    0,
+                    size,
+                    cx.theme().background,
+                    false,
+                    false,
+                ))
+            })
+            .into_any_element(),
+    }
+}
+
 #[cfg(test)]
 mod ssh_host_row_tests {
     use crate::core::config::Config;

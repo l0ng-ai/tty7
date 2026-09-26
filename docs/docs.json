@@ -33,7 +33,7 @@
             "pages": [
               "window/tabs-and-splits",
               "window/sidebar",
-              "window/command-palette",
+              "window/search-everywhere",
               "window/search",
               "window/side-panel"
             ]
@@ -138,5 +138,11 @@
       "github": "https://github.com/l0ng-ai/tty7",
       "discord": "https://discord.gg/s3dethqz2V"
     }
-  }
+  },
+  "redirects": [
+    {
+      "source": "/window/command-palette",
+      "destination": "/window/search-everywhere"
+    }
+  ]
 }

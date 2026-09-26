@@ -8472,7 +8472,7 @@ impl Tty7App {
         // page anyone is configuring.
         let filtering = !query.is_empty() && section_match_count(section, &query) > 0;
         let mut grouped: Vec<(
-            crate::ui::palette::CommandGroup,
+            crate::ui::search::CommandGroup,
             Vec<(String, Vec<String>, String)>,
         )> = Vec::new();
         for (action, key) in effective {
@@ -8490,7 +8490,7 @@ impl Tty7App {
             slot.1.push((action, key, label));
         }
         grouped.sort_by_key(|(g, _)| {
-            crate::ui::palette::CommandGroup::ORDER
+            crate::ui::search::CommandGroup::ORDER
                 .iter()
                 .position(|o| o == g)
                 .unwrap_or(usize::MAX)
