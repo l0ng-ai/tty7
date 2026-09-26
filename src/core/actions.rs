@@ -27,6 +27,7 @@ actions!(
         CloseTabsToTheRight,
         CopyWorkingDirectory,
         OpenLinkUnderPointer,
+        OpenLinkWithDefaultApp,
         RevealLinkUnderPointer,
         CopyLinkPathUnderPointer,
         MarkTabUnread,

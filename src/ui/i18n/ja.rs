@@ -1964,6 +1964,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuZoomPane => "ペインを拡大",
         L10nKey::AppMenuClearScrollback => "スクロールバックをクリア",
         L10nKey::AppMenuOpenLink => "開く",
+        L10nKey::AppMenuOpenLinkWithDefaultApp => "既定のアプリで開く",
         L10nKey::AppMenuRevealInFinder => "Finder に表示",
         L10nKey::AppMenuRevealInFolder => "含まれるフォルダーを開く",
         L10nKey::AppMenuCopyLinkPath => "パスをコピー",

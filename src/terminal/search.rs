@@ -22,6 +22,10 @@ const MAX_MATCHES: usize = 10_000;
 /// from turning a hover into a burst of filesystem calls.
 const MAX_FILE_CANDIDATES: usize = 8;
 
+/// The longest quoted span read as one path with spaces in it. Windows'
+/// classic `MAX_PATH`: past this a quote is holding a sentence, not a path.
+const MAX_QUOTED_PATH: usize = 260;
+
 /// How long a printing pane has to stay quiet before an open search bar
 /// rescans it. Short enough that a command's output is re-counted by the time
 /// the eye gets back to the bar, long enough that a flood costs one scan per
@@ -794,33 +798,137 @@ impl PathStyle {
             // A UNC share, or a drive letter with a separator behind it.
             // `C:foo` is drive-*relative* and deliberately not included, which
             // is what `Path::is_absolute` says on Windows too.
-            PathStyle::Windows => {
-                if path.starts_with("\\\\") {
-                    return true;
-                }
-                let mut chars = path.chars();
-                chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-                    && chars.next() == Some(':')
-                    && matches!(chars.next(), Some('\\' | '/'))
-            }
+            PathStyle::Windows => path.starts_with("\\\\") || drive_root(path).is_some(),
         }
+    }
+
+    /// The one path a token that names its own root stands for, spelled the
+    /// way the pane's host can look it up — `None` for a token that has to be
+    /// measured from somewhere.
+    ///
+    /// A Windows pane gets its path back with every separator a `\` and the
+    /// drive letter upper-cased. `c:/Users/me/a.png` is what Node prints on
+    /// Windows, and while the filesystem takes either slash, Explorer does
+    /// not: handed a forward-slashed path to open or `/select,` it shows
+    /// Documents and reports success.
+    ///
+    /// A POSIX pane has no drives, but it may well be a WSL distro looking at
+    /// the Windows machine it runs on — a Windows tool run through interop, a
+    /// `wslpath -w`, a build log from the other side. There `C:\Users` is
+    /// `/mnt/c/Users`, and that is what the host is asked about. Anywhere else
+    /// the mount is not there and the probe simply misses, so nothing
+    /// underlines; that beats measuring `C:\Users` from the pane's directory,
+    /// which could only ever be nonsense.
+    pub fn rooted(self, path: &str) -> Option<String> {
+        match self {
+            PathStyle::Posix if path.starts_with('/') => Some(path.to_string()),
+            PathStyle::Posix => {
+                let (drive, rest) = drive_root(path)?;
+                let rest = rest.replace('\\', "/");
+                Some(format!(
+                    "/mnt/{}/{}",
+                    drive.to_ascii_lowercase(),
+                    rest.trim_start_matches('/')
+                ))
+            }
+            PathStyle::Windows => self.is_absolute(path).then(|| windows_spelling(path)),
+        }
+    }
+
+    /// Whether a token only means something against the current directory of
+    /// one particular drive: `C:notes.txt`, or `C:` on its own.
+    ///
+    /// There is no such thing as "the current directory of drive C" for a
+    /// pane — only for a process — so the one answer that would exist is tty7's
+    /// own, which has nothing to do with what the pane printed. And a bare
+    /// letter and a colon is far more often prose than a path: `a:b`, `x:y`.
+    fn is_drive_relative(self, path: &str) -> bool {
+        let mut chars = path.chars();
+        self == PathStyle::Windows
+            && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+            && chars.next() == Some(':')
+            && !matches!(chars.next(), Some('\\' | '/'))
     }
 
     /// `rel` measured from `root`, spelled the way the pane's host spells it.
     ///
-    /// The POSIX arm joins textually because `Path::join` would reach for this
+    /// Both arms join textually because `Path::join` would reach for this
     /// machine's separator: on Windows it turns `/home/u` and `src/lib.rs`
     /// into `/home/u\src/lib.rs`, which the Linux box on the other end of the
-    /// probe cannot stat.
+    /// probe cannot stat, and on a Mac it turns `C:\proj` and `src\lib.rs`
+    /// into `C:\proj/src\lib.rs` for a Windows host.
+    ///
+    /// A Windows `rel` that starts with a separator is rooted on the root's
+    /// own drive (or share), the way `cd \etc` is in a `cmd.exe` sitting on C:.
     pub fn join(self, root: &Path, rel: &str) -> PathBuf {
+        let root = root.to_string_lossy();
         match self {
-            PathStyle::Posix => PathBuf::from(format!(
-                "{}/{rel}",
-                root.to_string_lossy().trim_end_matches('/')
-            )),
-            PathStyle::Windows => root.join(rel),
+            PathStyle::Posix => PathBuf::from(format!("{}/{rel}", root.trim_end_matches('/'))),
+            PathStyle::Windows => {
+                let joined = match rel.starts_with(['\\', '/']) {
+                    true => format!("{}{rel}", windows_prefix(&root)),
+                    false => format!("{}\\{rel}", root.trim_end_matches(['\\', '/'])),
+                };
+                PathBuf::from(windows_spelling(&joined))
+            }
         }
     }
+}
+
+/// The drive letter a path starts with, and everything after the colon — only
+/// when a separator follows it, which is what makes it absolute. `C:\x` and
+/// `c:/x` are; `C:x`, `C:` and `12:30` are not.
+fn drive_root(path: &str) -> Option<(char, &str)> {
+    let mut chars = path.chars();
+    let drive = chars.next().filter(char::is_ascii_alphabetic)?;
+    let rest = path.strip_prefix(drive)?.strip_prefix(':')?;
+    rest.starts_with(['\\', '/']).then_some((drive, rest))
+}
+
+/// The part of a Windows path that names its drive or share: `C:` out of
+/// `C:\proj`, `\\server\share` out of `\\server\share\proj`. Empty when there
+/// is none to take.
+fn windows_prefix(path: &str) -> &str {
+    if drive_root(path).is_some() || path.len() == 2 && path.ends_with(':') {
+        return &path[..2];
+    }
+    if path.starts_with("\\\\") || path.starts_with("//") {
+        // Past the two leading separators, the server, and the share.
+        let mut seps = path
+            .char_indices()
+            .skip(2)
+            .filter(|&(_, c)| matches!(c, '\\' | '/'));
+        seps.next();
+        return match seps.next() {
+            Some((end, _)) => &path[..end],
+            None => path,
+        };
+    }
+    ""
+}
+
+/// `path` spelled the way `style`'s own tools want it — for handing a path to
+/// something outside tty7, like the OS opener. Only a Windows spelling
+/// changes, and only a path that is valid UTF-8: rewriting anything else
+/// through a lossy string would name a different file.
+pub(super) fn spelled_for(style: PathStyle, path: &Path) -> PathBuf {
+    match (style, path.to_str()) {
+        (PathStyle::Windows, Some(text)) => PathBuf::from(windows_spelling(text)),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// A Windows path the way Windows itself writes one: `\` throughout and an
+/// upper-case drive letter. Every Windows API takes `/` too, but Explorer —
+/// the system opener and the "Reveal" menu item — does not.
+fn windows_spelling(path: &str) -> String {
+    let mut out = path.replace('/', "\\");
+    if let Some((drive, _)) = drive_root(&out)
+        && drive.is_ascii_lowercase()
+    {
+        out.replace_range(..1, &drive.to_ascii_uppercase().to_string());
+    }
+    out
 }
 
 /// Where a relative path printed by a pane is measured from.
@@ -955,11 +1063,11 @@ impl FileCandidate {
         let Some(expanded) = expand_home(&self.path, roots) else {
             return Vec::new();
         };
-        if expanded.is_empty() {
+        if expanded.is_empty() || roots.style.is_drive_relative(&expanded) {
             return Vec::new();
         }
-        if roots.style.is_absolute(&expanded) {
-            return vec![PathBuf::from(expanded)];
+        if let Some(rooted) = roots.style.rooted(&expanded) {
+            return vec![PathBuf::from(rooted)];
         }
         let mut out: Vec<PathBuf> = Vec::new();
         for root in &roots.dirs {
@@ -981,7 +1089,7 @@ impl FileCandidate {
     /// `/etc/hosts` printed by a `cmd.exe` pane is not, and `Path` alone
     /// cannot tell those apart.
     pub fn is_rooted(&self, style: PathStyle) -> bool {
-        self.path.starts_with('~') || style.is_absolute(&self.path)
+        self.path.starts_with('~') || style.rooted(&self.path).is_some()
     }
 
     /// Whether the token is written enough like a path to be worth telling the
@@ -990,11 +1098,12 @@ impl FileCandidate {
     ///
     /// A backslash counts only where it separates directories. In a POSIX
     /// pane it is an escape or an ordinary filename character, so `foo\ bar`
-    /// there is a word, not a path.
+    /// there is a word, not a path. A drive letter is one in any pane.
     pub fn looks_like_a_path(&self, style: PathStyle) -> bool {
         self.path.starts_with('~')
             || self.path.contains('/')
             || (style == PathStyle::Windows && self.path.contains('\\'))
+            || drive_root(&self.path).is_some()
     }
 }
 
@@ -1012,8 +1121,9 @@ impl FileCandidate {
 /// separator: naming the prefixes costs a handful of readings where
 /// enumerating pairs costs a probe per pair, on every hover.
 pub(super) fn file_candidates_at(text: &str, col: usize) -> Vec<FileCandidate> {
+    let quoted = quoted_candidates_at(text, col);
     let Some((base, _, token)) = non_ws_token_at(text, col) else {
-        return Vec::new();
+        return quoted;
     };
     let chars: Vec<char> = token.chars().collect();
     let mut out: Vec<FileCandidate> = Vec::new();
@@ -1030,8 +1140,91 @@ pub(super) fn file_candidates_at(text: &str, col: usize) -> Vec<FileCandidate> {
             .cmp(&a.path.chars().count())
             .then(a.start.cmp(&b.start))
     });
+    // A quote is the one place a path is allowed a space, and the writer put
+    // it there to say where the path starts and stops — so it is asked first.
+    for (i, candidate) in quoted.into_iter().enumerate() {
+        out.retain(|c| *c != candidate);
+        out.insert(i, candidate);
+    }
     out.truncate(MAX_FILE_CANDIDATES);
     out
+}
+
+/// The path a pair of quotes holds around `col`, when it has a space in it.
+///
+/// Whitespace ends a path everywhere else, and guessing where a path with
+/// spaces stops in unquoted prose is how `see C:\Program Files for more`
+/// would become a link to a folder that happens to exist. A quote is the
+/// writer saying where it stops — `"C:\Program Files\app\app.exe"`,
+/// `'/Users/me/My Docs/a.txt'` — so that is the only place a space is read as
+/// part of a path.
+///
+/// What is inside still has to be written like a path: no space at either
+/// end, a separator somewhere, and short enough to be one. A quoted sentence
+/// that clears all that and still names nothing costs one reading, the same
+/// as a single unquoted word — never one per word inside it.
+///
+/// A token with no space in it is left to the ordinary rules, which already
+/// peel quotes off a path. A location may be written inside the quotes
+/// (`"my file.rs:10:2"`) or straight after the closing one
+/// (`"my file.rs":10:2`, `"my file.cs"(10,2)`).
+fn quoted_candidates_at(text: &str, col: usize) -> Vec<FileCandidate> {
+    let chars: Vec<char> = text.chars().collect();
+    if col >= chars.len() {
+        return Vec::new();
+    }
+    let Some((open, close)) = ['"', '\'', '`']
+        .into_iter()
+        .filter_map(|q| {
+            let open = chars[..col].iter().rposition(|&c| c == q)?;
+            let close = col + chars[col..].iter().position(|&c| c == q)?;
+            (close > col).then_some((open, close))
+        })
+        // The innermost pair: `"it's '/a b/c'"` means the single-quoted one.
+        .min_by_key(|&(open, close)| close - open)
+    else {
+        return Vec::new();
+    };
+    let inner = &chars[open + 1..close];
+    let path_shaped = inner.len() <= MAX_QUOTED_PATH
+        && inner.iter().any(|c| c.is_whitespace())
+        && inner.first().is_some_and(|c| !c.is_whitespace())
+        && inner.last().is_some_and(|c| !c.is_whitespace())
+        && inner.iter().any(|&c| matches!(c, '/' | '\\'))
+        && !inner.iter().any(|c| c.is_control());
+    if !path_shaped {
+        return Vec::new();
+    }
+    let written: String = inner.iter().collect();
+    let mut location = split_file_location(&written);
+    if location.line.is_none() {
+        let after: String = chars[close + 1..]
+            .iter()
+            .take_while(|c| !c.is_whitespace())
+            .collect();
+        let after = after.trim_end_matches([':', ',', ';']);
+        if !after.is_empty() {
+            let outside = split_file_location(&format!("{written}{after}"));
+            if outside.line.is_some() && outside.path == written {
+                location = outside;
+            }
+        }
+    }
+    let mut readings = Vec::with_capacity(2);
+    if location.literal_too && location.line.is_some() && location.path != written {
+        readings.push((written.clone(), None, None));
+    }
+    readings.push((location.path, location.line, location.column));
+    readings
+        .into_iter()
+        .map(|(path, line, column)| FileCandidate {
+            start: open + 1,
+            end: close - 1,
+            path,
+            line,
+            column,
+        })
+        .collect()
 }
 
 /// The best reading of the token under `col`, which is what most of the
@@ -1100,6 +1293,24 @@ fn left_cuts(chars: &[char]) -> Vec<usize> {
         // What `git diff` calls the two sides of a change.
         if matches!(rest.first(), Some('a' | 'b')) && rest.get(1) == Some(&'/') {
             offsets.push(2);
+        }
+        // A Windows drive glued onto whatever came before it: `保存到：C:\out`,
+        // `图片已生成c:/Users/me/a.png`. CJK prose puts no space in front of a
+        // path, and the label rule above cannot see these — the only ASCII
+        // colon in the token is the drive's own. The letter must not be the
+        // tail of an ASCII word, or `abc:/x` would read as drive `c:`.
+        if let Some(i) = (1..rest.len()).find(|&i| {
+            !rest[i - 1].is_ascii_alphanumeric()
+                && rest[i].is_ascii_alphabetic()
+                && rest.get(i + 1) == Some(&':')
+                && matches!(rest.get(i + 2), Some('\\' | '/'))
+        }) {
+            offsets.push(i);
+        }
+        // A Markdown link's target, which is what an agent prints a file as:
+        // `![chart](c:/out/chart.png)`, `[notes](docs/notes.md)`.
+        if let Some(i) = rest.windows(2).position(|w| w == [']', '(']) {
+            offsets.push(i + 2);
         }
         for offset in offsets {
             let cut = base + offset;
@@ -2546,5 +2757,481 @@ mod tests {
             candidates.iter().any(|c| c.path == "d/e/f.rs"),
             "the reading behind the `note:` label is still on the ladder"
         );
+    }
+
+    /// A Windows pane sitting in `C:\proj`, the way the reporter of #965 saw it.
+    fn windows_roots() -> LinkRoots {
+        LinkRoots {
+            dirs: vec![PathBuf::from(r"C:\proj")],
+            local_home: false,
+            style: PathStyle::Windows,
+        }
+    }
+
+    /// `link_at` over `line` with the pointer on the first char of `needle`,
+    /// against a filesystem holding exactly `exists` — and every path it was
+    /// asked about, so a test can say what was *not* looked up.
+    fn link_with(
+        line: &str,
+        needle: &str,
+        roots: &LinkRoots,
+        exists: &str,
+    ) -> (Option<LinkMatch>, Vec<String>) {
+        let byte = line.find(needle).expect("needle in line");
+        let col = line[..byte].chars().count();
+        let mut asked = Vec::new();
+        let mut probe = |path: &Path, _: bool| {
+            let path = path.to_string_lossy().into_owned();
+            let hit = path == exists;
+            asked.push(path);
+            match hit {
+                true => Probe::Hit { is_dir: false },
+                false => Probe::Miss,
+            }
+        };
+        (link_at(line, col, roots, true, &mut probe), asked)
+    }
+
+    /// The path and span a Windows pane underlines under `needle`.
+    fn windows_link(line: &str, needle: &str, exists: &str) -> (String, usize, usize) {
+        let (link, asked) = link_with(line, needle, &windows_roots(), exists);
+        let link = link.unwrap_or_else(|| panic!("{line:?}: no link, asked {asked:?}"));
+        match link.target {
+            LinkTarget::File { path, .. } => {
+                (path.to_string_lossy().into_owned(), link.start, link.end)
+            }
+            LinkTarget::Url(url) => panic!("{line:?}: expected a file link, got {url}"),
+        }
+    }
+
+    /// The columns `needle` occupies in `line`, inclusive.
+    fn span_of(line: &str, needle: &str) -> (usize, usize) {
+        let byte = line.find(needle).expect("needle in line");
+        let start = line[..byte].chars().count();
+        (start, start + needle.chars().count() - 1)
+    }
+
+    /// #965: the path exactly as the reporter pasted it, and its backslashed
+    /// twin. Either separator names the same file, and the file is handed on
+    /// spelled the way Explorer will take it.
+    #[test]
+    fn a_drive_letter_path_is_a_link_with_either_separator() {
+        let want = r"C:\Users\xxxxx\images\gen_gptimage2_gen_20260925_220725.png";
+        for written in [
+            "c:/Users/xxxxx/images/gen_gptimage2_gen_20260925_220725.png",
+            r"C:\Users\xxxxx\images\gen_gptimage2_gen_20260925_220725.png",
+            r"C:/Users\xxxxx/images\gen_gptimage2_gen_20260925_220725.png",
+        ] {
+            let line = format!("saved {written} ok");
+            let (path, start, end) = windows_link(&line, "images", want);
+            assert_eq!(path, want, "{line:?}");
+            assert_eq!((start, end), span_of(&line, written), "{line:?}");
+        }
+    }
+
+    /// Prose and markup around a Windows path is not part of it — the same
+    /// trimming a POSIX path gets.
+    #[test]
+    fn a_drive_letter_path_sheds_the_punctuation_around_it() {
+        let want = r"C:\out\a.png";
+        for (line, path) in [
+            ("wrote c:/out/a.png.", "c:/out/a.png"),
+            (r"wrote C:\out\a.png, then quit", r"C:\out\a.png"),
+            (r"(see C:\out\a.png)", r"C:\out\a.png"),
+            (r#"open "C:\out\a.png";"#, r"C:\out\a.png"),
+            (r"`C:\out\a.png`", r"C:\out\a.png"),
+            ("「c:/out/a.png」。", "c:/out/a.png"),
+            ("<c:/out/a.png>", "c:/out/a.png"),
+            ("│ C:/out/a.png │", "C:/out/a.png"),
+            (r"C:\out\a.png:", r"C:\out\a.png"),
+        ] {
+            let (got, start, end) = windows_link(line, "out", want);
+            assert_eq!(got, want, "{line:?}");
+            assert_eq!((start, end), span_of(line, path), "{line:?}");
+        }
+    }
+
+    /// Compilers on Windows write the location onto the path; the drive's own
+    /// colon must not be mistaken for one.
+    #[test]
+    fn a_drive_letter_path_keeps_its_line_and_column() {
+        let want = r"C:\src\main.rs";
+        for (line, loc) in [
+            (r"C:\src\main.rs:10:2: error", (Some(10), Some(2))),
+            ("c:/src/main.rs:10", (Some(10), None)),
+            (r"C:\src\main.rs(10,2): error C2065", (Some(10), Some(2))),
+            ("c:/src/main.rs#L10", (Some(10), None)),
+            (r#"File "C:\src\main.rs", line 7"#, (Some(7), None)),
+        ] {
+            let (link, asked) = link_with(line, "src", &windows_roots(), want);
+            match link.map(|l| l.target) {
+                Some(LinkTarget::File {
+                    path,
+                    line: l,
+                    column,
+                    ..
+                }) => {
+                    assert_eq!(path, PathBuf::from(want), "{line:?}");
+                    assert_eq!((l, column), loc, "{line:?}");
+                }
+                other => panic!("{line:?}: {other:?}, asked {asked:?}"),
+            }
+        }
+    }
+
+    /// Chinese output glues a path straight onto the sentence in front of it,
+    /// often behind a full-width colon — which is how an agent reports the
+    /// file it just wrote in #965. The sentence is not part of the path.
+    #[test]
+    fn a_drive_letter_path_is_found_inside_the_prose_glued_onto_it() {
+        let want = r"C:\Users\me\a.png";
+        for (line, path) in [
+            ("图片已保存到：c:/Users/me/a.png", "c:/Users/me/a.png"),
+            ("图片已生成c:/Users/me/a.png", "c:/Users/me/a.png"),
+            (r"路径:C:\Users\me\a.png", r"C:\Users\me\a.png"),
+            ("--out=c:/Users/me/a.png", "c:/Users/me/a.png"),
+            ("output:c:/Users/me/a.png", "c:/Users/me/a.png"),
+        ] {
+            let (got, start, end) = windows_link(line, "Users", want);
+            assert_eq!(got, want, "{line:?}");
+            assert_eq!((start, end), span_of(line, path), "{line:?}");
+        }
+    }
+
+    /// An agent prints the image it made as Markdown. The target is the link;
+    /// the brackets and alt text are not.
+    #[test]
+    fn a_markdown_link_target_is_the_path() {
+        let want = r"C:\out\chart.png";
+        for line in [
+            "![chart](c:/out/chart.png)",
+            "see [the chart](c:/out/chart.png).",
+        ] {
+            let (got, start, end) = windows_link(line, "out", want);
+            assert_eq!(got, want, "{line:?}");
+            assert_eq!((start, end), span_of(line, "c:/out/chart.png"), "{line:?}");
+        }
+        let posix = LinkRoots {
+            dirs: vec![PathBuf::from("/home/u/proj")],
+            local_home: false,
+            style: PathStyle::Posix,
+        };
+        let line = "[notes](docs/notes.md)";
+        let (link, asked) = link_with(line, "docs", &posix, "/home/u/proj/docs/notes.md");
+        let link = link.unwrap_or_else(|| panic!("no link, asked {asked:?}"));
+        assert_eq!((link.start, link.end), span_of(line, "docs/notes.md"));
+    }
+
+    #[test]
+    fn a_unc_share_is_a_link_that_stands_alone() {
+        let want = r"\\server\share\team\a.png";
+        let line = r"copied to \\server\share\team\a.png";
+        let (got, start, end) = windows_link(line, "server", want);
+        assert_eq!(got, want);
+        assert_eq!((start, end), span_of(line, want));
+    }
+
+    /// Text that merely has a letter and a colon in it is not a drive path,
+    /// and must never be looked up as one.
+    #[test]
+    fn a_letter_and_a_colon_is_not_a_drive_path() {
+        for (line, needle) in [
+            // Drive-relative, or a bare drive: nothing a pane can resolve.
+            ("a:b", "a:b"),
+            ("x:y and more", "x:y"),
+            ("C:notes.txt", "C:notes"),
+            ("see C: now", "C:"),
+            // A time, a ratio, a port.
+            ("at 12:30 today", "12:30"),
+            ("ratio 16:9", "16:9"),
+            ("localhost:8080", "localhost"),
+            // A word that ends in a letter is not a drive behind it.
+            ("abc:/x/y", "abc"),
+            ("http:/x", "http"),
+        ] {
+            let (link, asked) = link_with(line, needle, &windows_roots(), "");
+            assert_eq!(link, None, "{line:?}");
+            for path in &asked {
+                assert!(
+                    path.starts_with(r"C:\proj\"),
+                    "{line:?} asked about {path:?}, which is not under the pane's directory"
+                );
+            }
+        }
+        // The drive-relative ones are not asked about at all.
+        for line in ["a:b", "C:notes.txt"] {
+            let (_, asked) = link_with(line, line, &windows_roots(), "");
+            assert!(asked.is_empty(), "{line:?} asked about {asked:?}");
+        }
+        // And nothing in `abc:/x/y` is read as drive `c:`.
+        assert!(
+            file_candidates_at("abc:/x/y", 0)
+                .iter()
+                .all(|c| !c.path.starts_with("c:")),
+            "{:?}",
+            file_candidates_at("abc:/x/y", 0)
+        );
+    }
+
+    /// A Windows path that does not exist is not underlined: the probe is
+    /// the gate, exactly as for a POSIX one.
+    #[test]
+    fn a_missing_drive_letter_path_is_not_a_link() {
+        let (link, asked) = link_with("wrote c:/out/gone.png", "out", &windows_roots(), "");
+        assert_eq!(link, None);
+        assert_eq!(asked, vec![r"C:\out\gone.png".to_string()]);
+        let candidate =
+            unresolved_candidate("wrote c:/out/gone.png", 8, PathStyle::Windows).unwrap();
+        assert!(candidate.looks_like_a_path(PathStyle::Windows));
+        assert!(candidate.is_rooted(PathStyle::Windows));
+    }
+
+    /// A POSIX pane has no drives, but a WSL distro can reach the Windows
+    /// machine it runs on through `/mnt/<drive>`, so that is what it is asked.
+    #[test]
+    fn a_posix_pane_reads_a_drive_letter_through_the_wsl_mount() {
+        let roots = LinkRoots {
+            dirs: vec![PathBuf::from("/home/u/proj")],
+            local_home: false,
+            style: PathStyle::Posix,
+        };
+        let want = "/mnt/c/Users/me/a.png";
+        for written in ["c:/Users/me/a.png", r"C:\Users\me\a.png"] {
+            let line = format!("wrote {written}");
+            let (link, asked) = link_with(&line, "Users", &roots, want);
+            assert_eq!(asked.first().map(String::as_str), Some(want), "{line:?}");
+            let link = link.unwrap_or_else(|| panic!("{line:?}: no link"));
+            assert_eq!((link.start, link.end), span_of(&line, written));
+            let candidate = file_candidate_at(&line, 8).unwrap();
+            assert!(candidate.is_rooted(PathStyle::Posix), "{line:?}");
+            assert!(candidate.looks_like_a_path(PathStyle::Posix), "{line:?}");
+        }
+        // Where there is no such mount the probe misses and nothing underlines.
+        let (link, _) = link_with("wrote c:/Users/me/a.png", "Users", &roots, "");
+        assert_eq!(link, None);
+    }
+
+    #[test]
+    fn a_rooted_token_is_spelled_the_way_its_host_looks_it_up() {
+        let w = PathStyle::Windows;
+        assert_eq!(w.rooted("c:/Users/me").as_deref(), Some(r"C:\Users\me"));
+        assert_eq!(w.rooted(r"D:\x/y").as_deref(), Some(r"D:\x\y"));
+        assert_eq!(
+            w.rooted(r"\\server\share\x").as_deref(),
+            Some(r"\\server\share\x")
+        );
+        for relative in ["src/lib.rs", r"src\lib.rs", "C:x", "C:", "/etc/hosts", ""] {
+            assert_eq!(w.rooted(relative), None, "{relative:?}");
+        }
+
+        let p = PathStyle::Posix;
+        assert_eq!(p.rooted("/etc/hosts").as_deref(), Some("/etc/hosts"));
+        assert_eq!(p.rooted(r"C:\Users\me").as_deref(), Some("/mnt/c/Users/me"));
+        assert_eq!(p.rooted("d:/").as_deref(), Some("/mnt/d/"));
+        for relative in ["src/lib.rs", "C:x", r"\\server\share", "12:30"] {
+            assert_eq!(p.rooted(relative), None, "{relative:?}");
+        }
+    }
+
+    /// The Windows join is textual so a Mac looking at a Windows host asks it
+    /// about a path it can stat, and so it can be pinned here at all.
+    #[test]
+    fn a_windows_join_spells_the_whole_path_the_windows_way() {
+        let w = PathStyle::Windows;
+        let join =
+            |root: &str, rel: &str| w.join(Path::new(root), rel).to_string_lossy().into_owned();
+        assert_eq!(join(r"C:\proj", "src/lib.rs"), r"C:\proj\src\lib.rs");
+        assert_eq!(join(r"C:\proj\", r"src\lib.rs"), r"C:\proj\src\lib.rs");
+        assert_eq!(join("c:/proj", "a.txt"), r"C:\proj\a.txt");
+        assert_eq!(join(r"C:\", "a.txt"), r"C:\a.txt");
+        // A leading separator is rooted on the root's own drive or share.
+        assert_eq!(join(r"C:\proj", "/etc/hosts"), r"C:\etc\hosts");
+        assert_eq!(join(r"D:\proj", r"\tmp\x"), r"D:\tmp\x");
+        assert_eq!(join(r"\\srv\share\proj", r"\x"), r"\\srv\share\x");
+        assert_eq!(join(r"\\srv\share\proj", "x"), r"\\srv\share\proj\x");
+        assert_eq!(windows_prefix(r"\\srv\share"), r"\\srv\share");
+        assert_eq!(windows_prefix("C:"), "C:");
+        assert_eq!(windows_prefix("proj"), "");
+    }
+
+    #[test]
+    fn a_path_handed_to_the_os_is_spelled_its_way() {
+        assert_eq!(
+            spelled_for(PathStyle::Windows, Path::new("c:/Users/me/a b.png")),
+            PathBuf::from(r"C:\Users\me\a b.png")
+        );
+        assert_eq!(
+            spelled_for(PathStyle::Windows, Path::new(r"\\srv/share/x")),
+            PathBuf::from(r"\\srv\share\x")
+        );
+        assert_eq!(
+            spelled_for(PathStyle::Posix, Path::new("/Users/me/a\\b.png")),
+            PathBuf::from("/Users/me/a\\b.png"),
+            "a POSIX backslash is a filename character, not a separator"
+        );
+    }
+
+    fn posix_roots() -> LinkRoots {
+        LinkRoots {
+            dirs: vec![PathBuf::from("/home/u/proj")],
+            local_home: false,
+            style: PathStyle::Posix,
+        }
+    }
+
+    /// The file link under the first char of `needle`, as (path, line,
+    /// column, start, end) — or `None`, with what was asked about.
+    fn file_link_with(
+        line: &str,
+        needle: &str,
+        roots: &LinkRoots,
+        exists: &str,
+    ) -> Result<(String, Option<u32>, Option<u32>, usize, usize), Vec<String>> {
+        let (link, asked) = link_with(line, needle, roots, exists);
+        match link {
+            Some(LinkMatch {
+                start,
+                end,
+                target:
+                    LinkTarget::File {
+                        path, line, column, ..
+                    },
+            }) => Ok((
+                path.to_string_lossy().into_owned(),
+                line,
+                column,
+                start,
+                end,
+            )),
+            _ => Err(asked),
+        }
+    }
+
+    /// A quote is where a path is allowed its spaces: every word of it is the
+    /// same link, and the quotes are not part of it.
+    #[test]
+    fn a_quoted_windows_path_keeps_its_spaces() {
+        let want = r"C:\Program Files\foo\bar.exe";
+        for line in [
+            r#"run "C:\Program Files\foo\bar.exe" now"#,
+            r"run 'C:\Program Files\foo\bar.exe' now",
+            r"run `C:\Program Files\foo\bar.exe` now",
+            r#"run "c:/Program Files/foo/bar.exe" now"#,
+        ] {
+            let written = &line[5..line.len() - 5];
+            for needle in ["Program", "Files", "bar.exe"] {
+                let got = file_link_with(line, needle, &windows_roots(), want);
+                assert_eq!(
+                    got,
+                    Ok((
+                        want.to_string(),
+                        None,
+                        None,
+                        span_of(line, written).0,
+                        span_of(line, written).1
+                    )),
+                    "{line:?} at {needle:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_quoted_posix_path_keeps_its_spaces_and_its_location() {
+        let roots = posix_roots();
+        let docs = "/Users/me/My Docs/a.txt";
+        let line = "open '/Users/me/My Docs/a.txt' please";
+        let (start, end) = span_of(line, docs);
+        assert_eq!(
+            file_link_with(line, "Docs", &roots, docs),
+            Ok((docs.to_string(), None, None, start, end))
+        );
+
+        let file = "/home/u/proj/src/my file.rs";
+        for (line, loc) in [
+            (
+                r#"error: "src/my file.rs:10:2" failed"#,
+                (Some(10), Some(2)),
+            ),
+            (
+                r#"error: "src/my file.rs":10:2: failed"#,
+                (Some(10), Some(2)),
+            ),
+            (
+                r#"error: "src/my file.rs"(10,2): failed"#,
+                (Some(10), Some(2)),
+            ),
+            (
+                r#"File "src/my file.rs", line 7, in <module>"#,
+                (Some(7), None),
+            ),
+            (r#"see "src/my file.rs"."#, (None, None)),
+        ] {
+            let got = file_link_with(line, "file", &roots, file)
+                .unwrap_or_else(|asked| panic!("{line:?}: no link, asked {asked:?}"));
+            assert_eq!(got.0, file, "{line:?}");
+            assert_eq!((got.1, got.2), loc, "{line:?}");
+            let byte = line.find("src/").unwrap();
+            assert_eq!(
+                got.3,
+                line[..byte].chars().count(),
+                "{line:?} starts inside the quote"
+            );
+        }
+    }
+
+    /// Outside a quote a space still ends a path — the part after it is not
+    /// guessed onto the part before.
+    #[test]
+    fn an_unquoted_space_still_ends_a_path() {
+        let want = r"C:\Program Files\foo\bar.exe";
+        let line = r"run C:\Program Files\foo\bar.exe now";
+        for needle in ["Program", "Files", "bar.exe"] {
+            assert!(
+                file_link_with(line, needle, &windows_roots(), want).is_err(),
+                "{needle:?}"
+            );
+        }
+        let docs = "/Users/me/My Docs/a.txt";
+        assert!(
+            file_link_with("open /Users/me/My Docs/a.txt", "Docs", &posix_roots(), docs).is_err()
+        );
+    }
+
+    /// Quotes around ordinary prose are not a path, and one that looks enough
+    /// like one to be asked about is asked about once.
+    #[test]
+    fn a_quote_around_prose_is_not_a_path() {
+        let spaced = |line: &str, needle: &str| {
+            let byte = line.find(needle).unwrap();
+            file_candidates_at(line, line[..byte].chars().count())
+                .into_iter()
+                .filter(|c| c.path.contains(' '))
+                .collect::<Vec<_>>()
+        };
+        for (line, needle) in [
+            (r#"say "hello world" twice"#, "world"),
+            (r#"say " /a b/c " twice"#, "b/c"),
+            (r#"mismatched "/a b/c' here"#, "b/c"),
+            (r#"a "x" and "y/z w""#, "and"),
+            ("it's a /tmp/x dir", "tmp"),
+            ("tab\"/a\tb/c\"", "b/c"),
+        ] {
+            assert_eq!(spaced(line, needle), Vec::new(), "{line:?}");
+        }
+        let long = format!("\"/{} x/y\"", "a".repeat(MAX_QUOTED_PATH));
+        assert_eq!(spaced(&long, "x/y"), Vec::new(), "past the cap");
+        let at_cap = format!("\"/{} x/y\"", "a".repeat(MAX_QUOTED_PATH - 6));
+        assert_eq!(spaced(&at_cap, "x/y").len(), 1, "at the cap");
+
+        // A quoted sentence that clears the shape check and names nothing
+        // is one question, not one per word.
+        let line = r#"note "see the docs/ folder and the src/ tree" ok"#;
+        for needle in ["see", "folder", "tree"] {
+            let (link, asked) = link_with(line, needle, &posix_roots(), "");
+            assert_eq!(link, None);
+            let spaced: Vec<_> = asked.iter().filter(|p| p.contains(' ')).collect();
+            assert_eq!(spaced.len(), 1, "{needle:?} asked {asked:?}");
+        }
     }
 }

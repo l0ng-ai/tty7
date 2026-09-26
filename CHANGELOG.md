@@ -64,6 +64,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pane in front as before, and an ended session still says so. The key is
   `ssh_tab_title` (`dynamic`, `profile-name`, `hostname`).
 
+- **Windows file paths are links** (#965). `C:\Users\me\a.png`,
+  `c:/Users/me/a.png` and `\\server\share\a.png` underline and open like any
+  other file path, with a `:10:2`, `(10,2)` or `#L10` location kept. The path
+  is found when Chinese prose is glued straight onto it
+  (`图片已保存到：c:/Users/me/a.png`) and inside a Markdown link
+  (`![chart](c:/out/chart.png)`), and is handed on with backslashes so
+  Explorer opens and reveals it — a forward-slashed path used to open
+  Documents instead. In a WSL pane a drive path is looked up under
+  `/mnt/<drive>`. A letter and a colon alone (`a:b`, `C:`, `C:notes.txt`) is
+  never read as a drive.
+
+- **A quoted path may contain spaces** (#965). `"C:\Program Files\app\app.exe"`,
+  `'/Users/me/My Docs/a.txt'` and the same in backticks are one link, with a
+  `:10:2` or `(10,2)` location read inside the quotes or just after the
+  closing one. Only quotes do this: an unquoted space still ends a path, and
+  quoted prose that is not written like a path — no separator, a space at
+  either end, over 260 characters — is left alone.
+
+- **"Open with Default App" in a file link's right-click menu** (#965). It
+  hands the file to whatever the OS has it associated with, whatever
+  `link_file_open` makes "Open" do. Shown for files on this machine only, and
+  not when "Open" already uses the system opener.
+
 ### Changed
 
 - **The sidebar groups tabs by repo automatically; pin what you want to keep**
