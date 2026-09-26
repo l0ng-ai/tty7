@@ -977,12 +977,6 @@ pub(crate) fn inverted_button(
         .active(ink.blend(surface.opacity(0.24)))
 }
 
-/// On-state shares the accent role with sliders and primary actions.
-pub(crate) fn switch(id: impl Into<gpui::ElementId>, cx: &App) -> gpui_component::switch::Switch {
-    let accent = cx.global::<presets::ActiveAccent>().0;
-    gpui_component::switch::Switch::new(id).color(Hsla::from(rgb(accent)))
-}
-
 pub(crate) fn apply_cursor_hide_mode(cx: &mut App) {
     let mode = if cx.global::<Config>().mouse_hide_while_typing {
         gpui::CursorHideMode::OnTypingAndAction

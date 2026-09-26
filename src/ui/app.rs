@@ -4,11 +4,7 @@ use gpui::{
 };
 use gpui_component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{InputEvent, InputState};
-use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
-use gpui_component::slider::{SliderEvent, SliderState};
-use gpui_component::{
-    ActiveTheme as _, IndexPath, InteractiveElementExt as _, TitleBar, WindowExt as _,
-};
+use gpui_component::{ActiveTheme as _, InteractiveElementExt as _, TitleBar, WindowExt as _};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -239,6 +235,7 @@ pub(crate) const TILE_SIZE_XS: f32 = 18.;
 pub(crate) const TILE_GLYPH_XS: f32 = 11.;
 
 /// Line-only controls share the toolbar icon size.
+#[allow(dead_code)]
 pub(crate) const TILE_GLYPH_LINE: f32 = 16.;
 
 pub(crate) const TILE_PAD: f32 = (TILE_SIZE - TILE_GLYPH) / 2.;
@@ -1031,28 +1028,9 @@ impl TabAgentSession {
     }
 }
 
-/// Maps a backdrop onto the settings dropdown. The dropdown lists the
-/// presets the current Windows build supports, plus the stored value even
-/// when unsupported here (see `theme::backdrop_options`), so the label
-/// always matches what the window actually resolves to.
+/// The name the settings backdrop menu gives a material.
 #[cfg(target_os = "windows")]
-fn window_backdrop_index(backdrop: WindowBackdrop) -> usize {
-    crate::ui::theme::backdrop_options(backdrop)
-        .iter()
-        .position(|candidate| *candidate == backdrop)
-        .unwrap_or(0)
-}
-
-#[cfg(target_os = "windows")]
-fn window_backdrop_from_index(idx: usize, current: WindowBackdrop) -> WindowBackdrop {
-    crate::ui::theme::backdrop_options(current)
-        .get(idx)
-        .copied()
-        .unwrap_or(WindowBackdrop::Auto)
-}
-
-#[cfg(target_os = "windows")]
-fn window_backdrop_label_key(backdrop: WindowBackdrop) -> L10nKey {
+pub(crate) fn window_backdrop_label_key(backdrop: WindowBackdrop) -> L10nKey {
     match backdrop {
         WindowBackdrop::Auto => L10nKey::SettingsBackdropAuto,
         WindowBackdrop::Blur => L10nKey::SettingsBackdropBlur,
@@ -1061,14 +1039,6 @@ fn window_backdrop_label_key(backdrop: WindowBackdrop) -> L10nKey {
         WindowBackdrop::Acrylic => L10nKey::SettingsBackdropAcrylic,
         WindowBackdrop::Off => L10nKey::SettingsBackdropOff,
     }
-}
-
-#[cfg(target_os = "windows")]
-fn window_backdrop_labels(backdrop: WindowBackdrop) -> Vec<String> {
-    crate::ui::theme::backdrop_options(backdrop)
-        .iter()
-        .map(|backdrop| t(window_backdrop_label_key(*backdrop)).to_string())
-        .collect()
 }
 
 /// What a full-window overlay (settings, the opened file, the diff view)
@@ -1386,7 +1356,6 @@ impl Tty7App {
             apply_theme(Some(window), cx);
             let _ = this.update(cx, |this, cx| {
                 this.rebuild_theme_editor(window, cx);
-                this.sync_window_opacity_slider(window, cx);
                 cx.notify();
             });
         });
@@ -2406,18 +2375,65 @@ impl Tty7App {
             cfg.theme_preset = effective;
         }
         self.after_theme_change(window, cx);
-        let slot = if on {
-            if crate::ui::theme::system_dark(cx) {
-                crate::ui::settings::ThemeSlot::Dark
-            } else {
-                crate::ui::settings::ThemeSlot::Light
-            }
-        } else {
-            crate::ui::settings::ThemeSlot::Manual
-        };
-        if let Some(s) = self.active_settings_mut() {
-            s.theme_panel_slot = slot;
+    }
+
+    /// The Appearance page's three modes. System follows the OS between the
+    /// light and the dark slot; Light and Dark pin the matching slot's theme.
+    pub(crate) fn set_theme_mode(
+        &mut self,
+        mode: crate::ui::settings::ThemeMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ui::settings::ThemeMode;
+        if self.theme_draft_dirty() {
+            self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
+                this.set_theme_mode(mode, window, cx)
+            });
+            return;
         }
+        match mode {
+            ThemeMode::System => {
+                if !cx.global::<Config>().theme_follow_system {
+                    self.set_theme_follow_system(true, window, cx);
+                }
+            }
+            ThemeMode::Light | ThemeMode::Dark => {
+                let cfg = cx.global_mut::<Config>();
+                cfg.theme_follow_system = false;
+                cfg.theme_preset = if mode == ThemeMode::Dark {
+                    cfg.theme_preset_dark.clone()
+                } else {
+                    cfg.theme_preset_light.clone()
+                };
+                self.theme_preview_restore = None;
+                self.after_theme_change(window, cx);
+            }
+        }
+    }
+
+    /// A pick from a theme slot's menu. Pinned to one mode, the pick is also
+    /// what that mode's slot remembers, so System picks it back up.
+    pub(crate) fn pick_slot_theme(
+        &mut self,
+        dark_slot: bool,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if cx.global::<Config>().theme_follow_system {
+            self.set_slot_preset(dark_slot, id, window, cx);
+            return;
+        }
+        if !self.theme_draft_dirty() {
+            let cfg = cx.global_mut::<Config>();
+            if dark_slot {
+                cfg.theme_preset_dark = id.to_string();
+            } else {
+                cfg.theme_preset_light = id.to_string();
+            }
+        }
+        self.set_preset(id, window, cx);
     }
 
     pub(crate) fn set_theme_legible_palette(
@@ -2444,57 +2460,7 @@ impl Tty7App {
             self.persist_settings_config(cx);
         }
         self.rebuild_theme_editor(window, cx);
-        self.sync_window_opacity_slider(window, cx);
         cx.notify();
-    }
-
-    /// Opens or closes the theme picker, and moves the caret with it.
-    ///
-    /// The panel leads with a search box, and it opened unfocused — so the
-    /// first thing typed at a panel whose whole job is picking one of nine
-    /// themes went nowhere. Closing hands the caret back to the settings
-    /// search rather than leaving it on a box that is no longer drawn.
-    pub(crate) fn toggle_theme_panel(
-        &mut self,
-        slot: crate::ui::settings::ThemeSlot,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let opened = match self.active_settings_mut() {
-            Some(s) if s.theme_panel_open && s.theme_panel_slot == slot => {
-                s.theme_panel_open = false;
-                false
-            }
-            Some(s) => {
-                s.theme_panel_open = true;
-                s.theme_panel_slot = slot;
-                true
-            }
-            None => return,
-        };
-        self.focus_theme_panel(opened, window, cx);
-        cx.notify();
-    }
-
-    pub(crate) fn close_theme_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_settings_mut().is_none() {
-            return;
-        }
-        if let Some(s) = self.active_settings_mut() {
-            s.theme_panel_open = false;
-        }
-        self.focus_theme_panel(false, window, cx);
-        cx.notify();
-    }
-
-    fn focus_theme_panel(&mut self, opened: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let handle = self.settings.as_ref().map(|s| match opened {
-            true => s.theme_search.read(cx).focus_handle(cx),
-            false => s.search.read(cx).focus_handle(cx),
-        });
-        if let Some(handle) = handle {
-            window.focus(&handle, cx);
-        }
     }
 
     pub(crate) fn open_themes_folder(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2519,28 +2485,6 @@ impl Tty7App {
             return;
         }
         cx.open_with_system(&dir);
-    }
-
-    pub(crate) fn fork_active_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let id = crate::ui::theme::effective_preset_id(cx);
-        let theme = crate::ui::presets::by_id(cx, &id);
-        match crate::ui::presets::fork_to_file(&theme) {
-            Ok(new_id) => {
-                crate::ui::presets::load_registry(cx);
-                self.set_preset(&new_id, window, cx);
-            }
-            // A button that does nothing is the worst kind of failure: there
-            // is no way to tell it from "I clicked the wrong thing".
-            Err(e) => {
-                log::warn!("failed to duplicate theme: {e}");
-                crate::ui::host_ops::HostOps::notify_err(
-                    window,
-                    cx,
-                    t(L10nKey::ThemeDuplicateFailed),
-                    &e,
-                );
-            }
-        }
     }
 
     pub(crate) fn theme_draft_dirty(&self) -> bool {
@@ -2667,18 +2611,6 @@ impl Tty7App {
         })
     }
 
-    pub(crate) fn set_window_opacity(
-        &mut self,
-        v: f32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        cx.global_mut::<Config>().window_opacity = Some(v.clamp(0.2, 1.0));
-        apply_theme(Some(window), cx);
-        self.persist_settings_config(cx);
-        cx.notify();
-    }
-
     pub(crate) fn set_window_blur(
         &mut self,
         on: bool,
@@ -2701,14 +2633,6 @@ impl Tty7App {
         cx.global_mut::<Config>().window_backdrop = backdrop;
         apply_theme(Some(window), cx);
         self.persist_settings_config(cx);
-        // A material changes the default opacity (SYSTEM_MATERIAL_OPACITY
-        // vs 1.0), so the slider must track the new effective value.
-        self.sync_window_opacity_slider(window, cx);
-        // Rebuild the rows as well as the selected index. The previous value
-        // may have been an unsupported preset retained only for cross-machine
-        // config sync, and must disappear after the user selects a supported
-        // preset on this machine.
-        self.sync_window_backdrop_select(window, cx);
         cx.notify();
     }
 
@@ -2719,46 +2643,7 @@ impl Tty7App {
         }
         apply_theme(Some(window), cx);
         self.persist_settings_config(cx);
-        self.sync_window_opacity_slider(window, cx);
-        #[cfg(target_os = "windows")]
-        self.sync_window_backdrop_select(window, cx);
         cx.notify();
-    }
-
-    pub(crate) fn sync_window_opacity_slider(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let eff = Self::effective_window_opacity(cx);
-        if let Some(slider) = self
-            .active_settings()
-            .map(|s| s.window_opacity_slider.clone())
-        {
-            slider.update(cx, |s, cx| s.set_value(eff, window, cx));
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    pub(crate) fn sync_window_backdrop_select(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(select) = self
-            .active_settings()
-            .map(|s| s.window_backdrop_select.clone())
-        {
-            let current = cx.global::<Config>().window_backdrop;
-            let rows = window_backdrop_labels(current);
-            let selected = window_backdrop_index(current);
-            select.update(cx, |state, cx| {
-                state.set_items(SearchableVec::new(rows), window, cx);
-                // Replacing the delegate clears its selection snapshot, so
-                // restore the stored value after installing the new rows.
-                state.set_selected_index(Some(IndexPath::default().row(selected)), window, cx);
-            });
-        }
     }
 
     pub(crate) fn pick_theme_image(&mut self, cx: &mut Context<Self>) {
@@ -2866,32 +2751,11 @@ impl Tty7App {
             })
             .collect();
 
-        let image_opacity_slider = theme.image.as_ref().map(|img| {
-            let slider = cx.new(|_| {
-                SliderState::new()
-                    .min(0.0)
-                    .max(1.0)
-                    .step(0.01)
-                    .default_value(img.opacity)
-            });
-            subs.push(cx.subscribe_in(
-                &slider,
-                window,
-                |this, _s, ev: &SliderEvent, window, cx| {
-                    if let SliderEvent::Change(v) = ev {
-                        this.set_theme_image_opacity(v.start(), window, cx);
-                    }
-                },
-            ));
-            slider
-        });
-
         if let Some(s) = self.settings.as_mut() {
             s.theme_editor = Some(ThemeEditor {
                 for_id: theme.id.clone(),
                 seed,
                 ansi,
-                image_opacity_slider,
                 _subs: subs,
             });
         }
@@ -5968,24 +5832,6 @@ impl Tty7App {
     ) {
         let mut subs = Vec::new();
         match title {
-            L10nKey::SettingsFontFamily
-            | L10nKey::SettingsBoldFont
-            | L10nKey::SettingsItalicFont
-            | L10nKey::SettingsUiFontFamily => {
-                let (font, bold, italic, ui) = self.build_font_selects(&mut subs, window, cx);
-                if let Some(s) = self.active_settings_mut() {
-                    s.font_select = font;
-                    s.font_bold_select = bold;
-                    s.font_italic_select = italic;
-                    s.ui_font_select = ui;
-                }
-            }
-            L10nKey::SettingsLanguage => {
-                let value = self.build_language_select(&mut subs, window, cx);
-                if let Some(s) = self.active_settings_mut() {
-                    s.language_select = value;
-                }
-            }
             L10nKey::SettingsProgram | L10nKey::SettingsArguments => {
                 let (program, args, _) = self.build_shell_inputs(&mut subs, window, cx);
                 if let Some(s) = self.active_settings_mut() {
@@ -6011,18 +5857,6 @@ impl Tty7App {
                 let value = self.build_http_proxy_input(&mut subs, window, cx);
                 if let Some(s) = self.active_settings_mut() {
                     s.http_proxy_input = value;
-                }
-            }
-            L10nKey::SettingsScrollSpeed => {
-                let value = self.build_scroll_slider(&mut subs, window, cx);
-                if let Some(s) = self.active_settings_mut() {
-                    s.scroll_slider = value;
-                }
-            }
-            L10nKey::SettingsOpacity | L10nKey::SettingsBlur | L10nKey::SettingsBackdrop => {
-                let value = self.build_window_opacity_slider(&mut subs, window, cx);
-                if let Some(s) = self.active_settings_mut() {
-                    s.window_opacity_slider = value;
                 }
             }
             _ => {}
@@ -6099,27 +5933,60 @@ impl Tty7App {
         });
     }
 
+    /// Every family the settings font menus offer, with the configured ones
+    /// kept even when the system no longer has them — a menu that cannot show
+    /// the current value cannot say what it is.
+    fn settings_font_names(cx: &App) -> Vec<String> {
+        let cfg = cx.global::<Config>();
+        let mut names = cx.text_system().all_font_names();
+        for configured in [
+            Some(&cfg.font_family),
+            cfg.ui_font_family.as_ref(),
+            cfg.font_family_bold.as_ref(),
+            cfg.font_family_italic.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !names.contains(configured) {
+                names.push(configured.clone());
+            }
+        }
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
     /// Build the settings page's state against `window` — the window it will
     /// be drawn in, which owns its inputs' focus.
     fn build_settings_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focus_handle = cx.focus_handle();
         let mut subs = Vec::new();
-        let (font_select, font_bold_select, font_italic_select, ui_font_select) =
-            self.build_font_selects(&mut subs, window, cx);
-        let language_select = self.build_language_select(&mut subs, window, cx);
-        #[cfg(target_os = "windows")]
-        let window_backdrop_select = self.build_window_backdrop_select(&mut subs, window, cx);
+        let font_names = std::rc::Rc::new(Self::settings_font_names(cx));
         let (shell_program_input, shell_args_input, wd_path_input) =
             self.build_shell_inputs(&mut subs, window, cx);
         let link_file_command_input = self.build_link_file_command_input(&mut subs, window, cx);
         let http_proxy_input = self.build_http_proxy_input(&mut subs, window, cx);
-        let scroll_slider = self.build_scroll_slider(&mut subs, window, cx);
-        let window_opacity_slider = self.build_window_opacity_slider(&mut subs, window, cx);
-        let theme_search = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(t(crate::ui::i18n::L10nKey::SearchThemes))
-        });
+        // One query box for whichever popover is open — a theme list or a
+        // font list — since only one is ever open at a time.
+        let menu_query = cx.new(|cx| InputState::new(window, cx));
         subs.push(
-            cx.subscribe_in(&theme_search, window, |_this, _i, ev, _w, cx| {
+            cx.subscribe_in(&menu_query, window, |this, input, ev, _w, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    // A new query starts from the top; the clear that opens a
+                    // popover keeps the row it opened on.
+                    let typed = !input.read(cx).value().is_empty();
+                    if let Some(s) = this.active_settings_mut().filter(|_| typed) {
+                        s.menu_hi = 0;
+                    }
+                    cx.notify();
+                }
+            }),
+        );
+        let agent_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t(L10nKey::SettingsSearchAgents)));
+        subs.push(
+            cx.subscribe_in(&agent_query, window, |_this, _i, ev, _w, cx| {
                 if matches!(ev, InputEvent::Change) {
                     cx.notify();
                 }
@@ -6141,7 +6008,7 @@ impl Tty7App {
         );
 
         let shortcut_search = cx
-            .new(|cx| InputState::new(window, cx).placeholder(t(L10nKey::SettingsNavKeybindings)));
+            .new(|cx| InputState::new(window, cx).placeholder(t(L10nKey::SettingsSearchShortcuts)));
         subs.push(
             cx.subscribe_in(&shortcut_search, window, |_, _, ev, _, cx| {
                 if matches!(ev, InputEvent::Change) {
@@ -6155,17 +6022,6 @@ impl Tty7App {
         });
         subs.push(
             cx.subscribe_in(&ssh_filter, window, |_this, _i, ev, _w, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    cx.notify();
-                }
-            }),
-        );
-
-        let ssh_quick_connect = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(t(L10nKey::AppPlaceholderSshQuickConnect))
-        });
-        subs.push(
-            cx.subscribe_in(&ssh_quick_connect, window, |_this, _i, ev, _w, cx| {
                 if matches!(ev, InputEvent::Change) {
                     cx.notify();
                 }
@@ -6188,44 +6044,42 @@ impl Tty7App {
             search_rows: std::cell::RefCell::new(None),
             focused_setting: None,
             content_scroll,
-            ssh_master_scroll: gpui::ScrollHandle::new(),
-            ssh_detail_scroll: gpui::ScrollHandle::new(),
-            theme_list_scroll: gpui::ScrollHandle::new(),
             search_anchor,
             reveal_first_hit: Cell::new(false),
-            font_select,
-            font_bold_select,
-            font_italic_select,
-            ui_font_select,
-            language_select,
-            #[cfg(target_os = "windows")]
-            window_backdrop_select,
+            font_names,
             shell_program_input,
             shell_args_input,
             wd_path_input,
             link_file_command_input,
             http_proxy_input,
-            scroll_slider,
-            window_opacity_slider,
             theme_editor: None,
             theme_draft: None,
             theme_draft_error: None,
             save_error: None,
             saved_config: cx.global::<Config>().clone(),
-            theme_panel_open: false,
-            theme_panel_slot: crate::ui::settings::ThemeSlot::Manual,
-            theme_search,
+            menu: None,
+            menu_query,
+            menu_hi: 0,
+            menu_scroll: gpui::ScrollHandle::new(),
+            focused: std::cell::RefCell::new(None),
+            kb_conflict: None,
             recording: None,
             rebinding_note: None,
             ssh_form: None,
-            ssh_detail: crate::ui::settings::SshDetail::None,
+            ssh_open: None,
+            ssh_show_all: false,
+            ssh_confirm_remove: false,
+            ssh_copied: None,
             ssh_filter,
             ssh_collapsed_groups: std::collections::HashSet::new(),
-            ssh_quick_connect,
             agent_hooks_host: crate::ui::host_ops::HostId::LOCAL,
             agent_hooks_states: crate::ui::settings::AgentHooksView::Loading,
             agent_hooks_seq: 0,
             agent_hooks_note: None,
+            agent_query,
+            agent_show_all: false,
+            agent_touched: std::collections::HashSet::new(),
+            agent_busy: std::collections::HashSet::new(),
             _subs: subs,
         });
         let search_focus = self
@@ -6241,212 +6095,10 @@ impl Tty7App {
         cx.notify();
     }
 
-    fn build_font_selects(
-        &mut self,
-        subs: &mut Vec<Subscription>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> (
-        Entity<SelectState<SearchableVec<String>>>,
-        Entity<SelectState<SearchableVec<String>>>,
-        Entity<SelectState<SearchableVec<String>>>,
-        Entity<SelectState<SearchableVec<String>>>,
-    ) {
-        let cfg = cx.global::<Config>();
-        let family = cfg.font_family.clone();
-        let font_bold = cfg.font_family_bold.clone();
-        let font_italic = cfg.font_family_italic.clone();
-        let ui_font_family = cfg.ui_font_family.clone();
-        let mut font_names = cx.text_system().all_font_names();
-        if !font_names.contains(&family) {
-            font_names.push(family.clone());
-            font_names.sort_unstable();
-        }
-        if let Some(ui_font) = &ui_font_family
-            && !font_names.contains(ui_font)
-        {
-            font_names.push(ui_font.clone());
-            font_names.sort_unstable();
-        }
-        let selected_font_index = font_names
-            .iter()
-            .position(|n| *n == family)
-            .map(|row| IndexPath::default().row(row));
-        let font_select = cx.new(|cx| {
-            SelectState::new(
-                SearchableVec::new(font_names.clone()),
-                selected_font_index,
-                window,
-                cx,
-            )
-            .searchable(true)
-        });
-        let build_alt_font_select = |value: &Option<String>,
-                                     default_label: &str,
-                                     names: &[String],
-                                     window: &mut Window,
-                                     cx: &mut Context<Self>| {
-            let mut rows = Vec::with_capacity(names.len() + 1);
-            rows.push(default_label.to_string());
-            rows.extend(names.iter().cloned());
-            let selected = value
-                .as_ref()
-                .and_then(|v| rows.iter().position(|n| n == v))
-                .unwrap_or(0);
-            cx.new(|cx| {
-                SelectState::new(
-                    SearchableVec::new(rows),
-                    Some(IndexPath::default().row(selected)),
-                    window,
-                    cx,
-                )
-                .searchable(true)
-            })
-        };
-        let alt_default = crate::ui::settings::font_default_label();
-        let font_bold_select =
-            build_alt_font_select(&font_bold, alt_default, &font_names, window, cx);
-        let font_italic_select =
-            build_alt_font_select(&font_italic, alt_default, &font_names, window, cx);
-        let ui_font_select = build_alt_font_select(
-            &ui_font_family,
-            crate::ui::settings::ui_font_default_label(),
-            &font_names,
-            window,
-            cx,
-        );
-        subs.push(cx.subscribe_in(
-            &font_select,
-            window,
-            |this, _select, ev: &SelectEvent<SearchableVec<String>>, _window, cx| {
-                if let SelectEvent::Confirm(Some(family)) = ev {
-                    this.commit_font_family(family.clone(), cx);
-                }
-            },
-        ));
-        subs.push(cx.subscribe_in(
-            &font_bold_select,
-            window,
-            |this, _s, ev: &SelectEvent<SearchableVec<String>>, _w, cx| {
-                if let SelectEvent::Confirm(Some(name)) = ev {
-                    this.commit_font_family_emphasis(true, name.clone(), cx);
-                }
-            },
-        ));
-        subs.push(cx.subscribe_in(
-            &font_italic_select,
-            window,
-            |this, _s, ev: &SelectEvent<SearchableVec<String>>, _w, cx| {
-                if let SelectEvent::Confirm(Some(name)) = ev {
-                    this.commit_font_family_emphasis(false, name.clone(), cx);
-                }
-            },
-        ));
-        subs.push(cx.subscribe_in(
-            &ui_font_select,
-            window,
-            |this, _s, ev: &SelectEvent<SearchableVec<String>>, window, cx| {
-                if let SelectEvent::Confirm(Some(name)) = ev {
-                    this.commit_ui_font_family(name.clone(), window, cx);
-                }
-            },
-        ));
-        (
-            font_select,
-            font_bold_select,
-            font_italic_select,
-            ui_font_select,
-        )
-    }
-
-    fn build_language_select(
-        &mut self,
-        subs: &mut Vec<Subscription>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<SelectState<SearchableVec<String>>> {
-        let labels = || {
-            crate::ui::i18n::SUPPORTED_LANGUAGES
-                .iter()
-                .map(|lang| t(lang.label_key).to_string())
-                .collect::<Vec<_>>()
-        };
-        let cfg = cx.global::<Config>();
-        let current = Self::normalize_gui_language(&cfg.gui_language);
-        let rows = labels();
-        let selected = crate::ui::i18n::SUPPORTED_LANGUAGES
-            .iter()
-            .position(|lang| lang.code == current)
-            .unwrap_or(0);
-        let language_select = cx.new(|cx| {
-            SelectState::new(
-                SearchableVec::new(rows),
-                Some(IndexPath::default().row(selected)),
-                window,
-                cx,
-            )
-        });
-        subs.push(cx.subscribe_in(
-            &language_select,
-            window,
-            move |this, _select, ev: &SelectEvent<SearchableVec<String>>, window, cx| {
-                if let SelectEvent::Confirm(Some(label)) = ev {
-                    let rows = labels();
-                    if let Some(idx) = rows.iter().position(|r| r == label) {
-                        if let Some(lang) = crate::ui::i18n::SUPPORTED_LANGUAGES.get(idx) {
-                            this.set_gui_language(lang.code, window, cx);
-                        }
-                    }
-                }
-            },
-        ));
-        language_select
-    }
-
-    fn normalize_gui_language(code: &str) -> &'static str {
+    pub(crate) fn normalize_gui_language(code: &str) -> &'static str {
         crate::ui::i18n::find_language(code)
             .map(|lang| lang.code)
             .unwrap_or_else(crate::ui::i18n::default_language_code)
-    }
-
-    /// The backdrop dropdown only lists the presets this Windows build
-    /// supports, in the order of `theme::supported_backdrops`; the select
-    /// resolves the picked label back through that same list.
-    #[cfg(target_os = "windows")]
-    fn build_window_backdrop_select(
-        &mut self,
-        subs: &mut Vec<Subscription>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<SelectState<SearchableVec<String>>> {
-        let rows = window_backdrop_labels(cx.global::<Config>().window_backdrop);
-        let selected = window_backdrop_index(cx.global::<Config>().window_backdrop);
-        let select = cx.new(|cx| {
-            SelectState::new(
-                SearchableVec::new(rows),
-                Some(IndexPath::default().row(selected)),
-                window,
-                cx,
-            )
-        });
-        subs.push(cx.subscribe_in(
-            &select,
-            window,
-            move |this, _select, ev: &SelectEvent<SearchableVec<String>>, window, cx| {
-                if let SelectEvent::Confirm(Some(label)) = ev {
-                    let current = cx.global::<Config>().window_backdrop;
-                    let rows = window_backdrop_labels(current);
-                    if let Some(idx) = rows.iter().position(|row| row == label) {
-                        this.set_window_backdrop(
-                            window_backdrop_from_index(idx, current),
-                            window,
-                            cx,
-                        );
-                    }
-                }
-            },
-        ));
-        select
     }
 
     pub(crate) fn set_gui_language(
@@ -6484,45 +6136,17 @@ impl Tty7App {
             state.set_placeholder(t(L10nKey::SearchFiles), window, cx)
         });
         if let Some(s) = self.active_settings() {
-            let rows = crate::ui::i18n::SUPPORTED_LANGUAGES
-                .iter()
-                .map(|lang| t(lang.label_key).to_string())
-                .collect::<Vec<_>>();
-            s.language_select.update(cx, |state, cx| {
-                state.set_items(SearchableVec::new(rows), window, cx);
-                let code = Self::normalize_gui_language(&cx.global::<Config>().gui_language);
-                let selected = crate::ui::i18n::SUPPORTED_LANGUAGES
-                    .iter()
-                    .position(|lang| lang.code == code)
-                    .unwrap_or(0);
-                state.set_selected_index(Some(IndexPath::default().row(selected)), window, cx);
-            });
-            #[cfg(target_os = "windows")]
-            s.window_backdrop_select.update(cx, |state, cx| {
-                let current = cx.global::<Config>().window_backdrop;
-                let rows = window_backdrop_labels(current);
-                state.set_items(SearchableVec::new(rows), window, cx);
-                // `set_items` does not preserve the selection; restore the
-                // index of the stored value so a locale refresh (which
-                // re-translates the labels) cannot leave the dropdown
-                // showing no — or the wrong — selection.
-                state.set_selected_index(
-                    Some(IndexPath::default().row(window_backdrop_index(current))),
-                    window,
-                    cx,
-                );
-            });
             s.search.update(cx, |state, cx| {
                 state.set_placeholder(t(L10nKey::SearchSettings), window, cx)
-            });
-            s.theme_search.update(cx, |state, cx| {
-                state.set_placeholder(t(L10nKey::SearchThemes), window, cx)
             });
             s.ssh_filter.update(cx, |state, cx| {
                 state.set_placeholder(t(L10nKey::FilterHosts), window, cx)
             });
-            s.ssh_quick_connect.update(cx, |state, cx| {
-                state.set_placeholder(t(L10nKey::AppPlaceholderSshQuickConnect), window, cx)
+            s.shortcut_search.update(cx, |state, cx| {
+                state.set_placeholder(t(L10nKey::SettingsSearchShortcuts), window, cx)
+            });
+            s.agent_query.update(cx, |state, cx| {
+                state.set_placeholder(t(L10nKey::SettingsSearchAgents), window, cx)
             });
             s.shell_args_input.update(cx, |state, cx| {
                 state.set_placeholder(t(L10nKey::AppPlaceholderNone), window, cx)
@@ -6701,63 +6325,6 @@ impl Tty7App {
         cx.notify();
     }
 
-    fn build_window_opacity_slider(
-        &mut self,
-        subs: &mut Vec<Subscription>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<SliderState> {
-        let eff = Self::effective_window_opacity(cx);
-        let slider = cx.new(|_| {
-            SliderState::new()
-                .min(0.2)
-                .max(1.0)
-                .step(0.01)
-                .default_value(eff)
-        });
-        subs.push(cx.subscribe_in(
-            &slider,
-            window,
-            |this, _s, ev: &SliderEvent, window, cx| match ev {
-                SliderEvent::Change(v) => {
-                    cx.global_mut::<Config>().window_opacity = Some(v.start().clamp(0.2, 1.0));
-                    apply_theme(Some(window), cx);
-                    cx.notify();
-                }
-                SliderEvent::Release(_) => this.persist_settings_config(cx),
-            },
-        ));
-        slider
-    }
-
-    fn build_scroll_slider(
-        &mut self,
-        subs: &mut Vec<Subscription>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<SliderState> {
-        let scroll_mult = cx.global::<Config>().mouse_scroll_multiplier;
-        let scroll_slider = cx.new(|_| {
-            SliderState::new()
-                .min(0.5)
-                .max(5.0)
-                .step(0.25)
-                .default_value(scroll_mult)
-        });
-        subs.push(cx.subscribe_in(
-            &scroll_slider,
-            window,
-            |this, _s, ev: &SliderEvent, _w, cx| match ev {
-                SliderEvent::Change(v) => {
-                    cx.global_mut::<Config>().mouse_scroll_multiplier = v.start().clamp(0.1, 10.0);
-                    cx.notify();
-                }
-                SliderEvent::Release(_) => this.persist_settings_config(cx),
-            },
-        ));
-        scroll_slider
-    }
-
     pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(s) = self.settings.take() {
             self.last_settings_location = (
@@ -6926,7 +6493,7 @@ impl Tty7App {
         self.open_ssh_profile_form(profile, window, cx);
     }
 
-    fn commit_font_family(&mut self, family: String, cx: &mut Context<Self>) {
+    pub(crate) fn commit_font_family(&mut self, family: String, cx: &mut Context<Self>) {
         self.font_family = family.clone();
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
@@ -6940,7 +6507,12 @@ impl Tty7App {
         cx.notify();
     }
 
-    fn commit_font_family_emphasis(&mut self, bold: bool, name: String, cx: &mut Context<Self>) {
+    pub(crate) fn commit_font_family_emphasis(
+        &mut self,
+        bold: bool,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
         let family = (name != crate::ui::settings::font_default_label()).then_some(name);
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
@@ -6969,7 +6541,12 @@ impl Tty7App {
         cx.notify();
     }
 
-    fn commit_ui_font_family(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn commit_ui_font_family(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let family = (name != crate::ui::settings::ui_font_default_label()).then_some(name);
         let cfg = cx.global_mut::<Config>();
         if cfg.ui_font_family == family {
@@ -6984,14 +6561,6 @@ impl Tty7App {
 
     fn reload_from_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         apply_theme(Some(window), cx);
-        self.sync_window_opacity_slider(window, cx);
-        // Another window — or a hand edit / config sync picked up by the
-        // `Config` watcher — can change the backdrop while this window's
-        // settings panel is open. The window itself already switched
-        // material above, so the dropdown has to follow or it contradicts
-        // what it describes.
-        #[cfg(target_os = "windows")]
-        self.sync_window_backdrop_select(window, cx);
         let config = cx.global::<Config>().clone();
         if config.cursor_style != self.terminal_cursor_style
             || config.scrollback_limit != self.terminal_scrollback_limit
@@ -7614,6 +7183,11 @@ impl Tty7App {
             return;
         };
 
+        if let Some(s) = self.settings.as_mut() {
+            s.agent_busy.insert(agent);
+            s.agent_touched.insert(agent);
+        }
+        cx.notify();
         crate::ui::host_ops::HostOps::run(
             host,
             cx,
@@ -7632,6 +7206,7 @@ impl Tty7App {
             },
             move |this, result, cx| {
                 if let Some(s) = this.settings.as_mut() {
+                    s.agent_busy.remove(&agent);
                     s.agent_hooks_note = Some((
                         agent,
                         match result {
@@ -7691,6 +7266,7 @@ impl Tty7App {
         self.record_gen = self.record_gen.wrapping_add(1);
         if let Some(s) = self.active_settings_mut() {
             s.rebinding_note = None;
+            s.kb_conflict = None;
             s.recording = Some(Recording {
                 action,
                 chords: Vec::new(),
@@ -7776,7 +7352,54 @@ impl Tty7App {
             return;
         };
         self.stop_recording(cx);
-        self.assign_keybinding(action, chords.join(" "), cx);
+        let spec = chords.join(" ");
+        // A chord another action answers to is not taken silently: the row
+        // asks whether to take it over, and only Replace moves it.
+        if let Some(other) = Self::keybinding_owner(&action, &spec, cx) {
+            if let Some(s) = self.active_settings_mut() {
+                s.kb_conflict = Some(crate::ui::settings::KeyConflict {
+                    action,
+                    spec,
+                    other,
+                });
+            }
+            cx.notify();
+            return;
+        }
+        self.assign_keybinding(action, spec, cx);
+    }
+
+    /// The other action that already answers to `spec`, if any.
+    fn keybinding_owner(action: &str, spec: &str, cx: &App) -> Option<String> {
+        use crate::ui::keymap::same_chord;
+        crate::ui::keymap::effective_chords(cx)
+            .into_iter()
+            .find(|(a, chords)| a != action && chords.iter().any(|k| same_chord(k, spec)))
+            .map(|(a, _)| a)
+            .or_else(|| {
+                crate::ui::keymap::extra_bindings(cx)
+                    .into_iter()
+                    .find(|(a, k)| a != action && same_chord(k, spec))
+                    .map(|(a, _)| a)
+            })
+    }
+
+    /// Takes the conflicting chord over, as the row's Replace button says.
+    pub(crate) fn resolve_keybinding_conflict(&mut self, replace: bool, cx: &mut Context<Self>) {
+        let Some(conflict) = self
+            .active_settings_mut()
+            .and_then(|s| s.kb_conflict.take())
+        else {
+            return;
+        };
+        if replace {
+            self.assign_keybinding(conflict.action, conflict.spec, cx);
+            if let Some(s) = self.active_settings_mut() {
+                // The row already said what Replace would do.
+                s.rebinding_note = None;
+            }
+        }
+        cx.notify();
     }
 
     fn stop_recording(&mut self, cx: &mut Context<Self>) {
@@ -7892,36 +7515,7 @@ impl Tty7App {
         cx.notify();
     }
 
-    pub(crate) fn restore_default_keybindings(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Nothing here is recoverable: the overrides are dropped from config
-        // and the only record of them was the config.
-        if cx.global::<Config>().keybindings.is_empty() {
-            return;
-        }
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            t(crate::ui::i18n::L10nKey::SettingsRestoreAllDefaults),
-            Some(t(crate::ui::i18n::L10nKey::SettingsRestoreAllDefaultsBody)),
-            &crate::ui::confirm_answers(
-                t(crate::ui::i18n::L10nKey::SettingsRestoreAllDefaults),
-                t(crate::ui::i18n::L10nKey::Cancel),
-            ),
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(0) = answer.await else { return };
-            let _ = this.update(cx, |this, cx| {
-                this.restore_default_keybindings_confirmed(cx)
-            });
-        })
-        .detach();
-    }
-
-    fn restore_default_keybindings_confirmed(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn restore_default_keybindings_confirmed(&mut self, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.keybindings.clear());
         crate::ui::keymap::rebind(cx);
         if let Some(s) = self.active_settings_mut() {
@@ -11148,16 +10742,46 @@ mod keybinding_gpui_tests {
         }
     }
 
+    /// Waits for the row to ask about a chord another action has, checks who
+    /// it names, and answers Replace.
+    fn replace_conflict(app: &Entity<Tty7App>, vcx: &mut VisualTestContext, owner: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            vcx.background_executor.run_until_parked();
+            let other = app.update_in(vcx, |app, _, _| {
+                app.active_settings()
+                    .and_then(|s| s.kb_conflict.as_ref().map(|c| c.other.clone()))
+            });
+            if let Some(other) = other {
+                assert_eq!(
+                    other, owner,
+                    "the conflict names the action that has the chord"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "recording a taken chord never asked about it"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        app.update_in(vcx, |app, _, cx| app.resolve_keybinding_conflict(true, cx));
+    }
+
     #[gpui::test]
     fn recording_a_shortcut_writes_the_override_and_ends_capture(cx: &mut TestAppContext) {
         let (app, mut vcx) = harness(cx);
         begin_capture(&app, &mut vcx, "NewTab");
-        vcx.simulate_keystrokes("secondary-shift-n");
+        vcx.simulate_keystrokes("secondary-shift-f9");
         // A list, because recording a shortcut on the Settings page *sets* it:
         // the row showed one chord and now shows another. A bare string in
         // config adds a chord beside the default (#868), which is not what
         // the person at the row just did.
-        wait_for_binding(&mut vcx, "NewTab", serde_json::json!(["secondary-shift-n"]));
+        wait_for_binding(
+            &mut vcx,
+            "NewTab",
+            serde_json::json!(["secondary-shift-f9"]),
+        );
 
         let recording = app.update_in(&mut vcx, |app, _, _| {
             app.active_settings().map(|s| s.recording.is_some())
@@ -11194,6 +10818,7 @@ mod keybinding_gpui_tests {
         });
         begin_capture(&app, &mut vcx, "NewTab");
         vcx.simulate_keystrokes("secondary-alt-n");
+        replace_conflict(&app, &mut vcx, "NextTab");
         wait_for_binding(&mut vcx, "NewTab", serde_json::json!(["secondary-alt-n"]));
         // Emptying the other action was right when an action had one chord.
         // With two, it would take Ctrl+Tab away as well, for a keystroke that
@@ -11206,17 +10831,10 @@ mod keybinding_gpui_tests {
         let (app, mut vcx) = harness(cx);
         begin_capture(&app, &mut vcx, "NewTab");
         vcx.simulate_keystrokes("alt-enter");
+        // The row names the action that would lose the chord before it does.
+        replace_conflict(&app, &mut vcx, "InsertNewline");
         wait_for_binding(&mut vcx, "NewTab", serde_json::json!(["alt-enter"]));
         wait_for_binding(&mut vcx, "InsertNewline", serde_json::json!([]));
-
-        let note = app.update_in(&mut vcx, |app, _, _| {
-            app.active_settings().and_then(|s| s.rebinding_note.clone())
-        });
-        assert!(
-            note.as_deref()
-                .is_some_and(|n| n.contains("Insert Newline")),
-            "the takeover note must name the action that lost the chord (got {note:?})"
-        );
     }
 
     /// #901, the half that happens in the UI: Alt+1…9 belongs to vim, and the

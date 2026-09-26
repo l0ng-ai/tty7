@@ -2,6 +2,68 @@ use super::L10nKey;
 
 pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
     Some(match key {
+        L10nKey::SettingsNoMatchesShort => "没有匹配项",
+        L10nKey::SettingsModifiedTitle => "已修改",
+        L10nKey::SettingsMatchCount => "{count} 个结果",
+        L10nKey::SettingsNothingModified => "所有设置均为默认值",
+        L10nKey::SettingsKeyThen => "再按",
+        L10nKey::SettingsStartupRestore => "启动与恢复",
+        L10nKey::SettingsSettingsFile => "设置文件",
+        L10nKey::SettingsReveal => "显示",
+        L10nKey::SettingsThemeModeSystem => "跟随系统",
+        L10nKey::SettingsThemeModeSystemDesc => "跟随系统外观，在浅色与深色主题之间切换。",
+        L10nKey::SettingsThemeModeLightDesc => "始终使用浅色主题。",
+        L10nKey::SettingsThemeModeDarkDesc => "始终使用深色主题。",
+        L10nKey::SettingsThemeSlotLightDesc => "系统处于浅色模式时使用。",
+        L10nKey::SettingsThemeSlotDarkDesc => "系统处于深色模式时使用。",
+        L10nKey::SettingsThemeSlotDesc => "终端和界面使用的主题。",
+        L10nKey::SettingsLightThemeLabel => "浅色主题",
+        L10nKey::SettingsDarkThemeLabel => "深色主题",
+        L10nKey::SettingsNoThemesMatch => "没有匹配的主题",
+        L10nKey::SettingsRestoreChanged => "恢复 {count} 项修改",
+        L10nKey::SettingsShortcutsHint => {
+            "点击快捷键后按下新组合键；紧接着再按一组即可组成序列。Esc 取消，⌫ 清除。"
+        }
+        L10nKey::SettingsShortcutsHintTmux => {
+            "tmux 预设：窗格与标签页操作使用前缀键。点击快捷键即可修改；Esc 取消，⌫ 清除。"
+        }
+        L10nKey::SettingsShortcutConflict => "{keys} 已被「{action}」使用，替换后将从那里移除。",
+        L10nKey::SettingsReplace => "替换",
+        L10nKey::SettingsNoActionsMatch => "没有与「{query}」匹配的操作",
+        L10nKey::SettingsSearchShortcuts => "搜索操作或按键",
+        L10nKey::SettingsHostsDesc => "最近使用的主机。搜索可找到任意已保存的主机。",
+        L10nKey::SettingsAddHost => "添加主机",
+        L10nKey::SettingsNoHostsMatch => "没有与「{query}」匹配的主机",
+        L10nKey::SettingsHostsFromFiles => "{count} 台主机，来自 {files} 个来源",
+        L10nKey::SettingsMoreHosts => "还有 {count} 台主机",
+        L10nKey::SettingsShowRecentOnly => "只显示最近",
+        L10nKey::SettingsShowAll => "显示全部",
+        L10nKey::SettingsUnsaved => "未保存",
+        L10nKey::SettingsNever => "从未",
+        L10nKey::SettingsDefinedIn => "定义于",
+        L10nKey::SettingsConnectInNewTab => "在新标签页中连接",
+        L10nKey::SettingsCopied => "已复制",
+        L10nKey::SettingsCopySshCommand => "复制 ssh 命令",
+        L10nKey::SettingsStoredInTty7 => "保存在 tty7 设置中",
+        L10nKey::SettingsClickAgainToRemove => "再次点击以删除",
+        L10nKey::SettingsRemoveHost => "删除主机",
+        L10nKey::SettingsEditHost => "编辑",
+        L10nKey::SettingsLive => "已连接",
+        L10nKey::SettingsPressKeysShort => "按下按键…",
+        L10nKey::SettingsSearchAgents => "搜索 Agent",
+        L10nKey::SettingsConnectedMachines => "已连接",
+        L10nKey::SettingsInstalledCount => "已安装 {count} 个",
+        L10nKey::SettingsMachine => "机器",
+        L10nKey::SettingsMachineLocalDesc => "钩子按机器安装。远程机器在连接期间会出现在这里。",
+        L10nKey::SettingsMachineRemoteDesc => "通过当前与 {name} 的连接安装。",
+        L10nKey::SettingsAgentsInstalledSummary => "已安装 {count} / {total}",
+        L10nKey::SettingsNoAgentsInstalled => "这台机器上还没有安装 Agent 钩子。",
+        L10nKey::SettingsNoAgentsMatch => "没有与「{query}」匹配的 Agent",
+        L10nKey::SettingsMoreAgents => "还有 {count} 个可用 Agent",
+        L10nKey::SettingsShowInstalledOnly => "只显示已安装",
+        L10nKey::SettingsWorking => "处理中…",
+        L10nKey::SettingsUpdateAvailable => "有可用更新",
+        L10nKey::SettingsRevealHookFile => "显示钩子文件",
         L10nKey::SettingsNavGeneral => "常规",
         L10nKey::SettingsEditShortcuts => "编辑快捷键…",
         L10nKey::SettingsModifiedOnly => "仅显示已修改",
@@ -97,32 +159,26 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::Download => "下载",
         L10nKey::Link => "关联",
         L10nKey::SettingsThemeIntroTitle => "主题",
-        L10nKey::SettingsThemeIntroDesc => "选择配色主题。每个主题都有各自的浅色或深色外观。",
+        L10nKey::SettingsThemeIntroDesc => "每个主题自带浅色或深色外观。",
         L10nKey::SettingsTypography => "字体排版",
         L10nKey::SettingsFontSize => "终端字号",
         L10nKey::SettingsFontSizeDesc => "终端文字大小（像素）。",
         L10nKey::SettingsUiFontSize => "界面字号",
-        L10nKey::SettingsUiFontSizeDesc => {
-            "终端以外所有地方的文字大小——标签页、面板、设置。非 Retina 显示器上可以调大。"
-        }
+        L10nKey::SettingsUiFontSizeDesc => "标签页、面板、设置等非终端文字的大小。",
         L10nKey::SettingsUiFontFamily => "界面字体",
-        L10nKey::SettingsUiFontFamilyDesc => {
-            "用于标签页、侧栏、弹窗和设置的字体；默认使用系统 UI 字体。"
-        }
+        L10nKey::SettingsUiFontFamilyDesc => "用于标签页、侧栏、弹窗和设置。",
         L10nKey::SettingsLineHeight => "行高",
         L10nKey::SettingsLineHeightDesc => "行间距为字号的倍数。",
         L10nKey::SettingsFontFamily => "终端字体",
         L10nKey::SettingsFontFamilyDesc => "从系统已安装的字体中选择。",
         L10nKey::SettingsBoldFont => "粗体字体",
-        L10nKey::SettingsBoldFontDesc => "粗体文字使用的字体；默认由主字体合成。",
+        L10nKey::SettingsBoldFontDesc => "粗体字形；默认由主字体合成。",
         L10nKey::SettingsItalicFont => "斜体字体",
-        L10nKey::SettingsItalicFontDesc => "斜体文字使用的字体；默认由主字体合成。",
+        L10nKey::SettingsItalicFontDesc => "斜体字形；默认由主字体合成。",
         L10nKey::SettingsFontLigatures => "字体连字",
-        L10nKey::SettingsFontLigaturesDesc => "为终端文字启用常见的编程连字特性。",
+        L10nKey::SettingsFontLigaturesDesc => "终端文字启用编程连字。",
         L10nKey::SettingsFontThicken => "笔画加粗",
-        L10nKey::SettingsFontThickenDesc => {
-            "macOS 字体平滑：文字画得稍粗，浅色文字最明显。重启 tty7 后生效。"
-        }
+        L10nKey::SettingsFontThickenDesc => "文字画得稍粗一些，重启后生效。",
         L10nKey::SettingsCursor => "光标",
         L10nKey::SettingsCursorShape => "光标形状",
         L10nKey::SettingsCursorShapeDesc => "终端光标的绘制方式。",
@@ -138,9 +194,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsTransparency => "透明度",
         L10nKey::SettingsOpacity => "不透明度",
-        L10nKey::SettingsOpacityDesc => {
-            "窗口背景的不透明度，适用于所有主题。低于 100% 时可以看到桌面。"
-        }
+        L10nKey::SettingsOpacityDesc => "低于 100% 时可透出桌面。",
         L10nKey::SettingsBlur => "模糊",
         L10nKey::SettingsBlurDesc => {
             if cfg!(target_os = "macos") {
@@ -149,13 +203,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
                 "模糊半透明窗口背后的内容。需要合成器支持——KDE Plasma 可以；GNOME 和裸 X11 下窗口只会变透明。"
             }
         }
-        L10nKey::SettingsBlurAutoDesc => {
-            "模糊半透明窗口背后的内容。仅在「背景材质」为「自动」时生效。"
-        }
+        L10nKey::SettingsBlurAutoDesc => "模糊窗口背后的内容，仅限「自动」材质。",
         L10nKey::SettingsBackdrop => "背景材质",
-        L10nKey::SettingsBackdropDesc => {
-            "半透明窗口背后的原生 Windows 背景材质。云母需要 Windows 11 22H2，亚克力需要 1809；更旧的系统会自动回退。"
-        }
+        L10nKey::SettingsBackdropDesc => "半透明窗口背后的原生背景材质。",
         L10nKey::SettingsSearchBackdropKeywords => {
             "材质 背景 云母 亚克力 模糊 毛玻璃 窗口 material backdrop mica acrylic blur frosted window background"
         }
@@ -175,9 +225,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsImageOpacity => "图片不透明度",
         L10nKey::SettingsImageOpacityDesc => "图片叠加在背景色上的显示强度。",
         L10nKey::SettingsEditTheme => "编辑主题",
-        L10nKey::SettingsEditThemeIntro => {
-            "你正在编辑一份副本。更改会保存到主题文件夹中的对应文件并实时生效。"
-        }
+        L10nKey::SettingsEditThemeIntro => "正在编辑副本，更改实时生效并保存到主题文件夹。",
         L10nKey::SettingsBackgroundImage => "背景图片",
         L10nKey::SettingsBackgroundImageDesc => "叠加在背景色之上、文字之下。",
         L10nKey::SettingsAnsiColors => "ANSI 颜色",
@@ -189,7 +237,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ExplorerMenuOpenIn => "在 tty7 中打开",
         L10nKey::ExplorerMenuOpenHere => "在此处打开 tty7",
         L10nKey::SettingsCustomThemesIntro => {
-            "复制一个主题即可在此编辑颜色，或把 tty7 YAML 主题、iTerm2 .itermcolors 文件放进主题文件夹。"
+            "复制主题后即可编辑，或把 YAML、.itermcolors 文件放进主题文件夹。"
         }
         L10nKey::SettingsDuplicateToEdit => "复制以编辑",
         L10nKey::SettingsHosts => "主机",
@@ -206,9 +254,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsMoreInSshConfig => "~/.ssh/config 中还有 {count} 个",
         L10nKey::SettingsAliasesLinked => "已关联 {count} 个别名。",
         L10nKey::SettingsImportAliases => "导入别名",
-        L10nKey::SettingsImportAliasesDesc => {
-            "重新读取文件并添加新内容。你在这里做的编辑由 tty7 保存——不会写入该文件本身。"
-        }
+        L10nKey::SettingsImportAliasesDesc => "重新读取文件并添加新条目，不会改动文件本身。",
         L10nKey::SettingsImportNow => "立即导入",
         L10nKey::SettingsImportUnreadable => "无法读取 {path}——没有导入任何内容。",
         L10nKey::SettingsImportNoHosts => "{path} 中没有可导入的主机——只有通配符或 Match 规则。",
@@ -219,9 +265,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "有 {count} 个选项在 tty7 中没有对应设置，仍留在文件里：{options}"
         }
         L10nKey::SettingsImportMoreOptions => "还有 {count} 个",
-        L10nKey::SettingsDefaultsIntro => {
-            "所有主机都从这些设置开始。每个主机都可以在自己的高级选项中覆盖某项。"
-        }
+        L10nKey::SettingsDefaultsIntro => "所有主机都以此为默认值，可在各自的高级选项中覆盖。",
         L10nKey::SettingsCopyAddress => "复制地址",
         L10nKey::SettingsDuplicate => "复制",
         L10nKey::SettingsForgetPassword => "清除已保存的密码",
@@ -244,12 +288,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSecurityIntro => "主机可以在自己的高级选项中覆盖这些设置。",
         L10nKey::SettingsVerifyHostKeys => "校验主机密钥",
         L10nKey::SettingsVerifyHostKeysDesc => {
-            "连接前对照 known_hosts 检查服务器密钥。关闭后不做检查，被仿冒的服务器也不会被察觉。"
+            "连接前对照 known_hosts 校验服务器密钥。关闭后无法察觉仿冒的服务器。"
         }
         L10nKey::WarnBeforeClosing => "关闭前警告",
-        L10nKey::SettingsWarnBeforeClosingDesc => {
-            "在关闭带有活动 SSH 会话的标签页或窗格前请求确认。"
-        }
+        L10nKey::SettingsWarnBeforeClosingDesc => "关闭有活动 SSH 会话的标签页前确认。",
         L10nKey::SettingsNewHost => "新主机",
         L10nKey::SettingsDiscardChangesTitle => "放弃未保存的更改？",
         L10nKey::SettingsDiscardChangesBody => "当前连接有未保存的更改。",
@@ -301,9 +343,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsGroupSession => "会话",
         L10nKey::SettingsGroupSecurity => "安全",
         L10nKey::SettingsRemoteClipboardWrite => "远端剪贴板图片",
-        L10nKey::SettingsRemoteClipboardWriteDesc => {
-            "允许此主机上的程序通过 OSC 5522 用图片覆盖本机剪贴板。"
-        }
+        L10nKey::SettingsRemoteClipboardWriteDesc => "允许此主机通过 OSC 5522 写入图片到剪贴板。",
         L10nKey::SettingsIdentityFiles => "身份文件",
         L10nKey::SettingsIdentityFilesDesc => "私钥路径，每行一个（支持 %h/%r 展开）。",
         L10nKey::SettingsAgentForwarding => "ssh-agent 转发",
@@ -375,18 +415,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsOn => "开",
         L10nKey::SettingsOff => "关",
         L10nKey::SettingsShell => "Shell",
-        L10nKey::SettingsShellIntro => {
-            "每个新终端启动的程序。将“Shell 程序”留空可使用平台默认值（{default}）。"
-        }
+        L10nKey::SettingsShellIntro => "新终端启动的程序，留空则使用 {default}。",
         L10nKey::SettingsProgram => "Shell 程序",
-        L10nKey::SettingsProgramDesc => "PATH 中的可执行文件名或绝对路径，例如 zsh、fish、pwsh。",
+        L10nKey::SettingsProgramDesc => "PATH 中的命令名或绝对路径，如 zsh、fish。",
         L10nKey::SettingsArguments => "Shell 参数",
-        L10nKey::SettingsArgumentsDesc => {
-            "启动参数，按命令行规则切分——含空格的参数请用引号包住（例如 -l，或 -c \"echo hi\"）。"
-        }
+        L10nKey::SettingsArgumentsDesc => "按命令行规则切分，例如 -l 或 -c \"echo hi\"。",
         L10nKey::SettingsArgumentsInvalid => "引号不配对，该值未保存。",
         L10nKey::SettingsStartIn => "启动目录",
-        L10nKey::SettingsStartInDesc => "新 shell 的启动目录：tty7 的启动目录、主目录或固定路径。",
+        L10nKey::SettingsStartInDesc => "tty7 的启动目录、主目录或固定路径。",
         L10nKey::SettingsCustomPath => "自定义路径",
         L10nKey::SettingsCustomPathDesc => "新 shell 启动的目录。",
         L10nKey::SettingsWdInherit => "继承",
@@ -394,7 +430,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsWdCustom => "自定义",
         L10nKey::SettingsWdPathInvalid => "这个目录不存在，该值未保存。",
         L10nKey::SettingsShellFooter => {
-            "仅适用于没有目录可继承的 shell，例如窗口的第一个标签页。新标签页和分屏仍继承活动窗格的目录，已打开的 shell 继续运行。"
+            "仅用于没有目录可继承的 shell，例如窗口的第一个标签页；新标签页和分屏沿用当前窗格的目录。"
         }
         L10nKey::SettingsScrolling => "滚动",
         L10nKey::SettingsScrollback => "终端输出历史行数",
@@ -402,39 +438,32 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsScrollSpeed => "滚动速度",
         L10nKey::SettingsScrollSpeedDesc => "应用于鼠标滚轮滚动的倍率。",
         L10nKey::SettingsSmoothScroll => "平滑滚动",
-        L10nKey::SettingsSmoothScrollDesc => {
-            "滚轮每一格分几帧滚到位，而不是一次跳完。触控板本来就是连续滚动，不受影响。"
-        }
+        L10nKey::SettingsSmoothScrollDesc => "滚轮每格分几帧滚动，触控板不受影响。",
         L10nKey::SettingsMouse => "鼠标",
         L10nKey::SettingsFocusFollowsMouse => "焦点跟随鼠标",
         L10nKey::SettingsFocusFollowsMouseDesc => "悬停窗格即聚焦，无需点击。",
         L10nKey::SettingsHideMouseWhileTyping => "输入时隐藏鼠标",
         L10nKey::SettingsHideMouseWhileTypingDesc => "输入时隐藏指针；下次移动鼠标时恢复。",
         L10nKey::SettingsMouseZoom => "滚轮缩放",
-        L10nKey::SettingsMouseZoomDesc => "按住该修饰键滚轮时缩放终端字号，而不是滚动。",
+        L10nKey::SettingsMouseZoomDesc => "按住它滚动滚轮可缩放终端字号。",
         L10nKey::SettingsMouseZoomOff => "关闭",
         L10nKey::SettingsReportMouseToApps => "向应用报告鼠标",
         L10nKey::SettingsReportMouseToAppsDesc => {
-            "让全屏应用（如 vim、tmux）处理点击和滚动；按住 Shift 可让操作保持本地。\
-             关闭后点击不再传给它们，滚轮也会变成方向键。"
+            "让 vim、tmux 等应用处理点击，按住 Shift 则留在本地。"
         }
         L10nKey::SettingsBell => "铃声",
         L10nKey::SettingsTerminalBell => "终端铃声",
-        L10nKey::SettingsTerminalBellDesc => {
-            "铃声（^G）的通知方式：静音、短暂闪烁、系统声音，或两者同时。"
-        }
+        L10nKey::SettingsTerminalBellDesc => "铃声（^G）的提示方式。",
         L10nKey::SettingsLinks => "链接",
         L10nKey::DetectUrls => "检测 URL",
-        L10nKey::SettingsDetectUrlsDesc => "悬停时给链接加下划线，通过 {modifier}+点击 打开。",
+        L10nKey::SettingsDetectUrlsDesc => "悬停显示下划线，{modifier}+点击 打开。",
         L10nKey::ForwardSshLoopbackLinks => "转发远程端口",
-        L10nKey::SettingsForwardSshLoopbackLinksDesc => {
-            "SSH 会话里，自动转发窗格开始监听的端口，并在本机打开它的 localhost 链接。"
-        }
+        L10nKey::SettingsForwardSshLoopbackLinksDesc => "在本机打开远程窗格的 localhost 链接。",
         L10nKey::SettingsOpenFilesInternal => "内置编辑器",
         L10nKey::SettingsOpenFilesSystem => "默认应用",
         L10nKey::SettingsOpenFilesCommand => "自定义命令",
         L10nKey::SettingsOpenFilesModeDesc => {
-            "{modifier}+点击 文件链接时用什么打开。只有内置编辑器能跳到指定行、能打开远程主机上的文件。"
+            "{modifier}+点击 文件链接时用什么打开。只有内置编辑器能跳到指定行、打开远程文件。"
         }
         L10nKey::LinkFileNotUnder => "{path} —— {dir} 下没有这个文件",
         L10nKey::LinkFileNoDirectory => {
@@ -443,37 +472,27 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::LinkFileMissing => "{path} —— 这个路径下什么也没有",
         L10nKey::LinkDirOutsideTree => "{path} —— 它在另一台机器上，也不在文件面板打开的任何目录里",
         L10nKey::OpenFilesWith => "打开文件方式",
-        L10nKey::SettingsOpenFilesWithDesc => {
-            "{modifier}+点击 文件链接时运行的命令。可用 {path}、{line}、{column}——取值缺失的标志会被丢弃。留空则用默认应用。"
-        }
+        L10nKey::SettingsOpenFilesWithDesc => "可用 {path}、{line}、{column}，留空用默认应用。",
         L10nKey::SettingsBellModeOff => "关",
         L10nKey::SettingsBellModeVisual => "闪烁",
         L10nKey::SettingsBellModeAudible => "声音",
         L10nKey::SettingsBellModeBoth => "闪烁 + 声音",
         L10nKey::SettingsPrompt => "提示符与命令历史",
-        L10nKey::SettingsPromptIntro => {
-            "shell 提示符处的 tty7 自带编辑器与菜单。关闭某项即可把这部分交还给 shell。"
-        }
+        L10nKey::SettingsPromptIntro => "提示符上 tty7 自带的编辑器和菜单，关闭即交还给 shell。",
         L10nKey::SettingsPromptEditor => "tty7 提示符编辑器",
         L10nKey::SettingsPromptEditorDesc => {
-            "由 tty7 编辑你在 shell 提示符上敲的这一行：选择、撤销，以及下面这些菜单。关闭后交还给 shell 自己的行编辑器——ZLE、readline、fish。"
+            "在输入行上提供选择、撤销和菜单。关闭后交还给 ZLE、readline 或 fish。"
         }
         L10nKey::SettingsNeedsPromptEditor => {
             "需要提示符编辑器：它关闭时，这个按键本就归 shell 所有。"
         }
         L10nKey::SettingsTabCompletion => "Tab 补全",
-        L10nKey::SettingsTabCompletionDesc => {
-            "在提示符按 Tab 打开 tty7 的补全菜单。关闭后 Tab 交由 shell 自身的补全处理。"
-        }
+        L10nKey::SettingsTabCompletionDesc => "Tab 打开 tty7 的补全菜单，关闭后交给 shell。",
         L10nKey::SettingsHistorySearch => "命令历史搜索",
-        L10nKey::SettingsHistorySearchDesc => {
-            "在提示符按 ⌃R 打开 tty7 的模糊历史菜单。关闭后 ⌃R 交给 shell——它自带的反向搜索，或你绑定的其它功能（fzf、percol）。"
-        }
+        L10nKey::SettingsHistorySearchDesc => "⌃R 打开 tty7 的模糊历史搜索，关闭后交给 shell。",
         L10nKey::SettingsSelectionClipboard => "选择与剪贴板",
         L10nKey::SettingsSmartSelection => "智能选择",
-        L10nKey::SettingsSmartSelectionDesc => {
-            "双击选择光标下的完整 URL、文件路径、邮箱或成对的括号。"
-        }
+        L10nKey::SettingsSmartSelectionDesc => "双击选中完整的 URL、路径、邮箱或括号对。",
         L10nKey::SettingsCopyOnSelect => "选中即复制",
         L10nKey::SettingsCopyOnSelectDesc => {
             if cfg!(target_os = "macos") {
@@ -486,12 +505,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsTrimTrailingSpacesDesc => "去除每行复制文本末尾的空白。",
         L10nKey::SettingsKeyboard => "键盘",
         L10nKey::SettingsOptionAsMeta => "Option (⌥) 作为 Meta",
-        L10nKey::SettingsOptionAsMetaDesc => {
-            "⌥+按键 发送 shell 期望的转义组合键（⌥B = 后退一个词），而不是输入特殊字符（∫）。"
-        }
-        L10nKey::SettingsAgentsIntro => "AI agent",
+        L10nKey::SettingsOptionAsMetaDesc => "⌥+按键 作为 Meta，如 ⌥B 后退一词。",
+        L10nKey::SettingsAgentsIntro => "Agent 钩子",
         L10nKey::SettingsAgentsIntroDesc => {
-            "安装 hook，让运行 AI agent 的窗格在标签栏显示实时状态（进行中 / 等待中 / 已完成）。仅在 tty7 内生效。"
+            "安装 hook 后，agent 的状态（进行中 / 等待中 / 已完成）会显示在标签栏。"
         }
         L10nKey::SettingsReadingAgentConfig => "正在读取这台机器的 AI agent 配置…",
         L10nKey::SettingsStatusNotInstalled => "未安装",
@@ -504,10 +521,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsOfflineMachines => {
             "还有 {count} 台已保存的机器未连接——在其中一台上打开工作区，即可在那台机器上安装 hook。"
         }
-        L10nKey::SettingsSyncWithSystem => "跟随系统",
+        L10nKey::SettingsSyncWithSystem => "外观",
         L10nKey::SettingsSyncWithSystemDesc => "跟随操作系统外观，并分别使用浅色与深色主题。",
         L10nKey::SettingsLegiblePalette => "低对比度颜色纠偏",
-        L10nKey::SettingsLegiblePaletteDesc => "自动把主题背景上对比度不足的颜色调整到可读级别。",
+        L10nKey::SettingsLegiblePaletteDesc => "自动调整在背景上看不清的亮色。",
         L10nKey::SettingsChangeTheme => "更换主题",
         L10nKey::SettingsThemes => "主题",
         L10nKey::SettingsThemesCloseTooltip => "关闭主题面板 (Esc)",
@@ -525,30 +542,20 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsStartupWindow => "启动窗口",
         L10nKey::SettingsStartupWindowDesc => "tty7 启动时的窗口状态。",
         L10nKey::SettingsRememberWindowSize => "记住窗口大小与位置",
-        L10nKey::SettingsRememberWindowSizeDesc => {
-            "以 tty7 上次退出时窗口的大小和位置重新打开。关闭时以默认大小居中打开。"
-        }
+        L10nKey::SettingsRememberWindowSizeDesc => "按上次退出时的大小和位置打开窗口。",
         L10nKey::SettingsRestoreLastLayout => "恢复上次布局",
-        L10nKey::SettingsRestoreLastLayoutDesc => {
-            "启动时恢复上次窗口的标签页、分屏和目录。关闭时从单个新终端开始。"
-        }
+        L10nKey::SettingsRestoreLastLayoutDesc => "启动时恢复上次的标签页、分屏和目录。",
         L10nKey::SettingsShowTrayIcon => "显示托盘图标",
-        L10nKey::SettingsShowTrayIconDesc => {
-            "在系统托盘/菜单栏保留状态项：agent 需要输入时发出提示，菜单可跳到该 agent 的窗格。"
-        }
+        L10nKey::SettingsShowTrayIconDesc => "agent 等待输入时提醒，可跳到对应窗格。",
         L10nKey::SettingsTabs => "标签页",
         L10nKey::SettingsNewTabPosition => "新标签页位置",
         L10nKey::SettingsNewTabPositionDesc => "新打开的标签页插入的位置。",
         L10nKey::SettingsTabBarPosition => "标签栏位置",
         L10nKey::SettingsTabBarPositionDesc => "将标签页显示为顶部横向条或左侧垂直侧栏。",
         L10nKey::SettingsSidebarGrouping => "侧栏分组",
-        L10nKey::SettingsSidebarGroupingDesc => {
-            "按 git 仓库给侧栏标签页分组。仓库外的标签页归到“草稿”，选“按仓库或文件夹”时则按工作目录分。仅左侧栏。"
-        }
+        L10nKey::SettingsSidebarGroupingDesc => "按 git 仓库分组侧栏标签页，其余归入“草稿”。",
         L10nKey::SettingsDiffPreviewFromCounts => "从侧栏计数打开 diff 预览",
-        L10nKey::SettingsDiffPreviewFromCountsDesc => {
-            "点击行上的 +N −N 在浮层中打开 worktree diff。关闭后计数仍显示，只是不可点击。"
-        }
+        L10nKey::SettingsDiffPreviewFromCountsDesc => "点击行上的 +N −N 打开 diff。",
         L10nKey::DocumentDock => "停靠在终端旁",
         L10nKey::DocumentFill => "铺满窗口",
         L10nKey::SettingsNotifications => "通知",
@@ -571,18 +578,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsByRepoOrFolder => "按仓库或文件夹",
         L10nKey::SettingsFlat => "平铺",
         L10nKey::SettingsPreset => "预设",
-        L10nKey::SettingsPresetDesc => {
-            "tmux 预设把窗格/标签页操作映射为前缀序列（例如 Ctrl-B 后按 C）。"
-        }
+        L10nKey::SettingsPresetDesc => "tmux 预设把操作映射为前缀键（如 Ctrl-B C）。",
         L10nKey::SettingsPrefix => "前缀",
         L10nKey::SettingsPressKeys => "按下按键… · ⌫ 表示不设快捷键",
         L10nKey::SettingsPauseToSaveEsc => "暂停以保存 · Esc",
         L10nKey::SettingsKeybindingsIntroDesc => {
-            "点击某个快捷键，再按下新按键，短暂停顿后保存。连续按键可组成序列，例如 Ctrl-B 后按 X。Esc 取消；Backspace 移除最后一个按键，最先按下则不设快捷键，点「重置」可恢复默认。"
+            "点击快捷键后按新按键，连按可组成序列（如 Ctrl-B X）。Esc 取消，Backspace 清除。"
         }
-        L10nKey::SettingsPrefixNote => {
-            "启用前缀后，单独按前缀键约 1 秒后会传给 shell，前缀 + 未绑定的按键会直接发送到终端。"
-        }
+        L10nKey::SettingsPrefixNote => "单独按前缀键，约 1 秒后传给 shell。",
         L10nKey::SettingsRestoreAllDefaults => "恢复全部默认值",
         L10nKey::SettingsRestoreAllDefaultsBody => "你改过的每一个按键都会退回默认值，且无法撤销。",
         L10nKey::KeybindGoToTab => "跳到第 {n} 个标签页",
@@ -592,10 +595,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::KeybindForkSessionLeft => "向左 Fork 会话",
         L10nKey::KeybindForkSessionDown => "向下 Fork 会话",
         L10nKey::KeybindForkSessionUp => "向上 Fork 会话",
-        L10nKey::SettingsAboutDesc1 => "终端工作台：持久会话、远程开发、AI agent。",
+        L10nKey::SettingsAboutDesc1 => {
+            "为长时间工作打造的终端工作台。会话不随窗口关闭而结束，远程主机用起来和本地一样，编程 agent 的状态直接显示在侧栏里。"
+        }
         L10nKey::SettingsDefaultTerminal => "默认终端",
         L10nKey::SettingsDefaultTerminalDesc => {
-            "将 tty7 设为 Unix 可执行文件、SSH 链接和 man 页面链接的 macOS 默认终端。tty7 仍可打开文件夹和脚本，但不会替换 Finder 的文件夹处理程序。自行指定终端的应用可能不会遵循此设置。"
+            "用 tty7 打开 Unix 可执行文件、SSH 链接和 man 页面。"
         }
         L10nKey::SettingsDefaultTerminalSet => "设为默认终端",
         L10nKey::SettingsDefaultTerminalSetSuccess => {
@@ -623,18 +628,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateInstallNow => "安装并重启",
         L10nKey::SettingsUpdateDiscard => "丢弃",
         L10nKey::SettingsAutoDownload => "后台下载更新",
-        L10nKey::SettingsAutoDownloadDesc => {
-            "发现新版本就先下载并校验好，安装时只需重启一下。不会未经确认就安装。安装包约 30 MB。"
-        }
+        L10nKey::SettingsAutoDownloadDesc => "后台下载新版本，安装时只需重启；不会未经确认就安装。",
         L10nKey::SettingsUpdateChannel => "更新通道",
-        L10nKey::SettingsUpdateChannelDesc => {
-            "稳定版（Stable）跟随正式发布的版本；每夜构建（Nightly）跟随每晚从最新代码构建的版本，更新更快，但未经发布测试。"
-        }
+        L10nKey::SettingsUpdateChannelDesc => "Nightly 每晚从最新代码构建，未经发布测试。",
         L10nKey::SettingsUpdateChannelStable => "稳定版",
         L10nKey::SettingsUpdateChannelNightly => "每夜构建",
         L10nKey::SettingsDaemonStale => "tty7 server 仍运行在 {build}。",
         L10nKey::SettingsDaemonStaleDesc => {
-            "tty7 是原地升级的：界面已是新版，窗格还由旧版 tty7 server 托管。重启 tty7 server 换成新版，代价是窗格里正在跑的进程全部结束。不急，挑窗格空闲时再重启。"
+            "tty7 已更新，但窗格仍跑在旧版 server 上。重启后换用新版，窗格中运行的进程会全部结束。"
         }
         L10nKey::UpdateDialogTitle => "有可用更新",
         L10nKey::UpdateDialogDetail => {
@@ -679,17 +680,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCheckUpdatesDesc => "无法就地更新的安装方式会改为打开发布页面。",
         L10nKey::SettingsCheckUpdatesOnLaunch => "启动时检查更新",
         L10nKey::SettingsCommandLine => "命令行",
-        L10nKey::SettingsCommandLineDesc => {
-            "让脚本和 AI agent 使用随应用提供的 tty7 命令。下次启动生效；关闭后不会移除已安装的命令。"
-        }
+        L10nKey::SettingsCommandLineDesc => "把 tty7 命令加入 PATH，下次启动生效。",
         L10nKey::SettingsInstallCliOnPath => "将 tty7 命令安装到 PATH",
         L10nKey::SettingsServer => "tty7 server",
-        L10nKey::SettingsServerDesc => "管理这台计算机上的终端会话，让会话在后台持续运行。",
+        L10nKey::SettingsServerDesc => "让终端会话在后台持续运行。",
         L10nKey::SettingsRestartServer => "重启 tty7 server…",
         L10nKey::SettingsAppHttpProxy => "更新代理",
-        L10nKey::SettingsAppHttpProxyDesc => {
-            "仅用于 tty7 自身的更新检查和下载，不影响窗格中运行的程序。留空则跟随系统代理。"
-        }
+        L10nKey::SettingsAppHttpProxyDesc => "仅用于 tty7 的更新检查，留空跟随系统。",
         L10nKey::SettingsAppHttpProxyInvalid => "不是有效的代理地址，该值未保存。",
         L10nKey::SettingsAgentClaudeCode => "Claude Code",
         L10nKey::SettingsAgentCodex => "Codex",
@@ -1655,7 +1652,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::Replace => "覆盖",
         L10nKey::SftpErrorInvalidOctalMode => "无效的八进制模式",
         L10nKey::SettingsDaemonStaleDescInPlace => {
-            "tty7 是原地更新的：应用是新的，窗格还跑在旧版上。tty7 server 可以不停机就换成新版，shell 直接延续下来。用 tty7 内置 SSH 客户端的窗格除外——那些连接会断开，需要重新打开。"
+            "tty7 已更新。server 可原地替换，shell 不受影响；只有内置 SSH 的窗格会断开。"
         }
         L10nKey::AppRestartServerBodyInPlace => {
             "tty7 server 会原地把自己换成当前这个版本：shell 继续运行，窗口稍后自动连回去。用 tty7 内置 SSH 客户端的窗格除外——那些连接会断开，需要重新打开。"
@@ -1664,9 +1661,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "已恢复的画面 —— 下面是新的 shell，上面的内容都已不在运行"
         }
         L10nKey::SettingsPerPaneHistory => "各窗格使用独立命令历史",
-        L10nKey::SettingsPerPaneHistoryDescription => {
-            "上方向键翻的是这个窗格里跑过的命令，而不是所有窗格混在一起。新窗格从已有历史开始，关闭时把新增的写回去。只对 tty7 能接管的 bash 和 zsh 窗格生效；用你自己参数启动的 shell 不受影响。"
-        }
+        L10nKey::SettingsPerPaneHistoryDescription => "↑ 只翻本窗格的历史，仅限 bash 和 zsh。",
         L10nKey::IntegrationNoticeBlocked => {
             "“{wrapper}”截获了此窗格的 shell 上报，内联补全和 Ctrl+R 菜单不可用。shell 自带的历史搜索仍可使用。"
         }
@@ -1806,6 +1801,18 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
 
 pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'static str> {
     let res = match (key, branch) {
+        (L10nKey::SettingsMatchCount, "zero") => "没有结果",
+        (L10nKey::SettingsMatchCount, "one") => "1 个结果",
+        (L10nKey::SettingsMatchCount, "other") => "{count} 个结果",
+        (L10nKey::SettingsRestoreChanged, "zero") => "恢复修改",
+        (L10nKey::SettingsRestoreChanged, "one") => "恢复 1 项修改",
+        (L10nKey::SettingsRestoreChanged, "other") => "恢复 {count} 项修改",
+        (L10nKey::SettingsMoreHosts, "zero") => "没有更多主机",
+        (L10nKey::SettingsMoreHosts, "one") => "还有 1 台主机",
+        (L10nKey::SettingsMoreHosts, "other") => "还有 {count} 台主机",
+        (L10nKey::SettingsMoreAgents, "zero") => "没有更多 Agent",
+        (L10nKey::SettingsMoreAgents, "one") => "还有 1 个可用 Agent",
+        (L10nKey::SettingsMoreAgents, "other") => "还有 {count} 个可用 Agent",
         (L10nKey::SettingsDeleteProfileCascade, "one") => {
             "有 1 个已保存的远程工作区条目指向 {endpoint}，将随配置一并从本机清除；\
              远端机器上的会话不受影响，新建配置连上同一台机器后即可在工作区列表找回。"

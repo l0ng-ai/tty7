@@ -1,6 +1,6 @@
 pub use tty7_core::core::session::{
-    RemoteRef, RemoteTarget, RouteSnapshot, Session, SessionAxis, SessionPane, SessionTab,
-    WindowView, WindowViews, WorkspaceId,
+    RemoteRef, RemoteTarget, Session, SessionAxis, SessionPane, SessionTab, WindowView,
+    WindowViews, WorkspaceId,
 };
 pub use tty7_core::host::HostId;
 

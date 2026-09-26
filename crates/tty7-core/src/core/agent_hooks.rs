@@ -266,7 +266,7 @@ fn ancestor_pids(procs: &[crate::daemon::winproc::Proc]) -> Vec<u32> {
     out
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum HookAgent {
     Claude,
     Codex,

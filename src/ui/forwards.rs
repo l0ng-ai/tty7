@@ -463,8 +463,7 @@ impl Tty7App {
                 )
             })
             .when(advanced, |form| {
-                form.child(self.segmented_on(
-                    sf,
+                form.child(self.segmented(
                     "ssh-managed-forward-kind",
                     &[
                         t(L10nKey::ForwardLocal),

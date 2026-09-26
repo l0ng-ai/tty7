@@ -15,9 +15,8 @@ section something is in.
 
 <CardGroup cols={2}>
   <Card title="General" icon="sliders">
-    Interface language, startup and layout restore, tray icon, default terminal,
-    command completion notifications, update preferences and proxy, and the
-    tty7 server.
+    Interface language, default terminal, startup window, size and layout
+    restore, tray icon, and command completion notifications.
   </Card>
   <Card title="Appearance" icon="palette" href="/customization/themes">
     Theme and colors, interface and terminal fonts, cursor, background image,
@@ -34,30 +33,36 @@ section something is in.
     Tab position and placement, sidebar grouping, and diff previews.
   </Card>
   <Card title="SSH" icon="server" href="/remote/ssh">
-    Hosts, connection defaults, security, authentication, proxies, and forwarding.
+    Recent and saved hosts, each opened and edited in place, and host key
+    security.
   </Card>
   <Card title="Integrations" icon="robot" href="/agents/status">
     AI agent hooks per machine and the tty7 command on PATH.
   </Card>
   <Card title="About" icon="circle-info" href="/reference/updates">
-    App information, version, manual update checks, and available updates.
+    Version and update checks, update preferences and proxy, the settings
+    file, and the tty7 server.
   </Card>
 </CardGroup>
 
 ## Search and edit
 
 Search matches setting names, descriptions, English aliases, and configuration
-keys such as `mouse_zoom_modifier`. Ordinary results are editable directly;
-use the path above a result to open its category. SSH, theme editors, and
-keyboard shortcuts have dedicated views.
+keys such as `mouse_zoom_modifier`. Results are grouped by section and are
+editable directly; click a section name to open it. Press ⌘F (Ctrl+F) to jump
+to the search box.
 
 Use **Modified only** to find settings that differ from their defaults. A
-modified setting offers **Reset setting**; installation and maintenance actions
+modified setting offers **Reset** beside its name; installation and maintenance actions
 do not have a generic reset.
 
 Ordinary controls save automatically. Text fields commit valid values on Enter
 or when focus leaves the field. Custom theme edits are previewed until you save;
-cancel restores the original theme. SSH profiles also use explicit saving.
+cancel restores the original theme. SSH hosts also use explicit saving.
+
+Recording a keyboard shortcut that another action already uses asks before
+taking it over: **Replace** moves the shortcut, **Cancel** leaves both as they
+were.
 Leaving an edited form offers save, discard, or continue editing.
 
 ## The settings file

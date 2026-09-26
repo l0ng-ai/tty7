@@ -47,6 +47,36 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/machine-local.svg" => include_bytes!("../../assets/icons/machine-local.svg"),
         "icons/machine-remote.svg" => include_bytes!("../../assets/icons/machine-remote.svg"),
         "icons/refresh.svg" => include_bytes!("../../assets/icons/refresh.svg"),
+        "icons/settings/about.svg" => include_bytes!("../../assets/icons/settings/about.svg"),
+        "icons/settings/appearance.svg" => {
+            include_bytes!("../../assets/icons/settings/appearance.svg")
+        }
+        "icons/settings/back.svg" => include_bytes!("../../assets/icons/settings/back.svg"),
+        "icons/settings/check.svg" => include_bytes!("../../assets/icons/settings/check.svg"),
+        "icons/settings/chevron-down.svg" => {
+            include_bytes!("../../assets/icons/settings/chevron-down.svg")
+        }
+        "icons/settings/chevron-right.svg" => {
+            include_bytes!("../../assets/icons/settings/chevron-right.svg")
+        }
+        "icons/settings/close.svg" => include_bytes!("../../assets/icons/settings/close.svg"),
+        "icons/settings/general.svg" => include_bytes!("../../assets/icons/settings/general.svg"),
+        "icons/settings/integrations.svg" => {
+            include_bytes!("../../assets/icons/settings/integrations.svg")
+        }
+        "icons/settings/keyboard.svg" => include_bytes!("../../assets/icons/settings/keyboard.svg"),
+        "icons/settings/machine-local.svg" => {
+            include_bytes!("../../assets/icons/settings/machine-local.svg")
+        }
+        "icons/settings/machine-remote.svg" => {
+            include_bytes!("../../assets/icons/settings/machine-remote.svg")
+        }
+        "icons/settings/more.svg" => include_bytes!("../../assets/icons/settings/more.svg"),
+        "icons/settings/plus.svg" => include_bytes!("../../assets/icons/settings/plus.svg"),
+        "icons/settings/search.svg" => include_bytes!("../../assets/icons/settings/search.svg"),
+        "icons/settings/ssh.svg" => include_bytes!("../../assets/icons/settings/ssh.svg"),
+        "icons/settings/terminal.svg" => include_bytes!("../../assets/icons/settings/terminal.svg"),
+        "icons/settings/window.svg" => include_bytes!("../../assets/icons/settings/window.svg"),
         "icons/agents/claude.svg" => include_bytes!("../../assets/icons/agents/claude.svg"),
         "icons/agents/codex.svg" => include_bytes!("../../assets/icons/agents/codex.svg"),
         "icons/agents/traecli.svg" => include_bytes!("../../assets/icons/agents/traecli.svg"),
