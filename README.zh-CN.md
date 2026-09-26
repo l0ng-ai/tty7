@@ -77,6 +77,7 @@ macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/
 | **Grok** | ✓ | ✓ | ✓ |
 | **OpenCode** | ✓ | ✓ | ✓ |
 | **Oh My Pi** | ✓ | ✓ | ✓ |
+| **Prime Agent** | ✓ | ✓ | ✓ |
 | **Droid** | ✓ | ✓ | ✓ |
 | **Qwen Code** | ✓ | ✓ | ✓ |
 | **Goose** | ✓ | ✓ | ✓ |
@@ -84,13 +85,14 @@ macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/
 | **Copilot** | ✓ | ✓ | |
 | **Kimi Code** | ✓ | ✓ | |
 | **Pi** | ✓ | ✓ | |
+| **Antigravity** | ✓ | ✓ | |
 | Aider | ✓ | | |
 | Amp | ✓ | | |
 | Cursor | ✓ | | |
 | Auggie | ✓ | | |
 | Hermes | ✓ | | |
 | Vibe | ✓ | | |
-| Antigravity | ✓ | | |
+| Empryo | ✓ | | |
 
 </details>
 

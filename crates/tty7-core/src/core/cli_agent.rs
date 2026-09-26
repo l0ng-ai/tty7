@@ -29,10 +29,12 @@ pub enum CLIAgent {
     QoderCLI,
     Crush,
     CodeBuddy,
+    Empryo,
+    PrimeAgent,
 }
 
 impl CLIAgent {
-    pub const ALL: [CLIAgent; 23] = [
+    pub const ALL: [CLIAgent; 25] = [
         CLIAgent::Claude,
         CLIAgent::Codex,
         CLIAgent::TraeCode,
@@ -56,6 +58,8 @@ impl CLIAgent {
         CLIAgent::QoderCLI,
         CLIAgent::Crush,
         CLIAgent::CodeBuddy,
+        CLIAgent::Empryo,
+        CLIAgent::PrimeAgent,
     ];
 
     fn aliases(self) -> &'static [&'static str] {
@@ -106,6 +110,8 @@ impl CLIAgent {
             // `cbc` also names the COIN-OR solver; a solver run wearing the
             // avatar until it exits is the cost of catching the short name.
             CLIAgent::CodeBuddy => &["codebuddy", "codebuddy-code", "cbc"],
+            CLIAgent::Empryo => &["empryo"],
+            CLIAgent::PrimeAgent => &["prime-agent"],
         }
     }
 
@@ -134,6 +140,8 @@ impl CLIAgent {
             CLIAgent::QoderCLI => "qodercli",
             CLIAgent::Crush => "crush",
             CLIAgent::CodeBuddy => "codebuddy",
+            CLIAgent::Empryo => "empryo",
+            CLIAgent::PrimeAgent => "prime-agent",
         }
     }
 
@@ -167,6 +175,8 @@ impl CLIAgent {
             CLIAgent::QoderCLI => "Qoder CLI",
             CLIAgent::Crush => "Crush",
             CLIAgent::CodeBuddy => "CodeBuddy",
+            CLIAgent::Empryo => "Empryo",
+            CLIAgent::PrimeAgent => "Prime Agent",
         }
     }
 
@@ -204,13 +214,15 @@ impl CLIAgent {
             CLIAgent::Kimi => Some(format!("kimi{flags} --session {session_id}")),
             CLIAgent::Crush => Some(format!("crush{flags} --session {session_id}")),
             CLIAgent::CodeBuddy => Some(format!("codebuddy{flags} --resume {session_id}")),
+            CLIAgent::Empryo => Some(format!("empryo{flags} --session {session_id}")),
+            CLIAgent::PrimeAgent => Some(format!("prime-agent{flags} --resume {session_id}")),
             _ => None,
         }
     }
 
     fn opts_out_of_sessions(self, argv: &[String]) -> bool {
         let ephemeral: &[&str] = match self {
-            CLIAgent::Pi | CLIAgent::OhMyPi => &["--no-session"],
+            CLIAgent::Pi | CLIAgent::OhMyPi | CLIAgent::PrimeAgent => &["--no-session"],
             // "Do not save conversation history" — nothing is persisted, so
             // there is no session left to resume from.
             CLIAgent::Auggie => &["--dont-save-session"],
@@ -245,6 +257,7 @@ impl CLIAgent {
             )),
             CLIAgent::OpenCode => Some(format!("opencode{flags} --session {session_id} --fork")),
             CLIAgent::OhMyPi => Some(format!("omp{flags} --fork {session_id}")),
+            CLIAgent::PrimeAgent => Some(format!("prime-agent{flags} --fork {session_id}")),
             // Droid forks with a standalone flag rather than resume-plus-a-switch.
             CLIAgent::Droid => Some(format!("droid{flags} --fork {session_id}")),
             // `fork` is missing from `amp threads --help`, but the subcommand is
@@ -267,6 +280,7 @@ impl CLIAgent {
             | CLIAgent::Grok
             | CLIAgent::OpenCode
             | CLIAgent::OhMyPi
+            | CLIAgent::PrimeAgent
             | CLIAgent::Droid
             | CLIAgent::Amp
             | CLIAgent::Qwen
@@ -433,6 +447,12 @@ impl CLIAgent {
             // `--resume`, `-r` and `--session` are three spellings of one flag
             // in Oh My Pi; `--session-dir` is a different one and survives.
             CLIAgent::OhMyPi => &["--resume", "-r", "--session", "--fork", "--continue", "-c"],
+            // Prime Agent is a Pi fork with the same session switches;
+            // `--session-dir` is a different option and survives.
+            CLIAgent::PrimeAgent => &["--resume", "-r", "--fork", "--continue", "-c"],
+            // empryo resumes with `--session <id>`; `--save-session` only
+            // applies to headless runs and is not a session selector.
+            CLIAgent::Empryo => &["--session"],
             // `--resume`/`-r` is Kimi's hidden alias for `--session`/`-S`.
             // `--agent`/`--agent-file` bind the main agent at session creation
             // and Kimi rejects either next to `--session` outright; resuming
@@ -548,6 +568,8 @@ impl CLIAgent {
             CLIAgent::QoderCLI => 0xFFFFFF,
             // The blue-violet field Charm ships the Crush heart on.
             CLIAgent::Crush => 0x6B50FF,
+            CLIAgent::Empryo => 0xE8663D,
+            CLIAgent::PrimeAgent => 0x111111,
             // The near-black field CodeBuddy's own app icon sits on.
             CLIAgent::CodeBuddy => 0x1F1F1F,
         }
@@ -597,7 +619,9 @@ impl CLIAgent {
             | CLIAgent::Auggie
             | CLIAgent::Hermes
             | CLIAgent::Vibe
-            | CLIAgent::Antigravity => "icons/bot.svg",
+            | CLIAgent::Antigravity
+            | CLIAgent::Empryo
+            | CLIAgent::PrimeAgent => "icons/bot.svg",
         }
     }
 
@@ -1239,7 +1263,15 @@ mod tests {
             .collect();
         assert_eq!(
             fallback,
-            ["aider", "auggie", "hermes", "vibe", "antigravity"]
+            [
+                "aider",
+                "auggie",
+                "hermes",
+                "vibe",
+                "antigravity",
+                "empryo",
+                "prime-agent"
+            ]
         );
         assert!(
             !fallback.contains(&"omp"),
@@ -1253,6 +1285,55 @@ mod tests {
                 a.display_name()
             );
         }
+    }
+
+    #[test]
+    fn empryo_and_prime_agent_are_detected_and_resume() {
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&[
+                "/home/me/.empryo/bin/empryo",
+                "--session",
+                "750adff9"
+            ])),
+            Some(CLIAgent::Empryo)
+        );
+        assert_eq!(
+            CLIAgent::detect_from_argv(&argv(&["prime-agent", "--model", "x"])),
+            Some(CLIAgent::PrimeAgent)
+        );
+        assert_eq!(CLIAgent::from_slug("empryo"), Some(CLIAgent::Empryo));
+        assert_eq!(
+            CLIAgent::from_slug("prime-agent"),
+            Some(CLIAgent::PrimeAgent)
+        );
+        assert_eq!(
+            CLIAgent::Empryo
+                .resume_command(
+                    "750adff9-f366",
+                    Some(&argv(&["empryo", "--session", "old"]))
+                )
+                .as_deref(),
+            Some("empryo --session 750adff9-f366")
+        );
+        assert_eq!(
+            CLIAgent::PrimeAgent
+                .resume_command(
+                    "s-1",
+                    Some(&argv(&["prime-agent", "-r", "old", "--model", "m"]))
+                )
+                .as_deref(),
+            Some("prime-agent --model m --resume s-1")
+        );
+        assert_eq!(
+            CLIAgent::PrimeAgent.fork_command("s-1", None).as_deref(),
+            Some("prime-agent --fork s-1")
+        );
+        assert_eq!(
+            CLIAgent::PrimeAgent
+                .resume_command("s-1", Some(&argv(&["prime-agent", "--no-session"]))),
+            None
+        );
+        assert_eq!(CLIAgent::Empryo.fork_command("s-1", None), None);
     }
 
     #[test]

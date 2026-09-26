@@ -43,6 +43,26 @@ fn effective_agent(agent: &str, ran_by_grok: bool) -> &str {
 }
 
 fn effective_event<'a>(agent: &str, event: &'a str, stdin_json: &str) -> Option<&'a str> {
+    // Antigravity has no turn-start event, only `PreInvocation` before every
+    // model call. The first call of a turn starts it; later ones are the same
+    // turn still working, and must not count as new prompts. `Stop` with
+    // `fullyIdle: false` ends one execution loop while more are queued.
+    if agent == "antigravity"
+        && let Ok(payload) = serde_json::from_str::<serde_json::Value>(stdin_json)
+    {
+        if event == "prompt-submit"
+            && payload
+                .get("invocationNum")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0)
+                > 0
+        {
+            return Some("tool-complete");
+        }
+        if event == "stop" && payload.get("fullyIdle").and_then(|v| v.as_bool()) == Some(false) {
+            return None;
+        }
+    }
     // Qoder and CodeBuddy also emit SessionStart after compacting the active
     // turn. Preserve its status until a real turn or session boundary arrives.
     if matches!(agent, "qodercli" | "codebuddy")
@@ -80,6 +100,8 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
         ("cwd", "cwd"),
         // Goose spells the working directory its own way.
         ("cwd", "working_dir"),
+        // Antigravity spells the session in camelCase.
+        ("session_id", "conversationId"),
     ] {
         if let Some(v) = payload
             .get(key)
@@ -95,6 +117,7 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
     if body.get("cwd").is_none()
         && let Some(root) = payload
             .get("workspace_roots")
+            .or_else(|| payload.get("workspacePaths"))
             .and_then(|r| r.as_array())
             .and_then(|r| r.first())
             .and_then(|r| r.as_str())
@@ -285,10 +308,12 @@ pub enum HookAgent {
     Crush,
     CodeBuddy,
     Cursor,
+    PrimeAgent,
+    Antigravity,
 }
 
 impl HookAgent {
-    pub const ALL: [HookAgent; 17] = [
+    pub const ALL: [HookAgent; 19] = [
         HookAgent::Claude,
         HookAgent::Codex,
         HookAgent::TraeCode,
@@ -306,6 +331,8 @@ impl HookAgent {
         HookAgent::Crush,
         HookAgent::CodeBuddy,
         HookAgent::Cursor,
+        HookAgent::PrimeAgent,
+        HookAgent::Antigravity,
     ];
 
     /// The hooks behind a detected agent process, if it has any.
@@ -323,6 +350,8 @@ impl HookAgent {
             CLIAgent::Pi => Some(HookAgent::Pi),
             CLIAgent::Grok => Some(HookAgent::Grok),
             CLIAgent::OhMyPi => Some(HookAgent::OhMyPi),
+            CLIAgent::PrimeAgent => Some(HookAgent::PrimeAgent),
+            CLIAgent::Antigravity => Some(HookAgent::Antigravity),
             CLIAgent::Gemini => Some(HookAgent::Gemini),
             CLIAgent::Droid => Some(HookAgent::Droid),
             CLIAgent::Qwen => Some(HookAgent::Qwen),
@@ -337,7 +366,7 @@ impl HookAgent {
             | CLIAgent::Auggie
             | CLIAgent::Hermes
             | CLIAgent::Vibe
-            | CLIAgent::Antigravity => None,
+            | CLIAgent::Empryo => None,
         }
     }
 
@@ -361,6 +390,8 @@ impl HookAgent {
             | HookAgent::Pi
             | HookAgent::Grok
             | HookAgent::OhMyPi
+            | HookAgent::PrimeAgent
+            | HookAgent::Antigravity
             | HookAgent::Goose
             | HookAgent::Kimi => None,
         }
@@ -406,6 +437,8 @@ impl HookAgent {
             HookAgent::Pi => "pi",
             HookAgent::Grok => "grok",
             HookAgent::OhMyPi => "omp",
+            HookAgent::PrimeAgent => "prime-agent",
+            HookAgent::Antigravity => "antigravity",
             HookAgent::Gemini => "gemini",
             HookAgent::Droid => "droid",
             HookAgent::Qwen => "qwen",
@@ -428,6 +461,8 @@ impl HookAgent {
             HookAgent::Pi => "Pi",
             HookAgent::Grok => "Grok Build",
             HookAgent::OhMyPi => "Oh My Pi",
+            HookAgent::PrimeAgent => "Prime Agent",
+            HookAgent::Antigravity => "Antigravity",
             HookAgent::Gemini => "Gemini",
             HookAgent::Droid => "Droid",
             HookAgent::Qwen => "Qwen Code",
@@ -455,6 +490,10 @@ impl HookAgent {
                 &["opencode", "plugins", OWNED_FILE_STEM_JS],
             ),
             HookAgent::Pi => target.under_home(&[".pi", "agent", "extensions", "tty7", "index.ts"]),
+            HookAgent::PrimeAgent => {
+                target.under_home(&[".prime", "agent", "extensions", "tty7", "index.ts"])
+            }
+            HookAgent::Antigravity => target.under_home(&[".gemini", "config", "hooks.json"]),
             HookAgent::Grok => target.under_home(&[".grok", "hooks", OWNED_FILE_STEM_JSON]),
             HookAgent::OhMyPi => {
                 target.under_home(&[".omp", "agent", "extensions", "tty7", "index.ts"])
@@ -683,6 +722,9 @@ pub enum HooksState {
 
 pub fn hooks_state(target: &HookTarget, agent: HookAgent) -> HooksState {
     let path = agent.target_path(target);
+    if agent == HookAgent::Antigravity {
+        return named_hook_set_state(target, &path, &antigravity_hook_set(target));
+    }
     if let Some(events) = agent.toml_hook_events() {
         return toml_hooks_state(target, &path, agent, events);
     }
@@ -719,6 +761,10 @@ pub enum HookOutcome {
 
 pub fn install_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<HookOutcome> {
     let path = agent.target_path(target);
+    if agent == HookAgent::Antigravity {
+        named_hook_set_install(target, &path, antigravity_hook_set(target))?;
+        return Ok(HookOutcome::Installed);
+    }
     if let Some(events) = agent.toml_hook_events() {
         toml_hooks_install(target, &path, agent, events)?;
         return Ok(HookOutcome::Installed);
@@ -744,6 +790,9 @@ pub fn install_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<Ho
 
 pub fn uninstall_hooks(target: &HookTarget, agent: HookAgent) -> anyhow::Result<HookOutcome> {
     let path = agent.target_path(target);
+    if agent == HookAgent::Antigravity {
+        return named_hook_set_uninstall(target, &path);
+    }
     if agent.toml_hook_events().is_some() {
         return toml_hooks_uninstall(target, &path, agent);
     }
@@ -1324,11 +1373,108 @@ fn enable_codex_hooks_feature() -> Result<(), String> {
     }
 }
 
+/// The key tty7's entry lives under in Antigravity's `hooks.json`.
+///
+/// Antigravity names every hook set at the root of the file —
+/// `{"<name>": {"<Event>": [...]}}` — rather than grouping handlers under a
+/// shared `hooks` object the way Claude does, so tty7 owns one named set and
+/// never has to pick its commands out of the user's lists.
+const ANTIGRAVITY_HOOK_SET: &str = "tty7";
+
+/// Antigravity CLI's lifecycle events, mapped onto tty7's.
+///
+/// It has no session-start or session-end event. `PreInvocation` fires before
+/// every model call of a turn, so `effective_event` keeps only the first one
+/// as the turn start; `Stop` fires when the execution loop ends. The
+/// `PreToolUse` gate is left alone: it must answer with a `decision`, and an
+/// empty reply from a status hook has no business deciding anything.
+fn antigravity_hook_set(target: &HookTarget) -> serde_json::Value {
+    let handler = |event: &str| {
+        serde_json::json!({
+            "type": "command",
+            "command": target.hook_command(HookAgent::Antigravity, event),
+            "timeout": 5,
+        })
+    };
+    serde_json::json!({
+        "PreInvocation": [handler("prompt-submit")],
+        "PostToolUse": [{ "matcher": "*", "hooks": [handler("tool-complete")] }],
+        "Stop": [handler("stop")],
+    })
+}
+
+fn read_json_object(target: &HookTarget, path: &Path) -> anyhow::Result<Option<serde_json::Value>> {
+    let text = match target.read(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow::anyhow!("read {}: {e}", path.display())),
+    };
+    if text.trim().is_empty() {
+        return Ok(Some(serde_json::json!({})));
+    }
+    let root: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        anyhow::anyhow!(
+            "{} is not valid JSON ({e}); not touching it",
+            path.display()
+        )
+    })?;
+    if !root.is_object() {
+        return Err(anyhow::anyhow!(
+            "{} is not a JSON object; not touching it",
+            path.display()
+        ));
+    }
+    Ok(Some(root))
+}
+
+fn named_hook_set_state(
+    target: &HookTarget,
+    path: &Path,
+    expected: &serde_json::Value,
+) -> HooksState {
+    match read_json_object(target, path) {
+        Ok(Some(root)) => match root.get(ANTIGRAVITY_HOOK_SET) {
+            None => HooksState::NotInstalled,
+            Some(set) if set == expected => HooksState::Installed,
+            Some(_) => HooksState::Outdated,
+        },
+        _ => HooksState::NotInstalled,
+    }
+}
+
+fn named_hook_set_install(
+    target: &HookTarget,
+    path: &Path,
+    set: serde_json::Value,
+) -> anyhow::Result<()> {
+    let mut root = read_json_object(target, path)?.unwrap_or_else(|| serde_json::json!({}));
+    root.as_object_mut()
+        .unwrap()
+        .insert(ANTIGRAVITY_HOOK_SET.to_string(), set);
+    target.write(path, serde_json::to_string_pretty(&root)?.as_bytes())
+}
+
+fn named_hook_set_uninstall(target: &HookTarget, path: &Path) -> anyhow::Result<HookOutcome> {
+    let Some(mut root) = read_json_object(target, path)? else {
+        return Ok(HookOutcome::NothingInstalled);
+    };
+    if root
+        .as_object_mut()
+        .unwrap()
+        .remove(ANTIGRAVITY_HOOK_SET)
+        .is_none()
+    {
+        return Ok(HookOutcome::NoTty7Hooks);
+    }
+    target.write(path, serde_json::to_string_pretty(&root)?.as_bytes())?;
+    Ok(HookOutcome::Removed)
+}
+
 fn owned_file_content(target: &HookTarget, agent: HookAgent) -> Option<String> {
     match agent {
         HookAgent::Copilot => copilot_hooks_json(target),
         HookAgent::OpenCode => opencode_plugin_js(target),
-        HookAgent::Pi | HookAgent::OhMyPi => pi_extension_ts(target, agent),
+        HookAgent::Pi | HookAgent::OhMyPi | HookAgent::PrimeAgent => pi_extension_ts(target, agent),
         HookAgent::Grok => grok_hooks_json(target),
         HookAgent::Goose => goose_hooks_json(target),
         HookAgent::Claude
@@ -1341,6 +1487,7 @@ fn owned_file_content(target: &HookTarget, agent: HookAgent) -> Option<String> {
         | HookAgent::Crush
         | HookAgent::CodeBuddy
         | HookAgent::Cursor
+        | HookAgent::Antigravity
         | HookAgent::Kimi => None,
     }
 }
@@ -1568,6 +1715,7 @@ fn pi_extension_ts(target: &HookTarget, agent: HookAgent) -> Option<String> {
     let (slug, package) = match agent {
         HookAgent::Pi => ("pi", "@mariozechner/pi-coding-agent"),
         HookAgent::OhMyPi => ("omp", "@oh-my-pi/pi-coding-agent"),
+        HookAgent::PrimeAgent => ("prime-agent", "@earendil-works/pi-coding-agent"),
         _ => return None,
     };
     let exe = serde_json::to_string(&target.exe.display().to_string()).ok()?;
@@ -1838,6 +1986,10 @@ mod tests {
             (HookAgent::Crush, "/home/me/.config/crush/crush.json"),
             (HookAgent::CodeBuddy, "/home/me/.codebuddy/settings.json"),
             (HookAgent::Cursor, "/home/me/.cursor/hooks.json"),
+            (
+                HookAgent::PrimeAgent,
+                "/home/me/.prime/agent/extensions/tty7/index.ts",
+            ),
         ] {
             assert_eq!(
                 agent.target_path(&t),
@@ -2583,6 +2735,127 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_owns_a_named_hook_set_beside_the_users() {
+        let dir = std::env::temp_dir().join(format!("tty7-agy-hooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let host = FakeRemote::shared();
+        let target = HookTarget::remote(&*host, dir.clone());
+        let path = HookAgent::Antigravity.target_path(&target);
+        assert_eq!(path, dir.join(".gemini/config/hooks.json"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let theirs = serde_json::json!({
+            "my-linter-hook": {
+                "PostToolUse": [{ "matcher": "run_command", "hooks": [{ "command": "./lint.sh" }] }]
+            }
+        });
+        std::fs::write(&path, theirs.to_string()).unwrap();
+
+        assert_eq!(
+            hooks_state(&target, HookAgent::Antigravity),
+            HooksState::NotInstalled
+        );
+        install_hooks(&target, HookAgent::Antigravity).expect("install succeeds");
+        assert_eq!(
+            hooks_state(&target, HookAgent::Antigravity),
+            HooksState::Installed
+        );
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            root["my-linter-hook"], theirs["my-linter-hook"],
+            "the user's set survives"
+        );
+        let set = &root[ANTIGRAVITY_HOOK_SET];
+        assert!(
+            set["PreInvocation"][0]["command"]
+                .as_str()
+                .unwrap()
+                .ends_with("agent-hook antigravity prompt-submit")
+        );
+        assert_eq!(set["PostToolUse"][0]["matcher"], "*");
+        assert!(
+            set["Stop"][0]["command"]
+                .as_str()
+                .unwrap()
+                .ends_with("agent-hook antigravity stop")
+        );
+        assert!(
+            set.get("PreToolUse").is_none(),
+            "a status hook must not gate tools"
+        );
+
+        root_set_to(&path, serde_json::json!({ "Stop": [] }), &root);
+        assert_eq!(
+            hooks_state(&target, HookAgent::Antigravity),
+            HooksState::Outdated
+        );
+        install_hooks(&target, HookAgent::Antigravity).expect("reinstall succeeds");
+        assert_eq!(
+            hooks_state(&target, HookAgent::Antigravity),
+            HooksState::Installed
+        );
+
+        assert_eq!(
+            uninstall_hooks(&target, HookAgent::Antigravity).expect("uninstall succeeds"),
+            HookOutcome::Removed
+        );
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            root, theirs,
+            "uninstall leaves exactly what was there before"
+        );
+        assert_eq!(
+            uninstall_hooks(&target, HookAgent::Antigravity).expect("second uninstall"),
+            HookOutcome::NoTty7Hooks
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn root_set_to(path: &Path, set: serde_json::Value, root: &serde_json::Value) {
+        let mut root = root.clone();
+        root[ANTIGRAVITY_HOOK_SET] = set;
+        std::fs::write(path, root.to_string()).unwrap();
+    }
+
+    #[test]
+    fn antigravity_payloads_map_onto_turns() {
+        let first = r#"{"conversationId":"c-1","invocationNum":0,"workspacePaths":["/repo"]}"#;
+        let later = r#"{"conversationId":"c-1","invocationNum":2,"workspacePaths":["/repo"]}"#;
+        assert_eq!(
+            effective_event("antigravity", "prompt-submit", first),
+            Some("prompt-submit")
+        );
+        assert_eq!(
+            effective_event("antigravity", "prompt-submit", later),
+            Some("tool-complete")
+        );
+        assert_eq!(
+            effective_event(
+                "antigravity",
+                "stop",
+                r#"{"conversationId":"c-1","fullyIdle":true}"#
+            ),
+            Some("stop")
+        );
+        assert_eq!(
+            effective_event(
+                "antigravity",
+                "stop",
+                r#"{"conversationId":"c-1","fullyIdle":false}"#
+            ),
+            None
+        );
+        let ev = round_trip("antigravity", "prompt-submit", first);
+        assert_eq!(ev.session_id.as_deref(), Some("c-1"));
+        assert_eq!(ev.cwd.as_deref(), Some(Path::new("/repo")));
+        assert_eq!(
+            ev.agent,
+            Some(crate::core::cli_agent::CLIAgent::Antigravity)
+        );
+    }
+
+    #[test]
     fn a_remote_install_round_trips_through_the_host() {
         let dir = std::env::temp_dir().join(format!("tty7-remote-hooks-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2679,6 +2952,11 @@ mod tests {
         for (agent, slug, package) in [
             (HookAgent::Pi, "pi", "@mariozechner/pi-coding-agent"),
             (HookAgent::OhMyPi, "omp", "@oh-my-pi/pi-coding-agent"),
+            (
+                HookAgent::PrimeAgent,
+                "prime-agent",
+                "@earendil-works/pi-coding-agent",
+            ),
         ] {
             let bridge =
                 pi_extension_ts(&target, agent).unwrap_or_else(|| panic!("{slug} content builds"));

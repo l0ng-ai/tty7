@@ -52,7 +52,7 @@ Native builds for macOS, Windows, and Linux on [**Releases**](https://github.com
 
 | | |
 |---|---|
-| **Agent-aware** | per-pane detection (23 CLIs) · status dot · notifications · branch + diff · tray icon when input is needed · resume after reboot · tab sidebar grouped by repository, with pinned groups |
+| **Agent-aware** | per-pane detection (25 CLIs) · status dot · notifications · branch + diff · tray icon when input is needed · resume after reboot · tab sidebar grouped by repository, with pinned groups |
 | **CLI + Skills** | bundled `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · `run` streams a command and exits with its code · `split` · `send` · `wait --until free` · `capture` |
 | **Editor-grade input** | ghost suggestions from history · explained tab completion · syntax highlighting · multi-line editing · click places the caret · <kbd>⌃ R</kbd> fuzzy history |
 | **Window** | tabs & splits · <kbd>⌘ P</kbd> palette · <kbd>⌘ F</kbd> scrollback search · <kbd>⌘ J</kbd> panel with process tree and listening ports · 13 themes, your own YAML, iTerm2 import · IME |
@@ -69,7 +69,7 @@ after a reboot. **Fork** needs both — the agent's own fork command, and the ho
 that tells tty7 which session to fork.
 
 <details>
-<summary>The full support matrix, all twenty-three</summary>
+<summary>The full support matrix, all twenty-five</summary>
 
 | Agent | Detected | Status · resume | Fork |
 |---|:-:|:-:|:-:|
@@ -79,6 +79,7 @@ that tells tty7 which session to fork.
 | **Grok** | ✓ | ✓ | ✓ |
 | **OpenCode** | ✓ | ✓ | ✓ |
 | **Oh My Pi** | ✓ | ✓ | ✓ |
+| **Prime Agent** | ✓ | ✓ | ✓ |
 | **Droid** | ✓ | ✓ | ✓ |
 | **Qwen Code** | ✓ | ✓ | ✓ |
 | **Goose** | ✓ | ✓ | ✓ |
@@ -89,13 +90,14 @@ that tells tty7 which session to fork.
 | **Kimi Code** | ✓ | ✓ | |
 | **Pi** | ✓ | ✓ | |
 | **Crush** | ✓ | ✓ | |
+| **Antigravity** | ✓ | ✓ | |
 | **Cursor** | ✓ | ✓ | |
 | Aider | ✓ | | |
 | Amp | ✓ | | |
 | Auggie | ✓ | | |
 | Hermes | ✓ | | |
 | Vibe | ✓ | | |
-| Antigravity | ✓ | | |
+| Empryo | ✓ | | |
 
 </details>
 
