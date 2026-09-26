@@ -5742,11 +5742,91 @@ impl Tty7App {
 
     /// Everything the search offers from this window, gathered when it opens.
     pub(crate) fn search_catalog(&self, window: &Window, cx: &App) -> Catalog {
-        Catalog::new(
+        let mut catalog = Catalog::new(
             self.search_actions(window, cx),
             self.search_terminals(cx),
             crate::ui::search::host_items(cx),
-        )
+        );
+        let (sessions, here) =
+            self.search_sessions(crate::core::agent_history::cached(), window, cx);
+        catalog.sessions = sessions;
+        catalog.sessions_here = here;
+        catalog
+    }
+
+    /// The Sessions tab's rows from `found`: those that ran in the focused
+    /// pane's directory first, under its name, then the rest by recency. The
+    /// second value is how many lead.
+    ///
+    /// Only this computer's sessions, and only in a window on this computer:
+    /// a remote window's new tab opens on the other machine, where the
+    /// directory a local session ran in means nothing.
+    pub(crate) fn search_sessions(
+        &self,
+        found: Vec<crate::core::agent_history::PastSession>,
+        window: &Window,
+        cx: &App,
+    ) -> (Vec<Item>, usize) {
+        if WorkspaceStore::remote_ref(cx, self.workspace).is_some() {
+            return (Vec::new(), 0);
+        }
+        let here = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.pane.focused_or_first(window, cx))
+            .and_then(|leaf| leaf.read(cx).spawnable_cwd());
+        let home = crate::core::agent_history::home();
+        let now = crate::core::config::unix_now();
+        let (mut mine, mut rest): (Vec<_>, Vec<_>) = found
+            .into_iter()
+            .partition(|s| here.is_some() && s.cwd == here);
+        let here_section: Option<gpui::SharedString> = here.as_ref().map(|dir| {
+            t_fmt(
+                L10nKey::SearchSectionSessionsHere,
+                &[("dir", &crate::ui::home::display_path(dir, home.as_deref()))],
+            )
+            .into()
+        });
+        let recent: gpui::SharedString = t(L10nKey::SearchSectionSessionsRecent).into();
+        let row = |s: crate::core::agent_history::PastSession, section: gpui::SharedString| {
+            let place = s
+                .cwd
+                .as_deref()
+                .map(|p| crate::ui::home::display_path(p, home.as_deref()));
+            let subtitle = match (&place, &s.branch) {
+                (Some(place), Some(branch)) => Some(format!("{place} · {branch}")),
+                (Some(place), None) => Some(place.clone()),
+                (None, Some(branch)) => Some(branch.clone()),
+                (None, None) => None,
+            };
+            let mut item = Item::new(
+                s.title,
+                CommandKind::ResumeSession {
+                    agent: s.agent,
+                    session_id: s.id.clone(),
+                    cwd: s.cwd,
+                },
+            )
+            .with_note(crate::ui::home::relative_time(now, s.updated))
+            .with_avatar(Avatar {
+                agent: Some(s.agent),
+                ..Avatar::default()
+            })
+            .with_alias(s.id)
+            .with_alias(s.agent.display_name())
+            .in_section(section);
+            if let Some(subtitle) = subtitle {
+                item = item.with_subtitle(subtitle);
+            }
+            item
+        };
+        let count = mine.len();
+        let mut out: Vec<Item> = match here_section {
+            Some(section) => mine.drain(..).map(|s| row(s, section.clone())).collect(),
+            None => Vec::new(),
+        };
+        out.extend(rest.drain(..).map(|s| row(s, recent.clone())));
+        (out, count)
     }
 
     /// The Actions tab: the fixed set, plus the rows only this window can
@@ -5934,8 +6014,43 @@ impl Tty7App {
         let catalog = self.search_catalog(window, cx);
         let view = cx.new(|cx| SearchView::new(catalog, tab, query, window, cx));
         self.search_sub = Some(cx.subscribe_in(&view, window, Self::on_search_event));
-        self.search = Some(view);
+        self.search = Some(view.clone());
+        self.refresh_search_sessions(view, window, cx);
         cx.notify();
+    }
+
+    /// Reads the agents' history off the disk and hands what changed to the
+    /// open search. The search opened on the last scan's answer, so this is
+    /// only ever news: a session run since, or the first scan of the process.
+    fn refresh_search_sessions(
+        &mut self,
+        view: Entity<SearchView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if WorkspaceStore::remote_ref(cx, self.workspace).is_some() {
+            return;
+        }
+        let Some(home) = crate::core::agent_history::home() else {
+            return;
+        };
+        let codex_home = crate::core::agent_history::codex_home();
+        let scan = cx.background_spawn(async move {
+            crate::core::agent_history::scan(&home, codex_home.as_deref())
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let found = scan.await;
+            this.update_in(cx, |this, window, cx| {
+                // Closed, or closed and opened again, since: nothing to update.
+                if this.search.as_ref() != Some(&view) {
+                    return;
+                }
+                let (sessions, here) = this.search_sessions(found, window, cx);
+                view.update(cx, |view, cx| view.set_sessions(sessions, here, window, cx));
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn on_search_event(
@@ -6160,6 +6275,11 @@ impl Tty7App {
             OpenThemePicker => {}
             SearchHosts => self.open_search(SearchTab::Hosts, "", window, cx),
             GoToTab { workspace, tab } => self.go_to_tab(workspace, tab, false, window, cx),
+            ResumeSession {
+                agent,
+                session_id,
+                cwd,
+            } => self.resume_session(agent, &session_id, cwd, window, cx),
         }
     }
 

@@ -78,6 +78,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the rest into a row that opens its tab. With nothing typed, <kbd>⌘ P</kbd>
   <kbd>⏎</kbd> goes back to the tab you were just in. The keybinding action is
   still `TogglePalette`, so a custom binding keeps working.
+- **Resume a past agent session from Search Everywhere.** Its **Sessions** tab
+  lists the Claude Code and Codex sessions on this computer — those that ran in
+  the focused tab's directory first — by the title the agent gave them, with
+  directory, branch and age, and <kbd>⏎</kbd> resumes one in a new tab in the
+  directory it ran in, with the agent's configured launch flags. Only the ends
+  of each transcript are read, in the background, and remembered until the file
+  changes.
 
 - **The sidebar groups tabs by repo automatically; pin what you want to keep**
   (#955). Groups now come in two halves, split by a divider. Below it, every

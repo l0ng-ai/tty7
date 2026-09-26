@@ -24,15 +24,17 @@ pub(crate) enum SearchTab {
     All,
     Actions,
     Terminals,
+    Sessions,
     Hosts,
 }
 
 impl SearchTab {
     /// The tab row, left to right, and the order Tab walks it.
-    pub(crate) const ORDER: [SearchTab; 4] = [
+    pub(crate) const ORDER: [SearchTab; 5] = [
         SearchTab::All,
         SearchTab::Actions,
         SearchTab::Terminals,
+        SearchTab::Sessions,
         SearchTab::Hosts,
     ];
 
@@ -41,6 +43,7 @@ impl SearchTab {
             SearchTab::All => L10nKey::SearchTabAll,
             SearchTab::Actions => L10nKey::SearchTabActions,
             SearchTab::Terminals => L10nKey::SearchTabTerminals,
+            SearchTab::Sessions => L10nKey::SearchTabSessions,
             SearchTab::Hosts => L10nKey::SearchTabHosts,
         })
     }
@@ -50,6 +53,7 @@ impl SearchTab {
             SearchTab::All => L10nKey::SearchPlaceholderAll,
             SearchTab::Actions => L10nKey::SearchPlaceholderActions,
             SearchTab::Terminals => L10nKey::SearchPlaceholderTerminals,
+            SearchTab::Sessions => L10nKey::SearchPlaceholderSessions,
             SearchTab::Hosts => L10nKey::SearchPlaceholderHosts,
         })
     }
@@ -76,5 +80,6 @@ mod tests {
         assert_eq!(SearchTab::Hosts.step(true), SearchTab::All);
         assert_eq!(SearchTab::All.step(false), SearchTab::Hosts);
         assert_eq!(SearchTab::Terminals.step(false), SearchTab::Actions);
+        assert_eq!(SearchTab::Terminals.step(true), SearchTab::Sessions);
     }
 }

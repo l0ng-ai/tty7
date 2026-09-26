@@ -33,6 +33,15 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SearchPlaceholderActions => "アクションを検索…",
         L10nKey::SearchPlaceholderTerminals => "開いているタブ、シェル、エージェントを検索…",
         L10nKey::SearchPlaceholderHosts => "ホストを検索、または user@host を入力して接続…",
+        L10nKey::SearchTabSessions => "セッション",
+        L10nKey::SearchPlaceholderSessions => "過去のエージェントセッションを検索…",
+        L10nKey::SearchSessionsEmptyHint => {
+            "このコンピューター上の Claude Code と Codex のセッションがここに表示されます。"
+        }
+        L10nKey::SearchSectionSessionsHere => "{dir} 内",
+        L10nKey::SearchSectionSessionsRecent => "最近",
+        L10nKey::AppSessionNotResumable => "{name} は ID によるセッション再開に対応していません。",
+        L10nKey::AppSessionDirectoryGone => "セッションのディレクトリが存在しません: {path}",
         L10nKey::SearchMoreIn => "{tab} にさらに {count} 件",
         L10nKey::SearchNoResults => "結果がありません",
         L10nKey::SearchSectionNewTerminal => "新しいターミナル",

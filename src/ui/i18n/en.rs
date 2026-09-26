@@ -34,6 +34,15 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SearchPlaceholderActions => "Search actions…",
         L10nKey::SearchPlaceholderTerminals => "Search open tabs, shells and agents…",
         L10nKey::SearchPlaceholderHosts => "Search hosts, or type user@host to connect…",
+        L10nKey::SearchTabSessions => "Sessions",
+        L10nKey::SearchPlaceholderSessions => "Search past agent sessions…",
+        L10nKey::SearchSessionsEmptyHint => {
+            "Claude Code and Codex sessions on this computer are listed here."
+        }
+        L10nKey::SearchSectionSessionsHere => "In {dir}",
+        L10nKey::SearchSectionSessionsRecent => "Recent",
+        L10nKey::AppSessionNotResumable => "{name} cannot resume a session by id.",
+        L10nKey::AppSessionDirectoryGone => "The session's directory no longer exists: {path}",
         L10nKey::SearchMoreIn => "{count} more in {tab}",
         L10nKey::SearchNoResults => "No results",
         L10nKey::SearchSectionNewTerminal => "New Terminal",

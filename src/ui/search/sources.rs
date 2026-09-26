@@ -74,6 +74,12 @@ pub(crate) struct Catalog {
     /// open a new one.
     pub terminals: Vec<Item>,
     pub hosts: Vec<Item>,
+    /// Past agent sessions, most recent first — those that ran where this
+    /// window's tab is first of all. They arrive after the rest: reading them
+    /// is disk work, done off the window's thread (`Tty7App::open_search`).
+    pub sessions: Vec<Item>,
+    /// How many of `sessions` lead the list because they ran here.
+    pub sessions_here: usize,
 }
 
 impl Catalog {
@@ -90,6 +96,8 @@ impl Catalog {
             actions,
             terminals,
             hosts,
+            sessions: Vec::new(),
+            sessions_here: 0,
         }
     }
 
@@ -98,6 +106,10 @@ impl Catalog {
             SearchTab::All => None,
             SearchTab::Actions => Some(Box::new(Actions(&self.actions))),
             SearchTab::Terminals => Some(Box::new(Terminals(&self.terminals))),
+            SearchTab::Sessions => Some(Box::new(Sessions {
+                items: &self.sessions,
+                here: self.sessions_here,
+            })),
             SearchTab::Hosts => Some(Box::new(Hosts(&self.hosts))),
         }
     }
@@ -297,6 +309,40 @@ impl Source for Terminals<'_> {
 
     fn search(&self, query: &str, _cx: &App) -> Vec<(i32, Item)> {
         rank(self.0, query, |_| 0)
+    }
+}
+
+/// How many of this directory's sessions stand for the Sessions tab on the
+/// All tab before anything is typed: enough to pick up where you left off.
+const SESSIONS_HERE_ON_ALL: usize = 3;
+
+struct Sessions<'a> {
+    items: &'a [Item],
+    here: usize,
+}
+
+impl Source for Sessions<'_> {
+    fn tab(&self) -> SearchTab {
+        SearchTab::Sessions
+    }
+
+    fn browse(&self, _cx: &App) -> Vec<Section> {
+        by_section(self.items)
+    }
+
+    /// The last few sessions that ran where you are, and nothing from
+    /// elsewhere: a session from another project is not what an empty query
+    /// in this one is reaching for.
+    fn highlights(&self, _cx: &App) -> Vec<Item> {
+        self.items[..self.here.min(self.items.len())]
+            .iter()
+            .take(SESSIONS_HERE_ON_ALL)
+            .cloned()
+            .collect()
+    }
+
+    fn search(&self, query: &str, _cx: &App) -> Vec<(i32, Item)> {
+        rank(self.items, query, |_| 0)
     }
 }
 
@@ -592,6 +638,48 @@ mod tests {
             assert!(matches!(kinds[0], CommandKind::QuickConnect(_)));
             assert!(matches!(kinds[1], CommandKind::SaveQuickConnect(_)));
             assert!(matches!(kinds[2], CommandKind::ConnectSavedProfile(_)));
+        });
+    }
+
+    fn session(title: &str, section: &str) -> Item {
+        Item::new(
+            title,
+            CommandKind::ResumeSession {
+                agent: crate::core::cli_agent::CLIAgent::Claude,
+                session_id: title.into(),
+                cwd: None,
+            },
+        )
+        .in_section(section.to_string())
+    }
+
+    /// Before anything is typed, the All tab offers to pick up where you left
+    /// off here — and never a session from some other project.
+    #[gpui::test]
+    fn the_empty_all_tab_offers_only_this_directorys_sessions(cx: &mut TestAppContext) {
+        with_config(cx);
+        let mut catalog = Catalog::new(Vec::new(), Vec::new(), Vec::new());
+        catalog.sessions = (0..5)
+            .map(|i| session(&format!("here {i}"), "In ~/repo"))
+            .chain([session("elsewhere", "Recent")])
+            .collect();
+        catalog.sessions_here = 5;
+        cx.update(|cx| {
+            let sections = catalog.sections(SearchTab::All, "", cx);
+            assert_eq!(sections.len(), 1);
+            assert_eq!(sections[0].title.as_deref(), Some("Sessions"));
+            assert_eq!(row_titles(&sections[0]), vec!["here 0", "here 1", "here 2"]);
+
+            catalog.sessions_here = 0;
+            assert!(
+                catalog.sections(SearchTab::All, "", cx).is_empty(),
+                "no session ran here, so none is offered"
+            );
+
+            // The tab itself lists them all, here first.
+            let own = catalog.sections(SearchTab::Sessions, "", cx);
+            let headers: Vec<_> = own.iter().filter_map(|s| s.title.clone()).collect();
+            assert_eq!(headers, vec!["In ~/repo", "Recent"]);
         });
     }
 }

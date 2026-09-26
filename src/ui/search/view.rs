@@ -67,6 +67,16 @@ impl SearchDelegate {
         self.selected.and_then(|ix| self.row_at(ix)?.item())
     }
 
+    fn position_of(&self, kind: &CommandKind) -> Option<IndexPath> {
+        self.sections.iter().enumerate().find_map(|(s, section)| {
+            let row = section
+                .rows
+                .iter()
+                .position(|r| r.item().is_some_and(|i| &i.kind == kind))?;
+            Some(IndexPath::new(row).section(s))
+        })
+    }
+
     fn first_row(&self) -> Option<IndexPath> {
         let section = self.sections.iter().position(|s| !s.rows.is_empty())?;
         Some(IndexPath::new(0).section(section))
@@ -196,6 +206,9 @@ impl ListDelegate for SearchDelegate {
         // theme picker with no matches teaching SSH is a crossed wire (#602).
         let hint = match self.scope {
             Scope::Tab(SearchTab::All | SearchTab::Hosts) => t(L10nKey::ConnectSshHint),
+            Scope::Tab(SearchTab::Sessions) if self.query.trim().is_empty() => {
+                t(L10nKey::SearchSessionsEmptyHint)
+            }
             _ => t(L10nKey::PaletteTryDifferentSearch),
         };
         v_flex()
@@ -391,6 +404,37 @@ impl SearchView {
             let first = state.delegate().first_row();
             state.set_selected_index(first, window, cx);
             state.scroll_to_item(IndexPath::default(), ScrollStrategy::Top, window, cx);
+        });
+        cx.notify();
+    }
+
+    /// The Sessions tab's rows, arrived from a scan that finished after the
+    /// search opened. The highlight stays on the row it was on when that row
+    /// is still there, so a list that fills in under the cursor does not
+    /// move what Return runs.
+    pub(crate) fn set_sessions(
+        &mut self,
+        sessions: Vec<Item>,
+        here: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut catalog = (*self.catalog).clone();
+        catalog.sessions = sessions;
+        catalog.sessions_here = here;
+        self.catalog = Rc::new(catalog);
+        if self.in_themes() {
+            return;
+        }
+        let catalog = self.catalog.clone();
+        self.list.update(cx, |state, cx| {
+            let before = state.delegate().selected_item().map(|i| i.kind.clone());
+            let delegate = state.delegate_mut();
+            delegate.catalog = catalog;
+            delegate.refresh(cx);
+            let keep = before.and_then(|kind| delegate.position_of(&kind));
+            let target = keep.or_else(|| state.delegate().first_row());
+            state.set_selected_index(target, window, cx);
         });
         cx.notify();
     }

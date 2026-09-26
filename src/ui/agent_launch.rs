@@ -127,6 +127,19 @@ pub(crate) fn remember_launch_line(cfg: &mut Config, agent: CLIAgent, line: Stri
     cfg.agent_launch.insert(agent.slug().to_string(), line);
 }
 
+/// The line that resumes `agent`'s session `session_id`, carrying the flags
+/// `agent_launch` gives the agent: a session started with
+/// `--dangerously-skip-permissions` comes back with it.
+pub(crate) fn resume_line(
+    agent: CLIAgent,
+    session_id: &str,
+    overrides: &HashMap<String, String>,
+) -> Option<String> {
+    let launch = agent.launch_command(overrides);
+    let argv: Vec<String> = launch.split_whitespace().map(str::to_string).collect();
+    agent.resume_command(session_id, Some(&argv))
+}
+
 /// Type `command` into the shell `slot` holds — now if it is up, or the
 /// moment it lands if it is still connecting.
 fn run_when_ready(slot: &PaneSlot, command: String, cx: &mut App) {
@@ -197,6 +210,49 @@ impl Tty7App {
                 .or_default()
                 .last_used = unix_now();
         });
+    }
+
+    /// Reopen `agent`'s session `session_id` in a new tab in `cwd`, the
+    /// directory it ran in — an agent keys its history by directory, and
+    /// `--resume` elsewhere finds nothing. The resume carries the flags the
+    /// agent is configured to launch with (`agent_launch`), so a session
+    /// started with them comes back with them.
+    pub(crate) fn resume_session(
+        &mut self,
+        agent: CLIAgent,
+        session_id: &str,
+        cwd: Option<std::path::PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(command) = resume_line(agent, session_id, &cx.global::<Config>().agent_launch)
+        else {
+            window.push_notification(
+                t_fmt(
+                    L10nKey::AppSessionNotResumable,
+                    &[("name", agent.display_name())],
+                ),
+                cx,
+            );
+            return;
+        };
+        // A directory that is gone cannot hold the session either; say so
+        // rather than resume into a history the agent will not find.
+        if let Some(dir) = cwd.as_ref().filter(|dir| !dir.is_dir()) {
+            window.push_notification(
+                t_fmt(
+                    L10nKey::AppSessionDirectoryGone,
+                    &[("path", &dir.display().to_string())],
+                ),
+                cx,
+            );
+            return;
+        }
+        let Some(slot) = self.new_tab_slot(cwd, None, window, cx) else {
+            log::warn!("no pane opened to resume {} {session_id}", agent.slug());
+            return;
+        };
+        run_when_ready(&slot, command, cx);
     }
 
     /// "New Agent Tab": launch the agent used most recently.
@@ -445,5 +501,33 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(installed_on(path, &overrides), vec![CLIAgent::Claude]);
+    }
+
+    #[test]
+    fn a_resume_carries_the_configured_launch_flags() {
+        let none = HashMap::new();
+        assert_eq!(
+            resume_line(CLIAgent::Claude, "abc-1", &none).as_deref(),
+            Some("claude --resume abc-1")
+        );
+        assert_eq!(
+            resume_line(CLIAgent::Codex, "0199-x", &none).as_deref(),
+            Some("codex resume 0199-x")
+        );
+        let flagged = HashMap::from([(
+            "claude".to_string(),
+            "claude --dangerously-skip-permissions".to_string(),
+        )]);
+        assert_eq!(
+            resume_line(CLIAgent::Claude, "abc-1", &flagged).as_deref(),
+            Some("claude --dangerously-skip-permissions --resume abc-1")
+        );
+    }
+
+    #[test]
+    fn an_id_that_could_smuggle_a_command_is_not_resumed() {
+        let none = HashMap::new();
+        assert_eq!(resume_line(CLIAgent::Claude, "x; rm -rf ~", &none), None);
+        assert_eq!(resume_line(CLIAgent::Claude, "", &none), None);
     }
 }

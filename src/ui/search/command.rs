@@ -113,6 +113,12 @@ pub enum CommandKind {
         workspace: WorkspaceId,
         tab: TabId,
     },
+    /// A past agent session, reopened in a new tab where it ran.
+    ResumeSession {
+        agent: CLIAgent,
+        session_id: String,
+        cwd: Option<std::path::PathBuf>,
+    },
     ConnectSavedProfile(Uuid),
     EditSavedProfile(Uuid),
     /// Open the shell the window's inventory lists under this label, as the
@@ -234,6 +240,7 @@ impl CommandKind {
             OpenSshConnect(_)
             | SetTheme(_)
             | GoToTab { .. }
+            | ResumeSession { .. }
             | ConnectSavedProfile(_)
             | EditSavedProfile(_)
             | OpenShell(_)
@@ -360,6 +367,7 @@ impl CommandKind {
             | OpenSshConnect(_)
             | SetTheme(_)
             | GoToTab { .. }
+            | ResumeSession { .. }
             | ConnectSavedProfile(_)
             | EditSavedProfile(_)
             | OpenShell(_)
