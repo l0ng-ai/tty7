@@ -1522,6 +1522,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdSwapPanePrevious => "Swap Pane Previous",
         L10nKey::CmdNextTab => "Next Tab",
         L10nKey::CmdPreviousTab => "Previous Tab",
+        L10nKey::CmdMoveTabLeft => "Move Tab Left",
+        L10nKey::CmdMoveTabRight => "Move Tab Right",
         L10nKey::CmdRecentTabSwitcher => "Recent Tab Switcher",
         L10nKey::CmdRecentTabSwitcherReverse => "Recent Tab Switcher (Reverse)",
         L10nKey::CmdCopyWorkingDirectory => "Copy Working Directory",

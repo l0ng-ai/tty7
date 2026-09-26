@@ -410,6 +410,11 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
             "SelectPrevTab",
             per_platform("secondary-shift-[", "ctrl-pageup"),
         ),
+        // Reordering, not switching: bound by the user who wants it (the
+        // palette and the Keybindings page both carry these), like the pane
+        // swap pair above. No chord ships free enough to spend on both.
+        ("MoveTabLeft", ""),
+        ("MoveTabRight", ""),
         ("ActivateTab1", per_platform("secondary-1", "alt-1")),
         ("ActivateTab2", per_platform("secondary-2", "alt-2")),
         ("ActivateTab3", per_platform("secondary-3", "alt-3")),
@@ -725,6 +730,14 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         "SelectPrevTab" => (
             CommandGroup::TabsPanes,
             t(L10nKey::CmdPreviousTab).to_string(),
+        ),
+        "MoveTabLeft" => (
+            CommandGroup::TabsPanes,
+            t(L10nKey::CmdMoveTabLeft).to_string(),
+        ),
+        "MoveTabRight" => (
+            CommandGroup::TabsPanes,
+            t(L10nKey::CmdMoveTabRight).to_string(),
         ),
         "NewWorkspace" => (
             CommandGroup::Workspaces,
@@ -1426,6 +1439,8 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "PrevTab" => KeyBinding::new(keystroke, PrevTab, None),
         "SelectNextTab" => KeyBinding::new(keystroke, SelectNextTab, None),
         "SelectPrevTab" => KeyBinding::new(keystroke, SelectPrevTab, None),
+        "MoveTabLeft" => KeyBinding::new(keystroke, MoveTabLeft, None),
+        "MoveTabRight" => KeyBinding::new(keystroke, MoveTabRight, None),
         "ActivateTab1" => KeyBinding::new(keystroke, ActivateTab1, None),
         "ActivateTab2" => KeyBinding::new(keystroke, ActivateTab2, None),
         "ActivateTab3" => KeyBinding::new(keystroke, ActivateTab3, None),

@@ -1429,6 +1429,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdSwapPanePrevious => "与上一窗格交换",
         L10nKey::CmdNextTab => "下一标签页",
         L10nKey::CmdPreviousTab => "上一标签页",
+        L10nKey::CmdMoveTabLeft => "标签页左移",
+        L10nKey::CmdMoveTabRight => "标签页右移",
         L10nKey::CmdRecentTabSwitcher => "最近标签页切换器",
         L10nKey::CmdRecentTabSwitcherReverse => "最近标签页切换器（反向）",
         L10nKey::CmdCopyWorkingDirectory => "复制工作目录",

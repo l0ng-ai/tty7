@@ -4888,6 +4888,17 @@ impl Tty7App {
         }
     }
 
+    /// Reorders the active tab one slot — the keyboard form of the drag that
+    /// the strip and the sidebar both do. Left is back along the order and
+    /// right is forward (on a left tab bar that reads as up and down), and
+    /// both wrap: past the last tab the first one follows, so a tab can walk
+    /// the whole list without letting go of the key.
+    fn move_tab(&mut self, right: bool, cx: &mut Context<Self>) {
+        if let Some(permutation) = one_slot_move(&self.visual_tab_order(cx), self.active, right) {
+            self.apply_tab_order(&permutation, cx);
+        }
+    }
+
     pub(crate) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         // A tab is woken by being looked at, the way a browser reloads a
         // discarded tab when it is selected: a tab on screen is always a
@@ -5973,6 +5984,8 @@ impl Tty7App {
             SwapPanePrev => self.swap_pane(false, window, cx),
             SelectNextTab => self.cycle_tab(true, window, cx),
             SelectPrevTab => self.cycle_tab(false, window, cx),
+            MoveTabLeft => self.move_tab(false, cx),
+            MoveTabRight => self.move_tab(true, cx),
             ToggleMaximizePane => self.toggle_maximize(window, cx),
             ToggleFullscreen => self.toggle_fullscreen(window, cx),
             ToggleTabSidebar => self.toggle_tab_sidebar(cx),
@@ -9191,6 +9204,12 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &SelectPrevTab, window, cx| {
                     this.cycle_tab(false, window, cx)
                 }))
+                .on_action(
+                    cx.listener(|this, _: &MoveTabLeft, _window, cx| this.move_tab(false, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &MoveTabRight, _window, cx| this.move_tab(true, cx)),
+                )
                 .on_action(cx.listener(|this, _: &ActivateTab1, window, cx| {
                     this.activate_visual(0, window, cx)
                 }))
@@ -9475,6 +9494,37 @@ fn step_in_order(order: &[usize], active: usize, forward: bool) -> Option<usize>
         (None, false) => n - 1,
     };
     Some(order[next]).filter(|&i| i != active)
+}
+
+/// The `apply_tab_order` permutation that moves the active tab one slot along
+/// `order` — a move, not a trade: the tab is lifted out and put back at the
+/// neighbour's place, so through a wrap the run it crossed shifts one slot
+/// (`[a, b, c]` with `c` moved right becomes `[c, a, b]`, not `[c, b, a]`).
+/// `order` is the visual order as `self.tabs` indices; a step that crosses
+/// into another sidebar group comes back as an unchanged permutation, which
+/// `apply_tab_order` leaves alone — the grouping keys off the tab, not its
+/// position. `None` when
+/// there is nothing to move: fewer than two tabs, or an active tab that
+/// `order` does not hold.
+fn one_slot_move(order: &[usize], active: usize, right: bool) -> Option<Vec<usize>> {
+    let n = order.len();
+    if n < 2 {
+        return None;
+    }
+    let pos = order.iter().position(|&i| i == active)?;
+    let target = if right {
+        (pos + 1) % n
+    } else {
+        (pos + n - 1) % n
+    };
+    let mut permutation: Vec<usize> = (0..n).collect();
+    let lifted = permutation.remove(active);
+    // Put back at the neighbour's place, on the side it was crossed from: one
+    // past it when stepping towards the larger visual slot, before it when
+    // the step wraps back around.
+    let at = permutation.iter().position(|&i| i == order[target])?;
+    permutation.insert(at + usize::from(target > pos), lifted);
+    Some(permutation)
 }
 
 fn mru_order(stamps: &[u64], active: usize) -> Vec<usize> {
@@ -10665,7 +10715,7 @@ mod tests {
     use super::{
         CloseReason, DOCUMENT_MIN_W, Dir, Pane, Rename, TERMINAL_MIN_W, TITLE_BAR_HEIGHT, Tab,
         TabAgentSession, clear_window_override_values, close_prompt, document_column_px,
-        join_shell_args, leaf_shares_the_window_daemon, mru_order, pane_free_for,
+        join_shell_args, leaf_shares_the_window_daemon, mru_order, one_slot_move, pane_free_for,
         parse_ssh_connect_input, parse_ssh_option_words, rename_outcome, side_panel_max,
         split_shell_args, step_in_order, strip_band, wd_path_saveable,
     };
@@ -11043,6 +11093,28 @@ mod tests {
         assert_eq!(step_in_order(&[], 0, true), None);
         assert_eq!(step_in_order(&[0], 0, true), None);
         assert_eq!(step_in_order(&[0], 0, false), None);
+    }
+
+    #[test]
+    fn moving_a_tab_one_slot_puts_it_where_the_neighbour_was() {
+        // A move, not a trade: the neighbour it crossed shifts one slot.
+        assert_eq!(one_slot_move(&[0, 1, 2], 1, true), Some(vec![0, 2, 1]));
+        assert_eq!(one_slot_move(&[0, 1, 2], 1, false), Some(vec![1, 0, 2]));
+    }
+
+    #[test]
+    fn a_tab_moved_past_an_end_carries_the_whole_run_with_it() {
+        // Through the wrap the tab lands at the far end and the run it
+        // crossed shifts one slot — `[c, a, b]`, not `[c, b, a]`.
+        assert_eq!(one_slot_move(&[0, 1, 2], 2, true), Some(vec![2, 0, 1]));
+        assert_eq!(one_slot_move(&[0, 1, 2], 0, false), Some(vec![1, 2, 0]));
+    }
+
+    #[test]
+    fn a_move_with_nothing_to_move_is_refused() {
+        assert_eq!(one_slot_move(&[], 0, true), None);
+        assert_eq!(one_slot_move(&[0], 0, true), None);
+        assert_eq!(one_slot_move(&[0, 1, 2], 7, true), None);
     }
 
     #[test]

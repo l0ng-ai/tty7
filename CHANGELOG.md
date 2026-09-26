@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Reorder the active tab from the keyboard** (`MoveTabLeft` / `MoveTabRight`).
+  The tab trades places with its neighbour in the order — the keyboard form of
+  dragging it in the tab strip or the sidebar — and wraps past either end, so
+  one held key walks a tab the whole way down the list. Shipped unbound like
+  the pane-swap pair: bind it under Settings → Keyboard shortcuts ("Move Tab
+  Left" / "Move Tab Right"), in `config.json`, or run it from the palette. On
+  a left tab bar the same pair reads as up and down.
+
 - **Quick launch for the coding agents on your PATH** (#955). Every agent tty7
   recognises whose binary is on `PATH` is a palette command — "Agent: Claude
   Code", "Agent: Codex", … — ordered by how often and how recently it was
