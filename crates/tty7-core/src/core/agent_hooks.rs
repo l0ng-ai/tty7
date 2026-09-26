@@ -285,10 +285,11 @@ pub enum HookAgent {
     Crush,
     CodeBuddy,
     Cursor,
+    PrimeAgent,
 }
 
 impl HookAgent {
-    pub const ALL: [HookAgent; 17] = [
+    pub const ALL: [HookAgent; 18] = [
         HookAgent::Claude,
         HookAgent::Codex,
         HookAgent::TraeCode,
@@ -306,6 +307,7 @@ impl HookAgent {
         HookAgent::Crush,
         HookAgent::CodeBuddy,
         HookAgent::Cursor,
+        HookAgent::PrimeAgent,
     ];
 
     /// The hooks behind a detected agent process, if it has any.
@@ -323,6 +325,7 @@ impl HookAgent {
             CLIAgent::Pi => Some(HookAgent::Pi),
             CLIAgent::Grok => Some(HookAgent::Grok),
             CLIAgent::OhMyPi => Some(HookAgent::OhMyPi),
+            CLIAgent::PrimeAgent => Some(HookAgent::PrimeAgent),
             CLIAgent::Gemini => Some(HookAgent::Gemini),
             CLIAgent::Droid => Some(HookAgent::Droid),
             CLIAgent::Qwen => Some(HookAgent::Qwen),
@@ -337,7 +340,8 @@ impl HookAgent {
             | CLIAgent::Auggie
             | CLIAgent::Hermes
             | CLIAgent::Vibe
-            | CLIAgent::Antigravity => None,
+            | CLIAgent::Antigravity
+            | CLIAgent::Empryo => None,
         }
     }
 
@@ -361,6 +365,7 @@ impl HookAgent {
             | HookAgent::Pi
             | HookAgent::Grok
             | HookAgent::OhMyPi
+            | HookAgent::PrimeAgent
             | HookAgent::Goose
             | HookAgent::Kimi => None,
         }
@@ -406,6 +411,7 @@ impl HookAgent {
             HookAgent::Pi => "pi",
             HookAgent::Grok => "grok",
             HookAgent::OhMyPi => "omp",
+            HookAgent::PrimeAgent => "prime-agent",
             HookAgent::Gemini => "gemini",
             HookAgent::Droid => "droid",
             HookAgent::Qwen => "qwen",
@@ -428,6 +434,7 @@ impl HookAgent {
             HookAgent::Pi => "Pi",
             HookAgent::Grok => "Grok Build",
             HookAgent::OhMyPi => "Oh My Pi",
+            HookAgent::PrimeAgent => "Prime Agent",
             HookAgent::Gemini => "Gemini",
             HookAgent::Droid => "Droid",
             HookAgent::Qwen => "Qwen Code",
@@ -455,6 +462,9 @@ impl HookAgent {
                 &["opencode", "plugins", OWNED_FILE_STEM_JS],
             ),
             HookAgent::Pi => target.under_home(&[".pi", "agent", "extensions", "tty7", "index.ts"]),
+            HookAgent::PrimeAgent => {
+                target.under_home(&[".prime", "agent", "extensions", "tty7", "index.ts"])
+            }
             HookAgent::Grok => target.under_home(&[".grok", "hooks", OWNED_FILE_STEM_JSON]),
             HookAgent::OhMyPi => {
                 target.under_home(&[".omp", "agent", "extensions", "tty7", "index.ts"])
@@ -1328,7 +1338,7 @@ fn owned_file_content(target: &HookTarget, agent: HookAgent) -> Option<String> {
     match agent {
         HookAgent::Copilot => copilot_hooks_json(target),
         HookAgent::OpenCode => opencode_plugin_js(target),
-        HookAgent::Pi | HookAgent::OhMyPi => pi_extension_ts(target, agent),
+        HookAgent::Pi | HookAgent::OhMyPi | HookAgent::PrimeAgent => pi_extension_ts(target, agent),
         HookAgent::Grok => grok_hooks_json(target),
         HookAgent::Goose => goose_hooks_json(target),
         HookAgent::Claude
@@ -1568,6 +1578,7 @@ fn pi_extension_ts(target: &HookTarget, agent: HookAgent) -> Option<String> {
     let (slug, package) = match agent {
         HookAgent::Pi => ("pi", "@mariozechner/pi-coding-agent"),
         HookAgent::OhMyPi => ("omp", "@oh-my-pi/pi-coding-agent"),
+        HookAgent::PrimeAgent => ("prime-agent", "@earendil-works/pi-coding-agent"),
         _ => return None,
     };
     let exe = serde_json::to_string(&target.exe.display().to_string()).ok()?;
@@ -1838,6 +1849,10 @@ mod tests {
             (HookAgent::Crush, "/home/me/.config/crush/crush.json"),
             (HookAgent::CodeBuddy, "/home/me/.codebuddy/settings.json"),
             (HookAgent::Cursor, "/home/me/.cursor/hooks.json"),
+            (
+                HookAgent::PrimeAgent,
+                "/home/me/.prime/agent/extensions/tty7/index.ts",
+            ),
         ] {
             assert_eq!(
                 agent.target_path(&t),
@@ -2679,6 +2694,11 @@ mod tests {
         for (agent, slug, package) in [
             (HookAgent::Pi, "pi", "@mariozechner/pi-coding-agent"),
             (HookAgent::OhMyPi, "omp", "@oh-my-pi/pi-coding-agent"),
+            (
+                HookAgent::PrimeAgent,
+                "prime-agent",
+                "@earendil-works/pi-coding-agent",
+            ),
         ] {
             let bridge =
                 pi_extension_ts(&target, agent).unwrap_or_else(|| panic!("{slug} content builds"));
