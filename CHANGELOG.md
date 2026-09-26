@@ -156,6 +156,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The character under the cursor no longer disappears in vim and Neovim**
+  (#966). An input-method composition with nothing visible in it — Windows
+  IMEs can leave one behind — was still painted at the cursor, as a cell of
+  the theme's background with an underline under it, covering both the
+  character and the block cursor on every cell the cursor moved to. A
+  composition that has nothing to draw is no longer painted, so the cell keeps
+  its character and the block cursor draws it in reverse video as usual.
 - **Nerd Font icons from a fallback font come out at the text's size** (#866).
   With a Nerd Font icon face such as Symbols Nerd Font Mono behind a primary
   that lacks the icons, an icon followed by a space on the same background —
