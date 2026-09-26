@@ -27,8 +27,8 @@ use super::typeahead::{RawInput, Typeahead};
 use crate::core::actions::{
     CloseActiveTab, CopyLinkPathUnderPointer, DecreaseFontSize, ForkAgentSessionDown,
     ForkAgentSessionLeft, ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab,
-    OpenLinkUnderPointer, RevealLinkUnderPointer, SaveAgentLaunchArgs, SendBackTab, SendTab,
-    SplitDown, SplitRight, ToggleMaximizePane,
+    OpenLinkUnderPointer, OpenLinkWithDefaultApp, RevealLinkUnderPointer, SaveAgentLaunchArgs,
+    SendBackTab, SendTab, SplitDown, SplitRight, ToggleMaximizePane,
 };
 use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier, NotifyMode};
 use crate::core::shell_quote::quote_for_shell;
@@ -5975,6 +5975,22 @@ impl TerminalView {
         self.open_file_link(path, line, column, is_dir, window, cx);
     }
 
+    /// "Open with Default App": the file link under the menu, handed to the
+    /// OS association whatever `link_file_open` says "Open" does.
+    fn open_menu_link_with_default_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The menu only offers this for a local pane; a key binding could
+        // still fire it on a remote one, where the path means nothing here.
+        if !self.host_id.is_local() {
+            return;
+        }
+        let Some(path) = self.menu_link_path().map(std::path::Path::to_path_buf) else {
+            return;
+        };
+        if let Err(e) = open_file_path(&path) {
+            self.warn_file_open_failed(&path, &e, window, cx);
+        }
+    }
+
     fn reveal_menu_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.menu_link_path().map(std::path::Path::to_path_buf) else {
             return;
@@ -7253,6 +7269,9 @@ impl Render for TerminalView {
             .on_action(cx.listener(|this, _: &OpenLinkUnderPointer, window, cx| {
                 this.open_menu_link(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenLinkWithDefaultApp, window, cx| {
+                this.open_menu_link_with_default_app(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &RevealLinkUnderPointer, window, cx| {
                 this.reveal_menu_link(window, cx);
             }))
@@ -7300,10 +7319,18 @@ impl Render for TerminalView {
                             false => L10nKey::AppMenuRevealInFolder,
                         };
                         let label = link_menu_label(path);
+                        let default_app =
+                            offers_default_app_open(local, cx.global::<Config>().file_open_mode());
                         menu.min_w(px(220.))
                             .action_context(menu_focus.clone())
                             .label(label)
                             .menu(t(L10nKey::AppMenuOpenLink), Box::new(OpenLinkUnderPointer))
+                            .when(default_app, |menu| {
+                                menu.menu(
+                                    t(L10nKey::AppMenuOpenLinkWithDefaultApp),
+                                    Box::new(OpenLinkWithDefaultApp),
+                                )
+                            })
                             // A file on another machine has no folder here to
                             // show it in, and naming this one's would show
                             // whatever it happens to keep at that path.
@@ -7649,9 +7676,23 @@ fn select_end_copy(enabled: bool, grid: bool, editor: bool) -> SelectEndCopy {
     }
 }
 
+/// Whether a file link's menu offers "Open with Default App" beside "Open".
+///
+/// Only for a file on this machine: the OS opener is handed a local path, and
+/// a remote pane's path names nothing here — or worse, this machine's copy.
+/// And not when "Open" already goes to the OS association, where the two rows
+/// would do the same thing.
+fn offers_default_app_open(host_is_local: bool, open_mode: LinkFileOpen) -> bool {
+    host_is_local && open_mode != LinkFileOpen::System
+}
+
 /// Hands a path to whatever the OS has it associated with. Also the fallback
 /// for a directory the file tree cannot reach.
+///
+/// The path is spelled this OS's way first: Explorer takes `c:/a.png` as a
+/// request to show Documents.
 pub(crate) fn open_file_path(path: &std::path::Path) -> std::io::Result<()> {
+    let path = &super::search::spelled_for(super::search::PathStyle::NATIVE, path);
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(windows) {
@@ -7669,6 +7710,7 @@ pub(crate) fn open_file_path(path: &std::path::Path) -> std::io::Result<()> {
 /// no desktop-neutral Linux equivalent exists, so there the folder is opened
 /// and the file is left for the eye to find.
 pub(crate) fn reveal_file_path(path: &std::path::Path) -> std::io::Result<()> {
+    let path = &super::search::spelled_for(super::search::PathStyle::NATIVE, path);
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut c = std::process::Command::new("open");
@@ -10055,6 +10097,30 @@ mod tests {
             [("g", true), ("it ", false), ("st", true), ("atus", false)]
         );
         assert!(highlight_runs("", &[]).is_empty());
+    }
+
+    /// "Open with Default App" sits beside "Open" only where it adds
+    /// something: on a local file, and when "Open" is not already the OS
+    /// association.
+    #[test]
+    fn the_default_app_row_is_offered_only_where_it_differs_from_open() {
+        use super::{LinkFileOpen, offers_default_app_open};
+        assert!(offers_default_app_open(true, LinkFileOpen::Internal));
+        assert!(offers_default_app_open(true, LinkFileOpen::Command));
+        assert!(
+            !offers_default_app_open(true, LinkFileOpen::System),
+            "it would repeat Open"
+        );
+        for mode in [
+            LinkFileOpen::Internal,
+            LinkFileOpen::System,
+            LinkFileOpen::Command,
+        ] {
+            assert!(
+                !offers_default_app_open(false, mode),
+                "a remote file has nothing here for the OS to open ({mode:?})"
+            );
+        }
     }
 
     #[test]

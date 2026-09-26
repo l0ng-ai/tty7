@@ -22,6 +22,10 @@ const MAX_MATCHES: usize = 10_000;
 /// from turning a hover into a burst of filesystem calls.
 const MAX_FILE_CANDIDATES: usize = 8;
 
+/// The longest quoted span read as one path with spaces in it. Windows'
+/// classic `MAX_PATH`: past this a quote is holding a sentence, not a path.
+const MAX_QUOTED_PATH: usize = 260;
+
 /// How long a printing pane has to stay quiet before an open search bar
 /// rescans it. Short enough that a command's output is re-counted by the time
 /// the eye gets back to the bar, long enough that a flood costs one scan per
@@ -903,6 +907,17 @@ fn windows_prefix(path: &str) -> &str {
     ""
 }
 
+/// `path` spelled the way `style`'s own tools want it — for handing a path to
+/// something outside tty7, like the OS opener. Only a Windows spelling
+/// changes, and only a path that is valid UTF-8: rewriting anything else
+/// through a lossy string would name a different file.
+pub(super) fn spelled_for(style: PathStyle, path: &Path) -> PathBuf {
+    match (style, path.to_str()) {
+        (PathStyle::Windows, Some(text)) => PathBuf::from(windows_spelling(text)),
+        _ => path.to_path_buf(),
+    }
+}
+
 /// A Windows path the way Windows itself writes one: `\` throughout and an
 /// upper-case drive letter. Every Windows API takes `/` too, but Explorer —
 /// the system opener and the "Reveal" menu item — does not.
@@ -1106,8 +1121,9 @@ impl FileCandidate {
 /// separator: naming the prefixes costs a handful of readings where
 /// enumerating pairs costs a probe per pair, on every hover.
 pub(super) fn file_candidates_at(text: &str, col: usize) -> Vec<FileCandidate> {
+    let quoted = quoted_candidates_at(text, col);
     let Some((base, _, token)) = non_ws_token_at(text, col) else {
-        return Vec::new();
+        return quoted;
     };
     let chars: Vec<char> = token.chars().collect();
     let mut out: Vec<FileCandidate> = Vec::new();
@@ -1124,8 +1140,91 @@ pub(super) fn file_candidates_at(text: &str, col: usize) -> Vec<FileCandidate> {
             .cmp(&a.path.chars().count())
             .then(a.start.cmp(&b.start))
     });
+    // A quote is the one place a path is allowed a space, and the writer put
+    // it there to say where the path starts and stops — so it is asked first.
+    for (i, candidate) in quoted.into_iter().enumerate() {
+        out.retain(|c| *c != candidate);
+        out.insert(i, candidate);
+    }
     out.truncate(MAX_FILE_CANDIDATES);
     out
+}
+
+/// The path a pair of quotes holds around `col`, when it has a space in it.
+///
+/// Whitespace ends a path everywhere else, and guessing where a path with
+/// spaces stops in unquoted prose is how `see C:\Program Files for more`
+/// would become a link to a folder that happens to exist. A quote is the
+/// writer saying where it stops — `"C:\Program Files\app\app.exe"`,
+/// `'/Users/me/My Docs/a.txt'` — so that is the only place a space is read as
+/// part of a path.
+///
+/// What is inside still has to be written like a path: no space at either
+/// end, a separator somewhere, and short enough to be one. A quoted sentence
+/// that clears all that and still names nothing costs one reading, the same
+/// as a single unquoted word — never one per word inside it.
+///
+/// A token with no space in it is left to the ordinary rules, which already
+/// peel quotes off a path. A location may be written inside the quotes
+/// (`"my file.rs:10:2"`) or straight after the closing one
+/// (`"my file.rs":10:2`, `"my file.cs"(10,2)`).
+fn quoted_candidates_at(text: &str, col: usize) -> Vec<FileCandidate> {
+    let chars: Vec<char> = text.chars().collect();
+    if col >= chars.len() {
+        return Vec::new();
+    }
+    let Some((open, close)) = ['"', '\'', '`']
+        .into_iter()
+        .filter_map(|q| {
+            let open = chars[..col].iter().rposition(|&c| c == q)?;
+            let close = col + chars[col..].iter().position(|&c| c == q)?;
+            (close > col).then_some((open, close))
+        })
+        // The innermost pair: `"it's '/a b/c'"` means the single-quoted one.
+        .min_by_key(|&(open, close)| close - open)
+    else {
+        return Vec::new();
+    };
+    let inner = &chars[open + 1..close];
+    let path_shaped = inner.len() <= MAX_QUOTED_PATH
+        && inner.iter().any(|c| c.is_whitespace())
+        && inner.first().is_some_and(|c| !c.is_whitespace())
+        && inner.last().is_some_and(|c| !c.is_whitespace())
+        && inner.iter().any(|&c| matches!(c, '/' | '\\'))
+        && !inner.iter().any(|c| c.is_control());
+    if !path_shaped {
+        return Vec::new();
+    }
+    let written: String = inner.iter().collect();
+    let mut location = split_file_location(&written);
+    if location.line.is_none() {
+        let after: String = chars[close + 1..]
+            .iter()
+            .take_while(|c| !c.is_whitespace())
+            .collect();
+        let after = after.trim_end_matches([':', ',', ';']);
+        if !after.is_empty() {
+            let outside = split_file_location(&format!("{written}{after}"));
+            if outside.line.is_some() && outside.path == written {
+                location = outside;
+            }
+        }
+    }
+    let mut readings = Vec::with_capacity(2);
+    if location.literal_too && location.line.is_some() && location.path != written {
+        readings.push((written.clone(), None, None));
+    }
+    readings.push((location.path, location.line, location.column));
+    readings
+        .into_iter()
+        .map(|(path, line, column)| FileCandidate {
+            start: open + 1,
+            end: close - 1,
+            path,
+            line,
+            column,
+        })
+        .collect()
 }
 
 /// The best reading of the token under `col`, which is what most of the
@@ -2953,5 +3052,186 @@ mod tests {
         assert_eq!(windows_prefix(r"\\srv\share"), r"\\srv\share");
         assert_eq!(windows_prefix("C:"), "C:");
         assert_eq!(windows_prefix("proj"), "");
+    }
+
+    #[test]
+    fn a_path_handed_to_the_os_is_spelled_its_way() {
+        assert_eq!(
+            spelled_for(PathStyle::Windows, Path::new("c:/Users/me/a b.png")),
+            PathBuf::from(r"C:\Users\me\a b.png")
+        );
+        assert_eq!(
+            spelled_for(PathStyle::Windows, Path::new(r"\\srv/share/x")),
+            PathBuf::from(r"\\srv\share\x")
+        );
+        assert_eq!(
+            spelled_for(PathStyle::Posix, Path::new("/Users/me/a\\b.png")),
+            PathBuf::from("/Users/me/a\\b.png"),
+            "a POSIX backslash is a filename character, not a separator"
+        );
+    }
+
+    fn posix_roots() -> LinkRoots {
+        LinkRoots {
+            dirs: vec![PathBuf::from("/home/u/proj")],
+            local_home: false,
+            style: PathStyle::Posix,
+        }
+    }
+
+    /// The file link under the first char of `needle`, as (path, line,
+    /// column, start, end) — or `None`, with what was asked about.
+    fn file_link_with(
+        line: &str,
+        needle: &str,
+        roots: &LinkRoots,
+        exists: &str,
+    ) -> Result<(String, Option<u32>, Option<u32>, usize, usize), Vec<String>> {
+        let (link, asked) = link_with(line, needle, roots, exists);
+        match link {
+            Some(LinkMatch {
+                start,
+                end,
+                target:
+                    LinkTarget::File {
+                        path, line, column, ..
+                    },
+            }) => Ok((
+                path.to_string_lossy().into_owned(),
+                line,
+                column,
+                start,
+                end,
+            )),
+            _ => Err(asked),
+        }
+    }
+
+    /// A quote is where a path is allowed its spaces: every word of it is the
+    /// same link, and the quotes are not part of it.
+    #[test]
+    fn a_quoted_windows_path_keeps_its_spaces() {
+        let want = r"C:\Program Files\foo\bar.exe";
+        for line in [
+            r#"run "C:\Program Files\foo\bar.exe" now"#,
+            r"run 'C:\Program Files\foo\bar.exe' now",
+            r"run `C:\Program Files\foo\bar.exe` now",
+            r#"run "c:/Program Files/foo/bar.exe" now"#,
+        ] {
+            let written = &line[5..line.len() - 5];
+            for needle in ["Program", "Files", "bar.exe"] {
+                let got = file_link_with(line, needle, &windows_roots(), want);
+                assert_eq!(
+                    got,
+                    Ok((
+                        want.to_string(),
+                        None,
+                        None,
+                        span_of(line, written).0,
+                        span_of(line, written).1
+                    )),
+                    "{line:?} at {needle:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_quoted_posix_path_keeps_its_spaces_and_its_location() {
+        let roots = posix_roots();
+        let docs = "/Users/me/My Docs/a.txt";
+        let line = "open '/Users/me/My Docs/a.txt' please";
+        let (start, end) = span_of(line, docs);
+        assert_eq!(
+            file_link_with(line, "Docs", &roots, docs),
+            Ok((docs.to_string(), None, None, start, end))
+        );
+
+        let file = "/home/u/proj/src/my file.rs";
+        for (line, loc) in [
+            (
+                r#"error: "src/my file.rs:10:2" failed"#,
+                (Some(10), Some(2)),
+            ),
+            (
+                r#"error: "src/my file.rs":10:2: failed"#,
+                (Some(10), Some(2)),
+            ),
+            (
+                r#"error: "src/my file.rs"(10,2): failed"#,
+                (Some(10), Some(2)),
+            ),
+            (
+                r#"File "src/my file.rs", line 7, in <module>"#,
+                (Some(7), None),
+            ),
+            (r#"see "src/my file.rs"."#, (None, None)),
+        ] {
+            let got = file_link_with(line, "file", &roots, file)
+                .unwrap_or_else(|asked| panic!("{line:?}: no link, asked {asked:?}"));
+            assert_eq!(got.0, file, "{line:?}");
+            assert_eq!((got.1, got.2), loc, "{line:?}");
+            let byte = line.find("src/").unwrap();
+            assert_eq!(
+                got.3,
+                line[..byte].chars().count(),
+                "{line:?} starts inside the quote"
+            );
+        }
+    }
+
+    /// Outside a quote a space still ends a path — the part after it is not
+    /// guessed onto the part before.
+    #[test]
+    fn an_unquoted_space_still_ends_a_path() {
+        let want = r"C:\Program Files\foo\bar.exe";
+        let line = r"run C:\Program Files\foo\bar.exe now";
+        for needle in ["Program", "Files", "bar.exe"] {
+            assert!(
+                file_link_with(line, needle, &windows_roots(), want).is_err(),
+                "{needle:?}"
+            );
+        }
+        let docs = "/Users/me/My Docs/a.txt";
+        assert!(
+            file_link_with("open /Users/me/My Docs/a.txt", "Docs", &posix_roots(), docs).is_err()
+        );
+    }
+
+    /// Quotes around ordinary prose are not a path, and one that looks enough
+    /// like one to be asked about is asked about once.
+    #[test]
+    fn a_quote_around_prose_is_not_a_path() {
+        let spaced = |line: &str, needle: &str| {
+            let byte = line.find(needle).unwrap();
+            file_candidates_at(line, line[..byte].chars().count())
+                .into_iter()
+                .filter(|c| c.path.contains(' '))
+                .collect::<Vec<_>>()
+        };
+        for (line, needle) in [
+            (r#"say "hello world" twice"#, "world"),
+            (r#"say " /a b/c " twice"#, "b/c"),
+            (r#"mismatched "/a b/c' here"#, "b/c"),
+            (r#"a "x" and "y/z w""#, "and"),
+            ("it's a /tmp/x dir", "tmp"),
+            ("tab\"/a\tb/c\"", "b/c"),
+        ] {
+            assert_eq!(spaced(line, needle), Vec::new(), "{line:?}");
+        }
+        let long = format!("\"/{} x/y\"", "a".repeat(MAX_QUOTED_PATH));
+        assert_eq!(spaced(&long, "x/y"), Vec::new(), "past the cap");
+        let at_cap = format!("\"/{} x/y\"", "a".repeat(MAX_QUOTED_PATH - 6));
+        assert_eq!(spaced(&at_cap, "x/y").len(), 1, "at the cap");
+
+        // A quoted sentence that clears the shape check and names nothing
+        // is one question, not one per word.
+        let line = r#"note "see the docs/ folder and the src/ tree" ok"#;
+        for needle in ["see", "folder", "tree"] {
+            let (link, asked) = link_with(line, needle, &posix_roots(), "");
+            assert_eq!(link, None);
+            let spaced: Vec<_> = asked.iter().filter(|p| p.contains(' ')).collect();
+            assert_eq!(spaced.len(), 1, "{needle:?} asked {asked:?}");
+        }
     }
 }

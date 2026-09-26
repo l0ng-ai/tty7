@@ -1042,6 +1042,7 @@ l10n_keys! {
     AppMenuZoomPane,
     AppMenuClearScrollback,
     AppMenuOpenLink,
+    AppMenuOpenLinkWithDefaultApp,
     AppMenuRevealInFinder,
     AppMenuRevealInFolder,
     AppMenuCopyLinkPath,
