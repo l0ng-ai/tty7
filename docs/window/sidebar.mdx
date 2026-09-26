@@ -18,17 +18,19 @@ is doing.
 
 The sidebar groups tabs by repository automatically. Pin what you want to keep.
 
-**Auto groups** sit below a divider. Every tab you have not pinned is filed
-under the git repository its working directory is in — a linked worktree under
-the repository it belongs to, a submodule under itself — and an SSH tab under
-the host it is connected to, so `/home/ubuntu` on two machines is two groups.
+**Auto groups** sit below the pinned ones. Every tab you have not pinned is
+filed under the git repository its working directory is in — a linked worktree
+under the repository it belongs to, a submodule under itself — and an SSH tab
+under the host it is connected to, so `/home/ubuntu` on two machines is two
+groups.
 Everything else collects in a trailing **Ungrouped** section. An auto group
 follows the tab's working directory, not its history: `cd` into another
 repository and the row moves; switching branches never does. When its last tab
 leaves, the group is gone.
 
-**Pinned groups** sit above the divider, in the order you put them, and stay
-until you delete them — an empty one keeps its place with a **+ New Tab** row.
+**Pinned groups** sit at the top, each marked ◆ beside its name, in the order
+you put them, and stay until you delete them — an empty one keeps its place
+with a **+ New Tab** row.
 A tab in a pinned group never leaves it on its own. There are two kinds:
 
 - A **folder group** keeps a directory. A tab whose working directory *enters*
@@ -36,7 +38,7 @@ A tab in a pinned group never leaves it on its own. There are two kinds:
   repository the folder is. When folders nest, the deepest one wins, so pinning
   a monorepo and one package in it files the package's tabs under the package.
   A tab you drag out while it is still inside stays out until it leaves the
-  folder and comes back. Hover the header for the folder's path; click its pin
+  folder and comes back. Hover the header for the folder's path; click its ◆
   to unpin it, and its tabs go back to auto groups.
 - A **label group** is just a name, for tabs that belong together for a reason
   no directory shows. Tabs go in and out of it by hand.
@@ -45,7 +47,7 @@ Ways to pin:
 
 | To get | Do this |
 |---|---|
-| A folder group from an auto group | Click the pin on its header, or drag the header above the divider |
+| A folder group from an auto group | Click the ◆ on its header, or drag the header up among the pinned groups |
 | A folder group from a folder | Drop it from Finder onto the sidebar, choose **Pin as Group** on it in the Files panel, or run **Open Folder as Group…** from the command palette |
 | A label group | Right-click a tab → **Move to Group → New Group…**, or run **New Group** from the command palette |
 
@@ -92,8 +94,8 @@ they simply stop opening the overlay.
 
 Drag a row to reorder it within its group, or drag a group header to move the
 group — pinned groups among pinned groups, auto groups among auto groups. Drag
-a row onto a pinned group to put it there, or anywhere below the divider to
-hand it back to auto grouping. A row cannot be dragged into an auto group: its
+a row onto a pinned group to put it there, or anywhere below the pinned groups
+to hand it back to auto grouping. A row cannot be dragged into an auto group: its
 membership comes from the working directory, so `cd` is what moves it.
 
 Drag a row out over the panes instead and it stops being a session of its own:

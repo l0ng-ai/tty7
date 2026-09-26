@@ -34,6 +34,17 @@ const GRAB_HANDLE_W: f32 = 48.;
 
 const ROW_GAP: f32 = 2.;
 
+/// What marks a kept group, and what the header button that keeps one reads.
+///
+/// A character rather than an icon: at a header's size a drawn pin is a
+/// smudge, and the mark only has to say "kept" beside the name, the way a
+/// bullet does. With no line between kept and derived groups it is also the
+/// only thing that tells the two apart, so every kept group carries it.
+const PIN_MARK: &str = "\u{25C6}";
+
+/// The mark's size: small enough to sit under the header text's x-height.
+const PIN_MARK_SIZE: f32 = 8.;
+
 /// A single-line tab row: one line of `text_sm` and a little air, the same
 /// 28px the search field and the workspace chip above it stand at.
 const ROW_HEIGHT: f32 = 28.;
@@ -1283,37 +1294,39 @@ impl Tty7App {
                                 .child(Icon::new(IconName::ChevronRight).xsmall()),
                         )
                     })
-                    // The pin marks a folder group: kept, and keeping a folder.
-                    // It is also the way to stop keeping it — a click unpins,
-                    // and the folder's tabs fall back to the groups their cwds
-                    // resolve to. A label group has no such mark: it sits above
-                    // the divider, and there is no folder to fall back on.
-                    .when_some(
-                        pinned_id.filter(|_| pinned_folder.is_some()),
-                        |header, id| {
-                            header.child(
-                                div()
-                                    .id(("sidebar-group-unpin", group_ix))
-                                    .flex_shrink_0()
-                                    .cursor_pointer()
-                                    .hover(|s| s.text_color(cx.theme().foreground))
-                                    .child(Icon::empty().path("icons/pin.svg").xsmall())
-                                    .tooltip(|window, cx| {
-                                        gpui_component::tooltip::Tooltip::new(t(
-                                            L10nKey::SidebarUnpinGroup,
-                                        ))
-                                        .build(window, cx)
-                                    })
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .on_click(cx.listener(move |this, _, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.delete_group(id, cx);
-                                    })),
-                            )
-                        },
-                    )
+                    // Every kept group carries the mark; it is what sets them
+                    // apart from the derived groups below. On a folder group it
+                    // is also the way to stop keeping it — a click unpins, and
+                    // the folder's tabs fall back to the groups their cwds
+                    // resolve to. A label group's mark is only a mark: without a
+                    // folder there is nothing to fall back on, so letting go of
+                    // it is Delete Group, in its menu, not a stray click.
+                    .when_some(pinned_id, |header, id| {
+                        let mark = div()
+                            .flex_shrink_0()
+                            .text_size(px(PIN_MARK_SIZE))
+                            .line_height(px(PIN_MARK_SIZE))
+                            .child(PIN_MARK);
+                        header.child(match pinned_folder.is_some() {
+                            false => mark.into_any_element(),
+                            true => mark
+                                .id(("sidebar-group-unpin", group_ix))
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(cx.theme().foreground))
+                                .tooltip(|window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(t(
+                                        L10nKey::SidebarUnpinGroup,
+                                    ))
+                                    .build(window, cx)
+                                })
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.delete_group(id, cx);
+                                }))
+                                .into_any_element(),
+                        })
+                    })
                     .child(match renaming_group {
                         Some(input) => div()
                             .id(("sidebar-group-rename", group_ix))
@@ -1823,8 +1836,14 @@ impl Tty7App {
             .child(handle)
     }
 
-    /// The line between the kept groups and the derived ones, recording where
-    /// it was drawn so a drag next frame can tell which side it is on.
+    /// The boundary between the kept groups and the derived ones, recording
+    /// where it lies so a drag next frame can tell which side it is on.
+    ///
+    /// Not drawn at rest — the mark on each kept header already says which
+    /// side a group is on, and a hairline across the list was one more rule
+    /// for the eye to cross. It keeps its place in the layout all the same, so
+    /// nothing jumps when a drag starts, and shows as a line only while it is
+    /// the target: when letting go would pin a header or hand a tab back.
     ///
     /// With nothing pinned yet it only appears while an auto header is being
     /// carried, and then as a drop zone rather than a hairline: a one-pixel
@@ -1833,9 +1852,10 @@ impl Tty7App {
     /// back to auto grouping.
     fn sidebar_divider(&self, lit: bool, zone: bool, cx: &Context<Self>) -> AnyElement {
         let bounds = self.sidebar_divider.clone();
-        let ink = match lit {
-            true => cx.theme().drag_border,
-            false => cx.theme().sidebar_border,
+        let ink = match (lit, zone) {
+            (true, _) => cx.theme().drag_border,
+            (false, true) => cx.theme().sidebar_border,
+            (false, false) => gpui::transparent_black(),
         };
         let body = match zone {
             true => h_flex()
@@ -1862,7 +1882,9 @@ impl Tty7App {
             .relative()
             .w_full()
             .px_2()
-            .pt(px(10.))
+            // Less than when it was a drawn rule: the next header's own top
+            // margin already opens the gap between the two kinds of group.
+            .pt(px(4.))
             .pb(px(2.))
             .child(
                 canvas(move |b, _window, _cx| bounds.set(Some(b)), |_, _, _, _| {})
@@ -1895,7 +1917,7 @@ impl Tty7App {
         fade.a = 0.;
         let muted = cx.theme().muted_foreground;
         let ink = cx.theme().foreground;
-        let button = |id: &'static str, path: &'static str, tip: L10nKey| {
+        let button = |id: &'static str, glyph: AnyElement, tip: L10nKey| {
             div()
                 .id((id, group_ix))
                 .flex_shrink_0()
@@ -1904,7 +1926,7 @@ impl Tty7App {
                 .cursor_pointer()
                 .text_color(muted)
                 .hover(move |s| s.text_color(ink))
-                .child(Icon::empty().path(path).xsmall())
+                .child(glyph)
                 .tooltip(move |window, cx| {
                     gpui_component::tooltip::Tooltip::new(t(tip)).build(window, cx)
                 })
@@ -1914,7 +1936,19 @@ impl Tty7App {
             buttons = buttons.child(
                 button(
                     "sidebar-group-pin",
-                    "icons/pin.svg",
+                    // The mark the group will carry once kept, the size of
+                    // the icon beside it so the two buttons line up.
+                    div()
+                        .size(px(12.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(PIN_MARK_SIZE))
+                        // Its own line box: the header's is several times the
+                        // mark's size and would drop it below the "+" beside it.
+                        .line_height(px(PIN_MARK_SIZE))
+                        .child(PIN_MARK)
+                        .into_any_element(),
                     L10nKey::SidebarPinGroup,
                 )
                 .on_mouse_down(
@@ -1930,7 +1964,10 @@ impl Tty7App {
             buttons = buttons.child(
                 button(
                     "sidebar-group-add",
-                    "icons/plus.svg",
+                    Icon::empty()
+                        .path("icons/plus.svg")
+                        .xsmall()
+                        .into_any_element(),
                     L10nKey::SidebarGroupNewTab,
                 )
                 .on_mouse_down(
