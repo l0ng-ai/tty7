@@ -30,6 +30,12 @@ const GLYPH: f32 = 14.;
 const PINNED_ROW_H: f32 = 28.;
 /// The segmented switches' cells.
 const SWITCH_H: f32 = 22.;
+/// The pinned header borrows the Git tab's grammar for its own pinned block:
+/// 10px between its parts, 14px before the list, and a side inset 2px further
+/// in than the list's, so the switches read as controls rather than rows.
+const PINNED_GAP: f32 = 10.;
+const LIST_GAP: f32 = 14.;
+const PINNED_INSET: f32 = 14.;
 
 impl Tty7App {
     pub(crate) fn render_panel_github(
@@ -99,6 +105,9 @@ impl Tty7App {
         if let Some(label) = self.github.label.clone() {
             pinned.push(self.github_label_filter_row(&label, cx));
         }
+        // The Git tab's gap under its pinned block, so the header reads as
+        // one unit and the list starts clear of it.
+        pinned.push(div().flex_none().h(px(LIST_GAP)).into_any_element());
         let body = self.github_list_body(&chosen.slug, cx);
         self.github_shell(title, pinned, body, false)
     }
@@ -313,10 +322,13 @@ impl Tty7App {
             .items_center()
             .justify_between()
             .flex_wrap()
-            .gap(px(4.))
-            .min_h(px(PINNED_ROW_H))
-            .px(px(CONTENT_INSET))
-            .pb(px(4.))
+            // Wrapped onto two lines in a narrow panel, the pairs sit as far
+            // apart as the header's parts do, or the two selected pills stack
+            // into one lump.
+            .gap_x(px(8.))
+            .gap_y(px(PINNED_GAP))
+            .px(px(PINNED_INSET))
+            .pt(px(PINNED_GAP))
             .child(h_flex().gap(px(2.)).children(kind_cells))
             .child(h_flex().gap(px(2.)).children(state_cells))
             .into_any_element()
@@ -340,8 +352,8 @@ impl Tty7App {
             .items_center()
             .gap(px(4.))
             .min_h(px(PINNED_ROW_H - 4.))
-            .px(px(TEXT_INSET))
-            .pb(px(4.))
+            .px(px(PINNED_INSET))
+            .pt(px(PINNED_GAP))
             .child(label_chip(&known, cx))
             .child(
                 github_tile(
