@@ -4892,9 +4892,12 @@ impl Tty7App {
     /// the strip and the sidebar both do. Left is back along the order and
     /// right is forward (on a left tab bar that reads as up and down), and
     /// both wrap: past the last tab the first one follows, so a tab can walk
-    /// the whole list without letting go of the key.
+    /// the whole list without letting go of the key. On a left tab bar the
+    /// list is the tab's own sidebar group: the grouping keys off the tab,
+    /// not its position, so a step out of the group would move nothing.
     fn move_tab(&mut self, right: bool, cx: &mut Context<Self>) {
-        if let Some(permutation) = one_slot_move(&self.visual_tab_order(cx), self.active, right) {
+        let run = self.tab_run(self.active, cx);
+        if let Some(permutation) = one_slot_move(&run, self.tabs.len(), self.active, right) {
             self.apply_tab_order(&permutation, cx);
         }
     }
@@ -9496,34 +9499,32 @@ fn step_in_order(order: &[usize], active: usize, forward: bool) -> Option<usize>
     Some(order[next]).filter(|&i| i != active)
 }
 
-/// The `apply_tab_order` permutation that moves the active tab one slot along
-/// `order` — a move, not a trade: the tab is lifted out and put back at the
-/// neighbour's place, so through a wrap the run it crossed shifts one slot
+/// The `apply_tab_order` permutation that moves the active tab one slot
+/// within `run` — a move, not a trade: the tab is lifted out and put back at
+/// the neighbour's place, so through a wrap the run it crossed shifts one slot
 /// (`[a, b, c]` with `c` moved right becomes `[c, a, b]`, not `[c, b, a]`).
-/// `order` is the visual order as `self.tabs` indices; a step that crosses
-/// into another sidebar group comes back as an unchanged permutation, which
-/// `apply_tab_order` leaves alone — the grouping keys off the tab, not its
-/// position. `None` when
-/// there is nothing to move: fewer than two tabs, or an active tab that
-/// `order` does not hold.
-fn one_slot_move(order: &[usize], active: usize, right: bool) -> Option<Vec<usize>> {
-    let n = order.len();
-    if n < 2 {
+/// `run` is the tabs drawn together (a sidebar section, or every tab on a top
+/// bar) as ascending `self.tabs` indices out of `n`; only their slots are
+/// reassigned, so no tab in another run moves, not even out of sight. `None`
+/// when there is nothing to move: a run of fewer than two tabs, or one that
+/// does not hold the active tab.
+fn one_slot_move(run: &[usize], n: usize, active: usize, right: bool) -> Option<Vec<usize>> {
+    let len = run.len();
+    if len < 2 {
         return None;
     }
-    let pos = order.iter().position(|&i| i == active)?;
-    let target = if right {
-        (pos + 1) % n
-    } else {
-        (pos + n - 1) % n
-    };
+    let pos = run.iter().position(|&i| i == active)?;
+    let mut moved = run.to_vec();
+    match (right, pos) {
+        (true, p) if p + 1 == len => moved.rotate_right(1),
+        (false, 0) => moved.rotate_left(1),
+        (true, p) => moved.swap(p, p + 1),
+        (false, p) => moved.swap(p, p - 1),
+    }
     let mut permutation: Vec<usize> = (0..n).collect();
-    let lifted = permutation.remove(active);
-    // Put back at the neighbour's place, on the side it was crossed from: one
-    // past it when stepping towards the larger visual slot, before it when
-    // the step wraps back around.
-    let at = permutation.iter().position(|&i| i == order[target])?;
-    permutation.insert(at + usize::from(target > pos), lifted);
+    for (&slot, &tab) in run.iter().zip(&moved) {
+        permutation[slot] = tab;
+    }
     Some(permutation)
 }
 
@@ -11098,23 +11099,41 @@ mod tests {
     #[test]
     fn moving_a_tab_one_slot_puts_it_where_the_neighbour_was() {
         // A move, not a trade: the neighbour it crossed shifts one slot.
-        assert_eq!(one_slot_move(&[0, 1, 2], 1, true), Some(vec![0, 2, 1]));
-        assert_eq!(one_slot_move(&[0, 1, 2], 1, false), Some(vec![1, 0, 2]));
+        assert_eq!(one_slot_move(&[0, 1, 2], 3, 1, true), Some(vec![0, 2, 1]));
+        assert_eq!(one_slot_move(&[0, 1, 2], 3, 1, false), Some(vec![1, 0, 2]));
     }
 
     #[test]
     fn a_tab_moved_past_an_end_carries_the_whole_run_with_it() {
         // Through the wrap the tab lands at the far end and the run it
         // crossed shifts one slot — `[c, a, b]`, not `[c, b, a]`.
-        assert_eq!(one_slot_move(&[0, 1, 2], 2, true), Some(vec![2, 0, 1]));
-        assert_eq!(one_slot_move(&[0, 1, 2], 0, false), Some(vec![1, 2, 0]));
+        assert_eq!(one_slot_move(&[0, 1, 2], 3, 2, true), Some(vec![2, 0, 1]));
+        assert_eq!(one_slot_move(&[0, 1, 2], 3, 0, false), Some(vec![1, 2, 0]));
+    }
+
+    #[test]
+    fn a_move_inside_a_sidebar_group_leaves_the_other_groups_alone() {
+        // Tabs 0, 2 and 4 are one group, 1 and 3 another: only the group's
+        // own slots are reassigned, and the wrap stays inside it.
+        assert_eq!(
+            one_slot_move(&[0, 2, 4], 5, 2, true),
+            Some(vec![0, 1, 4, 3, 2])
+        );
+        assert_eq!(
+            one_slot_move(&[0, 2, 4], 5, 0, false),
+            Some(vec![2, 1, 4, 3, 0])
+        );
+        assert_eq!(
+            one_slot_move(&[1, 3], 5, 3, true),
+            Some(vec![0, 3, 2, 1, 4])
+        );
     }
 
     #[test]
     fn a_move_with_nothing_to_move_is_refused() {
-        assert_eq!(one_slot_move(&[], 0, true), None);
-        assert_eq!(one_slot_move(&[0], 0, true), None);
-        assert_eq!(one_slot_move(&[0, 1, 2], 7, true), None);
+        assert_eq!(one_slot_move(&[], 0, 0, true), None);
+        assert_eq!(one_slot_move(&[0], 3, 0, true), None);
+        assert_eq!(one_slot_move(&[0, 1, 2], 3, 7, true), None);
     }
 
     #[test]

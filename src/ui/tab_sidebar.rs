@@ -2597,6 +2597,21 @@ impl Tty7App {
             .collect()
     }
 
+    /// The tabs drawn in the same run as `index`, in `self.tabs` order: its
+    /// sidebar section on a left tab bar, every tab on a top one. Empty when
+    /// no run holds `index`.
+    pub(crate) fn tab_run(&self, index: usize, cx: &gpui::App) -> Vec<usize> {
+        if cx.global::<Config>().tab_bar_position != crate::core::config::TabBarPosition::Left {
+            return (0..self.tabs.len()).collect();
+        }
+        let keys = self.sidebar_group_keys(cx);
+        sidebar_sections(&keys, &self.sidebar_groups)
+            .into_iter()
+            .map(|s| s.tabs)
+            .find(|tabs| tabs.contains(&index))
+            .unwrap_or_default()
+    }
+
     pub(crate) fn activate_visual(
         &mut self,
         n: usize,
