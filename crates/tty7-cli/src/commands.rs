@@ -12,7 +12,7 @@ use crate::address::{self, Context, WorkspaceAddress};
 use crate::backend::{Backend, RunSpec};
 use crate::cli::{
     CaptureArgs, Cli, Command, ExecArgs, MachineCmd, PaneCmd, RunArgs, SendArgs, ServerCmd,
-    SplitArgs, TabCmd, WaitArgs, WaitState, WsCmd,
+    SplitArgs, TabCmd, TaskCmd, WaitArgs, WaitState, WsCmd,
 };
 use crate::exec::ExecEnd;
 use crate::output;
@@ -89,6 +89,32 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
         Some(Command::Tab(TabCmd::Close { tab })) => tab_close(&tab, backend),
         Some(Command::Tab(TabCmd::Rename { tab, name })) => tab_rename(&tab, name, backend),
         Some(Command::Tab(TabCmd::Move { tab, index })) => tab_move(&tab, index, backend),
+        Some(Command::Task(TaskCmd::Ls { ws })) => task_ls(ws.as_deref(), ctx, backend),
+        Some(Command::Task(TaskCmd::Add {
+            title,
+            prompt,
+            prompt_file,
+            cwd,
+            agent,
+            ws,
+        })) => {
+            let prompt = match prompt_file {
+                Some(path) => Some(read_prompt_file(&path)?),
+                None => prompt,
+            };
+            task_add(
+                title,
+                prompt,
+                cwd,
+                agent.as_deref(),
+                ws.as_deref(),
+                ctx,
+                backend,
+            )
+        }
+        Some(Command::Task(TaskCmd::Done { task })) => task_mark(&task, true, backend),
+        Some(Command::Task(TaskCmd::Reopen { task })) => task_mark(&task, false, backend),
+        Some(Command::Task(TaskCmd::Rm { task })) => task_rm(&task, backend),
         Some(Command::Pane(PaneCmd::Ls { ws, all })) => pane_ls(ws.as_deref(), all, backend),
         Some(Command::Pane(PaneCmd::Close { targets, orphans })) => {
             pane_close(&targets, orphans, ctx, backend)
@@ -1136,6 +1162,227 @@ fn tab_move(tab: &str, index: u64, backend: &mut dyn Backend) -> Result<Outcome>
         to: index,
     })?;
     report("", json!({ "tab": tab.to_string(), "to": index }))
+}
+
+/// Refuses up front on a server that keeps no board. It would refuse the
+/// request anyway, but as an unknown variant — which says nothing about what
+/// to do.
+fn require_board(backend: &mut dyn Backend) -> Result<()> {
+    if !backend
+        .hello()?
+        .has_feature(tty7_core::daemon::control::feature::TASKS)
+    {
+        bail!("this server keeps no board — update it (`tty7 server restart`) to use tasks");
+    }
+    Ok(())
+}
+
+/// What each pane's agent last reported, by pane id. A server that cannot say
+/// leaves every run looking finished, which is the safe misreading: a task
+/// shows in Review rather than claiming to be busy.
+fn agent_states_by_pane(
+    backend: &mut dyn Backend,
+) -> std::collections::HashMap<u64, tty7_core::core::cli_agent::AgentSessionState> {
+    match backend.control(ControlRequest::AgentStates) {
+        Ok(ReplyOk::AgentStates(states)) => {
+            states.into_iter().map(|s| (s.pane_id, s.state)).collect()
+        }
+        _ => Default::default(),
+    }
+}
+
+/// The live agent a run's tab is running, read the way the GUI's board reads
+/// it: the tab's most urgent agent pane speaks for it.
+fn run_live(
+    ws: &Workspace,
+    run: &tty7_core::core::task::Run,
+    states: &std::collections::HashMap<u64, tty7_core::core::cli_agent::AgentSessionState>,
+) -> Option<tty7_core::core::task::Live> {
+    use tty7_core::core::cli_agent::AgentStatus;
+    let tab = ws.tabs.iter().find(|t| Some(t.id) == run.tab)?;
+    let urgency = |s: AgentStatus| match s {
+        AgentStatus::Waiting => 3,
+        AgentStatus::Working => 2,
+        AgentStatus::Done => 1,
+        AgentStatus::Idle => 0,
+    };
+    tab.root
+        .pane_ids()
+        .iter()
+        .filter_map(|p| states.get(p))
+        .max_by_key(|s| urgency(s.status))
+        .map(tty7_core::core::task::Live::from)
+}
+
+fn column_name(column: tty7_core::core::task::Column) -> &'static str {
+    use tty7_core::core::task::Column;
+    match column {
+        Column::Queued => "queued",
+        Column::Running => "running",
+        Column::NeedsInput => "needs-input",
+        Column::Review => "review",
+        Column::Done => "done",
+    }
+}
+
+fn task_ls(explicit: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
+    let machine = fetch_machine(backend)?;
+    let id = resolve_ws(explicit, ctx, &machine)?;
+    let ws = machine
+        .workspaces
+        .iter()
+        .find(|ws| ws.id == id)
+        .expect("resolve_ws returned an id straight out of this machine");
+    let states = agent_states_by_pane(backend);
+    let columns: Vec<_> = ws
+        .tasks
+        .iter()
+        .map(|task| tty7_core::core::task::column(task, |run| run_live(ws, run, &states)))
+        .collect();
+    let rows: Vec<Vec<String>> = ws
+        .tasks
+        .iter()
+        .zip(&columns)
+        .map(|(task, column)| {
+            vec![
+                short_task_id(task.id),
+                column_name(*column).to_string(),
+                task.runs
+                    .last()
+                    .map(|r| r.agent)
+                    .or(task.agent)
+                    .map_or("-".to_string(), |a| a.slug().to_string()),
+                task.title.clone(),
+            ]
+        })
+        .collect();
+    let tasks: Vec<Value> = ws
+        .tasks
+        .iter()
+        .zip(&columns)
+        .map(|(task, column)| {
+            json!({
+                "id": task.id.to_string(),
+                "title": task.title,
+                "prompt": task.prompt,
+                "column": column_name(*column),
+                "cwd": task.cwd,
+                "agent": task.agent.map(|a| a.slug()),
+                "runs": task.runs.iter().map(|r| json!({
+                    "agent": r.agent.slug(),
+                    "tab": r.tab.map(|t| t.to_string()),
+                    "session_id": r.session_id,
+                    "started": r.started,
+                })).collect::<Vec<_>>(),
+                "created": task.created,
+                "done": task.done.map(|d| d.at),
+            })
+        })
+        .collect();
+    report(
+        output::table(&["TASK", "COLUMN", "AGENT", "TITLE"], &rows),
+        json!({ "workspace": id.to_string(), "tasks": tasks }),
+    )
+}
+
+/// The first eight hex digits — as much of an id as a person types, and
+/// what [`find_task`] takes back.
+fn short_task_id(id: tty7_core::core::task::TaskId) -> String {
+    id.to_string().chars().take(8).collect()
+}
+
+fn read_prompt_file(path: &str) -> Result<String> {
+    if path == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+            .context("reading the prompt from stdin")?;
+        return Ok(text);
+    }
+    std::fs::read_to_string(path).with_context(|| format!("reading the prompt from {path}"))
+}
+
+fn task_add(
+    title: String,
+    prompt: Option<String>,
+    cwd: Option<String>,
+    agent: Option<&str>,
+    explicit: Option<&str>,
+    ctx: &Context,
+    backend: &mut dyn Backend,
+) -> Result<Outcome> {
+    require_board(backend)?;
+    let machine = fetch_machine(backend)?;
+    let workspace = resolve_ws(explicit, ctx, &machine)?;
+    let mut task = tty7_core::core::task::Task::new(title.trim());
+    task.prompt = prompt.unwrap_or_default().trim().to_string();
+    task.cwd = cwd;
+    task.agent = match agent {
+        Some(name) => Some(
+            tty7_core::core::cli_agent::CLIAgent::from_slug(name)
+                .with_context(|| format!("no agent is called {name:?}"))?,
+        ),
+        None => None,
+    };
+    if let Err(why) = task.check() {
+        bail!(why);
+    }
+    let id = task.id;
+    backend.control(ControlRequest::TaskPut { workspace, task })?;
+    report(
+        id.to_string(),
+        json!({ "workspace": workspace.to_string(), "task": id.to_string() }),
+    )
+}
+
+/// The one task on this machine whose id is, or starts with, `text`.
+fn find_task<'a>(
+    machine: &'a Machine,
+    text: &str,
+) -> Result<(&'a Workspace, &'a tty7_core::core::task::Task)> {
+    let text = text.trim().to_ascii_lowercase();
+    if text.len() < 4 {
+        bail!("give at least four characters of the task id");
+    }
+    let mut found = machine.workspaces.iter().flat_map(|ws| {
+        ws.tasks
+            .iter()
+            .filter(|t| t.id.to_string().starts_with(&text))
+            .map(move |t| (ws, t))
+    });
+    match (found.next(), found.next()) {
+        (Some(hit), None) => Ok(hit),
+        (None, _) => bail!("no task {text} on this machine (tty7 task ls lists them)"),
+        (Some(_), Some(_)) => bail!("{text} names more than one task; give more of the id"),
+    }
+}
+
+fn task_mark(text: &str, done: bool, backend: &mut dyn Backend) -> Result<Outcome> {
+    require_board(backend)?;
+    let machine = fetch_machine(backend)?;
+    let (ws, task) = find_task(&machine, text)?;
+    let states = agent_states_by_pane(backend);
+    let mut task = task.clone();
+    task.done = done.then(|| tty7_core::core::task::Done {
+        at: tty7_core::core::machine::unix_now(),
+        turns: tty7_core::core::task::live_turns(&task, |run| run_live(ws, run, &states)),
+    });
+    let id = task.id;
+    backend.control(ControlRequest::TaskPut {
+        workspace: ws.id,
+        task,
+    })?;
+    report("", json!({ "task": id.to_string(), "done": done }))
+}
+
+fn task_rm(text: &str, backend: &mut dyn Backend) -> Result<Outcome> {
+    require_board(backend)?;
+    let machine = fetch_machine(backend)?;
+    let (ws, task) = find_task(&machine, text)?;
+    backend.control(ControlRequest::TaskRemove {
+        workspace: ws.id,
+        task: task.id,
+    })?;
+    report("", json!({ "task": task.id.to_string(), "removed": true }))
 }
 
 fn pane_ls(explicit: Option<&str>, all: bool, backend: &mut dyn Backend) -> Result<Outcome> {
@@ -2280,6 +2527,134 @@ mod tests {
             backend.killed.is_empty(),
             "no kill may be sent for a pane the registry does not hold"
         );
+    }
+
+    #[test]
+    fn task_add_puts_a_queued_task_on_the_named_workspace() {
+        let mut backend = mock();
+        let api = backend.machine.workspaces[0].id;
+        let out = run_cli(
+            &[
+                "tty7",
+                "task",
+                "add",
+                " Fix the flaky test ",
+                "--prompt",
+                "it fails 1 in 10",
+                "--agent",
+                "codex",
+                "--cwd",
+                "/src/api",
+                "--ws",
+                "api",
+            ],
+            &Context::default(),
+            &mut backend,
+        );
+        let Some(ControlRequest::TaskPut { workspace, task }) = backend.control_calls.last() else {
+            panic!("expected a TaskPut, got {:?}", backend.control_calls);
+        };
+        assert_eq!(*workspace, api);
+        assert_eq!(task.title, "Fix the flaky test");
+        assert_eq!(task.prompt, "it fails 1 in 10");
+        assert_eq!(task.agent, Some(CLIAgent::Codex));
+        assert_eq!(task.cwd.as_deref(), Some("/src/api"));
+        assert!(task.runs.is_empty() && task.done.is_none());
+        assert_eq!(
+            human(out),
+            task.id.to_string(),
+            "the id is the printed result"
+        );
+    }
+
+    #[test]
+    fn task_add_refuses_an_agent_nobody_has_heard_of() {
+        let mut backend = mock();
+        let err = execute(
+            cli(&["tty7", "task", "add", "x", "--agent", "hal", "--ws", "api"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("hal"), "{err}");
+        assert!(
+            !backend
+                .control_calls
+                .iter()
+                .any(|c| matches!(c, ControlRequest::TaskPut { .. }))
+        );
+    }
+
+    #[test]
+    fn task_ls_reads_each_column_off_the_agent_in_the_run_tab() {
+        use tty7_core::core::cli_agent::{AgentSessionState, AgentStatus};
+        use tty7_core::core::task::{Run, Task};
+        let mut backend = mock();
+        let ws = &mut backend.machine.workspaces[0];
+        let build_tab = ws.tabs[0].id;
+        let queued = Task::new("write the docs");
+        let mut running = Task::new("fix the build");
+        running.push_run(Run {
+            agent: CLIAgent::Claude,
+            tab: Some(build_tab),
+            session_id: None,
+            started: 0,
+        });
+        ws.tasks = vec![queued, running];
+        backend.replies.push_back(ReplyOk::AgentStates(vec![
+            tty7_core::daemon::control::PaneAgentState {
+                pane_id: 1,
+                agent: Some(CLIAgent::Claude),
+                state: AgentSessionState {
+                    status: AgentStatus::Waiting,
+                    ..AgentSessionState::default()
+                },
+            },
+        ]));
+        let out = json_of(run_cli(
+            &["tty7", "task", "ls", "api"],
+            &Context::default(),
+            &mut backend,
+        ));
+        let columns: Vec<&str> = out["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["column"].as_str().unwrap())
+            .collect();
+        assert_eq!(columns, vec!["queued", "needs-input"]);
+    }
+
+    #[test]
+    fn task_done_finds_the_task_by_the_start_of_its_id() {
+        use tty7_core::core::task::Task;
+        let mut backend = mock();
+        let task = Task::new("ship it");
+        backend.machine.workspaces[1].tasks = vec![task.clone()];
+        let prefix: String = task.id.to_string().chars().take(8).collect();
+        run_cli(
+            &["tty7", "task", "done", &prefix],
+            &Context::default(),
+            &mut backend,
+        );
+        let Some(ControlRequest::TaskPut {
+            workspace,
+            task: put,
+        }) = backend.control_calls.last()
+        else {
+            panic!("expected a TaskPut, got {:?}", backend.control_calls);
+        };
+        assert_eq!(*workspace, backend.machine.workspaces[1].id);
+        assert_eq!(put.id, task.id);
+        assert!(put.done.is_some());
+
+        let err = execute(
+            cli(&["tty7", "task", "rm", "abc"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("four"), "{err}");
     }
 
     #[test]

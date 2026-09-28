@@ -282,7 +282,8 @@ where
         }
     };
 
-    let machine_sub = subscribe_machine(&services, &sink);
+    let reads_tasks = hello.features.iter().any(|f| f == feature::TASKS);
+    let machine_sub = subscribe_machine(&services, &sink, reads_tasks);
 
     let conn = Arc::new(Conn {
         host,
@@ -390,6 +391,7 @@ fn handshake<R: Read>(
     }
     if services.machine.is_some() {
         features.push(feature::MACHINE_TREE.to_string());
+        features.push(feature::TASKS.to_string());
     }
     // A sleeping tab is a mark in the tree *and* stopped panes; a peer that can
     // do only half of that would leave a tab asleep with its shells running,
@@ -825,6 +827,16 @@ fn run_request(
                 .workspace_set_groups(workspace, groups, conn.machine_origin)?;
             (ReplyOk::Unit, Vec::new())
         }
+        ControlRequest::TaskPut { workspace, task } => {
+            conn.machine()?
+                .task_put(workspace, task, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
+        ControlRequest::TaskRemove { workspace, task } => {
+            conn.machine()?
+                .task_remove(workspace, task, conn.machine_origin)?;
+            (ReplyOk::Unit, Vec::new())
+        }
         ControlRequest::TabSetHibernated {
             workspace,
             tab,
@@ -1212,13 +1224,23 @@ impl Conn {
     }
 }
 
-fn subscribe_machine(services: &Services, sink: &Arc<Sink>) -> Option<machine::Subscription> {
+/// `reads_tasks` is whether the peer said it can decode the board's deltas. A
+/// peer that did not is simply not told about the board: it has nowhere to
+/// show one, and an event it cannot decode would end the link.
+fn subscribe_machine(
+    services: &Services,
+    sink: &Arc<Sink>,
+    reads_tasks: bool,
+) -> Option<machine::Subscription> {
     let store = services.machine.as_ref()?;
     let (tx, rx) = smol::channel::bounded::<(String, machine::LayoutDelta)>(LAYOUT_EVENT_QUEUE);
     let lagged = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let saw_drop = Arc::clone(&lagged);
     let subscription = store.subscribe(Arc::new(
         move |workspace: &str, delta: &machine::LayoutDelta| {
+            if !reads_tasks && delta.is_task() {
+                return;
+            }
             if tx.try_send((workspace.to_string(), delta.clone())).is_err() {
                 saw_drop.store(true, Ordering::Release);
                 log::warn!(
@@ -2360,6 +2382,7 @@ mod tests {
             client_token: token.to_string(),
             client_hostname: hostname.to_string(),
             gui: false,
+            features: vec![feature::TASKS.to_string()],
         }
     }
 
@@ -3512,6 +3535,60 @@ mod tests {
             }
             other => panic!("expected the post-resync delta, got {other:?}"),
         }
+    }
+
+    /// A peer that predates the board would fail to decode a task delta, and a
+    /// control event it cannot decode ends its link. So only a peer that said
+    /// it reads them is sent them; the older one sees the rest of the tree
+    /// move as before.
+    #[test]
+    fn board_deltas_reach_only_the_peers_that_read_them() {
+        let (services, _dir) = workspace_services();
+        let store = Arc::clone(services.machine.as_ref().unwrap());
+        let ws = store.workspace_create(None, None, None).unwrap();
+        let ((mut old, old_ok), _s1) = raw_hello(
+            services.clone(),
+            ControlHello {
+                features: Vec::new(),
+                ..ControlHello::host_rpc("old", "old")
+            },
+        );
+        let ((mut new, _), _s2) = raw_hello(services.clone(), ControlHello::host_rpc("new", "new"));
+        assert!(old_ok.has_feature(feature::TASKS));
+        // A request answered means the connection is past its subscription.
+        round_trip(&mut old, 1, ControlRequest::Ping);
+        round_trip(&mut new, 1, ControlRequest::Ping);
+
+        let task = crate::core::task::Task::new("ship it");
+        store.task_put(ws.id, task.clone(), None).unwrap();
+        store
+            .workspace_rename(ws.id, Some("after".into()), None)
+            .unwrap();
+
+        let until_rename = |sock: &mut UnixStream| {
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut seen = Vec::new();
+            loop {
+                match ControlServerMsg::read(sock).unwrap() {
+                    ControlServerMsg::Event(ControlEvent::Layout { delta, .. }) => {
+                        let done = matches!(delta, machine::LayoutDelta::WorkspaceRenamed { .. });
+                        seen.push(delta);
+                        if done {
+                            return seen;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+        };
+        assert!(
+            !until_rename(&mut old).iter().any(|d| d.is_task()),
+            "a peer that never said it reads tasks is not sent one"
+        );
+        assert!(
+            until_rename(&mut new).contains(&machine::LayoutDelta::TaskPut { task }),
+            "a peer that did gets the card"
+        );
     }
 
     #[test]

@@ -158,6 +158,12 @@ pub mod feature {
     /// request, and sending it would take the link down, so a client asks for
     /// the name first and tells the user the server needs updating instead.
     pub const CONTENT_SEARCH: &str = "content-search";
+    /// Both ways. From a server: it keeps a board on each workspace and
+    /// answers [`ControlRequest::TaskPut`] and [`ControlRequest::TaskRemove`].
+    /// From a client (in [`ControlHello::features`]): it can decode the
+    /// board's layout deltas, which a server holds back from a client that
+    /// never said so rather than send it an event it would choke on.
+    pub const TASKS: &str = "tasks";
 }
 
 pub use crate::host::{
@@ -341,6 +347,17 @@ pub enum ControlRequest {
         tab: TabId,
         hibernated: bool,
     },
+    /// Add a task to the workspace's board, or replace the one with its id.
+    /// Gated on [`feature::TASKS`].
+    TaskPut {
+        workspace: WorkspaceId,
+        task: crate::core::task::Task,
+    },
+    /// Gated on [`feature::TASKS`].
+    TaskRemove {
+        workspace: WorkspaceId,
+        task: crate::core::task::TaskId,
+    },
     PaneSplit {
         workspace: WorkspaceId,
         pane: u64,
@@ -453,6 +470,8 @@ impl ControlRequest {
             | TabSetGroup { .. }
             | WorkspaceSetGroups { .. }
             | TabSetHibernated { .. }
+            | TaskPut { .. }
+            | TaskRemove { .. }
             | PaneSplit { .. }
             | PaneClose { .. }
             | PaneSetRatio { .. }
@@ -667,6 +686,11 @@ pub struct ControlHello {
     pub client_hostname: String,
     #[serde(default)]
     pub gui: bool,
+    /// What this client can take that an older one could not — the client's
+    /// half of [`ControlHelloOk::features`]. A server predating the field
+    /// ignores it, and a client predating it is taken to read nothing new.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
 }
 
 impl ControlHello {
@@ -677,6 +701,7 @@ impl ControlHello {
             client_token: client_token.into(),
             client_hostname: client_hostname.into(),
             gui: false,
+            features: vec![feature::TASKS.to_string()],
         }
     }
 
@@ -1794,6 +1819,7 @@ mod tests {
             client_token: "tok".into(),
             client_hostname: "laptop".into(),
             gui: false,
+            features: Vec::new(),
         }
     }
 

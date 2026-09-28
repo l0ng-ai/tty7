@@ -189,7 +189,11 @@ pub mod mock {
                 build: "mock".into(),
                 separator: '\\',
                 home: "C:\\Users\\mock".into(),
-                features: vec![feature::CONTROL.into(), feature::MACHINE_TREE.into()],
+                features: vec![
+                    feature::CONTROL.into(),
+                    feature::MACHINE_TREE.into(),
+                    feature::TASKS.into(),
+                ],
                 instance: "mock-instance".into(),
             })
         }
