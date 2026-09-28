@@ -1888,13 +1888,19 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::WorktreePromptShell => "Shell",
         L10nKey::WorktreePromptTask => "Task",
         L10nKey::WorktreePromptSetup => "Runs .tty7/setup first",
-        L10nKey::WorktreePromptSetupHint => "No .tty7/setup. Add one to run `{command}` in new worktrees",
+        L10nKey::WorktreePromptSetupHint => {
+            "No .tty7/setup. Add one to run `{command}` in new worktrees"
+        }
         L10nKey::AppWorktreeSetupTitle => "Run this repo's setup script?",
-        L10nKey::AppWorktreeSetupDetail => "{path} runs in the new tab before anything else. Approve it only if you trust this repo; tty7 asks again whenever the script changes.",
+        L10nKey::AppWorktreeSetupDetail => {
+            "{path} runs in the new tab before anything else. Approve it only if you trust this repo; tty7 asks again whenever the script changes."
+        }
         L10nKey::AppWorktreeSetupRun => "Run Setup",
         L10nKey::AppWorktreeSetupSkip => "Skip",
         L10nKey::AppWorktreeNotCarried => "Not copied from .worktreeinclude: {paths}",
-        L10nKey::AppWorktreeRemovedBranchKept => "Removed worktree; kept branch \"{branch}\", which has unmerged commits",
+        L10nKey::AppWorktreeRemovedBranchKept => {
+            "Removed worktree; kept branch \"{branch}\", which has unmerged commits"
+        }
         L10nKey::AppForkStillConnecting => "Could not fork: the pane is still connecting",
         L10nKey::AppPaneNoCodingAgent => "This pane isn't running a coding agent",
         L10nKey::AppForkNoCommand => "tty7 has no fork command for {name}",

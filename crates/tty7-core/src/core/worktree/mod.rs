@@ -196,6 +196,55 @@ fn snapshot(host: &dyn Host, wt: &ManagedWorktree) -> Result<String, String> {
     Ok(refname)
 }
 
+/// One checkout of a repo, as `git worktree list` knows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    pub path: PathBuf,
+    /// `None` on a detached HEAD.
+    pub branch: Option<String>,
+    /// The repo's main checkout.
+    pub main: bool,
+    /// Made by tty7, under `.tty7/worktrees/`.
+    pub managed: bool,
+}
+
+/// Every checkout of the repo `cwd` is in, the main one first.
+pub fn list(host: &dyn Host, cwd: &Path) -> Result<Vec<Listed>, String> {
+    let (_, dir) = repo_dir(host, cwd)?;
+    let out = git(host, cwd, &["worktree", "list", "--porcelain"])?;
+    let mut found: Vec<Listed> = Vec::new();
+    for line in out.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            let path = git_path(host, path);
+            found.push(Listed {
+                managed: path.starts_with(&dir),
+                main: found.is_empty(),
+                path,
+                branch: None,
+            });
+        } else if let (Some(branch), Some(last)) = (line.strip_prefix("branch "), found.last_mut())
+        {
+            last.branch = Some(branch.trim_start_matches("refs/heads/").to_string());
+        }
+    }
+    Ok(found)
+}
+
+/// The tty7 worktree `target` names: a path, or a name under the repo's
+/// `.tty7/worktrees/`.
+pub fn find(host: &dyn Host, cwd: &Path, target: &str) -> Result<ManagedWorktree, String> {
+    let as_path = Path::new(target);
+    let path = if host.is_absolute(as_path) || target.contains(['/', '\\']) {
+        as_path.to_path_buf()
+    } else {
+        host.join(&repo_dir(host, cwd)?.1, target)
+    };
+    if !host.exists(&path) {
+        return Err(format!("no worktree at {}", path.display()));
+    }
+    managed(host, &path).ok_or_else(|| format!("{} is not a worktree tty7 made", path.display()))
+}
+
 /// Names removed worktrees left behind.
 fn retired(host: &dyn Host, repo_root: &Path) -> Vec<String> {
     git(
@@ -759,6 +808,37 @@ mod tests {
         assert!(git(&*h, &wt.path, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_err());
         let _ = std::fs::remove_dir_all(&upstream);
         let _ = std::fs::remove_dir_all(&clone);
+    }
+
+    #[test]
+    fn list_and_find_see_the_managed_checkouts() {
+        let h = h();
+        let repo = temp_repo("list");
+        let wt = create(&*h, &repo, &req("list-wt")).unwrap();
+        let listed = list(&*h, &wt.path).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed[0].main && !listed[0].managed);
+        assert!(!listed[1].main && listed[1].managed);
+        assert_eq!(listed[1].branch.as_deref(), Some("list-wt"));
+        assert_eq!(plain(&listed[1].path), plain(&wt.path));
+
+        assert_eq!(find(&*h, &repo, "list-wt").unwrap().branch, "list-wt");
+        assert_eq!(
+            find(&*h, &repo, wt.path.to_str().unwrap()).unwrap().branch,
+            "list-wt"
+        );
+        assert!(
+            find(&*h, &repo, "nope")
+                .unwrap_err()
+                .contains("no worktree")
+        );
+        let tmp = repo.to_str().unwrap();
+        assert!(
+            find(&*h, &repo, tmp)
+                .unwrap_err()
+                .contains("not a worktree tty7 made")
+        );
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]

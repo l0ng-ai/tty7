@@ -16,10 +16,13 @@
 //! path, so no allocator has to remember anything and a worktree recreated at
 //! the same place gets the same ports back.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use crate::core::cli_agent::CLIAgent;
+use crate::core::shell_quote::quote_for_shell;
 use crate::host::{Host, HostId, fnv1a64};
 
 pub const SCRIPT: &[&str] = &[".tty7", "setup"];
@@ -99,6 +102,43 @@ pub fn hint(host: &dyn Host, worktree: &Path) -> Option<&'static str> {
         .map(|(_, cmd)| *cmd)
 }
 
+/// The line a new worktree's first pane types: the setup script under its
+/// variables, then the agent — chained with `&&`, so a failed setup stops
+/// there, on screen, instead of under an agent that cannot build.
+pub fn launch_line(
+    setup: Option<(&Path, &[(&'static str, String)])>,
+    agent: Option<String>,
+) -> Option<String> {
+    let q = |s: &str| quote_for_shell(s, None);
+    let setup = setup.map(|(script, env)| {
+        let mut parts = vec!["env".to_string()];
+        parts.extend(env.iter().map(|(k, v)| format!("{k}={}", q(v))));
+        parts.push(q(&script.to_string_lossy()));
+        parts.join(" ")
+    });
+    match (setup, agent) {
+        (Some(setup), Some(agent)) => Some(format!("{setup} && {agent}")),
+        (setup, agent) => setup.or(agent),
+    }
+}
+
+/// `agent`'s launch line (`overrides` is `Config::agent_launch`), opening on
+/// `task` when the agent takes a first message.
+pub fn agent_line(agent: CLIAgent, task: &str, overrides: &HashMap<String, String>) -> String {
+    let mut line = agent.launch_command(overrides);
+    let task = task.trim();
+    if let Some(args) = (!task.is_empty())
+        .then(|| agent.prompt_args(task))
+        .flatten()
+    {
+        for arg in args {
+            line.push(' ');
+            line.push_str(&quote_for_shell(&arg, None));
+        }
+    }
+    line
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -114,6 +154,44 @@ mod tests {
         assert_eq!((a - PORT_FIRST) % PORT_BLOCK, 0);
         assert!(a >= PORT_FIRST && a + PORT_BLOCK <= PORT_FIRST + 10_000);
         assert_ne!(a, port_base(Path::new("/r/.tty7/worktrees/amber-heron")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_line_chains_setup_before_the_agent_and_quotes_values() {
+        let env = vec![
+            ("TTY7_ROOT_PATH", "/r/my repo".to_string()),
+            ("TTY7_PORT", "20010".to_string()),
+        ];
+        let script = Path::new("/r/my repo/.tty7/worktrees/w/.tty7/setup");
+        assert_eq!(
+            launch_line(Some((script, &env)), Some("claude 'fix it'".into())).unwrap(),
+            "env TTY7_ROOT_PATH='/r/my repo' TTY7_PORT=20010 \
+             '/r/my repo/.tty7/worktrees/w/.tty7/setup' && claude 'fix it'"
+        );
+        assert_eq!(launch_line(None, Some("codex".into())).unwrap(), "codex");
+        assert_eq!(launch_line(None, None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_line_passes_the_task_only_to_agents_that_take_one() {
+        let none = HashMap::new();
+        assert_eq!(
+            agent_line(CLIAgent::Claude, " it's done ", &none),
+            r"claude 'it'\''s done'"
+        );
+        assert_eq!(agent_line(CLIAgent::Gemini, "go", &none), "gemini -i go");
+        assert_eq!(agent_line(CLIAgent::Claude, "  ", &none), "claude");
+        assert_eq!(agent_line(CLIAgent::Aider, "go", &none), "aider");
+        let flags = HashMap::from([(
+            "claude".to_string(),
+            "claude --dangerously-skip-permissions".to_string(),
+        )]);
+        assert_eq!(
+            agent_line(CLIAgent::Claude, "go", &flags),
+            "claude --dangerously-skip-permissions go"
+        );
     }
 
     #[test]

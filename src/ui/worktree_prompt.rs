@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use gpui::{
     AnyElement, Context, Entity, PromptLevel, Subscription, Window, div, prelude::*, px, rems,
 };
@@ -8,7 +6,6 @@ use gpui_component::{ActiveTheme as _, WindowExt as _};
 
 use crate::core::cli_agent::CLIAgent;
 use crate::core::config::Config;
-use crate::core::shell_quote::quote_for_shell;
 use crate::core::worktree::{NewWorktree, WorktreeDefaults, WorktreeRequest, setup};
 use crate::ui::app::Tty7App;
 use crate::ui::dialog::{self, Tone};
@@ -46,41 +43,6 @@ struct Start {
 struct Created {
     wt: NewWorktree,
     setup: Option<(setup::Setup, Vec<(&'static str, String)>)>,
-}
-
-/// The line the first pane types: the setup script with its variables, then
-/// the agent — chained with `&&`, so a failed setup stops there, on screen.
-fn first_line(
-    setup: Option<(&Path, &[(&'static str, String)])>,
-    agent: Option<String>,
-) -> Option<String> {
-    let q = |s: &str| quote_for_shell(s, None);
-    let setup = setup.map(|(script, env)| {
-        let mut parts = vec!["env".to_string()];
-        parts.extend(env.iter().map(|(k, v)| format!("{k}={}", q(v))));
-        parts.push(q(&script.to_string_lossy()));
-        parts.join(" ")
-    });
-    match (setup, agent) {
-        (Some(setup), Some(agent)) => Some(format!("{setup} && {agent}")),
-        (setup, agent) => setup.or(agent),
-    }
-}
-
-/// `agent`'s launch line, opening on `task` when it takes a first message.
-fn agent_line(agent: CLIAgent, task: &str, cfg: &Config) -> String {
-    let mut line = agent.launch_command(&cfg.agent_launch);
-    let task = task.trim();
-    if let Some(args) = (!task.is_empty())
-        .then(|| agent.prompt_args(task))
-        .flatten()
-    {
-        for arg in args {
-            line.push(' ');
-            line.push_str(&quote_for_shell(&arg, None));
-        }
-    }
-    line
 }
 
 impl Tty7App {
@@ -248,14 +210,14 @@ impl Tty7App {
         }
         let agent = start
             .agent
-            .map(|a| agent_line(a, &start.task, cx.global::<Config>()));
+            .map(|a| setup::agent_line(a, &start.task, &cx.global::<Config>().agent_launch));
         let Some((script, env)) = setup else {
-            self.open_worktree_tab(wt, first_line(None, agent), window, cx);
+            self.open_worktree_tab(wt, setup::launch_line(None, agent), window, cx);
             return;
         };
         let key = setup::trust_key(host, &wt.main_root);
         if cx.global::<Config>().worktree_setup_trust.get(&key) == Some(&script.digest) {
-            let line = first_line(Some((&script.script, &env)), agent);
+            let line = setup::launch_line(Some((&script.script, &env)), agent);
             self.open_worktree_tab(wt, line, window, cx);
             return;
         }
@@ -281,7 +243,7 @@ impl Tty7App {
                     });
                 }
                 let setup = run.then_some((script.script.as_path(), env.as_slice()));
-                this.open_worktree_tab(wt, first_line(setup, agent), window, cx);
+                this.open_worktree_tab(wt, setup::launch_line(setup, agent), window, cx);
             });
         })
         .detach();
@@ -438,38 +400,5 @@ impl Tty7App {
                 .child(card)
                 .into_any_element(),
         )
-    }
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn first_line_chains_setup_before_the_agent_and_quotes_values() {
-        let env = vec![
-            ("TTY7_ROOT_PATH", "/r/my repo".to_string()),
-            ("TTY7_PORT", "20010".to_string()),
-        ];
-        let script = Path::new("/r/my repo/.tty7/worktrees/w/.tty7/setup");
-        assert_eq!(
-            first_line(Some((script, &env)), Some("claude 'fix it'".into())).unwrap(),
-            "env TTY7_ROOT_PATH='/r/my repo' TTY7_PORT=20010 \
-             '/r/my repo/.tty7/worktrees/w/.tty7/setup' && claude 'fix it'"
-        );
-        assert_eq!(first_line(None, Some("codex".into())).unwrap(), "codex");
-        assert_eq!(first_line(None, None), None);
-    }
-
-    #[test]
-    fn agent_line_passes_the_task_only_to_agents_that_take_one() {
-        let cfg = Config::default();
-        assert_eq!(
-            agent_line(CLIAgent::Claude, " it's done ", &cfg),
-            r"claude 'it'\''s done'"
-        );
-        assert_eq!(agent_line(CLIAgent::Gemini, "go", &cfg), "gemini -i go");
-        assert_eq!(agent_line(CLIAgent::Claude, "  ", &cfg), "claude");
-        assert_eq!(agent_line(CLIAgent::Aider, "go", &cfg), "aider");
     }
 }
