@@ -1904,7 +1904,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "config.json を読み込めませんでした。実行中の設定を保持し、ファイルもそのままです。権限か内容を直せば自動で再読み込みされます。それまでに設定を保存すると上書きされます"
         }
         L10nKey::AppWorktreeRemoveDetailDirty => {
-            "閉じたタブの {path} にあるワークツリーには未コミットの変更があります"
+            "閉じたタブの {path} にあるワークツリーには未コミットの変更があります。削除前に refs/tty7/trash/{name} へ保存します"
         }
         L10nKey::AppWorktreeRemoveDetailClean => {
             "閉じたタブの {path} にあるワークツリーはクリーンです"
@@ -1929,6 +1929,17 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaneDragHandleTooltip => "ドラッグしてこのペインを移動",
         L10nKey::AppWorktreeRemoved => "ワークツリー「{branch}」を削除しました",
         L10nKey::AppWorktreeRemoveFailed => "ワークツリーの削除に失敗しました: {error}",
+        L10nKey::WorktreePromptAgent => "起動",
+        L10nKey::WorktreePromptShell => "シェル",
+        L10nKey::WorktreePromptTask => "タスク",
+        L10nKey::WorktreePromptSetup => "最初に .tty7/setup を実行",
+        L10nKey::WorktreePromptSetupHint => ".tty7/setup がありません。追加すると新しいワークツリーで `{command}` を実行します",
+        L10nKey::AppWorktreeSetupTitle => "このリポジトリのセットアップスクリプトを実行しますか？",
+        L10nKey::AppWorktreeSetupDetail => "{path} は新しいタブで最初に実行されます。このリポジトリを信頼できる場合のみ許可してください。スクリプトが変わるたびに再確認します",
+        L10nKey::AppWorktreeSetupRun => "実行",
+        L10nKey::AppWorktreeSetupSkip => "スキップ",
+        L10nKey::AppWorktreeNotCarried => ".worktreeinclude から複製されませんでした: {paths}",
+        L10nKey::AppWorktreeRemovedBranchKept => "ワークツリーを削除しました。ブランチ「{branch}」には未マージのコミットがあるため残しました",
         L10nKey::AppForkStillConnecting => "フォークできませんでした: ペインはまだ接続中です",
         L10nKey::AppPaneNoCodingAgent => "このペインはコーディングエージェントを実行していません",
         L10nKey::AppForkNoCommand => "tty7 には {name} 用のフォークコマンドがありません",

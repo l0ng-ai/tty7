@@ -427,6 +427,10 @@ pub struct Config {
     /// "New Agent Tab" opens.
     #[serde(default)]
     pub agent_frecency: HashMap<String, ProfileUsage>,
+    /// Approved `.tty7/setup` scripts: repo (`worktree::setup::trust_key`) to
+    /// the sha256 of the content approved. A changed script asks again.
+    #[serde(default)]
+    pub worktree_setup_trust: HashMap<String, String>,
     /// Past agent sessions taken out of the search's Sessions tab, as
     /// `<agent slug>:<session id>`. Only the listing forgets them; the
     /// agent's own history is not touched.
@@ -814,6 +818,7 @@ impl Default for Config {
             agent_commands: HashMap::new(),
             agent_launch: HashMap::new(),
             agent_frecency: HashMap::new(),
+            worktree_setup_trust: HashMap::new(),
             hidden_agent_sessions: BTreeSet::new(),
             restore_agent_sessions: true,
             per_pane_history: false,

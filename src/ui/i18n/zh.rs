@@ -1730,7 +1730,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "config.json 读取失败。tty7 保留了当前在用的设置，文件也原样保留。修好权限或内容后会自动重载；在此之前保存设置会覆盖它。"
         }
         L10nKey::AppWorktreeRemoveDetailDirty => {
-            "位于 {path} 的已关闭标签页的 worktree 有未提交的变更。"
+            "位于 {path} 的已关闭标签页的 worktree 有未提交的变更。删除前会先存到 refs/tty7/trash/{name}。"
         }
         L10nKey::AppWorktreeRemoveDetailClean => "位于 {path} 的已关闭标签页的 worktree 是干净的。",
         L10nKey::AppWorktreeRemoveTitle => "删除 worktree“{branch}”？",
@@ -1751,6 +1751,17 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaneDragHandleTooltip => "拖动可把这个窗格挪到别处",
         L10nKey::AppWorktreeRemoved => "已删除 worktree“{branch}”",
         L10nKey::AppWorktreeRemoveFailed => "删除 worktree 失败：{error}",
+        L10nKey::WorktreePromptAgent => "启动",
+        L10nKey::WorktreePromptShell => "Shell",
+        L10nKey::WorktreePromptTask => "任务",
+        L10nKey::WorktreePromptSetup => "先运行 .tty7/setup",
+        L10nKey::WorktreePromptSetupHint => "没有 .tty7/setup。加一个，新 worktree 就会先运行 `{command}`",
+        L10nKey::AppWorktreeSetupTitle => "运行这个仓库的 setup 脚本？",
+        L10nKey::AppWorktreeSetupDetail => "{path} 会在新标签页里最先运行。只在信任这个仓库时批准；脚本内容一变，tty7 会再问一次。",
+        L10nKey::AppWorktreeSetupRun => "运行",
+        L10nKey::AppWorktreeSetupSkip => "跳过",
+        L10nKey::AppWorktreeNotCarried => "未按 .worktreeinclude 复制：{paths}",
+        L10nKey::AppWorktreeRemovedBranchKept => "已删除 worktree；分支“{branch}”有未合并的提交，已保留",
         L10nKey::AppForkStillConnecting => "无法 fork：窗格仍在连接中",
         L10nKey::AppPaneNoCodingAgent => "此窗格未运行编码 agent",
         L10nKey::AppForkNoCommand => "tty7 没有用于 {name} 的 fork 命令",

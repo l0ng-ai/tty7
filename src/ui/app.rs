@@ -5243,8 +5243,16 @@ impl Tty7App {
             move |_this, found, cx| {
                 let Some(wt) = found else { return };
                 let path = wt.path.display().to_string();
+                let name = wt
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 let detail = if wt.dirty {
-                    t_fmt(L10nKey::AppWorktreeRemoveDetailDirty, &[("path", &path)])
+                    t_fmt(
+                        L10nKey::AppWorktreeRemoveDetailDirty,
+                        &[("path", &path), ("name", &name)],
+                    )
                 } else {
                     t_fmt(L10nKey::AppWorktreeRemoveDetailClean, &[("path", &path)])
                 };
@@ -5283,8 +5291,15 @@ impl Tty7App {
                             cx,
                             move |h| crate::core::worktree::remove(h, &wt, force),
                             move |_this, result, window, cx| match result {
-                                Ok(()) => window.push_notification(
-                                    t_fmt(L10nKey::AppWorktreeRemoved, &[("branch", &branch)]),
+                                Ok(removed) => window.push_notification(
+                                    t_fmt(
+                                        if removed.branch_kept {
+                                            L10nKey::AppWorktreeRemovedBranchKept
+                                        } else {
+                                            L10nKey::AppWorktreeRemoved
+                                        },
+                                        &[("branch", &branch)],
+                                    ),
                                     cx,
                                 ),
                                 Err(e) => window.push_notification(
@@ -5633,9 +5648,12 @@ impl Tty7App {
         );
     }
 
+    /// Open `wt` in a new tab named after its branch, typing `first` — its
+    /// setup and agent — into the shell there.
     pub(crate) fn open_worktree_tab(
         &mut self,
         wt: crate::core::worktree::NewWorktree,
+        first: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -5662,6 +5680,9 @@ impl Tty7App {
                 return;
             }
         };
+        if let Some(first) = first {
+            crate::ui::agent_launch::run_when_ready(&view, first, cx);
+        }
         self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
