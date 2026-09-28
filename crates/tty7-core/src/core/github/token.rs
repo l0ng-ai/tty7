@@ -7,6 +7,11 @@
 //!    a CI-style setup behaves the same here as in the shell;
 //! 2. `gh auth token --hostname github.com`.
 //!
+//! When the answer came from `gh`, the CLI's *other* github.com accounts are
+//! on offer too ([`other_gh_accounts`]): a repository the active account
+//! cannot see is retried with them (`super::accounts`). A token from the
+//! environment is taken as a deliberate choice and gets no fallback.
+//!
 //! No token is not an error. Public repositories read fine without one, at
 //! GitHub's unauthenticated rate (60 requests an hour).
 //!
@@ -67,8 +72,8 @@ pub const GH_FALLBACKS: [&str; 3] = [
 pub struct TokenEnv<'a> {
     pub var: &'a dyn Fn(&str) -> Option<String>,
     pub is_file: &'a dyn Fn(&Path) -> bool,
-    /// Run `<gh> auth token …` and hand back its stdout on success.
-    pub gh_token: &'a dyn Fn(&Path) -> Option<String>,
+    /// Run `<gh> <args>` and hand back its stdout on success.
+    pub gh: &'a dyn Fn(&Path, &[&str]) -> Option<String>,
 }
 
 /// Resolve a token, or `None` to go unauthenticated.
@@ -78,17 +83,87 @@ pub fn resolve_token(env: &TokenEnv<'_>) -> Option<(Token, TokenSource)> {
             return Some((token, TokenSource::Env(var)));
         }
     }
-    // Only the first `gh` found is asked. A second install answering for a
-    // different account than the one on PATH would be a surprise, not a
-    // fallback.
-    let gh = gh_candidates((env.var)("PATH").as_deref())
+    let gh = find_gh(env)?;
+    gh_token(env, &gh, None).map(|t| (t, TokenSource::GhCli))
+}
+
+/// The `gh` to ask. Only the first one found: a second install answering for
+/// a different account than the one on PATH would be a surprise, not a
+/// fallback.
+pub fn find_gh(env: &TokenEnv<'_>) -> Option<PathBuf> {
+    gh_candidates((env.var)("PATH").as_deref())
         .into_iter()
-        .find(|p| (env.is_file)(p))?;
-    let out = (env.gh_token)(&gh)?;
+        .find(|p| (env.is_file)(p))
+}
+
+/// `gh auth token` for github.com — the active account's, or `user`'s.
+fn gh_token(env: &TokenEnv<'_>, gh: &Path, user: Option<&str>) -> Option<Token> {
+    let mut args = vec!["auth", "token", "--hostname", "github.com"];
+    if let Some(user) = user {
+        args.extend(["--user", user]);
+    }
+    let out = (env.gh)(gh, &args)?;
     // `gh auth token` prints the token and a newline; anything multi-line is
     // not a token.
-    let line = out.lines().next()?;
-    Token::new(line).map(|t| (t, TokenSource::GhCli))
+    Token::new(out.lines().next()?)
+}
+
+/// Every github.com account `gh` is signed in to besides the active one, by
+/// login, in the order `gh` lists them. Accounts whose sign-in `gh` itself
+/// reports as broken are left out.
+///
+/// Slow — `gh auth status` checks each account against GitHub — so it is
+/// only asked once the active account has come up short.
+pub fn other_gh_accounts(env: &TokenEnv<'_>) -> Vec<(String, Token)> {
+    let Some(gh) = find_gh(env) else {
+        return Vec::new();
+    };
+    let Some(status) = (env.gh)(
+        &gh,
+        &[
+            "auth",
+            "status",
+            "--hostname",
+            "github.com",
+            "--json",
+            "hosts",
+        ],
+    ) else {
+        return Vec::new();
+    };
+    inactive_logins(&status)
+        .into_iter()
+        .filter_map(|login| gh_token(env, &gh, Some(&login)).map(|t| (login, t)))
+        .collect()
+}
+
+/// The signed-in, inactive github.com logins in `gh auth status --json hosts`.
+fn inactive_logins(status: &str) -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct Status {
+        #[serde(default)]
+        hosts: std::collections::HashMap<String, Vec<Account>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Account {
+        #[serde(default)]
+        state: String,
+        #[serde(default)]
+        active: bool,
+        #[serde(default)]
+        login: String,
+    }
+    let Ok(status) = serde_json::from_str::<Status>(status) else {
+        return Vec::new();
+    };
+    status
+        .hosts
+        .get("github.com")
+        .into_iter()
+        .flatten()
+        .filter(|a| !a.active && a.state == "success" && !a.login.is_empty())
+        .map(|a| a.login.clone())
+        .collect()
 }
 
 /// Every place `gh` might be, `PATH` first, without duplicates.
@@ -116,25 +191,44 @@ pub fn gh_candidates(path_var: Option<&str>) -> Vec<PathBuf> {
 /// wait on that forever.
 const GH_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// `gh auth status` asks GitHub about every account, so it gets a network
+/// round trip's worth more.
+const GH_STATUS_TIMEOUT: Duration = Duration::from_secs(20);
+
+fn system_env<'a>() -> TokenEnv<'a> {
+    TokenEnv {
+        var: &|name| std::env::var(name).ok(),
+        is_file: &|p| p.is_file(),
+        gh: &run_gh,
+    }
+}
+
 /// [`resolve_token`] against the real process environment. Blocking: call it
 /// off the UI thread.
 pub fn resolve_token_from_system() -> Option<(Token, TokenSource)> {
-    resolve_token(&TokenEnv {
-        var: &|name| std::env::var(name).ok(),
-        is_file: &|p| p.is_file(),
-        gh_token: &run_gh_auth_token,
-    })
+    resolve_token(&system_env())
 }
 
-fn run_gh_auth_token(gh: &Path) -> Option<String> {
+/// [`other_gh_accounts`] against the real `gh`. Blocking: call it off the UI
+/// thread.
+pub fn other_gh_accounts_from_system() -> Vec<(String, Token)> {
+    other_gh_accounts(&system_env())
+}
+
+fn run_gh(gh: &Path, args: &[&str]) -> Option<String> {
     use crate::core::proc::{hide_console, output_within};
     let mut cmd = std::process::Command::new(gh);
-    cmd.args(["auth", "token", "--hostname", "github.com"])
+    cmd.args(args)
         .env("GH_PROMPT_DISABLED", "1")
         .env("GH_NO_UPDATE_NOTIFIER", "1");
+    let timeout = if args.get(1) == Some(&"status") {
+        GH_STATUS_TIMEOUT
+    } else {
+        GH_TIMEOUT
+    };
     // A GUI app spawning a console program on Windows flashes a console
     // window unless told not to.
-    let out = output_within(hide_console(&mut cmd), GH_TIMEOUT).ok()?;
+    let out = output_within(hide_console(&mut cmd), timeout).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -151,7 +245,10 @@ mod tests {
         vars: HashMap<&'static str, &'static str>,
         files: Vec<PathBuf>,
         gh_out: Option<&'static str>,
+        status_out: Option<&'static str>,
+        per_user: HashMap<&'static str, &'static str>,
         asked: RefCell<Vec<PathBuf>>,
+        args: RefCell<Vec<String>>,
     }
 
     impl Fake {
@@ -160,19 +257,31 @@ mod tests {
                 vars: HashMap::new(),
                 files: Vec::new(),
                 gh_out: None,
+                status_out: None,
+                per_user: HashMap::new(),
                 asked: RefCell::new(Vec::new()),
+                args: RefCell::new(Vec::new()),
             }
         }
 
-        fn resolve(&self) -> Option<(Token, TokenSource)> {
-            resolve_token(&TokenEnv {
+        fn with_env<T>(&self, f: impl FnOnce(&TokenEnv<'_>) -> T) -> T {
+            f(&TokenEnv {
                 var: &|name| self.vars.get(name).map(|v| v.to_string()),
                 is_file: &|p| self.files.iter().any(|f| f == p),
-                gh_token: &|p| {
+                gh: &|p, args| {
                     self.asked.borrow_mut().push(p.to_path_buf());
-                    self.gh_out.map(str::to_string)
+                    self.args.borrow_mut().push(args.join(" "));
+                    match args {
+                        ["auth", "status", ..] => self.status_out.map(str::to_string),
+                        [.., "--user", user] => self.per_user.get(user).map(|t| t.to_string()),
+                        _ => self.gh_out.map(str::to_string),
+                    }
                 },
             })
+        }
+
+        fn resolve(&self) -> Option<(Token, TokenSource)> {
+            self.with_env(resolve_token)
         }
     }
 
@@ -272,6 +381,62 @@ mod tests {
         assert!(c.iter().all(|p| p.file_name().unwrap() == exe));
         let unique: std::collections::HashSet<_> = c.iter().collect();
         assert_eq!(unique.len(), c.len());
+    }
+
+    const STATUS: &str = r#"{"hosts":{"github.com":[
+        {"state":"success","active":true,"host":"github.com","login":"me"},
+        {"state":"success","active":false,"host":"github.com","login":"work"},
+        {"state":"error","active":false,"host":"github.com","login":"expired"},
+        {"state":"success","active":false,"host":"github.com","login":"side"}
+      ],"ghe.example.com":[
+        {"state":"success","active":false,"host":"ghe.example.com","login":"elsewhere"}
+      ]}}"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn other_accounts_are_the_inactive_signed_in_github_com_ones() {
+        let mut f = Fake::new();
+        f.files.push(PathBuf::from("/usr/local/bin/gh"));
+        f.status_out = Some(STATUS);
+        f.per_user.insert("work", "gho_work\n");
+        f.per_user.insert("side", "gho_side\n");
+        let got: Vec<(String, String)> = f
+            .with_env(other_gh_accounts)
+            .into_iter()
+            .map(|(login, t)| (login, t.expose().to_string()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("work".to_string(), "gho_work".to_string()),
+                ("side".to_string(), "gho_side".to_string()),
+            ]
+        );
+        assert!(
+            f.args
+                .borrow()
+                .contains(&"auth token --hostname github.com --user work".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_account_gh_has_no_token_for_is_skipped() {
+        let mut f = Fake::new();
+        f.files.push(PathBuf::from("/usr/local/bin/gh"));
+        f.status_out = Some(STATUS);
+        f.per_user.insert("side", "gho_side\n");
+        let got = f.with_env(other_gh_accounts);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "side");
+    }
+
+    #[test]
+    fn no_gh_or_an_unreadable_status_is_no_other_accounts() {
+        let f = Fake::new();
+        assert!(f.with_env(other_gh_accounts).is_empty());
+        assert!(inactive_logins("gh: unknown flag --json").is_empty());
+        assert!(inactive_logins(r#"{"hosts":{}}"#).is_empty());
     }
 
     #[test]

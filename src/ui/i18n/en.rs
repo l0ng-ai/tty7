@@ -2075,7 +2075,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "GitHub did not find this repository. If it is private, sign in first."
         }
         L10nKey::GitHubNotFoundSignedIn => {
-            "GitHub did not find this repository, or this account cannot see it."
+            "GitHub did not find this repository, or none of your gh accounts can see it."
         }
         L10nKey::GitHubUnauthorized => "GitHub rejected the saved sign-in.",
         L10nKey::GitHubRateLimited => "GitHub's rate limit is used up.",

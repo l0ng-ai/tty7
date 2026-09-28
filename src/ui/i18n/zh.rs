@@ -1933,7 +1933,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubNoPulls => "没有匹配的拉取请求。",
         L10nKey::GitHubSignInHint => "在终端中运行 `gh auth login` 登录，然后刷新。",
         L10nKey::GitHubNotFoundSignedOut => "GitHub 找不到此仓库。如果它是私有仓库，请先登录。",
-        L10nKey::GitHubNotFoundSignedIn => "GitHub 找不到此仓库，或当前账户无权查看。",
+        L10nKey::GitHubNotFoundSignedIn => "GitHub 找不到此仓库，或 gh 登录的账户都无权查看。",
         L10nKey::GitHubUnauthorized => "GitHub 拒绝了已保存的登录凭据。",
         L10nKey::GitHubRateLimited => "GitHub 的请求额度已用完。",
         L10nKey::GitHubRateLimitResetIn => "{n} 分钟后重置。",

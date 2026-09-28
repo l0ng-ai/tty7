@@ -6,6 +6,7 @@
 //! behind the `github` feature, which only the GUI turns on — the headless
 //! server never talks to GitHub.
 
+pub mod accounts;
 pub mod api;
 #[cfg(feature = "github")]
 pub mod http;

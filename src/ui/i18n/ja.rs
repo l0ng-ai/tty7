@@ -2132,7 +2132,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "GitHub でこのリポジトリが見つかりません。非公開の場合は先にサインインしてください。"
         }
         L10nKey::GitHubNotFoundSignedIn => {
-            "GitHub でこのリポジトリが見つからないか、このアカウントでは閲覧できません。"
+            "GitHub でこのリポジトリが見つからないか、gh でサインイン中のどのアカウントでも閲覧できません。"
         }
         L10nKey::GitHubUnauthorized => "GitHub が保存済みのサインイン情報を拒否しました。",
         L10nKey::GitHubRateLimited => "GitHub のレート制限に達しました。",
