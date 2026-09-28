@@ -1638,6 +1638,47 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdDocumentDock => "文档：停靠在终端旁",
         L10nKey::CmdDocumentFill => "文档：铺满窗口",
         L10nKey::CmdToggleDocumentFill => "切换文档铺满 / 停靠",
+        L10nKey::CmdToggleBoard => "切换看板",
+        L10nKey::BoardTitle => "看板",
+        L10nKey::BoardNewTask => "新任务",
+        L10nKey::BoardEditTask => "编辑任务",
+        L10nKey::BoardColQueued => "排队",
+        L10nKey::BoardColRunning => "运行中",
+        L10nKey::BoardColNeedsInput => "等待输入",
+        L10nKey::BoardColReview => "待审阅",
+        L10nKey::BoardColDone => "完成",
+        L10nKey::BoardAllAgents => "全部 Agent",
+        L10nKey::BoardSummary => "{running} 运行中  ·  {input} 等你  ·  {review} 待审阅",
+        L10nKey::BoardEmpty => "看板上还没有东西",
+        L10nKey::BoardEmptyHint => {
+            "用「新任务」(N) 添加一个任务，或者在任意标签页里启动 Agent——它会自己出现在这里。"
+        }
+        L10nKey::BoardOpen => "打开",
+        L10nKey::BoardStart => "开始",
+        L10nKey::BoardResume => "恢复会话",
+        L10nKey::BoardResumable => "可恢复",
+        L10nKey::BoardMarkDone => "标记完成",
+        L10nKey::BoardReopen => "重新打开",
+        L10nKey::BoardEdit => "编辑",
+        L10nKey::BoardDelete => "删除",
+        L10nKey::BoardKeep => "保留为任务",
+        L10nKey::BoardFieldTitle => "标题",
+        L10nKey::BoardFieldPrompt => "提示词",
+        L10nKey::BoardFieldAgent => "使用的 Agent",
+        L10nKey::BoardTitlePlaceholder => "要 Agent 做什么？",
+        L10nKey::BoardPromptPlaceholder => "细节、上下文、怎么算完成……（可选，留空则发送标题）",
+        L10nKey::BoardSave => "保存",
+        L10nKey::BoardAddToQueue => "加入排队",
+        L10nKey::BoardStartNow => "开始",
+        L10nKey::BoardNeedsTitle => "任务需要一个标题",
+        L10nKey::BoardNoAgent => "没有找到 Agent",
+        L10nKey::BoardPromptCopied => {
+            "{agent} 不支持启动时带提示词，已复制到剪贴板——{agent} 启动后粘贴进去"
+        }
+        L10nKey::BoardUnavailable => {
+            "这台机器的 server 版本太旧，还不能保存任务——更新后即可使用看板"
+        }
+        L10nKey::BoardNow => "刚刚",
         L10nKey::CmdDocumentWidthThird => "文档：三分之一宽",
         L10nKey::CmdDocumentWidthHalf => "文档：一半宽",
         L10nKey::CmdDocumentWidthTwoThirds => "文档：三分之二宽",

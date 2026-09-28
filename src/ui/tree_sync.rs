@@ -16,6 +16,7 @@ use crate::core::session::{Session, SessionPane, SessionTab, WorkspaceId, Worksp
 use crate::ui::app::Tty7App;
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::pane::{Pane, PaneSlot};
+use tty7_core::core::task::{Task, TaskId};
 
 pub(crate) fn control_for(cx: &mut App, host: HostId) -> Option<Arc<ControlClient>> {
     if host.is_local() {
@@ -340,6 +341,7 @@ pub(crate) struct WsMirror {
     pub tabs: Vec<TreeTab>,
     pub active: Option<TabId>,
     pub groups: WorkspaceGroups,
+    pub tasks: Vec<Task>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1571,6 +1573,7 @@ fn primed(ws: Workspace, arrival: Arrival) -> (WsMirror, Option<String>, Arrival
             tabs: ws.tabs,
             active: ws.active_tab,
             groups: ws.groups,
+            tasks: ws.tasks,
         },
         ws.name,
         arrival,
@@ -1611,6 +1614,7 @@ fn finish_prime(
         }
     };
     adopt_groups(cx, client_ws);
+    adopt_tasks(cx, client_ws);
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
     crate::ui::machine_mirror::MachineMirrors::note_synced_workspace(
@@ -1709,6 +1713,104 @@ fn adopt_groups(cx: &mut App, client_ws: WorkspaceId) {
             return;
         };
         app.update(cx, |app, cx| app.adopt_sidebar_groups(groups, cx));
+    });
+}
+
+/// Whether the machine holding `client_ws` keeps a board. One that predates
+/// the board would refuse the request that saves a card — and, worse, one it
+/// cannot decode takes the whole link down — so a window never sends it one.
+pub(crate) fn can_board_on(cx: &App, client_ws: WorkspaceId) -> bool {
+    let feature = tty7_core::daemon::control::feature::TASKS;
+    let host = WorkspaceStore::host_of(cx, client_ws);
+    match host.is_local() {
+        true => crate::ui::local_link::LocalLink::supports(cx, feature),
+        false => crate::ui::remote_connect::HostLinks::peer_supports(cx, host, feature),
+    }
+}
+
+/// Sends a card a window just made or changed up to the machine — the whole
+/// card, which replaces whatever the machine had under its id.
+///
+/// Like groups, tasks are never part of the diff [`sync_window`] runs: a
+/// window has nothing to say about a card except the edit someone just made
+/// to it. Returns false when the window's tree has not landed yet (or the
+/// machine keeps no board), in which case nothing was sent and the caller
+/// should not show the edit as made.
+pub(crate) fn push_task(cx: &mut App, client_ws: WorkspaceId, task: Task) -> bool {
+    if !cx.has_global::<crate::core::session::WorkspaceStore>() || !can_board_on(cx, client_ws) {
+        return false;
+    }
+    let machine_ws = tree_workspace_id(cx, client_ws);
+    let state = cx
+        .default_global::<TreeSync>()
+        .windows
+        .entry(client_ws)
+        .or_default();
+    let SyncPhase::Primed(mirror) = &mut state.sync else {
+        return false;
+    };
+    match mirror.tasks.iter_mut().find(|t| t.id == task.id) {
+        Some(slot) if *slot == task => return true,
+        Some(slot) => *slot = task.clone(),
+        None => mirror.tasks.push(task.clone()),
+    }
+    state.queue.push_back(ControlRequest::TaskPut {
+        workspace: machine_ws,
+        task,
+    });
+    pump(cx, client_ws);
+    true
+}
+
+/// Takes a card off the machine's board. See [`push_task`].
+pub(crate) fn remove_task(cx: &mut App, client_ws: WorkspaceId, task: TaskId) -> bool {
+    if !cx.has_global::<crate::core::session::WorkspaceStore>() || !can_board_on(cx, client_ws) {
+        return false;
+    }
+    let machine_ws = tree_workspace_id(cx, client_ws);
+    let state = cx
+        .default_global::<TreeSync>()
+        .windows
+        .entry(client_ws)
+        .or_default();
+    let SyncPhase::Primed(mirror) = &mut state.sync else {
+        return false;
+    };
+    let before = mirror.tasks.len();
+    mirror.tasks.retain(|t| t.id != task);
+    if mirror.tasks.len() == before {
+        return true;
+    }
+    state.queue.push_back(ControlRequest::TaskRemove {
+        workspace: machine_ws,
+        task,
+    });
+    pump(cx, client_ws);
+    true
+}
+
+/// Hands the window the board a pull just brought in. Deferred for the same
+/// reason as [`adopt_groups`].
+fn adopt_tasks(cx: &mut App, client_ws: WorkspaceId) {
+    cx.defer(move |cx| {
+        let tasks = match cx
+            .default_global::<TreeSync>()
+            .windows
+            .get(&client_ws)
+            .map(|s| &s.sync)
+        {
+            Some(SyncPhase::Primed(mirror)) => mirror.tasks.clone(),
+            _ => return,
+        };
+        if !cx.has_global::<crate::ui::windows::WindowRegistry>() {
+            return;
+        }
+        let Some(app) =
+            crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|a| a.upgrade())
+        else {
+            return;
+        };
+        app.update(cx, |app, cx| app.adopt_board_tasks(tasks, cx));
     });
 }
 
@@ -2379,6 +2481,7 @@ fn layout_of(
         tabs: ws.tabs.clone(),
         active: ws.active_tab,
         groups: ws.groups.clone(),
+        tasks: ws.tasks.clone(),
     };
     let session = session_from_tree(ws, &machine.panes);
     Ok((machine, mirror, session))
@@ -2460,6 +2563,7 @@ fn settle_hydration(
         dirty
     };
     adopt_groups(cx, client_ws);
+    adopt_tasks(cx, client_ws);
     let Some(app) =
         crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|app| app.upgrade())
     else {
@@ -2741,6 +2845,17 @@ fn apply_to_mirror(mirror: &mut WsMirror, delta: &LayoutDelta) -> bool {
             mirror.groups = groups.clone();
             true
         }
+        LayoutDelta::TaskPut { task } => {
+            match mirror.tasks.iter_mut().find(|t| t.id == task.id) {
+                Some(slot) => *slot = task.clone(),
+                None => mirror.tasks.push(task.clone()),
+            }
+            true
+        }
+        LayoutDelta::TaskRemoved { task } => {
+            mirror.tasks.retain(|t| t.id != *task);
+            true
+        }
         LayoutDelta::TabMoved { tab, to } => {
             let Some(from) = mirror.tabs.iter().position(|t| t.id == *tab) else {
                 return false;
@@ -2913,6 +3028,14 @@ impl Tty7App {
             }
             LayoutDelta::GroupsChanged { groups } => {
                 self.adopt_sidebar_groups(groups.clone(), cx);
+                true
+            }
+            LayoutDelta::TaskPut { task } => {
+                self.board_task_put(task.clone());
+                true
+            }
+            LayoutDelta::TaskRemoved { task } => {
+                self.board_task_removed(*task);
                 true
             }
             LayoutDelta::TabMoved { tab, to } => {

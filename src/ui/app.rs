@@ -878,6 +878,9 @@ pub struct Tty7App {
     pub(crate) closed: Vec<SessionTab>,
     pub(crate) renaming: Option<Renaming>,
     pub(crate) worktree_prompt: Option<crate::ui::worktree_prompt::WorktreePrompt>,
+    /// What the main area shows: the terminal, or the board over it.
+    pub(crate) main_view: crate::ui::board::MainView,
+    pub(crate) board: crate::ui::board::Board,
     pub(crate) maximized: Option<Entity<TerminalView>>,
     pub(crate) mod_hint_badges: bool,
     pub(crate) mod_hint_gen: u64,
@@ -1516,6 +1519,8 @@ impl Tty7App {
             closed: Vec::new(),
             renaming: None,
             worktree_prompt: None,
+            main_view: crate::ui::board::MainView::Terminal,
+            board: crate::ui::board::Board::new(cx),
             maximized: None,
             mod_hint_badges: false,
             mod_hint_gen: 0,
@@ -3765,6 +3770,10 @@ impl Tty7App {
             window.focus(&settings.focus_handle, cx);
             return;
         }
+        if self.board_open() {
+            window.focus(&self.board.focus, cx);
+            return;
+        }
         let Some(tab) = self.tabs.get(self.active) else {
             window.focus(&self.home_focus, cx);
             return;
@@ -4056,6 +4065,9 @@ impl Tty7App {
         };
         // Something opened, so whatever the last failure was is stale.
         self.startup_error = None;
+        // A new tab is one to look at. The board's own Start puts the board
+        // back once the tab is open.
+        self.main_view = crate::ui::board::MainView::Terminal;
         self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
@@ -4908,6 +4920,12 @@ impl Tty7App {
     }
 
     pub(crate) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // Picking a tab is asking to see it, board or not.
+        if self.board_open() && index < self.tabs.len() {
+            self.main_view = crate::ui::board::MainView::Terminal;
+            self.focus_active(window, cx);
+            cx.notify();
+        }
         // A tab is woken by being looked at, the way a browser reloads a
         // discarded tab when it is selected: a tab on screen is always a
         // running one, so there is no third state to draw. A wake that fails
@@ -6365,6 +6383,7 @@ impl Tty7App {
             ShowSshForwards => self.show_ssh_forwards(window, cx),
             ToggleCodePanel => self.toggle_code_panel(window, cx),
             ToggleDocumentFill => self.toggle_document_fill(cx),
+            ToggleBoard => self.toggle_board(window, cx),
             DocumentWidthThird => {
                 self.set_document_ratio(crate::core::config::DOCUMENT_RATIO_THIRD, cx)
             }
@@ -8947,6 +8966,7 @@ impl Render for Tty7App {
             .when_some(self.render_remote_workspace_strip(cx), |this, el| {
                 this.child(el)
             })
+            .when_some(self.render_board(window, cx), |this, el| this.child(el))
             // Both of these used to anchor themselves at `bottom_4` and centre
             // themselves, as siblings here — so a remote workspace whose ssh
             // link had also dropped drew them one on top of the other. One
@@ -9379,6 +9399,9 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &ToggleDiffViewMode, _window, cx| {
                     this.toggle_diff_view_mode(cx)
                 }))
+                .on_action(
+                    cx.listener(|this, _: &ToggleBoard, window, cx| this.toggle_board(window, cx)),
+                )
                 .on_action(cx.listener(|this, _: &ToggleDocumentFill, _window, cx| {
                     this.toggle_document_fill(cx)
                 }))

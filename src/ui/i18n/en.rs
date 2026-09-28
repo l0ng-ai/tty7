@@ -1766,6 +1766,49 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdDocumentDock => "Document: Dock Beside Terminal",
         L10nKey::CmdDocumentFill => "Document: Fill Window",
         L10nKey::CmdToggleDocumentFill => "Toggle Document Fill / Dock",
+        L10nKey::CmdToggleBoard => "Toggle Board",
+        L10nKey::BoardTitle => "Board",
+        L10nKey::BoardNewTask => "New task",
+        L10nKey::BoardEditTask => "Edit task",
+        L10nKey::BoardColQueued => "Queued",
+        L10nKey::BoardColRunning => "Running",
+        L10nKey::BoardColNeedsInput => "Needs input",
+        L10nKey::BoardColReview => "Review",
+        L10nKey::BoardColDone => "Done",
+        L10nKey::BoardAllAgents => "All agents",
+        L10nKey::BoardSummary => "{running} running  ·  {input} need you  ·  {review} to review",
+        L10nKey::BoardEmpty => "Nothing on the board yet",
+        L10nKey::BoardEmptyHint => {
+            "Add a task with New task (N), or start an agent in any tab — it shows up here on its own."
+        }
+        L10nKey::BoardOpen => "Open",
+        L10nKey::BoardStart => "Start",
+        L10nKey::BoardResume => "Resume",
+        L10nKey::BoardResumable => "Resumable",
+        L10nKey::BoardMarkDone => "Mark done",
+        L10nKey::BoardReopen => "Reopen",
+        L10nKey::BoardEdit => "Edit",
+        L10nKey::BoardDelete => "Delete",
+        L10nKey::BoardKeep => "Keep as task",
+        L10nKey::BoardFieldTitle => "Title",
+        L10nKey::BoardFieldPrompt => "Prompt",
+        L10nKey::BoardFieldAgent => "Agent",
+        L10nKey::BoardTitlePlaceholder => "What should the agent do?",
+        L10nKey::BoardPromptPlaceholder => {
+            "Details, context, how to check it’s done… (optional — the title is sent if this is empty)"
+        }
+        L10nKey::BoardSave => "Save",
+        L10nKey::BoardAddToQueue => "Add to queue",
+        L10nKey::BoardStartNow => "Start",
+        L10nKey::BoardNeedsTitle => "A task needs a title",
+        L10nKey::BoardNoAgent => "No agent found",
+        L10nKey::BoardPromptCopied => {
+            "{agent} can’t be given a starting prompt, so it was copied — paste it in once {agent} is up"
+        }
+        L10nKey::BoardUnavailable => {
+            "This machine’s server can’t keep tasks yet — update it to use the board"
+        }
+        L10nKey::BoardNow => "now",
         L10nKey::CmdDocumentWidthThird => "Document: Third Width",
         L10nKey::CmdDocumentWidthHalf => "Document: Half Width",
         L10nKey::CmdDocumentWidthTwoThirds => "Document: Two-Thirds Width",

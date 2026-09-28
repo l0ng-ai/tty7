@@ -659,6 +659,7 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         // terminal back, so a default chord here would only be one more thing
         // competing for a two-key combination nobody asked for.
         ("ToggleDocumentFill", ""),
+        ("ToggleBoard", "secondary-alt-b"),
         ("DocumentWidthThird", ""),
         ("DocumentWidthHalf", ""),
         ("DocumentWidthTwoThirds", ""),
@@ -946,6 +947,7 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             CommandGroup::View,
             t(L10nKey::CmdToggleDocumentFill).to_string(),
         ),
+        "ToggleBoard" => (CommandGroup::View, t(L10nKey::CmdToggleBoard).to_string()),
         "DocumentWidthThird" => (
             CommandGroup::View,
             t(L10nKey::CmdDocumentWidthThird).to_string(),
@@ -1799,6 +1801,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ShowSshForwards" => KeyBinding::new(keystroke, ShowSshForwards, None),
         "ToggleCodePanel" => KeyBinding::new(keystroke, ToggleCodePanel, None),
         "ToggleDocumentFill" => KeyBinding::new(keystroke, ToggleDocumentFill, None),
+        "ToggleBoard" => KeyBinding::new(keystroke, ToggleBoard, None),
         "DocumentWidthThird" => KeyBinding::new(keystroke, DocumentWidthThird, None),
         "DocumentWidthHalf" => KeyBinding::new(keystroke, DocumentWidthHalf, None),
         "DocumentWidthTwoThirds" => KeyBinding::new(keystroke, DocumentWidthTwoThirds, None),

@@ -119,6 +119,7 @@ actions!(
         ShowSshForwards,
         ToggleCodePanel,
         ToggleDocumentFill,
+        ToggleBoard,
         DocumentWidthThird,
         DocumentWidthHalf,
         DocumentWidthTwoThirds,

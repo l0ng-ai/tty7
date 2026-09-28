@@ -72,7 +72,7 @@ const META_SEP: &str = " · ";
 const META_SEP_TRIMMED: &str = "·";
 
 /// Tabular numerals, so a column of diff counts lines up digit for digit.
-fn tabular() -> gpui::FontFeatures {
+pub(crate) fn tabular() -> gpui::FontFeatures {
     gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)]))
 }
 
@@ -1774,7 +1774,8 @@ impl Tty7App {
             .pt(px(4.))
             .pb(px(16.))
             .child(self.workspace_head(cx))
-            .child(search);
+            .child(search)
+            .child(self.render_board_nav(cx));
 
         let container: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
         // Read while there is still a `cx` to read it from: the drag handler

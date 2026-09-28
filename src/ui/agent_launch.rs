@@ -149,7 +149,7 @@ pub(crate) fn fork_line(
 
 /// Type `command` into the shell `slot` holds — now if it is up, or the
 /// moment it lands if it is still connecting.
-fn run_when_ready(slot: &PaneSlot, command: String, cx: &mut App) {
+pub(crate) fn run_when_ready(slot: &PaneSlot, command: String, cx: &mut App) {
     match slot {
         PaneSlot::Ready(view) => view.read(cx).run_command_line(&command),
         PaneSlot::Connecting(pending) => {

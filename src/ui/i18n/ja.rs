@@ -1811,6 +1811,49 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdDocumentDock => "ドキュメント: ターミナルの隣にドック",
         L10nKey::CmdDocumentFill => "ドキュメント: ウィンドウ全体",
         L10nKey::CmdToggleDocumentFill => "ドキュメントのフィル / ドックを切り替え",
+        L10nKey::CmdToggleBoard => "ボードの表示を切り替え",
+        L10nKey::BoardTitle => "ボード",
+        L10nKey::BoardNewTask => "新しいタスク",
+        L10nKey::BoardEditTask => "タスクを編集",
+        L10nKey::BoardColQueued => "待機",
+        L10nKey::BoardColRunning => "実行中",
+        L10nKey::BoardColNeedsInput => "入力待ち",
+        L10nKey::BoardColReview => "レビュー",
+        L10nKey::BoardColDone => "完了",
+        L10nKey::BoardAllAgents => "すべてのエージェント",
+        L10nKey::BoardSummary => "実行中 {running}  ·  入力待ち {input}  ·  レビュー待ち {review}",
+        L10nKey::BoardEmpty => "ボードはまだ空です",
+        L10nKey::BoardEmptyHint => {
+            "「新しいタスク」(N) でタスクを追加するか、どれかのタブでエージェントを起動してください。自動的にここに表示されます。"
+        }
+        L10nKey::BoardOpen => "開く",
+        L10nKey::BoardStart => "開始",
+        L10nKey::BoardResume => "再開",
+        L10nKey::BoardResumable => "再開可能",
+        L10nKey::BoardMarkDone => "完了にする",
+        L10nKey::BoardReopen => "再度開く",
+        L10nKey::BoardEdit => "編集",
+        L10nKey::BoardDelete => "削除",
+        L10nKey::BoardKeep => "タスクとして残す",
+        L10nKey::BoardFieldTitle => "タイトル",
+        L10nKey::BoardFieldPrompt => "プロンプト",
+        L10nKey::BoardFieldAgent => "エージェント",
+        L10nKey::BoardTitlePlaceholder => "エージェントに何をさせますか？",
+        L10nKey::BoardPromptPlaceholder => {
+            "詳細、背景、完了の確認方法など（任意 — 空ならタイトルを送ります）"
+        }
+        L10nKey::BoardSave => "保存",
+        L10nKey::BoardAddToQueue => "キューに追加",
+        L10nKey::BoardStartNow => "開始",
+        L10nKey::BoardNeedsTitle => "タスクにはタイトルが必要です",
+        L10nKey::BoardNoAgent => "エージェントが見つかりません",
+        L10nKey::BoardPromptCopied => {
+            "{agent} は起動時にプロンプトを受け取れないため、コピーしました。起動したら貼り付けてください"
+        }
+        L10nKey::BoardUnavailable => {
+            "このマシンのサーバーはまだタスクを保存できません。ボードを使うには更新してください"
+        }
+        L10nKey::BoardNow => "たった今",
         L10nKey::CmdDocumentWidthThird => "ドキュメント: 幅3分の1",
         L10nKey::CmdDocumentWidthHalf => "ドキュメント: 幅半分",
         L10nKey::CmdDocumentWidthTwoThirds => "ドキュメント: 幅3分の2",

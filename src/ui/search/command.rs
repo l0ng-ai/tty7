@@ -85,6 +85,7 @@ pub enum CommandKind {
     ShowSshForwards,
     ToggleCodePanel,
     ToggleDocumentFill,
+    ToggleBoard,
     DocumentWidthThird,
     DocumentWidthHalf,
     DocumentWidthTwoThirds,
@@ -265,6 +266,7 @@ impl CommandKind {
             ShowSshForwards => "ssh-port-forwarding",
             ToggleCodePanel => "code-panel",
             ToggleDocumentFill => "document-fill",
+            ToggleBoard => "board",
             DocumentWidthThird => "document-width-third",
             DocumentWidthHalf => "document-width-half",
             DocumentWidthTwoThirds => "document-width-two-thirds",
@@ -407,6 +409,7 @@ impl CommandKind {
             ShowSshForwards => "ShowSshForwards",
             ToggleCodePanel => "ToggleCodePanel",
             ToggleDocumentFill => "ToggleDocumentFill",
+            ToggleBoard => "ToggleBoard",
             DocumentWidthThird => "DocumentWidthThird",
             DocumentWidthHalf => "DocumentWidthHalf",
             DocumentWidthTwoThirds => "DocumentWidthTwoThirds",
@@ -690,6 +693,7 @@ impl Item {
                 ToggleRightPanel,
             ),
             Item::localized(L10nKey::CmdShowCodePanel, ToggleCodePanel),
+            Item::localized(L10nKey::CmdToggleBoard, ToggleBoard),
             Item::localized(L10nKey::CmdGoToFile, QuickOpenFile),
             Item::localized(
                 if document_filled {
