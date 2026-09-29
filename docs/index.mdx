@@ -143,12 +143,12 @@ export const P = ({ br = "main", caret, children }) => (
 
 export const O = ({ c = "", children }) => <div className={"t7w-out " + c}>{children}</div>;
 
-{/* Sidebar for a frame: the base groups plus whatever the chapter changed. */}
+{/* Sidebar for a frame: the base groups plus whatever the chapter changed. A split
+   stays in the same tab; the tab picks up the agent's status. */}
 export const sidebar = (ch, t) => {
   const g = GROUPS.map((x) => ({ ...x, items: x.items.map((it) => ({ ...it })) }));
   const find = (title) => g.flatMap((x) => x.items).find((it) => it.t === title);
   if (ch === 0) find("Refactor session auth").s = t < 3.1 ? "working" : "waiting";
-  // A split stays in the same tab; the tab picks up the agent's status.
   if (ch === 1 && t >= 3.2) find("~/code/orbit").s = t < 6.4 ? "working" : "done";
   if ((ch === 3 && t >= 4.1) || ch === 4) {
     find("~/code/orbit").on = false;
@@ -370,10 +370,15 @@ export const Frame = ({ ch, t }) => {
   );
 };
 
+{/* Mintlify documents useState and useEffect in MDX, so the mutable clock and the
+   element handle live in state rather than refs.
+
+   Keep JS comments out of every export body in this file, line and block comments alike: the
+   hosted Mintlify build fails to parse a page that has one, and shows only a
+   "parsing error" placeholder. mint dev and mint validate accept it, so the only
+   place it shows up is the live site. Comment at the top level, like this. */}
 export const Demo = () => {
   const [st, setSt] = useState({ ch: 0, t: 0 });
-  // Mintlify documents useState and useEffect in MDX, so the mutable clock
-  // and the element handle live in state rather than refs.
   const [c0] = useState(() => ({ ch: 0, start: 0, visible: true, last: 0, paused: 0 }));
   const [el, setEl] = useState(null);
   useEffect(() => {

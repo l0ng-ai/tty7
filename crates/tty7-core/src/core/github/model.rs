@@ -86,11 +86,178 @@ pub struct Comment {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PullInfo {
     pub head_ref: String,
+    /// The head commit — what the checks ran on. Empty if GitHub left it out.
+    pub head_sha: String,
     pub base_ref: String,
     pub additions: u32,
     pub deletions: u32,
     pub changed_files: u32,
     pub commits: u32,
+    pub merge_state: MergeState,
+}
+
+/// GitHub's `mergeable_state`: whether the pull request could be merged now,
+/// and if not, the broad reason. GitHub computes it lazily, so the first read
+/// of a freshly pushed pull request is often `Unknown`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MergeState {
+    /// Mergeable, everything required has passed.
+    Clean,
+    /// Mergeable, but a check that is not required is failing.
+    Unstable,
+    /// Branch protection says no: a required check or review is missing.
+    Blocked,
+    /// The base branch has moved on and protection requires being up to date.
+    Behind,
+    /// Merge conflicts.
+    Dirty,
+    Draft,
+    #[default]
+    Unknown,
+}
+
+impl MergeState {
+    fn parse(s: Option<&str>) -> MergeState {
+        match s {
+            // "has_hooks" is clean with a pre-receive hook in the way — for
+            // the panel's purposes, clean.
+            Some("clean") | Some("has_hooks") => MergeState::Clean,
+            Some("unstable") => MergeState::Unstable,
+            Some("blocked") => MergeState::Blocked,
+            Some("behind") => MergeState::Behind,
+            Some("dirty") => MergeState::Dirty,
+            Some("draft") => MergeState::Draft,
+            _ => MergeState::Unknown,
+        }
+    }
+}
+
+/// Where one CI check stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CheckState {
+    // Declared in the order the panel lists them: what needs attention first.
+    Failed,
+    Pending,
+    Passed,
+    /// Skipped, neutral, or stale — ran (or was never going to) without a
+    /// verdict either way. Not counted toward "N of M passed".
+    Skipped,
+}
+
+/// One CI check on a pull request's head commit: a check run (GitHub Actions
+/// and any other GitHub App) or a commit status (the older API some external
+/// CI still reports through). GitHub's own page lists both side by side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Check {
+    pub name: String,
+    pub state: CheckState,
+    /// Unix seconds, zero when unknown. A commit status has no start time.
+    pub started_at: i64,
+    pub completed_at: i64,
+    /// Its log or details page, when there is one.
+    pub url: Option<String>,
+}
+
+/// Every check on a head commit, the ones that need attention first.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Checks {
+    pub items: Vec<Check>,
+    /// More checks exist than were fetched.
+    pub truncated: bool,
+}
+
+impl Checks {
+    pub fn count(&self, state: CheckState) -> usize {
+        self.items.iter().filter(|c| c.state == state).count()
+    }
+
+    /// The checks with a verdict to give: everything but the skipped ones.
+    pub fn counted(&self) -> usize {
+        self.items.len() - self.count(CheckState::Skipped)
+    }
+
+    /// The whole set in one state, the way a list row or a badge shows it:
+    /// any failure fails it, else anything running keeps it pending.
+    pub fn rollup(&self) -> Option<CheckState> {
+        if self.items.is_empty() {
+            return None;
+        }
+        [CheckState::Failed, CheckState::Pending, CheckState::Passed]
+            .into_iter()
+            .find(|s| self.count(*s) > 0)
+            .or(Some(CheckState::Skipped))
+    }
+
+    fn sort(&mut self) {
+        // Stable: within a state, GitHub's own order (by run, then context).
+        self.items.sort_by_key(|c| c.state);
+    }
+}
+
+/// Where one reviewer stands on a pull request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ReviewState {
+    Approved,
+    ChangesRequested,
+    /// Left review comments without a verdict.
+    Commented,
+    /// Asked for a review that has not come in (or was asked again after one).
+    Requested,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reviewer {
+    /// A user's login, or `org/team` for a requested team.
+    pub login: String,
+    pub state: ReviewState,
+}
+
+/// Whether an open pull request can be merged, and if not, the one thing
+/// most worth saying about why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Readiness {
+    Ready,
+    Conflicts,
+    ChecksFailing(usize),
+    WaitingOnChecks(usize),
+    ChangesRequested,
+    ReviewRequired,
+    Behind,
+    Blocked,
+}
+
+/// Folds the merge state, the checks and the reviews into one line's worth,
+/// the way GitHub's merge box leads with its most pressing reason. `None` for
+/// anything but an open, non-draft pull request, and while GitHub has not
+/// worked the merge state out yet.
+pub fn readiness(
+    state: ItemState,
+    merge: MergeState,
+    checks: Option<&Checks>,
+    reviewers: Option<&[Reviewer]>,
+) -> Option<Readiness> {
+    if state != ItemState::Open {
+        return None;
+    }
+    let count = |s| checks.map_or(0, |c| c.count(s));
+    let has = |s| reviewers.is_some_and(|r| r.iter().any(|r| r.state == s));
+    Some(match merge {
+        MergeState::Unknown | MergeState::Draft => return None,
+        MergeState::Dirty => Readiness::Conflicts,
+        _ if count(CheckState::Failed) > 0 && merge != MergeState::Clean => {
+            Readiness::ChecksFailing(count(CheckState::Failed))
+        }
+        _ if count(CheckState::Pending) > 0 && merge != MergeState::Clean => {
+            Readiness::WaitingOnChecks(count(CheckState::Pending))
+        }
+        _ if has(ReviewState::ChangesRequested) && merge != MergeState::Clean => {
+            Readiness::ChangesRequested
+        }
+        MergeState::Behind => Readiness::Behind,
+        MergeState::Clean | MergeState::Unstable => Readiness::Ready,
+        MergeState::Blocked if !has(ReviewState::Approved) => Readiness::ReviewRequired,
+        MergeState::Blocked => Readiness::Blocked,
+    })
 }
 
 /// One file a pull request touches, from `/pulls/{n}/files`.
@@ -157,6 +324,12 @@ pub struct Detail {
     /// `Some` for a pull request.
     pub files: Option<Vec<PrFile>>,
     pub files_truncated: bool,
+    /// The head commit's CI. `None` for an issue, and for a pull request
+    /// whose checks could not be read — a detail does not fail over them.
+    pub checks: Option<Checks>,
+    /// Reviews in and reviews asked for, one entry per reviewer. `None` as
+    /// for `checks`.
+    pub reviewers: Option<Vec<Reviewer>>,
 }
 
 // ---- wire ------------------------------------------------------------------
@@ -219,6 +392,14 @@ pub(crate) struct RawIssue {
 pub(crate) struct RawBranchRef {
     #[serde(default, rename = "ref")]
     name: String,
+    #[serde(default)]
+    sha: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RawTeam {
+    #[serde(default)]
+    slug: String,
 }
 
 /// An entry of `/pulls`, or `/pulls/{n}`.
@@ -257,6 +438,13 @@ pub(crate) struct RawPull {
     changed_files: Option<u32>,
     #[serde(default)]
     commits: Option<u32>,
+    /// Only on `/pulls/{n}`.
+    #[serde(default)]
+    mergeable_state: Option<String>,
+    #[serde(default)]
+    pub(crate) requested_reviewers: Vec<RawUser>,
+    #[serde(default)]
+    pub(crate) requested_teams: Vec<RawTeam>,
 }
 
 #[derive(Deserialize)]
@@ -290,6 +478,60 @@ pub(crate) struct RawFile {
     deletions: u32,
     #[serde(default)]
     patch: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RawReview {
+    #[serde(default)]
+    user: Option<RawUser>,
+    #[serde(default)]
+    state: String,
+}
+
+/// `/commits/{sha}/check-runs`.
+#[derive(Deserialize)]
+pub(crate) struct RawCheckRuns {
+    #[serde(default)]
+    pub(crate) total_count: usize,
+    #[serde(default)]
+    pub(crate) check_runs: Vec<RawCheckRun>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RawCheckRun {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    conclusion: Option<String>,
+    #[serde(default)]
+    started_at: Option<String>,
+    #[serde(default)]
+    completed_at: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
+}
+
+/// `/commits/{sha}/status`: the latest status per context.
+#[derive(Deserialize)]
+pub(crate) struct RawCombinedStatus {
+    #[serde(default)]
+    pub(crate) total_count: usize,
+    #[serde(default)]
+    pub(crate) statuses: Vec<RawStatus>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RawStatus {
+    #[serde(default)]
+    context: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    target_url: Option<String>,
+    #[serde(default)]
+    updated_at: String,
 }
 
 fn login(user: Option<RawUser>) -> String {
@@ -355,13 +597,16 @@ impl RawPull {
             self.merged_at.is_some(),
             self.draft.unwrap_or(false),
         );
+        let (head_ref, head_sha) = self.head.map(|h| (h.name, h.sha)).unwrap_or_default();
         let info = PullInfo {
-            head_ref: self.head.map(|h| h.name).unwrap_or_default(),
+            head_ref,
+            head_sha,
             base_ref: self.base.map(|b| b.name).unwrap_or_default(),
             additions: self.additions.unwrap_or(0),
             deletions: self.deletions.unwrap_or(0),
             changed_files: self.changed_files.unwrap_or(0),
             commits: self.commits.unwrap_or(0),
+            merge_state: MergeState::parse(self.mergeable_state.as_deref()),
         };
         let item = Item {
             number: self.number,
@@ -376,6 +621,134 @@ impl RawPull {
             html_url: self.html_url,
         };
         (item, info)
+    }
+}
+
+impl RawCheckRun {
+    pub(crate) fn into_check(self) -> Check {
+        let state = match (self.status.as_str(), self.conclusion.as_deref()) {
+            ("completed", Some("success")) => CheckState::Passed,
+            ("completed", Some("skipped" | "neutral" | "stale")) => CheckState::Skipped,
+            // failure, cancelled, timed_out, action_required, startup_failure
+            ("completed", _) => CheckState::Failed,
+            // queued, in_progress, waiting, requested, pending
+            _ => CheckState::Pending,
+        };
+        Check {
+            name: self.name,
+            state,
+            started_at: self.started_at.as_deref().map_or(0, timestamp),
+            completed_at: self.completed_at.as_deref().map_or(0, timestamp),
+            url: self.html_url.filter(|u| !u.is_empty()),
+        }
+    }
+}
+
+impl RawStatus {
+    pub(crate) fn into_check(self) -> Check {
+        let state = match self.state.as_str() {
+            "success" => CheckState::Passed,
+            "pending" => CheckState::Pending,
+            // failure, error
+            _ => CheckState::Failed,
+        };
+        Check {
+            name: self.context,
+            state,
+            started_at: 0,
+            completed_at: if state == CheckState::Pending {
+                0
+            } else {
+                timestamp(&self.updated_at)
+            },
+            url: self.target_url.filter(|u| !u.is_empty()),
+        }
+    }
+}
+
+/// Check runs and commit statuses as one list, the ones needing attention
+/// first. `/check-runs` already keeps only each check's latest run, and
+/// `/status` each context's latest status.
+pub(crate) fn checks(runs: RawCheckRuns, statuses: RawCombinedStatus) -> Checks {
+    let truncated =
+        runs.total_count > runs.check_runs.len() || statuses.total_count > statuses.statuses.len();
+    let mut checks = Checks {
+        items: runs
+            .check_runs
+            .into_iter()
+            .map(RawCheckRun::into_check)
+            .chain(statuses.statuses.into_iter().map(RawStatus::into_check))
+            .collect(),
+        truncated,
+    };
+    checks.sort();
+    checks
+}
+
+/// Each reviewer's standing, from the reviews in (oldest first, as GitHub
+/// lists them) and the reviews still asked for.
+///
+/// A verdict sticks until the same reviewer gives another or it is dismissed;
+/// a later plain comment does not undo an approval, the way GitHub's own
+/// sidebar reads. Asking again puts a reviewer back to "requested" whatever
+/// they said before. The author's replies in their own review threads are
+/// reviews by GitHub's count, but not a reviewer.
+pub(crate) fn reviewers(
+    author: &str,
+    reviews: Vec<RawReview>,
+    requested_users: Vec<RawUser>,
+    requested_teams: Vec<String>,
+) -> Vec<Reviewer> {
+    let mut out: Vec<Reviewer> = Vec::new();
+    for review in reviews {
+        let login = login(review.user);
+        if login.is_empty() || login == author {
+            continue;
+        }
+        let verdict = match review.state.as_str() {
+            "APPROVED" => Some(ReviewState::Approved),
+            "CHANGES_REQUESTED" => Some(ReviewState::ChangesRequested),
+            "COMMENTED" | "DISMISSED" => None,
+            // PENDING: the viewer's own unsubmitted review.
+            _ => continue,
+        };
+        match out.iter_mut().find(|r| r.login == login) {
+            Some(r) => match verdict {
+                Some(v) => r.state = v,
+                None if review.state == "DISMISSED" => r.state = ReviewState::Commented,
+                None => {}
+            },
+            None => out.push(Reviewer {
+                login,
+                state: verdict.unwrap_or(ReviewState::Commented),
+            }),
+        }
+    }
+    let requested = requested_users
+        .into_iter()
+        .map(|u| u.login)
+        .chain(requested_teams)
+        .filter(|l| !l.is_empty());
+    for login in requested {
+        match out.iter_mut().find(|r| r.login == login) {
+            Some(r) => r.state = ReviewState::Requested,
+            None => out.push(Reviewer {
+                login,
+                state: ReviewState::Requested,
+            }),
+        }
+    }
+    out
+}
+
+impl RawPull {
+    /// The teams asked to review, as `org/team` when the org is known.
+    pub(crate) fn requested_team_names(&self, org: &str) -> Vec<String> {
+        self.requested_teams
+            .iter()
+            .filter(|t| !t.slug.is_empty())
+            .map(|t| format!("{org}/{}", t.slug))
+            .collect()
     }
 }
 
@@ -489,6 +862,196 @@ mod tests {
         assert_eq!(timestamp("1970-01-01T00:00:00Z"), 0);
         assert_eq!(timestamp("2024-02-29T12:00:00Z"), 1_709_208_000);
         assert_eq!(timestamp("garbage"), 0);
+    }
+
+    fn review(login: &str, state: &str) -> RawReview {
+        RawReview {
+            user: Some(RawUser {
+                login: login.into(),
+            }),
+            state: state.into(),
+        }
+    }
+
+    fn states(r: &[Reviewer]) -> Vec<(&str, ReviewState)> {
+        r.iter().map(|r| (r.login.as_str(), r.state)).collect()
+    }
+
+    #[test]
+    fn a_verdict_sticks_until_the_reviewer_gives_another() {
+        let got = reviewers(
+            "author",
+            vec![
+                review("mara", "CHANGES_REQUESTED"),
+                review("mara", "APPROVED"),
+                review("mara", "COMMENTED"),
+                review("jonas", "COMMENTED"),
+                review("kai", "APPROVED"),
+                review("kai", "DISMISSED"),
+                review("author", "COMMENTED"),
+                review("lee", "PENDING"),
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            states(&got),
+            vec![
+                ("mara", ReviewState::Approved),
+                ("jonas", ReviewState::Commented),
+                ("kai", ReviewState::Commented),
+            ]
+        );
+    }
+
+    #[test]
+    fn asking_again_puts_a_reviewer_back_to_requested() {
+        let got = reviewers(
+            "author",
+            vec![review("mara", "CHANGES_REQUESTED")],
+            vec![RawUser {
+                login: "mara".into(),
+            }],
+            vec!["acme/core".into()],
+        );
+        assert_eq!(
+            states(&got),
+            vec![
+                ("mara", ReviewState::Requested),
+                ("acme/core", ReviewState::Requested),
+            ]
+        );
+    }
+
+    fn run(status: &str, conclusion: Option<&str>) -> RawCheckRun {
+        RawCheckRun {
+            name: format!("{status}/{conclusion:?}"),
+            status: status.into(),
+            conclusion: conclusion.map(str::to_string),
+            started_at: None,
+            completed_at: None,
+            html_url: None,
+        }
+    }
+
+    #[test]
+    fn check_runs_fold_into_four_states() {
+        for (status, conclusion, want) in [
+            ("completed", Some("success"), CheckState::Passed),
+            ("completed", Some("failure"), CheckState::Failed),
+            ("completed", Some("cancelled"), CheckState::Failed),
+            ("completed", Some("timed_out"), CheckState::Failed),
+            ("completed", Some("action_required"), CheckState::Failed),
+            ("completed", Some("skipped"), CheckState::Skipped),
+            ("completed", Some("neutral"), CheckState::Skipped),
+            ("queued", None, CheckState::Pending),
+            ("in_progress", None, CheckState::Pending),
+            ("waiting", None, CheckState::Pending),
+        ] {
+            assert_eq!(
+                run(status, conclusion).into_check().state,
+                want,
+                "{status} {conclusion:?}"
+            );
+        }
+    }
+
+    fn checks_of(states: &[CheckState]) -> Checks {
+        Checks {
+            items: states
+                .iter()
+                .map(|s| Check {
+                    name: String::new(),
+                    state: *s,
+                    started_at: 0,
+                    completed_at: 0,
+                    url: None,
+                })
+                .collect(),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn a_rollup_is_failed_before_pending_before_passed() {
+        use CheckState::*;
+        assert_eq!(checks_of(&[]).rollup(), None);
+        assert_eq!(checks_of(&[Passed, Pending, Failed]).rollup(), Some(Failed));
+        assert_eq!(
+            checks_of(&[Passed, Pending, Skipped]).rollup(),
+            Some(Pending)
+        );
+        assert_eq!(checks_of(&[Passed, Skipped]).rollup(), Some(Passed));
+        assert_eq!(checks_of(&[Skipped]).rollup(), Some(Skipped));
+    }
+
+    #[test]
+    fn a_merge_box_leads_with_its_most_pressing_reason() {
+        use CheckState::*;
+        let approved = [Reviewer {
+            login: "mara".into(),
+            state: ReviewState::Approved,
+        }];
+        let changes = [Reviewer {
+            login: "mara".into(),
+            state: ReviewState::ChangesRequested,
+        }];
+        let r = |merge, checks: &[CheckState], reviews: &[Reviewer]| {
+            readiness(
+                ItemState::Open,
+                merge,
+                Some(&checks_of(checks)),
+                Some(reviews),
+            )
+        };
+        assert_eq!(
+            r(MergeState::Blocked, &[Passed, Pending], &approved),
+            Some(Readiness::WaitingOnChecks(1))
+        );
+        assert_eq!(
+            r(MergeState::Blocked, &[Failed, Failed, Pending], &approved),
+            Some(Readiness::ChecksFailing(2))
+        );
+        assert_eq!(
+            r(MergeState::Dirty, &[Failed], &approved),
+            Some(Readiness::Conflicts)
+        );
+        assert_eq!(
+            r(MergeState::Blocked, &[Passed], &changes),
+            Some(Readiness::ChangesRequested)
+        );
+        assert_eq!(
+            r(MergeState::Blocked, &[Passed], &[]),
+            Some(Readiness::ReviewRequired)
+        );
+        assert_eq!(
+            r(MergeState::Blocked, &[Passed], &approved),
+            Some(Readiness::Blocked)
+        );
+        assert_eq!(
+            r(MergeState::Behind, &[Passed], &approved),
+            Some(Readiness::Behind)
+        );
+        // Clean means everything required is in, whatever optional check is
+        // still running.
+        assert_eq!(
+            r(MergeState::Clean, &[Pending], &[]),
+            Some(Readiness::Ready)
+        );
+        assert_eq!(
+            r(MergeState::Unstable, &[Failed], &[]),
+            Some(Readiness::ChecksFailing(1))
+        );
+        assert_eq!(r(MergeState::Unknown, &[Passed], &approved), None);
+        assert_eq!(
+            readiness(ItemState::Draft, MergeState::Clean, None, None),
+            None,
+            "a draft is not up for merging"
+        );
+        assert_eq!(
+            readiness(ItemState::Merged, MergeState::Clean, None, None),
+            None
+        );
     }
 
     fn file(patch: Option<&str>, additions: u32, deletions: u32) -> PrFile {

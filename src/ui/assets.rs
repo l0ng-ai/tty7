@@ -118,6 +118,19 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/github/pr-closed.svg" => include_bytes!("../../assets/icons/github/pr-closed.svg"),
         "icons/github/pr-merged.svg" => include_bytes!("../../assets/icons/github/pr-merged.svg"),
         "icons/github/pr-draft.svg" => include_bytes!("../../assets/icons/github/pr-draft.svg"),
+        // …and its checks': passed, failed, running, skipped.
+        "icons/github/check-passed.svg" => {
+            include_bytes!("../../assets/icons/github/check-passed.svg")
+        }
+        "icons/github/check-failed.svg" => {
+            include_bytes!("../../assets/icons/github/check-failed.svg")
+        }
+        "icons/github/check-pending.svg" => {
+            include_bytes!("../../assets/icons/github/check-pending.svg")
+        }
+        "icons/github/check-skipped.svg" => {
+            include_bytes!("../../assets/icons/github/check-skipped.svg")
+        }
         _ => return None,
     };
     Some(bytes)

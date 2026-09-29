@@ -22,6 +22,7 @@ pub mod host_registry;
 pub mod i18n;
 pub mod keymap;
 pub mod local_link;
+pub mod lsp;
 pub mod machine_mirror;
 pub mod notice;
 pub mod pane;

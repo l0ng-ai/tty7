@@ -8,7 +8,8 @@
 use serde::de::DeserializeOwned;
 
 use super::model::{
-    Comment, Detail, Item, Kind, PrFile, RawComment, RawFile, RawIssue, RawPull, StateFilter,
+    Checks, Comment, Detail, Item, ItemState, Kind, PrFile, RawCheckRuns, RawCombinedStatus,
+    RawComment, RawFile, RawIssue, RawPull, RawReview, StateFilter,
 };
 use super::remote::RepoSlug;
 
@@ -267,12 +268,32 @@ pub fn detail(t: &dyn Transport, slug: &RepoSlug, number: u64) -> Result<Detail,
     let comments_truncated = reply.has_next;
 
     let (mut pull, mut files, mut files_truncated) = (None, None, false);
+    let (mut checks_out, mut reviewers_out) = (None, None);
     if is_pr {
-        let (pr_item, info) =
-            decode::<RawPull>(&t.get(&format!("{base}/pulls/{number}"))?)?.into_item();
+        let mut raw: RawPull = decode(&t.get(&format!("{base}/pulls/{number}"))?)?;
+        let teams = raw.requested_team_names(&slug.owner);
+        let requested = std::mem::take(&mut raw.requested_reviewers);
+        let (pr_item, info) = raw.into_item();
         // `/pulls/{n}` is the one that knows about drafts; the issue's
         // labels and comment count are kept, which `/pulls` omits.
         item.state = pr_item.state;
+        // Checks and reviews are the panel's summary, not the pull request
+        // itself: one that cannot be read is left out rather than failing
+        // the whole view (an old commit's checks can be gone, a token can be
+        // scoped away from them).
+        if !info.head_sha.is_empty() {
+            checks_out = checks(t, slug, &info.head_sha)
+                .inspect_err(|e| log::warn!("github: checks of {}#{number}: {e}", slug.full()))
+                .ok();
+        }
+        reviewers_out = t
+            .get(&format!(
+                "{base}/pulls/{number}/reviews?per_page={DETAIL_PAGE}"
+            ))
+            .and_then(|r| decode::<Vec<RawReview>>(&r))
+            .inspect_err(|e| log::warn!("github: reviews of {}#{number}: {e}", slug.full()))
+            .ok()
+            .map(|reviews| super::model::reviewers(&item.author, reviews, requested, teams));
         pull = Some(info);
         let reply = t.get(&format!(
             "{base}/pulls/{number}/files?per_page={DETAIL_PAGE}"
@@ -294,6 +315,50 @@ pub fn detail(t: &dyn Transport, slug: &RepoSlug, number: u64) -> Result<Detail,
         pull,
         files,
         files_truncated,
+        checks: checks_out,
+        reviewers: reviewers_out,
+    })
+}
+
+/// Every check on commit `sha`: its check runs and its commit statuses.
+/// This is also what a pending pull request is polled with, so it stays two
+/// requests however the detail around it grows.
+pub fn checks(t: &dyn Transport, slug: &RepoSlug, sha: &str) -> Result<Checks, ApiError> {
+    let base = repo_path(slug);
+    let sha = super::remote::escape_path(sha);
+    let runs: RawCheckRuns = decode(&t.get(&format!(
+        "{base}/commits/{sha}/check-runs?per_page={DETAIL_PAGE}"
+    ))?)?;
+    let statuses: RawCombinedStatus = decode(&t.get(&format!(
+        "{base}/commits/{sha}/status?per_page={DETAIL_PAGE}"
+    ))?)?;
+    Ok(super::model::checks(runs, statuses))
+}
+
+/// The pull request branch `branch` of `head_owner`'s fork (or of the
+/// repository itself) opened against `slug`: the open one if there is one,
+/// else the most recently updated. `None` when the branch has none.
+pub fn pull_for_branch(
+    t: &dyn Transport,
+    slug: &RepoSlug,
+    head_owner: &str,
+    branch: &str,
+) -> Result<Option<Item>, ApiError> {
+    let head = escape_query(&format!("{head_owner}:{branch}"));
+    let path = format!(
+        "{}/pulls?state=all&head={head}&sort=updated&direction=desc&per_page=10",
+        repo_path(slug)
+    );
+    let items: Vec<Item> = decode::<Vec<RawPull>>(&t.get(&path)?)?
+        .into_iter()
+        .map(|p| p.into_item().0)
+        .collect();
+    let open = items
+        .iter()
+        .position(|i| matches!(i.state, ItemState::Open | ItemState::Draft));
+    Ok(match open {
+        Some(i) => items.into_iter().nth(i),
+        None => items.into_iter().next(),
     })
 }
 
@@ -301,7 +366,7 @@ pub fn detail(t: &dyn Transport, slug: &RepoSlug, number: u64) -> Result<Detail,
 pub(crate) mod tests {
     use super::*;
     use crate::core::git::diff::FileStatus;
-    use crate::core::github::model::ItemState;
+    use crate::core::github::model::{CheckState, ItemState, MergeState, ReviewState};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -528,6 +593,166 @@ pub(crate) mod tests {
         assert_eq!(files[1].old_path.as_deref(), Some("logo.png"));
         assert!(files[1].patch.is_none());
         assert!(d.files_truncated);
+    }
+
+    /// A pull request's issue, comments and `/pulls/{n}` — the three answers
+    /// every pull request detail starts from.
+    fn pull_fixture(t: &mut Fixture, pull: &str) {
+        t.on(
+            "/repos/l0ng-ai/tty7/issues/31",
+            r#"{"number": 31, "title": "Handle empty summaries", "state": "open",
+                "user": {"login": "ada"}, "pull_request": {"merged_at": null}}"#,
+            false,
+        );
+        t.on(
+            "/repos/l0ng-ai/tty7/issues/31/comments?per_page=100",
+            "[]",
+            false,
+        );
+        t.on("/repos/l0ng-ai/tty7/pulls/31", pull, false);
+        t.on(
+            "/repos/l0ng-ai/tty7/pulls/31/files?per_page=100",
+            "[]",
+            false,
+        );
+    }
+
+    const PULL_31: &str = r#"{"number": 31, "title": "Handle empty summaries", "state": "open",
+        "draft": false, "merged_at": null, "user": {"login": "ada"},
+        "head": {"ref": "fix/summary", "sha": "abc123"}, "base": {"ref": "main"},
+        "mergeable_state": "blocked",
+        "requested_reviewers": [{"login": "jonas"}], "requested_teams": [{"slug": "core"}]}"#;
+
+    #[test]
+    fn a_pull_request_detail_reads_its_checks_and_reviews() {
+        let mut t = Fixture::new();
+        pull_fixture(&mut t, PULL_31);
+        t.on(
+            "/repos/l0ng-ai/tty7/commits/abc123/check-runs?per_page=100",
+            r#"{"total_count": 3, "check_runs": [
+                {"name": "lint", "status": "completed", "conclusion": "success",
+                 "started_at": "2026-09-01T10:00:00Z", "completed_at": "2026-09-01T10:00:18Z",
+                 "html_url": "https://github.com/l0ng-ai/tty7/actions/runs/1"},
+                {"name": "test", "status": "in_progress", "conclusion": null,
+                 "started_at": "2026-09-01T10:00:00Z"},
+                {"name": "docs", "status": "completed", "conclusion": "skipped"}]}"#,
+            false,
+        );
+        t.on(
+            "/repos/l0ng-ai/tty7/commits/abc123/status?per_page=100",
+            r#"{"total_count": 1, "statuses": [
+                {"context": "ci/deploy", "state": "failure",
+                 "target_url": "https://ci.example.com/9", "updated_at": "2026-09-01T10:05:00Z"}]}"#,
+            false,
+        );
+        t.on(
+            "/repos/l0ng-ai/tty7/pulls/31/reviews?per_page=100",
+            r#"[{"user": {"login": "mara"}, "state": "APPROVED"},
+                {"user": {"login": "ada"}, "state": "COMMENTED"}]"#,
+            false,
+        );
+        let d = detail(&t, &slug(), 31).unwrap();
+        let pull = d.pull.as_ref().unwrap();
+        assert_eq!(pull.head_sha, "abc123");
+        assert_eq!(pull.merge_state, MergeState::Blocked);
+
+        let checks = d.checks.as_ref().unwrap();
+        let names: Vec<&str> = checks.items.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["ci/deploy", "test", "lint", "docs"],
+            "failures first"
+        );
+        assert_eq!(
+            checks.items[2].completed_at - checks.items[2].started_at,
+            18
+        );
+        assert_eq!(checks.counted(), 3, "a skipped check has no verdict");
+        assert_eq!(checks.rollup(), Some(CheckState::Failed));
+        assert!(!checks.truncated);
+
+        let reviewers = d.reviewers.as_ref().unwrap();
+        assert_eq!(
+            reviewers
+                .iter()
+                .map(|r| (r.login.as_str(), r.state))
+                .collect::<Vec<_>>(),
+            vec![
+                ("mara", ReviewState::Approved),
+                ("jonas", ReviewState::Requested),
+                ("l0ng-ai/core", ReviewState::Requested),
+            ],
+            "the author's own reply is not a review"
+        );
+    }
+
+    #[test]
+    fn checks_and_reviews_that_cannot_be_read_leave_the_detail_standing() {
+        let mut t = Fixture::new();
+        pull_fixture(&mut t, PULL_31);
+        // Nothing answers for check runs, statuses or reviews.
+        let d = detail(&t, &slug(), 31).unwrap();
+        assert!(d.pull.is_some());
+        assert!(d.checks.is_none());
+        assert!(d.reviewers.is_none());
+    }
+
+    #[test]
+    fn a_pull_request_without_a_head_sha_asks_for_no_checks() {
+        let mut t = Fixture::new();
+        pull_fixture(
+            &mut t,
+            r#"{"number": 31, "title": "x", "state": "open", "head": {"ref": "gone"}}"#,
+        );
+        let d = detail(&t, &slug(), 31).unwrap();
+        assert!(d.checks.is_none());
+        assert!(
+            !t.asked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.contains("/commits/")),
+            "no commit to ask about"
+        );
+    }
+
+    #[test]
+    fn a_branchs_pull_request_prefers_the_open_one() {
+        let mut t = Fixture::new();
+        t.on(
+            "/repos/l0ng-ai/tty7/pulls?state=all&head=bob%3Afeat%2Fpanel&sort=updated&direction=desc&per_page=10",
+            r#"[{"number": 20, "title": "Second try", "state": "closed", "merged_at": null},
+                {"number": 13, "title": "Add panel", "state": "open", "draft": true}]"#,
+            false,
+        );
+        let got = pull_for_branch(&t, &slug(), "bob", "feat/panel")
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.number, 13);
+        assert_eq!(got.state, ItemState::Draft);
+
+        let mut t = Fixture::new();
+        t.on(
+            "/repos/l0ng-ai/tty7/pulls?state=all&head=bob%3Aold&sort=updated&direction=desc&per_page=10",
+            r#"[{"number": 20, "title": "Merged", "state": "closed", "merged_at": "2026-09-01T10:00:00Z"}]"#,
+            false,
+        );
+        assert_eq!(
+            pull_for_branch(&t, &slug(), "bob", "old")
+                .unwrap()
+                .unwrap()
+                .number,
+            20,
+            "no open one: the latest"
+        );
+
+        let mut t = Fixture::new();
+        t.on(
+            "/repos/l0ng-ai/tty7/pulls?state=all&head=bob%3Anone&sort=updated&direction=desc&per_page=10",
+            "[]",
+            false,
+        );
+        assert_eq!(pull_for_branch(&t, &slug(), "bob", "none"), Ok(None));
     }
 
     #[test]

@@ -1,10 +1,15 @@
-use gpui::{AnyElement, Context, Entity, Subscription, Window, div, prelude::*, px, rems};
+use gpui::{
+    AnyElement, Context, Div, Entity, PromptLevel, Subscription, Window, div, prelude::*, px, rems,
+};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, WindowExt as _};
 
-use crate::core::worktree::{WorktreeDefaults, WorktreeRequest};
+use crate::core::cli_agent::CLIAgent;
+use crate::core::config::Config;
+use crate::core::worktree::{NewWorktree, WorktreeDefaults, WorktreeRequest, setup};
 use crate::ui::app::Tty7App;
 use crate::ui::dialog::{self, Tone};
+use crate::ui::host_ops::HostId;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::right_panel::META_MONO;
 
@@ -15,8 +20,28 @@ pub(crate) struct WorktreePrompt {
     name: Entity<InputState>,
     branch: Entity<InputState>,
     base: Entity<InputState>,
+    task: Entity<InputState>,
+    agents: Vec<CLIAgent>,
+    /// Which of `agents` the first pane starts; `None` is a plain shell.
+    agent: Option<usize>,
+    /// The Start dropdown is open.
+    agent_menu: bool,
+    has_setup: bool,
+    setup_hint: Option<&'static str>,
     busy: bool,
     _subs: Vec<Subscription>,
+}
+
+/// What the new worktree's first pane was asked to start.
+struct Start {
+    agent: Option<CLIAgent>,
+    task: String,
+}
+
+/// A created worktree, and the setup script its checkout carries.
+struct Created {
+    wt: NewWorktree,
+    setup: Option<(setup::Setup, Vec<(&'static str, String)>)>,
 }
 
 impl Tty7App {
@@ -36,8 +61,9 @@ impl Tty7App {
         let name = prefill(defaults.name.clone(), window, cx);
         let branch = prefill(defaults.name, window, cx);
         let base = prefill(defaults.base, window, cx);
+        let task = cx.new(|cx| InputState::new(window, cx));
         name.update(cx, |state, cx| state.focus(window, cx));
-        let subs = [&name, &branch, &base]
+        let subs = [&name, &branch, &base, &task]
             .into_iter()
             .map(|input| {
                 cx.subscribe_in(
@@ -51,6 +77,12 @@ impl Tty7App {
                 )
             })
             .collect();
+        let agents = self.offered_agents(cx);
+        // A worktree is usually for a task, so it opens on the agent last
+        // used; Shell is one pick away.
+        let agent =
+            crate::ui::agent_launch::most_recent(&agents, &cx.global::<Config>().agent_frecency)
+                .and_then(|a| agents.iter().position(|x| *x == a));
         self.worktree_prompt = Some(WorktreePrompt {
             host,
             cwd,
@@ -58,6 +90,12 @@ impl Tty7App {
             name,
             branch,
             base,
+            task,
+            agents,
+            agent,
+            agent_menu: false,
+            has_setup: defaults.has_setup,
+            setup_hint: defaults.setup_hint,
             busy: false,
             _subs: subs,
         });
@@ -99,20 +137,34 @@ impl Tty7App {
                 base
             },
         };
+        let start = Start {
+            agent: p.agent.map(|i| p.agents[i]),
+            task: p.task.read(cx).value().to_string(),
+        };
         let p = self.worktree_prompt.as_mut().expect("checked above");
         p.busy = true;
         let cwd = p.cwd.clone();
         let host = p.host.clone();
+        let host_id = host.id();
         cx.notify();
         crate::ui::host_ops::HostOps::run_in(
             host,
             window,
             cx,
-            move |h| crate::core::worktree::create(h, &cwd, &req),
+            move |h| {
+                let wt = crate::core::worktree::create(h, &cwd, &req)?;
+                // The script is a POSIX executable run through `env`; a
+                // Windows host has neither.
+                let setup = (h.separator() == '/')
+                    .then(|| setup::find(h, &wt.path))
+                    .flatten()
+                    .zip(setup::env(h, &wt.main_root, &wt.path));
+                Ok::<_, String>(Created { wt, setup })
+            },
             move |this, result, window, cx| match result {
-                Ok(wt) => {
+                Ok(created) => {
                     this.worktree_prompt = None;
-                    this.open_worktree_tab(wt, window, cx);
+                    this.start_worktree(host_id, created, start, window, cx);
                 }
                 Err(e) => {
                     if let Some(p) = this.worktree_prompt.as_mut() {
@@ -129,6 +181,132 @@ impl Tty7App {
                 }
             },
         );
+    }
+
+    /// Open the worktree's tab, running its setup first — once the script's
+    /// content has been approved for this repo.
+    fn start_worktree(
+        &mut self,
+        host: HostId,
+        created: Created,
+        start: Start,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Created { wt, setup } = created;
+        if !wt.carried.skipped.is_empty() {
+            let paths = wt
+                .carried
+                .skipped
+                .iter()
+                .map(|(p, why)| format!("{p} ({why})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            window.push_notification(
+                t_fmt(L10nKey::AppWorktreeNotCarried, &[("paths", &paths)]),
+                cx,
+            );
+        }
+        let agent = start
+            .agent
+            .map(|a| setup::agent_line(a, &start.task, &cx.global::<Config>().agent_launch));
+        let Some((script, env)) = setup else {
+            let line = setup::launch_line(&wt.path, None, agent);
+            self.open_worktree_tab(wt, line, window, cx);
+            return;
+        };
+        let key = setup::trust_key(host, &wt.main_root);
+        if cx.global::<Config>().worktree_setup_trust.get(&key) == Some(&script.digest) {
+            let line = setup::launch_line(&wt.path, Some((&script.script, &env)), agent);
+            self.open_worktree_tab(wt, line, window, cx);
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            t(L10nKey::AppWorktreeSetupTitle),
+            Some(&t_fmt(
+                L10nKey::AppWorktreeSetupDetail,
+                &[("path", &script.script.display().to_string())],
+            )),
+            &crate::ui::confirm_answers(
+                t(L10nKey::AppWorktreeSetupRun),
+                t(L10nKey::AppWorktreeSetupSkip),
+            ),
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let run = matches!(answer.await, Ok(0));
+            let _ = this.update_in(cx, |this, window, cx| {
+                if run {
+                    this.update_config(cx, |cfg| {
+                        cfg.worktree_setup_trust.insert(key, script.digest.clone());
+                    });
+                }
+                let setup = run.then_some((script.script.as_path(), env.as_slice()));
+                let line = setup::launch_line(&wt.path, setup, agent);
+                this.open_worktree_tab(wt, line, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn close_worktree_start_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(p) = self.worktree_prompt.as_mut().filter(|p| p.agent_menu) {
+            p.agent_menu = false;
+            cx.notify();
+        }
+    }
+
+    /// The Start dropdown: Shell, then every agent this machine offers.
+    fn render_worktree_start(&self, p: &WorktreePrompt, cx: &mut Context<Self>) -> Div {
+        use crate::ui::settings::kit;
+        let tk = kit::Tk::of(cx);
+        let current = p.agent.map_or(t(L10nKey::WorktreePromptShell), |i| {
+            p.agents[i].display_name()
+        });
+        let trigger = dialog::select_well("worktree-start", current, cx)
+            // Not a click on the form, which closes the menu this reopens.
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, _, cx| {
+                if let Some(p) = this.worktree_prompt.as_mut() {
+                    p.agent_menu = !p.agent_menu;
+                    cx.notify();
+                }
+            }));
+        let menu = p.agent_menu.then(|| {
+            let choices = std::iter::once((None, t(L10nKey::WorktreePromptShell))).chain(
+                p.agents
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| (Some(i), a.display_name())),
+            );
+            let mut panel = kit::menu_panel(&tk).min_w(px(220.));
+            for (row, (choice, label)) in choices.enumerate() {
+                panel = panel.child(
+                    kit::menu_row(
+                        gpui::ElementId::NamedInteger("worktree-start-item".into(), row as u64),
+                        false,
+                        &tk,
+                    )
+                    .child(kit::check_mark(choice == p.agent, &tk))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(p) = this.worktree_prompt.as_mut() {
+                            p.agent = choice;
+                            p.agent_menu = false;
+                            cx.notify();
+                        }
+                    })),
+                );
+            }
+            // `popover_below` measures from a 26px settings trigger.
+            kit::popover_below(false, dialog::FIELD_H - 26. + 4., panel)
+        });
+        dialog::labelled_control(
+            t(L10nKey::WorktreePromptAgent),
+            div().relative().child(trigger).children(menu),
+            cx,
+        )
     }
 
     pub(crate) fn render_worktree_prompt_overlay(
@@ -159,35 +337,65 @@ impl Tty7App {
             })
             .display()
             .to_string();
+        let mono = cx.theme().mono_font_family.clone();
+        let meta = move |text: String| {
+            div()
+                .truncate()
+                .text_size(rems(META_MONO))
+                .font_family(mono.clone())
+                .text_color(muted)
+                .child(text)
+        };
+        let setup_note = match (p.has_setup, p.setup_hint) {
+            (true, _) => Some(t(L10nKey::WorktreePromptSetup).to_string()),
+            (false, Some(command)) => Some(t_fmt(
+                L10nKey::WorktreePromptSetupHint,
+                &[("command", command)],
+            )),
+            (false, None) => None,
+        };
+        // Only an agent that can open on a first message gets the Task box;
+        // for the rest it would be a field that does nothing.
+        let takes_task = p
+            .agent
+            .is_some_and(|i| p.agents[i].prompt_args("").is_some());
+        let start = (!p.agents.is_empty()).then(|| self.render_worktree_start(p, cx));
 
         let rungs = dialog::popover_rungs(cx);
         let card = dialog::card(440., cx)
             .child(dialog::header(t(L10nKey::WorktreePromptTitle), cx))
             .child(
                 dialog::body()
+                    // A click anywhere else in the form closes the Start menu.
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+                            this.close_worktree_start_menu(cx)
+                        }),
+                    )
                     // The path preview hangs off the Name field it follows,
                     // closer to it than the next field is.
                     .child(
                         dialog::labelled(t(L10nKey::WorktreePromptName), Input::new(&p.name), cx)
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(rems(META_MONO))
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .text_color(muted)
-                                    .child(preview),
-                            ),
+                            .child(meta(preview)),
                     )
                     .child(dialog::labelled(
                         t(L10nKey::WorktreePromptBranch),
                         Input::new(&p.branch),
                         cx,
                     ))
-                    .child(dialog::labelled(
-                        t(L10nKey::WorktreePromptBase),
-                        Input::new(&p.base),
-                        cx,
-                    )),
+                    .child(
+                        dialog::labelled(t(L10nKey::WorktreePromptBase), Input::new(&p.base), cx)
+                            .children(setup_note.map(meta)),
+                    )
+                    .children(start)
+                    .when(takes_task, |body| {
+                        body.child(dialog::labelled(
+                            t(L10nKey::WorktreePromptTask),
+                            Input::new(&p.task),
+                            cx,
+                        ))
+                    }),
             )
             .child(
                 dialog::footer(cx)
@@ -225,7 +433,13 @@ impl Tty7App {
                 // palette and the switcher already answer to.
                 .bg(crate::ui::presets::scrim_fill(cx))
                 .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
-                    if ev.keystroke.key == "escape" {
+                    if ev.keystroke.key != "escape" {
+                        return;
+                    }
+                    // Escape backs out one level: an open menu first.
+                    if this.worktree_prompt.as_ref().is_some_and(|p| p.agent_menu) {
+                        this.close_worktree_start_menu(cx);
+                    } else {
                         this.cancel_worktree_prompt(window, cx);
                     }
                 }))

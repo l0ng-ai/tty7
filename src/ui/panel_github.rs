@@ -10,7 +10,7 @@ use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use tty7_core::core::github::{
-    ApiError, GitHubRemote, Item, ItemState, Kind, Label, RepoSlug, StateFilter,
+    ApiError, CheckState, GitHubRemote, Item, ItemState, Kind, Label, RepoSlug, StateFilter,
 };
 
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App};
@@ -48,7 +48,7 @@ impl Tty7App {
         // other tab has, just to hold ↻. Refresh sits with the repository's
         // other actions instead — in the repo row, and in a detail's header.
         let title = self.panel_title(t(L10nKey::PanelGitHubTitle), None, None, window, cx);
-        let (repo, remotes, chosen) = match target {
+        let (host, repo, remotes, chosen) = match target {
             GhTarget::NoPane => {
                 let body = self.panel_empty(
                     t(L10nKey::PanelNoWorkingDirectory),
@@ -78,10 +78,11 @@ impl Tty7App {
                 return self.github_shell(title, Vec::new(), body, false);
             }
             GhTarget::Ready {
+                host,
                 repo,
                 remotes,
                 chosen,
-            } => (repo, remotes, chosen),
+            } => (host, repo, remotes, chosen),
         };
 
         // A detail belongs to the repository it was opened from. If the pane
@@ -98,10 +99,20 @@ impl Tty7App {
         let query = self.github_query(&chosen.slug);
         self.github_ensure_list(&query, cx);
 
-        let mut pinned = vec![
-            self.github_repo_row(&repo, &remotes, &chosen, cx),
-            self.github_switch_row(cx),
-        ];
+        let mut pinned = vec![self.github_repo_row(&repo, &remotes, &chosen, cx)];
+        // The pull request the pane is working on, one click from the list
+        // whichever way the list is switched.
+        if let Some(item) = self.github_branch_pull(host, &repo, &remotes, &chosen, cx) {
+            let branch = self
+                .github
+                .branches
+                .get(&repo)
+                .and_then(|b| b.head.as_ref())
+                .map(|h| h.branch.clone())
+                .unwrap_or_default();
+            pinned.push(self.github_branch_pull_row(&chosen.slug, &branch, &item, cx));
+        }
+        pinned.push(self.github_switch_row(cx));
         if let Some(label) = self.github.label.clone() {
             pinned.push(self.github_label_filter_row(&label, cx));
         }
@@ -284,6 +295,102 @@ impl Tty7App {
                 )
                 .on_click(move |_, _window, cx| cx.open_url(&url)),
             )
+            .into_any_element()
+    }
+
+    /// The pane's branch's pull request, under a caption naming the branch:
+    /// its state, number and title, and — once its detail has been read — how
+    /// its checks stand. A list row in every other respect, so it rests
+    /// unfilled and lights up on hover, or while its detail is the one open.
+    fn github_branch_pull_row(
+        &self,
+        slug: &RepoSlug,
+        branch: &str,
+        item: &Item,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+        let muted = cx.theme().muted_foreground;
+        let mono = cx.theme().mono_font_family.clone();
+        let number = item.number;
+        let key = (slug.clone(), number);
+        let rollup = self
+            .github
+            .details
+            .get(&key)
+            .and_then(|d| d.detail.as_ref())
+            .and_then(|d| d.checks.as_ref())
+            .and_then(|c| c.rollup());
+        let open = self.github.open.as_ref() == Some(&key);
+        let slug = slug.clone();
+        let title = SharedString::from(item.title.clone());
+        let caption = h_flex()
+            .items_center()
+            .gap(px(6.))
+            .min_w_0()
+            .px(px(TEXT_INSET))
+            .text_size(rems(META))
+            .text_color(muted)
+            .child(
+                Icon::empty()
+                    .path("icons/git-branch.svg")
+                    .xsmall()
+                    .text_color(muted),
+            )
+            .child(div().flex_none().child(t(L10nKey::GitHubThisBranch)))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(mono.clone())
+                    .child(branch.to_string()),
+            );
+        let row = h_flex()
+            .id("panel-github-branch-pull")
+            .items_center()
+            .gap(px(8.))
+            .h(px(ROW_H))
+            .w_full()
+            .px(px(ROW_INSET))
+            .rounded(ROW_FILL_RADIUS)
+            .cursor_pointer()
+            .when(open, |r| r.bg(gpui::rgb(sf.selected)))
+            .hover(|s| s.bg(gpui::rgb(sf.hover)))
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)
+            })
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                this.github_open_detail(slug.clone(), number, cx);
+            }))
+            .child(div().flex_none().child(state_glyph(item.state, true, cx)))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(rems(META))
+                    .font_family(mono)
+                    .text_color(muted)
+                    .child(format!("#{number}")),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(rems(TEXT))
+                    .text_color(gpui::rgb(if open {
+                        sf.text_selected
+                    } else {
+                        sf.text_resting
+                    }))
+                    .child(item.title.clone()),
+            )
+            .children(rollup.map(|s| check_glyph(s, cx)));
+        v_flex()
+            .flex_none()
+            .gap(px(4.))
+            .pt(px(PINNED_GAP))
+            .child(caption)
+            .child(div().px(px(CONTENT_INSET)).child(row))
             .into_any_element()
     }
 
@@ -627,6 +734,33 @@ pub(crate) fn state_glyph(state: ItemState, is_pr: bool, cx: &gpui::App) -> AnyE
         .into_any_element()
 }
 
+/// A check's glyph: a shape per state, coloured the way the rest of the
+/// panel colours success, failure and waiting.
+pub(crate) fn check_glyph(state: CheckState, cx: &gpui::App) -> AnyElement {
+    let theme = cx.theme();
+    let (path, color) = match state {
+        CheckState::Passed => ("icons/github/check-passed.svg", theme.success),
+        CheckState::Failed => ("icons/github/check-failed.svg", theme.danger),
+        CheckState::Pending => ("icons/github/check-pending.svg", theme.warning),
+        CheckState::Skipped => ("icons/github/check-skipped.svg", theme.muted_foreground),
+    };
+    gpui::svg()
+        .path(path)
+        .flex_none()
+        .size(px(GLYPH))
+        .text_color(color)
+        .into_any_element()
+}
+
+pub(crate) fn check_label(state: CheckState) -> &'static str {
+    t(match state {
+        CheckState::Passed => L10nKey::GitHubCheckPassed,
+        CheckState::Failed => L10nKey::GitHubCheckFailed,
+        CheckState::Pending => L10nKey::GitHubCheckPending,
+        CheckState::Skipped => L10nKey::GitHubCheckSkipped,
+    })
+}
+
 pub(crate) fn state_label(state: ItemState) -> &'static str {
     t(match state {
         ItemState::Open => L10nKey::GitHubOpen,
@@ -935,6 +1069,153 @@ mod gpui_tests {
             vcx.background_executor.run_until_parked();
         }
         assert_eq!(fake.asked.lock().unwrap().len(), before);
+
+        test_window::quiesce(&mut vcx, Some(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A signed-in fake with one pull request on the pane's branch, whose one
+    /// check is running until `done` is set.
+    struct PullFake {
+        asked: Mutex<Vec<String>>,
+        done: std::sync::atomic::AtomicBool,
+    }
+
+    impl Transport for PullFake {
+        fn get(&self, path: &str) -> Result<Reply, ApiError> {
+            self.asked.lock().unwrap().push(path.to_string());
+            let done = self.done.load(std::sync::atomic::Ordering::SeqCst);
+            let body =
+                if path.starts_with("/repos/acme/widgets/pulls?state=all&head=acme%3Afeat%2Fx&") {
+                    r#"[{"number": 31, "title": "Handle empty summaries", "state": "open",
+                     "head": {"ref": "feat/x", "sha": "abc"}, "base": {"ref": "main"}}]"#
+                } else if path.starts_with("/repos/acme/widgets/issues?") {
+                    "[]"
+                } else if path == "/repos/acme/widgets/issues/31" {
+                    r#"{"number": 31, "title": "Handle empty summaries", "state": "open",
+                    "user": {"login": "ada"}, "pull_request": {"merged_at": null}}"#
+                } else if path.starts_with("/repos/acme/widgets/issues/31/comments")
+                    || path.starts_with("/repos/acme/widgets/pulls/31/files")
+                {
+                    "[]"
+                } else if path == "/repos/acme/widgets/pulls/31" {
+                    r#"{"number": 31, "title": "Handle empty summaries", "state": "open",
+                    "user": {"login": "ada"}, "mergeable_state": "blocked",
+                    "head": {"ref": "feat/x", "sha": "abc"}, "base": {"ref": "main"},
+                    "requested_reviewers": [{"login": "jonas"}]}"#
+                } else if path.starts_with("/repos/acme/widgets/pulls/31/reviews") {
+                    r#"[{"user": {"login": "mara"}, "state": "APPROVED"}]"#
+                } else if path.starts_with("/repos/acme/widgets/commits/abc/check-runs") {
+                    if done {
+                        r#"{"total_count": 1, "check_runs": [{"name": "test",
+                        "status": "completed", "conclusion": "success"}]}"#
+                    } else {
+                        r#"{"total_count": 1, "check_runs": [{"name": "test",
+                        "status": "in_progress"}]}"#
+                    }
+                } else if path.starts_with("/repos/acme/widgets/commits/abc/status") {
+                    r#"{"total_count": 0, "statuses": []}"#
+                } else {
+                    return Err(ApiError::NotFound);
+                };
+            Ok(Reply {
+                body: body.as_bytes().to_vec(),
+                has_next: false,
+            })
+        }
+
+        fn authenticated(&self) -> bool {
+            true
+        }
+    }
+
+    #[gpui::test]
+    fn the_branchs_pull_request_is_pinned_and_its_running_checks_polled(cx: &mut TestAppContext) {
+        use tty7_core::core::github::CheckState;
+
+        let root = scratch("branch-pull");
+        git(&root, &["init", "--quiet", "-b", "feat/x"]);
+        git(
+            &root,
+            &["remote", "add", "origin", "https://github.com/acme/widgets"],
+        );
+
+        let fake = Arc::new(PullFake {
+            asked: Mutex::new(Vec::new()),
+            done: std::sync::atomic::AtomicBool::new(false),
+        });
+        let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
+        let transport: Arc<dyn Transport> = fake.clone();
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.github.connector = Some(Arc::new(move || Connection {
+                transport: transport.clone(),
+            }));
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::GitHub;
+            cx.notify();
+        });
+        DaemonMsg::Cwd(root.clone())
+            .encode(&mut pane)
+            .expect("the pane's socket takes the cwd");
+
+        settle(&app, &mut vcx, "the branch's pull request", |app| {
+            app.github
+                .branch_pulls
+                .values()
+                .any(|p| p.item.as_ref().is_some_and(|i| i.number == 31))
+        });
+
+        let slug = app.update_in(&mut vcx, |app, _, cx| {
+            let slug = app.github.branch_pulls.keys().next().unwrap().slug.clone();
+            app.github_open_detail(slug.clone(), 31, cx);
+            slug
+        });
+        let key = (slug.clone(), 31);
+        let checks = |app: &Tty7App| {
+            app.github
+                .details
+                .get(&key)
+                .and_then(|d| d.detail.as_ref())
+                .and_then(|d| d.checks.clone())
+        };
+        settle(&app, &mut vcx, "the detail with its checks", |app| {
+            checks(app).is_some()
+        });
+        let reviewers = app.update_in(&mut vcx, |app, _, _| {
+            app.github.details[&key]
+                .detail
+                .as_ref()
+                .unwrap()
+                .reviewers
+                .clone()
+                .unwrap()
+        });
+        assert_eq!(reviewers.len(), 2, "one approval, one request");
+        assert_eq!(
+            app.update_in(&mut vcx, |app, _, _| checks(app).unwrap().rollup()),
+            Some(CheckState::Pending)
+        );
+
+        let reads_of_pull = || {
+            fake.asked
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| *p == "/repos/acme/widgets/pulls/31")
+                .count()
+        };
+        assert_eq!(reads_of_pull(), 1);
+
+        fake.done.store(true, std::sync::atomic::Ordering::SeqCst);
+        vcx.executor()
+            .advance_clock(crate::ui::github::CHECKS_POLL + std::time::Duration::from_secs(1));
+        settle(&app, &mut vcx, "the poll's verdict", |app| {
+            checks(app).and_then(|c| c.rollup()) == Some(CheckState::Passed)
+        });
+        // With every verdict in, the detail is read again for the merge state.
+        settle(&app, &mut vcx, "the detail read again", |_| {
+            reads_of_pull() >= 2
+        });
 
         test_window::quiesce(&mut vcx, Some(&root));
         let _ = std::fs::remove_dir_all(&root);

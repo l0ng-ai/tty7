@@ -7,7 +7,7 @@ use gpui::{
     AnyElement, Context, Entity, EntityInputHandler as _, Focusable as _, MouseButton, PromptLevel,
     SharedString, Subscription, Window, div, px, rems,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState, Position, RopeExt as _, TabSize};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_component::{
@@ -21,6 +21,15 @@ use crate::ui::editor_session::{self, TabEditor};
 use crate::ui::editor_text::{self, EditorConfig, Indent, LineEnding, TextFormat};
 use crate::ui::host_ops::{HostId, HostOps, MTime, SharedHost, WatchSub};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+
+mod gutter;
+mod nav;
+pub(crate) mod outline;
+mod problems;
+mod split;
+mod strip;
+
+pub(crate) use nav::KEY_CONTEXT as NAV_KEY_CONTEXT;
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -117,6 +126,8 @@ pub(crate) struct OpenFile {
     /// scrollbar every other scrolling surface in tty7 has. The editor itself
     /// gets one from `Input`.
     pub(crate) preview_scroll: gpui::ScrollHandle,
+    /// Git change markers — see `gutter`.
+    gutter: gutter::BufferGutter,
     _sub: Subscription,
     _observe: Subscription,
 }
@@ -147,6 +158,25 @@ impl OpenFile {
         }
         language_for_path(&self.path)
     }
+
+    fn local(&self) -> Option<LocalFile> {
+        (self.untitled.is_none() && self.host.id().is_local()).then(|| LocalFile {
+            id: self.id(),
+            input: self.input.clone(),
+            path: self.path.clone(),
+            language: self.language(),
+            indent: self.indent,
+        })
+    }
+}
+
+/// A saved file on this machine, as the language servers see it.
+pub(crate) struct LocalFile {
+    pub(crate) id: BufferId,
+    pub(crate) input: Entity<InputState>,
+    pub(crate) path: PathBuf,
+    pub(crate) language: &'static str,
+    pub(crate) indent: Indent,
 }
 
 /// One tab's view of the editor: which buffers it shows, in the order its
@@ -158,6 +188,14 @@ pub(crate) struct TabCode {
     pub(crate) roots: Vec<PathBuf>,
     pub(crate) expanded: std::collections::HashSet<PathBuf>,
     pub(crate) selected: Option<PathBuf>,
+    /// The second editor group, when the editor is split — the one without
+    /// the focus. `files` and `active` above are always the focused group's
+    /// (see `split`).
+    pub(crate) split: Option<split::OtherGroup>,
+    /// Buffers in the order they were last in front, most recent first —
+    /// what decides which files keep a place in the header's strip when
+    /// it cannot hold them all (see `strip`).
+    pub(crate) recent: Vec<BufferId>,
 }
 
 impl TabCode {
@@ -169,6 +207,8 @@ impl TabCode {
             roots: Vec::new(),
             expanded: std::collections::HashSet::new(),
             selected: None,
+            split: None,
+            recent: Vec::new(),
         }
     }
 
@@ -245,7 +285,15 @@ struct SaveWaiter {
 
 enum BarKind {
     GoToLine,
-    SaveAs { id: BufferId, then_close: bool },
+    SaveAs {
+        id: BufferId,
+        then_close: bool,
+    },
+    /// A new name for the symbol at `offset` (`ui::lsp`).
+    Rename {
+        id: BufferId,
+        offset: usize,
+    },
 }
 
 /// The one-line prompt that sits above the text: go to line, or name a file
@@ -281,6 +329,12 @@ pub(crate) struct EditorPanelState {
     watched_dirs: HashSet<PathBuf>,
     watched_files: HashSet<PathBuf>,
     events_tx: smol::channel::Sender<Vec<PathBuf>>,
+    /// Back/forward history, outlines and Go to Symbol's preview.
+    nav: nav::EditorNav,
+    /// The Problems list at the foot of the panel — see `problems`.
+    problems: problems::ProblemsPane,
+    /// The header's list of every open file, while it is open.
+    strip_picker: Option<strip::StripPicker>,
 }
 
 impl EditorPanelState {
@@ -323,6 +377,9 @@ impl EditorPanelState {
             watched_dirs: HashSet::new(),
             watched_files: HashSet::new(),
             events_tx: tx,
+            nav: nav::EditorNav::new(cx),
+            problems: Default::default(),
+            strip_picker: None,
         }
     }
 }
@@ -379,6 +436,49 @@ pub(crate) fn language_for_path(path: &Path) -> &'static str {
         "cmake" | "mk" => "cmake",
         _ => "text",
     }
+}
+
+/// What the status bar calls a language id from [`language_for_path`].
+/// `None` for plain text, which the bar leaves unsaid.
+fn language_label(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "rust" => "Rust",
+        "go" => "Go",
+        "python" => "Python",
+        "javascript" => "JavaScript",
+        "typescript" => "TypeScript",
+        "tsx" => "TypeScript JSX",
+        "json" => "JSON",
+        "toml" => "TOML",
+        "yaml" => "YAML",
+        "html" => "HTML",
+        "css" => "CSS",
+        "markdown" => "Markdown",
+        "bash" => "Shell",
+        "c" => "C",
+        "cpp" => "C++",
+        "java" => "Java",
+        "kotlin" => "Kotlin",
+        "lua" => "Lua",
+        "ruby" => "Ruby",
+        "php" => "PHP",
+        "sql" => "SQL",
+        "swift" => "Swift",
+        "scala" => "Scala",
+        "zig" => "Zig",
+        "proto" => "Protocol Buffers",
+        "diff" => "Diff",
+        "elixir" => "Elixir",
+        "erb" => "ERB",
+        "ejs" => "EJS",
+        "svelte" => "Svelte",
+        "astro" => "Astro",
+        "graphql" => "GraphQL",
+        "csharp" => "C#",
+        "cmake" => "CMake",
+        "make" => "Makefile",
+        _ => return None,
+    })
 }
 
 /// How many frames a jump-to-line may wait for the editor to be laid out.
@@ -796,12 +896,22 @@ impl Tty7App {
         self.tabs.iter().position(|t| t.tree_id.get() == tab)
     }
 
-    /// How many tabs show this buffer.
+    /// How many places show this buffer: every tab showing it, twice for a
+    /// tab whose split shows it in both groups.
     fn buffer_refs(&self, id: BufferId) -> usize {
         self.tabs
             .iter()
             .filter_map(|t| t.code.as_deref())
-            .filter(|c| c.files.contains(&id))
+            .map(|c| c.views_of(id))
+            .sum()
+    }
+
+    /// How many tabs show this buffer, in either group.
+    fn buffer_tabs(&self, id: BufferId) -> usize {
+        self.tabs
+            .iter()
+            .filter_map(|t| t.code.as_deref())
+            .filter(|c| c.shows(id))
             .count()
     }
 
@@ -819,10 +929,9 @@ impl Tty7App {
         let Some(code) = self.tabs.get(tab_ix).and_then(|t| t.code.as_deref()) else {
             return Vec::new();
         };
-        code.files
-            .iter()
-            .copied()
-            .filter(|id| self.buffer(*id).is_some_and(|b| b.dirty) && self.buffer_refs(*id) == 1)
+        code.all_files()
+            .into_iter()
+            .filter(|id| self.buffer(*id).is_some_and(|b| b.dirty) && self.buffer_tabs(*id) == 1)
             .collect()
     }
 
@@ -855,6 +964,9 @@ impl Tty7App {
             .filter_map(|p| p.parent().map(Path::to_path_buf))
             .collect();
         self.editor.watched_files = files;
+        // Every change to which files are open, or where they live, passes
+        // through here — which is exactly what the language servers follow.
+        self.lsp_sync_buffers(cx);
         if dirs == self.editor.watched_dirs {
             return;
         }
@@ -1247,6 +1359,7 @@ impl Tty7App {
                 .default_value(text)
         });
         let id = input.entity_id();
+        let git_gutter = gutter::BufferGutter::attach(&input, id, cx);
         let sub = cx.subscribe_in(
             &input,
             window,
@@ -1277,6 +1390,7 @@ impl Tty7App {
             preview,
             wrap,
             preview_scroll: gpui::ScrollHandle::new(),
+            gutter: git_gutter,
             _sub: sub,
             _observe: observe,
         });
@@ -1297,7 +1411,41 @@ impl Tty7App {
         if let Some(f) = self.buffer_mut(id) {
             f.dirty = dirty;
         }
+        self.lsp_buffer_edited(id, cx);
+        self.editor_gutter_note_edit(id, cx);
+        self.editor_nav_note_edit(id, cx);
         cx.notify();
+    }
+
+    /// Saved files on this machine — what a language server can read
+    /// (`ui::lsp`). Untitled buffers and files on other hosts are not.
+    pub(crate) fn editor_local_files(&self) -> Vec<LocalFile> {
+        self.editor
+            .buffers
+            .iter()
+            .filter_map(OpenFile::local)
+            .collect()
+    }
+
+    pub(crate) fn editor_local_file(&self, id: BufferId) -> Option<LocalFile> {
+        self.buffer(id).and_then(OpenFile::local)
+    }
+
+    pub(crate) fn editor_active_local_file(&self) -> Option<LocalFile> {
+        self.active_buffer().and_then(OpenFile::local)
+    }
+
+    /// Asks for a new name for the symbol at `offset`, in the bar above the
+    /// text; `ui::lsp` does the renaming once it is answered.
+    pub(crate) fn editor_open_rename_bar(
+        &mut self,
+        id: BufferId,
+        offset: usize,
+        current: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor_open_bar(BarKind::Rename { id, offset }, current, window, cx);
     }
 
     /// A new, empty, never-saved buffer, on the window's own machine.
@@ -1464,6 +1612,101 @@ impl Tty7App {
         self.editor_note_edit(id, cx);
     }
 
+    /// Run one of gpui-component's editing actions on the active buffer, as
+    /// if it had been pressed there. Returns false with no buffer to run it
+    /// on. The palette closes before its row runs, so this focuses the
+    /// buffer first rather than relying on where the focus happens to be.
+    pub(crate) fn editor_dispatch(
+        &mut self,
+        action: &dyn gpui::Action,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.code_panel_visible() {
+            return false;
+        }
+        let Some(input) = self.active_buffer().map(|f| f.input.clone()) else {
+            return false;
+        };
+        let handle = input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        handle.dispatch_action(action, window, cx);
+        true
+    }
+
+    /// The window's listeners for the editor's text commands, when the user
+    /// has bound one: each runs on the editor only while it has the focus.
+    pub(crate) fn with_editor_text_commands(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        use crate::core::actions::{
+            EditorJoinLines, EditorRemoveSurroundingBrackets, EditorTransformLowercase,
+            EditorTransformTitleCase, EditorTransformUppercase, EditorTrimTrailingWhitespace,
+        };
+        root.on_action(
+            cx.listener(|this, _: &EditorTransformUppercase, window, cx| {
+                if !this.editor_has_focus(window, cx) {
+                    cx.propagate();
+                    return;
+                }
+                this.editor_dispatch(&gpui_component::input::TransformToUppercase, window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &EditorTransformLowercase, window, cx| {
+                if !this.editor_has_focus(window, cx) {
+                    cx.propagate();
+                    return;
+                }
+                this.editor_dispatch(&gpui_component::input::TransformToLowercase, window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &EditorTransformTitleCase, window, cx| {
+                if !this.editor_has_focus(window, cx) {
+                    cx.propagate();
+                    return;
+                }
+                this.editor_dispatch(&gpui_component::input::TransformToTitleCase, window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &EditorTrimTrailingWhitespace, window, cx| {
+                if !this.editor_has_focus(window, cx) {
+                    cx.propagate();
+                    return;
+                }
+                this.editor_dispatch(&gpui_component::input::TrimTrailingWhitespace, window, cx);
+            }),
+        )
+        .on_action(cx.listener(|this, _: &EditorJoinLines, window, cx| {
+            if !this.editor_has_focus(window, cx) {
+                cx.propagate();
+                return;
+            }
+            this.editor_dispatch(&gpui_component::input::JoinLines, window, cx);
+        }))
+        .on_action(
+            cx.listener(|this, _: &EditorRemoveSurroundingBrackets, window, cx| {
+                if !this.editor_has_focus(window, cx) {
+                    cx.propagate();
+                    return;
+                }
+                this.editor_dispatch(
+                    &gpui_component::input::RemoveSurroundingBrackets,
+                    window,
+                    cx,
+                );
+            }),
+        )
+    }
+
+    /// Whether an editor exists to run [`Self::editor_dispatch`] on.
+    pub(crate) fn editor_can_dispatch(&self) -> bool {
+        self.code_panel_visible() && self.active_buffer().is_some()
+    }
+
     pub(crate) fn editor_has_focus(&self, window: &Window, cx: &Context<Self>) -> bool {
         self.code_panel_visible()
             && self.active_buffer().is_some_and(|f| {
@@ -1587,6 +1830,8 @@ impl Tty7App {
                         f.saved_format = format;
                         f.conflict = None;
                         app.editor_note_edit(id, cx);
+                        app.lsp_buffer_saved(id, cx);
+                        app.editor_gutter_refetch(id);
                         // A save is a working-tree edit the `.git` watch cannot
                         // see, and the file tree only sees it while it happens
                         // to be showing that directory.
@@ -1816,6 +2061,7 @@ impl Tty7App {
                 )
             }
             BarKind::SaveAs { .. } => t(L10nKey::EditorSaveAsPlaceholder).to_string(),
+            BarKind::Rename { .. } => t_fmt(L10nKey::LspRenamePlaceholder, &[("name", &initial)]),
         };
         let input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -1833,7 +2079,7 @@ impl Tty7App {
                     InputEvent::Blur => {
                         if matches!(
                             this.editor.bar.as_ref().map(|b| &b.kind),
-                            Some(BarKind::GoToLine)
+                            Some(BarKind::GoToLine | BarKind::Rename { .. })
                         ) {
                             this.editor.bar = None;
                             cx.notify();
@@ -1896,6 +2142,14 @@ impl Tty7App {
                     character: column - 1,
                 };
                 place_cursor(input, position, CURSOR_SCROLL_ATTEMPTS, window, cx);
+            }
+            BarKind::Rename { id, offset } => {
+                let name = text.trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                self.editor_close_bar(window, cx);
+                self.lsp_rename(id, offset, name, window, cx);
             }
             BarKind::SaveAs { id, then_close } => {
                 let path = PathBuf::from(text.trim());
@@ -2100,11 +2354,37 @@ impl Tty7App {
             )
             .menu(t(L10nKey::AppMenuSelectAll), Box::new(edit::SelectAll))
             .separator()
+            // The line commands act on every line a cursor or selection
+            // touches. Their chords live on gpui-component's `CodeEditor` key
+            // context and are re-added in `keymap::fixed_bindings`, so they
+            // beat the app's own keys while the editor has focus.
+            .menu(
+                t(L10nKey::EditorToggleComment),
+                Box::new(edit::ToggleLineComment),
+            )
+            .menu(t(L10nKey::EditorMoveLineUp), Box::new(edit::MoveLineUp))
+            .menu(t(L10nKey::EditorMoveLineDown), Box::new(edit::MoveLineDown))
+            .menu(
+                t(L10nKey::EditorDuplicateLine),
+                Box::new(edit::CopyLineDown),
+            )
+            .menu(t(L10nKey::EditorDeleteLine), Box::new(edit::DeleteLine))
+            .separator()
             .menu(t(L10nKey::AppMenuFind), Box::new(edit::Search))
             .menu(
                 t(L10nKey::EditorGoToLineAction),
                 Box::new(crate::core::actions::EditorGoToLine),
+            )
+            .menu_with_disabled(
+                t(L10nKey::EditorGitRevertChange),
+                Box::new(crate::core::actions::EditorRevertChange),
+                !this.editor_gutter_can_revert(id, cx),
+            )
+            .menu(
+                t(L10nKey::EditorGoToMatchingBracket),
+                Box::new(edit::MoveToMatchingBracket),
             );
+        let menu = this.lsp_menu_items(menu, id, cx);
         this.editor_file_menu_items(menu, id, app, cx)
     }
 
@@ -2252,7 +2532,7 @@ impl Tty7App {
             .get_mut(tab_ix)
             .and_then(|t| t.code.as_deref_mut())
         {
-            code.forget(id);
+            code.close_in_focused(id);
         }
         if self.buffer_refs(id) == 0 {
             self.editor_drop_buffer(id, cx);
@@ -2266,9 +2546,10 @@ impl Tty7App {
         // see that happen now.
         self.editor_saves_failed(id);
         for code in self.tabs.iter_mut().filter_map(|t| t.code.as_deref_mut()) {
-            code.forget(id);
+            code.forget_everywhere(id);
         }
         self.editor.buffers.retain(|b| b.id() != id);
+        self.editor.nav.forget_buffer(id);
         if matches!(
             self.editor.bar.as_ref().map(|b| &b.kind),
             Some(BarKind::SaveAs { id: bar_id, .. }) if *bar_id == id
@@ -2337,10 +2618,15 @@ impl Tty7App {
         if let Some(tab_ix) = ids.first().and_then(|id| {
             self.tabs
                 .iter()
-                .position(|t| t.code.as_deref().is_some_and(|c| c.files.contains(id)))
+                .position(|t| t.code.as_deref().is_some_and(|c| c.shows(*id)))
         }) && tab_ix == self.active
             && let Some(code) = self.tab_code_mut()
-            && let Some(pos) = code.files.iter().position(|f| *f == ids[0])
+            && let Some(pos) = {
+                if !code.files.contains(&ids[0]) {
+                    code.swap_focus();
+                }
+                code.files.iter().position(|f| *f == ids[0])
+            }
         {
             code.active = pos;
             code.visible = true;
@@ -2634,7 +2920,7 @@ impl Tty7App {
             .tabs
             .iter()
             .filter_map(|t| t.code.as_deref())
-            .flat_map(|c| c.files.iter().copied())
+            .flat_map(TabCode::all_files)
             .collect();
         let orphans: Vec<(BufferId, bool)> = self
             .editor
@@ -2650,6 +2936,7 @@ impl Tty7App {
         for (id, dirty) in orphans {
             if !dirty {
                 self.editor.buffers.retain(|b| b.id() != id);
+                self.editor.nav.forget_buffer(id);
                 changed = true;
                 continue;
             }
@@ -2683,7 +2970,9 @@ impl Tty7App {
         let Some(state) = editor_session::get(cx, tab_id) else {
             return;
         };
-        if state.files.is_empty() {
+        // The left group can be empty while the right is not: it held only
+        // files that are not recorded (untitled, remote).
+        if state.files.is_empty() && state.split.as_ref().is_none_or(|s| s.files.is_empty()) {
             return;
         }
         let Some(host) = self.active_host(cx) else {
@@ -2692,7 +2981,14 @@ impl Tty7App {
         // What was recorded is what is being put back; recording it again
         // before the files have loaded would write down an empty tab.
         self.editor.recorded.insert(tab_id, state.clone());
-        let files = state.files.clone();
+        // Both groups' files in one trip, the left group's first.
+        let files: Vec<PathBuf> = state
+            .files
+            .iter()
+            .chain(state.split.iter().flat_map(|s| s.files.iter()))
+            .cloned()
+            .collect();
+        let requested = files.clone();
         HostOps::run_in(
             host.clone(),
             window,
@@ -2704,32 +3000,55 @@ impl Tty7App {
                     .collect::<Vec<_>>()
             },
             move |app, loaded: Vec<Option<Loaded>>, window, cx| {
-                let front = loaded
-                    .get(state.active)
-                    .and_then(Option::as_ref)
-                    .map(|l| l.path.clone());
-                let mut ids = Vec::new();
-                for l in loaded.into_iter().flatten() {
-                    ids.push(app.editor_install(host.clone(), l, tab_id, false, window, cx));
+                let mut opened: Vec<(PathBuf, BufferId)> = Vec::new();
+                for (path, l) in requested.into_iter().zip(loaded) {
+                    if let Some(l) = l {
+                        let id = app.editor_install(host.clone(), l, tab_id, false, window, cx);
+                        opened.push((path, id));
+                    }
                 }
+                let group = |paths: &[PathBuf], active: usize| -> (Vec<BufferId>, usize) {
+                    let front = paths.get(active);
+                    let mut ids: Vec<BufferId> = Vec::new();
+                    let mut at = 0;
+                    for path in paths {
+                        let Some(&(_, id)) = opened.iter().find(|(p, _)| p == path) else {
+                            continue;
+                        };
+                        if ids.contains(&id) {
+                            continue;
+                        }
+                        if Some(path) == front {
+                            at = ids.len();
+                        }
+                        ids.push(id);
+                    }
+                    (ids, at)
+                };
+                let (left, left_active) = group(&state.files, state.active);
+                let right = state
+                    .split
+                    .as_ref()
+                    .map(|s| (group(&s.files, s.active), s.focused));
                 let Some(tab_ix) = app.tab_index_of(tab_id) else {
                     return;
                 };
                 let Some(code) = app.tabs[tab_ix].code.as_deref_mut() else {
                     return;
                 };
-                if let Some(front) = front
-                    && let Some(pos) = code.files.iter().position(|id| {
-                        app.editor
-                            .buffers
-                            .iter()
-                            .any(|b| b.id() == *id && b.path == front)
-                    })
-                {
-                    code.active = pos;
-                }
-                code.visible = state.visible && !code.files.is_empty();
-                if tab_ix == app.active && code.visible {
+                let restored: Vec<BufferId> = opened.iter().map(|(_, id)| *id).collect();
+                // Merged into what the tab has now, not written over it: a
+                // file opened, or a split made, while these were loading stays.
+                let untouched = code.restore_groups(
+                    &restored,
+                    (left, left_active),
+                    right.map(|((files, active), focused)| (files, active, focused)),
+                );
+                let visible = state.visible && !code.files.is_empty();
+                code.visible |= visible;
+                // Only a restore nobody has touched takes the keyboard; one the
+                // reader has moved on from leaves it where they put it.
+                if untouched && tab_ix == app.active && visible {
                     app.focus_editor(window, cx);
                 }
                 cx.notify();
@@ -2750,24 +3069,38 @@ impl Tty7App {
             if !self.editor.restored.contains(&tab_id) {
                 continue;
             }
-            let mut files = Vec::new();
-            let mut active = 0;
-            for (pos, id) in code.files.iter().enumerate() {
-                // Only files on the window's own machine: an SFTP buffer's
-                // host is a connection that will not exist next launch.
-                let Some(f) = self.buffer(*id) else { continue };
-                if f.untitled.is_some() || f.host.id() != spawn_host {
-                    continue;
+            // Only files on the window's own machine: an SFTP buffer's host
+            // is a connection that will not exist next launch.
+            let group = |ids: &[BufferId], front: usize| -> (Vec<PathBuf>, usize) {
+                let mut files = Vec::new();
+                let mut active = 0;
+                for (pos, id) in ids.iter().enumerate() {
+                    let Some(f) = self.buffer(*id) else { continue };
+                    if f.untitled.is_some() || f.host.id() != spawn_host {
+                        continue;
+                    }
+                    if pos == front {
+                        active = files.len();
+                    }
+                    files.push(f.path.clone());
                 }
-                if pos == code.active {
-                    active = files.len();
-                }
-                files.push(f.path.clone());
-            }
+                (files, active)
+            };
+            let sides = code.sides();
+            let (files, active) = group(&sides[0].files, sides[0].active);
+            let split = sides.get(1).and_then(|right| {
+                let (files, active) = group(&right.files, right.active);
+                (!files.is_empty()).then_some(editor_session::SplitEditor {
+                    files,
+                    active,
+                    focused: right.focused,
+                })
+            });
             let state = TabEditor {
                 files,
                 active,
                 visible: code.visible,
+                split,
             };
             if self.editor.recorded.get(&tab_id) != Some(&state) {
                 changed.push((tab_id, state));
@@ -2788,12 +3121,12 @@ impl Tty7App {
             .tabs
             .get(tab_ix)
             .and_then(|t| t.code.as_deref())
-            .map(|c| c.files.clone())
+            .map(TabCode::all_files)
         else {
             return;
         };
         for id in ids {
-            if self.buffer_refs(id) == 1 && self.buffer(id).is_some_and(|b| !b.dirty) {
+            if self.buffer_tabs(id) == 1 && self.buffer(id).is_some_and(|b| !b.dirty) {
                 self.editor_drop_buffer(id, cx);
             }
         }
@@ -2802,6 +3135,7 @@ impl Tty7App {
     /// A tab was closed for good: forget what it had open.
     pub(crate) fn editor_forget_tab(&mut self, tab: TabId, cx: &mut Context<Self>) {
         self.editor.recorded.remove(&tab);
+        self.editor.nav.forget_tab(tab);
         editor_session::remove(cx, tab);
     }
 }
@@ -2823,58 +3157,18 @@ impl Tty7App {
         if !self.code_panel_visible() {
             return None;
         }
-        let body = match self.active_buffer() {
-            None => self.render_editor_empty(cx).into_any_element(),
-            Some(f) if f.preview => {
-                let markdown = f.input.read(cx).text().to_string();
-                let scroll = f.preview_scroll.clone();
-                // The bar's wrapper takes its height from `flex_1`, so it needs
-                // a column with a definite height to grow inside — hand it one
-                // rather than dropping it straight into the overlay, or the
-                // pane sizes to its content and there is nothing left to
-                // scroll.
-                v_flex()
-                    .size_full()
-                    .child(crate::ui::scrollbar::with_vertical_scrollbar(
-                        "editor-md-preview-scrollbar",
-                        div()
-                            .id("editor-md-preview")
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&scroll)
-                            .px_4()
-                            .py_3()
-                            .child(
-                                gpui_component::text::TextView::markdown(
-                                    "editor-md-preview-body",
-                                    markdown,
-                                )
-                                .style(crate::ui::theme::markdown_style(cx)),
-                            ),
-                        &scroll,
-                    ))
-                    .into_any_element()
-            }
-            Some(f) => {
-                let input = f.input.clone();
-                let id = f.id();
-                let app = cx.entity().downgrade();
-                div()
-                    .id("editor-body")
-                    .size_full()
-                    .child(
-                        Input::new(&input)
-                            .appearance(false)
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(cx.theme().mono_font_size)
-                            .size_full(),
-                    )
-                    .context_menu(move |menu, _window, cx| {
-                        Self::editor_body_menu(menu, &app, id, cx)
-                    })
-                    .into_any_element()
-            }
-        };
+        self.editor_split_follow_focus(window, cx);
+        self.editor_gutter_sync(cx);
+        self.editor_nav_tick(cx);
+        if let Some(code) = self.tab_code_mut() {
+            code.note_front();
+        }
+        let breadcrumbs = self.render_editor_breadcrumbs(window, cx);
+        let body = self.render_editor_body(
+            self.tab_code().and_then(TabCode::active_id),
+            self.tab_code().map_or(0, TabCode::focused_slot),
+            cx,
+        );
         let conflict_banner = self
             .active_buffer()
             .and_then(|f| f.conflict.map(|c| (f.id(), c)))
@@ -2891,7 +3185,8 @@ impl Tty7App {
             .children(header)
             .when_some(conflict_banner, |this, b| this.child(b))
             .children(bar)
-            .child(div().flex_1().min_h_0().child(body));
+            .child(self.render_editor_groups(breadcrumbs, body, window, cx))
+            .children(self.render_editor_problems(window, cx));
 
         // The panel's own paint is the same either way; only the box is not.
         // Filling the workspace means stopping the window's translucency and
@@ -2915,10 +3210,16 @@ impl Tty7App {
                 .children(crate::ui::app::overlay_surface_layers(cx)),
             DocumentChrome::Dock | DocumentChrome::DockHoisted => shell.size_full().min_w_0(),
         };
+        let shell = self.editor_nav_actions(shell, cx);
+        let shell = self.editor_split_command_sync(shell, cx);
         Some(
             shell
                 .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                     if ev.keystroke.key != "escape" {
+                        return;
+                    }
+                    if this.editor_gutter_close_peek(cx) {
+                        cx.stop_propagation();
                         return;
                     }
                     // Escape in the go-to-line or Save As box dismisses the
@@ -2934,6 +3235,69 @@ impl Tty7App {
                 .child(self.render_code_status_bar(window, cx))
                 .into_any_element(),
         )
+    }
+
+    /// One group's text: the file `id`, rendered or as source, or the empty
+    /// panel. `slot` tells the two groups' elements apart.
+    pub(crate) fn render_editor_body(
+        &self,
+        id: Option<BufferId>,
+        slot: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match id.and_then(|id| self.buffer(id)) {
+            None => self.render_editor_empty(cx).into_any_element(),
+            Some(f) if f.preview => {
+                let markdown = f.input.read(cx).text().to_string();
+                let scroll = f.preview_scroll.clone();
+                // The bar's wrapper takes its height from `flex_1`, so it needs
+                // a column with a definite height to grow inside — hand it one
+                // rather than dropping it straight into the overlay, or the
+                // pane sizes to its content and there is nothing left to
+                // scroll.
+                v_flex()
+                    .size_full()
+                    .child(crate::ui::scrollbar::with_vertical_scrollbar(
+                        ("editor-md-preview-scrollbar", slot),
+                        div()
+                            .id(("editor-md-preview", slot))
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&scroll)
+                            .px_4()
+                            .py_3()
+                            .child(
+                                gpui_component::text::TextView::markdown(
+                                    ("editor-md-preview-body", slot),
+                                    markdown,
+                                )
+                                .style(crate::ui::theme::markdown_style(cx)),
+                            ),
+                        &scroll,
+                    ))
+                    .into_any_element()
+            }
+            Some(f) => {
+                let input = f.input.clone();
+                let id = f.id();
+                let app = cx.entity().downgrade();
+                div()
+                    .id(("editor-body", slot))
+                    .size_full()
+                    .child(
+                        Input::new(&input)
+                            .appearance(false)
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(cx.theme().mono_font_size)
+                            .size_full(),
+                    )
+                    .children(self.render_editor_gutter_peek(id, cx))
+                    .context_menu(move |menu, _window, cx| {
+                        Self::editor_body_menu(menu, &app, id, cx)
+                    })
+                    .into_any_element()
+            }
+        }
     }
 
     /// The editor header alone, for the strip above a docked column.
@@ -2967,38 +3331,37 @@ impl Tty7App {
         } else {
             row
         };
-        let menu_app = cx.entity().downgrade();
-        // v4 chrome: the file names in body ink — the one heading the column
-        // has — a hairline in the divider tone under the bar, and the rail's
-        // 26px close tile, so the header reads as part of the plane it sits in
-        // rather than a toolbar bolted on top of it.
+        // v6 chrome: no rule under the bar — the header, the breadcrumbs and
+        // the text are one plane — and only as many file cells as the column
+        // has room for, the rest behind a `+N` list (see `strip`).
         let (tile, glyph) = (
             crate::ui::tab_strip::RAIL_TILE,
             crate::ui::tab_strip::RAIL_TILE_GLYPH,
         );
-        let files: Vec<(usize, SharedString, String, bool, bool)> = self
+        let cap = self.editor_strip_cap(chrome, cx);
+        let (shown, hidden) = self
             .tab_code()
-            .map(|c| {
-                c.files
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(pos, id)| {
-                        let f = self.buffer(*id)?;
-                        let tip = if f.untitled.is_some() {
-                            f.label().to_string()
-                        } else {
-                            f.path.display().to_string()
-                        };
-                        Some((pos, f.label(), tip, pos == c.active, f.dirty))
-                    })
-                    .collect()
-            })
+            .map(|c| c.strip_split(cap))
             .unwrap_or_default();
+        let active_id = self.tab_code().and_then(TabCode::active_id);
+        let files: Vec<(usize, SharedString, String, bool, bool)> = shown
+            .into_iter()
+            .filter_map(|(pos, id)| {
+                let f = self.buffer(id)?;
+                let tip = if f.untitled.is_some() {
+                    f.label().to_string()
+                } else {
+                    f.path.display().to_string()
+                };
+                Some((pos, f.label(), tip, Some(id) == active_id, f.dirty))
+            })
+            .collect();
         let strip = if files.is_empty() {
             div()
                 .min_w_0()
+                .px(px(8.))
                 .text_ellipsis()
-                .text_size(gpui::rems(crate::ui::right_panel::TEXT))
+                .text_size(gpui::rems(strip::CELL_TEXT))
                 .text_color(cx.theme().muted_foreground)
                 .child(SharedString::from(t(L10nKey::EditorNoFileOpen)))
                 .into_any_element()
@@ -3006,26 +3369,28 @@ impl Tty7App {
             h_flex()
                 .id("editor-file-tabs")
                 .min_w_0()
-                .h_full()
-                .overflow_x_scroll()
+                .gap(px(2.))
+                .overflow_hidden()
                 .children(files.into_iter().map(|(pos, name, tip, active, dirty)| {
                     self.render_file_tab(pos, name, tip, active, dirty, cx)
                 }))
                 .into_any_element()
         };
+        let back =
+            (chrome == DocumentChrome::Fill).then(|| self.render_back_to_terminal(window, cx));
         row.flex_none()
             .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
             .items_center()
-            .gap(px(4.))
+            .gap(px(2.))
             .pl(px(lead - 8.).max(px(0.)))
             // The glyph, not the tile, lands on `CONTENT_INSET`, the column
             // the file name starts on at the other end of the bar.
             .pr(px(crate::ui::app::CONTENT_INSET - (tile - glyph) / 2.))
-            .border_b(crate::ui::theme::hairline(window))
-            .border_color(cx.theme().sidebar_border)
+            .children(back)
             .child(strip)
+            .children(self.render_strip_overflow(&hidden, cap, cx))
             .child(
-                div().occlude().flex_shrink_0().child(
+                div().occlude().flex_none().child(
                     crate::ui::tab_strip::chrome_tile_sized(
                         Button::new("editor-new-file").icon(Icon::new(IconName::Plus)),
                         tile,
@@ -3042,8 +3407,9 @@ impl Tty7App {
             )
             // Whatever is left of the bar stays a place to drag the window by.
             .child(div().flex_1().h_full())
+            .child(self.render_layout_switch(chrome, cx))
             .child(
-                div().occlude().flex_shrink_0().child(
+                div().occlude().flex_none().ml(px(4.)).child(
                     crate::ui::tab_strip::chrome_tile_sized(
                         Button::new("editor-panel-close").icon(Icon::new(IconName::Close)),
                         tile,
@@ -3058,9 +3424,6 @@ impl Tty7App {
                     })),
                 ),
             )
-            .context_menu(move |menu, _window, cx| {
-                Tty7App::document_header_menu(menu, &menu_app, cx)
-            })
     }
 
     /// One file in the header's strip: its name, and a slot that shows the
@@ -3076,7 +3439,8 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let group: SharedString = format!("editor-file-tab-{pos}").into();
-        let slot = crate::ui::tab_strip::ROW_STATUS_SLOT;
+        let slot = 16.;
+        let muted = cx.theme().muted_foreground;
         let close = div()
             .id(("editor-file-tab-close", pos))
             .flex_none()
@@ -3084,61 +3448,64 @@ impl Tty7App {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(3.))
+            .rounded(px(4.))
             .hover(|s| s.bg(cx.theme().muted))
-            .child(
-                Icon::new(IconName::Close)
-                    .xsmall()
-                    .text_color(cx.theme().muted_foreground),
-            )
+            .child(Icon::new(IconName::Close).xsmall().text_color(muted))
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
                 this.editor_close_file(pos, window, cx);
             }));
+        // Unsaved is a state, not an alarm: the dot is in caption ink, the
+        // same as the `+N` button's, not the warning hue.
         let slot_el = div()
             .flex_none()
             .size(px(slot))
             .flex()
             .items_center()
             .justify_center()
-            .map(|d| {
-                if dirty {
-                    d.child(
-                        div()
-                            .group_hover(group.clone(), |s| s.invisible())
-                            .size(px(crate::ui::tab_strip::ROW_STATUS_DOT))
-                            .rounded_full()
-                            .bg(cx.theme().warning),
-                    )
-                } else {
-                    d
-                }
+            .when(dirty, |d| {
+                d.child(
+                    div()
+                        .group_hover(group.clone(), |s| s.invisible())
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(muted),
+                )
             });
         div()
             .id(("editor-file-tab", pos))
             .group(group.clone())
             .occlude()
             .flex_none()
-            .h(px(26.))
+            .min_w_0()
+            .max_w(px(strip::CELL_MAX_W))
+            .h(px(strip::CELL_H))
             .flex()
             .items_center()
-            .gap(px(4.))
-            .pl(px(8.))
-            .pr(px(4.))
-            .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
-            .text_size(gpui::rems(crate::ui::right_panel::TEXT))
+            .gap(px(6.))
+            .pl(px(10.))
+            .pr(px(6.))
+            .rounded(px(strip::CELL_RADIUS))
+            .text_size(gpui::rems(strip::CELL_TEXT))
             .map(|d| match active {
                 true => d
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(cx.theme().foreground)
                     .bg(cx.theme().sidebar_accent),
-                false => d.text_color(cx.theme().muted_foreground).hover(|s| {
+                false => d.text_color(muted).hover(|s| {
                     s.bg(gpui::rgb(
                         cx.global::<crate::ui::presets::Surfaces>().sidebar.hover,
                     ))
                 }),
             })
-            .child(div().whitespace_nowrap().child(name))
+            .child(
+                div()
+                    .min_w_0()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(name),
+            )
             .child(
                 div()
                     .relative()
@@ -3179,6 +3546,7 @@ impl Tty7App {
         let label = match bar.kind {
             BarKind::GoToLine => t(L10nKey::EditorGoToLine),
             BarKind::SaveAs { .. } => t(L10nKey::EditorSaveAs),
+            BarKind::Rename { .. } => t(L10nKey::LspRenameSymbol),
         };
         Some(
             h_flex()
@@ -3208,45 +3576,32 @@ impl Tty7App {
     }
 
     fn render_code_status_bar(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
-        // The roots below belong to this window's own machine. A file read
-        // over SFTP is on another one, where they mean nothing, so it shows
-        // its own full path rather than borrowing the local repo's name.
-        let tree_host = self.spawn_host(cx);
-        let code = self.tab_code();
+        // No path here: the breadcrumbs over the text show where the file is.
         let muted = cx.theme().muted_foreground;
         let active = self.active_buffer();
-        let path_text: Option<SharedString> = code.map(|c| {
-            let repo = c
-                .roots
-                .first()
-                .and_then(|r| r.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            match active {
-                Some(f) if f.untitled.is_some() => f.label(),
-                Some(f) if f.host.id() != tree_host => f.path.display().to_string().into(),
-                Some(f) => {
-                    let rel = c
-                        .roots
-                        .iter()
-                        .find_map(|r| f.path.strip_prefix(r).ok())
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| f.label().to_string());
-                    format!("{repo} › {rel}").into()
-                }
-                None => repo.into(),
-            }
-        });
         let cursor: Option<SharedString> = active.map(|f| {
-            let pos = f.input.read(cx).cursor_position();
-            t_fmt(
+            let input = f.input.read(cx);
+            let pos = input.cursor_position();
+            let ln_col = t_fmt(
                 L10nKey::EditorLnCol,
                 &[
                     ("line", &(pos.line + 1).to_string()),
                     ("column", &(pos.character + 1).to_string()),
                 ],
-            )
-            .into()
+            );
+            // Multi-cursor: the position is the primary caret's, the count
+            // says there are more.
+            match input.selection_count() {
+                1 => ln_col.into(),
+                n => {
+                    let n = n.to_string();
+                    format!(
+                        "{ln_col} {}",
+                        t_fmt(L10nKey::EditorSelections, &[("n", &n)])
+                    )
+                    .into()
+                }
+            }
         });
         let wrap: Option<bool> = active.map(|f| f.wrap);
         let is_markdown = active.is_some_and(|f| f.language() == "markdown");
@@ -3261,51 +3616,86 @@ impl Tty7App {
         });
         let line_ending: Option<&'static str> = active.map(|f| f.format.line_ending.label());
         let encoding: Option<SharedString> = active.map(|f| f.format.encoding_label().into());
+        let language: Option<&'static str> = active.and_then(|f| language_label(f.language()));
+        let (lsp_lead, lsp_tail) = match self.render_lsp_status(cx) {
+            Some((el, true)) => (Some(el), None),
+            Some((el, false)) => (None, Some(el)),
+            None => (None, None),
+        };
 
         // Metadata, not a toolbar: caption ink on the plane's own fill, set
         // off by a hairline in the divider tone rather than a control border.
+        // The readouts that do something answer the pointer with a soft fill
+        // and body ink; the rest are plain text in the same row.
+        let fg = cx.theme().foreground;
+        let hover = cx.theme().muted;
+        let item = |id: &'static str, label: SharedString| {
+            div()
+                .id(id)
+                .flex_none()
+                .h(px(20.))
+                .px(px(4.))
+                .mx(px(-4.))
+                .flex()
+                .items_center()
+                .rounded(px(4.))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover).text_color(fg))
+                .child(label)
+        };
         h_flex()
             .flex_none()
             .w_full()
-            .h(px(26.))
+            .h(px(28.))
             .items_center()
-            .gap_3()
+            .gap(px(14.))
             .px(px(crate::ui::app::CONTENT_INSET))
             .border_t(crate::ui::theme::hairline(window))
             .border_color(cx.theme().sidebar_border)
-            .text_size(gpui::rems(crate::ui::right_panel::META))
+            .text_size(gpui::rems(11.5 / 16.))
             .text_color(muted)
-            .when_some(path_text, |this, t| {
-                this.child(div().min_w_0().text_ellipsis().child(t))
-            })
+            .whitespace_nowrap()
+            .children(lsp_lead)
             .child(div().flex_1())
+            // The counts open the Problems list.
+            .children(lsp_tail.map(|status| {
+                div()
+                    .id("status-problems")
+                    .flex_none()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_editor_problems(cx)))
+                    .child(status)
+            }))
             .when(is_markdown, |this| {
+                let label = if preview {
+                    t(L10nKey::EditorEdit)
+                } else {
+                    t(L10nKey::EditorPreview)
+                };
                 this.child(
-                    Button::new("status-md-preview")
-                        .label(if preview {
-                            t(L10nKey::EditorEdit)
-                        } else {
-                            t(L10nKey::EditorPreview)
-                        })
-                        .custom(crate::ui::tab_strip::chrome_tile_variant(cx))
-                        .xsmall()
+                    item("status-md-preview", label.into())
                         .on_click(cx.listener(|this, _, _w, cx| this.toggle_document_preview(cx))),
                 )
             })
             .when_some(wrap, |this, wrap| {
+                let label = if wrap {
+                    t(L10nKey::EditorWrapOn)
+                } else {
+                    t(L10nKey::EditorWrapOff)
+                };
+                this.child(item("status-wrap", label.into()).on_click(
+                    cx.listener(|this, _, window, cx| this.toggle_document_wrap(window, cx)),
+                ))
+            })
+            // Tabular figures, so the position does not jitter sideways as
+            // the caret walks from line 9 to line 10. A click asks for a line
+            // to go to.
+            .when_some(cursor, |this, t| {
                 this.child(
-                    Button::new("status-wrap")
-                        .label(if wrap {
-                            t(L10nKey::EditorWrapOn)
-                        } else {
-                            t(L10nKey::EditorWrapOff)
-                        })
-                        .custom(crate::ui::tab_strip::chrome_tile_variant(cx))
-                        .xsmall()
+                    item("status-cursor", t)
+                        .font_features(crate::ui::theme::tabular_figures())
                         .on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.toggle_document_wrap(window, cx)
-                            }),
+                            cx.listener(|this, _, window, cx| this.editor_go_to_line(window, cx)),
                         ),
                 )
             })
@@ -3313,22 +3703,11 @@ impl Tty7App {
             .when_some(encoding, |this, t| this.child(div().flex_none().child(t)))
             .when_some(line_ending, |this, eol| {
                 this.child(
-                    Button::new("status-eol")
-                        .label(eol)
-                        .custom(crate::ui::tab_strip::chrome_tile_variant(cx))
-                        .xsmall()
+                    item("status-eol", eol.into())
                         .on_click(cx.listener(|this, _, _w, cx| this.toggle_line_ending(cx))),
                 )
             })
-            // Tabular figures, so the position does not jitter sideways as
-            // the caret walks from line 9 to line 10.
-            .when_some(cursor, |this, t| {
-                this.child(
-                    div()
-                        .font_features(crate::ui::theme::tabular_figures())
-                        .child(t),
-                )
-            })
+            .when_some(language, |this, l| this.child(div().flex_none().child(l)))
     }
 
     fn render_editor_empty(&self, cx: &Context<Self>) -> gpui::Div {
@@ -3453,6 +3832,16 @@ impl Tty7App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A temp dir as the editor will see paths under it: through the local
+    /// host's `canonicalize`, the call `load_file` makes. That resolves
+    /// macOS's `/var` → `/private/var` and Windows' 8.3 short names
+    /// (`RUNNER~1`), and never answers in Windows' `\\?\` form.
+    pub(crate) fn test_real_dir(dir: &Path) -> PathBuf {
+        tty7_core::host::local::LocalHost::new()
+            .canonicalize(dir)
+            .unwrap()
+    }
 
     /// Handing a file the editor cannot read to the desktop is how a click
     /// opens a PNG. It must not be how a click runs a build's output.

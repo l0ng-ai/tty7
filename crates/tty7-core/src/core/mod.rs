@@ -19,6 +19,7 @@ pub mod paste;
 pub mod path_spelling;
 pub mod proc;
 pub mod session;
+pub mod shell_quote;
 pub mod shells;
 #[allow(dead_code)]
 pub mod ssh_profile;

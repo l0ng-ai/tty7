@@ -284,6 +284,11 @@ pub(super) fn logical_line_at<T: EventListener>(
     if click.column.0 >= cols {
         return None;
     }
+    // Only a link is worth reading across a hard break, and a renderer that
+    // wrapped text inside a table cell has left nothing but hard breaks.
+    if bridge_hard_wrap && let Some(cell) = table_cell_at(term, click) {
+        return Some(cell);
+    }
     let grid = term.grid();
     let last_col = Column(cols - 1);
     let top = term.topmost_line();
@@ -298,25 +303,128 @@ pub(super) fn logical_line_at<T: EventListener>(
     };
     let continues = |line: Line| wraps(line) || hard(line);
 
-    let mut start_line = click.line;
+    let (start_line, end_line) = run_of_rows(click.line, top, bottom, continues);
+    let rows = (start_line.0..=end_line.0).map(|line| (Line(line), Column(0), last_col));
+    read_rows(term, click, rows)
+}
+
+/// What a table's renderer draws between cells. Only the box-drawing ones: a
+/// bare `|` is a shell pipe or a markdown source line far more often than it
+/// is a border.
+const CELL_BORDERS: [char; 3] = ['│', '┃', '║'];
+
+/// The text of the table cell under `click`, gathered from every row the
+/// table's renderer wrapped it onto.
+///
+/// It is the same stitching [`logical_line_at`] does for a whole row, only
+/// inside the cell's own columns: a row carries on into the next when its
+/// text runs up to the cell's right border and the next row's picks up at
+/// the left one, link characters on both sides of the break. The border
+/// columns have to line up too, which is what stops the walk at a `├─┼`
+/// rule or the table's edge.
+///
+/// A cell that fits on one row is left to the ordinary reading, so a table
+/// changes nothing until it actually wraps something.
+fn table_cell_at<T: EventListener>(
+    term: &Term<T>,
+    click: Point,
+) -> Option<(String, Vec<Point>, usize)> {
+    let grid = term.grid();
+    let cols = term.columns();
+    let is_border = |line: Line, col: usize| CELL_BORDERS.contains(&grid[line][Column(col)].c);
+    if is_border(click.line, click.column.0) {
+        return None;
+    }
+    let left = (0..click.column.0)
+        .rev()
+        .find(|&col| is_border(click.line, col))?;
+    let right = (click.column.0 + 1..cols).find(|&col| is_border(click.line, col))?;
+
+    // The written part of one row of the cell, padding trimmed off, or
+    // nothing when that row is not part of this cell.
+    let content = |line: Line| -> Option<(usize, usize)> {
+        if !(is_border(line, left) && is_border(line, right)) {
+            return None;
+        }
+        let written = |col: usize| {
+            let cell = &grid[line][Column(col)];
+            cell.c != ' ' || cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+        };
+        let first = (left + 1..right).find(|&col| written(col))?;
+        let last = (left + 1..right).rev().find(|&col| written(col))?;
+        Some((first, last))
+    };
+    let top = term.topmost_line();
+    let bottom = term.bottommost_line();
+    let is_link_char = |c: char| super::search::is_url_char(c);
+    let continues = |line: Line| {
+        line < bottom && {
+            let next = line + 1;
+            match (content(line), content(next)) {
+                (Some((_, last)), Some((first, _))) => {
+                    let head = grid[next][Column(first)].c;
+                    // One column of padding either side is what every
+                    // renderer leaves; a row that stops short of that ended
+                    // on its own.
+                    last + 2 >= right
+                        && first <= left + 2
+                        && is_link_char(grid[line][Column(last)].c)
+                        && is_link_char(head)
+                        && head != '@'
+                }
+                _ => false,
+            }
+        }
+    };
+
+    let (start_line, end_line) = run_of_rows(click.line, top, bottom, continues);
+    if start_line == end_line {
+        return None;
+    }
+    let rows = (start_line.0..=end_line.0).filter_map(|line| {
+        let line = Line(line);
+        let (first, last) = content(line)?;
+        Some((line, Column(first), Column(last)))
+    });
+    read_rows(term, click, rows)
+}
+
+/// The rows `click` shares a line of text with: every row above that
+/// `continues` into the next, and every row below that one continues into.
+fn run_of_rows(
+    click: Line,
+    top: Line,
+    bottom: Line,
+    continues: impl Fn(Line) -> bool,
+) -> (Line, Line) {
+    let mut start_line = click;
     let mut guard = 0;
     while start_line > top && guard < MAX_WRAP_ROWS && continues(start_line - 1) {
         start_line -= 1;
         guard += 1;
     }
-    let mut end_line = click.line;
+    let mut end_line = click;
     guard = 0;
     while end_line < bottom && guard < MAX_WRAP_ROWS && continues(end_line) {
         end_line += 1;
         guard += 1;
     }
+    (start_line, end_line)
+}
 
+/// Reads the given stretch of each row, in order, as one string: its text,
+/// the grid point of every character in it, and which of those is `click`.
+fn read_rows<T: EventListener>(
+    term: &Term<T>,
+    click: Point,
+    rows: impl Iterator<Item = (Line, Column, Column)>,
+) -> Option<(String, Vec<Point>, usize)> {
+    let grid = term.grid();
     let mut text = String::new();
     let mut points = Vec::new();
     let mut click_idx = None;
-    let mut line = start_line;
-    while line <= end_line {
-        for col in 0..cols {
+    for (line, from, to) in rows {
+        for col in from.0..=to.0 {
             let cell = &grid[line][Column(col)];
             let p = Point::new(line, Column(col));
             if cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
@@ -337,10 +445,50 @@ pub(super) fn logical_line_at<T: EventListener>(
             text.push(cell.c);
             points.push(p);
         }
-        line += 1;
     }
     let click_idx = click_idx.filter(|&i| i < points.len())?;
     Some((text, points, click_idx))
+}
+
+/// The cells `points` covers, as one run per row — what an underline has to
+/// paint when those points are not one stretch of the grid. A wide glyph at
+/// the end of a run takes its spacer column along.
+pub(super) fn row_runs<T: EventListener>(term: &Term<T>, points: &[Point]) -> Vec<(Point, Point)> {
+    let mut runs: Vec<(Point, Point)> = Vec::new();
+    for &p in points {
+        match runs.last_mut() {
+            Some((_, end)) if end.line == p.line => *end = p,
+            _ => runs.push((p, p)),
+        }
+    }
+    let grid = term.grid();
+    for (_, end) in &mut runs {
+        let next = end.column + 1;
+        if next.0 < term.columns() && grid[end.line][next].flags.contains(Flags::WIDE_CHAR_SPACER) {
+            *end = Point::new(end.line, next);
+        }
+    }
+    runs
+}
+
+/// Every cell from `start` to `end` in reading order, as one run per row.
+pub(super) fn grid_runs(start: Point, end: Point, cols: usize) -> Vec<(Point, Point)> {
+    (start.line.0..=end.line.0)
+        .map(|line| {
+            let line = Line(line);
+            let from = if line == start.line {
+                start.column
+            } else {
+                Column(0)
+            };
+            let to = if line == end.line {
+                end.column
+            } else {
+                Column(cols.saturating_sub(1))
+            };
+            (Point::new(line, from), Point::new(line, to))
+        })
+        .collect()
 }
 
 pub(super) fn pair_range(chars: &[char], click: usize) -> Option<(usize, usize)> {
@@ -745,6 +893,92 @@ mod tests {
         let (_s, _e, url) =
             crate::terminal::search::url_span_at(&text, idx).expect("url span under click");
         assert_eq!(url, "https://user1234@ex.com/z");
+    }
+
+    /// A table renderer wraps a long cell by hand: every row is a hard
+    /// newline, framed by borders, with the next cell's text in between.
+    /// This is the shape Claude Code prints a markdown table in.
+    const TABLE: [&str; 8] = [
+        "┌───────────────────────────────┬──────────┐",
+        "│ report.xlsx (https://s3.examp │ 10/2     │",
+        "│ le.com/a/b.xlsx?Sig=xy%3D&Exp │ 20:13    │",
+        "│ ires=179)（美妆）             │          │",
+        "├───────────────────────────────┼──────────┤",
+        "│ short https://a.com           │ 10/2     │",
+        "│ tail.com                      │          │",
+        "└───────────────────────────────┴──────────┘",
+    ];
+
+    const TABLE_URL: &str = "https://s3.example.com/a/b.xlsx?Sig=xy%3D&Expires=179";
+
+    fn table_term() -> Term<VoidListener> {
+        term_with(50, 8, &TABLE.join("\r\n"))
+    }
+
+    fn table_col(line: usize, needle: &str) -> usize {
+        let row = TABLE[line];
+        row[..row.find(needle).expect("needle in fixture")]
+            .chars()
+            .count()
+    }
+
+    fn table_link(term: &Term<VoidListener>, line: usize, col: usize) -> Option<String> {
+        let click = Point::new(Line(line as i32), Column(col));
+        let (text, _points, idx) = logical_line_at(term, click, true)?;
+        crate::terminal::search::url_span_at(&text, idx).map(|(_, _, url)| url)
+    }
+
+    #[test]
+    fn a_url_a_table_wrapped_inside_its_cell_is_one_link() {
+        let term = table_term();
+        for (line, needle, where_) in [
+            (1, "https", "the row it starts on"),
+            (2, "Exp", "the middle row"),
+            (3, "ires", "the row it ends on"),
+        ] {
+            assert_eq!(
+                table_link(&term, line, table_col(line, needle)).as_deref(),
+                Some(TABLE_URL),
+                "{where_} opens the whole URL"
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_cell_underlines_only_its_own_columns() {
+        let term = table_term();
+        let click = Point::new(Line(2), Column(4));
+        let (text, points, idx) = logical_line_at(&term, click, true).expect("cell text");
+        let (s, e, _) = crate::terminal::search::url_span_at(&text, idx).expect("a url");
+        let runs: Vec<_> = row_runs(&term, &points[s..=e])
+            .iter()
+            .map(|(a, b)| (a.line.0, a.column.0, b.column.0))
+            .collect();
+        assert_eq!(
+            runs,
+            vec![(1, table_col(1, "https"), 30), (2, 2, 30), (3, 2, 9)]
+        );
+    }
+
+    #[test]
+    fn a_table_cell_that_stops_short_of_its_border_is_not_wrapped() {
+        let term = table_term();
+        assert_eq!(
+            table_link(&term, 5, table_col(5, "a.com")).as_deref(),
+            Some("https://a.com"),
+            "the next row's text is its own line, not the URL's tail"
+        );
+    }
+
+    #[test]
+    fn double_click_does_not_read_across_table_rows() {
+        let term = table_term();
+        let click = Point::new(Line(2), Column(4));
+        let (text, _points, _idx) = logical_line_at(&term, click, false).expect("row text");
+        assert!(
+            !text.contains("https"),
+            "selection keeps to its row: {text:?}"
+        );
     }
 
     #[test]

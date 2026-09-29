@@ -90,7 +90,23 @@ pub(crate) struct Catalog {
     /// The project's files, from the window's last walk of it. A fresh walk
     /// may land after the search opens (`Tty7App::refresh_file_index`).
     pub files: FileList,
+    /// The symbols of the file in front of the editor, in document order,
+    /// each with how deep it sits — filled only for Go to Symbol
+    /// (`Tty7App::editor_go_to_symbol`).
+    pub symbols: Vec<(usize, Item)>,
+    /// What a language server found for Find References or a definition
+    /// with more than one answer (`ui::lsp`), in the order to list them.
+    pub locations: Vec<Item>,
+    /// What the front file's language server found across the project for
+    /// the Symbols tab's query (`ui::lsp`), listed after the file's own.
+    pub project_symbols: Vec<Item>,
+    /// Asked with every query the Symbols tab is given; its answer comes
+    /// back through `SearchView::set_project_symbols`.
+    pub live_query: Option<LiveQuery>,
 }
+
+/// Something that answers a query later — a language server.
+pub(crate) type LiveQuery = std::rc::Rc<dyn Fn(&str, &mut App)>;
 
 impl Catalog {
     pub(crate) fn new(mut actions: Vec<Item>, terminals: Vec<Item>, hosts: Vec<Item>) -> Self {
@@ -109,6 +125,10 @@ impl Catalog {
             sessions: Vec::new(),
             sessions_here: 0,
             files: FileList::default(),
+            symbols: Vec::new(),
+            locations: Vec::new(),
+            project_symbols: Vec::new(),
+            live_query: None,
         }
     }
 
@@ -123,12 +143,17 @@ impl Catalog {
             })),
             SearchTab::Hosts => Some(Box::new(Hosts(&self.hosts))),
             SearchTab::Files => Some(Box::new(Files(&self.files))),
+            SearchTab::Symbols => Some(Box::new(Symbols(&self.symbols))),
+            SearchTab::Locations => Some(Box::new(Locations(&self.locations))),
         }
     }
 
     /// The sections `tab` shows for `query`.
     pub(crate) fn sections(&self, tab: SearchTab, query: &str, cx: &App) -> Vec<Section> {
         let query = query.trim();
+        if tab == SearchTab::Symbols && !query.is_empty() && !self.project_symbols.is_empty() {
+            return self.symbols_here_and_in_the_project(query, cx);
+        }
         if let Some(source) = self.source(tab) {
             return match query.is_empty() {
                 true => source.browse(cx),
@@ -136,6 +161,29 @@ impl Catalog {
             };
         }
         self.all(query, cx)
+    }
+
+    /// A Symbols search once the language server has answered: the file's
+    /// own symbols first, since the one in front is the likeliest meant, then
+    /// the project's — each under a heading only when both have rows.
+    fn symbols_here_and_in_the_project(&self, query: &str, cx: &App) -> Vec<Section> {
+        let rows = |hits: Vec<(i32, Item)>| -> Vec<Row> {
+            hits.into_iter().map(|(_, item)| Row::Item(item)).collect()
+        };
+        let here = rows(Symbols(&self.symbols).search(query, cx));
+        let everywhere = rows(rank(&self.project_symbols, query, |_| 0));
+        let both = !here.is_empty() && !everywhere.is_empty();
+        [
+            (L10nKey::SearchSectionThisFile, here),
+            (L10nKey::SearchSectionProject, everywhere),
+        ]
+        .into_iter()
+        .filter(|(_, rows)| !rows.is_empty())
+        .map(|(title, rows)| Section {
+            title: both.then(|| t(title).into()),
+            rows,
+        })
+        .collect()
     }
 
     /// Every tab's top rows, each under the tab's name.
@@ -421,6 +469,83 @@ impl Source for Sessions<'_> {
 /// A typed address outranks any saved host: typing one is saying where to go.
 const TYPED_ADDRESS_SCORE: i32 = 10_000;
 
+/// Go to Symbol's rows. Browsing shows the file's shape, each symbol
+/// indented under what holds it; a search ranks them flat, each naming what
+/// holds it instead.
+struct Symbols<'a>(&'a [(usize, Item)]);
+
+/// How far one level of nesting indents a symbol while browsing.
+const SYMBOL_INDENT: &str = "    ";
+
+impl Source for Symbols<'_> {
+    fn tab(&self) -> SearchTab {
+        SearchTab::Symbols
+    }
+
+    fn browse(&self, _cx: &App) -> Vec<Section> {
+        if self.0.is_empty() {
+            return Vec::new();
+        }
+        vec![Section {
+            title: None,
+            rows: self
+                .0
+                .iter()
+                .map(|(depth, item)| {
+                    let mut item = item.clone();
+                    item.title = format!("{}{}", SYMBOL_INDENT.repeat(*depth), item.title);
+                    item.subtitle = None;
+                    Row::Item(item)
+                })
+                .collect(),
+        }]
+    }
+
+    fn highlights(&self, _cx: &App) -> Vec<Item> {
+        Vec::new()
+    }
+
+    fn on_the_empty_all_tab(&self) -> bool {
+        false
+    }
+
+    fn search(&self, query: &str, _cx: &App) -> Vec<(i32, Item)> {
+        let items: Vec<Item> = self.0.iter().map(|(_, item)| item.clone()).collect();
+        rank(&items, query, |_| 0)
+    }
+}
+
+/// Find References' rows: listed as found, filtered by path and line text.
+struct Locations<'a>(&'a [Item]);
+
+impl Source for Locations<'_> {
+    fn tab(&self) -> SearchTab {
+        SearchTab::Locations
+    }
+
+    fn browse(&self, _cx: &App) -> Vec<Section> {
+        if self.0.is_empty() {
+            return Vec::new();
+        }
+        vec![Section {
+            title: None,
+            rows: self.0.iter().cloned().map(Row::Item).collect(),
+        }]
+    }
+
+    fn highlights(&self, _cx: &App) -> Vec<Item> {
+        Vec::new()
+    }
+
+    fn on_the_empty_all_tab(&self) -> bool {
+        false
+    }
+
+    fn search(&self, query: &str, _cx: &App) -> Vec<(i32, Item)> {
+        rank(self.0, query, |_| 0)
+    }
+}
+
 struct Hosts<'a>(&'a [Item]);
 
 impl Source for Hosts<'_> {
@@ -600,6 +725,71 @@ mod tests {
                 Row::More { tab, hidden } => format!("+{hidden} {tab:?}"),
             })
             .collect()
+    }
+
+    /// Symbols lists the file's own first; what the language server found
+    /// across the project follows, and headings appear only when both do.
+    #[gpui::test]
+    fn symbols_lists_the_file_then_the_project(cx: &mut TestAppContext) {
+        with_config(cx);
+        let here = |name: &str, line| {
+            (
+                0,
+                Item::new(name, CommandKind::GoToSymbol { line, column: 0 }),
+            )
+        };
+        let there = |name: &str| {
+            Item::new(
+                name,
+                CommandKind::GoToLocation {
+                    path: "/p/other.rs".into(),
+                    line: 0,
+                    column: 0,
+                },
+            )
+        };
+        let mut catalog = Catalog::new(Vec::new(), Vec::new(), Vec::new());
+        catalog.symbols = vec![here("render", 3), here("Config", 9)];
+        let shape = |catalog: &Catalog, query: &str, cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                catalog
+                    .sections(SearchTab::Symbols, query, cx)
+                    .into_iter()
+                    .map(|s| {
+                        let rows: Vec<String> = s
+                            .rows
+                            .iter()
+                            .filter_map(|r| r.item().map(|i| i.title.clone()))
+                            .collect();
+                        (s.title.map(|t| t.to_string()), rows)
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        // Before the server answers: the file alone, untitled.
+        assert_eq!(
+            shape(&catalog, "render", cx),
+            vec![(None, vec!["render".to_string()])]
+        );
+        catalog.project_symbols = vec![there("render_row"), there("unrelated")];
+        assert_eq!(
+            shape(&catalog, "render", cx),
+            vec![
+                (Some("In This File".into()), vec!["render".to_string()]),
+                (Some("Project".into()), vec!["render_row".to_string()]),
+            ]
+        );
+        // Nothing here: the project's rows need no heading.
+        assert_eq!(
+            shape(&catalog, "unrelated", cx),
+            vec![(None, vec!["unrelated".to_string()])]
+        );
+        // Nothing typed: the file's outline, never the project.
+        assert!(
+            shape(&catalog, "", cx)
+                .iter()
+                .all(|(_, rows)| !rows.contains(&"render_row".to_string()))
+        );
     }
 
     #[gpui::test]

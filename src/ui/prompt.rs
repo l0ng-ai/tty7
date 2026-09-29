@@ -49,6 +49,11 @@ fn build(
 /// worktree form, with three fields, is 440.
 const ALERT_W: f32 = 360.;
 
+/// A third answer does not fit beside the other two at [`ALERT_W`]: the
+/// update prompt's "Update and relaunch / Install on Next Launch / Later"
+/// needs about 400 of button row, and the card clipped it.
+const ALERT_W_WIDE: f32 = 460.;
+
 /// How far down the alert sits, at most.
 const ALERT_TOP: f32 = 180.;
 
@@ -139,6 +144,11 @@ impl Render for TextPrompt {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        // gpui paints the prompt as a root of its own, beside the window's
+        // `Root` rather than inside it, so nothing it sets is inherited here:
+        // left alone the card is set in gpui's `.SystemUIFont`, not the
+        // Interface font the rest of the chrome uses (#920).
+        let font_family = theme.font_family.clone();
         let rungs = dialog::popover_rungs(cx);
 
         // Answer 0 goes rightmost, where the native dialogs put it and where
@@ -186,14 +196,23 @@ impl Render for TextPrompt {
                     .child(detail)
             }));
 
+        // Buttons never shrink, so a row too long for the card — a locale
+        // with longer labels than the width was sized for — wraps onto a
+        // second line, still flush right, rather than running off the edge.
         let answers = h_flex()
+            .flex_wrap()
+            .justify_end()
             .items_center()
             .gap(px(8.))
             .children(apart)
             .child(div().flex_1())
             .children(packed);
 
-        let card = dialog::card(ALERT_W, cx)
+        let width = match self.answers.len() {
+            0..=2 => ALERT_W,
+            _ => ALERT_W_WIDE,
+        };
+        let card = dialog::card(width, cx)
             .max_w(gpui::relative(0.9))
             .gap(px(16.))
             .pt(px(20.))
@@ -211,6 +230,7 @@ impl Render for TextPrompt {
             .id("text-prompt")
             .track_focus(&self.focus)
             .size_full()
+            .font_family(font_family)
             // Nothing under the scrim answers the pointer while the question
             // is up: the prompt is painted over the window, not into it, and
             // gpui hands a click to every hitbox under it that is not
@@ -314,6 +334,36 @@ mod tests {
             assert!(p.stands_apart(2));
             assert_eq!(p.answer_for_key("escape"), Some(1));
         });
+    }
+
+    /// #920. The quit-and-stop question is asked through `window.prompt`, and
+    /// with the builder installed it must never reach the platform — on Linux
+    /// that meant gpui's fallback, a white box that clipped the text to one
+    /// line and ignored the theme. Return still answers it.
+    #[gpui::test]
+    fn the_quit_prompt_is_drawn_by_the_app_not_the_platform(cx: &mut TestAppContext) {
+        use crate::ui::i18n::{L10nKey, t};
+
+        let (_app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let mut answer = vcx.update(|window, cx| {
+            super::install(cx);
+            window.prompt(
+                gpui::PromptLevel::Warning,
+                t(L10nKey::QuitStopServerTitle),
+                Some(t(L10nKey::QuitStopServerBody)),
+                &crate::ui::confirm_answers(t(L10nKey::QuitAndStop), t(L10nKey::Cancel)),
+                cx,
+            )
+        });
+        vcx.run_until_parked();
+        assert!(
+            !vcx.has_pending_prompt(),
+            "the quit prompt fell through to the platform dialog"
+        );
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert_eq!(answer.try_recv().ok().flatten(), Some(0));
     }
 
     #[gpui::test]

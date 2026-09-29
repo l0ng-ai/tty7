@@ -1605,6 +1605,11 @@ impl Tty7App {
             crate::ui::tray::init(cx);
         }
         app.refresh_shells(cx);
+        // Backstop for every other way a window goes away (a workspace
+        // closed from elsewhere): its language-server documents go with it.
+        let app_id = cx.entity_id();
+        cx.on_release(move |_, cx| crate::ui::lsp::LspStore::sync_window(app_id, Vec::new(), cx))
+            .detach();
         cx.on_app_quit(|app, cx| {
             app.save_session(cx);
             crate::core::window_state::WindowState::from_bounds(app.window_bounds).save();
@@ -1670,7 +1675,10 @@ impl Tty7App {
             if asked {
                 return false;
             }
-            app.update(cx, |app, cx| app.prepare_window_close(cx));
+            app.update(cx, |app, cx| {
+                app.prepare_window_close(cx);
+                app.lsp_window_closed(cx);
+            });
             true
         });
 
@@ -1772,6 +1780,7 @@ impl Tty7App {
             return;
         }
         self.prepare_window_close(cx);
+        self.lsp_window_closed(cx);
         window.remove_window();
     }
 
@@ -4591,7 +4600,7 @@ impl Tty7App {
             (None, code) => host.code = code,
             // Both had an editor: the files come along into this tab's strip
             // rather than being dropped with the tab that brought them.
-            (Some(code), Some(theirs)) => code.adopt(&theirs.files),
+            (Some(code), Some(theirs)) => code.adopt(&theirs.all_files()),
             (Some(_), None) => {}
         }
         if host.diff_overlay.is_none() {
@@ -5234,8 +5243,16 @@ impl Tty7App {
             move |_this, found, cx| {
                 let Some(wt) = found else { return };
                 let path = wt.path.display().to_string();
+                let name = wt
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 let detail = if wt.dirty {
-                    t_fmt(L10nKey::AppWorktreeRemoveDetailDirty, &[("path", &path)])
+                    t_fmt(
+                        L10nKey::AppWorktreeRemoveDetailDirty,
+                        &[("path", &path), ("name", &name)],
+                    )
                 } else {
                     t_fmt(L10nKey::AppWorktreeRemoveDetailClean, &[("path", &path)])
                 };
@@ -5274,8 +5291,15 @@ impl Tty7App {
                             cx,
                             move |h| crate::core::worktree::remove(h, &wt, force),
                             move |_this, result, window, cx| match result {
-                                Ok(()) => window.push_notification(
-                                    t_fmt(L10nKey::AppWorktreeRemoved, &[("branch", &branch)]),
+                                Ok(removed) => window.push_notification(
+                                    t_fmt(
+                                        if removed.branch_kept {
+                                            L10nKey::AppWorktreeRemovedBranchKept
+                                        } else {
+                                            L10nKey::AppWorktreeRemoved
+                                        },
+                                        &[("branch", &branch)],
+                                    ),
                                     cx,
                                 ),
                                 Err(e) => window.push_notification(
@@ -5624,9 +5648,12 @@ impl Tty7App {
         );
     }
 
+    /// Open `wt` in a new tab named after its branch, typing `first` — its
+    /// setup and agent — into the shell there.
     pub(crate) fn open_worktree_tab(
         &mut self,
         wt: crate::core::worktree::NewWorktree,
+        first: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -5653,6 +5680,9 @@ impl Tty7App {
                 return;
             }
         };
+        if let Some(first) = first {
+            crate::ui::agent_launch::run_when_ready(&view, first, cx);
+        }
         self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
@@ -5888,6 +5918,9 @@ impl Tty7App {
             },
         );
 
+        // The editor's navigation, while there is a file in front of it.
+        actions.extend(self.editor_palette_items());
+
         // Groups are something the sidebar draws, so they are offered only
         // while the tabs are in it. Opening a folder as a group asks the
         // system picker, which browses this computer: a path picked there
@@ -5912,6 +5945,37 @@ impl Tty7App {
                     .in_group(CommandGroup::TabsPanes),
                 );
             }
+        }
+
+        // The editor's text commands, while there is a buffer to run them on.
+        if self.editor_can_dispatch() {
+            actions.extend(
+                [
+                    Item::localized(
+                        L10nKey::CmdEditorTransformUppercase,
+                        CommandKind::EditorTransformUppercase,
+                    ),
+                    Item::localized(
+                        L10nKey::CmdEditorTransformLowercase,
+                        CommandKind::EditorTransformLowercase,
+                    ),
+                    Item::localized(
+                        L10nKey::CmdEditorTransformTitleCase,
+                        CommandKind::EditorTransformTitleCase,
+                    ),
+                    Item::localized(
+                        L10nKey::CmdEditorTrimTrailingWhitespace,
+                        CommandKind::EditorTrimTrailingWhitespace,
+                    ),
+                    Item::localized(L10nKey::CmdEditorJoinLines, CommandKind::EditorJoinLines),
+                    Item::localized(
+                        L10nKey::CmdEditorRemoveSurroundingBrackets,
+                        CommandKind::EditorRemoveSurroundingBrackets,
+                    ),
+                ]
+                .into_iter()
+                .map(|item| item.in_group(CommandGroup::View)),
+            );
         }
 
         // Offered only where it would do something. A connection opened from a
@@ -6056,6 +6120,10 @@ impl Tty7App {
     ) {
         let catalog = self.search_catalog(window, cx);
         let view = cx.new(|cx| SearchView::new(catalog, tab, query, window, cx));
+        if tab.in_editor_row() {
+            let tabs = self.editor_search_tabs();
+            view.update(cx, |view, cx| view.set_editor_tabs(tabs, cx));
+        }
         self.search_sub = Some(cx.subscribe_in(&view, window, Self::on_search_event));
         self.search = Some(view.clone());
         self.refresh_search_sessions(view, window, cx);
@@ -6131,6 +6199,13 @@ impl Tty7App {
                 if matches!(kind, CommandKind::SetTheme(_)) {
                     self.theme_preview_restore = None;
                 }
+                // Likewise the symbol Go to Symbol has the caret on.
+                if matches!(
+                    kind,
+                    CommandKind::GoToSymbol { .. } | CommandKind::GoToLocation { .. }
+                ) {
+                    self.editor_symbol_preview_commit();
+                }
                 self.close_search(window, cx);
                 self.run_command(kind, window, cx);
             }
@@ -6143,6 +6218,22 @@ impl Tty7App {
                 }
             }
             SearchEvent::CancelThemePreview => self.cancel_preset_preview(window, cx),
+            SearchEvent::PreviewSymbol { line, column } => {
+                self.editor_symbol_preview(*line, *column, cx)
+            }
+            SearchEvent::PreviewLocation { path, line, column } => {
+                self.lsp_preview_location(path, *line, *column, cx)
+            }
+            // Each editor tab is opened the way its own chord opens it, so
+            // it arrives set up: the outline around the caret, the server
+            // to ask. Closing first puts back a caret Go to Symbol moved.
+            SearchEvent::SwitchEditorTab(tab) => {
+                self.close_search(window, cx);
+                match tab {
+                    SearchTab::Symbols => self.editor_go_to_symbol(window, cx),
+                    _ => self.open_search(SearchTab::Files, "", window, cx),
+                }
+            }
         }
     }
 
@@ -6153,6 +6244,9 @@ impl Tty7App {
         // other than confirming the pick puts the old one back.
         self.cancel_preset_preview(window, cx);
         self.focus_active(window, cx);
+        // Nor was a symbol Go to Symbol previewed: the caret goes back, and
+        // the keyboard with it to the editor it came from.
+        self.editor_symbol_preview_cancel(window, cx);
         cx.notify();
     }
 
@@ -6303,6 +6397,34 @@ impl Tty7App {
             }
             ToggleDocumentPreview => self.toggle_document_preview(cx),
             ToggleDocumentWrap => self.toggle_document_wrap(window, cx),
+            EditorTransformUppercase => {
+                self.editor_dispatch(&gpui_component::input::TransformToUppercase, window, cx);
+            }
+            EditorTransformLowercase => {
+                self.editor_dispatch(&gpui_component::input::TransformToLowercase, window, cx);
+            }
+            EditorTransformTitleCase => {
+                self.editor_dispatch(&gpui_component::input::TransformToTitleCase, window, cx);
+            }
+            EditorTrimTrailingWhitespace => {
+                self.editor_dispatch(&gpui_component::input::TrimTrailingWhitespace, window, cx);
+            }
+            EditorJoinLines => {
+                self.editor_dispatch(&gpui_component::input::JoinLines, window, cx);
+            }
+            EditorRemoveSurroundingBrackets => {
+                self.editor_dispatch(
+                    &gpui_component::input::RemoveSurroundingBrackets,
+                    window,
+                    cx,
+                );
+            }
+            EditorGoToSymbol => self.editor_go_to_symbol(window, cx),
+            EditorNavigateBack => self.editor_navigate(false, window, cx),
+            EditorNavigateForward => self.editor_navigate(true, window, cx),
+            EditorSplitRight => {
+                self.editor_split(window, cx);
+            }
             RestartSshSession => self.restart_ssh_session(window, cx),
             SetTheme(i) => {
                 if let Some(id) = crate::ui::presets::all(cx).get(i).map(|t| t.id.clone()) {
@@ -6344,6 +6466,10 @@ impl Tty7App {
             QuickOpenFile => self.open_search(SearchTab::Files, "", window, cx),
             OpenFile { path, line, column } => {
                 self.open_indexed_file(&path, line, column, window, cx)
+            }
+            GoToSymbol { line, column } => self.editor_go_to_position(line, column, window, cx),
+            GoToLocation { path, line, column } => {
+                self.open_file_in_editor_at(&path, Some(line + 1), Some(column + 1), window, cx)
             }
             GoToTab { workspace, tab } => self.go_to_tab(workspace, tab, false, window, cx),
             ResumeSession {
@@ -6480,6 +6606,16 @@ impl Tty7App {
             }
             L10nKey::SettingsSidebarGrouping => {
                 self.set_sidebar_auto_grouping(defaults.sidebar_auto_grouping, cx)
+            }
+            L10nKey::SettingsEditorGitGutter => {
+                self.set_editor_git_gutter(defaults.editor_git_gutter, cx)
+            }
+            L10nKey::SettingsEditorLsp => self.set_editor_lsp(defaults.editor_lsp, cx),
+            L10nKey::SettingsEditorSoftWrap => {
+                self.set_editor_soft_wrap(defaults.editor_soft_wrap, cx)
+            }
+            L10nKey::SettingsEditorMarkdownPreview => {
+                self.set_editor_markdown_preview(defaults.editor_markdown_preview, cx)
             }
             L10nKey::SettingsNotifyOnCommandFinish => {
                 self.set_notify_mode(defaults.notify_on_command_finish, cx)
@@ -9409,8 +9545,78 @@ impl Render for Tty7App {
                     }
                     this.editor_go_to_line(window, cx)
                 }))
+                // The language-server commands (`ui::lsp`) belong to the
+                // editor only while it has the focus; F2 and F12 mean
+                // something to programs in the terminal too.
+                .on_action(cx.listener(|this, _: &EditorGoToDefinition, window, cx| {
+                    if !this.editor_has_focus(window, cx) {
+                        cx.propagate();
+                        return;
+                    }
+                    this.lsp_go_to_definition(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &EditorQuickFix, window, cx| {
+                    if !this.editor_has_focus(window, cx) {
+                        cx.propagate();
+                        return;
+                    }
+                    this.lsp_code_actions(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &EditorRenameSymbol, window, cx| {
+                    if !this.editor_has_focus(window, cx) {
+                        cx.propagate();
+                        return;
+                    }
+                    this.lsp_rename_start(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &EditorFormatDocument, window, cx| {
+                    if !this.editor_has_focus(window, cx) {
+                        cx.propagate();
+                        return;
+                    }
+                    this.lsp_format_document(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &EditorFindReferences, window, cx| {
+                    if !this.editor_has_focus(window, cx) {
+                        cx.propagate();
+                        return;
+                    }
+                    this.lsp_find_references(window, cx)
+                }))
                 .on_action(cx.listener(|this, _: &EditorNewFile, window, cx| {
                     this.editor_new_file(window, cx)
+                }))
+                // The gutter's change markers. Each one lets the chord through
+                // when the editor is not focused or has nothing to do.
+                .on_action(cx.listener(|this, _: &EditorNextChange, window, cx| {
+                    if !this.editor_gutter_step(true, window, cx) {
+                        cx.propagate();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &EditorPrevChange, window, cx| {
+                    if !this.editor_gutter_step(false, window, cx) {
+                        cx.propagate();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &EditorRevertChange, window, cx| {
+                    if !this.editor_gutter_revert_at_cursor(window, cx) {
+                        cx.propagate();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &ToggleEditorGitGutter, _, cx| {
+                    this.toggle_editor_git_gutter(cx)
+                }))
+                .on_action(cx.listener(|this, _: &EditorPeekChange, window, cx| {
+                    if !this.editor_gutter_peek_at_cursor(window, cx) {
+                        cx.propagate();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &ToggleEditorProblems, _, cx| {
+                    if !this.code_panel_visible() {
+                        cx.propagate();
+                        return;
+                    }
+                    this.toggle_editor_problems(cx)
                 }))
                 .on_action(
                     cx.listener(|this, _: &Quit, window, cx| this.quit_stop_sessions(window, cx)),
@@ -9516,6 +9722,7 @@ impl Render for Tty7App {
                 .children(self.render_switcher(window, cx))
                 .when_some(self.search.clone(), |this, search| this.child(search))
                 .children(gpui_component::Root::render_notification_layer(window, cx));
+        let root = Self::with_editor_text_commands(root, cx);
 
         if let Some(start) = prof {
             crate::ui::perf::record("window", start.elapsed());

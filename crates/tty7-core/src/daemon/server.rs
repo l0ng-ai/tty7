@@ -117,6 +117,27 @@ impl crate::host::server::PaneDirectory for Registry {
     }
 }
 
+/// How often panes are checked for an agent turn that has gone silent past
+/// [`crate::daemon::pane::AGENT_STALE_AFTER`]. The threshold is half an hour,
+/// so being up to a minute late to notice costs nothing.
+const AGENT_STALE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn spawn_agent_stale_sweep(registry: Arc<Registry>) {
+    let spawned = std::thread::Builder::new()
+        .name("tty7-agent-stale".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(AGENT_STALE_SWEEP_INTERVAL);
+                for pane in registry.all() {
+                    pane.expire_stale_agent();
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        log::warn!("could not start the agent status sweep: {e}");
+    }
+}
+
 const ORPHAN_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
 
 fn spawn_orphan_sweep(registry: Arc<Registry>) {
@@ -616,6 +637,7 @@ fn run_with(registry: Arc<Registry>, alone: bool) -> anyhow::Result<()> {
     }
 
     spawn_orphan_sweep(registry.clone());
+    spawn_agent_stale_sweep(registry.clone());
     // No sweeping here, deliberately — of either kind. Startup is the one
     // moment this process knows least: it owns no panes yet, and the windows
     // that know which of a dead daemon's files are still wanted cannot say so

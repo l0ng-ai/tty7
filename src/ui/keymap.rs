@@ -70,6 +70,89 @@ fn fixed_bindings() -> Vec<KeyBinding> {
     let search = Some(crate::ui::search::KEY_CONTEXT);
     bindings.push(KeyBinding::new("tab", SearchNextTab, search));
     bindings.push(KeyBinding::new("shift-tab", SearchPrevTab, search));
+    // The code editor's multi-cursor chords, laid down again after tty7's
+    // own table. gpui ranks a context-free binding as deep as the focused
+    // context, and breaks the tie by whichever was added last — so the copies
+    // gpui-component installs lose ⌘D to `SplitRight` and ⌘⌥↑/↓ to
+    // `FocusPaneUp`/`Down`, whose handlers sit on the workspace root and take
+    // the key before the editor is asked. Re-added here they win inside an
+    // `Input`; only the code editor handles them, so in any other text field
+    // gpui falls through to the pane binding next in line.
+    {
+        use gpui_component::input::{
+            AddCursorAbove, AddCursorBelow, SelectAllOccurrences, SelectNextOccurrence,
+        };
+        let input = Some("Input");
+        bindings.push(KeyBinding::new("secondary-d", SelectNextOccurrence, input));
+        bindings.push(KeyBinding::new(
+            "secondary-shift-l",
+            SelectAllOccurrences,
+            input,
+        ));
+        bindings.push(KeyBinding::new("secondary-alt-up", AddCursorAbove, input));
+        bindings.push(KeyBinding::new("secondary-alt-down", AddCursorBelow, input));
+        // ⌘K ⌘D: a chord whose first key is `ClearScrollback` on macOS. gpui
+        // drops a pending chord that ranks below a complete match, so this
+        // too has to come after tty7's table. Code editor only: in any other
+        // field ⌘K goes straight through, without waiting for a second key.
+        bindings.push(KeyBinding::new(
+            "secondary-k secondary-d",
+            gpui_component::input::SkipOccurrence,
+            Some(gpui_component::input::CODE_EDITOR_CONTEXT),
+        ));
+    }
+    // The language-server commands, on the keys VS Code taught everyone, and
+    // only inside a text field: F2 and F12 in a terminal belong to the
+    // program running there. The handlers act only for the code editor and
+    // let the key go on anywhere else. ⌘. / Ctrl+. needs nothing here: the
+    // editor binds it to the same code-action menu itself.
+    let input = Some("Input");
+    bindings.push(KeyBinding::new("f12", EditorGoToDefinition, input));
+    bindings.push(KeyBinding::new("f2", EditorRenameSymbol, input));
+    bindings.push(KeyBinding::new("shift-alt-f", EditorFormatDocument, input));
+    bindings.push(KeyBinding::new("shift-f12", EditorFindReferences, input));
+    // The gutter's change markers, on VS Code's chords. Only in an `Input`:
+    // a function key bound for the whole window would never reach the shell,
+    // and the handlers let the key through when the code editor is not the
+    // field that has it.
+    {
+        let input = Some("Input");
+        bindings.push(KeyBinding::new("alt-f5", EditorNextChange, input));
+        bindings.push(KeyBinding::new("shift-alt-f5", EditorPrevChange, input));
+        bindings.push(KeyBinding::new("alt-f3", EditorPeekChange, input));
+    }
+    // The code editor's line commands, for the same tie: ⌘/ is the shortcut
+    // sheet, ⌘↵ fullscreen, ⌘⇧↵ maximize and ⌥↑/⌥↓ pane focus off macOS, all
+    // context-free. Bound on `CodeEditor`, which only a multi-line code
+    // editor declares, so every other text field and the terminal keep the
+    // app's keys.
+    {
+        use gpui_component::input::{
+            CODE_EDITOR_CONTEXT, CopyLineDown, CopyLineUp, DeleteLine, InsertLineAbove,
+            InsertLineBelow, MoveLineDown, MoveLineUp, MoveToMatchingBracket, SelectLine,
+            ToggleBlockComment, ToggleLineComment,
+        };
+        let editor = Some(CODE_EDITOR_CONTEXT);
+        bindings.extend([
+            KeyBinding::new("secondary-/", ToggleLineComment, editor),
+            KeyBinding::new("alt-shift-a", ToggleBlockComment, editor),
+            KeyBinding::new("alt-up", MoveLineUp, editor),
+            KeyBinding::new("alt-down", MoveLineDown, editor),
+            KeyBinding::new("alt-shift-up", CopyLineUp, editor),
+            KeyBinding::new("alt-shift-down", CopyLineDown, editor),
+            KeyBinding::new("secondary-shift-k", DeleteLine, editor),
+            KeyBinding::new("secondary-enter", InsertLineBelow, editor),
+            KeyBinding::new("secondary-shift-enter", InsertLineAbove, editor),
+            KeyBinding::new("secondary-l", SelectLine, editor),
+            KeyBinding::new("secondary-shift-\\", MoveToMatchingBracket, editor),
+        ]);
+        #[cfg(target_os = "macos")]
+        bindings.push(KeyBinding::new(
+            "ctrl-j",
+            gpui_component::input::JoinLines,
+            editor,
+        ));
+    }
     bindings
 }
 
@@ -292,6 +375,11 @@ fn steals_a_control_code(chord: &str) -> bool {
 /// simply swallows the byte does not belong on this list.
 fn control_code_binding_allowed(action: &str, chord: &str) -> bool {
     matches!(action, "EditorSave" | "EditorGoToLine")
+        // Bound in the text field's context only, and handled only by the
+        // code editor: in the terminal the chord is never matched, and in any
+        // other field it falls through. VS Code's Go Forward, ⌃⇧-, folds to
+        // Ctrl+_ (US) there.
+        || action_context(action) == Some(crate::ui::code_editor::NAV_KEY_CONTEXT)
         || (cfg!(not(target_os = "macos")) && chord == "ctrl-v")
 }
 
@@ -590,8 +678,60 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         ("EditorSave", "secondary-s"),
         ("EditorSaveAs", "secondary-shift-s"),
         ("EditorGoToLine", "ctrl-g"),
+        // VS Code's chords. ⌘⇧O is the workspace switcher everywhere but the
+        // editor, which takes it back while it has the focus (see
+        // `action_context`). Back and Forward are ⌃- and ⌃⇧- on macOS; off
+        // it ⌃- is Decrease Font Size, so Alt+←/→ as VS Code has them there.
+        ("EditorGoToSymbol", "secondary-shift-o"),
+        ("EditorNavigateBack", per_platform("ctrl--", "alt-left")),
+        (
+            "EditorNavigateForward",
+            per_platform("ctrl-shift--", "alt-right"),
+        ),
+        // VS Code's Split Editor. Off macOS Ctrl+\ is the terminal's SIGQUIT,
+        // which it keeps: the binding lives in the editor's context only.
+        ("EditorSplitRight", "secondary-\\"),
+        // Moving between the two groups, on the chords that move between
+        // panes — at the edge of the editor, or with no split, they carry on
+        // to the panes. Off macOS those are Alt+←/→, which Back and Forward
+        // hold inside the editor.
+        (
+            "EditorFocusLeftGroup",
+            per_platform("secondary-alt-left", "ctrl-alt-left"),
+        ),
+        (
+            "EditorFocusRightGroup",
+            per_platform("secondary-alt-right", "ctrl-alt-right"),
+        ),
         // Unbound: ⌘N is New Window, and the editor's header has a + for it.
         ("EditorNewFile", ""),
+        // The language-server commands. Unbound here — a default on a bare
+        // function key would take it from the shell — and bound instead in
+        // the editor's own context by `fixed_bindings`.
+        ("EditorGoToDefinition", ""),
+        ("EditorQuickFix", ""),
+        ("EditorRenameSymbol", ""),
+        ("EditorFormatDocument", ""),
+        // The editor's text commands. Unbound: none of them has a chord in
+        // VS Code either, except Join Lines, whose ⌃J is a fixed `CodeEditor`
+        // binding on macOS (in the terminal it is a line feed).
+        ("EditorTransformUppercase", ""),
+        ("EditorTransformLowercase", ""),
+        ("EditorTransformTitleCase", ""),
+        ("EditorTrimTrailingWhitespace", ""),
+        ("EditorJoinLines", ""),
+        ("EditorRemoveSurroundingBrackets", ""),
+        ("EditorFindReferences", ""),
+        // Alt+F5 / Shift+Alt+F5 (VS Code's) are fixed `Input`-context
+        // bindings: a default on a function key would hide it from the shell.
+        ("EditorNextChange", ""),
+        ("EditorPrevChange", ""),
+        ("EditorRevertChange", ""),
+        ("ToggleEditorGitGutter", ""),
+        // Alt+F3 is a fixed `Input`-context binding, like Alt+F5.
+        ("EditorPeekChange", ""),
+        // VS Code's chord for its Problems panel.
+        ("ToggleEditorProblems", "secondary-shift-m"),
         ("OpenSshProfiles", ""),
         ("RestartSshSession", "secondary-shift-r"),
         ("Quit", per_platform("secondary-q", "secondary-shift-q")),
@@ -878,9 +1018,98 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             CommandGroup::Terminal,
             t(L10nKey::EditorGoToLineAction).to_string(),
         ),
+        "EditorGoToDefinition" => (
+            CommandGroup::Terminal,
+            t(L10nKey::LspGoToDefinition).to_string(),
+        ),
+        "EditorQuickFix" => (CommandGroup::Terminal, t(L10nKey::LspQuickFix).to_string()),
+        "EditorRenameSymbol" => (
+            CommandGroup::Terminal,
+            t(L10nKey::LspRenameSymbolAction).to_string(),
+        ),
+        "EditorFormatDocument" => (
+            CommandGroup::Terminal,
+            t(L10nKey::LspFormatDocument).to_string(),
+        ),
+        "EditorTransformUppercase" => (
+            CommandGroup::Terminal,
+            t(L10nKey::CmdEditorTransformUppercase).to_string(),
+        ),
+        "EditorTransformLowercase" => (
+            CommandGroup::Terminal,
+            t(L10nKey::CmdEditorTransformLowercase).to_string(),
+        ),
+        "EditorTransformTitleCase" => (
+            CommandGroup::Terminal,
+            t(L10nKey::CmdEditorTransformTitleCase).to_string(),
+        ),
+        "EditorTrimTrailingWhitespace" => (
+            CommandGroup::Terminal,
+            t(L10nKey::CmdEditorTrimTrailingWhitespace).to_string(),
+        ),
+        "EditorJoinLines" => (
+            CommandGroup::Terminal,
+            t(L10nKey::CmdEditorJoinLines).to_string(),
+        ),
+        "EditorRemoveSurroundingBrackets" => (
+            CommandGroup::Terminal,
+            t(L10nKey::CmdEditorRemoveSurroundingBrackets).to_string(),
+        ),
+        "EditorFindReferences" => (
+            CommandGroup::Terminal,
+            t(L10nKey::LspFindReferences).to_string(),
+        ),
+        "EditorGoToSymbol" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorGoToSymbolAction).to_string(),
+        ),
+        "EditorNavigateBack" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorNavigateBack).to_string(),
+        ),
+        "EditorNavigateForward" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorNavigateForward).to_string(),
+        ),
+        "EditorSplitRight" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorSplitRight).to_string(),
+        ),
+        "EditorFocusLeftGroup" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorFocusLeftGroup).to_string(),
+        ),
+        "EditorFocusRightGroup" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorFocusRightGroup).to_string(),
+        ),
         "EditorNewFile" => (
             CommandGroup::Terminal,
             t(L10nKey::EditorNewFile).to_string(),
+        ),
+        "EditorNextChange" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorGitNextChange).to_string(),
+        ),
+        "EditorPrevChange" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorGitPrevChange).to_string(),
+        ),
+        "EditorRevertChange" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorGitRevertChange).to_string(),
+        ),
+        "ToggleEditorGitGutter" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorGitToggleGutter).to_string(),
+        ),
+        "EditorPeekChange" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorGitPeekChange).to_string(),
+        ),
+        "ToggleEditorProblems" => (
+            CommandGroup::Terminal,
+            t(L10nKey::EditorProblemsToggle).to_string(),
         ),
         "OpenSshProfiles" => (
             CommandGroup::Ssh,
@@ -1440,6 +1669,12 @@ fn action_context(action: &str) -> Option<&'static str> {
         // carries on to the PTY as SYN (#677).
         "AlternatePaste" => Some("Terminal && !alt_screen"),
         "ScmCommit" | "ScmCommitAmend" => Some("ScmCommit"),
+        "EditorGoToSymbol"
+        | "EditorNavigateBack"
+        | "EditorNavigateForward"
+        | "EditorSplitRight"
+        | "EditorFocusLeftGroup"
+        | "EditorFocusRightGroup" => Some(crate::ui::code_editor::NAV_KEY_CONTEXT),
         _ => None,
     }
 }
@@ -1572,7 +1807,58 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "EditorSave" => KeyBinding::new(keystroke, EditorSave, None),
         "EditorSaveAs" => KeyBinding::new(keystroke, EditorSaveAs, None),
         "EditorGoToLine" => KeyBinding::new(keystroke, EditorGoToLine, None),
+        "EditorGoToSymbol" => KeyBinding::new(
+            keystroke,
+            EditorGoToSymbol,
+            Some(crate::ui::code_editor::NAV_KEY_CONTEXT),
+        ),
+        "EditorNavigateBack" => KeyBinding::new(
+            keystroke,
+            EditorNavigateBack,
+            Some(crate::ui::code_editor::NAV_KEY_CONTEXT),
+        ),
+        "EditorNavigateForward" => KeyBinding::new(
+            keystroke,
+            EditorNavigateForward,
+            Some(crate::ui::code_editor::NAV_KEY_CONTEXT),
+        ),
+        "EditorSplitRight" => KeyBinding::new(
+            keystroke,
+            EditorSplitRight,
+            Some(crate::ui::code_editor::NAV_KEY_CONTEXT),
+        ),
+        "EditorFocusLeftGroup" => KeyBinding::new(
+            keystroke,
+            EditorFocusLeftGroup,
+            Some(crate::ui::code_editor::NAV_KEY_CONTEXT),
+        ),
+        "EditorFocusRightGroup" => KeyBinding::new(
+            keystroke,
+            EditorFocusRightGroup,
+            Some(crate::ui::code_editor::NAV_KEY_CONTEXT),
+        ),
         "EditorNewFile" => KeyBinding::new(keystroke, EditorNewFile, None),
+        "EditorGoToDefinition" => KeyBinding::new(keystroke, EditorGoToDefinition, None),
+        "EditorQuickFix" => KeyBinding::new(keystroke, EditorQuickFix, None),
+        "EditorRenameSymbol" => KeyBinding::new(keystroke, EditorRenameSymbol, None),
+        "EditorFormatDocument" => KeyBinding::new(keystroke, EditorFormatDocument, None),
+        "EditorTransformUppercase" => KeyBinding::new(keystroke, EditorTransformUppercase, None),
+        "EditorTransformLowercase" => KeyBinding::new(keystroke, EditorTransformLowercase, None),
+        "EditorTransformTitleCase" => KeyBinding::new(keystroke, EditorTransformTitleCase, None),
+        "EditorTrimTrailingWhitespace" => {
+            KeyBinding::new(keystroke, EditorTrimTrailingWhitespace, None)
+        }
+        "EditorJoinLines" => KeyBinding::new(keystroke, EditorJoinLines, None),
+        "EditorRemoveSurroundingBrackets" => {
+            KeyBinding::new(keystroke, EditorRemoveSurroundingBrackets, None)
+        }
+        "EditorFindReferences" => KeyBinding::new(keystroke, EditorFindReferences, None),
+        "EditorNextChange" => KeyBinding::new(keystroke, EditorNextChange, None),
+        "EditorPrevChange" => KeyBinding::new(keystroke, EditorPrevChange, None),
+        "EditorRevertChange" => KeyBinding::new(keystroke, EditorRevertChange, None),
+        "ToggleEditorGitGutter" => KeyBinding::new(keystroke, ToggleEditorGitGutter, None),
+        "EditorPeekChange" => KeyBinding::new(keystroke, EditorPeekChange, None),
+        "ToggleEditorProblems" => KeyBinding::new(keystroke, ToggleEditorProblems, None),
         "OpenSshProfiles" => KeyBinding::new(keystroke, OpenSshProfiles, None),
         "RestartSshSession" => KeyBinding::new(keystroke, RestartSshSession, None),
         "Quit" => KeyBinding::new(keystroke, Quit, None),
@@ -2595,6 +2881,60 @@ mod gpui_tests {
             .collect()
     }
 
+    /// The code editor's line commands sit on chords the app also spends —
+    /// ⌘/ is the shortcut sheet, ⌘↵ fullscreen, ⌘⇧↵ maximize, ⌥↑/⌥↓ pane
+    /// focus off macOS. `fixed_bindings` re-adds them on the `CodeEditor`
+    /// context the editor declares beside `Input`, after the app's table, so
+    /// inside the editor they win and everywhere else nothing changes.
+    #[gpui::test]
+    fn the_code_editor_chords_win_inside_the_editor(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            running_on_json(cx, "{}");
+            let first = |keys: &str, stack: &[&str]| {
+                let input: Vec<Keystroke> = keys
+                    .split(' ')
+                    .map(|k| Keystroke::parse(k).expect("the typed keystroke parses"))
+                    .collect();
+                let stack: Vec<gpui::KeyContext> = stack
+                    .iter()
+                    .map(|c| gpui::KeyContext::parse(c).expect("the context parses"))
+                    .collect();
+                cx.key_bindings()
+                    .borrow()
+                    .bindings_for_input(&input, &stack)
+                    .0
+                    .first()
+                    .map(|b| b.action().name())
+            };
+            let editor = ["Workspace", "Input CodeEditor"];
+            let join_lines = cfg!(target_os = "macos").then_some(("ctrl-j", "input::JoinLines"));
+            for (keys, action) in join_lines.into_iter().chain([
+                ("secondary-/", "input::ToggleLineComment"),
+                ("alt-up", "input::MoveLineUp"),
+                ("alt-down", "input::MoveLineDown"),
+                ("alt-shift-up", "input::CopyLineUp"),
+                ("alt-shift-down", "input::CopyLineDown"),
+                ("secondary-shift-k", "input::DeleteLine"),
+                ("secondary-enter", "input::InsertLineBelow"),
+                ("secondary-shift-enter", "input::InsertLineAbove"),
+                ("secondary-l", "input::SelectLine"),
+                ("secondary-shift-\\", "input::MoveToMatchingBracket"),
+            ]) {
+                assert_eq!(first(keys, &editor), Some(action), "{keys} in the editor");
+                assert_ne!(
+                    first(keys, &["Workspace", "Input"]),
+                    Some(action),
+                    "{keys} in a plain text field"
+                );
+                assert_ne!(
+                    first(keys, &["Workspace", "Terminal"]),
+                    Some(action),
+                    "{keys} in a terminal"
+                );
+            }
+        });
+    }
+
     #[gpui::test]
     fn a_chord_added_in_config_keeps_the_default_one(cx: &mut TestAppContext) {
         use gpui::Action as _;
@@ -2831,6 +3171,176 @@ mod gpui_tests {
             assert_eq!(backspace(cx), inherited, "init must not drop them");
             rebind(cx);
             assert_eq!(backspace(cx), inherited, "nor may a rebind");
+        });
+    }
+
+    /// The gutter's next / previous change chords live only in an `Input`:
+    /// the editor gets them, a terminal never loses a function key to them.
+    #[gpui::test]
+    fn editor_change_chords_are_bound_only_in_an_input(cx: &mut TestAppContext) {
+        use gpui::Action as _;
+        cx.update(|cx| {
+            running_on_json(cx, "{}");
+            let hits = |keys: &str, contexts: &[&str]| -> Vec<&'static str> {
+                let input = [Keystroke::parse(keys).expect("the keystroke parses")];
+                let context: Vec<_> = contexts
+                    .iter()
+                    .map(|c| gpui::KeyContext::parse(c).expect("the context parses"))
+                    .collect();
+                cx.key_bindings()
+                    .borrow()
+                    .bindings_for_input(&input, &context)
+                    .0
+                    .iter()
+                    .map(|b| b.action().name())
+                    .collect()
+            };
+            assert_eq!(
+                hits("alt-f5", &["Workspace", "Input"]).first(),
+                Some(&EditorNextChange::name_for_type())
+            );
+            assert_eq!(
+                hits("shift-alt-f5", &["Workspace", "Input"]).first(),
+                Some(&EditorPrevChange::name_for_type())
+            );
+            assert_eq!(
+                hits("alt-f3", &["Workspace", "Input"]).first(),
+                Some(&EditorPeekChange::name_for_type())
+            );
+            assert!(hits("alt-f5", &["Workspace"]).is_empty());
+        });
+    }
+
+    /// The code editor's multi-cursor chords sit on keys tty7 ships for panes
+    /// (⌘D split, ⌘⌥↑/↓ focus). `fixed_bindings` re-adds them after the
+    /// pane table so they rank first inside an `Input`; any other text field
+    /// has no handler for them, and gpui falls through to the pane binding
+    /// listed after. A terminal never sees them.
+    #[gpui::test]
+    fn editor_multi_cursor_chords_outrank_the_pane_bindings(cx: &mut TestAppContext) {
+        use gpui::Action as _;
+        use gpui_component::input::{
+            AddCursorAbove, AddCursorBelow, SelectAllOccurrences, SelectNextOccurrence,
+        };
+        cx.update(|cx| {
+            running_on_json(cx, "{}");
+            let in_input = |keys: &str| -> Vec<&'static str> {
+                let input = [Keystroke::parse(keys).expect("the keystroke parses")];
+                let context = [
+                    gpui::KeyContext::parse("Workspace").expect("the context parses"),
+                    gpui::KeyContext::parse("Input").expect("the context parses"),
+                ];
+                cx.key_bindings()
+                    .borrow()
+                    .bindings_for_input(&input, &context)
+                    .0
+                    .iter()
+                    .map(|b| b.action().name())
+                    .collect()
+            };
+            let cases = [
+                ("secondary-d", SelectNextOccurrence::name_for_type()),
+                ("secondary-shift-l", SelectAllOccurrences::name_for_type()),
+                ("secondary-alt-up", AddCursorAbove::name_for_type()),
+                ("secondary-alt-down", AddCursorBelow::name_for_type()),
+            ];
+            for (keys, editor_action) in cases {
+                let hits = in_input(keys);
+                assert_eq!(hits.first(), Some(&editor_action), "{keys} in the editor");
+            }
+            if cfg!(target_os = "macos") {
+                assert!(in_input("secondary-d").contains(&SplitRight::name_for_type()));
+                assert_eq!(
+                    fired(cx, "secondary-d").first(),
+                    Some(&SplitRight::name_for_type()),
+                    "a terminal still splits on ⌘D"
+                );
+            }
+
+            // ⌘K ⌘D in the code editor skips to the next occurrence, and ⌘K
+            // there waits for the chord's second key.
+            let editor = [
+                gpui::KeyContext::parse("Workspace").expect("the context parses"),
+                gpui::KeyContext::parse("Input CodeEditor").expect("the context parses"),
+            ];
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            let chord = [
+                Keystroke::parse("secondary-k").unwrap(),
+                Keystroke::parse("secondary-d").unwrap(),
+            ];
+            let (hits, _) = keymap.bindings_for_input(&chord, &editor);
+            assert_eq!(
+                hits.first().map(|b| b.action().name()),
+                Some(gpui_component::input::SkipOccurrence::name_for_type())
+            );
+            let (_, pending) =
+                keymap.bindings_for_input(&[Keystroke::parse("secondary-k").unwrap()], &editor);
+            assert!(pending, "⌘K waits for the chord in the code editor");
+            // A plain text field isn't held up.
+            let field = [
+                gpui::KeyContext::parse("Workspace").expect("the context parses"),
+                gpui::KeyContext::parse("Input").expect("the context parses"),
+            ];
+            let (_, pending) =
+                keymap.bindings_for_input(&[Keystroke::parse("secondary-k").unwrap()], &field);
+            assert!(!pending, "⌘K goes straight through in other fields");
+        });
+    }
+
+    /// Go to Symbol and Back/Forward sit on chords the window already uses
+    /// (⌘⇧O is the workspace switcher; off macOS Alt+←/→ move between
+    /// panes). Bound at the text field's depth and after the window's table,
+    /// they rank first inside the editor, and a terminal never sees them.
+    #[gpui::test]
+    fn editor_navigation_chords_outrank_the_window_inside_a_text_field(cx: &mut TestAppContext) {
+        use gpui::Action as _;
+        cx.update(|cx| {
+            running_on_json(cx, "{}");
+            let in_input = |keys: &str| -> Vec<&'static str> {
+                let input = [Keystroke::parse(keys).expect("the keystroke parses")];
+                let context = [
+                    gpui::KeyContext::parse("Workspace").expect("the context parses"),
+                    gpui::KeyContext::parse("Input").expect("the context parses"),
+                ];
+                cx.key_bindings()
+                    .borrow()
+                    .bindings_for_input(&input, &context)
+                    .0
+                    .iter()
+                    .map(|b| b.action().name())
+                    .collect()
+            };
+            let (back, forward) = match cfg!(target_os = "macos") {
+                true => ("ctrl--", "ctrl-shift--"),
+                false => ("alt-left", "alt-right"),
+            };
+            for (keys, action) in [
+                ("secondary-shift-o", EditorGoToSymbol::name_for_type()),
+                (back, EditorNavigateBack::name_for_type()),
+                (forward, EditorNavigateForward::name_for_type()),
+                ("secondary-\\", EditorSplitRight::name_for_type()),
+                (
+                    per_platform("secondary-alt-left", "ctrl-alt-left"),
+                    EditorFocusLeftGroup::name_for_type(),
+                ),
+                (
+                    per_platform("secondary-alt-right", "ctrl-alt-right"),
+                    EditorFocusRightGroup::name_for_type(),
+                ),
+            ] {
+                assert_eq!(
+                    in_input(keys).first(),
+                    Some(&action),
+                    "{keys} in the editor"
+                );
+                assert!(!fired(cx, keys).contains(&action), "{keys} in a terminal");
+            }
+            assert_eq!(
+                fired(cx, "secondary-shift-o").first(),
+                Some(&ToggleSwitcher::name_for_type()),
+                "a terminal still opens the switcher"
+            );
         });
     }
 }

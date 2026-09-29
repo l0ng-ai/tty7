@@ -17,7 +17,7 @@ mod view;
 pub(crate) use command::{Avatar, ChromeState, CommandGroup, CommandKind, Item};
 pub(crate) use files::{FileIndexStore, FileList};
 pub(crate) use score::fuzzy_score;
-pub(crate) use sources::{Catalog, host_items};
+pub(crate) use sources::{Catalog, LiveQuery, host_items};
 pub(crate) use view::{KEY_CONTEXT, SearchEvent, SearchView};
 
 use crate::ui::i18n::{L10nKey, t};
@@ -30,6 +30,12 @@ pub(crate) enum SearchTab {
     Terminals,
     Sessions,
     Hosts,
+    /// Go to Symbol: the symbols of the file in front of the editor. Like
+    /// Files, reached by its chord (or the breadcrumbs), never by the row.
+    Symbols,
+    /// Places a language server found — the references to a symbol, or its
+    /// several definitions (`ui::lsp`). Reached only by those commands.
+    Locations,
 }
 
 impl SearchTab {
@@ -49,6 +55,17 @@ impl SearchTab {
         SearchTab::Actions,
     ];
 
+    /// The editor's row: finding your way around the code, as opposed to
+    /// around the window. Go to File and Go to Symbol open on it, and Tab
+    /// walks it the way it walks the window's row. Symbols shows only with a
+    /// file in front; once something is typed it also lists what the file's
+    /// language server finds across the project.
+    pub(crate) const EDITOR_ORDER: [SearchTab; 2] = [SearchTab::Files, SearchTab::Symbols];
+
+    pub(crate) fn in_editor_row(self) -> bool {
+        Self::EDITOR_ORDER.contains(&self)
+    }
+
     pub(crate) fn title(self) -> &'static str {
         t(match self {
             SearchTab::All => L10nKey::SearchTabAll,
@@ -57,7 +74,17 @@ impl SearchTab {
             SearchTab::Terminals => L10nKey::SearchTabTerminals,
             SearchTab::Sessions => L10nKey::SearchTabSessions,
             SearchTab::Hosts => L10nKey::SearchTabHosts,
+            SearchTab::Symbols => L10nKey::SearchTabSymbols,
+            SearchTab::Locations => L10nKey::SearchTabLocations,
         })
+    }
+
+    /// A tab outside the window's row. It never sits under that row with
+    /// nothing lit, and Tab never trades it for the terminals: the editor's
+    /// tabs get their own row (`EDITOR_ORDER`), and a language server's places
+    /// stand alone under their name.
+    pub(crate) fn stands_alone(self) -> bool {
+        !Self::ORDER.contains(&self)
     }
 
     pub(crate) fn placeholder(self) -> &'static str {
@@ -68,6 +95,8 @@ impl SearchTab {
             SearchTab::Terminals => L10nKey::SearchPlaceholderTerminals,
             SearchTab::Sessions => L10nKey::SearchPlaceholderSessions,
             SearchTab::Hosts => L10nKey::SearchPlaceholderHosts,
+            SearchTab::Symbols => L10nKey::SearchPlaceholderSymbols,
+            SearchTab::Locations => L10nKey::SearchPlaceholderLocations,
         })
     }
 
@@ -100,7 +129,12 @@ mod tests {
     #[test]
     fn files_is_reached_by_its_chord_not_by_the_row() {
         assert!(!SearchTab::ORDER.contains(&SearchTab::Files));
-        // Tab out of Go to File lands on the row again.
-        assert_eq!(SearchTab::Files.step(true), SearchTab::Terminals);
+        assert!(!SearchTab::ORDER.contains(&SearchTab::Symbols));
+        // Reached by a chord, they stand alone rather than sit under a row
+        // with nothing in it lit.
+        for tab in [SearchTab::Files, SearchTab::Symbols, SearchTab::Locations] {
+            assert!(tab.stands_alone());
+        }
+        assert!(SearchTab::ORDER.iter().all(|tab| !tab.stands_alone()));
     }
 }

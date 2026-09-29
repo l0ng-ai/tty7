@@ -735,8 +735,75 @@ struct PaneState {
     agent: Option<crate::core::cli_agent::CLIAgent>,
     agent_argv: Option<Vec<String>>,
     agent_session: Option<crate::core::cli_agent::AgentSessionState>,
+    agent_clock: AgentClock,
     alive: bool,
     exit_code: Option<i32>,
+}
+
+/// When the agent session last heard from the agent, for the two conclusions
+/// tty7 draws from silence: a turn the user interrupted, and a turn whose end
+/// was lost.
+#[derive(Default)]
+struct AgentClock {
+    /// Bumped by every hook event and every session reset, so a pending
+    /// interrupt can tell whether anything spoke after the key it was armed by.
+    generation: u64,
+    /// The last hook event, or when the sweep first saw a turn it had no
+    /// event time for (a pane carried across a daemon handoff).
+    last_event: Option<std::time::Instant>,
+    /// An interrupt key is already waiting out [`INTERRUPT_SETTLE`].
+    interrupt_pending: bool,
+}
+
+/// How long after an interrupt key a real hook event still gets to speak
+/// first. Agents that do report an interrupt (Kimi's `Interrupt`, a `Stop`
+/// racing the key) do it well inside this.
+const INTERRUPT_SETTLE: Duration = Duration::from_millis(1000);
+
+/// How long a turn may stay on working with no hook event at all before the
+/// status is given up on. Far past any single quiet stretch a live turn has:
+/// Claude's longest tool call is capped at ten minutes, and every other event
+/// — a tool finishing, a permission prompt — resets the clock.
+pub(crate) const AGENT_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
+
+/// Whether one input write is the user asking a running agent to stop: a bare
+/// <kbd>Esc</kbd> or <kbd>Ctrl+C</kbd>, in the legacy encoding or in the
+/// kitty keyboard protocol and xterm `modifyOtherKeys` forms a TUI may have
+/// switched the terminal into. Only a whole write counts — the key arrives on
+/// its own, and a paste that happens to hold `0x03` is not a keypress.
+fn is_interrupt_key(bytes: &[u8]) -> bool {
+    match bytes {
+        b"\x1b" | b"\x03" | b"\x1b[27;5;99~" => return true,
+        _ => {}
+    }
+    let Some(body) = bytes
+        .strip_prefix(b"\x1b[")
+        .and_then(|b| b.strip_suffix(b"u"))
+        .and_then(|b| std::str::from_utf8(b).ok())
+    else {
+        return false;
+    };
+    let mut fields = body.split(';');
+    let Some(code) = fields
+        .next()
+        .and_then(|f| f.split(':').next())
+        .and_then(|c| c.parse::<u32>().ok())
+    else {
+        return false;
+    };
+    let mut modifiers = fields.next().unwrap_or("1").split(':');
+    let mods = modifiers
+        .next()
+        .and_then(|m| m.parse::<u32>().ok())
+        .unwrap_or(1);
+    let event = modifiers.next().map_or(Some(1), |e| e.parse::<u32>().ok());
+    if event != Some(1) {
+        return false;
+    }
+    // Caps Lock and Num Lock ride along in the mask without changing the key.
+    const LOCKS: u32 = 64 | 128;
+    let mods = mods.saturating_sub(1) & !LOCKS;
+    (code == 27 && mods == 0) || (code == 99 && mods == 4)
 }
 
 fn notify(st: &mut PaneState, msg: DaemonMsg) {
@@ -1699,6 +1766,7 @@ impl DaemonPane {
                 agent: None,
                 agent_session: None,
                 agent_argv: None,
+                agent_clock: AgentClock::default(),
                 alive: true,
                 exit_code: None,
             },
@@ -1932,6 +2000,7 @@ impl DaemonPane {
                 agent: carried.agent,
                 agent_session: carried.agent_session,
                 agent_argv: carried.agent_argv,
+                agent_clock: AgentClock::default(),
                 alive: true,
                 exit_code: None,
             },
@@ -1988,6 +2057,7 @@ impl DaemonPane {
             agent: None,
             agent_session: None,
             agent_argv: None,
+            agent_clock: AgentClock::default(),
             alive: true,
             exit_code: None,
         }));
@@ -2403,6 +2473,11 @@ impl DaemonPane {
         agent_state_snapshot(&self.state.lock().unwrap())
     }
 
+    /// See [`expire_stale_agent`].
+    pub fn expire_stale_agent(&self) {
+        expire_stale_agent(&mut self.state.lock().unwrap(), std::time::Instant::now());
+    }
+
     pub fn gate(&self) -> Arc<OutputGate> {
         self.gate.clone()
     }
@@ -2410,6 +2485,9 @@ impl DaemonPane {
     pub fn write_input(&self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
+        }
+        if is_interrupt_key(bytes) {
+            arm_interrupt(&self.state);
         }
         if let Ok(mut writer) = self.writer.lock() {
             let _ = writer.write_all(bytes);
@@ -3232,6 +3310,73 @@ fn agent_from_shell_mark(
     Some((agent, crate::core::cli_agent::command_argv(cmd)))
 }
 
+/// Start waiting out an interrupt key on a pane whose agent is mid-turn.
+///
+/// The key only *may* have stopped the turn — it also dismisses menus and
+/// clears half-typed input — so nothing changes until [`INTERRUPT_SETTLE`]
+/// passes with no hook event. A guess that still turns out wrong is undone by
+/// the agent's next finished tool ([`AgentSessionState::apply_event`]).
+///
+/// [`AgentSessionState::apply_event`]: crate::core::cli_agent::AgentSessionState::apply_event
+fn arm_interrupt(state: &Arc<Mutex<PaneState>>) {
+    let generation = {
+        let mut st = state.lock().unwrap();
+        let armable = st
+            .agent_session
+            .as_ref()
+            .is_some_and(|s| s.rich && s.mid_turn());
+        if !armable || st.agent_clock.interrupt_pending {
+            return;
+        }
+        st.agent_clock.interrupt_pending = true;
+        st.agent_clock.generation
+    };
+    let waiter = state.clone();
+    let spawned = std::thread::Builder::new()
+        .name("tty7-agent-interrupt".into())
+        .spawn(move || {
+            std::thread::sleep(INTERRUPT_SETTLE);
+            let mut st = waiter.lock().unwrap();
+            settle_interrupt(&mut st, generation);
+        });
+    if spawned.is_err() {
+        state.lock().unwrap().agent_clock.interrupt_pending = false;
+    }
+}
+
+fn settle_interrupt(st: &mut PaneState, armed_at: u64) {
+    st.agent_clock.interrupt_pending = false;
+    if st.agent_clock.generation != armed_at || !st.alive {
+        return;
+    }
+    let Some(sess) = st.agent_session.as_mut().filter(|s| s.mid_turn()) else {
+        return;
+    };
+    sess.assume_interrupted();
+    notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
+}
+
+/// Give up on a turn that has said nothing for [`AGENT_STALE_AFTER`]. Run by
+/// the daemon's periodic sweep, since a silent pane produces nothing that
+/// would otherwise wake anything up to notice.
+fn expire_stale_agent(st: &mut PaneState, now: std::time::Instant) {
+    let working = st
+        .agent_session
+        .as_ref()
+        .is_some_and(|s| s.status == crate::core::cli_agent::AgentStatus::Working);
+    if !working {
+        return;
+    }
+    let since = *st.agent_clock.last_event.get_or_insert(now);
+    if now.saturating_duration_since(since) < AGENT_STALE_AFTER {
+        return;
+    }
+    if let Some(sess) = st.agent_session.as_mut() {
+        sess.assume_stale();
+    }
+    notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
+}
+
 fn apply_agent_signals(
     st: &mut PaneState,
     events: Vec<crate::core::cli_agent::AgentEvent>,
@@ -3257,6 +3402,8 @@ fn apply_agent_signals(
             st.agent = event.agent;
             notify(st, DaemonMsg::Agent(st.agent));
         }
+        st.agent_clock.generation = st.agent_clock.generation.wrapping_add(1);
+        st.agent_clock.last_event = Some(std::time::Instant::now());
         st.agent_session
             .get_or_insert_with(AgentSessionState::default)
             .apply_event(event);
@@ -3383,6 +3530,8 @@ fn apply_agent(
     // Claude to omp (or back to the shell) must not keep the previous id.
     if st.agent_session.is_some() {
         st.agent_session = None;
+        st.agent_clock.generation = st.agent_clock.generation.wrapping_add(1);
+        st.agent_clock.last_event = None;
         notify(st, DaemonMsg::AgentStatus(None));
     }
     if agent.is_none() {
@@ -5337,9 +5486,157 @@ mod tests {
             agent: None,
             agent_session: None,
             agent_argv: None,
+            agent_clock: AgentClock::default(),
             alive,
             exit_code: None,
         }
+    }
+
+    #[test]
+    fn interrupt_keys_are_recognised_in_every_encoding() {
+        for key in [
+            &b"\x1b"[..],
+            b"\x03",
+            b"\x1b[27u",
+            b"\x1b[27;1u",
+            b"\x1b[27;1:1u",
+            b"\x1b[27;65u",
+            b"\x1b[99;5u",
+            b"\x1b[99;5:1u",
+            b"\x1b[99:67;5u",
+            b"\x1b[27;5;99~",
+        ] {
+            assert!(is_interrupt_key(key), "{key:?}");
+        }
+        for key in [
+            &b"\x1b[A"[..],
+            b"\x1b\x1b",
+            b"\x1b[27;1:3u",
+            b"\x1b[27;3u",
+            b"\x1b[99u",
+            b"\x1b[99;6u",
+            b"abc\x03",
+            b"\x1b[13u",
+            b"q",
+        ] {
+            assert!(!is_interrupt_key(key), "{key:?}");
+        }
+    }
+
+    fn working_session() -> crate::core::cli_agent::AgentSessionState {
+        crate::core::cli_agent::AgentSessionState {
+            status: crate::core::cli_agent::AgentStatus::Working,
+            rich: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_interrupt_settles_only_if_nothing_spoke_after_it() {
+        use crate::core::cli_agent::AgentStatus;
+
+        let mut st = test_state(true);
+        st.agent_session = Some(working_session());
+        st.agent_clock.interrupt_pending = true;
+        let armed = st.agent_clock.generation;
+        settle_interrupt(&mut st, armed);
+        let sess = st.agent_session.as_ref().unwrap();
+        assert_eq!(sess.status, AgentStatus::Done);
+        assert!(sess.inferred);
+        assert!(!st.agent_clock.interrupt_pending);
+
+        let mut st = test_state(true);
+        st.agent_session = Some(working_session());
+        let armed = st.agent_clock.generation;
+        st.agent_clock.generation += 1;
+        settle_interrupt(&mut st, armed);
+        assert_eq!(
+            st.agent_session.as_ref().unwrap().status,
+            AgentStatus::Working,
+            "a hook event after the key has the last word"
+        );
+
+        let mut st = test_state(false);
+        st.agent_session = Some(working_session());
+        let armed = st.agent_clock.generation;
+        settle_interrupt(&mut st, armed);
+        assert_eq!(
+            st.agent_session.as_ref().unwrap().status,
+            AgentStatus::Working,
+            "a dead pane is left to its exit report"
+        );
+    }
+
+    #[test]
+    fn an_interrupt_arms_once_and_only_mid_turn() {
+        let state = Arc::new(Mutex::new(test_state(true)));
+        arm_interrupt(&state);
+        assert!(
+            !state.lock().unwrap().agent_clock.interrupt_pending,
+            "no agent"
+        );
+
+        state.lock().unwrap().agent_session = Some(crate::core::cli_agent::AgentSessionState {
+            rich: false,
+            ..working_session()
+        });
+        arm_interrupt(&state);
+        assert!(
+            !state.lock().unwrap().agent_clock.interrupt_pending,
+            "a status without hooks behind it has no Stop to miss"
+        );
+
+        state.lock().unwrap().agent_session = Some(working_session());
+        arm_interrupt(&state);
+        assert!(state.lock().unwrap().agent_clock.interrupt_pending);
+    }
+
+    #[test]
+    fn a_turn_silent_past_the_limit_goes_idle() {
+        use crate::core::cli_agent::AgentStatus;
+
+        let now = std::time::Instant::now();
+        let mut st = test_state(true);
+        st.agent_session = Some(working_session());
+
+        expire_stale_agent(&mut st, now);
+        assert_eq!(
+            st.agent_clock.last_event,
+            Some(now),
+            "a turn with no event time starts the clock rather than expiring"
+        );
+        expire_stale_agent(&mut st, now + AGENT_STALE_AFTER - Duration::from_secs(1));
+        assert_eq!(
+            st.agent_session.as_ref().unwrap().status,
+            AgentStatus::Working
+        );
+
+        expire_stale_agent(&mut st, now + AGENT_STALE_AFTER);
+        let sess = st.agent_session.as_ref().unwrap();
+        assert_eq!(sess.status, AgentStatus::Idle);
+        assert!(sess.inferred);
+    }
+
+    #[test]
+    fn hook_events_restart_the_agent_clock() {
+        use crate::core::cli_agent::{AgentEvent, AgentEventKind};
+
+        let mut st = test_state(true);
+        let before = st.agent_clock.generation;
+        apply_agent_signals(
+            &mut st,
+            vec![AgentEvent {
+                agent: None,
+                kind: AgentEventKind::PromptSubmit,
+                session_id: None,
+                message: None,
+                cwd: None,
+                prompt: None,
+            }],
+            None,
+        );
+        assert_ne!(st.agent_clock.generation, before);
+        assert!(st.agent_clock.last_event.is_some());
     }
 
     #[test]
@@ -5640,6 +5937,7 @@ mod tests {
             cwd: None,
             activity: 0,
             turns: 0,
+            inferred: false,
         });
         apply_signals(&mut st, sniffer.feed(b"\x1b]9;noise\x07"));
         assert_eq!(

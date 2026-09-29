@@ -677,6 +677,18 @@ impl CLIAgent {
             .map_or_else(|| self.binary().to_string(), str::to_string)
     }
 
+    /// The arguments that start an interactive session whose first message is
+    /// `prompt`. `None` for an agent whose positional prompt means a one-shot,
+    /// non-interactive run, or whose form is not known — the caller then
+    /// starts the agent bare rather than guess.
+    pub fn prompt_args(self, prompt: &str) -> Option<Vec<String>> {
+        match self {
+            CLIAgent::Claude | CLIAgent::Codex => Some(vec![prompt.to_string()]),
+            CLIAgent::Gemini => Some(vec!["-i".to_string(), prompt.to_string()]),
+            _ => None,
+        }
+    }
+
     /// `argv` as a command line worth launching this agent with again: its
     /// binary followed by the flags it ran with, minus everything that names
     /// one particular session (a resume, a fork, a session id) and minus
@@ -971,6 +983,13 @@ pub struct AgentSessionState {
     /// later one that finished while nobody was watching (#870).
     #[serde(default)]
     pub turns: u64,
+    /// The status was concluded by tty7, not reported by the agent: a turn
+    /// the user interrupted ([`Self::assume_interrupted`]) or one that went
+    /// quiet for too long ([`Self::assume_stale`]). Cleared by the next real
+    /// event, and a tool finishing after it proves the guess wrong and puts
+    /// the turn back on [`AgentStatus::Working`].
+    #[serde(default)]
+    pub inferred: bool,
 }
 
 impl AgentStatus {
@@ -989,8 +1008,44 @@ impl AgentSessionState {
         AgentStatus::Idle
     }
 
+    /// Whether a turn is in flight: the only statuses a user interrupt or a
+    /// lost `Stop` can leave behind.
+    pub fn mid_turn(&self) -> bool {
+        matches!(self.status, AgentStatus::Working | AgentStatus::Waiting)
+    }
+
+    /// End the turn the user just interrupted.
+    ///
+    /// Most agents fire no hook when <kbd>Esc</kbd> or <kbd>Ctrl+C</kbd>
+    /// cancels a turn — Claude's `Stop` explicitly skips user interrupts — so
+    /// without this the pane stays on working until the next prompt, and a
+    /// close asks about a turn that is long over. The caller has already
+    /// waited for a real event to say otherwise.
+    pub fn assume_interrupted(&mut self) {
+        if !self.mid_turn() {
+            return;
+        }
+        self.turns = self.turns.wrapping_add(1);
+        self.status = AgentStatus::Done;
+        self.message = None;
+        self.inferred = true;
+    }
+
+    /// Give up on a turn that has gone silent for longer than any real one
+    /// stays quiet. Idle rather than Done: nothing says it finished, only
+    /// that nothing says it is still going.
+    pub fn assume_stale(&mut self) {
+        if self.status != AgentStatus::Working {
+            return;
+        }
+        self.status = AgentStatus::Idle;
+        self.message = None;
+        self.inferred = true;
+    }
+
     pub fn apply_event(&mut self, ev: &AgentEvent) {
         self.rich = true;
+        let guessed = std::mem::take(&mut self.inferred);
         if let Some(id) = &ev.session_id {
             self.session_id = Some(id.clone());
         }
@@ -1018,7 +1073,7 @@ impl AgentSessionState {
             }
             AgentEventKind::ToolComplete => {
                 self.activity = self.activity.wrapping_add(1);
-                if self.status == AgentStatus::Waiting {
+                if self.status == AgentStatus::Waiting || guessed {
                     self.status = AgentStatus::Working;
                     self.message = None;
                 }
@@ -1646,6 +1701,95 @@ mod tests {
 
         s.apply_event(&ev(AgentEventKind::SessionEnd));
         assert_eq!(s.activity, 4);
+    }
+
+    #[test]
+    fn an_assumed_interrupt_ends_the_turn_until_the_agent_says_otherwise() {
+        let ev = |kind| AgentEvent {
+            agent: Some(CLIAgent::Claude),
+            kind,
+            session_id: None,
+            message: None,
+            cwd: None,
+            prompt: None,
+        };
+
+        let mut s = AgentSessionState::default();
+        s.assume_interrupted();
+        assert_eq!(s.status, AgentStatus::Idle, "no turn, nothing to interrupt");
+        assert!(!s.inferred);
+
+        s.apply_event(&ev(AgentEventKind::PromptSubmit));
+        s.apply_event(&ev(AgentEventKind::PermissionRequest));
+        s.assume_interrupted();
+        assert_eq!(
+            s.status,
+            AgentStatus::Done,
+            "a rejected prompt ends the turn"
+        );
+        assert_eq!(s.turns, 1);
+        assert!(s.inferred);
+
+        s.apply_event(&ev(AgentEventKind::ToolComplete));
+        assert_eq!(
+            s.status,
+            AgentStatus::Working,
+            "a tool finishing after the key proves the turn was still going"
+        );
+        assert!(!s.inferred);
+
+        s.apply_event(&ev(AgentEventKind::Stop));
+        assert_eq!(s.turns, 2);
+        s.apply_event(&ev(AgentEventKind::ToolComplete));
+        assert_eq!(
+            s.status,
+            AgentStatus::Done,
+            "a real Stop is not a guess and stays put"
+        );
+
+        s.apply_event(&ev(AgentEventKind::PromptSubmit));
+        s.assume_interrupted();
+        s.apply_event(&ev(AgentEventKind::Notification));
+        assert!(!s.inferred, "any real event retires the guess");
+        s.apply_event(&ev(AgentEventKind::ToolComplete));
+        assert_eq!(s.status, AgentStatus::Done);
+    }
+
+    #[test]
+    fn a_stale_turn_goes_idle_and_comes_back_on_the_next_tool() {
+        let ev = |kind| AgentEvent {
+            agent: Some(CLIAgent::Claude),
+            kind,
+            session_id: None,
+            message: None,
+            cwd: None,
+            prompt: None,
+        };
+
+        let mut s = AgentSessionState::default();
+        s.apply_event(&ev(AgentEventKind::PromptSubmit));
+        s.apply_event(&ev(AgentEventKind::PermissionRequest));
+        s.assume_stale();
+        assert_eq!(
+            s.status,
+            AgentStatus::Waiting,
+            "a prompt nobody answered is not stale"
+        );
+
+        s.apply_event(&ev(AgentEventKind::ToolComplete));
+        s.assume_stale();
+        assert_eq!(s.status, AgentStatus::Idle);
+        assert_eq!(s.turns, 0, "going quiet is not finishing");
+        assert!(s.inferred);
+
+        s.apply_event(&ev(AgentEventKind::ToolComplete));
+        assert_eq!(s.status, AgentStatus::Working);
+    }
+
+    #[test]
+    fn a_session_state_from_an_older_daemon_is_not_inferred() {
+        let s: AgentSessionState = serde_json::from_str(r#"{"status":"done"}"#).unwrap();
+        assert!(!s.inferred);
     }
 
     #[test]

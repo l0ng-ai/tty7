@@ -80,6 +80,15 @@ impl SearchDelegate {
         })
     }
 
+    /// How many rows the filter left, for a standalone tab's heading.
+    fn row_count(&self) -> usize {
+        self.sections
+            .iter()
+            .flat_map(|s| s.rows.iter())
+            .filter(|r| r.item().is_some())
+            .count()
+    }
+
     fn first_row(&self) -> Option<IndexPath> {
         let section = self.sections.iter().position(|s| !s.rows.is_empty())?;
         Some(IndexPath::new(0).section(section))
@@ -213,6 +222,11 @@ impl ListDelegate for SearchDelegate {
         cx: &mut Context<ListState<Self>>,
     ) -> Task<()> {
         self.query = query.to_string();
+        if self.scope == Scope::Tab(SearchTab::Symbols)
+            && let Some(live) = self.catalog.live_query.clone()
+        {
+            live(query, cx);
+        }
         self.refresh(cx);
         // Through `set_selected_index`, not by hand: the row index may not have
         // moved, but the row under it has, and the theme picker previews the
@@ -270,6 +284,13 @@ impl ListDelegate for SearchDelegate {
             Scope::Tab(SearchTab::All | SearchTab::Hosts) => t(L10nKey::ConnectSshHint),
             Scope::Tab(SearchTab::Sessions) if self.query.trim().is_empty() => {
                 t(L10nKey::SearchSessionsEmptyHint)
+            }
+            Scope::Tab(SearchTab::Locations) if self.catalog.locations.is_empty() => {
+                t(L10nKey::SearchLocationsNone)
+            }
+            Scope::Tab(SearchTab::Symbols) if self.catalog.symbols.is_empty() => {
+                headline = t(L10nKey::SearchSymbolsNone);
+                t(L10nKey::SearchSymbolsNoneHint)
             }
             _ => t(L10nKey::PaletteTryDifferentSearch),
         };
@@ -373,6 +394,22 @@ pub enum SearchEvent {
     PreviewTheme(usize),
     /// Put back the theme that was live before the preview started.
     CancelThemePreview,
+    /// Show this 0-based place in the file Go to Symbol is listing, leaving
+    /// the keyboard in the search. Closing the search without a choice puts
+    /// the caret back (`Tty7App::close_search`).
+    PreviewSymbol {
+        line: u32,
+        column: u32,
+    },
+    /// Move to another tab on the editor's row, which the app sets up.
+    SwitchEditorTab(SearchTab),
+    /// The same for a place a language server found (`ui::lsp`), which may
+    /// be in another file.
+    PreviewLocation {
+        path: std::path::PathBuf,
+        line: u32,
+        column: u32,
+    },
 }
 
 pub struct SearchView {
@@ -389,6 +426,18 @@ pub struct SearchView {
     /// How many session lists have arrived since the search opened. A test
     /// waits on it: the scan runs on a real thread and lands when it lands.
     sessions_landed: usize,
+    /// The symbol Go to Symbol opened on — the one around the caret — which
+    /// is not previewed until the highlight has moved: opening the picker
+    /// must not move the caret.
+    symbol_initial: Option<CommandKind>,
+    symbol_moved: bool,
+    /// What a language server's list is of — References, Definitions — shown
+    /// where the scope row would be. The other standalone tabs are named by
+    /// their title.
+    heading: Option<&'static str>,
+    /// The editor's row as this window can fill it (`SearchTab::EDITOR_ORDER`
+    /// less what cannot answer), set by whoever opened an editor tab.
+    editor_tabs: Vec<SearchTab>,
     _sub: Subscription,
 }
 
@@ -420,6 +469,10 @@ impl SearchView {
             parked_query: None,
             previewing: None,
             sessions_landed: 0,
+            symbol_initial: None,
+            symbol_moved: false,
+            heading: None,
+            editor_tabs: Vec::new(),
             _sub,
         }
     }
@@ -526,6 +579,96 @@ impl SearchView {
         self.update_catalog(|catalog| catalog.files = files, window, cx);
     }
 
+    /// Go to Symbol's rows, with the highlight on `selected` — the symbol the
+    /// caret is in — when it is one of them.
+    pub(crate) fn set_symbols(
+        &mut self,
+        symbols: Vec<(usize, Item)>,
+        selected: Option<CommandKind>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.symbol_moved = false;
+        self.symbol_initial = selected.clone();
+        self.update_catalog(|catalog| catalog.symbols = symbols, window, cx);
+        if let Some(kind) = selected {
+            self.list.update(cx, |state, cx| {
+                if let Some(ix) = state.delegate().position_of(&kind) {
+                    state.set_selected_index(Some(ix), window, cx);
+                    state.scroll_to_selected_item(window, cx);
+                }
+            });
+        }
+    }
+
+    /// Find References' rows (`ui::lsp`). The first is highlighted and not
+    /// previewed — opening the list must not move the caret — until the
+    /// highlight moves.
+    pub(crate) fn set_locations(
+        &mut self,
+        heading: Option<&'static str>,
+        locations: Vec<Item>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.heading = heading;
+        self.symbol_moved = false;
+        self.symbol_initial = locations.first().map(|item| item.kind.clone());
+        self.update_catalog(|catalog| catalog.locations = locations, window, cx);
+    }
+
+    /// The editor tabs this window can offer, for the editor's row.
+    pub(crate) fn set_editor_tabs(&mut self, tabs: Vec<SearchTab>, cx: &mut Context<Self>) {
+        self.editor_tabs = tabs;
+        cx.notify();
+    }
+
+    /// The row over the list: the window's, the editor's (when it has more
+    /// than one tab to offer), or none — the tab then stands alone under its
+    /// name.
+    fn scope_row(&self) -> Option<Vec<SearchTab>> {
+        if !self.tab.stands_alone() {
+            return Some(SearchTab::ORDER.to_vec());
+        }
+        (self.tab.in_editor_row() && self.editor_tabs.len() > 1).then(|| self.editor_tabs.clone())
+    }
+
+    /// Moves to `tab` on whichever row it is on. The editor's tabs each need
+    /// the app to set them up (an outline, a server to ask), so those go by
+    /// way of it.
+    fn go_to_tab(&mut self, tab: SearchTab, window: &mut Window, cx: &mut Context<Self>) {
+        if tab == self.tab {
+            return;
+        }
+        if tab.in_editor_row() {
+            cx.emit(SearchEvent::SwitchEditorTab(tab));
+        } else {
+            self.set_tab(tab, None, window, cx);
+        }
+    }
+
+    /// What the language server found across the project for the Symbols
+    /// tab's current query, listed after the file's own symbols.
+    pub(crate) fn set_project_symbols(
+        &mut self,
+        symbols: Vec<Item>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_catalog(|catalog| catalog.project_symbols = symbols, window, cx);
+    }
+
+    /// Sets what the Symbols tab asks the language server as the query
+    /// changes.
+    pub(crate) fn set_live_query(
+        &mut self,
+        live: crate::ui::search::LiveQuery,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_catalog(|catalog| catalog.live_query = Some(live), window, cx);
+    }
+
     /// Changes part of the catalog under an open list. The highlight stays on
     /// the row it was on when that row is still there, so a list that fills in
     /// under the cursor does not move what Return runs.
@@ -554,13 +697,26 @@ impl SearchView {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub(crate) fn symbol_count(&self) -> usize {
+        self.catalog.symbols.len()
+    }
+
     /// The tab showing — or, in a row's own list, the one Escape returns to.
     pub(crate) fn tab(&self) -> SearchTab {
         self.tab
     }
 
     fn step_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_tab(self.tab.step(forward), None, window, cx);
+        let Some(row) = self.scope_row() else { return };
+        let n = row.len();
+        let i = row.iter().position(|t| *t == self.tab).unwrap_or(0);
+        let next = row[if forward {
+            (i + 1) % n
+        } else {
+            (i + n - 1) % n
+        }];
+        self.go_to_tab(next, window, cx);
     }
 
     fn open_themes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -689,6 +845,32 @@ impl SearchView {
                 false => cx.emit(SearchEvent::Dismiss),
             },
             ListEvent::Select(ix) => {
+                if !self.in_sub_list()
+                    && self.tab == SearchTab::Symbols
+                    && let Some(Row::Item(item)) = list.read(cx).delegate().row_at(*ix)
+                    && let CommandKind::GoToSymbol { line, column } = item.kind
+                {
+                    if self.symbol_moved || self.symbol_initial.as_ref() != Some(&item.kind) {
+                        self.symbol_moved = true;
+                        cx.emit(SearchEvent::PreviewSymbol { line, column });
+                    }
+                    return;
+                }
+                if !self.in_sub_list()
+                    && matches!(self.tab, SearchTab::Locations | SearchTab::Symbols)
+                    && let Some(Row::Item(item)) = list.read(cx).delegate().row_at(*ix)
+                    && let CommandKind::GoToLocation { path, line, column } = &item.kind
+                {
+                    if self.symbol_moved || self.symbol_initial.as_ref() != Some(&item.kind) {
+                        self.symbol_moved = true;
+                        cx.emit(SearchEvent::PreviewLocation {
+                            path: path.clone(),
+                            line: *line,
+                            column: *column,
+                        });
+                    }
+                    return;
+                }
                 if self.in_sub_list()
                     && let Some(Row::Item(item)) = list.read(cx).delegate().row_at(*ix)
                     && let CommandKind::SetTheme(i) = item.kind
@@ -718,32 +900,68 @@ impl SearchView {
             .bg(theme.popover)
             .border_b_1()
             .border_color(theme.border)
-            .children(SearchTab::ORDER.into_iter().enumerate().map(|(i, tab)| {
-                let active = tab == self.tab;
-                div()
-                    .id(("search-tab", i))
-                    .h(px(24.))
-                    .px(px(9.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.))
-                    .text_size(rems(SCOPE_TEXT))
-                    .cursor_pointer()
-                    .map(|d| match active {
-                        true => d
-                            .bg(active_bg)
-                            .text_color(fg)
-                            .font_weight(FontWeight::MEDIUM),
-                        false => d
+            .when(self.scope_row().is_none(), |row| {
+                // Go to File's rows are a capped sample of the project, so a
+                // count there would read as the size of something it is not.
+                let count = match self.tab {
+                    SearchTab::Files => 0,
+                    _ => self.list.read(cx).delegate().row_count(),
+                };
+                let heading = match self.tab {
+                    SearchTab::Locations => self.heading.unwrap_or_else(|| self.tab.title()),
+                    _ => self.tab.title(),
+                };
+                row.child(
+                    div()
+                        .h(px(24.))
+                        .px(px(9.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(6.))
+                        .bg(active_bg)
+                        .text_size(rems(SCOPE_TEXT))
+                        .text_color(fg)
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(heading),
+                )
+                .when(count > 0, |row| {
+                    row.child(
+                        div()
+                            .px(px(6.))
+                            .text_size(rems(SCOPE_TEXT))
                             .text_color(muted)
-                            .hover(move |d| d.bg(hover_bg).text_color(fg)),
-                    })
-                    .child(tab.title())
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.set_tab(tab, None, window, cx);
-                        this.list.update(cx, |state, cx| state.focus(window, cx));
-                    }))
-            }))
+                            .child(count.to_string()),
+                    )
+                })
+            })
+            .when_some(self.scope_row(), |row, tabs| {
+                row.children(tabs.into_iter().enumerate().map(|(i, tab)| {
+                    let active = tab == self.tab;
+                    div()
+                        .id(("search-tab", i))
+                        .h(px(24.))
+                        .px(px(9.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(6.))
+                        .text_size(rems(SCOPE_TEXT))
+                        .cursor_pointer()
+                        .map(|d| match active {
+                            true => d
+                                .bg(active_bg)
+                                .text_color(fg)
+                                .font_weight(FontWeight::MEDIUM),
+                            false => d
+                                .text_color(muted)
+                                .hover(move |d| d.bg(hover_bg).text_color(fg)),
+                        })
+                        .child(tab.title())
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.go_to_tab(tab, window, cx);
+                            this.list.update(cx, |state, cx| state.focus(window, cx));
+                        }))
+                }))
+            })
     }
 
     /// The switcher's footer, minus its New workspace button: the keys that
@@ -757,7 +975,7 @@ impl SearchView {
                 .children(keys)
                 .child(label)
         };
-        let tabs = !self.in_sub_list();
+        let tabs = !self.in_sub_list() && self.scope_row().is_some();
         h_flex()
             .flex_none()
             .items_center()
@@ -973,6 +1191,17 @@ impl Render for SearchView {
             .on_action(
                 cx.listener(|this, _: &SearchPrevTab, window, cx| this.step_tab(false, window, cx)),
             )
+            // Go to Symbol's chord puts Go to Symbol away, as Go to File's
+            // does; anywhere else in the search it is the switcher's.
+            .on_action(cx.listener(
+                |this, _: &crate::core::actions::EditorGoToSymbol, _window, cx| {
+                    if this.tab == SearchTab::Symbols && !this.in_sub_list() {
+                        cx.emit(SearchEvent::Dismiss);
+                    } else {
+                        cx.propagate();
+                    }
+                },
+            ))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 if is_edit_gesture(&ev.keystroke) && this.on_edit_gesture(window, cx) {
                     cx.stop_propagation();
@@ -1163,6 +1392,28 @@ mod tests {
         app.update_in(&mut vcx, |app, window, cx| app.quick_open_file(window, cx));
         vcx.run_until_parked();
         assert!(app.read_with(&vcx, |app, _| app.search.is_none()));
+    }
+
+    /// A tab reached by its own chord stands alone: Tab does not swap Go to
+    /// File or the places a language server found for the terminals.
+    #[gpui::test]
+    fn a_standalone_tab_keeps_its_list_on_tab(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        for tab in [SearchTab::Files, SearchTab::Symbols, SearchTab::Locations] {
+            app.update_in(&mut vcx, |app, window, cx| {
+                app.open_search(tab, "", window, cx)
+            });
+            vcx.run_until_parked();
+            let view = open(&app, &mut vcx);
+            view.update_in(&mut vcx, |view, window, cx| {
+                view.step_tab(true, window, cx);
+                view.step_tab(false, window, cx);
+            });
+            view.read_with(&vcx, |view, _| assert_eq!(view.tab, tab));
+            app.update_in(&mut vcx, |app, window, cx| app.close_search(window, cx));
+            vcx.run_until_parked();
+        }
     }
 
     /// The Actions tab's "Go to File…" row moves the search to its Files tab

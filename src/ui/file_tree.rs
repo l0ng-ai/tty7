@@ -1856,6 +1856,7 @@ impl Tty7App {
         let is_dir = row.entry.is_dir;
         let selected = self.tab_code().and_then(|c| c.selected.as_deref()) == Some(&*path);
         let muted = cx.theme().muted_foreground;
+        let paths_are_local = self.spawn_host(cx).is_local();
 
         // A placeholder standing in for children that are not there. Not a
         // file, so it takes none of the row machinery below — no hover, no
@@ -2057,11 +2058,26 @@ impl Tty7App {
                     }
                 }),
             )
-            .on_drag(ExternalPaths(vec![path.clone()].into()), {
+            // A local tree's rows are this machine's files, as good as ones
+            // dragged in from Finder, and every drop target takes them that
+            // way. A remote tree's rows name files on the far machine: they
+            // travel as their own type, so no target that reads, uploads or
+            // pins local paths can mistake one for a file here.
+            .map(|d| {
                 let name = row.entry.name.clone();
-                move |_, _, _, cx| {
+                let ghost = move |cx: &mut App| {
                     let name = name.clone();
                     cx.new(|_| DragGhost { name })
+                };
+                match paths_are_local {
+                    true => d.on_drag(
+                        ExternalPaths(vec![path.clone()].into()),
+                        move |_, _, _, cx| ghost(cx),
+                    ),
+                    false => d
+                        .on_drag(RemotePathDrag { path: path.clone() }, move |_, _, _, cx| {
+                            ghost(cx)
+                        }),
                 }
             })
             // The other direction: files dropped on this row are copied in.
@@ -2082,7 +2098,6 @@ impl Tty7App {
                 let path = path.clone();
                 let is_root = row.is_root;
                 let show_hidden = self.file_tree.show_hidden;
-                let paths_are_local = self.spawn_host(cx).is_local();
                 move |menu, _window, cx| {
                     Self::tree_row_context_menu(
                         menu,
@@ -2332,6 +2347,13 @@ fn dotfiles_menu_item(show_hidden: bool, app: &gpui::WeakEntity<Tty7App>) -> Pop
 
 struct DragGhost {
     name: String,
+}
+
+/// A row dragged out of a remote Files tree: a path on that remote, which
+/// nothing on this machine can open. See the row's `on_drag`.
+#[derive(Clone)]
+pub(crate) struct RemotePathDrag {
+    pub path: PathBuf,
 }
 
 impl gpui::Render for DragGhost {

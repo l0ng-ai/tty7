@@ -90,6 +90,13 @@ pub enum CommandKind {
     DocumentWidthTwoThirds,
     ToggleDocumentPreview,
     ToggleDocumentWrap,
+    /// The code editor's text commands, run on the active buffer.
+    EditorTransformUppercase,
+    EditorTransformLowercase,
+    EditorTransformTitleCase,
+    EditorTrimTrailingWhitespace,
+    EditorJoinLines,
+    EditorRemoveSurroundingBrackets,
     RestartSshSession,
     ScmCommit,
     ScmStageAll,
@@ -115,6 +122,22 @@ pub enum CommandKind {
         path: std::path::PathBuf,
         line: Option<u32>,
         column: Option<u32>,
+    },
+    /// The code editor's navigation, from the palette.
+    EditorGoToSymbol,
+    EditorNavigateBack,
+    EditorNavigateForward,
+    EditorSplitRight,
+    /// A Go to Symbol row: this 0-based place in the file in front.
+    GoToSymbol {
+        line: u32,
+        column: u32,
+    },
+    /// A place a language server found: 0-based, the column in chars.
+    GoToLocation {
+        path: std::path::PathBuf,
+        line: u32,
+        column: u32,
     },
     /// Connect with a typed `ssh` command line (`-p`, `-J`, an alias…).
     OpenSshConnect(String),
@@ -247,6 +270,16 @@ impl CommandKind {
             DocumentWidthTwoThirds => "document-width-two-thirds",
             ToggleDocumentPreview => "document-preview",
             ToggleDocumentWrap => "document-wrap",
+            EditorTransformUppercase => "editor-uppercase",
+            EditorTransformLowercase => "editor-lowercase",
+            EditorTransformTitleCase => "editor-title-case",
+            EditorTrimTrailingWhitespace => "editor-trim-trailing-whitespace",
+            EditorJoinLines => "editor-join-lines",
+            EditorRemoveSurroundingBrackets => "editor-remove-brackets",
+            EditorGoToSymbol => "editor-go-to-symbol",
+            EditorNavigateBack => "editor-go-back",
+            EditorNavigateForward => "editor-go-forward",
+            EditorSplitRight => "editor-split-right",
             RestartSshSession => "ssh-reconnect",
             ScmCommit => "git-commit",
             ScmStageAll => "git-stage-all",
@@ -270,6 +303,8 @@ impl CommandKind {
             | SetTheme(_)
             | GoToTab { .. }
             | OpenFile { .. }
+            | GoToSymbol { .. }
+            | GoToLocation { .. }
             | ResumeSession { .. }
             | ForkSession { .. }
             | CopySessionId(_)
@@ -292,6 +327,8 @@ impl CommandKind {
             CutText => return inline("secondary-x"),
             PasteText => return inline("secondary-v"),
             SelectAllText => return inline("secondary-a"),
+            // A fixed `CodeEditor` binding, not one of the keymap's slots.
+            EditorJoinLines => return inline("ctrl-j"),
             LaunchAgent(agent) => {
                 return crate::ui::keymap::effective_key(
                     crate::ui::agent_launch::launch_action_name(*agent),
@@ -375,6 +412,16 @@ impl CommandKind {
             DocumentWidthTwoThirds => "DocumentWidthTwoThirds",
             ToggleDocumentPreview => "ToggleDocumentPreview",
             ToggleDocumentWrap => "ToggleDocumentWrap",
+            EditorTransformUppercase => "EditorTransformUppercase",
+            EditorTransformLowercase => "EditorTransformLowercase",
+            EditorTransformTitleCase => "EditorTransformTitleCase",
+            EditorTrimTrailingWhitespace => "EditorTrimTrailingWhitespace",
+            EditorJoinLines => "EditorJoinLines",
+            EditorRemoveSurroundingBrackets => "EditorRemoveSurroundingBrackets",
+            EditorGoToSymbol => "EditorGoToSymbol",
+            EditorNavigateBack => "EditorNavigateBack",
+            EditorNavigateForward => "EditorNavigateForward",
+            EditorSplitRight => "EditorSplitRight",
             RestartSshSession => "RestartSshSession",
             OpenSshProfiles => "OpenSshProfiles",
             ScmCommit => "ScmCommit",
@@ -406,6 +453,8 @@ impl CommandKind {
             | SetTheme(_)
             | GoToTab { .. }
             | OpenFile { .. }
+            | GoToSymbol { .. }
+            | GoToLocation { .. }
             | ResumeSession { .. }
             | ForkSession { .. }
             | CopySessionId(_)

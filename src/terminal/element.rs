@@ -1996,31 +1996,17 @@ impl TerminalElement {
         let Some(link) = self.view.read(cx).hovered_link.as_ref() else {
             return;
         };
-        let (start, end) = (link.start, link.end);
-        let mut line = start.line.0;
-        while line <= end.line.0 {
-            let grid_row = line + display_offset;
-            if grid_row >= 0 && (grid_row as usize) < rows {
-                let grid_row = grid_row as usize;
-                let col_start = if line == start.line.0 {
-                    start.column.0
-                } else {
-                    0
-                };
-                let col_end = if line == end.line.0 {
-                    end.column.0
-                } else {
-                    cols.saturating_sub(1)
-                };
-                let mut col = col_start;
-                while col <= col_end && col < cols {
-                    let cell = &mut buf[grid_row * cols + col];
-                    cell.link_hover = true;
-                    cell.underline_color = link_underline_color(cell, link.armed);
-                    col += 1;
-                }
+        for &(start, end) in &link.runs {
+            let grid_row = start.line.0 + display_offset;
+            if grid_row < 0 || grid_row as usize >= rows {
+                continue;
             }
-            line += 1;
+            let row = grid_row as usize * cols;
+            for col in start.column.0..=end.column.0.min(cols.saturating_sub(1)) {
+                let cell = &mut buf[row + col];
+                cell.link_hover = true;
+                cell.underline_color = link_underline_color(cell, link.armed);
+            }
         }
     }
 

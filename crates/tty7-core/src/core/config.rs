@@ -263,6 +263,18 @@ pub struct Config {
     /// [`Self::editor_soft_wrap`]. Files that are not Markdown ignore it.
     #[serde(default)]
     pub editor_markdown_preview: bool,
+    /// Whether the code editor starts language servers (rust-analyzer,
+    /// typescript-language-server, …) for the files it opens, for
+    /// diagnostics, completion, hover and go to definition. On by default;
+    /// a language whose server is not installed simply goes without.
+    #[serde(default = "default_true")]
+    pub editor_lsp: bool,
+    /// Whether the code editor marks lines that differ from the file's
+    /// staged (index) version in its gutter. On by default; flipped by the
+    /// `ToggleEditorGitGutter` command and remembered like
+    /// [`Self::editor_soft_wrap`].
+    #[serde(default = "default_true")]
+    pub editor_git_gutter: bool,
     /// Whether the sidebar files tabs nobody pinned into groups of its own —
     /// by repository, and by host for an SSH pane. Off, those tabs sit in one
     /// flat list below the pinned groups, which are the user's and show
@@ -420,6 +432,10 @@ pub struct Config {
     /// "New Agent Tab" opens.
     #[serde(default)]
     pub agent_frecency: HashMap<String, ProfileUsage>,
+    /// Approved `.tty7/setup` scripts: repo (`worktree::setup::trust_key`) to
+    /// the sha256 of the content approved. A changed script asks again.
+    #[serde(default)]
+    pub worktree_setup_trust: HashMap<String, String>,
     /// Past agent sessions taken out of the search's Sessions tab, as
     /// `<agent slug>:<session id>`. Only the listing forgets them; the
     /// agent's own history is not touched.
@@ -764,6 +780,8 @@ impl Default for Config {
             scm_changes_tree: false,
             editor_soft_wrap: false,
             editor_markdown_preview: false,
+            editor_lsp: true,
+            editor_git_gutter: true,
             sidebar_auto_grouping: true,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,
@@ -806,6 +824,7 @@ impl Default for Config {
             agent_commands: HashMap::new(),
             agent_launch: HashMap::new(),
             agent_frecency: HashMap::new(),
+            worktree_setup_trust: HashMap::new(),
             hidden_agent_sessions: BTreeSet::new(),
             restore_agent_sessions: true,
             per_pane_history: false,

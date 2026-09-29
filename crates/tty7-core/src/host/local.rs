@@ -316,6 +316,11 @@ impl Host for LocalHost {
         git::git_output_with_env(cwd, args, &no_prompt_env())
     }
 
+    fn repo_head(&self, cwd: &Path) -> Option<Option<git::head::RepoHead>> {
+        guard_off_ui();
+        Some(git::head::read_head(cwd))
+    }
+
     fn git_lines(
         &self,
         cwd: &Path,

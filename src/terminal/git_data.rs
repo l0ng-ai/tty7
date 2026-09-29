@@ -890,8 +890,12 @@ impl Tty7App {
         // it against a local repository that merely shares the path.
         let (host, path) = self.editor_active_location()?;
         let root = cx
-            .try_global::<crate::terminal::git_status::GitStatusCache>()?
-            .repo_root_for(host, path.parent()?)?;
+            .try_global::<crate::terminal::git_status::GitStatusCache>()
+            .and_then(|cache| cache.repo_root_for(host, path.parent()?))
+            // The gutter's own base read finds the repository of a file no
+            // terminal has been in, and its markers need this watch to
+            // notice a stage or a checkout.
+            .or_else(|| self.editor_gutter_root())?;
         Some((host, root.to_path_buf()))
     }
 
