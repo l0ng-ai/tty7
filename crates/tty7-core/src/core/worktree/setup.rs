@@ -105,7 +105,13 @@ pub fn hint(host: &dyn Host, worktree: &Path) -> Option<&'static str> {
 /// The line a new worktree's first pane types: the setup script under its
 /// variables, then the agent — chained with `&&`, so a failed setup stops
 /// there, on screen, instead of under an agent that cannot build.
+///
+/// It opens with a `cd` into `worktree`. The pane is spawned there, but a
+/// shell's startup files may move it (`cd ~/src` in a `.zshrc`), and a setup
+/// run from the main checkout would install into — and write files into —
+/// the wrong tree.
 pub fn launch_line(
+    worktree: &Path,
     setup: Option<(&Path, &[(&'static str, String)])>,
     agent: Option<String>,
 ) -> Option<String> {
@@ -116,10 +122,11 @@ pub fn launch_line(
         parts.push(q(&script.to_string_lossy()));
         parts.join(" ")
     });
-    match (setup, agent) {
-        (Some(setup), Some(agent)) => Some(format!("{setup} && {agent}")),
-        (setup, agent) => setup.or(agent),
-    }
+    let run = match (setup, agent) {
+        (Some(setup), Some(agent)) => format!("{setup} && {agent}"),
+        (setup, agent) => setup.or(agent)?,
+    };
+    Some(format!("cd {} && {run}", q(&worktree.to_string_lossy())))
 }
 
 /// `agent`'s launch line (`overrides` is `Config::agent_launch`), opening on
@@ -163,14 +170,19 @@ mod tests {
             ("TTY7_ROOT_PATH", "/r/my repo".to_string()),
             ("TTY7_PORT", "20010".to_string()),
         ];
+        let wt = Path::new("/r/my repo/.tty7/worktrees/w");
         let script = Path::new("/r/my repo/.tty7/worktrees/w/.tty7/setup");
         assert_eq!(
-            launch_line(Some((script, &env)), Some("claude 'fix it'".into())).unwrap(),
-            "env TTY7_ROOT_PATH='/r/my repo' TTY7_PORT=20010 \
+            launch_line(wt, Some((script, &env)), Some("claude 'fix it'".into())).unwrap(),
+            "cd '/r/my repo/.tty7/worktrees/w' && \
+             env TTY7_ROOT_PATH='/r/my repo' TTY7_PORT=20010 \
              '/r/my repo/.tty7/worktrees/w/.tty7/setup' && claude 'fix it'"
         );
-        assert_eq!(launch_line(None, Some("codex".into())).unwrap(), "codex");
-        assert_eq!(launch_line(None, None), None);
+        assert_eq!(
+            launch_line(wt, None, Some("codex".into())).unwrap(),
+            "cd '/r/my repo/.tty7/worktrees/w' && codex"
+        );
+        assert_eq!(launch_line(wt, None, None), None);
     }
 
     #[cfg(unix)]

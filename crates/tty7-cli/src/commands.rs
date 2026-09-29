@@ -1210,6 +1210,7 @@ fn worktree_new(args: WorktreeNew, ctx: &Context, backend: &mut dyn Backend) -> 
     let agent_line =
         agent.map(|a| setup::agent_line(a, args.task.as_deref().unwrap_or(""), &overrides));
     let line = setup::launch_line(
+        &wt.path,
         setup
             .as_ref()
             .map(|(s, env)| (s.script.as_path(), env.as_slice())),
