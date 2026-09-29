@@ -1906,6 +1906,7 @@ mod tests {
                 activity: 12,
                 turns: 4,
                 inferred: false,
+                question: false,
             })),
             DaemonMsg::AgentStatus(None),
             DaemonMsg::LoopbackForward(LoopbackForward { local_port: 49152 }),

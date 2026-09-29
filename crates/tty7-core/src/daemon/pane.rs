@@ -5771,6 +5771,7 @@ mod tests {
             activity: 0,
             turns: 0,
             inferred: false,
+            question: false,
         });
         apply_signals(&mut st, sniffer.feed(b"\x1b]9;noise\x07"));
         assert_eq!(

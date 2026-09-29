@@ -92,6 +92,11 @@ pub struct Task {
     pub runs: Vec<Run>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done: Option<Done>,
+    /// The user paused it — interrupted its agent and sent the card back to
+    /// the queue — at this Unix second. It holds while no agent on it is in
+    /// the middle of a turn; whoever puts one back to work clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<u64>,
 }
 
 /// One agent started for a task.
@@ -198,6 +203,9 @@ pub fn column(task: &Task, live: impl Fn(&Run) -> Option<Live>) -> Column {
     if states.iter().any(|s| s.status == AgentStatus::Working) {
         return Column::Running;
     }
+    if task.paused.is_some() {
+        return Column::Queued;
+    }
     if let Some(done) = task.done
         && turns(&states) <= done.turns
     {
@@ -240,6 +248,7 @@ impl Task {
             created: crate::core::machine::unix_now(),
             runs: Vec::new(),
             done: None,
+            paused: None,
         }
     }
 
@@ -418,6 +427,21 @@ mod tests {
         assert_eq!(col(&t, &[]), Column::Done);
         assert_eq!(col(&t, &at(live(AgentStatus::Working, 1))), Column::Running);
         assert_eq!(col(&t, &at(live(AgentStatus::Done, 2))), Column::Review);
+    }
+
+    #[test]
+    fn a_paused_task_waits_in_the_queue_until_its_agent_works_again() {
+        let (mut t, tabs) = task_with(1);
+        t.paused = Some(1);
+        assert_eq!(
+            col(&t, &[(tabs[0], live(AgentStatus::Done, 3))]),
+            Column::Queued
+        );
+        assert_eq!(col(&t, &[]), Column::Queued);
+        assert_eq!(
+            col(&t, &[(tabs[0], live(AgentStatus::Working, 3))]),
+            Column::Running
+        );
     }
 
     #[test]

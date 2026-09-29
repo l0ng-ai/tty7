@@ -978,6 +978,12 @@ pub struct AgentSessionState {
     /// the turn back on [`AgentStatus::Working`].
     #[serde(default)]
     pub inferred: bool,
+    /// While [`AgentStatus::Waiting`]: the agent asked the user a question,
+    /// rather than for permission to go ahead. The two want different
+    /// answers — a permission prompt takes a yes, a question takes words — so
+    /// anything offering a one-click "allow" has to tell them apart.
+    #[serde(default)]
+    pub question: bool,
 }
 
 impl AgentStatus {
@@ -1052,11 +1058,13 @@ impl AgentSessionState {
             AgentEventKind::PermissionRequest | AgentEventKind::QuestionAsked => {
                 self.status = AgentStatus::Waiting;
                 self.message = ev.message.clone();
+                self.question = ev.kind == AgentEventKind::QuestionAsked;
             }
             AgentEventKind::Notification => {
                 if self.status == AgentStatus::Working {
                     self.status = AgentStatus::Waiting;
                     self.message = ev.message.clone();
+                    self.question = false;
                 }
             }
             AgentEventKind::ToolComplete => {
@@ -1596,6 +1604,24 @@ mod tests {
             parse_agent_event(b"777;notify;tty7://cli-agent;{oops"),
             None
         );
+    }
+
+    #[test]
+    fn a_waiting_agent_says_whether_it_asked_a_question_or_for_permission() {
+        let ev = |kind| AgentEvent {
+            agent: Some(CLIAgent::Claude),
+            kind,
+            session_id: None,
+            message: None,
+            cwd: None,
+            prompt: None,
+        };
+        let mut s = AgentSessionState::default();
+        s.apply_event(&ev(AgentEventKind::PromptSubmit));
+        s.apply_event(&ev(AgentEventKind::QuestionAsked));
+        assert!(s.question);
+        s.apply_event(&ev(AgentEventKind::PermissionRequest));
+        assert!(!s.question);
     }
 
     #[test]

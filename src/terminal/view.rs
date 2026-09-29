@@ -2225,6 +2225,36 @@ impl TerminalView {
             .filter(|t| !t.trim().is_empty())
     }
 
+    /// Bytes typed into the pane as if at the keyboard — `\r` to take a
+    /// highlighted choice, ESC to interrupt an agent's turn.
+    pub fn send_keys(&self, bytes: &[u8]) {
+        self.terminal.write(bytes.to_vec());
+    }
+
+    /// The last `n` lines on screen that carry any text, top to bottom — what
+    /// the board shows of a pane without opening it. Lines of nothing but
+    /// punctuation and box drawing (a TUI's borders and rules) are skipped:
+    /// they say nothing about what the program is doing.
+    pub fn screen_tail(&self, n: usize) -> Vec<String> {
+        let term = self.terminal.term.lock();
+        let grid = term.grid();
+        let cols = grid.columns();
+        let mut out = Vec::new();
+        for line in (0..grid.screen_lines() as i32).rev() {
+            if out.len() == n {
+                break;
+            }
+            let row = &grid[Line(line)];
+            let text: String = (0..cols).map(|c| row[Column(c)].c).collect();
+            let text = text.trim();
+            if text.chars().any(char::is_alphanumeric) {
+                out.push(text.to_string());
+            }
+        }
+        out.reverse();
+        out
+    }
+
     pub fn send_agent_prompt(&self, prompt: &str) {
         self.terminal
             .write(crate::core::agent_prompt::submit_bytes(prompt));
@@ -10748,6 +10778,7 @@ mod gpui_tests {
                 activity: 0,
                 turns: 0,
                 inferred: false,
+                question: false,
             }))
             .encode(daemon)
             .unwrap();
@@ -10805,6 +10836,7 @@ mod gpui_tests {
             activity: 0,
             turns: 0,
             inferred: false,
+            question: false,
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -10873,6 +10905,7 @@ mod gpui_tests {
             activity: 0,
             turns,
             inferred: false,
+            question: false,
         };
         DaemonMsg::AgentStatus(Some(state.clone()))
             .encode(daemon)
@@ -11331,6 +11364,7 @@ mod gpui_tests {
             activity: 0,
             turns: 0,
             inferred: false,
+            question: false,
         }))
         .encode(&mut daemon)
         .unwrap();
