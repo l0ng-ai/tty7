@@ -180,6 +180,45 @@ pub(crate) const DEFAULT_TITLE: &str = "tty7";
 /// deliberately (#438) rather than the absence of one. The literal string
 /// `tty7` is the only title that says nothing, because it is the app's own
 /// name standing in for a pane that has never introduced itself.
+/// The last `n` lines of a screen that are output rather than chrome.
+///
+/// An agent's TUI keeps its own furniture at the bottom of the screen: an
+/// input box between two rules, and under it a status line or five — model,
+/// branch, token meter. Read naively, the "last lines" of a Claude pane are
+/// that status bar, never what it answered. So a screen with a rule in its
+/// lower half is cut at the rule — at the upper of two close together, the
+/// top of the input box — and only what is above counts. Then lines with no
+/// text (borders, blank rows) are skipped, and so is the spinner's
+/// "✻ Crunched for 17s" summary, which says how long, not what.
+pub(crate) fn output_tail(rows: &[String], n: usize) -> Vec<String> {
+    let is_rule = |row: &str| {
+        let row = row.trim();
+        let ruled = row
+            .chars()
+            .filter(|c| matches!(c, '─' | '━' | '═' | '-'))
+            .count();
+        !row.is_empty() && ruled * 10 >= row.chars().count() * 9 && ruled >= 8
+    };
+    let rules: Vec<usize> = (rows.len() / 2..rows.len())
+        .filter(|&i| is_rule(&rows[i]))
+        .collect();
+    let cut = match rules.as_slice() {
+        [] => rows.len(),
+        [.., upper, lower] if lower - upper <= 6 => *upper,
+        [.., last] => *last,
+    };
+    let spinner = |row: &str| row.starts_with(['✻', '✳', '✶', '✢', '✽']);
+    let mut out: Vec<String> = rows[..cut]
+        .iter()
+        .rev()
+        .map(|r| r.trim().to_string())
+        .filter(|r| r.chars().any(char::is_alphanumeric) && !spinner(r))
+        .take(n)
+        .collect();
+    out.reverse();
+    out
+}
+
 pub(crate) fn stated_title(title: &str) -> Option<&str> {
     match title.trim() {
         "" => None,
@@ -2231,28 +2270,20 @@ impl TerminalView {
         self.terminal.write(bytes.to_vec());
     }
 
-    /// The last `n` lines on screen that carry any text, top to bottom — what
-    /// the board shows of a pane without opening it. Lines of nothing but
-    /// punctuation and box drawing (a TUI's borders and rules) are skipped:
-    /// they say nothing about what the program is doing.
+    /// The last `n` lines of what the program in this pane has said, top to
+    /// bottom — what the board shows of an agent without opening it. See
+    /// [`output_tail`] for what counts.
     pub fn screen_tail(&self, n: usize) -> Vec<String> {
         let term = self.terminal.term.lock();
         let grid = term.grid();
         let cols = grid.columns();
-        let mut out = Vec::new();
-        for line in (0..grid.screen_lines() as i32).rev() {
-            if out.len() == n {
-                break;
-            }
-            let row = &grid[Line(line)];
-            let text: String = (0..cols).map(|c| row[Column(c)].c).collect();
-            let text = text.trim();
-            if text.chars().any(char::is_alphanumeric) {
-                out.push(text.to_string());
-            }
-        }
-        out.reverse();
-        out
+        let rows: Vec<String> = (0..grid.screen_lines() as i32)
+            .map(|line| {
+                let row = &grid[Line(line)];
+                (0..cols).map(|c| row[Column(c)].c).collect()
+            })
+            .collect();
+        output_tail(&rows, n)
     }
 
     pub fn send_agent_prompt(&self, prompt: &str) {
@@ -8521,6 +8552,44 @@ fn drag_scroll_step(overshoot: f32) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn output_tail_reads_above_an_agents_input_box() {
+        let rule = "─".repeat(40);
+        let rows: Vec<String> = [
+            "> Explain what task::column does",
+            "",
+            "● task::column works out which column a card belongs in.",
+            "  Rules, checked in order.",
+            "",
+            "✻ Crunched for 17s · done 9:32 AM",
+            "",
+            rule.as_str(),
+            "❯",
+            rule.as_str(),
+            "⚠ Transcript saving is off",
+            "5h[ 0% ] 4h36m",
+            "↳ feat-task-board · worktree-feat-task-board",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            super::output_tail(&rows, 2),
+            vec![
+                "● task::column works out which column a card belongs in.",
+                "Rules, checked in order.",
+            ]
+        );
+    }
+
+    #[test]
+    fn output_tail_of_a_plain_screen_is_its_last_lines() {
+        let rows: Vec<String> = ["$ cargo test", "running 3 tests", "ok", ""]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(super::output_tail(&rows, 2), vec!["running 3 tests", "ok"]);
+    }
 
     /// What the label ladder asks a pane: are you showing a name of your own,
     /// or still standing under the app's? (#740)

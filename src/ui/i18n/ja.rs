@@ -1842,11 +1842,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "このマシンのサーバーはまだタスクを保存できません。ボードを使うには更新してください"
         }
         L10nKey::BoardNow => "たった今",
+        L10nKey::BoardModeWorktree => "新しい worktree",
+        L10nKey::BoardModeInPlace => "その場で実行",
         L10nKey::BoardComposerPlaceholder => "タスクを書いてください。1 行目がタイトルになります。",
         L10nKey::BoardComposerIn => "場所",
-        L10nKey::BoardBranchAuto => "新しい worktree（名前は自動）",
-        L10nKey::BoardInPlace => "その場で実行 · {cwd}",
-        L10nKey::BoardWorktreeTip => "新しい git worktree とその場での実行を切り替え",
+        L10nKey::BoardBranchAuto => "ブランチ名は自動",
         L10nKey::BoardToastStarted => "開始しました · {title}",
         L10nKey::BoardToastQueued => "キューに追加 · {title}",
         L10nKey::BoardToastPaused => "一時停止 · {title}",

@@ -216,6 +216,8 @@ impl Tty7App {
         let c = self.board.composer.as_ref()?;
         let theme = cx.theme();
         let (fg, muted) = (theme.foreground, theme.muted_foreground);
+        let mono = theme.mono_font_family.clone();
+        let border = theme.border;
         let rungs = dialog::popover_rungs(cx);
         let (hover, picked) = (gpui::rgb(rungs.hover), gpui::rgb(rungs.selected));
         let text = c.text.read(cx).value().to_string();
@@ -309,7 +311,7 @@ impl Tty7App {
                 .rounded(px(PILL_H / 2.))
                 .text_size(rems(META))
                 .text_color(if on { fg } else { muted })
-                .when(on, |d| d.bg(picked).border_1().border_color(theme.border))
+                .when(on, |d| d.bg(picked).border_1().border_color(border))
                 .when(!on, |d| d.hover(move |s| s.bg(hover)))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| this.set_composer_agent(agent, cx)))
@@ -324,52 +326,89 @@ impl Tty7App {
             .pb(px(14.))
             .children(pills);
 
-        // Where the work lands: a new branch in its own worktree, or the
-        // checkout it runs in. Clicking the line switches between the two.
+        // Where the work lands, as a choice with both sides on show: a new
+        // branch in a worktree of its own, or the checkout it is started in.
+        // After it, what that choice comes to — the branch, or the folder.
         let first_line = split(&text).map(|(title, _)| title).unwrap_or_default();
         let lands: SharedString = match c.worktree {
             true => task::branch_slug(&first_line)
                 .unwrap_or_else(|| t(L10nKey::BoardBranchAuto).to_string())
                 .into(),
-            false => t_fmt(
-                L10nKey::BoardInPlace,
-                &[(
-                    "cwd",
-                    &c.cwd
+            false => c
+                .cwd
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+                .into(),
+        };
+        let well = dialog::well_fill(cx);
+        let worktree_now = c.worktree;
+        let segment = |id: &'static str, label: L10nKey, worktree: bool, cx: &mut Context<Self>| {
+            let on = worktree_now == worktree;
+            div()
+                .id(id)
+                .h(px(22.))
+                .px(px(9.))
+                .flex()
+                .items_center()
+                .rounded(px(5.))
+                .text_size(rems(META))
+                .text_color(if on { fg } else { muted })
+                .when(on, |d| d.bg(picked).font_weight(gpui::FontWeight::MEDIUM))
+                .when(!on, |d| d.cursor_pointer().hover(move |s| s.text_color(fg)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this
+                        .board
+                        .composer
                         .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default(),
-                )],
-            )
-            .into(),
+                        .is_some_and(|c| c.worktree != worktree)
+                    {
+                        this.toggle_composer_worktree(cx);
+                    }
+                }))
+                .child(t(label))
         };
         let lands_line = h_flex()
-            .id("board-composer-worktree")
             .flex_1()
             .min_w_0()
-            .h(px(28.))
-            .px(px(6.))
-            .gap(px(8.))
+            .gap(px(10.))
             .items_center()
-            .rounded(px(6.))
-            .hover(move |s| s.bg(hover))
-            .cursor_pointer()
-            .tooltip(|window, cx| {
-                gpui_component::tooltip::Tooltip::new(t(L10nKey::BoardWorktreeTip))
-                    .build(window, cx)
-            })
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_composer_worktree(cx)))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .p(px(2.))
+                    .gap(px(2.))
+                    .rounded(px(7.))
+                    .bg(well)
+                    .child(segment(
+                        "board-composer-worktree",
+                        L10nKey::BoardModeWorktree,
+                        true,
+                        cx,
+                    ))
+                    .child(segment(
+                        "board-composer-in-place",
+                        L10nKey::BoardModeInPlace,
+                        false,
+                        cx,
+                    )),
+            )
             .child(
                 Icon::empty()
-                    .path("icons/git-branch.svg")
+                    .path(if worktree_now {
+                        "icons/git-branch.svg"
+                    } else {
+                        "icons/folder-closed.svg"
+                    })
                     .size(px(12.))
+                    .flex_none()
                     .text_color(muted),
             )
             .child(
                 div()
                     .min_w_0()
                     .truncate()
-                    .font_family(theme.mono_font_family.clone())
+                    .font_family(mono)
                     .text_size(rems(META_MONO))
                     .text_color(muted)
                     .child(lands),
@@ -382,7 +421,7 @@ impl Tty7App {
             .gap(px(8.))
             .items_center()
             .border_t_1()
-            .border_color(theme.border)
+            .border_color(border)
             .child(lands_line)
             .child(dialog::button(
                 "board-composer-queue",

@@ -18,7 +18,7 @@ const WIDTH: f32 = 360.;
 const INSET: f32 = 12.;
 const RADIUS: f32 = 11.;
 /// Lines of the agent's screen the Output block shows.
-const OUTPUT_LINES: usize = 6;
+const OUTPUT_LINES: usize = 12;
 
 impl Tty7App {
     /// The reply box, made once per window the first time the panel opens.

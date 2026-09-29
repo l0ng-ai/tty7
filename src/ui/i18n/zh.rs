@@ -1669,11 +1669,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "这台机器的 server 版本太旧，还不能保存任务——更新后即可使用看板"
         }
         L10nKey::BoardNow => "刚刚",
+        L10nKey::BoardModeWorktree => "新 worktree",
+        L10nKey::BoardModeInPlace => "原地运行",
         L10nKey::BoardComposerPlaceholder => "描述任务，第一行会作为标题。",
         L10nKey::BoardComposerIn => "位置",
-        L10nKey::BoardBranchAuto => "新 worktree，自动命名",
-        L10nKey::BoardInPlace => "原地运行 · {cwd}",
-        L10nKey::BoardWorktreeTip => "在新 git worktree 与原地运行之间切换",
+        L10nKey::BoardBranchAuto => "分支名自动生成",
         L10nKey::BoardToastStarted => "已开始 · {title}",
         L10nKey::BoardToastQueued => "已加入排队 · {title}",
         L10nKey::BoardToastPaused => "已暂停 · {title}",

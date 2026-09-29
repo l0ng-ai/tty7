@@ -1797,11 +1797,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "This machine’s server can’t keep tasks yet — update it to use the board"
         }
         L10nKey::BoardNow => "now",
+        L10nKey::BoardModeWorktree => "New worktree",
+        L10nKey::BoardModeInPlace => "In place",
         L10nKey::BoardComposerPlaceholder => "Describe the task. The first line becomes its title.",
         L10nKey::BoardComposerIn => "in",
-        L10nKey::BoardBranchAuto => "new worktree, name picked for you",
-        L10nKey::BoardInPlace => "in place · {cwd}",
-        L10nKey::BoardWorktreeTip => "Switch between a new git worktree and running in place",
+        L10nKey::BoardBranchAuto => "branch name picked for you",
         L10nKey::BoardToastStarted => "Started · {title}",
         L10nKey::BoardToastQueued => "Queued · {title}",
         L10nKey::BoardToastPaused => "Paused · {title}",
