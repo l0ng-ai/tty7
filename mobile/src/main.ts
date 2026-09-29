@@ -2,6 +2,7 @@ import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 
 import { Terminal } from "@xterm/xterm";
+import { WebglAddon } from "@xterm/addon-webgl";
 import type { ITheme } from "@xterm/xterm";
 import * as scanner from "@tauri-apps/plugin-barcode-scanner";
 
@@ -20,6 +21,30 @@ import { agentLook, icon } from "./icons";
 import logoUrl from "./assets/logo.svg?url";
 
 const app = document.getElementById("app")!;
+
+// The keyboard. The WebView runs edge to edge and is never resized for it
+// (lib.rs `edge_to_edge`): the keyboard simply covers the bottom of the page.
+// What is left is the visual viewport, so the app is sized to that, and the
+// dock and the message box sit on top of the keyboard. Screens that lay out
+// by size hear it as a window resize.
+{
+  const view = window.visualViewport;
+  let last = 0;
+  const fitView = () => {
+    if (!view) return;
+    const height = Math.round(view.height);
+    // iOS scrolls the page to show a focused field; the app does its own.
+    if (window.scrollY) window.scrollTo(0, 0);
+    if (height === last) return;
+    last = height;
+    const up = height < window.innerHeight - 80;
+    document.documentElement.classList.toggle("keyboard", up);
+    app.style.height = up ? `${height}px` : "";
+    window.dispatchEvent(new CustomEvent("viewport"));
+  };
+  view?.addEventListener("resize", fitView);
+  view?.addEventListener("scroll", fitView);
+}
 
 // ---------------------------------------------------------------------------
 // A tiny DOM helper. Four screens do not justify a framework, and the
@@ -1307,6 +1332,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       }
       // Typing brings a pane scrolled back into its history to the prompt.
       term.scrollToBottom();
+      showCursor();
       void input(data);
     };
 
@@ -1490,28 +1516,98 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // mostly vertical, it scrolls the buffer here, a row at a time, and
     // coasts after the finger lifts; mostly sideways, it is left to the
     // native pan of a pane wider than the phone.
-    let touch: { x: number; y: number; axis: "x" | "y" | null; carry: number; samples: [number, number][] } | null =
-      null;
+    let touch: { x: number; y: number; axis: "x" | "y" | null; samples: [number, number][] } | null = null;
     let coast = 0;
+    // Finger movement not yet applied, and the frame that will apply it.
+    let pending = 0;
+    let frame = 0;
     const rowHeight = () => {
       const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen");
       return drawn && term.rows ? drawn.clientHeight / term.rows : 14;
     };
-    // Moves the buffer by a distance in pixels, keeping what is short of a
-    // row for the next move. Dragging down goes back in the scrollback.
-    const scrollBy = (dy: number, carry: number) => {
-      const total = carry + dy;
-      const rows = Math.trunc(total / rowHeight());
-      if (rows) term.scrollLines(-rows);
-      return total - rows * rowHeight();
+    // Scrolls the pane's box so the cursor's line shows, when the pane is
+    // taller than the room left (the keyboard is up). Not while reading back
+    // through history.
+    const showCursor = () => {
+      const buf = term.buffer.active;
+      if (buf.viewportY < buf.baseY) return;
+      const pad = parseFloat(getComputedStyle(screenEl).paddingTop) || 0;
+      const top = pad + buf.cursorY * rowHeight();
+      const bottom = top + rowHeight() + pad;
+      if (bottom > screenEl.scrollTop + screenEl.clientHeight) screenEl.scrollTop = bottom - screenEl.clientHeight;
+      else if (top < screenEl.scrollTop) screenEl.scrollTop = Math.max(0, top - pad);
+    };
+    // How far past the top row's top edge the view is, in pixels: the part
+    // of a row a swipe has moved that xterm, which scrolls whole rows, cannot
+    // show. The drawn screen is shifted up by it, so the text follows the
+    // finger pixel by pixel instead of jumping a row at a time. The GPU moves
+    // the image; nothing is redrawn for it.
+    let frac = 0;
+    // The shift waiting for xterm to draw the rows it goes with.
+    let shiftAfterRender: number | null = null;
+    const shift = (px: number) => {
+      const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen");
+      if (drawn) drawn.style.transform = px ? `translate3d(0, ${-px}px, 0)` : "";
+    };
+    const setFrac = (px: number, afterRender = false) => {
+      frac = px;
+      // xterm draws a scroll on its next frame, not at once. A shift for the
+      // new rows put on the old ones would jolt the text a row for a frame,
+      // on every row crossed; so it waits for the draw.
+      if (afterRender) shiftAfterRender = px;
+      else {
+        shiftAfterRender = null;
+        shift(px);
+      }
+    };
+    term.onRender(() => {
+      if (shiftAfterRender === null) return;
+      shift(shiftAfterRender);
+      shiftAfterRender = null;
+    });
+    // Anything else that scrolls the buffer — output, typing — lands on a
+    // whole row.
+    let ownScroll = false;
+    term.onScroll(() => {
+      if (!ownScroll && frac) setFrac(0);
+    });
+    // Moves the view by a distance in pixels. Dragging down goes back in the
+    // scrollback.
+    const scrollBy = (dy: number) => {
+      // With the keyboard up the pane can be taller than what is left of the
+      // screen, and its box scrolls too: back through history, the box goes
+      // to its top before the buffer moves; forward, the buffer comes to the
+      // prompt before the box goes to its bottom.
+      const buf = term.buffer.active;
+      const boxRoom = screenEl.scrollHeight - screenEl.clientHeight;
+      if ((dy > 0 && screenEl.scrollTop > 0) || (dy < 0 && buf.viewportY >= buf.baseY && screenEl.scrollTop < boxRoom)) {
+        screenEl.scrollTop -= dy;
+        return;
+      }
+      const row = rowHeight();
+      // Where the view is, from the top of the scrollback, and where it goes;
+      // the bottom is the prompt with nothing shifted.
+      const at = buf.viewportY * row + frac;
+      const to = Math.min(Math.max(0, at - dy), buf.baseY * row);
+      const line = Math.floor(to / row);
+      const crossed = line !== buf.viewportY;
+      if (crossed) {
+        ownScroll = true;
+        term.scrollToLine(line);
+        ownScroll = false;
+      }
+      setFrac(to - line * row, crossed);
     };
     screenEl.addEventListener(
       "touchstart",
       (e) => {
         cancelAnimationFrame(coast);
+        cancelAnimationFrame(frame);
+        frame = 0;
+        pending = 0;
         if (e.touches.length !== 1) return (touch = null);
         const t = e.touches[0];
-        touch = { x: t.clientX, y: t.clientY, axis: null, carry: 0, samples: [[t.clientY, e.timeStamp]] };
+        touch = { x: t.clientX, y: t.clientY, axis: null, samples: [[t.clientY, e.timeStamp]] };
       },
       { passive: true },
     );
@@ -1529,9 +1625,17 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         if (touch.axis !== "y") return;
         e.preventDefault();
         const last = touch.samples[touch.samples.length - 1][0];
-        touch.carry = scrollBy(t.clientY - last, touch.carry);
+        pending += t.clientY - last;
         touch.samples.push([t.clientY, e.timeStamp]);
         if (touch.samples.length > 5) touch.samples.shift();
+        // A 120 Hz screen sends a move every 8 ms; the terminal redraws once
+        // a frame, with all of them.
+        if (!frame)
+          frame = requestAnimationFrame(() => {
+            frame = 0;
+            if (touch) scrollBy(pending);
+            pending = 0;
+          });
       },
       { passive: false },
     );
@@ -1558,7 +1662,6 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       const [y1, t1] = lifted.samples[lifted.samples.length - 1];
       // Pixels per millisecond at the lift, eased out over about a second.
       let velocity = (y1 - y0) / Math.max(1, t1 - t0);
-      let carry = lifted.carry;
       let at = performance.now();
       const step = (now: number) => {
         if (!alive) return;
@@ -1566,7 +1669,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         at = now;
         velocity *= Math.pow(0.995, dt);
         if (Math.abs(velocity) < 0.02) return;
-        carry = scrollBy(velocity * dt, carry);
+        scrollBy(velocity * dt);
         coast = requestAnimationFrame(step);
       };
       coast = requestAnimationFrame(step);
@@ -1659,6 +1762,10 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       fit();
     };
     term.onCursorMove(follow);
+    // Output running on below what the keyboard leaves showing: kept in sight.
+    term.onCursorMove(() => {
+      if (document.documentElement.classList.contains("keyboard")) showCursor();
+    });
     // The whole buffer, scrollback included, as lines of text. A row the
     // terminal wrapped joins the one before it, so a long URL or path comes
     // out whole; its trailing blanks are real and kept.
@@ -1694,6 +1801,13 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     };
     window.addEventListener("resize", fit);
     window.addEventListener("resize", regridSoon);
+    // The keyboard came up or went down: the pane's box grew or shrank, so a
+    // taken-over pane regrids, and the cursor's line is kept in sight.
+    const viewport = () => {
+      regridSoon();
+      requestAnimationFrame(showCursor);
+    };
+    window.addEventListener("viewport", viewport);
     darkScheme.addEventListener("change", retheme);
 
     const setState = (cls: string, label: string) => {
@@ -1813,6 +1927,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       window.removeEventListener("online", online);
       window.removeEventListener("resize", fit);
       window.removeEventListener("resize", regridSoon);
+      window.removeEventListener("viewport", viewport);
       clearTimeout(regrid);
       darkScheme.removeEventListener("change", retheme);
       if (handle !== null) api.paneClose(handle);
@@ -1828,6 +1943,16 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       document.fonts.load("12px Hack").finally(() => {
         if (!alive) return;
         term.open(screenEl);
+        // Drawn on the GPU: the DOM renderer lays every row out again on each
+        // line scrolled, which a phone cannot do at the finger's pace. If the
+        // context is lost, xterm goes back to the DOM renderer.
+        try {
+          const webgl = new WebglAddon();
+          webgl.onContextLoss(() => webgl.dispose());
+          term.loadAddon(webgl);
+        } catch {
+          // No WebGL here: the DOM renderer stays.
+        }
         fit();
         edited();
         open();

@@ -53,6 +53,10 @@
   --mono: Hack, "SF Mono", Menlo, ui-monospace, monospace;
   --ease: cubic-bezier(0.32, 0.72, 0, 1);
 
+  /* The home indicator's gap; none while the keyboard is up, which covers
+     it (main.ts sets `keyboard` on <html>). */
+  --safe-bottom: env(safe-area-inset-bottom);
+
   color-scheme: light dark;
   font: 17px/1.35 var(--ui);
   letter-spacing: -0.005em;
@@ -106,6 +110,10 @@ body {
 
 #app {
   height: 100dvh;
+}
+
+html.keyboard {
+  --safe-bottom: 0px;
 }
 
 button {
@@ -306,7 +314,7 @@ code {
   overflow-y: auto;
   overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
-  padding: 0 max(0px, env(safe-area-inset-right)) calc(32px + env(safe-area-inset-bottom))
+  padding: 0 max(0px, env(safe-area-inset-right)) calc(32px + var(--safe-bottom))
     max(0px, env(safe-area-inset-left));
 }
 
@@ -326,7 +334,7 @@ code {
 
 /* Clear of the floating bar at the bottom. */
 .screen.docked .scroll {
-  padding-bottom: calc(104px + env(safe-area-inset-bottom));
+  padding-bottom: calc(104px + var(--safe-bottom));
 }
 
 .large-title {
@@ -822,7 +830,7 @@ html.scanning #app {
   justify-items: center;
   align-items: center;
   gap: 24px;
-  padding: env(safe-area-inset-top) 24px calc(28px + env(safe-area-inset-bottom));
+  padding: env(safe-area-inset-top) 24px calc(28px + var(--safe-bottom));
   color: #fff;
 }
 
@@ -931,7 +939,7 @@ html.scanning #app {
 
 .dock {
   flex: none;
-  padding: 12px max(16px, env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom))
+  padding: 12px max(16px, env(safe-area-inset-right)) calc(12px + var(--safe-bottom))
     max(16px, env(safe-area-inset-left));
   background: var(--canvas);
 }
@@ -1182,6 +1190,12 @@ html.scanning #app {
   user-select: text;
 }
 
+/* Shifted by part of a row while a swipe scrolls it (main.ts `setFrac`):
+   kept on its own layer so that is a move, not a repaint. */
+.term .xterm-screen {
+  will-change: transform;
+}
+
 /* The field typing into the terminal goes through: focusable, so the
    keyboard and its input methods work, but never seen. 16px, or iOS zooms
    the page when it takes focus. */
@@ -1276,7 +1290,7 @@ html.scanning #app {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px max(12px, env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom))
+  padding: 10px max(12px, env(safe-area-inset-right)) calc(10px + var(--safe-bottom))
     max(12px, env(safe-area-inset-left));
   background: var(--canvas);
   box-shadow: 0 -0.5px 0 var(--hair);
@@ -1423,7 +1437,7 @@ html.scanning #app {
   z-index: 3;
   left: max(16px, env(safe-area-inset-left));
   right: max(16px, env(safe-area-inset-right));
-  bottom: calc(12px + env(safe-area-inset-bottom));
+  bottom: calc(12px + var(--safe-bottom));
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1521,7 +1535,7 @@ html.scanning #app {
   gap: 20px;
   width: 100%;
   max-height: calc(100% - env(safe-area-inset-top) - 24px);
-  padding: 10px 20px calc(20px + env(safe-area-inset-bottom));
+  padding: 10px 20px calc(20px + var(--safe-bottom));
   border-radius: 44px;
   background: var(--canvas);
   box-shadow: var(--shadow);
