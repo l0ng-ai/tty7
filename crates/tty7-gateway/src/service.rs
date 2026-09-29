@@ -205,7 +205,7 @@ async fn bind(key: SecretKey, port: Option<u16>) -> Result<Endpoint> {
             Err(e) => {
                 let what = match (port, mdns) {
                     (0, true) => "local network discovery".to_string(),
-                    (0, false) => "the iroh endpoint".to_string(),
+                    (0, false) => "the connection".to_string(),
                     (port, _) => format!("port {port}"),
                 };
                 failures.push(format!("{what}: {e}"));

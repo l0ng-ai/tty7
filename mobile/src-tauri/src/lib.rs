@@ -114,7 +114,7 @@ fn load_or_create_key(path: &std::path::Path) -> anyhow::Result<SecretKey> {
     if let Ok(bytes) = std::fs::read(path) {
         let bytes: [u8; 32] = bytes
             .try_into()
-            .map_err(|_| anyhow::anyhow!("the stored key is damaged"))?;
+            .map_err(|_| anyhow::anyhow!("this phone's pairing key is damaged — pair again"))?;
         return Ok(SecretKey::from_bytes(&bytes));
     }
     if let Some(dir) = path.parent() {

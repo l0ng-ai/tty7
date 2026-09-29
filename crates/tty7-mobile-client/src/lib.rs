@@ -38,7 +38,7 @@ pub struct Host {
 
 impl Host {
     fn addr(&self) -> Result<EndpointAddr> {
-        let id = EndpointId::from_str(&self.id).context("the host's id is damaged")?;
+        let id = EndpointId::from_str(&self.id).context("this machine's pairing is damaged — pair it again")?;
         let mut addr = EndpointAddr::new(id);
         if let Some(relay) = self
             .relay
@@ -74,7 +74,7 @@ pub async fn bind(secret: SecretKey) -> Result<Endpoint> {
             .secret_key(secret)
             .bind()
             .await
-            .context("starting the iroh endpoint"),
+            .context("could not start the connection"),
     }
 }
 
@@ -195,7 +195,7 @@ impl Session {
         // up.
         let (mut send, mut recv) = open(&self.conn, &ask).await.map_err(|e| {
             if e.to_string().contains("without answering") {
-                anyhow!("this machine's tty7-gateway is too old to open tabs — update it")
+                anyhow!("tty7 on this computer is too old to open tabs — update it")
             } else {
                 e
             }
