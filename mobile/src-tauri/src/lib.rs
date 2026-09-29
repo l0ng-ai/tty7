@@ -422,10 +422,39 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             hosts, pair, forget, watch, refresh, tab_new, pane_open, pane_input, pane_lease,
-            pane_close
+            pane_close, appearance
         ])
         .run(tauri::generate_context!())
         .expect("error while running tty7");
+}
+
+/// Light, dark or the system's, for what the page does not draw itself: the
+/// status bar, the keyboard, the scanner's chrome. The page follows along, as
+/// the WebView reports the window's style as `prefers-color-scheme`.
+#[tauri::command]
+fn appearance(window: tauri::WebviewWindow, style: String) {
+    #[cfg(target_os = "ios")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        // `UIUserInterfaceStyle`: unspecified follows the system.
+        let style: isize = match style.as_str() {
+            "light" => 1,
+            "dark" => 2,
+            _ => 0,
+        };
+        let _ = window.with_webview(move |webview| unsafe {
+            let Some(wk) = (webview.inner() as *const AnyObject).as_ref() else {
+                return;
+            };
+            let ui_window: *const AnyObject = msg_send![wk, window];
+            if let Some(ui_window) = ui_window.as_ref() {
+                let _: () = msg_send![ui_window, setOverrideUserInterfaceStyle: style];
+            }
+        });
+    }
+    #[cfg(not(target_os = "ios"))]
+    let _ = (window, style);
 }
 
 /// Lets the page run under the status bar and the home indicator, and leaves

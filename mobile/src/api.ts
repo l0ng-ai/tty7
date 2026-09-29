@@ -83,6 +83,9 @@ export const pair = (code: string, deviceName: string) =>
 
 export const forget = (hostId: string) => invoke<void>("forget", { hostId });
 
+/** Sets the style of what the page does not draw: status bar, keyboard. */
+export const appearance = (style: "system" | "light" | "dark") => invoke<void>("appearance", { style });
+
 export function watch(hostId: string, onMsg: (msg: TreeMsg) => void) {
   const onEvent = new Channel<TreeMsg>();
   onEvent.onmessage = onMsg;

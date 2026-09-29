@@ -39,6 +39,10 @@ export const icon = {
   copy: stroke(`<rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2.2"/><path d="M15.5 8.5V6.2A2.2 2.2 0 0 0 13.3 4H6.2A2.2 2.2 0 0 0 4 6.2v7.1a2.2 2.2 0 0 0 2.2 2.2h2.3"/>`),
   compose: stroke(`<path d="M20 11.5a8 8 0 0 1-11.6 7.1L4 20l1.4-4.2A8 8 0 1 1 20 11.5Z"/><path d="M8.5 10h7M8.5 13.5h4.5"/>`),
   send: stroke(`<path d="M12 19V5.5M6 11l6-6 6 6"/>`, 2.4),
+  settings: stroke(
+    `<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/>`,
+  ),
+  history: stroke(`<path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.5V9H9"/><path d="M12 8v4.2l2.8 1.8"/>`),
   alert: stroke(`<path d="M12 4 2.8 19.5h18.4Z"/><path d="M12 10v4M12 17h.01"/>`),
 };
 

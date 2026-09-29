@@ -6,6 +6,8 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import type { ITheme } from "@xterm/xterm";
 import * as scanner from "@tauri-apps/plugin-barcode-scanner";
 
+import { getVersion } from "@tauri-apps/api/app";
+
 import * as api from "./api";
 import type {
   AgentStatus,
@@ -40,6 +42,8 @@ const app = document.getElementById("app")!;
     const up = height < window.innerHeight - 80;
     document.documentElement.classList.toggle("keyboard", up);
     app.style.height = up ? `${height}px` : "";
+    // Sheets, outside the app, stand on the keyboard too.
+    document.documentElement.style.setProperty("--keyboard", up ? `${window.innerHeight - height}px` : "0px");
     window.dispatchEvent(new CustomEvent("viewport"));
   };
   view?.addEventListener("resize", fitView);
@@ -81,6 +85,97 @@ function sentence(text: string) {
 
 function errorText(e: unknown) {
   return typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
+}
+
+// ---------------------------------------------------------------------------
+// Preferences, kept on the phone. Appearance applies at once; the rest is read
+// as a terminal opens.
+
+type Appearance = "system" | "light" | "dark";
+
+interface Prefs {
+  appearance: Appearance;
+  /** The terminal's font size when it is not shrunk to fit, in px. */
+  textSize: number;
+  /** How a pane wider than the phone first shows: panning, or shrunk. */
+  wide: "readable" | "fit";
+}
+
+const PREFS: Prefs = { appearance: "system", textSize: 11, wide: "readable" };
+
+const prefs: Prefs = (() => {
+  try {
+    return { ...PREFS, ...JSON.parse(remembered("prefs") ?? "{}") };
+  } catch {
+    return { ...PREFS };
+  }
+})();
+
+function setPref<K extends keyof Prefs>(key: K, value: Prefs[K]) {
+  prefs[key] = value;
+  remember("prefs", JSON.stringify(prefs));
+  if (key === "appearance") applyAppearance();
+}
+
+const systemDark = matchMedia("(prefers-color-scheme: dark)");
+const themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+let shownDark: boolean | null = null;
+
+function isDark() {
+  return prefs.appearance === "system" ? systemDark.matches : prefs.appearance === "dark";
+}
+
+/** Draws the page light or dark; a change is heard as a `theme` event. */
+function paintAppearance() {
+  const dark = isDark();
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  themeColor?.setAttribute("content", dark ? "#0f0f10" : "#f3f3f1");
+  if (dark === shownDark) return;
+  shownDark = dark;
+  window.dispatchEvent(new CustomEvent("theme"));
+}
+
+function applyAppearance() {
+  paintAppearance();
+  api.appearance(prefs.appearance).catch(() => {});
+}
+
+systemDark.addEventListener("change", paintAppearance);
+applyAppearance();
+
+// What was sent from the message box, newest first, across every machine: a
+// command typed on one is as likely on the next.
+const HISTORY_MAX = 200;
+
+function sentHistory(): string[] {
+  try {
+    const list = JSON.parse(remembered("history") ?? "[]");
+    return Array.isArray(list) ? list.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function keepSent(text: string) {
+  const t = text.trim();
+  if (!t) return;
+  remember("history", JSON.stringify([t, ...sentHistory().filter((x) => x !== t)].slice(0, HISTORY_MAX)));
+}
+
+/** Past messages for what is being written: those it begins, then those
+ * that contain it. */
+function suggestions(typed: string, limit = 12) {
+  const q = typed.trim().toLowerCase();
+  if (!q) return [];
+  const starts: string[] = [];
+  const within: string[] = [];
+  for (const past of sentHistory()) {
+    const low = past.toLowerCase();
+    if (low === q) continue;
+    if (low.startsWith(q)) starts.push(past);
+    else if (low.includes(q)) within.push(past);
+  }
+  return [...starts, ...within].slice(0, limit);
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +224,7 @@ interface ScreenParts {
 
 /** A screen with a large title that folds into the bar as it scrolls away. */
 function screen(parts: ScreenParts) {
+  const root = !parts.back;
   const bar = h(
     "header",
     { class: "nav" },
@@ -144,22 +240,37 @@ function screen(parts: ScreenParts) {
         ),
     ),
     h("div", { class: "nav-title" }, parts.title),
-    h("div", { class: "nav-trail" }, ...(parts.trailing ?? [])),
+    h("div", { class: "nav-trail" }, ...(root ? [] : (parts.trailing ?? []))),
   );
   const large = h("h1", { class: "large-title" }, parts.title);
+  // A top-level screen keeps its buttons beside the large title, not in a
+  // bar of their own above it.
+  const heading = root && parts.trailing?.length
+    ? h("div", { class: "title-row" }, large, h("div", { class: "title-trail" }, ...parts.trailing))
+    : large;
   const scroll = h(
     "main",
     { class: "scroll" },
-    h("div", { class: "title-block" }, large, parts.subtitle),
+    h("div", { class: "title-block" }, heading, parts.subtitle),
     ...parts.body,
   );
-  new IntersectionObserver(
-    ([entry]) => bar.classList.toggle("folded", !entry.isIntersecting),
-    { root: scroll, threshold: 0, rootMargin: "-8px 0px 0px 0px" },
-  ).observe(large);
+  if (root) {
+    // The bar floats over a top-level screen, empty until the title has
+    // scrolled up under it.
+    scroll.addEventListener(
+      "scroll",
+      () => bar.classList.toggle("folded", scroll.scrollTop > large.offsetTop + large.offsetHeight - bar.offsetHeight),
+      { passive: true },
+    );
+  } else {
+    new IntersectionObserver(
+      ([entry]) => bar.classList.toggle("folded", !entry.isIntersecting),
+      { root: scroll, threshold: 0, rootMargin: "-8px 0px 0px 0px" },
+    ).observe(large);
+  }
   const view = h("div", { class: "screen" }, bar, scroll, parts.footer, parts.dock);
   if (parts.dock) view.classList.add("docked");
-  if (!parts.back && !parts.trailing?.length) view.classList.add("root");
+  if (root) view.classList.add("root");
   return view;
 }
 
@@ -224,7 +335,12 @@ function hostsScreen(direction: "push" | "pop" = "pop") {
       render();
     }, { label: "Pair a machine", run: () => pairScreen() });
     dock.hidden = true;
-    const view = screen({ title: "Machines", body: [body], dock });
+    const view = screen({
+      title: "Machines",
+      trailing: [h("button", { class: "nav-icon", ariaLabel: "Settings", onclick: () => settingsScreen() }, ico("settings"))],
+      body: [body],
+      dock,
+    });
 
     const render = () => {
       const shown = all.filter((host) => host.name.toLowerCase().includes(query));
@@ -257,6 +373,94 @@ function hostsScreen(direction: "push" | "pop" = "pop") {
       render();
     });
     return view;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+
+const APPEARANCES: { value: Appearance; label: string }[] = [
+  { value: "system", label: "Automatic" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+];
+
+const TEXT_SIZES = [
+  { value: 10, label: "Small" },
+  { value: 11, label: "Default" },
+  { value: 13, label: "Large" },
+  { value: 15, label: "Larger" },
+];
+
+const WIDE = [
+  { value: "readable", label: "Keep the text readable", meta: "Pan sideways" },
+  { value: "fit", label: "Fit the whole width", meta: "Smaller text" },
+] as const;
+
+function settingsScreen() {
+  go("push", () => {
+    const body = h("div", { class: "stack" });
+    const version = h("span", { class: "row-meta" });
+    void getVersion().then((v) => (version.textContent = v), () => {});
+
+    /** One setting's options, as rows with a check on the chosen one. */
+    const choices = <T,>(options: readonly { value: T; label: string; meta?: string }[], chosen: T, pick: (v: T) => void, sample?: (v: T) => Child) =>
+      options.map((o) =>
+        h(
+          "button",
+          { class: "row choice", onclick: () => (pick(o.value), draw()) },
+          h("span", { class: "row-title" }, o.label),
+          sample ? sample(o.value) : o.meta && h("span", { class: "row-meta" }, o.meta),
+          o.value === chosen ? ico("check", "icon choice-check") : h("span", { class: "choice-check" }),
+        ),
+      );
+    const note = (group: HTMLElement, text: string) => (group.append(h("p", { class: "group-note" }, text)), group);
+
+    const draw = () => {
+      const saved = sentHistory().length;
+      const clear = h(
+        "button",
+        { class: "row choice", disabled: saved === 0 },
+        h("span", { class: saved ? "row-title danger" : "row-title" }, "Clear message history"),
+        h("span", { class: "row-meta" }, saved ? `${saved} saved` : "Empty"),
+      );
+      clear.onclick = () => {
+        remember("history", "[]");
+        draw();
+      };
+      body.replaceChildren(
+        section("Appearance", ...choices(APPEARANCES, prefs.appearance, (v) => setPref("appearance", v))),
+        note(
+          section(
+            "Terminal text size",
+            ...choices(TEXT_SIZES, prefs.textSize, (v) => setPref("textSize", v), (v) => {
+              const aa = h("span", { class: "row-meta size-sample" }, "~/tty7 $");
+              aa.style.fontSize = `${v}px`;
+              return aa;
+            }),
+          ),
+          "The size panes are read at. Applies to the next pane you open.",
+        ),
+        note(
+          section("Panes wider than the phone", ...choices(WIDE, prefs.wide, (v) => setPref("wide", v))),
+          "How such a pane first shows. Switch any time from its ⋯ menu.",
+        ),
+        note(
+          section("Message history", clear),
+          "What you send from the message box is kept on this phone, to suggest as you write and to search from the history button.",
+        ),
+        section(
+          "About",
+          h("div", { class: "row choice static" }, h("span", { class: "row-title" }, "Version"), version),
+        ),
+      );
+    };
+    draw();
+    return screen({
+      title: "Settings",
+      back: { label: "Machines", onclick: () => hostsScreen() },
+      body: [body],
+    });
   });
 }
 
@@ -863,16 +1067,8 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void) 
   };
   draw();
 
-  const sheet = h(
-    "div",
-    { class: "sheet", role: "dialog", ariaLabel: "New tab" },
-    h("span", { class: "sheet-grip" }),
-    h(
-      "div",
-      { class: "sheet-head" },
-      h("h2", { class: "sheet-title" }, "New tab"),
-      h("button", { class: "round", ariaLabel: "Close", onclick: () => close() }, ico("close")),
-    ),
+  const { remove } = openSheet(
+    "New tab",
     h("div", { class: "sheet-body" },
       h("section", { class: "sheet-group" }, h("h3", { class: "group-title" }, "Agent"), agents),
       h(
@@ -885,11 +1081,6 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void) 
     ),
     open,
   );
-  const scrim = h("div", { class: "scrim", onclick: (e: Event) => e.target === scrim && close() }, sheet);
-  const close = () => {
-    scrim.classList.add("leaving");
-    setTimeout(() => scrim.remove(), still.matches ? 0 : 220);
-  };
   open.onclick = async () => {
     const { place, ws } = targets[target];
     const s = STARTERS[starter];
@@ -899,7 +1090,7 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void) 
     const cwd = ws.tabs.at(-1)?.panes[0]?.cwd ?? null;
     try {
       const created = await api.tabNew(host.id, place?.key ?? null, ws.id, cwd, phoneGrid());
-      scrim.remove();
+      remove();
       const title = s.kind ? agentLook(s.kind).name : "shell";
       terminalScreen(host, place, { id: created.pane_id, title, cwd }, title, s.command ?? undefined);
     } catch (e) {
@@ -908,14 +1099,36 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void) 
       open.disabled = false;
     }
   };
+}
+
+/** A sheet risen over the dimmed screen, with a title and a way to close. */
+function openSheet(title: string, ...content: Child[]) {
+  const sheet = h(
+    "div",
+    { class: "sheet", role: "dialog", ariaLabel: title },
+    h("span", { class: "sheet-grip" }),
+    h(
+      "div",
+      { class: "sheet-head" },
+      h("h2", { class: "sheet-title" }, title),
+      h("button", { class: "round", ariaLabel: "Close", onclick: () => close() }, ico("close")),
+    ),
+    ...content,
+  );
+  const scrim = h("div", { class: "scrim", onclick: (e: Event) => e.target === scrim && close() }, sheet);
+  const close = () => {
+    scrim.classList.add("leaving");
+    setTimeout(() => scrim.remove(), still.matches ? 0 : 220);
+  };
   document.body.append(scrim);
+  return { close, remove: () => scrim.remove() };
 }
 
 /** The grid that fills this screen at the readable size: what a tab started
  * here is spawned at, since no desktop window is showing it yet. */
 function phoneGrid() {
-  const cellW = READABLE_PX * CELL_EM;
-  const cellH = READABLE_PX * 1.18;
+  const cellW = readablePx() * CELL_EM;
+  const cellH = readablePx() * 1.18;
   // The terminal screen's bar, its dock (keys, page dots, message box, the
   // home indicator's gap) and the xterm padding.
   const chrome = 56 + 132 + 16;
@@ -1080,10 +1293,8 @@ const ANSI = {
 };
 const NAMES = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"] as const;
 
-const darkScheme = matchMedia("(prefers-color-scheme: dark)");
-
 function terminalTheme(): ITheme {
-  const dark = darkScheme.matches;
+  const dark = isDark();
   const ansi = dark ? ANSI.dark : ANSI.light;
   const theme: Record<string, string> = dark
     ? { background: "#1e1e20", foreground: "#ececed", cursor: "#ececed", cursorAccent: "#1e1e20", selectionBackground: "#ffffff2e" }
@@ -1149,6 +1360,8 @@ const KEY_PAGES: Key[][] = [
     { label: "~", seq: "~" },
     { label: "-", seq: "-" },
     { label: "_", seq: "_" },
+    // The shell's own history search.
+    { label: "Search history", text: "^R", seq: "\x12", flex: 1.2 },
     { label: "Home", seq: "\x1b[H", flex: 1.4 },
     { label: "End", seq: "\x1b[F", flex: 1.4 },
   ],
@@ -1156,8 +1369,9 @@ const KEY_PAGES: Key[][] = [
 
 /** Hack's advance width, in ems — what the fit divides by. */
 const CELL_EM = 0.602;
-/** The smallest font a pane is read at before it pans instead of shrinking. */
-const READABLE_PX = 11;
+/** The smallest font a pane is read at before it pans instead of shrinking:
+ * the text size chosen in Settings. */
+const readablePx = () => prefs.textSize;
 
 /** What was typed into a pane's compose box and not sent yet, by pane. Kept
  * across leaving the pane, and across a send that did not get through. */
@@ -1237,7 +1451,11 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // Typing straight into the terminal, key by key, for what a message box
     // cannot do: a full-screen program, a password prompt.
     const keyboard = h("button", { class: "round", ariaLabel: "Type into the terminal" }, ico("keyboard"));
-    const compose = h("div", { class: "compose" }, field, sendKey, keyboard);
+    // Past messages: the whole list, searchable, while the box is empty; the
+    // ones that match, in place of the key row, as it is written in.
+    const historyKey = h("button", { class: "round", ariaLabel: "History" }, ico("history"));
+    const compose = h("div", { class: "compose" }, historyKey, field, sendKey, keyboard);
+    const suggest = h("div", { class: "suggest", hidden: true });
     // What typing straight into the terminal goes through. xterm's own hidden
     // textarea is not: iOS input methods never commit into it (a pinyin
     // candidate stays unwritten), so this one, a plain field the keyboard
@@ -1258,13 +1476,13 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       { class: "screen term-screen" },
       bar,
       h("div", { class: "term-wrap" }, screenEl, typing, copyView, banner),
-      h("div", { class: "term-dock" }, pages, dots, compose),
+      h("div", { class: "term-dock" }, h("div", { class: "key-slot" }, pages, suggest), dots, compose),
     );
 
     const term = new Terminal({
       cols: 80,
       rows: 24,
-      fontSize: 11,
+      fontSize: readablePx(),
       fontFamily: "Hack, Menlo, ui-monospace, monospace",
       scrollback: 5000,
       cursorBlink: false,
@@ -1395,9 +1613,91 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       // Written, the round button sends; empty, it is the keyboard's.
       sendKey.hidden = !field.value;
       keyboard.hidden = !!field.value;
+      historyKey.hidden = !!field.value;
       grow();
+      offer();
+    };
+    const offer = () => {
+      const found = document.activeElement === field ? suggestions(field.value) : [];
+      suggest.replaceChildren(
+        ...found.map((past) => {
+          const chip = h("button", { class: "suggestion" }, past);
+          chip.onpointerdown = (e) => e.preventDefault();
+          chip.onclick = () => {
+            field.value = past;
+            edited();
+          };
+          return chip;
+        }),
+      );
+      suggest.hidden = found.length === 0;
+      suggest.scrollLeft = 0;
+      pages.classList.toggle("covered", found.length > 0);
+      dots.classList.toggle("covered", found.length > 0);
+    };
+    field.addEventListener("focus", offer);
+    field.addEventListener("blur", offer);
+
+    historyKey.onpointerdown = (e) => e.preventDefault();
+    historyKey.onclick = () => {
+      const all = sentHistory();
+      const search = h("input", {
+        type: "search",
+        class: "search-input",
+        placeholder: "Search history",
+        enterKeyHint: "search",
+        autocapitalize: "off",
+        spellcheck: false,
+        ariaLabel: "Search history",
+      });
+      search.setAttribute("autocorrect", "off");
+      const list = h("div", { class: "card" });
+      const empty = h("p", { class: "group-empty" });
+      const fill = () => {
+        const q = search.value.trim().toLowerCase();
+        const shown = all.filter((past) => past.toLowerCase().includes(q));
+        list.replaceChildren(
+          ...shown.map((past) =>
+            h(
+              "button",
+              {
+                class: "row choice past",
+                onclick: () => {
+                  remove();
+                  field.value = past;
+                  edited();
+                  field.focus({ preventScroll: true });
+                },
+              },
+              h("span", { class: "row-title" }, past),
+            ),
+          ),
+        );
+        list.hidden = shown.length === 0;
+        empty.hidden = shown.length > 0;
+        empty.textContent = all.length
+          ? `Nothing sent matches “${search.value.trim()}”.`
+          : "What you send from the message box shows up here.";
+      };
+      search.oninput = fill;
+      search.onkeydown = (e) => {
+        if (e.key === "Enter") search.blur();
+      };
+      const { remove } = openSheet(
+        "History",
+        h("label", { class: "search sheet-search" }, ico("search"), search),
+        h("div", { class: "sheet-body" }, list, empty),
+      );
+      fill();
     };
     field.addEventListener("input", edited);
+    // A password typed into the box is sent, never kept: the line the cursor
+    // is on says what the pane asked for.
+    const answersSecret = () => {
+      const buf = term.buffer.active;
+      const line = buf.getLine(buf.baseY + buf.cursorY)?.translateToString(true) ?? "";
+      return /pass(word|phrase)|\bpin\b|密码|口令/i.test(line);
+    };
     const submit = async () => {
       const body = field.value.replace(/\r?\n/g, "\r");
       // Several lines go in as one paste where the program asked for that,
@@ -1408,6 +1708,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       // how the bytes arrive would otherwise take it as part of the text.
       // An empty box sends Enter alone.
       if (!(await input("\r"))) return;
+      if (!answersSecret()) keepSent(field.value);
       field.value = "";
       edited();
     };
@@ -1471,23 +1772,23 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // until every column shows; readable, the font stays legible and the view
     // pans sideways, following the cursor. A pane that fits legibly is simply
     // fitted, and the toggle has nothing to offer.
-    let readable = true;
+    let readable = prefs.wide === "readable";
     const fittedSize = () => {
       const width = screenEl.clientWidth - 12;
-      return width <= 0 ? READABLE_PX : Math.min(14, Math.floor((width / cols / CELL_EM) * 10) / 10);
+      return width <= 0 ? readablePx() : Math.min(Math.max(14, readablePx()), Math.floor((width / cols / CELL_EM) * 10) / 10);
     };
     const fit = () => {
       // Taken over, the pane is exactly the phone's width at the readable
       // size: nothing to shrink, nothing to pan.
       if (leased) {
         cramped = false;
-        term.options.fontSize = READABLE_PX;
+        term.options.fontSize = readablePx();
         screenEl.classList.remove("panning");
         return;
       }
       const fitted = fittedSize();
-      cramped = fitted < READABLE_PX;
-      term.options.fontSize = cramped && readable ? READABLE_PX : Math.max(4, fitted);
+      cramped = fitted < readablePx();
+      term.options.fontSize = cramped && readable ? readablePx() : Math.max(4, fitted);
       screenEl.classList.toggle("panning", cramped && readable);
       follow();
       // The new font size is laid out on the next frame.
@@ -1696,13 +1997,13 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       // A row's height, measured off what xterm drew and scaled to the size
       // the pane will be read at; the metrics guess only before the first draw.
       const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen");
-      const now = term.options.fontSize ?? READABLE_PX;
+      const now = term.options.fontSize ?? readablePx();
       const rowH =
         drawn && term.rows && drawn.clientHeight
-          ? ((drawn.clientHeight / term.rows) * READABLE_PX) / now
-          : READABLE_PX * 1.18;
+          ? ((drawn.clientHeight / term.rows) * readablePx()) / now
+          : readablePx() * 1.18;
       return {
-        cols: Math.max(20, Math.floor(width / (READABLE_PX * CELL_EM))),
+        cols: Math.max(20, Math.floor(width / (readablePx() * CELL_EM))),
         rows: Math.max(5, Math.floor(height / rowH)),
       };
     };
@@ -1808,7 +2109,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       requestAnimationFrame(showCursor);
     };
     window.addEventListener("viewport", viewport);
-    darkScheme.addEventListener("change", retheme);
+    window.addEventListener("theme", retheme);
 
     const setState = (cls: string, label: string) => {
       state.className = `term-state ${cls}`;
@@ -1929,7 +2230,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       window.removeEventListener("resize", regridSoon);
       window.removeEventListener("viewport", viewport);
       clearTimeout(regrid);
-      darkScheme.removeEventListener("change", retheme);
+      window.removeEventListener("theme", retheme);
       if (handle !== null) api.paneClose(handle);
       term.dispose();
     };

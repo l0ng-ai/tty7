@@ -57,7 +57,7 @@
      it (main.ts sets `keyboard` on <html>). */
   --safe-bottom: env(safe-area-inset-bottom);
 
-  color-scheme: light dark;
+  color-scheme: light;
   font: 17px/1.35 var(--ui);
   letter-spacing: -0.005em;
   color: var(--ink);
@@ -66,28 +66,29 @@
   -webkit-font-smoothing: antialiased;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --canvas: #0f0f10;
-    --cell: #1e1e20;
-    --cell-press: #29292c;
-    --raised: #242427;
-    --ink: #ececed;
-    --ink-soft: rgb(255 255 255 / 0.78);
-    --ink-2: rgb(255 255 255 / 0.5);
-    --ink-3: rgb(255 255 255 / 0.3);
-    --hair: rgb(255 255 255 / 0.1);
-    --fill: rgb(255 255 255 / 0.08);
-    --fill-faint: rgb(255 255 255 / 0.045);
-    --line: rgb(255 255 255 / 0.16);
-    --accent-ink: #18181a;
-    --danger: #f07878;
-    --warn-ink: #e0a345;
-    --ok-ink: #5fd07a;
-    --bar: rgb(30 30 32 / 0.82);
-    --lift: 0 0 0 0.5px rgb(255 255 255 / 0.08), 0 8px 24px -8px rgb(0 0 0 / 0.6);
-    --shadow: 0 0 0 0.5px rgb(255 255 255 / 0.08), 0 18px 44px -12px rgb(0 0 0 / 0.7);
-  }
+/* Dark: the system's, or the one chosen in Settings (main.ts sets
+   `data-theme` on <html>). */
+:root[data-theme="dark"] {
+  --canvas: #0f0f10;
+  --cell: #1e1e20;
+  --cell-press: #29292c;
+  --raised: #242427;
+  --ink: #ececed;
+  --ink-soft: rgb(255 255 255 / 0.78);
+  --ink-2: rgb(255 255 255 / 0.5);
+  --ink-3: rgb(255 255 255 / 0.3);
+  --hair: rgb(255 255 255 / 0.1);
+  --fill: rgb(255 255 255 / 0.08);
+  --fill-faint: rgb(255 255 255 / 0.045);
+  --line: rgb(255 255 255 / 0.16);
+  --accent-ink: #18181a;
+  --danger: #f07878;
+  --warn-ink: #e0a345;
+  --ok-ink: #5fd07a;
+  --bar: rgb(30 30 32 / 0.82);
+  --lift: 0 0 0 0.5px rgb(255 255 255 / 0.08), 0 8px 24px -8px rgb(0 0 0 / 0.6);
+  --shadow: 0 0 0 0.5px rgb(255 255 255 / 0.08), 0 18px 44px -12px rgb(0 0 0 / 0.7);
+  color-scheme: dark;
 }
 
 * {
@@ -323,18 +324,45 @@ code {
 }
 
 /* A top-level screen has nothing in its bar until the title folds into it:
-   the title starts 34pt under the status bar instead. */
+   the bar floats over the list, clear until then, and the large title sits
+   just under the status bar. */
 .screen.root .nav {
-  height: calc(34px + env(safe-area-inset-top));
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  background: transparent;
+  pointer-events: none;
+}
+
+.screen.root .nav.folded {
+  background: var(--bar);
+}
+
+.screen.root .scroll {
+  padding-top: env(safe-area-inset-top);
 }
 
 .screen.root .title-block {
-  padding-top: 0;
+  padding-top: 8px;
 }
 
 /* Clear of the floating bar at the bottom. */
 .screen.docked .scroll {
   padding-bottom: calc(104px + var(--safe-bottom));
+}
+
+.title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.title-trail {
+  display: flex;
+  flex: none;
+  gap: 8px;
 }
 
 .large-title {
@@ -1516,7 +1544,7 @@ html.scanning #app {
 
 .scrim {
   position: fixed;
-  inset: 0;
+  inset: 0 0 var(--keyboard, 0px);
   z-index: 20;
   display: flex;
   align-items: flex-end;
@@ -1740,4 +1768,87 @@ html[data-nav="pop"]::view-transition-new(root) {
     animation: none !important;
     transition: none !important;
   }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Past messages: suggested over the key row as the box is written in, and
+   the History sheet. */
+
+.key-slot {
+  position: relative;
+}
+
+.key-pages.covered,
+.key-dots.covered {
+  visibility: hidden;
+}
+
+.suggest {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+}
+
+.suggest::-webkit-scrollbar {
+  display: none;
+}
+
+.suggestion {
+  flex: none;
+  max-width: 78%;
+  height: 42px;
+  padding: 0 14px;
+  border-radius: 10px;
+  background: var(--cell);
+  box-shadow:
+    0 0 0 0.5px var(--hair),
+    0 1px 0 var(--hair);
+  font: 14px var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.suggestion:active {
+  background: var(--cell-press);
+}
+
+.sheet-search {
+  flex: none;
+  height: 44px;
+  background: var(--cell);
+  box-shadow: 0 0 0 0.5px var(--hair);
+}
+
+.row.choice.past .row-title {
+  font: 14px/1.4 var(--mono);
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Settings */
+
+.row-title.danger {
+  color: var(--danger);
+}
+
+.row.choice:disabled {
+  opacity: 0.5;
+}
+
+.row.static:active {
+  background: none;
+}
+
+.size-sample {
+  font-family: var(--mono);
+  color: var(--ink-soft);
 }
