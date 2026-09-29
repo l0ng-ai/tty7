@@ -70,6 +70,14 @@ fn fixed_bindings() -> Vec<KeyBinding> {
     let search = Some(crate::ui::search::KEY_CONTEXT);
     bindings.push(KeyBinding::new("tab", SearchNextTab, search));
     bindings.push(KeyBinding::new("shift-tab", SearchPrevTab, search));
+    // The board's own undo, for what the board itself changed. On the
+    // board's context, so a text field inside it — the reply box, the new
+    // task sheet — keeps ⌘Z for its own text: `Input` is deeper and wins.
+    bindings.push(KeyBinding::new(
+        "secondary-z",
+        BoardUndo,
+        Some(crate::ui::board::KEY_CONTEXT),
+    ));
     // The code editor's multi-cursor chords, laid down again after tty7's
     // own table. gpui ranks a context-free binding as deep as the focused
     // context, and breaks the tie by whichever was added last — so the copies
@@ -661,9 +669,14 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         ("ToggleDocumentFill", ""),
         // Board is B: ⌘B shows the sidebar the Board row lives in, ⇧⌘B goes
         // straight to the board. Off macOS Ctrl+Shift+B is the sidebar
-        // already, and Alt+0 sits in front of Alt+1…9, the tab chords there —
-        // the board as tab zero.
-        ("ToggleBoard", per_platform("secondary-shift-b", "alt-0")),
+        // already, and an Alt chord would be Meta to the shell — Alt+0 is
+        // readline's digit argument — so the board takes Ctrl+Shift+Y, free
+        // here and clear of Ctrl+Shift+U, the Linux input methods' Unicode
+        // entry.
+        (
+            "ToggleBoard",
+            per_platform("secondary-shift-b", "ctrl-shift-y"),
+        ),
         ("DocumentWidthThird", ""),
         ("DocumentWidthHalf", ""),
         ("DocumentWidthTwoThirds", ""),

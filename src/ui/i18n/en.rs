@@ -1870,6 +1870,38 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "A worktree needs the task to run inside a git repository"
         }
         L10nKey::BoardWorktreeFailed => "Could not create the worktree: {error}",
+        L10nKey::BranchNameSpace => "A branch name can’t contain spaces",
+        L10nKey::BranchNameControl => "A branch name can’t contain control characters",
+        L10nKey::BranchNameContains => "A branch name can’t contain “{what}”",
+        L10nKey::BranchNameStarts => "A branch name can’t start with “{what}”",
+        L10nKey::BranchNameEnds => "A branch name can’t end with “{what}”",
+        L10nKey::BranchNamePartDot => "No part of a branch name can start with “.”",
+        L10nKey::BranchNamePartLock => "No part of a branch name can end with “.lock”",
+        L10nKey::BranchNameAt => "“@” alone isn’t a branch name",
+        L10nKey::BoardBranchTaken => "{branch} already exists — {next} will be used",
+        L10nKey::BoardPlaceMissing => "No folder at {path}",
+        L10nKey::BoardPlaceRemoteHome => {
+            "Type the full path — ~ isn’t expanded on a remote machine"
+        }
+        L10nKey::BoardTaskGone => "This task was removed elsewhere, so the edit wasn’t saved",
+        L10nKey::BoardCleanUpTitle => "Clean up {n} done tasks?",
+        L10nKey::BoardCleanUpOneTitle => "Clean up “{title}”?",
+        L10nKey::BoardCleanUpBody => {
+            "Worktrees are deleted and every tab open in them closes. Uncommitted work is saved under refs/tty7/trash/; files git ignores, like .env, are not kept."
+        }
+        L10nKey::BoardCleanUpRunning => "Still running: {what}",
+        L10nKey::BoardCleanUpOtherTabs => "Also closes {n} other tabs open in these worktrees",
+        L10nKey::BoardToastSaved => "work saved under {refs} · ignored files not kept",
+        L10nKey::BoardAgoMinutes => "{n}m",
+        L10nKey::BoardAgoHours => "{n}h",
+        L10nKey::BoardAgoDays => "{n}d",
+        L10nKey::BoardPromptChanged => "“{title}” is asking something else now — look again",
+        L10nKey::BoardCardMoved => "“{title}” has moved on — look again",
+        L10nKey::BoardReplyWaiting => "{agent} is waiting on a prompt — answer that first",
+        L10nKey::BoardFiltered => "Filtered",
+        L10nKey::BoardClearFilters => "Clear",
+        L10nKey::BoardStarting => "Starting…",
+        L10nKey::BoardStartGone => "“{title}” was removed before its agent started",
         L10nKey::CmdDocumentWidthThird => "Document: Third Width",
         L10nKey::CmdDocumentWidthHalf => "Document: Half Width",
         L10nKey::CmdDocumentWidthTwoThirds => "Document: Two-Thirds Width",

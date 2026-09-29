@@ -4066,8 +4066,10 @@ impl Tty7App {
         // Something opened, so whatever the last failure was is stale.
         self.startup_error = None;
         // A new tab is one to look at. The board's own Start puts the board
-        // back once the tab is open.
-        self.main_view = crate::ui::board::MainView::Terminal;
+        // back once the tab is open. Only a tab the user opened comes through
+        // here: one a CLI or an agent opens arrives by tree sync, which
+        // leaves the board where it is.
+        self.leave_board_view();
         self.remember_active_pane(window, cx);
         self.maximized = None;
         let insert_at = self.new_tab_insert_at(cx);
@@ -4920,9 +4922,10 @@ impl Tty7App {
     }
 
     pub(crate) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        // Picking a tab is asking to see it, board or not.
+        // Picking a tab is asking to see it, board or not. Every way here is
+        // the user's: a click, a key, a notification or the switcher.
         if self.board_open() && index < self.tabs.len() {
-            self.main_view = crate::ui::board::MainView::Terminal;
+            self.leave_board_view();
             self.focus_active(window, cx);
             cx.notify();
         }
@@ -7866,7 +7869,11 @@ impl Tty7App {
     }
 
     /// The first reason this pane should not simply vanish.
-    fn leaf_close_reason(&self, leaf: &Entity<TerminalView>, cx: &App) -> Option<CloseReason> {
+    pub(crate) fn leaf_close_reason(
+        &self,
+        leaf: &Entity<TerminalView>,
+        cx: &App,
+    ) -> Option<CloseReason> {
         if self.leaf_is_warn_ssh(leaf, cx) {
             return Some(CloseReason::LiveSsh);
         }

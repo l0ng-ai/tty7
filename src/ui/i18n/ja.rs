@@ -1917,6 +1917,42 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "worktree を使うには、タスクの実行場所が git リポジトリ内である必要があります"
         }
         L10nKey::BoardWorktreeFailed => "worktree を作成できませんでした: {error}",
+        L10nKey::BranchNameSpace => "ブランチ名にスペースは使えません",
+        L10nKey::BranchNameControl => "ブランチ名に制御文字は使えません",
+        L10nKey::BranchNameContains => "ブランチ名に「{what}」は使えません",
+        L10nKey::BranchNameStarts => "ブランチ名を「{what}」で始めることはできません",
+        L10nKey::BranchNameEnds => "ブランチ名を「{what}」で終えることはできません",
+        L10nKey::BranchNamePartDot => "ブランチ名の各部分を「.」で始めることはできません",
+        L10nKey::BranchNamePartLock => "ブランチ名の各部分を「.lock」で終えることはできません",
+        L10nKey::BranchNameAt => "「@」だけのブランチ名は使えません",
+        L10nKey::BoardBranchTaken => "{branch} はすでにあります — {next} を使います",
+        L10nKey::BoardPlaceMissing => "{path} にフォルダがありません",
+        L10nKey::BoardPlaceRemoteHome => {
+            "フルパスを入力してください — リモートでは ~ は展開されません"
+        }
+        L10nKey::BoardTaskGone => {
+            "このタスクは別の場所で削除されたため、編集は保存されませんでした"
+        }
+        L10nKey::BoardCleanUpTitle => "完了したタスク {n} 件をクリーンアップしますか？",
+        L10nKey::BoardCleanUpOneTitle => "「{title}」をクリーンアップしますか？",
+        L10nKey::BoardCleanUpBody => {
+            "worktree は削除され、その中で開いているタブはすべて閉じます。コミットしていない作業は refs/tty7/trash/ に保存されますが、.env など git が無視するファイルは残りません。"
+        }
+        L10nKey::BoardCleanUpRunning => "実行中: {what}",
+        L10nKey::BoardCleanUpOtherTabs => "これらの worktree で開いている他のタブ {n} 個も閉じます",
+        L10nKey::BoardToastSaved => "作業は {refs} に保存 · 無視されたファイルは残りません",
+        L10nKey::BoardAgoMinutes => "{n}分",
+        L10nKey::BoardAgoHours => "{n}時間",
+        L10nKey::BoardAgoDays => "{n}日",
+        L10nKey::BoardPromptChanged => {
+            "「{title}」の確認内容が変わりました — もう一度確認してください"
+        }
+        L10nKey::BoardCardMoved => "「{title}」の状態が変わりました — もう一度確認してください",
+        L10nKey::BoardReplyWaiting => "{agent} は確認待ちです — 先にそちらに答えてください",
+        L10nKey::BoardFiltered => "絞り込み中",
+        L10nKey::BoardClearFilters => "解除",
+        L10nKey::BoardStarting => "起動中…",
+        L10nKey::BoardStartGone => "エージェントの起動前に「{title}」は削除されました",
         L10nKey::CmdDocumentWidthThird => "ドキュメント: 幅3分の1",
         L10nKey::CmdDocumentWidthHalf => "ドキュメント: 幅半分",
         L10nKey::CmdDocumentWidthTwoThirds => "ドキュメント: 幅3分の2",

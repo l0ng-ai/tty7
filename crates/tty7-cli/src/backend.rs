@@ -115,6 +115,8 @@ pub mod mock {
         pub events: Vec<ControlEvent>,
         /// Set to make `hello` fail — doctor's unreachable-server branch.
         pub unreachable: bool,
+        /// Set to answer `hello` as a server from before the board.
+        pub no_board: bool,
         pub execs: Vec<(u64, Vec<u8>, Option<std::time::Duration>)>,
         pub exec_run: ExecRun,
     }
@@ -141,6 +143,7 @@ pub mod mock {
                 run_exit: Some(0),
                 events: Vec::new(),
                 unreachable: false,
+                no_board: false,
                 execs: Vec::new(),
                 exec_run: ExecRun {
                     end: ExecEnd::Finished {
@@ -189,11 +192,11 @@ pub mod mock {
                 build: "mock".into(),
                 separator: '\\',
                 home: "C:\\Users\\mock".into(),
-                features: vec![
-                    feature::CONTROL.into(),
-                    feature::MACHINE_TREE.into(),
-                    feature::TASKS.into(),
-                ],
+                features: [feature::CONTROL, feature::MACHINE_TREE, feature::TASKS]
+                    .into_iter()
+                    .filter(|&f| !(self.no_board && f == feature::TASKS))
+                    .map(Into::into)
+                    .collect(),
                 instance: "mock-instance".into(),
             })
         }

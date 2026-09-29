@@ -112,7 +112,7 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
                 worktree,
                 group,
             };
-            task_add(spec, ws.as_deref(), ctx, backend)
+            task_add(spec, ws.as_deref(), machine.is_none(), ctx, backend)
         }
         Some(Command::Task(TaskCmd::Done { task })) => task_mark(&task, true, backend),
         Some(Command::Task(TaskCmd::Reopen { task })) => task_mark(&task, false, backend),
@@ -1493,8 +1493,7 @@ fn run_live(
         .max_by_key(|s| urgency(s.status))
         .map(tty7_core::core::task::Live::from);
     // Its tab is open and nothing has reported yet: still starting.
-    let fresh = tty7_core::core::machine::unix_now().saturating_sub(run.started)
-        < tty7_core::core::task::START_GRACE_SECS;
+    let fresh = tty7_core::core::task::just_started(run, tty7_core::core::machine::unix_now());
     live.or(fresh.then_some(tty7_core::core::task::STARTING))
 }
 
@@ -1510,6 +1509,7 @@ fn column_name(column: tty7_core::core::task::Column) -> &'static str {
 }
 
 fn task_ls(explicit: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
+    require_board(backend)?;
     let machine = fetch_machine(backend)?;
     let id = resolve_ws(explicit, ctx, &machine)?;
     let ws = machine
@@ -1595,12 +1595,58 @@ struct NewTask {
     group: Option<String>,
 }
 
+/// A `--cwd` as the board keeps it: a path on the workspace's own host, where
+/// the GUI will later open the run — so one relative to wherever this command
+/// happened to be typed is made absolute here, while that still means
+/// something. `local` says this CLI is on that host; across `-m` a relative
+/// path names nothing either side, and is refused.
+fn task_cwd(cwd: String, local: bool) -> Result<String> {
+    let dotted = cwd == "."
+        || cwd == ".."
+        || ["./", "../", ".\\", "..\\"]
+            .iter()
+            .any(|p| cwd.starts_with(p));
+    if !local {
+        if dotted {
+            bail!(
+                "--cwd {cwd:?} is relative to this computer, not the machine given with -m; give the full path there"
+            );
+        }
+        return Ok(cwd);
+    }
+    let expanded = expand_home(&cwd).unwrap_or_else(|| std::path::PathBuf::from(&cwd));
+    if expanded.is_absolute() {
+        return Ok(expanded.to_string_lossy().into_owned());
+    }
+    let path = std::env::current_dir()
+        .context("reading the current directory")?
+        .join(expanded);
+    // `.` and `..` spelled out would name the right place but read badly on a
+    // card; drop them without resolving links, as `resolve_gui_path` does.
+    let mut clean = std::path::PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                clean.pop();
+            }
+            other => clean.push(other),
+        }
+    }
+    Ok(clean.to_string_lossy().into_owned())
+}
+
 fn task_add(
     spec: NewTask,
     explicit: Option<&str>,
+    local: bool,
     ctx: &Context,
     backend: &mut dyn Backend,
 ) -> Result<Outcome> {
+    if spec.worktree && spec.cwd.is_none() {
+        bail!("--worktree cuts each run's worktree from --cwd's repository; give --cwd too");
+    }
+    let cwd = spec.cwd.map(|cwd| task_cwd(cwd, local)).transpose()?;
     require_board(backend)?;
     let machine = fetch_machine(backend)?;
     let workspace = resolve_ws(explicit, ctx, &machine)?;
@@ -1611,7 +1657,7 @@ fn task_add(
         .expect("resolve_ws returned an id straight out of this machine");
     let mut task = tty7_core::core::task::Task::new(spec.title.trim());
     task.prompt = spec.prompt.unwrap_or_default().trim().to_string();
-    task.cwd = spec.cwd;
+    task.cwd = cwd;
     task.worktree = spec.worktree;
     task.group = match spec.group.as_deref() {
         Some(name) => Some(
@@ -1668,12 +1714,18 @@ fn task_mark(text: &str, done: bool, backend: &mut dyn Backend) -> Result<Outcom
     require_board(backend)?;
     let machine = fetch_machine(backend)?;
     let (ws, task) = find_task(&machine, text)?;
-    let states = agent_states_by_pane(backend);
     let mut task = task.clone();
-    task.done = done.then(|| tty7_core::core::task::Done {
-        at: tty7_core::core::machine::unix_now(),
-        turns: tty7_core::core::task::live_turns(&task, |run| run_live(ws, run, &states)),
-    });
+    if done {
+        // Marking done also takes a paused task out of the queue.
+        let states = agent_states_by_pane(backend);
+        tty7_core::core::task::mark_done(
+            &mut task,
+            |run| run_live(ws, run, &states),
+            tty7_core::core::machine::unix_now(),
+        );
+    } else {
+        tty7_core::core::task::reopen(&mut task);
+    }
     let id = task.id;
     backend.control(ControlRequest::TaskPut {
         workspace: ws.id,
@@ -2955,6 +3007,109 @@ mod tests {
             &mut backend,
         ));
         assert_eq!(out["tasks"][0]["column"], "running");
+    }
+
+    #[test]
+    fn task_add_makes_a_relative_cwd_absolute_here() {
+        let mut backend = mock();
+        run_cli(
+            &["tty7", "task", "add", "x", "--cwd", ".", "--ws", "api"],
+            &Context::default(),
+            &mut backend,
+        );
+        let Some(ControlRequest::TaskPut { task, .. }) = backend.control_calls.last() else {
+            panic!("expected a TaskPut, got {:?}", backend.control_calls);
+        };
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(task.cwd.as_deref(), here.to_str());
+
+        let mut backend = mock();
+        run_cli(
+            &[
+                "tty7",
+                "task",
+                "add",
+                "x",
+                "--cwd",
+                "sub/../repo",
+                "--ws",
+                "api",
+            ],
+            &Context::default(),
+            &mut backend,
+        );
+        let Some(ControlRequest::TaskPut { task, .. }) = backend.control_calls.last() else {
+            panic!("expected a TaskPut, got {:?}", backend.control_calls);
+        };
+        assert_eq!(task.cwd.as_deref(), here.join("repo").to_str());
+    }
+
+    #[test]
+    fn task_add_refuses_what_it_cannot_place() {
+        for args in [
+            &["tty7", "task", "add", "x", "--worktree", "--ws", "api"][..],
+            &[
+                "tty7", "-m", "devbox", "task", "add", "x", "--cwd", "./api", "--ws", "api",
+            ][..],
+        ] {
+            let mut backend = mock();
+            let err = execute(cli(args), &Context::default(), &mut backend).unwrap_err();
+            assert!(err.to_string().contains("--cwd"), "{err}");
+            assert!(
+                !backend
+                    .control_calls
+                    .iter()
+                    .any(|c| matches!(c, ControlRequest::TaskPut { .. }))
+            );
+        }
+    }
+
+    /// An old server has no board to list; an empty table would say it has
+    /// one with nothing on it.
+    #[test]
+    fn task_ls_refuses_on_a_server_without_a_board() {
+        let mut backend = MockBackend {
+            no_board: true,
+            ..mock()
+        };
+        let err = execute(
+            cli(&["tty7", "task", "ls", "api"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no board"), "{err}");
+    }
+
+    #[test]
+    fn task_done_takes_a_paused_task_out_of_the_queue() {
+        use tty7_core::core::task::Task;
+        let mut backend = mock();
+        let mut task = Task::new("ship it");
+        task.paused = Some(1);
+        backend.machine.workspaces[0].tasks = vec![task.clone()];
+        let id = task.id.to_string();
+        let out = json_of(run_cli(
+            &["tty7", "task", "done", &id],
+            &Context::default(),
+            &mut backend,
+        ));
+        let Some(ControlRequest::TaskPut { task: put, .. }) = backend.control_calls.last() else {
+            panic!("expected a TaskPut, got {:?}", backend.control_calls);
+        };
+        assert!(put.paused.is_none() && put.done.is_some());
+        assert_eq!(out["done"], true);
+
+        backend.machine.workspaces[0].tasks = vec![put.clone()];
+        run_cli(
+            &["tty7", "task", "reopen", &id],
+            &Context::default(),
+            &mut backend,
+        );
+        let Some(ControlRequest::TaskPut { task: put, .. }) = backend.control_calls.last() else {
+            panic!("expected a TaskPut, got {:?}", backend.control_calls);
+        };
+        assert!(put.done.is_none() && put.done_marks.is_none());
     }
 
     #[test]

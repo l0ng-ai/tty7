@@ -10,7 +10,8 @@
 //! maybe finished. Any other tab running an agent is a *loose* card, drawn
 //! from the tab itself and kept nowhere, so an agent started by hand shows up
 //! without anyone filing it. Where either sits is worked out from the agent
-//! on every frame; nothing here stores a column.
+//! on every frame; nothing here stores a column, beyond holding the last one
+//! drawn while a tab's agent cannot be read yet ([`Held`]).
 //!
 //! Moving a card is asking its agent to do something, so only the moves an
 //! agent can make are offered: start a queued task, pause a running one,
@@ -23,22 +24,33 @@ mod composer;
 mod peek;
 mod view;
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use gpui::{App, Context, Entity, FocusHandle, Focusable as _, SharedString, Subscription, Window};
+use gpui::{
+    App, Context, Entity, EntityId, FocusHandle, Focusable as _, SharedString, Subscription, Window,
+};
 use gpui_component::WindowExt as _;
 use gpui_component::input::InputState;
+use gpui_component::menu::PopupMenu;
 use tty7_core::core::group_key::GroupId;
 use tty7_core::core::machine::TabId;
-use tty7_core::core::task::{self, Column, Done, Live, Run, Task, TaskId};
+use tty7_core::core::task::{self, Column, Done, DoneMarks, Live, Run, Task, TaskId};
 use tty7_core::core::worktree::setup;
 
-use crate::core::cli_agent::{AgentStatus, CLIAgent};
+use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
 use crate::core::config::{Config, unix_now};
-use crate::ui::app::Tty7App;
+use crate::terminal::view::TerminalView;
+use crate::ui::app::{Tab, Tty7App};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::pane::PaneSlot;
 
 pub(crate) use composer::Composer;
+
+/// The key context the board declares, for the bindings that only mean
+/// something on it.
+pub(crate) const KEY_CONTEXT: &str = "Board";
 
 /// What the main area is showing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -66,14 +78,33 @@ pub(crate) struct Board {
     peek: bool,
     reply: Option<Entity<InputState>>,
     _reply_sub: Option<Subscription>,
+    /// The card whose words the reply box holds. A reply goes to it, not to
+    /// whichever card happens to be selected when Enter lands.
+    reply_for: Option<CardRef>,
+    /// What was typed to the other cards, put back when one is selected again.
+    drafts: HashMap<CardRef, String>,
+    /// The card and column the reply box's placeholder was last worded for.
+    reply_shape: Option<(CardRef, Column)>,
     /// The selected card's changed files, once `git diff` has answered.
     files: Option<(CardRef, Result<Vec<FileChange>, String>)>,
     /// The card being dragged, while one is.
     dragging: Option<CardDrag>,
     toast: Option<Toast>,
     toast_seq: u64,
+    /// What ⌘Z walks back, newest last.
+    undo: UndoStack,
     /// Done cards older than [`DONE_RECENT_SECS`] are on show.
     show_old_done: bool,
+    /// Tasks whose worktree is being cut, before their agent has a tab.
+    starting: HashSet<TaskId>,
+    /// The column each task was last drawn in, held while its tab's agent
+    /// has gone quiet — see [`Held`].
+    held: RefCell<HashMap<TaskId, Held>>,
+    /// The zoom the active tab had when the board opened, put back when the
+    /// board closes.
+    zoom: Option<(TabId, Entity<TerminalView>)>,
+    /// A card's menu opened from the keyboard, and what closes it.
+    menu: Option<(CardRef, Entity<PopupMenu>, Subscription)>,
 }
 
 impl Board {
@@ -89,33 +120,66 @@ impl Board {
             peek: false,
             reply: None,
             _reply_sub: None,
+            reply_for: None,
+            drafts: HashMap::new(),
+            reply_shape: None,
             files: None,
             dragging: None,
             toast: None,
             toast_seq: 0,
+            undo: UndoStack::default(),
             show_old_done: false,
+            starting: HashSet::new(),
+            held: RefCell::new(HashMap::new()),
+            zoom: None,
+            menu: None,
         }
     }
 }
 
 /// Which card a click, a drag or a key is about.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum CardRef {
     Task(TaskId),
     /// A tab running an agent that no task claims.
     Loose(TabId),
 }
 
+/// What the user was looking at when they asked for a move: the column the
+/// card was drawn in and what it was stopped on. The move is only made while
+/// the card still says that — an agent can go on to a different prompt
+/// between the frame that drew a button and the click on it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Seen {
+    column: Column,
+    ask: Option<SharedString>,
+}
+
+impl Seen {
+    fn of(card: &Card) -> Seen {
+        Seen {
+            column: card.column,
+            ask: card.ask.clone(),
+        }
+    }
+}
+
 /// What a dragged card carries.
 #[derive(Clone, Debug)]
 pub(crate) struct CardDrag {
     key: CardRef,
-    from: Column,
+    seen: Seen,
     /// It is waiting on a question, which a drop into Running answers with
     /// words rather than a yes.
     question: bool,
     title: SharedString,
     agent: Option<CLIAgent>,
+}
+
+impl CardDrag {
+    fn from(&self) -> Column {
+        self.seen.column
+    }
 }
 
 /// One changed file, from `git diff --numstat`.
@@ -127,19 +191,133 @@ struct FileChange {
 }
 
 /// The note at the bottom of the board saying what just happened, with the
-/// way back when there is one.
+/// way back when there is one — the newest entry on [`UndoStack`].
 struct Toast {
     text: SharedString,
-    undo: Option<Undo>,
+    undo: bool,
 }
 
 /// Putting the board back the way it was. Only for what the board itself
 /// changed: a keystroke already sent to an agent cannot be taken back.
-#[derive(Clone)]
+///
+/// Each one names only what its change touched, and is laid over the card
+/// as it is when undone: the card may have picked up a run, a session id or
+/// another window's edit since, none of which an undo should take away.
+#[derive(Clone, Debug, PartialEq)]
 enum Undo {
-    Put(Task),
+    /// Take off a card the board just put on.
     Remove(TaskId),
+    /// Put back a card the board just took off, as it was.
+    Restore(Task),
+    /// Put back what an edit changed: the fields the task sheet writes.
+    Edit(Task),
+    /// Put back a card's done and paused marks.
+    Marks(Marks),
 }
+
+/// A card's done and paused marks, as they stood.
+#[derive(Clone, Debug, PartialEq)]
+struct Marks {
+    id: TaskId,
+    done: Option<Done>,
+    done_marks: Option<DoneMarks>,
+    paused: Option<u64>,
+}
+
+impl Marks {
+    fn of(task: &Task) -> Marks {
+        Marks {
+            id: task.id,
+            done: task.done,
+            done_marks: task.done_marks.clone(),
+            paused: task.paused,
+        }
+    }
+}
+
+/// What an [`Undo`] comes to against the board as it is now.
+#[derive(Debug, PartialEq)]
+enum UndoStep {
+    Save(Box<Task>),
+    Delete(TaskId),
+}
+
+impl Undo {
+    fn task(&self) -> TaskId {
+        match self {
+            Undo::Remove(id) => *id,
+            Undo::Restore(t) | Undo::Edit(t) => t.id,
+            Undo::Marks(m) => m.id,
+        }
+    }
+
+    /// `current` is the card with this undo's id, if the board still has it.
+    /// `None` when there is nothing left to put back: the card is gone (or,
+    /// for a removal, back already).
+    fn step(self, current: Option<&Task>) -> Option<UndoStep> {
+        match (self, current) {
+            (Undo::Remove(id), Some(_)) => Some(UndoStep::Delete(id)),
+            (Undo::Restore(task), None) => Some(UndoStep::Save(Box::new(task))),
+            (Undo::Edit(before), Some(now)) => {
+                let mut task = now.clone();
+                task.title = before.title;
+                task.prompt = before.prompt;
+                task.agent = before.agent;
+                task.cwd = before.cwd;
+                task.group = before.group;
+                task.worktree = before.worktree;
+                task.branch = before.branch;
+                Some(UndoStep::Save(Box::new(task)))
+            }
+            (Undo::Marks(m), Some(now)) => {
+                let mut task = now.clone();
+                task.done = m.done;
+                task.done_marks = m.done_marks;
+                task.paused = m.paused;
+                Some(UndoStep::Save(Box::new(task)))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// How many of the board's own changes ⌘Z can walk back.
+const UNDO_DEPTH: usize = 10;
+
+#[derive(Default)]
+struct UndoStack(Vec<Undo>);
+
+impl UndoStack {
+    fn push(&mut self, undo: Undo) {
+        self.0.push(undo);
+        if self.0.len() > UNDO_DEPTH {
+            self.0.remove(0);
+        }
+    }
+
+    fn pop(&mut self) -> Option<Undo> {
+        self.0.pop()
+    }
+}
+
+/// A task's column as last drawn, and since when its agent has been silent.
+///
+/// A tab whose terminal is still connecting — the app just started, a link
+/// dropped and is coming back — has no agent to read yet, and a run with no
+/// agent reads as over. Without this every such card would flash into Review
+/// (and the sidebar's count drop to nothing) until the agent's status landed.
+/// So a card whose run's tab is open but silent keeps the column it was last
+/// drawn in: for as long as the tab is reconnecting, and for [`HOLD_SECS`]
+/// after its agent goes quiet otherwise — the moment between a terminal
+/// coming up and its agent's status arriving. An agent that really quit is
+/// read as over once that passes.
+#[derive(Clone, Copy, Debug)]
+struct Held {
+    column: Column,
+    silent_since: Option<u64>,
+}
+
+const HOLD_SECS: u64 = 5;
 
 /// One card, read off a task or a tab for this frame.
 struct Card {
@@ -164,17 +342,25 @@ struct Card {
     since: Option<u64>,
     /// The open tab a run of this card lives in.
     tab: Option<TabId>,
+    /// The pane in [`Self::tab`] this card was read from — see
+    /// [`speaking_leaf`]. What the card's buttons type goes to this one.
+    leaf: Option<EntityId>,
     /// A finished run this card could pick back up.
     resumable: bool,
     paused: bool,
     /// Its last run worked in a worktree that is no longer there: nothing to
     /// reopen or resume, only to start again.
     worktree_gone: bool,
+    /// Its worktree is being cut; no move is offered until its agent's tab
+    /// opens.
+    starting: bool,
 }
 
 /// What the board reads off one open tab.
 struct TabFacts {
     id: TabId,
+    /// The pane that speaks for the tab.
+    leaf: EntityId,
     agent: CLIAgent,
     live: Live,
     ask: Option<String>,
@@ -223,6 +409,51 @@ const TOAST_MS: u64 = 4500;
 /// How long a finished card stays on show in Done before it folds away.
 const DONE_RECENT_SECS: u64 = 7 * 24 * 3600;
 
+/// Whether a card is folded out of sight: finished more than
+/// [`DONE_RECENT_SECS`] before `now`, while the older ones have not been
+/// asked for. What the Done column draws and what the arrow keys reach are
+/// both this.
+fn folded(column: Column, since: Option<u64>, now: u64, show_old: bool) -> bool {
+    column == Column::Done
+        && !show_old
+        && since.is_some_and(|at| at < now.saturating_sub(DONE_RECENT_SECS))
+}
+
+/// The group filter still worth keeping: one whose group is still pinned.
+/// A filter on a group since unpinned would hide every card with nothing
+/// on the header left to undo it.
+fn live_group_filter(filter: Option<GroupId>, pinned: impl Fn(GroupId) -> bool) -> Option<GroupId> {
+    filter.filter(|g| pinned(*g))
+}
+
+/// The pane that speaks for a tab on the board: its most urgent agent pane,
+/// the same one its sidebar row reports. A card is read off this pane, and
+/// what the card's buttons send goes to it, so a split tab with two agents
+/// never shows one and answers the other.
+fn speaking_leaf(tab: &Tab, cx: &App) -> Option<Entity<TerminalView>> {
+    let urgency = |s: AgentStatus| match s {
+        AgentStatus::Waiting => 3,
+        AgentStatus::Working => 2,
+        AgentStatus::Done => 1,
+        AgentStatus::Idle => 0,
+    };
+    tab.pane
+        .terminals()
+        .into_iter()
+        .filter(|l| l.read(cx).agent().is_some())
+        .max_by_key(|l| l.read(cx).agent_session().map_or(0, |s| urgency(s.status)))
+}
+
+/// What a waiting agent is stopped on, in words: a question says itself, a
+/// permission prompt says what it would run.
+fn waiting_ask(session: &AgentSessionState) -> Option<String> {
+    session
+        .ask
+        .as_ref()
+        .map(|a| a.question.clone())
+        .or_else(|| session.message.clone())
+}
+
 impl Tty7App {
     pub(crate) fn board_open(&self) -> bool {
         self.main_view == MainView::Board
@@ -237,7 +468,12 @@ impl Tty7App {
 
     pub(crate) fn open_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.main_view = MainView::Board;
-        self.maximized = None;
+        // The board covers the panes, so a zoom has nothing to show; it is
+        // set aside, not dropped, and comes back with the terminal.
+        let tab = self.tabs.get(self.active).map(|t| t.tree_id.get());
+        if let (Some(tab), Some(leaf)) = (tab, self.maximized.take()) {
+            self.board.zoom = Some((tab, leaf));
+        }
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -246,11 +482,37 @@ impl Tty7App {
         if self.main_view == MainView::Terminal {
             return;
         }
-        self.main_view = MainView::Terminal;
+        self.leave_board_view();
         self.board.composer = None;
         self.board.peek = false;
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    /// Shows the terminal again, with the zoom the board set aside back on
+    /// the tab it came from: in force if that tab is still the active one,
+    /// parked on it otherwise, the way `activate` parks a zoom.
+    pub(crate) fn leave_board_view(&mut self) {
+        self.main_view = MainView::Terminal;
+        let Some((tab, leaf)) = self.board.zoom.take() else {
+            return;
+        };
+        let Some(i) = self.tabs.iter().position(|t| t.tree_id.get() == tab) else {
+            return;
+        };
+        let still_there = self.tabs[i]
+            .pane
+            .leaves()
+            .iter()
+            .any(|l| l.entity_id() == leaf.entity_id());
+        if !still_there {
+            return;
+        }
+        if i == self.active {
+            self.maximized.get_or_insert(leaf);
+        } else {
+            self.tabs[i].zoomed.get_or_insert(leaf);
+        }
     }
 
     /// Takes the tasks a tree pull brought in.
@@ -269,12 +531,16 @@ impl Tty7App {
     }
 
     pub(crate) fn board_task_removed(&mut self, task: TaskId) {
+        self.board.held.borrow_mut().remove(&task);
         self.board.tasks.retain(|t| t.id != task);
     }
 
     /// How many cards are stopped on the user — the sidebar row's count.
+    ///
+    /// Every card, whatever the board's header is filtering: the row says
+    /// what is waiting in this workspace, not what one view of it shows.
     pub(crate) fn board_needs_input(&self, cx: &App) -> usize {
-        self.board_cards(None, false, cx)
+        self.all_cards(None, false, cx)
             .iter()
             .filter(|c| c.column == Column::NeedsInput)
             .count()
@@ -291,10 +557,22 @@ impl Tty7App {
             window.push_notification(why, cx);
             return false;
         }
+        // A new card on a full board: the machine makes room by dropping
+        // the card done longest ago, and says so to every window — or, with
+        // nothing done to drop, refuses. Asked here first so the refusal is
+        // on screen rather than lost on the way.
+        if !self.board.tasks.iter().any(|t| t.id == task.id)
+            && let Err(why) = task::make_room(&self.board.tasks, task.id)
+        {
+            window.push_notification(why, cx);
+            return false;
+        }
         if !crate::ui::tree_sync::push_task(cx, self.workspace, task.clone()) {
             window.push_notification(t(L10nKey::BoardUnavailable), cx);
             return false;
         }
+        // The user just moved it: a column held for it is out of date.
+        self.board.held.borrow_mut().remove(&task.id);
         self.board_task_put(task);
         cx.notify();
         true
@@ -321,42 +599,20 @@ impl Tty7App {
     /// `full` also reads what only a drawn card shows — the tab's label and
     /// its git counts. The sidebar's count asks every frame and needs neither.
     fn tab_facts(&self, window: Option<&Window>, full: bool, cx: &App) -> Vec<TabFacts> {
-        let urgency = |s: AgentStatus| match s {
-            AgentStatus::Waiting => 3,
-            AgentStatus::Working => 2,
-            AgentStatus::Done => 1,
-            AgentStatus::Idle => 0,
-        };
         self.tabs
             .iter()
             .filter_map(|tab| {
-                // The tab's most urgent agent pane speaks for it, the same
-                // pane its sidebar row reports.
-                let leaf = tab
-                    .pane
-                    .terminals()
-                    .into_iter()
-                    .filter(|l| l.read(cx).agent().is_some())
-                    .max_by_key(|l| l.read(cx).agent_session().map_or(0, |s| urgency(s.status)))?;
+                let leaf = speaking_leaf(tab, cx)?;
                 let view = leaf.read(cx);
                 let session = view.agent_session().unwrap_or_default();
                 let waiting = session.status == AgentStatus::Waiting;
                 let git = full.then(|| view.git_status(cx)).flatten();
                 Some(TabFacts {
                     id: tab.tree_id.get(),
+                    leaf: leaf.entity_id(),
                     agent: view.agent()?,
                     live: Live::from(&session),
-                    // A question says itself; a permission prompt says what
-                    // it would run.
-                    ask: waiting
-                        .then(|| {
-                            session
-                                .ask
-                                .as_ref()
-                                .map(|a| a.question.clone())
-                                .or_else(|| session.message.clone())
-                        })
-                        .flatten(),
+                    ask: waiting.then(|| waiting_ask(&session)).flatten(),
                     options: match waiting {
                         true => session
                             .ask
@@ -379,13 +635,53 @@ impl Tty7App {
             .collect()
     }
 
+    /// Whether tab `id` is still connecting a pane — the app starting onto
+    /// it, or a dropped link coming back — so it cannot yet say what agent
+    /// runs there.
+    fn tab_connecting(&self, id: TabId, cx: &App) -> bool {
+        self.tabs
+            .iter()
+            .find(|t| t.tree_id.get() == id)
+            .is_some_and(|tab| {
+                tab.pane.leaves().iter().any(|slot| match slot {
+                    PaneSlot::Connecting(_) => true,
+                    PaneSlot::Ready(view) => {
+                        let term = &view.read(cx).terminal;
+                        term.exited && !term.child_exited()
+                    }
+                })
+            })
+    }
+
     /// Every card on the board this frame, filtered as the header says.
     fn board_cards(&self, window: Option<&Window>, full: bool, cx: &App) -> Vec<Card> {
+        let mut cards = self.all_cards(window, full, cx);
+        if !self.board.agent_filter.is_empty() {
+            cards.retain(|c| {
+                c.agent
+                    .is_some_and(|a| self.board.agent_filter.contains(&a))
+            });
+        }
+        if let Some(only) = self.board.group_filter {
+            cards.retain(|c| c.group == Some(only));
+        }
+        cards
+    }
+
+    /// Every card on the board this frame, whatever the header filters.
+    ///
+    /// `full` is for a drawn board: it reads what only a card on screen
+    /// shows, and asks the disk whether each finished run's worktree is still
+    /// there — nothing a count or a key press needs every frame.
+    fn all_cards(&self, window: Option<&Window>, full: bool, cx: &App) -> Vec<Card> {
         let facts = self.tab_facts(window, full, cx);
         let find = |tab: Option<TabId>| tab.and_then(|id| facts.iter().find(|f| f.id == id));
+        let tab_open = |id: TabId| self.tabs.iter().any(|t| t.tree_id.get() == id);
         // Whether a worktree is still there can only be asked of this
         // computer's disk; a remote one is taken to be.
-        let local = self.can_spawn_locally(cx);
+        let local = full && self.can_spawn_locally(cx);
+        let now = unix_now();
+        let mut held = self.board.held.borrow_mut();
         let mut cards = Vec::new();
         for task in &self.board.tasks {
             // A run whose tab is open but whose agent has not shown up yet —
@@ -393,15 +689,12 @@ impl Tty7App {
             // is starting, not over. Read as an agent that has not taken its
             // first turn, which `column` counts as Running. Past the grace a
             // run that never started is over after all.
-            let now = unix_now();
             let starting = |run: &Run| {
                 run.tab.is_some_and(|id| {
-                    find(Some(id)).is_none()
-                        && self.tabs.iter().any(|t| t.tree_id.get() == id)
-                        && now.saturating_sub(run.started) < task::START_GRACE_SECS
+                    find(Some(id)).is_none() && tab_open(id) && task::just_started(run, now)
                 })
             };
-            let column = task::column(task, |run| {
+            let computed = task::column(task, |run| {
                 find(run.tab)
                     .map(|f| f.live)
                     .or_else(|| starting(run).then_some(task::STARTING))
@@ -410,6 +703,42 @@ impl Tty7App {
             // The run this card reports: the newest one still open, else the
             // newest one at all.
             let open = task.runs.iter().rev().find_map(|r| find(r.tab));
+            // A run whose tab is open with no agent to read in it: see `Held`.
+            let silent = (open.is_none() && starting_tab.is_none())
+                .then(|| {
+                    task.runs
+                        .iter()
+                        .rev()
+                        .filter_map(|r| r.tab)
+                        .find(|id| tab_open(*id))
+                })
+                .flatten();
+            let column = match (silent, held.get_mut(&task.id)) {
+                (Some(tab), Some(h)) => {
+                    let since = *h.silent_since.get_or_insert(now);
+                    if !self.tab_connecting(tab, cx) && now.saturating_sub(since) >= HOLD_SECS {
+                        // Quiet for good: what it reads as now is what it is.
+                        h.column = computed;
+                    }
+                    h.column
+                }
+                (Some(_), None) => computed,
+                (None, _) => {
+                    held.insert(
+                        task.id,
+                        Held {
+                            column: computed,
+                            silent_since: None,
+                        },
+                    );
+                    computed
+                }
+            };
+            let starting_now = self.board.starting.contains(&task.id);
+            let column = match starting_now {
+                true => Column::Running,
+                false => column,
+            };
             let last = task.runs.last();
             let cwd = open
                 .and_then(|f| f.cwd.clone())
@@ -439,6 +768,7 @@ impl Tty7App {
                     _ => last.map(|r| r.started),
                 },
                 tab: open.map(|f| f.id).or(starting_tab),
+                leaf: open.map(|f| f.leaf),
                 resumable: open.is_none() && last.is_some_and(|r| r.session_id.is_some()),
                 paused: task.paused.is_some(),
                 worktree_gone: local
@@ -446,6 +776,7 @@ impl Tty7App {
                     && last
                         .and_then(|r| r.worktree.as_deref())
                         .is_some_and(|p| !std::path::Path::new(p).exists()),
+                starting: starting_now,
             });
         }
         let claimed = |id: TabId| self.board.tasks.iter().any(|t| t.runs_in(id));
@@ -471,40 +802,40 @@ impl Tty7App {
                 diff: f.diff,
                 since: None,
                 tab: Some(f.id),
+                leaf: Some(f.leaf),
                 resumable: false,
                 paused: false,
                 worktree_gone: false,
+                starting: false,
             });
-        }
-        if !self.board.agent_filter.is_empty() {
-            cards.retain(|c| {
-                c.agent
-                    .is_some_and(|a| self.board.agent_filter.contains(&a))
-            });
-        }
-        if let Some(only) = self.board.group_filter {
-            cards.retain(|c| c.group == Some(only));
         }
         cards
     }
 
     fn card(&self, key: CardRef, window: &Window, cx: &App) -> Option<Card> {
-        self.board_cards(Some(window), true, cx)
+        self.all_cards(Some(window), true, cx)
             .into_iter()
             .find(|c| c.key == key)
     }
 
-    /// The terminal the card's agent runs in, if it is open.
+    /// The terminal a card's agent runs in, if it is open: the very pane the
+    /// card was read from when it names one, else the one that speaks for
+    /// the tab now.
     fn card_view(
         &self,
         tab: Option<TabId>,
+        leaf: Option<EntityId>,
         cx: &App,
-    ) -> Option<Entity<crate::terminal::view::TerminalView>> {
+    ) -> Option<Entity<TerminalView>> {
         let tab = self.tabs.iter().find(|t| Some(t.tree_id.get()) == tab)?;
-        tab.pane
-            .terminals()
-            .into_iter()
-            .find(|l| l.read(cx).agent().is_some())
+        match leaf {
+            Some(leaf) => tab
+                .pane
+                .terminals()
+                .into_iter()
+                .find(|l| l.entity_id() == leaf),
+            None => speaking_leaf(tab, cx),
+        }
     }
 
     // ---- selection, peek, keys --------------------------------------------
@@ -524,11 +855,26 @@ impl Tty7App {
                 self.load_card_files(key, window, cx);
             }
             self.ensure_reply(window, cx);
-            if let Some(card) = self.card(key, window, cx) {
-                self.set_reply_placeholder(&card, window, cx);
-            }
         }
         cx.notify();
+    }
+
+    /// Points whatever was about card `from` at `to`: a loose card the
+    /// board has just filed as a task is the same card to the user, and the
+    /// panel open on it, and what was typed to it, stay with it.
+    fn repoint(&mut self, from: CardRef, to: CardRef) {
+        if self.board.selected == Some(from) {
+            self.board.selected = Some(to);
+        }
+        if self.board.reply_for == Some(from) {
+            self.board.reply_for = Some(to);
+        }
+        if let Some(draft) = self.board.drafts.remove(&from) {
+            self.board.drafts.insert(to, draft);
+        }
+        if let Some((k, _)) = self.board.files.as_mut().filter(|(k, _)| *k == from) {
+            *k = to;
+        }
     }
 
     fn close_peek(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -542,7 +888,7 @@ impl Tty7App {
         let Some(index) = self.tabs.iter().position(|t| t.tree_id.get() == tab) else {
             return;
         };
-        self.main_view = MainView::Terminal;
+        self.leave_board_view();
         self.board.composer = None;
         self.board.peek = false;
         self.activate(index, window, cx);
@@ -551,14 +897,28 @@ impl Tty7App {
     }
 
     /// Enter on a card, or a double click: into its terminal when there is
-    /// one.
+    /// one. Otherwise a task nobody has run yet opens for editing, a run that
+    /// can be picked back up is, and anything else opens in the panel.
     fn open_card(&mut self, key: CardRef, window: &mut Window, cx: &mut Context<Self>) {
-        match (self.card(key, window, cx).and_then(|c| c.tab), key) {
-            (Some(tab), _) => self.open_card_tab(tab, window, cx),
-            // Nothing running to look at: a task that has not run yet opens
-            // for editing.
-            (None, CardRef::Task(id)) => self.open_composer(Some(id), window, cx),
-            (None, CardRef::Loose(_)) => self.select_card(key, true, window, cx),
+        let Some(card) = self.card(key, window, cx) else {
+            return;
+        };
+        if let Some(tab) = card.tab {
+            self.open_card_tab(tab, window, cx);
+            return;
+        }
+        let never_ran = match key {
+            CardRef::Task(id) => self.task(id).is_some_and(|t| t.runs.is_empty()),
+            CardRef::Loose(_) => false,
+        };
+        match key {
+            CardRef::Task(id) if never_ran && !card.starting => {
+                self.open_composer(Some(id), window, cx)
+            }
+            CardRef::Task(id) if card.resumable && !card.worktree_gone => {
+                self.resume_task(id, window, cx)
+            }
+            _ => self.select_card(key, true, window, cx),
         }
     }
 
@@ -570,7 +930,12 @@ impl Tty7App {
             .as_ref()
             .is_some_and(|r| r.focus_handle(cx).is_focused(window));
         if k.key == "escape" {
-            if typing {
+            if cx.has_active_drag() {
+                // Esc lets go of a card, not of the board under it.
+                cx.stop_active_drag(window);
+                self.board.dragging = None;
+                cx.notify();
+            } else if typing {
                 window.focus(&self.board.focus, cx);
             } else if self.board.peek {
                 self.close_peek(window, cx);
@@ -582,7 +947,17 @@ impl Tty7App {
             cx.stop_propagation();
             return;
         }
-        if typing || k.modifiers.modified() {
+        let m = &k.modifiers;
+        let menu_key =
+            k.key == "menu" || (k.key == "f10" && m.shift && !m.control && !m.alt && !m.platform);
+        if !typing && menu_key {
+            if let Some(key) = self.board.selected {
+                self.open_card_menu(key, window, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
+        if typing || m.modified() {
             return;
         }
         match k.key.as_str() {
@@ -592,21 +967,88 @@ impl Tty7App {
                 None => return,
             },
             "up" | "down" | "left" | "right" => self.move_selection(&k.key, window, cx),
+            "a" | "d" | "p" | "r" => match self.board.selected {
+                Some(key) => self.card_key(key, &k.key, window, cx),
+                None => return,
+            },
             _ => return,
         }
         cx.stop_propagation();
     }
 
+    /// A letter on the selected card: A allows what it asks, D marks it
+    /// done, P pauses it, R reopens or resumes it — each only where the card
+    /// offers that move.
+    fn card_key(
+        &mut self,
+        key: CardRef,
+        letter: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(card) = self.card(key, window, cx) else {
+            return;
+        };
+        let seen = Seen::of(&card);
+        let can = |to: Column| moves_from(card.column).contains(&to);
+        match (letter, key) {
+            ("a", _) if card.column == Column::NeedsInput && !card.question => {
+                self.board_move(key, Column::Running, &seen, window, cx)
+            }
+            ("d", _) if can(Column::Done) => self.board_move(key, Column::Done, &seen, window, cx),
+            ("p", _) if can(Column::Queued) => {
+                self.board_move(key, Column::Queued, &seen, window, cx)
+            }
+            ("r", CardRef::Task(id)) if card.column == Column::Done => match card.worktree_gone {
+                true => self.start_again(id, window, cx),
+                false => self.reopen(id, window, cx),
+            },
+            ("r", CardRef::Task(id)) if card.resumable && !card.worktree_gone => {
+                self.resume_task(id, window, cx)
+            }
+            _ => {}
+        }
+    }
+
+    /// Opens a card's menu from the keyboard, under the card: the same menu
+    /// a right click opens.
+    fn open_card_menu(&mut self, key: CardRef, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(card) = self.card(key, window, cx) else {
+            return;
+        };
+        let spec = view::CardMenu::of(&card);
+        let app = cx.entity().downgrade();
+        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+            view::card_menu(menu, &spec, app.clone())
+        });
+        let sub = cx.subscribe_in(
+            &menu,
+            window,
+            |this, _, _: &gpui::DismissEvent, window, cx| {
+                this.board.menu = None;
+                if this.board_open() {
+                    window.focus(&this.board.focus, cx);
+                }
+                cx.notify();
+            },
+        );
+        menu.focus_handle(cx).focus(window, cx);
+        self.board.menu = Some((key, menu, sub));
+        cx.notify();
+    }
+
     /// Arrow keys: along a column, or to the nearest card in the next column
-    /// that has one.
+    /// that has one. Only the cards on show: a folded Done card is not one.
     fn move_selection(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         let cards = self.board_cards(Some(window), false, cx);
+        let now = unix_now();
+        let show_old = self.board.show_old_done;
         let grid: Vec<Vec<CardRef>> = Column::ALL
             .iter()
             .map(|col| {
                 cards
                     .iter()
-                    .filter(|c| c.column == *col)
+                    .filter(|c| c.column == *col && !folded(c.column, c.since, now, show_old))
                     .map(|c| c.key)
                     .collect()
             })
@@ -643,17 +1085,30 @@ impl Tty7App {
 
     // ---- moves --------------------------------------------------------------
 
-    /// Moves a card to `to`, by asking its agent for whatever that move means.
+    /// Moves a card to `to`, by asking its agent for whatever that move means
+    /// — so long as the card still stands where `seen` saw it.
     pub(crate) fn board_move(
         &mut self,
         key: CardRef,
         to: Column,
+        seen: &Seen,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(card) = self.card(key, window, cx) else {
             return;
         };
+        if card.starting {
+            return;
+        }
+        if card.column != seen.column {
+            self.flash(
+                t_fmt(L10nKey::BoardCardMoved, &[("title", &card.title)]),
+                None,
+                cx,
+            );
+            return;
+        }
         if !moves_from(card.column).contains(&to) {
             return;
         }
@@ -667,7 +1122,9 @@ impl Tty7App {
                     self.open_card_tab(tab, window, cx)
                 }
             }
-            (Column::NeedsInput, Column::Running) => self.allow_card(&card, window, cx),
+            (Column::NeedsInput, Column::Running) => {
+                self.allow_card(&card, seen.ask.as_ref(), window, cx)
+            }
             (_, Column::Running) => self.focus_reply(key, window, cx),
             (_, Column::Done) => self.mark_done(key, window, cx),
             _ => {}
@@ -681,11 +1138,11 @@ impl Tty7App {
         match card.key {
             CardRef::Task(id) => match (card.tab, self.task(id)) {
                 (Some(_), Some(mut task)) => {
-                    if let Some(view) = self.card_view(card.tab, cx) {
+                    if let Some(view) = self.card_view(card.tab, card.leaf, cx) {
                         view.read(cx).send_agent_prompt(CONTINUE);
                     }
                     task.paused = None;
-                    task.done = None;
+                    task::reopen(&mut task);
                     let title = task.title.clone();
                     if self.save_task(task, window, cx) {
                         self.flash(
@@ -704,31 +1161,58 @@ impl Tty7App {
 
     /// Interrupts the card's agent and sends the card back to the queue.
     fn pause_card(&mut self, card: &Card, window: &mut Window, cx: &mut Context<Self>) {
-        let mut task = match card.key {
+        let task = match card.key {
             CardRef::Task(id) => self.task(id),
             CardRef::Loose(tab) => self.loose_task(tab, window, cx),
         };
-        let Some(task) = task.as_mut() else {
+        let Some(mut task) = task else {
             return;
         };
-        if let Some(view) = self.card_view(card.tab, cx) {
+        let undo = match card.key {
+            CardRef::Task(_) => Undo::Marks(Marks::of(&task)),
+            CardRef::Loose(_) => Undo::Remove(task.id),
+        };
+        if let Some(view) = self.card_view(card.tab, card.leaf, cx) {
             view.read(cx).send_keys(b"\x1b");
         }
         task.paused = Some(unix_now());
-        let title = task.title.clone();
-        if self.save_task(task.clone(), window, cx) {
+        let (id, title) = (task.id, task.title.clone());
+        if self.save_task(task, window, cx) {
+            self.repoint(card.key, CardRef::Task(id));
             self.flash(
                 t_fmt(L10nKey::BoardToastPaused, &[("title", &title)]),
-                None,
+                Some(undo),
                 cx,
             );
         }
     }
 
     /// Takes the choice a permission prompt has highlighted, which is "yes"
-    /// for every agent the board can start.
-    fn allow_card(&mut self, card: &Card, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.card_view(card.tab, cx) else {
+    /// for every agent the board can start — but only on the prompt the user
+    /// saw, `seen`. Read again off the pane itself: an agent that has moved
+    /// on to another prompt since would otherwise be told yes to that one.
+    fn allow_card(
+        &mut self,
+        card: &Card,
+        seen: Option<&SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = self.card_view(card.tab, card.leaf, cx);
+        let still = view
+            .as_ref()
+            .and_then(|v| v.read(cx).agent_session())
+            .is_some_and(|s| {
+                s.status == AgentStatus::Waiting
+                    && !s.question
+                    && waiting_ask(&s).as_deref() == seen.map(|a| a.as_ref())
+            });
+        let Some(view) = view.filter(|_| still) else {
+            self.flash(
+                t_fmt(L10nKey::BoardPromptChanged, &[("title", &card.title)]),
+                None,
+                cx,
+            );
             return;
         };
         view.read(cx).send_keys(b"\r");
@@ -740,27 +1224,44 @@ impl Tty7App {
         );
     }
 
-    /// Sends `text` to the card's agent, as if typed at its prompt.
+    /// Sends `text` to the card's agent, as if typed at its prompt. False,
+    /// with the reason on screen, when the agent is not at its prompt — a
+    /// permission dialog or a picker came up since the reply box was drawn,
+    /// and typed words would land in it.
     fn send_reply(
         &mut self,
         key: CardRef,
         text: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let text = text.trim();
         if text.is_empty() {
-            return;
+            return false;
         }
         let Some(card) = self.card(key, window, cx) else {
-            return;
+            return false;
         };
-        let Some(view) = self.card_view(card.tab, cx) else {
-            return;
+        let Some(view) = self.card_view(card.tab, card.leaf, cx) else {
+            return false;
         };
+        let agent = card.agent.map_or("", |a| a.display_name());
+        let waiting = card.column == Column::NeedsInput
+            || card.ask.is_some()
+            || view
+                .read(cx)
+                .agent_session()
+                .is_some_and(|s| s.status == AgentStatus::Waiting || s.ask.is_some());
+        if waiting {
+            self.flash(
+                t_fmt(L10nKey::BoardReplyWaiting, &[("agent", agent)]),
+                None,
+                cx,
+            );
+            return false;
+        }
         view.read(cx).send_agent_prompt(text);
         self.unpause(key, window, cx);
-        let agent = card.agent.map_or("", |a| a.display_name());
         self.flash(
             t_fmt(
                 L10nKey::BoardToastSent,
@@ -769,6 +1270,7 @@ impl Tty7App {
             None,
             cx,
         );
+        true
     }
 
     fn unpause(&mut self, key: CardRef, window: &mut Window, cx: &mut Context<Self>) {
@@ -777,7 +1279,7 @@ impl Tty7App {
             && (task.paused.is_some() || task.done.is_some())
         {
             task.paused = None;
-            task.done = None;
+            task::reopen(&mut task);
             self.save_task(task, window, cx);
         }
     }
@@ -794,7 +1296,8 @@ impl Tty7App {
                 let Some(task) = self.task(id) else {
                     return;
                 };
-                (task.clone(), Undo::Put(task))
+                let undo = Undo::Marks(Marks::of(&task));
+                (task, undo)
             }
             CardRef::Loose(tab) => {
                 let Some(task) = self.loose_task(tab, window, cx) else {
@@ -804,13 +1307,10 @@ impl Tty7App {
                 (task, Undo::Remove(id))
             }
         };
-        task.paused = None;
-        task.done = Some(Done {
-            at: unix_now(),
-            turns: task::live_turns(&task, live),
-        });
-        let title = task.title.clone();
+        task::mark_done(&mut task, live, unix_now());
+        let (id, title) = (task.id, task.title.clone());
         if self.save_task(task, window, cx) {
+            self.repoint(key, CardRef::Task(id));
             self.flash(
                 t_fmt(L10nKey::BoardToastDone, &[("title", &title)]),
                 Some(undo),
@@ -825,7 +1325,7 @@ impl Tty7App {
         let Some(mut task) = self.task(id) else {
             return;
         };
-        task.done = None;
+        task::reopen(&mut task);
         if self.save_task(task, window, cx) {
             self.start_task(id, None, window, cx);
         }
@@ -835,13 +1335,13 @@ impl Tty7App {
         let Some(mut task) = self.task(id) else {
             return;
         };
-        let before = task.clone();
-        task.done = None;
+        let undo = Undo::Marks(Marks::of(&task));
+        task::reopen(&mut task);
         let title = task.title.clone();
         if self.save_task(task, window, cx) {
             self.flash(
                 t_fmt(L10nKey::BoardToastReopened, &[("title", &title)]),
-                Some(Undo::Put(before)),
+                Some(undo),
                 cx,
             );
         }
@@ -855,7 +1355,7 @@ impl Tty7App {
         if self.delete_task(id, window, cx) {
             self.flash(
                 t_fmt(L10nKey::BoardToastRemoved, &[("title", &title)]),
-                Some(Undo::Put(task)),
+                Some(Undo::Restore(task)),
                 cx,
             );
         }
@@ -891,7 +1391,7 @@ impl Tty7App {
         };
         let (id, title) = (task.id, task.title.clone());
         if self.save_task(task, window, cx) {
-            self.board.selected = Some(CardRef::Task(id));
+            self.repoint(CardRef::Loose(tab), CardRef::Task(id));
             self.flash(
                 t_fmt(L10nKey::BoardToastKept, &[("title", &title)]),
                 Some(Undo::Remove(id)),
@@ -900,8 +1400,10 @@ impl Tty7App {
         }
     }
 
+    /// Picks a finished run back up in a new tab. Like [`Self::launch_run`],
+    /// the window stays on the board when that is where it was asked.
     fn resume_task(&mut self, id: TaskId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(mut task) = self.task(id) else {
+        let Some(task) = self.task(id) else {
             return;
         };
         let Some(run) = task.runs.last().cloned() else {
@@ -915,8 +1417,13 @@ impl Tty7App {
             .as_ref()
             .or(task.cwd.as_ref())
             .map(PathBuf::from);
+        let on_board = self.board_open();
+        let zoom = self.board.zoom.take();
         let before = self.tabs.len();
         self.resume_session(run.agent, &session, cwd, false, window, cx);
+        if on_board {
+            self.return_to_board(zoom, window, cx);
+        }
         // Nothing opened, and the reason is on screen already; the run must
         // not be pinned to whichever tab happened to be active.
         if self.tabs.len() == before {
@@ -925,14 +1432,37 @@ impl Tty7App {
         let Some(tab) = self.tabs.get(self.active) else {
             return;
         };
+        let tab = tab.tree_id.get();
+        // Read again: opening the tab may have taken a while, and the card
+        // may have changed meanwhile.
+        let Some(mut task) = self.task(id) else {
+            return;
+        };
         task.push_run(Run {
-            tab: Some(tab.tree_id.get()),
+            tab: Some(tab),
             started: unix_now(),
             ..run
         });
-        task.done = None;
+        task::reopen(&mut task);
         task.paused = None;
         self.save_task(task, window, cx);
+    }
+
+    /// Puts the board back after one of its own moves opened a tab — which
+    /// shows the terminal, as any new tab does — with the zoom it had set
+    /// aside still set aside.
+    fn return_to_board(
+        &mut self,
+        zoom: Option<(TabId, Entity<TerminalView>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.main_view = MainView::Board;
+        if self.board.zoom.is_none() {
+            self.board.zoom = zoom;
+        }
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     /// Starts an agent on `task`, told what to do — in a worktree of its own
@@ -944,6 +1474,11 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A second Start while the worktree is still being cut would cut
+        // another.
+        if self.board.starting.contains(&id) {
+            return;
+        }
         let Some(task) = self.task(id) else {
             return;
         };
@@ -972,7 +1507,7 @@ impl Tty7App {
         }
         let cwd = task.cwd.as_ref().map(PathBuf::from);
         if !task.worktree {
-            self.launch_run(task, agent, Some(command), cwd, None, window, cx);
+            self.launch_run(id, agent, Some(command), cwd, None, window, cx);
             return;
         }
         // The worktree is cut first, off the thread — on whichever machine
@@ -991,6 +1526,11 @@ impl Tty7App {
             .branch
             .clone()
             .or_else(|| task::branch_slug(&task.title));
+        let title = task.title.clone();
+        // Until its tab opens, the card says it is on its way and offers no
+        // move: there is no agent yet to ask anything of.
+        self.board.starting.insert(id);
+        cx.notify();
         crate::ui::host_ops::HostOps::run_in(
             host,
             window,
@@ -1005,34 +1545,43 @@ impl Tty7App {
                     created,
                     Some(command),
                     Box::new(move |this, wt, line, window, cx| {
+                        this.board.starting.remove(&id);
+                        cx.notify();
+                        // Removed while its worktree was being cut: there is
+                        // no card left to give a run to.
+                        if this.task(id).is_none() {
+                            window.push_notification(
+                                t_fmt(L10nKey::BoardStartGone, &[("title", &title)]),
+                                cx,
+                            );
+                            return;
+                        }
                         let path = wt.path.clone();
-                        this.launch_run(
-                            task,
-                            agent,
-                            line,
-                            Some(path.clone()),
-                            Some(path),
-                            window,
-                            cx,
-                        )
+                        this.launch_run(id, agent, line, Some(path.clone()), Some(path), window, cx)
                     }),
                     window,
                     cx,
                 ),
-                Err(e) => window
-                    .push_notification(t_fmt(L10nKey::BoardWorktreeFailed, &[("error", &e)]), cx),
+                Err(e) => {
+                    this.board.starting.remove(&id);
+                    cx.notify();
+                    window.push_notification(
+                        t_fmt(L10nKey::BoardWorktreeFailed, &[("error", &e)]),
+                        cx,
+                    )
+                }
             },
         );
     }
 
-    /// Opens the tab a run of `task` works in and starts `agent` there.
+    /// Opens the tab a run of task `id` works in and starts `agent` there.
     ///
     /// The window stays on the board: the card moving to Running is the
     /// answer, and whoever wants to watch can open it.
     #[allow(clippy::too_many_arguments)]
     fn launch_run(
         &mut self,
-        mut task: Task,
+        id: TaskId,
         agent: CLIAgent,
         command: Option<String>,
         cwd: Option<PathBuf>,
@@ -1040,8 +1589,15 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The task as it is now, not as it was when Start was pressed: a
+        // worktree takes a while, and the card may have been edited since.
+        let Some(mut task) = self.task(id) else {
+            return;
+        };
         let on_board = self.board_open();
+        let zoom = self.board.zoom.take();
         let Some(slot) = self.new_tab_slot(cwd, None, window, cx) else {
+            self.board.zoom = zoom;
             return;
         };
         // The tab is named for the task, so its sidebar row says what it is
@@ -1058,8 +1614,7 @@ impl Tty7App {
             crate::ui::agent_launch::run_when_ready(&slot, command, cx);
         }
         if on_board {
-            self.main_view = MainView::Board;
-            self.focus_active(window, cx);
+            self.return_to_board(zoom, window, cx);
         }
         task.push_run(Run {
             agent,
@@ -1069,7 +1624,7 @@ impl Tty7App {
             worktree: worktree.map(|p| p.display().to_string()),
         });
         task.agent = Some(agent);
-        task.done = None;
+        task::reopen(&mut task);
         task.paused = None;
         let title = task.title.clone();
         if self.save_task(task, window, cx) {
@@ -1094,7 +1649,7 @@ impl Tty7App {
             let mut next = task.clone();
             let mut dirty = false;
             for run in next.runs.iter_mut() {
-                let Some(view) = self.card_view(run.tab, cx) else {
+                let Some(view) = self.card_view(run.tab, None, cx) else {
                     continue;
                 };
                 let session = view.read(cx).agent_session();
@@ -1126,12 +1681,18 @@ impl Tty7App {
 
     // ---- toast --------------------------------------------------------------
 
+    /// Says what just happened. With `undo`, the change goes on the stack
+    /// ⌘Z walks back, and the note offers to take it back.
     fn flash(&mut self, text: String, undo: Option<Undo>, cx: &mut Context<Self>) {
         self.board.toast_seq += 1;
         let seq = self.board.toast_seq;
+        let can_undo = undo.is_some();
+        if let Some(undo) = undo {
+            self.board.undo.push(undo);
+        }
         self.board.toast = Some(Toast {
             text: text.into(),
-            undo,
+            undo: can_undo,
         });
         cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -1148,17 +1709,22 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Walks back the newest change the board made, laid over the card as it
+    /// is now. One whose card has gone since has nothing to put back.
     fn undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(undo) = self.board.toast.take().and_then(|t| t.undo) else {
+        let Some(undo) = self.board.undo.pop() else {
             return;
         };
-        match undo {
-            Undo::Put(task) => {
-                self.save_task(task, window, cx);
+        self.board.toast = None;
+        let current = self.task(undo.task());
+        match undo.step(current.as_ref()) {
+            Some(UndoStep::Save(task)) => {
+                self.save_task(*task, window, cx);
             }
-            Undo::Remove(id) => {
+            Some(UndoStep::Delete(id)) => {
                 self.delete_task(id, window, cx);
             }
+            None => {}
         }
         cx.notify();
     }
@@ -1237,9 +1803,9 @@ fn ago(since: u64) -> String {
     let secs = unix_now().saturating_sub(since);
     match secs {
         0..60 => t(L10nKey::BoardNow).to_string(),
-        60..3600 => format!("{}m", secs / 60),
-        3600..86400 => format!("{}h", secs / 3600),
-        _ => format!("{}d", secs / 86400),
+        60..3600 => t_fmt(L10nKey::BoardAgoMinutes, &[("n", &(secs / 60).to_string())]),
+        3600..86400 => t_fmt(L10nKey::BoardAgoHours, &[("n", &(secs / 3600).to_string())]),
+        _ => t_fmt(L10nKey::BoardAgoDays, &[("n", &(secs / 86400).to_string())]),
     }
 }
 
@@ -1291,5 +1857,92 @@ mod tests {
             move_verb(Column::NeedsInput, Column::Running, false),
             L10nKey::BoardVerbAllow
         );
+    }
+
+    #[test]
+    fn only_old_done_cards_fold_and_only_until_asked_for() {
+        let now = 100 * 24 * 3600;
+        let old = Some(now - DONE_RECENT_SECS - 1);
+        let recent = Some(now - DONE_RECENT_SECS + 60);
+        assert!(folded(Column::Done, old, now, false));
+        assert!(
+            !folded(Column::Done, old, now, true),
+            "shown once asked for"
+        );
+        assert!(!folded(Column::Done, recent, now, false));
+        assert!(!folded(Column::Done, None, now, false), "no date, no fold");
+        assert!(!folded(Column::Review, old, now, false), "only Done folds");
+    }
+
+    #[test]
+    fn a_filter_on_an_unpinned_group_lets_go() {
+        let (kept, gone) = (GroupId::new(), GroupId::new());
+        let pinned = |g: GroupId| g == kept;
+        assert_eq!(live_group_filter(Some(kept), pinned), Some(kept));
+        assert_eq!(live_group_filter(Some(gone), pinned), None);
+        assert_eq!(live_group_filter(None, pinned), None);
+    }
+
+    #[test]
+    fn the_undo_stack_keeps_the_newest_few() {
+        let mut stack = UndoStack::default();
+        let ids: Vec<TaskId> = (0..UNDO_DEPTH + 2).map(|_| TaskId::new()).collect();
+        for id in &ids {
+            stack.push(Undo::Remove(*id));
+        }
+        assert_eq!(stack.0.len(), UNDO_DEPTH);
+        assert_eq!(stack.pop(), Some(Undo::Remove(ids[UNDO_DEPTH + 1])));
+        assert_eq!(stack.pop(), Some(Undo::Remove(ids[UNDO_DEPTH])));
+        while stack.pop().is_some() {}
+        assert!(!stack.0.contains(&Undo::Remove(ids[0])), "the oldest went");
+    }
+
+    /// An undo puts back what its change touched and nothing else: a run
+    /// the card picked up since stays.
+    #[test]
+    fn an_undo_is_laid_over_the_card_as_it_is_now() {
+        let mut before = Task::new("t");
+        before.paused = Some(5);
+        let undo = Undo::Marks(Marks::of(&before));
+        let mut now = before.clone();
+        task::mark_done(&mut now, |_| None, 9);
+        now.push_run(Run {
+            agent: CLIAgent::Claude,
+            tab: Some(TabId::new()),
+            session_id: Some("s".into()),
+            started: 10,
+            worktree: None,
+        });
+        let Some(UndoStep::Save(put)) = undo.clone().step(Some(&now)) else {
+            panic!("the card is still there to put back");
+        };
+        assert_eq!(put.paused, Some(5));
+        assert!(put.done.is_none() && put.done_marks.is_none());
+        assert_eq!(put.runs, now.runs, "the new run stays");
+        assert_eq!(undo.step(None), None, "a card gone since is left gone");
+
+        let mut edited = before.clone();
+        edited.title = "new".into();
+        edited.paused = None;
+        let Some(UndoStep::Save(put)) = Undo::Edit(before.clone()).step(Some(&edited)) else {
+            panic!("an edit is undone");
+        };
+        assert_eq!(put.title, "t");
+        assert_eq!(put.paused, None, "an edit's undo leaves the marks alone");
+    }
+
+    #[test]
+    fn a_removal_is_undone_only_while_the_card_is_still_gone() {
+        let task = Task::new("t");
+        assert_eq!(
+            Undo::Restore(task.clone()).step(None),
+            Some(UndoStep::Save(Box::new(task.clone())))
+        );
+        assert_eq!(Undo::Restore(task.clone()).step(Some(&task)), None);
+        assert_eq!(
+            Undo::Remove(task.id).step(Some(&task)),
+            Some(UndoStep::Delete(task.id))
+        );
+        assert_eq!(Undo::Remove(task.id).step(None), None);
     }
 }

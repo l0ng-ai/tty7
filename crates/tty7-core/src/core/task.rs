@@ -47,7 +47,17 @@ pub const START_GRACE_SECS: u64 = 120;
 pub const STARTING: Live = Live {
     status: AgentStatus::Idle,
     turns: 0,
+    session: None,
 };
+
+/// Whether `run` is still inside [`START_GRACE_SECS`] of being started, as
+/// of `now`. Measured either side of `now`: `started` was written by
+/// whichever machine opened the run, and a clock running ahead of this one
+/// must not keep a run that never came up "starting" for as long as the gap
+/// between them.
+pub fn just_started(run: &Run, now: u64) -> bool {
+    run.started.abs_diff(now) < START_GRACE_SECS
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -114,6 +124,14 @@ pub struct Task {
     /// the middle of a turn; whoever puts one back to work clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<u64>,
+    /// Where each of its agents stood when it was marked [`Self::done`] —
+    /// see [`mark_done`]. Kept beside the mark rather than in it so a mark
+    /// written by a build that predates these still reads, measured by
+    /// [`Done::turns`] alone; and it only speaks for the mark it was taken
+    /// with ([`DoneMarks::at`]), so one left over from an earlier mark is
+    /// never read against a later one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_marks: Option<DoneMarks>,
 }
 
 /// One agent started for a task.
@@ -143,10 +161,38 @@ pub struct Done {
     /// Unix seconds.
     pub at: u64,
     /// How many turns its live runs had finished between them when it was
-    /// marked. A later turn means someone put an agent back on it, and a card
-    /// that stayed in Done while its agent worked would be lying.
+    /// marked, a turn under way counted as finished. A later turn means
+    /// someone put an agent back on it, and a card that stayed in Done while
+    /// its agent worked would be lying. Only read for a mark with no
+    /// [`Task::done_marks`] of its own — one from an older build — since a
+    /// sum cannot tell one agent's new turn from another's relaunch.
     #[serde(default)]
     pub turns: u64,
+}
+
+/// Each live run's agent as it stood when its task was marked done: what a
+/// later turn is measured against, one agent at a time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoneMarks {
+    /// The [`Done::at`] these were taken with.
+    pub at: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunMark>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunMark {
+    pub tab: TabId,
+    /// [`Live::session`] then: another one in the same tab is an agent
+    /// started over, whose turns are all new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<u64>,
+    /// Turns it had finished.
+    pub turns: u64,
+    /// It was in the middle of a turn, or about to take its first. That turn
+    /// finishing is the work the user already called done, not new work.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub busy: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -179,6 +225,10 @@ pub struct Live {
     pub status: AgentStatus,
     /// Turns finished, as [`AgentSessionState::turns`].
     pub turns: u64,
+    /// Which agent session this is ([`session_key`] of its id), when it has
+    /// said. A different one in the same tab is an agent started over, whose
+    /// turn count began again at zero.
+    pub session: Option<u64>,
 }
 
 impl From<&AgentSessionState> for Live {
@@ -186,8 +236,24 @@ impl From<&AgentSessionState> for Live {
         Live {
             status: state.status,
             turns: state.turns,
+            session: state.session_id.as_deref().map(session_key),
         }
     }
+}
+
+/// A session id boiled down to what [`Live`] carries: FNV-1a, which is the
+/// same on every build and every machine, since it is written into the tree.
+pub fn session_key(id: &str) -> u64 {
+    id.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, b| {
+        (hash ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// Whether [`column`] reads this agent as busy on its task: in a turn, on a
+/// prompt, or open and not yet started on the one it was given.
+fn busy(state: Live) -> bool {
+    matches!(state.status, AgentStatus::Working | AgentStatus::Waiting)
+        || live_column(state) == Column::Queued
 }
 
 /// Where one live agent session puts its card.
@@ -213,7 +279,7 @@ pub fn live_column(state: Live) -> Column {
 /// agent asking a question is the card's news even while another is busy,
 /// and any agent still busy outranks the user's say-so that it is finished.
 pub fn column(task: &Task, live: impl Fn(&Run) -> Option<Live>) -> Column {
-    let states: Vec<Live> = task.runs.iter().filter_map(live).collect();
+    let states: Vec<Live> = task.runs.iter().filter_map(&live).collect();
     if states.iter().any(|s| s.status == AgentStatus::Waiting) {
         return Column::NeedsInput;
     }
@@ -224,7 +290,7 @@ pub fn column(task: &Task, live: impl Fn(&Run) -> Option<Live>) -> Column {
         return Column::Queued;
     }
     if let Some(done) = task.done
-        && turns(&states) <= done.turns
+        && still_done(task, done, &live)
     {
         return Column::Done;
     }
@@ -239,11 +305,75 @@ pub fn column(task: &Task, live: impl Fn(&Run) -> Option<Live>) -> Column {
     Column::Review
 }
 
-/// The turns a task's live runs have finished between them, which is what a
-/// [`Done`] mark is measured against.
-pub fn live_turns(task: &Task, live: impl Fn(&Run) -> Option<Live>) -> u64 {
-    let states: Vec<Live> = task.runs.iter().filter_map(live).collect();
-    turns(&states)
+/// Whether no agent has taken a turn on `task` since it was marked `done`.
+fn still_done(task: &Task, done: Done, live: &impl Fn(&Run) -> Option<Live>) -> bool {
+    let Some(marks) = task.done_marks.as_ref().filter(|m| m.at == done.at) else {
+        // A mark from before marks were kept: the sum is all there is.
+        let states: Vec<Live> = task.runs.iter().filter_map(live).collect();
+        return turns(&states) <= done.turns;
+    };
+    task.runs.iter().all(|run| {
+        let Some(now) = live(run) else {
+            return true;
+        };
+        let mark = run
+            .tab
+            .and_then(|tab| marks.runs.iter().find(|m| m.tab == tab));
+        let Some(mark) = mark else {
+            // Nothing was reporting from this run when it was marked — its tab
+            // was closed, or its agent had not said anything yet — so there is
+            // no count to hold this one against. Only a run started since the
+            // mark has turns that are plainly new.
+            return run.started <= done.at || now.turns == 0;
+        };
+        let restarted = matches!((mark.session, now.session), (Some(a), Some(b)) if a != b)
+            // A count only ever climbs within one agent; one that fell is a
+            // new agent counting from zero.
+            || now.turns < mark.turns;
+        if restarted {
+            now.turns == 0
+        } else {
+            now.turns <= mark.turns + u64::from(mark.busy)
+        }
+    })
+}
+
+/// Marks `task` finished as of `now`, noting where each of its agents stands
+/// so that only a turn taken after this moves it out of Done again.
+///
+/// `live` is the same reading [`column`] takes. A card dragged to Done while
+/// its agent is still working stays there once that turn ends — the user
+/// called it done knowing the turn was under way — and one marked before its
+/// agent has reported anything is not thrown back to Review when it does.
+/// It also stops being paused: done is the stronger word.
+pub fn mark_done(task: &mut Task, live: impl Fn(&Run) -> Option<Live>, now: u64) {
+    let mut runs: Vec<RunMark> = Vec::new();
+    for run in &task.runs {
+        let (Some(tab), Some(state)) = (run.tab, live(run)) else {
+            continue;
+        };
+        if runs.iter().any(|m| m.tab == tab) {
+            continue;
+        }
+        runs.push(RunMark {
+            tab,
+            session: state.session,
+            turns: state.turns,
+            busy: busy(state),
+        });
+    }
+    let turns = runs.iter().fold(0u64, |sum, m| {
+        sum.saturating_add(m.turns + u64::from(m.busy))
+    });
+    task.paused = None;
+    task.done = Some(Done { at: now, turns });
+    task.done_marks = Some(DoneMarks { at: now, runs });
+}
+
+/// Takes `task` back out of Done.
+pub fn reopen(task: &mut Task) {
+    task.done = None;
+    task.done_marks = None;
 }
 
 fn turns(states: &[Live]) -> u64 {
@@ -267,6 +397,7 @@ impl Task {
             runs: Vec::new(),
             done: None,
             paused: None,
+            done_marks: None,
         }
     }
 
@@ -319,6 +450,26 @@ impl Task {
     }
 }
 
+/// What has to go for `incoming` to fit on a board holding `tasks`.
+///
+/// `Ok(None)` when it fits as it is — it replaces a card already there, or
+/// the board is under [`MAX_TASKS`]. On a full board the card marked done
+/// longest ago makes way (`Ok(Some(id))`): it is the one nobody is looking
+/// at. A full board with nothing done has nothing to give up, and says so.
+pub fn make_room(tasks: &[Task], incoming: TaskId) -> Result<Option<TaskId>, String> {
+    if tasks.len() < MAX_TASKS || tasks.iter().any(|t| t.id == incoming) {
+        return Ok(None);
+    }
+    tasks
+        .iter()
+        .filter_map(|t| t.done.map(|d| (d.at, t.id)))
+        .min_by_key(|&(at, _)| at)
+        .map(|(_, id)| Some(id))
+        .ok_or_else(|| {
+            format!("the board already holds {MAX_TASKS} tasks and none is done — remove one first")
+        })
+}
+
 /// A branch and worktree name made from a task's title: lowercase ASCII
 /// words joined by `-`, at most 40 characters. `None` for a title with no
 /// ASCII word in it (a Chinese one, say), which gets a generated name instead.
@@ -346,7 +497,32 @@ mod tests {
     use super::*;
 
     fn live(status: AgentStatus, turns: u64) -> Live {
-        Live { status, turns }
+        Live {
+            status,
+            turns,
+            session: Some(1),
+        }
+    }
+
+    fn in_session(session: u64, status: AgentStatus, turns: u64) -> Live {
+        Live {
+            session: Some(session),
+            ..live(status, turns)
+        }
+    }
+
+    /// Marks `t` done at second 10 with its runs reading `states`.
+    fn mark(t: &mut Task, states: &[(TabId, Live)]) {
+        mark_done(
+            t,
+            |r| {
+                states
+                    .iter()
+                    .find(|(tab, _)| Some(*tab) == r.tab)
+                    .map(|(_, s)| *s)
+            },
+            10,
+        );
     }
 
     /// A task with one run per entry, each in a tab of its own.
@@ -432,6 +608,167 @@ mod tests {
         assert_eq!(col(&t, &at(live(AgentStatus::Done, 2))), Column::Review);
     }
 
+    /// Dragging a busy card to Done is saying the turn under way is the last
+    /// one; it ending must not throw the card back to Review.
+    #[test]
+    fn a_card_marked_done_mid_turn_stays_done_when_the_turn_ends() {
+        let (mut t, tabs) = task_with(1);
+        mark(&mut t, &[(tabs[0], live(AgentStatus::Working, 2))]);
+        let at = |l| [(tabs[0], l)];
+        assert_eq!(col(&t, &at(live(AgentStatus::Working, 2))), Column::Running);
+        assert_eq!(col(&t, &at(live(AgentStatus::Done, 3))), Column::Done);
+        assert_eq!(
+            col(&t, &at(live(AgentStatus::Done, 4))),
+            Column::Review,
+            "the turn after it is new work"
+        );
+        let (mut t, tabs) = task_with(1);
+        mark(&mut t, &[(tabs[0], live(AgentStatus::Waiting, 0))]);
+        assert_eq!(
+            col(&t, &[(tabs[0], live(AgentStatus::Done, 1))]),
+            Column::Done
+        );
+    }
+
+    /// A run just started reads as an agent about to take its first turn.
+    #[test]
+    fn a_card_marked_done_while_starting_stays_done_through_its_first_turn() {
+        let (mut t, tabs) = task_with(1);
+        mark(&mut t, &[(tabs[0], STARTING)]);
+        assert_eq!(
+            col(&t, &[(tabs[0], live(AgentStatus::Done, 1))]),
+            Column::Done
+        );
+        assert_eq!(
+            col(&t, &[(tabs[0], live(AgentStatus::Done, 2))]),
+            Column::Review
+        );
+    }
+
+    /// Its tab open, its agent not heard from yet: when the agent does
+    /// report, the turns it had already taken are not news.
+    #[test]
+    fn a_card_marked_done_before_its_agent_reported_is_not_undone_by_the_report() {
+        let (mut t, tabs) = task_with(1);
+        mark(&mut t, &[]);
+        assert_eq!(
+            col(&t, &[(tabs[0], live(AgentStatus::Done, 5))]),
+            Column::Done
+        );
+        assert_eq!(
+            col(&t, &[(tabs[0], live(AgentStatus::Idle, 5))]),
+            Column::Done
+        );
+        assert_eq!(
+            col(&t, &[(tabs[0], live(AgentStatus::Working, 5))]),
+            Column::Running,
+            "a busy agent still outranks the mark"
+        );
+    }
+
+    /// An agent quit and started again in the same tab counts from zero.
+    #[test]
+    fn an_agent_started_over_in_the_run_tab_is_measured_from_zero() {
+        let (mut t, tabs) = task_with(1);
+        mark(&mut t, &[(tabs[0], in_session(1, AgentStatus::Done, 4))]);
+        let at = |l| [(tabs[0], l)];
+        assert_eq!(
+            col(&t, &at(in_session(2, AgentStatus::Idle, 0))),
+            Column::Done
+        );
+        assert_eq!(
+            col(&t, &at(in_session(2, AgentStatus::Done, 1))),
+            Column::Review,
+            "a new session's first turn is new work"
+        );
+        // One that has not said which session it is yet gives itself away by
+        // its count going down.
+        let unnamed = Live {
+            session: None,
+            ..live(AgentStatus::Done, 1)
+        };
+        assert_eq!(col(&t, &at(unnamed)), Column::Review);
+    }
+
+    #[test]
+    fn a_run_started_after_the_mark_takes_the_card_out_of_done() {
+        let (mut t, _) = task_with(0);
+        mark(&mut t, &[]);
+        let tab = TabId::new();
+        t.push_run(Run {
+            agent: CLIAgent::Claude,
+            tab: Some(tab),
+            session_id: None,
+            started: 11,
+            worktree: None,
+        });
+        assert_eq!(
+            col(&t, &[(tab, live(AgentStatus::Done, 1))]),
+            Column::Review
+        );
+    }
+
+    #[test]
+    fn marking_done_unpauses_and_reopening_clears_the_mark() {
+        let (mut t, tabs) = task_with(1);
+        t.paused = Some(3);
+        mark(&mut t, &[(tabs[0], live(AgentStatus::Done, 1))]);
+        assert!(t.paused.is_none());
+        assert_eq!(t.done.map(|d| d.at), Some(10));
+        assert_eq!(
+            col(&t, &[(tabs[0], live(AgentStatus::Done, 1))]),
+            Column::Done
+        );
+        reopen(&mut t);
+        assert!(t.done.is_none() && t.done_marks.is_none());
+        assert_eq!(
+            col(&t, &[(tabs[0], live(AgentStatus::Done, 1))]),
+            Column::Review
+        );
+    }
+
+    /// A build that predates the marks writes the sum alone; marks left from
+    /// an earlier mark do not speak for it.
+    #[test]
+    fn a_mark_without_marks_of_its_own_is_measured_by_the_sum() {
+        let (mut t, tabs) = task_with(1);
+        mark(&mut t, &[(tabs[0], live(AgentStatus::Done, 7))]);
+        t.done = Some(Done { at: 20, turns: 1 });
+        assert_eq!(
+            col(&t, &[(tabs[0], live(AgentStatus::Done, 1))]),
+            Column::Done
+        );
+        assert_eq!(
+            col(&t, &[(tabs[0], live(AgentStatus::Done, 2))]),
+            Column::Review
+        );
+    }
+
+    #[test]
+    fn a_start_in_the_future_is_not_a_start_forever() {
+        let run = |started| Run {
+            agent: CLIAgent::Claude,
+            tab: None,
+            session_id: None,
+            started,
+            worktree: None,
+        };
+        assert!(just_started(&run(1_000), 1_000 + START_GRACE_SECS - 1));
+        assert!(!just_started(&run(1_000), 1_000 + START_GRACE_SECS));
+        assert!(just_started(&run(1_010), 1_000), "a few seconds of skew");
+        assert!(
+            !just_started(&run(1_000 + 3_600), 1_000),
+            "a clock an hour ahead does not hold the run open for an hour"
+        );
+    }
+
+    #[test]
+    fn a_session_key_is_stable() {
+        assert_eq!(session_key(""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(session_key("a"), 0xaf63_dc4c_8601_ec8c);
+        assert_ne!(session_key("abc"), session_key("abd"));
+    }
+
     #[test]
     fn a_paused_task_waits_in_the_queue_until_its_agent_works_again() {
         let (mut t, tabs) = task_with(1);
@@ -507,6 +844,16 @@ mod tests {
         t.done = Some(Done { at: 9, turns: 2 });
         let json = serde_json::to_string(&t).unwrap();
         assert_eq!(serde_json::from_str::<Task>(&json).unwrap(), t);
+        let tab = t.runs[0].tab.unwrap();
+        mark(&mut t, &[(tab, live(AgentStatus::Working, 2))]);
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(serde_json::from_str::<Task>(&json).unwrap(), t);
+        let old: Task = serde_json::from_str(
+            r#"{"id":"6f1c0b52-6a7e-4d53-9d1e-0a1b2c3d4e5f","title":"t","done":{"at":9,"turns":2}}"#,
+        )
+        .unwrap();
+        assert_eq!(old.done, Some(Done { at: 9, turns: 2 }));
+        assert!(old.done_marks.is_none());
         let bare: Task =
             serde_json::from_str(r#"{"id":"6f1c0b52-6a7e-4d53-9d1e-0a1b2c3d4e5f","title":"t"}"#)
                 .unwrap();

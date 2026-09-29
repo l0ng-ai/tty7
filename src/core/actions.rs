@@ -160,6 +160,7 @@ actions!(
         SwitcherAcrossBack,
         SearchNextTab,
         SearchPrevTab,
+        BoardUndo,
         Quit
     ]
 );

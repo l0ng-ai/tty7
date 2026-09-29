@@ -12,7 +12,10 @@ use tty7_core::core::group_key::{GroupId, PinnedGroup};
 use tty7_core::core::machine::TabId;
 use tty7_core::core::task::{Column, TaskId};
 
-use super::{Card, CardDrag, CardRef, MainView, ago, move_verb, moves_from};
+use super::{
+    Card, CardDrag, CardRef, KEY_CONTEXT, MainView, Seen, ago, folded, live_group_filter,
+    move_verb, moves_from,
+};
 use crate::core::cli_agent::{AgentStatus, CLIAgent};
 use crate::ui::app::Tty7App;
 use crate::ui::dialog::{self, Tone};
@@ -30,6 +33,8 @@ const DROP_H: f32 = 44.;
 const EMPTY_H: f32 = 64.;
 /// Answers a waiting card lists before it says how many more there are.
 const OPTIONS_SHOWN: usize = 4;
+/// Widest the note at the bottom grows; a longer one is cut short.
+const TOAST_MAX_W: f32 = 560.;
 
 impl Tty7App {
     /// The board over the terminal area, or `None` while the terminal shows.
@@ -47,6 +52,10 @@ impl Tty7App {
         if !cx.has_active_drag() {
             self.board.dragging = None;
         }
+        // A group unpinned since it was picked takes its filter with it.
+        let groups = &self.sidebar_groups;
+        self.board.group_filter =
+            live_group_filter(self.board.group_filter, |g| groups.contains(g));
         let cards = self.board_cards(Some(window), true, cx);
         // A selection whose card is gone (removed, filtered out) goes too.
         if let Some(sel) = self.board.selected
@@ -55,6 +64,19 @@ impl Tty7App {
             self.board.selected = None;
             self.board.peek = false;
         }
+        if self
+            .board
+            .menu
+            .as_ref()
+            .is_some_and(|(k, _, _)| !cards.iter().any(|c| c.key == *k))
+        {
+            self.board.menu = None;
+        }
+        let selected = self
+            .board
+            .selected
+            .and_then(|sel| cards.iter().find(|c| c.key == sel));
+        self.sync_reply(selected, window, cx);
         let header = self.render_board_header(&cards, cx);
         let filtered = !self.board.agent_filter.is_empty() || self.board.group_filter.is_some();
         let body = match cards.is_empty() && !filtered && self.board.dragging.is_none() {
@@ -84,7 +106,7 @@ impl Tty7App {
             v_flex()
                 .id("board")
                 .track_focus(&self.board.focus)
-                .key_context("Board")
+                .key_context(KEY_CONTEXT)
                 .absolute()
                 .inset_0()
                 .occlude()
@@ -93,6 +115,11 @@ impl Tty7App {
                 .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                     this.board_key(ev, window, cx)
                 }))
+                .on_action(
+                    cx.listener(|this, _: &crate::core::actions::BoardUndo, window, cx| {
+                        this.undo(window, cx)
+                    }),
+                )
                 // A click on the board's own ground closes the panel. Cards
                 // and the panel keep their clicks to themselves.
                 .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
@@ -124,8 +151,10 @@ impl Tty7App {
         );
         let app = cx.entity().downgrade();
 
-        // Agents: a set to pick from, each with how many cards it has.
-        let everyone = self.board_cards(None, false, cx);
+        // Agents: a set to pick from, each with how many cards it has —
+        // counted over every card, or a picked agent would hide the rest
+        // from the very list that picks them.
+        let everyone = self.all_cards(None, false, cx);
         let mut agents: Vec<(CLIAgent, usize)> = Vec::new();
         for agent in everyone.iter().filter_map(|c| c.agent) {
             match agents.iter_mut().find(|(a, _)| *a == agent) {
@@ -226,6 +255,41 @@ impl Tty7App {
                 .opacity(0.7)
                 .child("C"),
         );
+        // Said even when the dropdown that set it is not drawn: a filtered
+        // board that looks empty has to say why, and how to stop.
+        let filtered = !self.board.agent_filter.is_empty() || self.board.group_filter.is_some();
+        let fg = theme.foreground;
+        let chip = filtered.then(|| {
+            h_flex()
+                .flex_none()
+                .h(px(22.))
+                .pl(px(8.))
+                .pr(px(2.))
+                .gap(px(4.))
+                .items_center()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(rems(META))
+                .text_color(muted)
+                .child(t(L10nKey::BoardFiltered))
+                .child(
+                    div()
+                        .id("board-clear-filters")
+                        .px(px(5.))
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .text_color(fg)
+                        .hover(move |s| s.bg(gpui::rgb(rungs.hover)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.board.agent_filter.clear();
+                            this.board.group_filter = None;
+                            cx.notify();
+                        }))
+                        .child(t(L10nKey::BoardClearFilters)),
+                )
+        });
         h_flex()
             .flex_none()
             .h(px(HEADER_H))
@@ -248,6 +312,7 @@ impl Tty7App {
                     .text_color(muted)
                     .child(summary),
             )
+            .children(chip)
             .children(group_filter)
             .child(agent_filter)
             .child(
@@ -270,7 +335,7 @@ impl Tty7App {
     fn toggle_agent_filter(&mut self, agent: CLIAgent, cx: &mut Context<Self>) {
         let everyone: Vec<CLIAgent> = {
             let mut all: Vec<CLIAgent> = self
-                .board_cards(None, false, cx)
+                .all_cards(None, false, cx)
                 .iter()
                 .filter_map(|c| c.agent)
                 .collect();
@@ -333,8 +398,8 @@ impl Tty7App {
         // While a card is dragged: where it may go says what the drop would
         // do; where it may not fades back.
         let drag = self.board.dragging.as_ref();
-        let valid = drag.is_some_and(|d| moves_from(d.from).contains(&col));
-        let home = drag.is_some_and(|d| d.from == col);
+        let valid = drag.is_some_and(|d| moves_from(d.from()).contains(&col));
+        let home = drag.is_some_and(|d| d.from() == col);
         let zone = drag.filter(|_| valid).map(|d| {
             div()
                 .flex_none()
@@ -347,7 +412,7 @@ impl Tty7App {
                 .border_color(border)
                 .text_size(rems(META))
                 .text_color(muted)
-                .child(t(move_verb(d.from, col, d.question)))
+                .child(t(move_verb(d.from(), col, d.question)))
         });
         let empty = (cards.is_empty() && !valid).then(|| {
             div()
@@ -416,28 +481,22 @@ impl Tty7App {
                         .hover(move |s| s.text_color(fg))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
-                            this.clean_up(ids.clone(), window, cx)
+                            this.confirm_clean_up_all(ids.clone(), window, cx)
                         }))
                         .child(t(L10nKey::BoardCleanUpAll)),
                 )
             });
         // Done keeps the last week on show; older cards fold into one row
         // until asked for.
-        let (shown, folded): (Vec<&Card>, usize) = match col {
-            Column::Done if !self.board.show_old_done => {
-                let cutoff =
-                    crate::core::config::unix_now().saturating_sub(super::DONE_RECENT_SECS);
-                let recent: Vec<&Card> = cards
-                    .iter()
-                    .copied()
-                    .filter(|c| c.since.is_none_or(|at| at >= cutoff))
-                    .collect();
-                let folded = cards.len() - recent.len();
-                (recent, folded)
-            }
-            _ => (cards.to_vec(), 0),
-        };
-        let fold = (folded > 0).then(|| {
+        let now = crate::core::config::unix_now();
+        let show_old = self.board.show_old_done;
+        let shown: Vec<&Card> = cards
+            .iter()
+            .copied()
+            .filter(|c| !folded(c.column, c.since, now, show_old))
+            .collect();
+        let hidden = cards.len() - shown.len();
+        let fold = (hidden > 0).then(|| {
             div()
                 .id("board-done-older")
                 .flex_none()
@@ -457,7 +516,7 @@ impl Tty7App {
                 }))
                 .child(t_fmt(
                     L10nKey::BoardOlderDone,
-                    &[("n", &folded.to_string())],
+                    &[("n", &hidden.to_string())],
                 ))
         });
         let list = v_flex()
@@ -486,12 +545,12 @@ impl Tty7App {
             .can_drop(move |value, _, _| {
                 value
                     .downcast_ref::<CardDrag>()
-                    .is_some_and(|d| moves_from(d.from).contains(&col))
+                    .is_some_and(|d| moves_from(d.from()).contains(&col))
             })
             .drag_over::<CardDrag>(move |style, _, _, _| style.bg(over))
             .on_drop(cx.listener(move |this, drag: &CardDrag, window, cx| {
                 this.board.dragging = None;
-                this.board_move(drag.key, col, window, cx);
+                this.board_move(drag.key, col, &drag.seen, window, cx);
             }))
             .child(head)
             .child(list)
@@ -552,7 +611,7 @@ impl Tty7App {
         });
         // A running agent's newest line of output.
         let output = (card.column == Column::Running)
-            .then(|| self.card_view(card.tab, cx))
+            .then(|| self.card_view(card.tab, card.leaf, cx))
             .flatten()
             .and_then(|v| v.read(cx).screen_tail(1).pop())
             .map(|line| {
@@ -569,10 +628,14 @@ impl Tty7App {
             });
         // A waiting agent's question and its answers, or the command a
         // permission prompt would run — and the way to answer each.
+        let seen = Seen::of(card);
         let ask = (card.column == Column::NeedsInput).then(|| {
             let tab = card.tab;
             let action =
                 |which: usize, label: L10nKey, tone: Tone, allow: bool, cx: &mut Context<Self>| {
+                    // Allow says yes to the prompt drawn here, not to
+                    // whatever the agent is asking by the time of the click.
+                    let seen = seen.clone();
                     dialog::button(
                         SharedString::from(format!("{id}-act-{which}")),
                         t(label),
@@ -583,7 +646,9 @@ impl Tty7App {
                         cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             match (allow, tab) {
-                                (true, _) => this.board_move(key, Column::Running, window, cx),
+                                (true, _) => {
+                                    this.board_move(key, Column::Running, &seen, window, cx)
+                                }
                                 (false, Some(tab)) => this.open_card_tab(tab, window, cx),
                                 (false, None) => {}
                             }
@@ -660,7 +725,9 @@ impl Tty7App {
                         .child(div().text_color(danger).child(format!("−{removed}"))),
                 );
             }
-            if card.worktree_gone {
+            if card.starting {
+                row = row.child(t(L10nKey::BoardStarting));
+            } else if card.worktree_gone {
                 row = row.child(t(L10nKey::BoardWorktreeGone));
             } else if card.paused {
                 row = row.child(t(L10nKey::BoardStatusPaused));
@@ -675,11 +742,26 @@ impl Tty7App {
         };
         let drag = CardDrag {
             key,
-            from: card.column,
+            seen: seen.clone(),
             question: card.question,
             title: card.title.clone(),
             agent: card.agent,
         };
+        // The card's menu, opened from the keyboard: under the card, where
+        // a right click on it would have put it.
+        let key_menu =
+            self.board
+                .menu
+                .as_ref()
+                .filter(|(k, _, _)| *k == key)
+                .map(|(_, menu, _)| {
+                    gpui::deferred(
+                        gpui::anchored()
+                            .snap_to_window_with_margin(px(8.))
+                            .child(menu.clone()),
+                    )
+                    .with_priority(1)
+                });
         let app = cx.entity().downgrade();
         v_flex()
             .id(SharedString::from(id.clone()))
@@ -707,7 +789,7 @@ impl Tty7App {
                     window.focus(&this.board.focus, cx);
                 }
             }))
-            .when(card.column != Column::Done, |c| {
+            .when(card.column != Column::Done && !card.starting, |c| {
                 c.on_drag(drag, move |drag, _, _, cx| {
                     let _ = app.update(cx, |this, cx| {
                         this.board.dragging = Some(drag.clone());
@@ -722,14 +804,7 @@ impl Tty7App {
                 })
             })
             .context_menu({
-                let menu_card = CardMenu {
-                    key,
-                    column: card.column,
-                    tab: card.tab,
-                    question: card.question,
-                    resumable: card.resumable,
-                    gone: card.worktree_gone,
-                };
+                let menu_card = CardMenu::of(card);
                 let app = cx.entity().downgrade();
                 move |menu, _window, _cx| card_menu(menu, &menu_card, app.clone())
             })
@@ -738,13 +813,14 @@ impl Tty7App {
             .children(output)
             .children(ask)
             .child(footer)
+            .children(key_menu)
             .into_any_element()
     }
 
     fn render_toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let toast = self.board.toast.as_ref()?;
         let rungs = dialog::popover_rungs(cx);
-        let undo = toast.undo.is_some().then(|| {
+        let undo = toast.undo.then(|| {
             dialog::button(
                 "board-toast-undo",
                 t(L10nKey::BoardUndo),
@@ -767,6 +843,8 @@ impl Tty7App {
                 .child(
                     h_flex()
                         .occlude()
+                        .max_w(px(TOAST_MAX_W))
+                        .min_w_0()
                         .h(px(36.))
                         .pl(px(14.))
                         .pr(px(8.))
@@ -775,8 +853,15 @@ impl Tty7App {
                         .map(|panel| crate::ui::theme::floating_surface(panel, cx))
                         .rounded(px(9.))
                         .text_size(rems(TAB_TEXT))
-                        .child(toast.text.clone())
-                        .children(undo),
+                        // A long title gives way; Undo does not.
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(toast.text.clone()),
+                        )
+                        .children(undo.map(|b| b.flex_none())),
                 )
                 .into_any_element(),
         )
@@ -844,20 +929,39 @@ impl Tty7App {
 }
 
 /// What a card's right-click menu needs to know about it.
-struct CardMenu {
+pub(super) struct CardMenu {
     key: CardRef,
-    column: Column,
+    seen: Seen,
     tab: Option<TabId>,
     question: bool,
     resumable: bool,
     gone: bool,
+    starting: bool,
+}
+
+impl CardMenu {
+    pub(super) fn of(card: &Card) -> CardMenu {
+        CardMenu {
+            key: card.key,
+            seen: Seen::of(card),
+            tab: card.tab,
+            question: card.question,
+            resumable: card.resumable,
+            gone: card.worktree_gone,
+            starting: card.starting,
+        }
+    }
 }
 
 type Act = Box<dyn Fn(&mut Tty7App, &mut Window, &mut Context<Tty7App>)>;
 
 /// The card's everyday moves, the same ones its panel and a drag offer, by
 /// the column it is in — then editing and removing, for a task.
-fn card_menu(menu: PopupMenu, c: &CardMenu, app: gpui::WeakEntity<Tty7App>) -> PopupMenu {
+pub(super) fn card_menu(
+    menu: PopupMenu,
+    c: &CardMenu,
+    app: gpui::WeakEntity<Tty7App>,
+) -> PopupMenu {
     let item = |label: L10nKey, act: Act| {
         let app = app.clone();
         PopupMenuItem::new(t(label)).on_click(move |_, window, cx| {
@@ -866,7 +970,8 @@ fn card_menu(menu: PopupMenu, c: &CardMenu, app: gpui::WeakEntity<Tty7App>) -> P
     };
     let key = c.key;
     let to = |col: Column| -> Act {
-        Box::new(move |this, window, cx| this.board_move(key, col, window, cx))
+        let seen = c.seen.clone();
+        Box::new(move |this, window, cx| this.board_move(key, col, &seen, window, cx))
     };
     let reply: Act = Box::new(move |this, window, cx| this.focus_reply(key, window, cx));
     let mut menu = menu;
@@ -880,7 +985,9 @@ fn card_menu(menu: PopupMenu, c: &CardMenu, app: gpui::WeakEntity<Tty7App>) -> P
         CardRef::Task(id) => Some(id),
         CardRef::Loose(_) => None,
     };
-    menu = match c.column {
+    menu = match c.seen.column {
+        // On its way: no move until its agent has a tab.
+        _ if c.starting => menu,
         Column::Queued => menu.item(item(L10nKey::BoardVerbStart, to(Column::Running))),
         Column::Running => menu
             .item(item(L10nKey::BoardReply, reply))
@@ -918,7 +1025,8 @@ fn card_menu(menu: PopupMenu, c: &CardMenu, app: gpui::WeakEntity<Tty7App>) -> P
     };
     if c.resumable
         && !c.gone
-        && c.column != Column::Done
+        && !c.starting
+        && c.seen.column != Column::Done
         && let Some(id) = task
     {
         menu = menu.item(item(
@@ -931,7 +1039,7 @@ fn card_menu(menu: PopupMenu, c: &CardMenu, app: gpui::WeakEntity<Tty7App>) -> P
             L10nKey::BoardKeep,
             Box::new(move |this, window, cx| this.keep_loose(tab, window, cx)),
         )),
-        (_, Some(id)) if c.column != Column::Done => menu
+        (_, Some(id)) if c.seen.column != Column::Done => menu
             .separator()
             .item(item(
                 L10nKey::BoardEdit,

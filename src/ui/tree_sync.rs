@@ -1067,6 +1067,15 @@ struct WsState {
     /// An edit to the workspace's sidebar groups made before this window's
     /// pull landed, sent on when it does — see [`push_groups`].
     unsent_groups: Option<WorkspaceGroups>,
+    /// Card edits ([`push_task`], [`remove_task`]) that were queued, or on
+    /// their way, when the window lost its sync, in the order they were made.
+    ///
+    /// A resync throws the queue away and hands the window the machine's
+    /// board, which does not have them — so a run just recorded on a card, or
+    /// a card just deleted, would quietly come undone. They are kept here
+    /// instead and sent again once the pull lands, over whatever it brought
+    /// in: the same last-writer-wins every card edit already is.
+    unsent_tasks: Vec<ControlRequest>,
     /// Whether this window has already been told why it opened empty.
     ///
     /// The retry is as quiet as the failure was, so a window whose machine
@@ -1095,6 +1104,7 @@ impl Default for WsState {
             then_open: Vec::new(),
             chosen_name: None,
             unsent_groups: None,
+            unsent_tasks: Vec::new(),
             said_why_empty: false,
         }
     }
@@ -1789,9 +1799,74 @@ pub(crate) fn remove_task(cx: &mut App, client_ws: WorkspaceId, task: TaskId) ->
     true
 }
 
-/// Hands the window the board a pull just brought in. Deferred for the same
-/// reason as [`adopt_groups`].
+fn is_task_op(op: &ControlRequest) -> bool {
+    matches!(
+        op,
+        ControlRequest::TaskPut { .. } | ControlRequest::TaskRemove { .. }
+    )
+}
+
+/// Keeps the card edits among `ops` — ops a resync is about to throw away —
+/// to send again once it lands. See [`WsState::unsent_tasks`].
+fn park_task_ops(state: &mut WsState, ops: impl IntoIterator<Item = ControlRequest>) {
+    state
+        .unsent_tasks
+        .extend(ops.into_iter().filter(is_task_op));
+}
+
+/// Whether a call failed on the way rather than being answered: the machine
+/// may never have seen the op, so it is still owed. One the machine answered
+/// with a refusal would only be refused again.
+fn never_answered(e: &io::Error) -> bool {
+    use io::ErrorKind as K;
+    matches!(
+        e.kind(),
+        K::BrokenPipe
+            | K::ConnectionReset
+            | K::ConnectionAborted
+            | K::NotConnected
+            | K::UnexpectedEof
+            | K::TimedOut
+    )
+}
+
+/// Lays the card edits a resync interrupted over the board a pull just
+/// brought in, and queues them to go up again. Whether there were any.
+fn replay_unsent_tasks(state: &mut WsState) -> bool {
+    let SyncPhase::Primed(mirror) = &mut state.sync else {
+        return false;
+    };
+    if state.unsent_tasks.is_empty() {
+        return false;
+    }
+    for op in std::mem::take(&mut state.unsent_tasks) {
+        match &op {
+            ControlRequest::TaskPut { task, .. } => {
+                match mirror.tasks.iter_mut().find(|t| t.id == task.id) {
+                    Some(slot) => *slot = task.clone(),
+                    None => mirror.tasks.push(task.clone()),
+                }
+            }
+            ControlRequest::TaskRemove { task, .. } => mirror.tasks.retain(|t| t.id != *task),
+            _ => continue,
+        }
+        state.queue.push_back(op);
+    }
+    true
+}
+
+/// Hands the window the board a pull just brought in — with any card edits
+/// a resync interrupted laid back over it and sent again. Deferred for the
+/// same reason as [`adopt_groups`].
 fn adopt_tasks(cx: &mut App, client_ws: WorkspaceId) {
+    if cx
+        .default_global::<TreeSync>()
+        .windows
+        .get_mut(&client_ws)
+        .is_some_and(replay_unsent_tasks)
+    {
+        pump(cx, client_ws);
+    }
     cx.defer(move |cx| {
         let tasks = match cx
             .default_global::<TreeSync>()
@@ -1842,9 +1917,10 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
         let result = cx
             .background_executor()
             .spawn(async move {
-                for op in batch {
+                let mut ops = batch.into_iter();
+                while let Some(op) = ops.next() {
                     if let Err(e) = client.call(op.clone()) {
-                        return Err((op, e));
+                        return Err((op, e, ops.collect::<Vec<_>>()));
                     }
                 }
                 Ok(())
@@ -1856,8 +1932,13 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
             }
             match result {
                 Ok(()) => pump(cx, client_ws),
-                Err((op, e)) => {
+                Err((op, e, unsent)) => {
                     log::warn!("tree operation {op:?} failed: {e}; re-pulling the tree");
+                    if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws)
+                    {
+                        let retry = never_answered(&e).then_some(op);
+                        park_task_ops(state, retry.into_iter().chain(unsent));
+                    }
                     desync(cx, client_ws, "an operation was refused");
                 }
             }
@@ -1871,7 +1952,8 @@ fn desync(cx: &mut App, client_ws: WorkspaceId, why: &str) {
     let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
         return;
     };
-    state.queue.clear();
+    let queued = std::mem::take(&mut state.queue);
+    park_task_ops(state, queued);
     state.inflight = false;
     state.sync = SyncPhase::Unprimed {
         dirty: true,
@@ -2155,7 +2237,8 @@ fn hydrate_with(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt, showing: Vec
             dirty: false,
             priming: true,
         };
-        state.queue.clear();
+        let queued = std::mem::take(&mut state.queue);
+        park_task_ops(state, queued);
         state.epoch += 1;
         // This attempt takes over the debt; it re-records it if it fails too.
         state.rehydrate = None;
@@ -3251,6 +3334,82 @@ mod tests {
             !note_instance(&mut fresh, "abc"),
             "the first real instance after an unknown one is a first sighting"
         );
+    }
+
+    /// A card edit still in the queue when the window resyncs is kept, and
+    /// laid over the board the pull brings back — the machine's copy, which
+    /// never saw it, must not win.
+    #[gpui::test]
+    fn a_card_edit_outlives_a_resync(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let (ws, _view) = primed_window(cx, None);
+            let mut card = Task::new("fix it");
+            let gone = Task::new("delete me");
+            let machine_ws = tree_workspace_id(cx, ws);
+            {
+                let state = cx
+                    .default_global::<TreeSync>()
+                    .windows
+                    .get_mut(&ws)
+                    .unwrap();
+                state.sync = SyncPhase::Primed(WsMirror::default());
+                card.title = "fix it properly".into();
+                state.queue.push_back(ControlRequest::TabClose {
+                    workspace: machine_ws,
+                    tab: TabId::new(),
+                });
+                state.queue.push_back(ControlRequest::TaskPut {
+                    workspace: machine_ws,
+                    task: card.clone(),
+                });
+                state.queue.push_back(ControlRequest::TaskRemove {
+                    workspace: machine_ws,
+                    task: gone.id,
+                });
+            }
+
+            desync(cx, ws, "test");
+
+            let state = cx
+                .default_global::<TreeSync>()
+                .windows
+                .get_mut(&ws)
+                .unwrap();
+            assert!(state.queue.is_empty());
+            assert_eq!(
+                state.unsent_tasks.len(),
+                2,
+                "the card edits are kept; the tab op is the diff's to redo"
+            );
+
+            let mut stale = card.clone();
+            stale.title = "fix it".into();
+            state.sync = SyncPhase::Primed(WsMirror {
+                tasks: vec![stale, gone.clone()],
+                ..WsMirror::default()
+            });
+            assert!(replay_unsent_tasks(state));
+            let SyncPhase::Primed(mirror) = &state.sync else {
+                panic!("still primed");
+            };
+            assert_eq!(mirror.tasks, vec![card.clone()], "the window's edits win");
+            assert_eq!(
+                state.queue,
+                VecDeque::from(vec![
+                    ControlRequest::TaskPut {
+                        workspace: machine_ws,
+                        task: card,
+                    },
+                    ControlRequest::TaskRemove {
+                        workspace: machine_ws,
+                        task: gone.id,
+                    },
+                ]),
+                "and go up again"
+            );
+            assert!(state.unsent_tasks.is_empty());
+            assert!(!replay_unsent_tasks(state), "once");
+        });
     }
 
     /// A name typed into the create form is for a workspace the machine has

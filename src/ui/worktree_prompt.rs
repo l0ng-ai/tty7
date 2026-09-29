@@ -56,6 +56,86 @@ impl Created {
     }
 }
 
+/// Why git would refuse a name for a new branch — `git check-ref-format
+/// --branch`'s rules, asked here so a bad name is caught while it is being
+/// typed, not after the sheet it was typed in has gone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum BranchProblem {
+    Space,
+    Control,
+    Contains(&'static str),
+    Starts(&'static str),
+    Ends(&'static str),
+    /// A part between `/`s starts with `.`.
+    PartDot,
+    /// A part between `/`s ends in `.lock`.
+    PartLock,
+    At,
+}
+
+impl BranchProblem {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            BranchProblem::Space => t(L10nKey::BranchNameSpace).to_string(),
+            BranchProblem::Control => t(L10nKey::BranchNameControl).to_string(),
+            BranchProblem::Contains(what) => t_fmt(L10nKey::BranchNameContains, &[("what", what)]),
+            BranchProblem::Starts(what) => t_fmt(L10nKey::BranchNameStarts, &[("what", what)]),
+            BranchProblem::Ends(what) => t_fmt(L10nKey::BranchNameEnds, &[("what", what)]),
+            BranchProblem::PartDot => t(L10nKey::BranchNamePartDot).to_string(),
+            BranchProblem::PartLock => t(L10nKey::BranchNamePartLock).to_string(),
+            BranchProblem::At => t(L10nKey::BranchNameAt).to_string(),
+        }
+    }
+}
+
+/// What is wrong with `name` as a new branch's name, or `None` when git
+/// would take it. Empty is not judged here: every caller has a name to fall
+/// back on.
+pub(crate) fn branch_problem(name: &str) -> Option<BranchProblem> {
+    if name.is_empty() {
+        return None;
+    }
+    if name == "@" {
+        return Some(BranchProblem::At);
+    }
+    if name.contains(' ') {
+        return Some(BranchProblem::Space);
+    }
+    if name.chars().any(|c| c.is_ascii_control()) {
+        return Some(BranchProblem::Control);
+    }
+    for what in ["..", "@{", "//"] {
+        if name.contains(what) {
+            return Some(BranchProblem::Contains(what));
+        }
+    }
+    for what in ["~", "^", ":", "?", "*", "[", "\\"] {
+        if name.contains(what) {
+            return Some(BranchProblem::Contains(what));
+        }
+    }
+    // `-` would be read as an option by the `git branch` it goes to.
+    for what in ["-", "/"] {
+        if name.starts_with(what) {
+            return Some(BranchProblem::Starts(what));
+        }
+    }
+    for what in ["/", "."] {
+        if name.ends_with(what) {
+            return Some(BranchProblem::Ends(what));
+        }
+    }
+    for part in name.split('/') {
+        if part.starts_with('.') {
+            return Some(BranchProblem::PartDot);
+        }
+        if part.ends_with(".lock") {
+            return Some(BranchProblem::PartLock);
+        }
+    }
+    None
+}
+
 /// What to do with a worktree's first line once it is settled.
 pub(crate) type OpenWith =
     Box<dyn FnOnce(&mut Tty7App, NewWorktree, Option<String>, &mut Window, &mut Context<Tty7App>)>;
@@ -144,6 +224,10 @@ impl Tty7App {
             (false, true) => (name.clone(), name),
             (false, false) => (name, branch),
         };
+        if let Some(problem) = branch_problem(&branch) {
+            window.push_notification(problem.message(), cx);
+            return;
+        }
         let req = WorktreeRequest {
             name,
             branch,
@@ -343,6 +427,11 @@ impl Tty7App {
         // is enough; only both blank has nothing to name a worktree after.
         // Offering Create there is offering a click that can only fail.
         let nothing_to_name = name_now.is_empty() && branch_now.is_empty();
+        // The branch it would be cut on, by the same fallback.
+        let bad_branch = branch_problem(match branch_now.is_empty() {
+            true => name_now.as_str(),
+            false => branch_now.as_str(),
+        });
         // Preview what submitting would actually make, which is the same
         // fallback: with only a branch typed, the worktree takes its name, and
         // showing "…" there described a path that would never be created.
@@ -401,11 +490,24 @@ impl Tty7App {
                         dialog::labelled(t(L10nKey::WorktreePromptName), Input::new(&p.name), cx)
                             .child(meta(preview)),
                     )
-                    .child(dialog::labelled(
-                        t(L10nKey::WorktreePromptBranch),
-                        Input::new(&p.branch),
-                        cx,
-                    ))
+                    .child(
+                        dialog::labelled(
+                            t(L10nKey::WorktreePromptBranch),
+                            Input::new(&p.branch),
+                            cx,
+                        )
+                        .when_some(
+                            bad_branch.as_ref(),
+                            |field, problem| {
+                                field.child(
+                                    div()
+                                        .text_size(rems(META_MONO))
+                                        .text_color(cx.theme().danger)
+                                        .child(problem.message()),
+                                )
+                            },
+                        ),
+                    )
                     .child(
                         dialog::labelled(t(L10nKey::WorktreePromptBase), Input::new(&p.base), cx)
                             .children(setup_note.map(meta)),
@@ -438,7 +540,7 @@ impl Tty7App {
                             t(L10nKey::WorktreePromptCreate)
                         },
                         Tone::Primary,
-                        !(p.busy || nothing_to_name),
+                        !(p.busy || nothing_to_name || bad_branch.is_some()),
                         rungs,
                         cx,
                         cx.listener(|this, _, window, cx| this.submit_worktree_prompt(window, cx)),
@@ -479,5 +581,37 @@ impl Tty7App {
                 .child(card)
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_names_follow_git_check_ref_format() {
+        for ok in ["main", "feat/eu", "fix-1.2", "a.b/c", "user@host", "中文"] {
+            assert_eq!(branch_problem(ok), None, "{ok}");
+        }
+        let bad = |name: &str| branch_problem(name).unwrap_or_else(|| panic!("{name} passed"));
+        assert_eq!(bad("my branch"), BranchProblem::Space);
+        assert_eq!(bad("a\tb"), BranchProblem::Control);
+        assert_eq!(bad(".."), BranchProblem::Contains(".."));
+        assert_eq!(bad("a..b"), BranchProblem::Contains(".."));
+        assert_eq!(bad("a@{1}"), BranchProblem::Contains("@{"));
+        assert_eq!(bad("a//b"), BranchProblem::Contains("//"));
+        for c in ["~", "^", ":", "?", "*", "[", "\\"] {
+            assert_eq!(bad(&format!("a{c}b")), BranchProblem::Contains(c));
+        }
+        assert_eq!(bad("-x"), BranchProblem::Starts("-"));
+        assert_eq!(bad("/x"), BranchProblem::Starts("/"));
+        assert_eq!(bad("x/"), BranchProblem::Ends("/"));
+        assert_eq!(bad("x."), BranchProblem::Ends("."));
+        assert_eq!(bad(".x"), BranchProblem::PartDot);
+        assert_eq!(bad("feat/.x"), BranchProblem::PartDot);
+        assert_eq!(bad("x.lock"), BranchProblem::PartLock);
+        assert_eq!(bad("x.lock/y"), BranchProblem::PartLock);
+        assert_eq!(bad("@"), BranchProblem::At);
+        assert_eq!(branch_problem(""), None);
     }
 }

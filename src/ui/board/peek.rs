@@ -8,7 +8,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use tty7_core::core::task::Column;
 
-use super::{Card, CardRef, ago};
+use super::{Card, CardRef, Seen, ago};
 use crate::ui::app::Tty7App;
 use crate::ui::dialog::{self, Tone};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
@@ -31,15 +31,18 @@ impl Tty7App {
             &reply,
             window,
             |this, input, ev: &InputEvent, window, cx| {
+                // The send button goes live with the first word.
+                if let InputEvent::Change = ev {
+                    cx.notify();
+                }
+                // To the card the words were typed for.
                 if let InputEvent::PressEnter { .. } = ev
-                    && let Some(key) = this.board.selected
+                    && let Some(key) = this.board.reply_for
                 {
                     let text = input.read(cx).value().to_string();
-                    if text.trim().is_empty() {
-                        return;
+                    if this.send_reply(key, &text, window, cx) {
+                        input.update(cx, |s, cx| s.set_value("", window, cx));
                     }
-                    input.update(cx, |s, cx| s.set_value("", window, cx));
-                    this.send_reply(key, &text, window, cx);
                 }
             },
         );
@@ -49,6 +52,47 @@ impl Tty7App {
 
     fn _set_reply_sub(&mut self, sub: gpui::Subscription) {
         self.board._reply_sub = Some(sub);
+    }
+
+    /// Keeps the reply box about `card`, the selected card: what was typed
+    /// to the card it was about before is kept for that card, and what was
+    /// typed to this one comes back; and its placeholder follows the card's
+    /// column, which can change under an open panel.
+    pub(super) fn sync_reply(
+        &mut self,
+        card: Option<&Card>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(reply) = self.board.reply.clone() else {
+            return;
+        };
+        let want = card.map(|c| c.key);
+        if self.board.reply_for != want {
+            let text = reply.read(cx).value().to_string();
+            if let Some(was) = self.board.reply_for {
+                match text.trim().is_empty() {
+                    true => self.board.drafts.remove(&was),
+                    false => self.board.drafts.insert(was, text),
+                };
+            }
+            let next = want
+                .and_then(|k| self.board.drafts.remove(&k))
+                .unwrap_or_default();
+            reply.update(cx, |s, cx| s.set_value(next, window, cx));
+            self.board.reply_for = want;
+            // Words for a card that has left the board go with it.
+            let (tasks, tabs) = (&self.board.tasks, &self.tabs);
+            self.board.drafts.retain(|k, _| match k {
+                CardRef::Task(id) => tasks.iter().any(|t| t.id == *id),
+                CardRef::Loose(tab) => tabs.iter().any(|t| t.tree_id.get() == *tab),
+            });
+        }
+        if let Some(card) = card
+            && self.board.reply_shape != Some((card.key, card.column))
+        {
+            self.set_reply_placeholder(card, window, cx);
+        }
     }
 
     /// Words the reply box greets `card` with: an answer, a change request,
@@ -70,6 +114,7 @@ impl Tty7App {
             _ => t(L10nKey::BoardReplyFollowUp).into(),
         };
         reply.update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
+        self.board.reply_shape = Some((card.key, card.column));
     }
 
     /// Opens the panel on `key` with the reply box focused: Reply on a card,
@@ -212,7 +257,7 @@ impl Tty7App {
             )
         });
         let output = self
-            .card_view(card.tab, cx)
+            .card_view(card.tab, card.leaf, cx)
             .map(|v| v.read(cx).screen_tail(OUTPUT_LINES))
             .filter(|lines| !lines.is_empty())
             .map(|lines| {
@@ -327,6 +372,8 @@ impl Tty7App {
             .as_ref()
             .filter(|_| can_reply)
             .map(|reply| {
+                // Nothing to send is nothing to press.
+                let empty = reply.read(cx).value().trim().is_empty();
                 div().px(px(12.)).pb(px(10.)).child(
                     h_flex()
                         .items_center()
@@ -352,15 +399,22 @@ impl Tty7App {
                                 .justify_center()
                                 .rounded(px(6.))
                                 .bg(fg)
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    let Some(reply) = this.board.reply.clone() else {
-                                        return;
-                                    };
-                                    let text = reply.read(cx).value().to_string();
-                                    reply.update(cx, |s, cx| s.set_value("", window, cx));
-                                    this.send_reply(key, &text, window, cx);
-                                }))
+                                .when(empty, |b| b.opacity(0.35))
+                                .when(!empty, |b| {
+                                    b.cursor_pointer().on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            let Some(reply) = this.board.reply.clone() else {
+                                                return;
+                                            };
+                                            let text = reply.read(cx).value().to_string();
+                                            if this.send_reply(key, &text, window, cx) {
+                                                reply.update(cx, |s, cx| {
+                                                    s.set_value("", window, cx)
+                                                });
+                                            }
+                                        },
+                                    ))
+                                })
                                 .child(
                                     Icon::new(IconName::ArrowUp)
                                         .size(px(12.))
@@ -406,18 +460,22 @@ impl Tty7App {
                 )
             })
         };
+        let seen = Seen::of(card);
         let move_to =
             |id: &'static str, label: L10nKey, tone: Tone, to: Column, cx: &mut Context<Self>| {
+                let seen = seen.clone();
                 button(
                     id,
                     label,
                     tone,
                     cx,
-                    Box::new(move |this, window, cx| this.board_move(key, to, window, cx)),
+                    Box::new(move |this, window, cx| this.board_move(key, to, &seen, window, cx)),
                 )
             };
         let mut actions: Vec<gpui::Stateful<gpui::Div>> = Vec::new();
         match column {
+            // On its way: nothing to ask of an agent that has no tab yet.
+            _ if card.starting => {}
             Column::Queued => {
                 if let CardRef::Task(id) = key {
                     actions.push(button(
@@ -517,6 +575,7 @@ impl Tty7App {
         }
         if resumable
             && !gone
+            && !card.starting
             && column != Column::Done
             && let CardRef::Task(id) = key
         {
