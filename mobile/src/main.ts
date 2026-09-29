@@ -1792,7 +1792,42 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       screenEl.classList.toggle("panning", cramped && readable);
       follow();
       // The new font size is laid out on the next frame.
-      requestAnimationFrame(pinScrollbar);
+      requestAnimationFrame(() => {
+        pinScrollbar();
+        fill();
+        settle();
+      });
+    };
+    // A pane shorter than the view (a wide one, fitted) gets rows of its
+    // history above it, as many as fill the view: the terminal here runs
+    // taller than the pane. The pane's own output goes on as it would —
+    // a shell's lines run down to the bottom, then scroll — and growing
+    // the grid brings earlier lines back down out of the scrollback. A
+    // full-screen program draws in the pane's rows at the top.
+    let paneRows = 24;
+    let fillRows = 0;
+    const fill = () => {
+      // With the keyboard up the view is short for a while; the grid stays
+      // as it is, and the box scrolls instead.
+      if (document.documentElement.classList.contains("keyboard")) return;
+      screenEl.style.paddingTop = "";
+      const style = getComputedStyle(screenEl);
+      const room = screenEl.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+      fillRows = leased ? 0 : Math.floor(room / rowHeight());
+      const rows = Math.max(paneRows, fillRows);
+      if (rows !== term.rows) term.resize(cols, rows);
+    };
+    // A pane shorter than the view (a wide one, fitted) sits at the bottom,
+    // its prompt next to the keys, as a terminal's does: the room above it
+    // goes into the box's top padding.
+    const settle = () => {
+      const box = screenEl.querySelector<HTMLElement>(".xterm");
+      if (!box) return;
+      screenEl.style.paddingTop = "";
+      const style = getComputedStyle(screenEl);
+      const pad = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+      const room = screenEl.clientHeight - pad - box.offsetHeight;
+      if (room > 0) screenEl.style.paddingTop = `${parseFloat(style.paddingTop) + room}px`;
     };
     // xterm puts its scrollbar at the right of its own box, which pans with
     // the text; shift it so it stays at the right of what is on screen. The
@@ -1907,6 +1942,9 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         frame = 0;
         pending = 0;
         if (e.touches.length !== 1) return (touch = null);
+        // The scrollbar's thumb is dragged by xterm itself, the other way
+        // round from a swipe: both at once cancel out and it will not move.
+        if ((e.target as Element).closest?.(".scrollbar")) return (touch = null);
         const t = e.touches[0];
         touch = { x: t.clientX, y: t.clientY, axis: null, samples: [[t.clientY, e.timeStamp]] };
       },
@@ -2106,8 +2144,13 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // taken-over pane regrids, and the cursor's line is kept in sight.
     const viewport = () => {
       regridSoon();
-      requestAnimationFrame(showCursor);
+      requestAnimationFrame(() => {
+        settle();
+        showCursor();
+      });
     };
+    // The pane's grid changed: its height with it.
+    term.onResize(() => requestAnimationFrame(settle));
     window.addEventListener("viewport", viewport);
     window.addEventListener("theme", retheme);
 
@@ -2158,7 +2201,8 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
             switch (event.type) {
               case "size":
                 cols = event.cols;
-                term.resize(event.cols, event.rows);
+                paneRows = event.rows;
+                term.resize(event.cols, Math.max(event.rows, leased ? 0 : fillRows));
                 fit();
                 break;
               case "agent":
