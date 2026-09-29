@@ -16,6 +16,7 @@ use crate::core::session::{Session, SessionPane, SessionTab, WorkspaceId, Worksp
 use crate::ui::app::Tty7App;
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::pane::{Pane, PaneSlot};
+use tty7_core::core::task::{Task, TaskId};
 
 pub(crate) fn control_for(cx: &mut App, host: HostId) -> Option<Arc<ControlClient>> {
     if host.is_local() {
@@ -340,6 +341,7 @@ pub(crate) struct WsMirror {
     pub tabs: Vec<TreeTab>,
     pub active: Option<TabId>,
     pub groups: WorkspaceGroups,
+    pub tasks: Vec<Task>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1065,6 +1067,15 @@ struct WsState {
     /// An edit to the workspace's sidebar groups made before this window's
     /// pull landed, sent on when it does — see [`push_groups`].
     unsent_groups: Option<WorkspaceGroups>,
+    /// Card edits ([`push_task`], [`remove_task`]) that were queued, or on
+    /// their way, when the window lost its sync, in the order they were made.
+    ///
+    /// A resync throws the queue away and hands the window the machine's
+    /// board, which does not have them — so a run just recorded on a card, or
+    /// a card just deleted, would quietly come undone. They are kept here
+    /// instead and sent again once the pull lands, over whatever it brought
+    /// in: the same last-writer-wins every card edit already is.
+    unsent_tasks: Vec<ControlRequest>,
     /// Whether this window has already been told why it opened empty.
     ///
     /// The retry is as quiet as the failure was, so a window whose machine
@@ -1093,6 +1104,7 @@ impl Default for WsState {
             then_open: Vec::new(),
             chosen_name: None,
             unsent_groups: None,
+            unsent_tasks: Vec::new(),
             said_why_empty: false,
         }
     }
@@ -1571,6 +1583,7 @@ fn primed(ws: Workspace, arrival: Arrival) -> (WsMirror, Option<String>, Arrival
             tabs: ws.tabs,
             active: ws.active_tab,
             groups: ws.groups,
+            tasks: ws.tasks,
         },
         ws.name,
         arrival,
@@ -1611,6 +1624,7 @@ fn finish_prime(
         }
     };
     adopt_groups(cx, client_ws);
+    adopt_tasks(cx, client_ws);
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
     crate::ui::machine_mirror::MachineMirrors::note_synced_workspace(
@@ -1712,6 +1726,169 @@ fn adopt_groups(cx: &mut App, client_ws: WorkspaceId) {
     });
 }
 
+/// Whether the machine holding `client_ws` keeps a board. One that predates
+/// the board would refuse the request that saves a card — and, worse, one it
+/// cannot decode takes the whole link down — so a window never sends it one.
+pub(crate) fn can_board_on(cx: &App, client_ws: WorkspaceId) -> bool {
+    let feature = tty7_core::daemon::control::feature::TASKS;
+    let host = WorkspaceStore::host_of(cx, client_ws);
+    match host.is_local() {
+        true => crate::ui::local_link::LocalLink::supports(cx, feature),
+        false => crate::ui::remote_connect::HostLinks::peer_supports(cx, host, feature),
+    }
+}
+
+/// Sends a card a window just made or changed up to the machine — the whole
+/// card, which replaces whatever the machine had under its id.
+///
+/// Like groups, tasks are never part of the diff [`sync_window`] runs: a
+/// window has nothing to say about a card except the edit someone just made
+/// to it. Returns false when the window's tree has not landed yet (or the
+/// machine keeps no board), in which case nothing was sent and the caller
+/// should not show the edit as made.
+pub(crate) fn push_task(cx: &mut App, client_ws: WorkspaceId, task: Task) -> bool {
+    if !cx.has_global::<crate::core::session::WorkspaceStore>() || !can_board_on(cx, client_ws) {
+        return false;
+    }
+    let machine_ws = tree_workspace_id(cx, client_ws);
+    let state = cx
+        .default_global::<TreeSync>()
+        .windows
+        .entry(client_ws)
+        .or_default();
+    let SyncPhase::Primed(mirror) = &mut state.sync else {
+        return false;
+    };
+    match mirror.tasks.iter_mut().find(|t| t.id == task.id) {
+        Some(slot) if *slot == task => return true,
+        Some(slot) => *slot = task.clone(),
+        None => mirror.tasks.push(task.clone()),
+    }
+    state.queue.push_back(ControlRequest::TaskPut {
+        workspace: machine_ws,
+        task,
+    });
+    pump(cx, client_ws);
+    true
+}
+
+/// Takes a card off the machine's board. See [`push_task`].
+pub(crate) fn remove_task(cx: &mut App, client_ws: WorkspaceId, task: TaskId) -> bool {
+    if !cx.has_global::<crate::core::session::WorkspaceStore>() || !can_board_on(cx, client_ws) {
+        return false;
+    }
+    let machine_ws = tree_workspace_id(cx, client_ws);
+    let state = cx
+        .default_global::<TreeSync>()
+        .windows
+        .entry(client_ws)
+        .or_default();
+    let SyncPhase::Primed(mirror) = &mut state.sync else {
+        return false;
+    };
+    let before = mirror.tasks.len();
+    mirror.tasks.retain(|t| t.id != task);
+    if mirror.tasks.len() == before {
+        return true;
+    }
+    state.queue.push_back(ControlRequest::TaskRemove {
+        workspace: machine_ws,
+        task,
+    });
+    pump(cx, client_ws);
+    true
+}
+
+fn is_task_op(op: &ControlRequest) -> bool {
+    matches!(
+        op,
+        ControlRequest::TaskPut { .. } | ControlRequest::TaskRemove { .. }
+    )
+}
+
+/// Keeps the card edits among `ops` — ops a resync is about to throw away —
+/// to send again once it lands. See [`WsState::unsent_tasks`].
+fn park_task_ops(state: &mut WsState, ops: impl IntoIterator<Item = ControlRequest>) {
+    state
+        .unsent_tasks
+        .extend(ops.into_iter().filter(is_task_op));
+}
+
+/// Whether a call failed on the way rather than being answered: the machine
+/// may never have seen the op, so it is still owed. One the machine answered
+/// with a refusal would only be refused again.
+fn never_answered(e: &io::Error) -> bool {
+    use io::ErrorKind as K;
+    matches!(
+        e.kind(),
+        K::BrokenPipe
+            | K::ConnectionReset
+            | K::ConnectionAborted
+            | K::NotConnected
+            | K::UnexpectedEof
+            | K::TimedOut
+    )
+}
+
+/// Lays the card edits a resync interrupted over the board a pull just
+/// brought in, and queues them to go up again. Whether there were any.
+fn replay_unsent_tasks(state: &mut WsState) -> bool {
+    let SyncPhase::Primed(mirror) = &mut state.sync else {
+        return false;
+    };
+    if state.unsent_tasks.is_empty() {
+        return false;
+    }
+    for op in std::mem::take(&mut state.unsent_tasks) {
+        match &op {
+            ControlRequest::TaskPut { task, .. } => {
+                match mirror.tasks.iter_mut().find(|t| t.id == task.id) {
+                    Some(slot) => *slot = task.clone(),
+                    None => mirror.tasks.push(task.clone()),
+                }
+            }
+            ControlRequest::TaskRemove { task, .. } => mirror.tasks.retain(|t| t.id != *task),
+            _ => continue,
+        }
+        state.queue.push_back(op);
+    }
+    true
+}
+
+/// Hands the window the board a pull just brought in — with any card edits
+/// a resync interrupted laid back over it and sent again. Deferred for the
+/// same reason as [`adopt_groups`].
+fn adopt_tasks(cx: &mut App, client_ws: WorkspaceId) {
+    if cx
+        .default_global::<TreeSync>()
+        .windows
+        .get_mut(&client_ws)
+        .is_some_and(replay_unsent_tasks)
+    {
+        pump(cx, client_ws);
+    }
+    cx.defer(move |cx| {
+        let tasks = match cx
+            .default_global::<TreeSync>()
+            .windows
+            .get(&client_ws)
+            .map(|s| &s.sync)
+        {
+            Some(SyncPhase::Primed(mirror)) => mirror.tasks.clone(),
+            _ => return,
+        };
+        if !cx.has_global::<crate::ui::windows::WindowRegistry>() {
+            return;
+        }
+        let Some(app) =
+            crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|a| a.upgrade())
+        else {
+            return;
+        };
+        app.update(cx, |app, cx| app.adopt_board_tasks(tasks, cx));
+    });
+}
+
 fn pump(cx: &mut App, client_ws: WorkspaceId) {
     let host = WorkspaceStore::host_of(cx, client_ws);
     let client = tree_control_for(cx, host);
@@ -1740,9 +1917,10 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
         let result = cx
             .background_executor()
             .spawn(async move {
-                for op in batch {
+                let mut ops = batch.into_iter();
+                while let Some(op) = ops.next() {
                     if let Err(e) = client.call(op.clone()) {
-                        return Err((op, e));
+                        return Err((op, e, ops.collect::<Vec<_>>()));
                     }
                 }
                 Ok(())
@@ -1754,8 +1932,13 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
             }
             match result {
                 Ok(()) => pump(cx, client_ws),
-                Err((op, e)) => {
+                Err((op, e, unsent)) => {
                     log::warn!("tree operation {op:?} failed: {e}; re-pulling the tree");
+                    if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws)
+                    {
+                        let retry = never_answered(&e).then_some(op);
+                        park_task_ops(state, retry.into_iter().chain(unsent));
+                    }
                     desync(cx, client_ws, "an operation was refused");
                 }
             }
@@ -1769,7 +1952,8 @@ fn desync(cx: &mut App, client_ws: WorkspaceId, why: &str) {
     let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
         return;
     };
-    state.queue.clear();
+    let queued = std::mem::take(&mut state.queue);
+    park_task_ops(state, queued);
     state.inflight = false;
     state.sync = SyncPhase::Unprimed {
         dirty: true,
@@ -2053,7 +2237,8 @@ fn hydrate_with(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt, showing: Vec
             dirty: false,
             priming: true,
         };
-        state.queue.clear();
+        let queued = std::mem::take(&mut state.queue);
+        park_task_ops(state, queued);
         state.epoch += 1;
         // This attempt takes over the debt; it re-records it if it fails too.
         state.rehydrate = None;
@@ -2379,6 +2564,7 @@ fn layout_of(
         tabs: ws.tabs.clone(),
         active: ws.active_tab,
         groups: ws.groups.clone(),
+        tasks: ws.tasks.clone(),
     };
     let session = session_from_tree(ws, &machine.panes);
     Ok((machine, mirror, session))
@@ -2460,6 +2646,7 @@ fn settle_hydration(
         dirty
     };
     adopt_groups(cx, client_ws);
+    adopt_tasks(cx, client_ws);
     let Some(app) =
         crate::ui::windows::WindowRegistry::app_for(cx, client_ws).and_then(|app| app.upgrade())
     else {
@@ -2741,6 +2928,17 @@ fn apply_to_mirror(mirror: &mut WsMirror, delta: &LayoutDelta) -> bool {
             mirror.groups = groups.clone();
             true
         }
+        LayoutDelta::TaskPut { task } => {
+            match mirror.tasks.iter_mut().find(|t| t.id == task.id) {
+                Some(slot) => *slot = task.clone(),
+                None => mirror.tasks.push(task.clone()),
+            }
+            true
+        }
+        LayoutDelta::TaskRemoved { task } => {
+            mirror.tasks.retain(|t| t.id != *task);
+            true
+        }
         LayoutDelta::TabMoved { tab, to } => {
             let Some(from) = mirror.tabs.iter().position(|t| t.id == *tab) else {
                 return false;
@@ -2913,6 +3111,14 @@ impl Tty7App {
             }
             LayoutDelta::GroupsChanged { groups } => {
                 self.adopt_sidebar_groups(groups.clone(), cx);
+                true
+            }
+            LayoutDelta::TaskPut { task } => {
+                self.board_task_put(task.clone());
+                true
+            }
+            LayoutDelta::TaskRemoved { task } => {
+                self.board_task_removed(*task);
                 true
             }
             LayoutDelta::TabMoved { tab, to } => {
@@ -3128,6 +3334,82 @@ mod tests {
             !note_instance(&mut fresh, "abc"),
             "the first real instance after an unknown one is a first sighting"
         );
+    }
+
+    /// A card edit still in the queue when the window resyncs is kept, and
+    /// laid over the board the pull brings back — the machine's copy, which
+    /// never saw it, must not win.
+    #[gpui::test]
+    fn a_card_edit_outlives_a_resync(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let (ws, _view) = primed_window(cx, None);
+            let mut card = Task::new("fix it");
+            let gone = Task::new("delete me");
+            let machine_ws = tree_workspace_id(cx, ws);
+            {
+                let state = cx
+                    .default_global::<TreeSync>()
+                    .windows
+                    .get_mut(&ws)
+                    .unwrap();
+                state.sync = SyncPhase::Primed(WsMirror::default());
+                card.title = "fix it properly".into();
+                state.queue.push_back(ControlRequest::TabClose {
+                    workspace: machine_ws,
+                    tab: TabId::new(),
+                });
+                state.queue.push_back(ControlRequest::TaskPut {
+                    workspace: machine_ws,
+                    task: card.clone(),
+                });
+                state.queue.push_back(ControlRequest::TaskRemove {
+                    workspace: machine_ws,
+                    task: gone.id,
+                });
+            }
+
+            desync(cx, ws, "test");
+
+            let state = cx
+                .default_global::<TreeSync>()
+                .windows
+                .get_mut(&ws)
+                .unwrap();
+            assert!(state.queue.is_empty());
+            assert_eq!(
+                state.unsent_tasks.len(),
+                2,
+                "the card edits are kept; the tab op is the diff's to redo"
+            );
+
+            let mut stale = card.clone();
+            stale.title = "fix it".into();
+            state.sync = SyncPhase::Primed(WsMirror {
+                tasks: vec![stale, gone.clone()],
+                ..WsMirror::default()
+            });
+            assert!(replay_unsent_tasks(state));
+            let SyncPhase::Primed(mirror) = &state.sync else {
+                panic!("still primed");
+            };
+            assert_eq!(mirror.tasks, vec![card.clone()], "the window's edits win");
+            assert_eq!(
+                state.queue,
+                VecDeque::from(vec![
+                    ControlRequest::TaskPut {
+                        workspace: machine_ws,
+                        task: card,
+                    },
+                    ControlRequest::TaskRemove {
+                        workspace: machine_ws,
+                        task: gone.id,
+                    },
+                ]),
+                "and go up again"
+            );
+            assert!(state.unsent_tasks.is_empty());
+            assert!(!replay_unsent_tasks(state), "once");
+        });
     }
 
     /// A name typed into the create form is for a workspace the machine has

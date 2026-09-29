@@ -71,7 +71,7 @@ const HEAD_CONTROL_RADIUS: f32 = 7.;
 const META_SEP_TRIMMED: &str = "·";
 
 /// Tabular numerals, so a column of diff counts lines up digit for digit.
-fn tabular() -> gpui::FontFeatures {
+pub(crate) fn tabular() -> gpui::FontFeatures {
     gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)]))
 }
 
@@ -594,7 +594,9 @@ impl Tty7App {
             for (slot, i) in visible.into_iter().enumerate() {
                 let badge_pos = badge_pos[i];
                 let tab = &self.tabs[i];
-                let is_active = i == active;
+                // The board is what is on screen, not this tab: a row lit
+                // under it would say otherwise.
+                let is_active = i == active && !self.board_open();
                 let ssh_dot = self.tab_ssh_dot(tab, cx);
                 let asleep = tab.is_asleep();
                 let agent = tab.agent(cx).or_else(|| tab.asleep_agent());
@@ -1778,7 +1780,8 @@ impl Tty7App {
             .pt(px(4.))
             .pb(px(16.))
             .child(self.workspace_head(cx))
-            .child(search);
+            .child(search)
+            .child(self.render_board_nav(cx));
 
         let container: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
         // Read while there is still a `cx` to read it from: the drag handler
@@ -2690,6 +2693,101 @@ impl Tty7App {
             .collect()
     }
 
+    /// Where the board can start a task, in the sidebar's own order: each
+    /// group and the folder its tabs work in, then the folder of each tab
+    /// that sits in no group. With it, the index of the place the active tab
+    /// is in — where a new task goes unless the user picks otherwise.
+    ///
+    /// A pinned group's folder is its own when it keeps one, else its first
+    /// tab's; an automatic group's is its repository. An SSH host group has no
+    /// folder a local run could start in, so it is left out.
+    pub(crate) fn task_places(&self, cx: &gpui::App) -> (Vec<TaskPlace>, Option<usize>) {
+        let keys = self.sidebar_group_keys(cx);
+        let leaf = |i: usize| {
+            self.tabs
+                .get(i)
+                .and_then(|t| t.pane.first_leaf())
+                .and_then(|slot| slot.terminal().cloned())
+        };
+        let tab_cwd = |i: usize| leaf(i).and_then(|view| view.read(cx).spawnable_cwd());
+        let tab_branch = |i: usize| {
+            self.tabs
+                .get(i)
+                .and_then(|t| t.git_status(None, cx))
+                .map(|g| g.branch)
+        };
+        let first_branch = |tabs: &[usize]| tabs.iter().find_map(|&i| tab_branch(i));
+        let mut places: Vec<TaskPlace> = Vec::new();
+        let mut active = None;
+        for section in sidebar_sections(&keys, &self.sidebar_groups) {
+            let holds_active = section.tabs.contains(&self.active);
+            match &section.key {
+                Some(GroupKey::Pinned(id)) => {
+                    let cwd = self
+                        .sidebar_groups
+                        .get(*id)
+                        .and_then(|g| g.folder_path().map(Path::to_path_buf))
+                        .or_else(|| section.tabs.iter().find_map(|&i| tab_cwd(i)));
+                    if let Some(cwd) = cwd {
+                        if holds_active {
+                            active = Some(places.len());
+                        }
+                        places.push(TaskPlace {
+                            group: Some(*id),
+                            name: section.name.clone().unwrap_or_default(),
+                            cwd,
+                            grouped: true,
+                            branch: first_branch(&section.tabs),
+                        });
+                    }
+                }
+                Some(GroupKey::Auto(AutoKey::Repo(root))) => {
+                    if holds_active {
+                        active = Some(places.len());
+                    }
+                    places.push(TaskPlace {
+                        group: None,
+                        name: section.name.clone().unwrap_or_default(),
+                        cwd: root.clone(),
+                        grouped: true,
+                        branch: first_branch(&section.tabs),
+                    });
+                }
+                Some(GroupKey::Auto(AutoKey::SshHost(_))) => {}
+                None => {
+                    for &i in &section.tabs {
+                        let Some(cwd) = tab_cwd(i) else {
+                            continue;
+                        };
+                        let at = match places.iter().position(|p| !p.grouped && p.cwd == cwd) {
+                            Some(at) => at,
+                            None => {
+                                let home = leaf(i).and_then(|v| v.read(cx).display_home(cx));
+                                let name = crate::ui::path_display::abbreviate_home(
+                                    &cwd.to_string_lossy(),
+                                    home.as_deref(),
+                                )
+                                .into_owned();
+                                places.push(TaskPlace {
+                                    group: None,
+                                    name,
+                                    cwd,
+                                    grouped: false,
+                                    branch: tab_branch(i),
+                                });
+                                places.len() - 1
+                            }
+                        };
+                        if i == self.active {
+                            active = Some(at);
+                        }
+                    }
+                }
+            }
+        }
+        (places, active)
+    }
+
     pub(crate) fn visual_tab_order(&self, cx: &gpui::App) -> Vec<usize> {
         if cx.global::<Config>().tab_bar_position != crate::core::config::TabBarPosition::Left {
             return (0..self.tabs.len()).collect();
@@ -2920,6 +3018,21 @@ fn ssh_host(remote: Option<&crate::daemon::protocol::RemoteContext>) -> Option<S
     remote
         .filter(|r| matches!(r.kind, RemoteKind::Ssh | RemoteKind::NativeSsh))
         .map(|r| r.target.clone())
+}
+
+/// See [`Tty7App::task_places`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TaskPlace {
+    /// The pinned group, for a place that is one.
+    pub group: Option<GroupId>,
+    /// What the sidebar calls it.
+    pub name: String,
+    pub cwd: PathBuf,
+    /// A sidebar group (pinned or automatic), rather than the folder of a tab
+    /// in none.
+    pub grouped: bool,
+    /// The branch its tabs are on, as the sidebar knows it.
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]

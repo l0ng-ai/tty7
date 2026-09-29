@@ -285,6 +285,21 @@ Four rules from it survive even if you read nothing else:
 - **After the first send into a new pane, confirm the command left the
   prompt** — the swallowed-Enter check above.
 
+### The board
+
+Each workspace has a board: tasks for agents, in five columns (`queued`,
+`running`, `needs-input`, `review`, `done`) worked out from what each task's
+agent is doing. When the user wants work written down rather than started now,
+put it there; they start it from the GUI.
+
+```bash
+tty7 task add "Fix the flaky restore test" --prompt-file spec.md --cwd ~/src/api --agent claude
+tty7 task ls               # this workspace's tasks and their columns (--json for runs, sessions)
+tty7 task done 3f2a9c1e    # any unique prefix of the id, at least four characters
+tty7 task reopen 3f2a9c1e
+tty7 task rm 3f2a9c1e
+```
+
 ## Looking around
 
 ```bash

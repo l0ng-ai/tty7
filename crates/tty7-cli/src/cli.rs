@@ -155,6 +155,12 @@ pub enum Command {
 
     #[command(
         subcommand,
+        about = "The board: tasks for agents, and where each one stands"
+    )]
+    Task(TaskCmd),
+
+    #[command(
+        subcommand,
         about = "Machines: this one plus every remote the server has a link to"
     )]
     Machine(MachineCmd),
@@ -666,6 +672,79 @@ pub enum WorktreeCmd {
             help = "Repository (default: the current directory)"
         )]
         repo: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TaskCmd {
+    #[command(about = "Tasks on a workspace's board, with the column each one is in")]
+    Ls {
+        #[arg(value_name = "WORKSPACE")]
+        ws: Option<String>,
+    },
+
+    #[command(
+        about = "Put a task on the board (queued; start it from the GUI's board)",
+        long_about = "Put a task on a workspace's board, queued.\n\n\
+                      The GUI's board starts it: a new tab in --cwd, running --agent, \
+                      told the prompt (or the title, when there is no prompt). \
+                      Prints the task's id."
+    )]
+    Add {
+        #[arg(value_name = "TITLE")]
+        title: String,
+        #[arg(
+            long,
+            value_name = "TEXT",
+            help = "What the agent is told; defaults to the title"
+        )]
+        prompt: Option<String>,
+        #[arg(
+            long,
+            value_name = "FILE",
+            conflicts_with = "prompt",
+            help = "Read the prompt from a file ('-' for stdin)"
+        )]
+        prompt_file: Option<String>,
+        #[arg(long, value_name = "DIR", help = "Where the agent runs")]
+        cwd: Option<String>,
+        #[arg(
+            long,
+            value_name = "AGENT",
+            help = "Which agent runs it, e.g. claude, codex"
+        )]
+        agent: Option<String>,
+        #[arg(
+            long,
+            help = "Give each run a git worktree of its own, cut from --cwd's repository"
+        )]
+        worktree: bool,
+        #[arg(
+            long,
+            value_name = "GROUP",
+            help = "File it under a pinned sidebar group, by name"
+        )]
+        group: Option<String>,
+        #[arg(long, value_name = "WORKSPACE")]
+        ws: Option<String>,
+    },
+
+    #[command(about = "Mark a task finished")]
+    Done {
+        #[arg(value_name = "TASK")]
+        task: String,
+    },
+
+    #[command(about = "Take a task out of Done")]
+    Reopen {
+        #[arg(value_name = "TASK")]
+        task: String,
+    },
+
+    #[command(about = "Delete a task from the board")]
+    Rm {
+        #[arg(value_name = "TASK")]
+        task: String,
     },
 }
 

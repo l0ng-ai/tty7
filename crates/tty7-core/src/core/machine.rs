@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::cli_agent::CLIAgent;
 use crate::core::group_key::{AutoKey, GroupId, WorkspaceGroups};
 use crate::core::session::WorkspaceId;
+use crate::core::task::{Task, TaskId};
 use crate::daemon::protocol::{NativeSshSpec, ShellSpec};
 
 pub const MACHINE_FILE: &str = "machine.json";
@@ -140,6 +141,9 @@ pub struct Workspace {
     /// the workspace draws the same groups in the same order.
     #[serde(default, skip_serializing_if = "WorkspaceGroups::is_empty")]
     pub groups: WorkspaceGroups,
+    /// The workspace's board. See [`crate::core::task`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<Task>,
 }
 
 impl Default for Workspace {
@@ -152,6 +156,7 @@ impl Default for Workspace {
             active_tab: None,
             attachment: None,
             groups: WorkspaceGroups::default(),
+            tasks: Vec::new(),
         }
     }
 }
@@ -469,6 +474,15 @@ pub enum LayoutDelta {
     GroupsChanged {
         groups: WorkspaceGroups,
     },
+    /// A task was added or changed; the whole of it, which replaces any task
+    /// with the same id. Only sent to a peer that said it reads tasks
+    /// ([`LayoutDelta::is_task`]).
+    TaskPut {
+        task: Task,
+    },
+    TaskRemoved {
+        task: TaskId,
+    },
     TabRestructured {
         tab: Tab,
         pane: Option<PaneRecord>,
@@ -481,6 +495,18 @@ pub enum LayoutDelta {
     PaneFacts {
         pane: PaneRecord,
     },
+}
+
+impl LayoutDelta {
+    /// Whether this is one of the board's deltas, which a peer that predates
+    /// the board cannot decode — and a control event it cannot decode takes
+    /// the whole link down with it.
+    pub fn is_task(&self) -> bool {
+        matches!(
+            self,
+            LayoutDelta::TaskPut { .. } | LayoutDelta::TaskRemoved { .. }
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -889,6 +915,73 @@ impl MachineStore {
         })
     }
 
+    /// Adds `task` to the workspace's board, or replaces the one with its id.
+    ///
+    /// Whole-task last-writer-wins, like [`Self::workspace_set_groups`]: every
+    /// edit a window makes to a card is "this is the card now", and two windows
+    /// racing on the same card are each giving an answer the other would take.
+    ///
+    /// A new card on a full board pushes the one marked done longest ago off
+    /// it ([`crate::core::task::make_room`]) rather than being refused. That
+    /// removal goes out to every client, the sender included — it is not an
+    /// edit the sender made, so it has no other way to hear of it.
+    pub fn task_put(
+        &self,
+        workspace: WorkspaceId,
+        task: Task,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        task.check().map_err(refuse)?;
+        // Room is made and the task put in one commit: a put that is then
+        // refused never costs a card. The card dropped to make room is news
+        // to the window that asked as well, so that part goes to everyone.
+        self.mutate_split(origin, Persist::Now, |m| {
+            let ws = find_workspace(m, workspace)?;
+            let mut everyone = Vec::new();
+            if let Some(evicted) =
+                crate::core::task::make_room(&ws.tasks, task.id).map_err(refuse)?
+            {
+                ws.tasks.retain(|t| t.id != evicted);
+                everyone.push((workspace, LayoutDelta::TaskRemoved { task: evicted }));
+            }
+            match ws.tasks.iter().position(|t| t.id == task.id) {
+                Some(i) => ws.tasks[i] = task.clone(),
+                None if ws.tasks.len() >= crate::core::task::MAX_TASKS => {
+                    return Err(refuse(format!(
+                        "workspace {workspace} already keeps {} tasks",
+                        crate::core::task::MAX_TASKS
+                    )));
+                }
+                None => ws.tasks.push(task.clone()),
+            }
+            Ok((
+                (),
+                everyone,
+                vec![(workspace, LayoutDelta::TaskPut { task })],
+            ))
+        })
+    }
+
+    /// Takes a task off the board. One that is already gone is not an error:
+    /// two windows deleting the same card, or a delete sent again after a
+    /// resync, both get what they asked for.
+    pub fn task_remove(
+        &self,
+        workspace: WorkspaceId,
+        task: TaskId,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<()> {
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, workspace)?;
+            let before = ws.tasks.len();
+            ws.tasks.retain(|t| t.id != task);
+            if ws.tasks.len() == before {
+                return Ok(((), Vec::new()));
+            }
+            Ok(((), vec![(workspace, LayoutDelta::TaskRemoved { task })]))
+        })
+    }
+
     pub fn pane_split(
         &self,
         workspace: WorkspaceId,
@@ -1189,7 +1282,29 @@ impl MachineStore {
         persist: Persist,
         op: impl FnOnce(&mut Machine) -> io::Result<(T, Vec<(WorkspaceId, LayoutDelta)>)>,
     ) -> io::Result<T> {
+        self.mutate_split(origin, persist, |m| {
+            op(m).map(|(value, deltas)| (value, Vec::new(), deltas))
+        })
+    }
+
+    /// [`Self::mutate_with`] for a change that tells its own `origin` part
+    /// of what it did: the first list of deltas goes to every subscriber,
+    /// the origin included, then the second to everyone else — both from
+    /// one commit, so no subscriber sees the first without the second.
+    fn mutate_split<T>(
+        &self,
+        origin: Option<SubscriberId>,
+        persist: Persist,
+        op: impl FnOnce(
+            &mut Machine,
+        ) -> io::Result<(
+            T,
+            Vec<(WorkspaceId, LayoutDelta)>,
+            Vec<(WorkspaceId, LayoutDelta)>,
+        )>,
+    ) -> io::Result<T> {
         let _order = self.notify_order.lock().unwrap_or_else(|e| e.into_inner());
+        let everyone;
         let deltas;
         let value;
         {
@@ -1204,8 +1319,9 @@ impl MachineStore {
                 }
                 Ok(out)
             }) {
-                Ok((v, d)) => {
+                Ok((v, all, d)) => {
                     value = v;
+                    everyone = all;
                     deltas = d;
                 }
                 Err(e) => {
@@ -1213,6 +1329,9 @@ impl MachineStore {
                     return Err(e);
                 }
             }
+        }
+        if !everyone.is_empty() {
+            self.notify_all(&everyone, None);
         }
         if !deltas.is_empty() {
             self.notify_all(&deltas, origin);
@@ -1823,7 +1942,7 @@ fn env_dir(key: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn unix_now() -> u64 {
+pub fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1933,6 +2052,126 @@ mod tests {
         assert!(
             store.pane(3).is_none(),
             "the refused create adopted no pane either"
+        );
+    }
+
+    #[test]
+    fn a_workspace_keeps_its_board_across_a_restart() {
+        let (store, dir) = store();
+        let ws = store.workspace_create(None, None, None).unwrap();
+        let mut task = crate::core::task::Task::new("fix the flaky test");
+        task.prompt = "it fails one run in ten".into();
+        store.task_put(ws.id, task.clone(), None).unwrap();
+
+        task.title = "fix the flaky restore test".into();
+        store.task_put(ws.id, task.clone(), None).unwrap();
+        let other = crate::core::task::Task::new("second");
+        store.task_put(ws.id, other.clone(), None).unwrap();
+        store.task_remove(ws.id, other.id, None).unwrap();
+
+        let reopened = MachineStore::open(dir.path().join(MACHINE_FILE));
+        let back = reopened.workspace(ws.id).unwrap();
+        assert_eq!(
+            back.tasks,
+            vec![task],
+            "a put replaces by id; a remove drops it"
+        );
+    }
+
+    #[test]
+    fn the_board_refuses_what_it_cannot_keep() {
+        let (store, _dir) = store();
+        let ws = store.workspace_create(None, None, None).unwrap();
+        let untitled = crate::core::task::Task::new("   ");
+        assert_eq!(
+            store.task_put(ws.id, untitled, None).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(store.workspace(ws.id).unwrap().tasks.is_empty());
+    }
+
+    /// A delete that finds nothing has nothing left to do — and refusing it
+    /// would send the window that asked into a whole resync.
+    #[test]
+    fn removing_a_task_that_is_already_gone_is_not_an_error() {
+        let (store, _dir) = store();
+        let ws = store.workspace_create(None, None, None).unwrap();
+        store
+            .task_remove(ws.id, crate::core::task::TaskId::new(), None)
+            .unwrap();
+        assert_eq!(
+            store
+                .task_remove(WorkspaceId::new(), crate::core::task::TaskId::new(), None)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound,
+            "a workspace that is not there still is"
+        );
+    }
+
+    #[test]
+    fn a_full_board_lets_the_oldest_done_task_go_for_a_new_one() {
+        use crate::core::task::{Done, MAX_TASKS, Task};
+        let (store, _dir) = store();
+        let ws = store.workspace_create(None, None, None).unwrap();
+        let mut board: Vec<Task> = (0..MAX_TASKS).map(|i| Task::new(format!("t{i}"))).collect();
+        board[7].done = Some(Done { at: 50, turns: 0 });
+        board[3].done = Some(Done { at: 20, turns: 0 });
+        store
+            .mutate(None, |m| {
+                find_workspace(m, ws.id)?.tasks = board.clone();
+                Ok(((), Vec::new()))
+            })
+            .unwrap();
+        let (me, heard) = recorded(&store);
+
+        let fresh = Task::new("new");
+        store.task_put(ws.id, fresh.clone(), Some(me.id())).unwrap();
+        let tasks = store.workspace(ws.id).unwrap().tasks;
+        assert_eq!(tasks.len(), MAX_TASKS);
+        assert!(tasks.iter().any(|t| t.id == fresh.id));
+        assert!(
+            !tasks.iter().any(|t| t.id == board[3].id),
+            "the one done longest ago made way"
+        );
+        assert_eq!(
+            *heard.lock().unwrap(),
+            vec![(
+                ws.id.to_string(),
+                LayoutDelta::TaskRemoved { task: board[3].id }
+            )],
+            "the sender hears of the eviction, though not of its own put"
+        );
+
+        // Changing a card already there never evicts anything.
+        let mut edit = tasks[0].clone();
+        edit.title = "edited".into();
+        store.task_put(ws.id, edit, None).unwrap();
+        assert!(
+            store
+                .workspace(ws.id)
+                .unwrap()
+                .tasks
+                .iter()
+                .any(|t| t.id == board[7].id)
+        );
+
+        store.task_put(ws.id, Task::new("newer"), None).unwrap();
+        assert!(
+            !store
+                .workspace(ws.id)
+                .unwrap()
+                .tasks
+                .iter()
+                .any(|t| t.id == board[7].id)
+        );
+        let refused = store
+            .task_put(ws.id, Task::new("newest"), None)
+            .unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            io::ErrorKind::InvalidInput,
+            "with nothing done left, a full board refuses"
         );
     }
 

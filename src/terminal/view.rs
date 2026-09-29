@@ -170,6 +170,45 @@ pub struct NativeSshParts {
 /// What a pane is called when nothing running in it has said otherwise.
 pub(crate) const DEFAULT_TITLE: &str = "tty7";
 
+/// The last `n` lines of a screen that are output rather than chrome.
+///
+/// An agent's TUI keeps its own furniture at the bottom of the screen: an
+/// input box between two rules, and under it a status line or five — model,
+/// branch, token meter. Read naively, the "last lines" of a Claude pane are
+/// that status bar, never what it answered. So a screen with a rule in its
+/// lower half is cut at the rule — at the upper of two close together, the
+/// top of the input box — and only what is above counts. Then lines with no
+/// text (borders, blank rows) are skipped, and so is the spinner's
+/// "✻ Crunched for 17s" summary, which says how long, not what.
+pub(crate) fn output_tail(rows: &[String], n: usize) -> Vec<String> {
+    let is_rule = |row: &str| {
+        let row = row.trim();
+        let ruled = row
+            .chars()
+            .filter(|c| matches!(c, '─' | '━' | '═' | '-'))
+            .count();
+        !row.is_empty() && ruled * 10 >= row.chars().count() * 9 && ruled >= 8
+    };
+    let rules: Vec<usize> = (rows.len() / 2..rows.len())
+        .filter(|&i| is_rule(&rows[i]))
+        .collect();
+    let cut = match rules.as_slice() {
+        [] => rows.len(),
+        [.., upper, lower] if lower - upper <= 6 => *upper,
+        [.., last] => *last,
+    };
+    let spinner = |row: &str| row.starts_with(['✻', '✳', '✶', '✢', '✽']);
+    let mut out: Vec<String> = rows[..cut]
+        .iter()
+        .rev()
+        .map(|r| r.trim().to_string())
+        .filter(|r| r.chars().any(char::is_alphanumeric) && !spinner(r))
+        .take(n)
+        .collect();
+    out.reverse();
+    out
+}
+
 /// What a pane is *saying* about itself, if anything — the reading behind
 /// [`TerminalView::stated_title`], split out so it can be pinned without a
 /// live pane.
@@ -2252,6 +2291,40 @@ impl TerminalView {
             .lock()
             .selection_to_string()
             .filter(|t| !t.trim().is_empty())
+    }
+
+    /// Bytes typed into the pane as if at the keyboard — `\r` to take a
+    /// highlighted choice, ESC to interrupt an agent's turn.
+    pub fn send_keys(&self, bytes: &[u8]) {
+        self.terminal.write(bytes.to_vec());
+    }
+
+    /// The last `n` lines of what the program in this pane has said, top to
+    /// bottom — what the board shows of an agent without opening it. See
+    /// [`output_tail`] for what counts.
+    pub fn screen_tail(&self, n: usize) -> Vec<String> {
+        let term = self.terminal.term.lock();
+        let grid = term.grid();
+        let cols = grid.columns();
+        let rows: Vec<String> = (0..grid.screen_lines() as i32)
+            .map(|line| {
+                let row = &grid[Line(line)];
+                // A wide character (CJK, emoji) takes two cells, the second
+                // a spacer holding a blank; kept, it put a space between
+                // every character of Chinese text.
+                (0..cols)
+                    .map(|c| &row[Column(c)])
+                    .filter(|cell| {
+                        !cell.flags.intersects(
+                            alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER
+                                | alacritty_terminal::term::cell::Flags::LEADING_WIDE_CHAR_SPACER,
+                        )
+                    })
+                    .map(|cell| cell.c)
+                    .collect()
+            })
+            .collect();
+        output_tail(&rows, n)
     }
 
     pub fn send_agent_prompt(&self, prompt: &str) {
@@ -8526,6 +8599,44 @@ fn drag_scroll_step(overshoot: f32) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn output_tail_reads_above_an_agents_input_box() {
+        let rule = "─".repeat(40);
+        let rows: Vec<String> = [
+            "> Explain what task::column does",
+            "",
+            "● task::column works out which column a card belongs in.",
+            "  Rules, checked in order.",
+            "",
+            "✻ Crunched for 17s · done 9:32 AM",
+            "",
+            rule.as_str(),
+            "❯",
+            rule.as_str(),
+            "⚠ Transcript saving is off",
+            "5h[ 0% ] 4h36m",
+            "↳ feat-task-board · worktree-feat-task-board",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            super::output_tail(&rows, 2),
+            vec![
+                "● task::column works out which column a card belongs in.",
+                "Rules, checked in order.",
+            ]
+        );
+    }
+
+    #[test]
+    fn output_tail_of_a_plain_screen_is_its_last_lines() {
+        let rows: Vec<String> = ["$ cargo test", "running 3 tests", "ok", ""]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(super::output_tail(&rows, 2), vec!["running 3 tests", "ok"]);
+    }
 
     /// What the label ladder asks a pane: are you showing a name of your own,
     /// or still standing under the app's? (#740)
@@ -10786,6 +10897,8 @@ mod gpui_tests {
                 activity: 0,
                 turns: 0,
                 inferred: false,
+                question: false,
+                ask: None,
             }))
             .encode(daemon)
             .unwrap();
@@ -10843,6 +10956,8 @@ mod gpui_tests {
             activity: 0,
             turns: 0,
             inferred: false,
+            question: false,
+            ask: None,
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -10911,6 +11026,8 @@ mod gpui_tests {
             activity: 0,
             turns,
             inferred: false,
+            question: false,
+            ask: None,
         };
         DaemonMsg::AgentStatus(Some(state.clone()))
             .encode(daemon)
@@ -11369,6 +11486,8 @@ mod gpui_tests {
             activity: 0,
             turns: 0,
             inferred: false,
+            question: false,
+            ask: None,
         }))
         .encode(&mut daemon)
         .unwrap();

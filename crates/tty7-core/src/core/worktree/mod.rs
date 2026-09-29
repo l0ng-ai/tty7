@@ -376,6 +376,42 @@ fn exclude(host: &dyn Host, main_root: &Path) {
     let _ = host.write_file(&file, next.as_bytes());
 }
 
+/// A new worktree for a board task's run: [`create`] from the same fresh
+/// base [`defaults`] picks, on a branch named `preferred` when that is free —
+/// `-2`, `-3`, … when it is taken or retired — and a generated name otherwise.
+/// The folder is the branch with its `/`s as `-`s: `feat/eu` works in
+/// `…/worktrees/feat-eu`.
+pub fn create_for(
+    host: &dyn Host,
+    cwd: &Path,
+    preferred: Option<&str>,
+) -> Result<NewWorktree, String> {
+    let (repo_root, dir) = repo_dir(host, cwd)?;
+    let retired = retired(host, &repo_root);
+    let folder = |branch: &str| branch.replace(['/', '\\'], "-");
+    let taken = |branch: &str| {
+        retired.iter().any(|r| *r == folder(branch))
+            || branch_exists(host, &repo_root, branch)
+            || host.exists(&host.join(&dir, &folder(branch)))
+    };
+    let branch = match preferred.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(base) => std::iter::once(base.to_string())
+            .chain((2..100).map(|n| format!("{base}-{n}")))
+            .find(|name| !taken(name))
+            .ok_or_else(|| format!("every branch name after {base} is taken"))?,
+        None => Names::new().unique(taken),
+    };
+    create(
+        host,
+        cwd,
+        &WorktreeRequest {
+            name: folder(&branch),
+            branch,
+            base: default_base(host, &repo_root),
+        },
+    )
+}
+
 pub fn create(host: &dyn Host, cwd: &Path, req: &WorktreeRequest) -> Result<NewWorktree, String> {
     if req.name.is_empty() || req.name == "." || req.name == ".." || req.name.contains(['/', '\\'])
     {
@@ -458,6 +494,24 @@ mod tests {
         sh(&dir, &["git", "add", "."]);
         sh(&dir, &["git", "commit", "-q", "-m", "init"]);
         dir
+    }
+
+    #[test]
+    fn create_for_takes_the_preferred_branch_numbers_a_taken_one_and_flattens_slashes() {
+        let h = h();
+        let repo = temp_repo("board-for");
+        let first = create_for(&*h, &repo, Some("fix-restore")).unwrap();
+        let second = create_for(&*h, &repo, Some("fix-restore")).unwrap();
+        assert_eq!(first.branch, "fix-restore");
+        assert_eq!(second.branch, "fix-restore-2");
+        let slashed = create_for(&*h, &repo, Some("feat/eu-regions")).unwrap();
+        assert_eq!(slashed.branch, "feat/eu-regions");
+        assert_eq!(
+            slashed.path.file_name().unwrap().to_str().unwrap(),
+            "feat-eu-regions"
+        );
+        assert!(!create_for(&*h, &repo, None).unwrap().branch.is_empty());
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     fn h() -> crate::host::SharedHost {

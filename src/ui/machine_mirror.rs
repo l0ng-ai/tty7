@@ -316,6 +316,17 @@ fn apply(machine: &mut Machine, workspace: WorkspaceId, delta: &LayoutDelta) -> 
             ws.groups = groups.clone();
             true
         }
+        LayoutDelta::TaskPut { task } => {
+            match ws.tasks.iter_mut().find(|t| t.id == task.id) {
+                Some(slot) => *slot = task.clone(),
+                None => ws.tasks.push(task.clone()),
+            }
+            true
+        }
+        LayoutDelta::TaskRemoved { task } => {
+            ws.tasks.retain(|t| t.id != *task);
+            true
+        }
         LayoutDelta::TabMoved { tab, to } => {
             let Some(from) = ws.tabs.iter().position(|t| t.id == *tab) else {
                 return false;

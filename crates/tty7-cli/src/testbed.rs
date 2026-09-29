@@ -32,6 +32,7 @@ pub fn two_workspace_machine() -> Machine {
         active_tab: None,
         attachment: None,
         groups: Default::default(),
+        tasks: Vec::new(),
     };
     let web = Workspace {
         id: WorkspaceId::new(),
@@ -48,6 +49,7 @@ pub fn two_workspace_machine() -> Machine {
         active_tab: None,
         attachment: None,
         groups: Default::default(),
+        tasks: Vec::new(),
     };
     let record = |id: u64, cwd: &str| PaneRecord {
         id,

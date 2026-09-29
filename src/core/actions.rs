@@ -119,6 +119,7 @@ actions!(
         ShowSshForwards,
         ToggleCodePanel,
         ToggleDocumentFill,
+        ToggleBoard,
         DocumentWidthThird,
         DocumentWidthHalf,
         DocumentWidthTwoThirds,
@@ -159,6 +160,7 @@ actions!(
         SwitcherAcrossBack,
         SearchNextTab,
         SearchPrevTab,
+        BoardUndo,
         Quit
     ]
 );

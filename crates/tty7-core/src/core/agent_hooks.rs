@@ -56,6 +56,19 @@ fn effective_event<'a>(agent: &str, event: &'a str, stdin_json: &str) -> Option<
         let tool = payload.get("tool_name").and_then(|t| t.as_str())?;
         return QUESTION_TOOLS.contains(&tool).then_some("question-asked");
     }
+    // Claude puts its question tool through the permission dialog as well,
+    // right after the `PreToolUse` that said it was a question. Read as a
+    // permission request it would turn the question into a yes/no — and a
+    // board would offer to "allow" a multiple choice.
+    if event == "permission-request"
+        && let Ok(payload) = serde_json::from_str::<serde_json::Value>(stdin_json)
+        && payload
+            .get("tool_name")
+            .and_then(|t| t.as_str())
+            .is_some_and(|tool| QUESTION_TOOLS.contains(&tool))
+    {
+        return Some("question-asked");
+    }
     // Antigravity has no turn-start event, only `PreInvocation` before every
     // model call. The first call of a turn starts it; later ones are the same
     // turn still working, and must not count as new prompts. `Stop` with
@@ -158,7 +171,72 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
     {
         body["prompt"] = serde_json::Value::String(prompt);
     }
+    if let Some(ask) = question_of(&payload) {
+        body["ask"] = ask;
+    }
+    // A permission prompt that says nothing of itself — Claude's
+    // `PermissionRequest` carries the tool and its input, not a message —
+    // is named after what it would run.
+    if body.get("message").is_none()
+        && let Some(tool) = payload.get("tool_name").and_then(|t| t.as_str())
+        && !QUESTION_TOOLS.contains(&tool)
+    {
+        let input = payload.get("tool_input");
+        let detail = ["command", "file_path", "url", "pattern", "path"]
+            .iter()
+            .find_map(|k| input.and_then(|i| i.get(*k)).and_then(|v| v.as_str()));
+        let text = match detail {
+            Some(detail) => format!("{tool}: {}", clip(detail, ASK_TEXT_MAX)),
+            None => tool.to_string(),
+        };
+        body["message"] = serde_json::Value::String(text);
+    }
     format!("\x1b]777;notify;{AGENT_EVENT_SENTINEL};{body}\x07").into_bytes()
+}
+
+/// How long the question and each of its answers may be. The whole event
+/// rides one OSC, which a tokenizer drops outright past 8 KiB.
+const ASK_TEXT_MAX: usize = 300;
+const ASK_OPTIONS_MAX: usize = 8;
+
+fn clip(text: &str, max: usize) -> String {
+    let text = text.trim();
+    match text.chars().count() > max {
+        true => format!("{}…", text.chars().take(max - 1).collect::<String>()),
+        false => text.to_string(),
+    }
+}
+
+/// The first question a question tool's call asks, with its answers — Claude's
+/// `AskUserQuestion` and Codex's `request_user_input` both spell them as
+/// `tool_input.questions[]` of `{question, options[{label}], multiSelect}`.
+fn question_of(payload: &serde_json::Value) -> Option<serde_json::Value> {
+    let q = payload
+        .get("tool_input")?
+        .get("questions")?
+        .as_array()?
+        .first()?;
+    let question = q.get("question").and_then(|v| v.as_str())?;
+    let options: Vec<String> = q
+        .get("options")
+        .and_then(|o| o.as_array())
+        .map(|o| {
+            o.iter()
+                .filter_map(|opt| {
+                    opt.get("label")
+                        .and_then(|l| l.as_str())
+                        .or_else(|| opt.as_str())
+                })
+                .take(ASK_OPTIONS_MAX)
+                .map(|l| clip(l, 80))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(serde_json::json!({
+        "question": clip(question, ASK_TEXT_MAX),
+        "options": options,
+        "multi": q.get("multiSelect").and_then(|m| m.as_bool()).unwrap_or(false),
+    }))
 }
 
 /// How much of a prompt rides back to the terminal.
@@ -2071,6 +2149,39 @@ mod tests {
         assert_eq!(effective_agent("grok", true), "grok");
         assert_eq!(effective_agent("claude", false), "claude");
         assert_eq!(effective_agent("grok", false), "grok");
+    }
+
+    #[test]
+    fn claudes_question_through_the_permission_dialog_stays_a_question() {
+        let input = r#"{"tool_name":"AskUserQuestion","tool_input":{}}"#;
+        assert_eq!(
+            effective_event("claude", "permission-request", input),
+            Some("question-asked")
+        );
+        assert_eq!(
+            effective_event("claude", "permission-request", r#"{"tool_name":"Bash"}"#),
+            Some("permission-request")
+        );
+    }
+
+    #[test]
+    fn a_question_carries_its_options_and_a_permission_what_it_would_run() {
+        let input = r#"{"tool_name":"AskUserQuestion","tool_input":{"questions":[
+            {"question":"Keep which feature?","header":"One","multiSelect":false,
+             "options":[{"label":"SSH","description":"x"},{"label":"Hooks"}]}]}}"#;
+        let ev = round_trip("claude", "question-asked", input);
+        let ask = ev.ask.expect("the question rides along");
+        assert_eq!(ask.question, "Keep which feature?");
+        assert_eq!(ask.options, vec!["SSH", "Hooks"]);
+        assert!(!ask.multi);
+
+        let ev = round_trip(
+            "claude",
+            "permission-request",
+            r#"{"tool_name":"Bash","tool_input":{"command":"cargo test"}}"#,
+        );
+        assert_eq!(ev.message.as_deref(), Some("Bash: cargo test"));
+        assert!(ev.ask.is_none());
     }
 
     #[test]

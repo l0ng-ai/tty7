@@ -681,10 +681,23 @@ impl CLIAgent {
     /// `prompt`. `None` for an agent whose positional prompt means a one-shot,
     /// non-interactive run, or whose form is not known — the caller then
     /// starts the agent bare rather than guess.
+    ///
+    /// A prompt that starts with `-` would be read as an option, so it goes
+    /// after `--`, or glued to its flag with `=`.
     pub fn prompt_args(self, prompt: &str) -> Option<Vec<String>> {
+        let dashed = prompt.starts_with('-');
+        let flag = |short: &str, long: &str| match dashed {
+            true => vec![format!("{long}={prompt}")],
+            false => vec![short.to_string(), prompt.to_string()],
+        };
         match self {
-            CLIAgent::Claude | CLIAgent::Codex => Some(vec![prompt.to_string()]),
-            CLIAgent::Gemini => Some(vec!["-i".to_string(), prompt.to_string()]),
+            CLIAgent::Claude | CLIAgent::Codex | CLIAgent::Cursor => Some(match dashed {
+                true => vec!["--".to_string(), prompt.to_string()],
+                false => vec![prompt.to_string()],
+            }),
+            CLIAgent::Gemini | CLIAgent::Qwen => Some(flag("-i", "--prompt-interactive")),
+            CLIAgent::Copilot => Some(flag("-i", "--interactive")),
+            CLIAgent::OpenCode => Some(flag("--prompt", "--prompt")),
             _ => None,
         }
     }
@@ -990,6 +1003,28 @@ pub struct AgentSessionState {
     /// the turn back on [`AgentStatus::Working`].
     #[serde(default)]
     pub inferred: bool,
+    /// While [`AgentStatus::Waiting`]: the agent asked the user a question,
+    /// rather than for permission to go ahead. The two want different
+    /// answers — a permission prompt takes a yes, a question takes words — so
+    /// anything offering a one-click "allow" has to tell them apart.
+    #[serde(default)]
+    pub question: bool,
+    /// The question itself, when the agent said what it is — from the
+    /// tool call that asks it, not from the screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<AgentAsk>,
+}
+
+/// A question an agent put to the user, as its tool call spelled it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAsk {
+    pub question: String,
+    /// The answers it offers, by label; empty for a free-text question.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// Any number of the options may be picked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multi: bool,
 }
 
 impl AgentStatus {
@@ -1028,6 +1063,7 @@ impl AgentSessionState {
         self.turns = self.turns.wrapping_add(1);
         self.status = AgentStatus::Done;
         self.message = None;
+        self.ask = None;
         self.inferred = true;
     }
 
@@ -1040,6 +1076,7 @@ impl AgentSessionState {
         }
         self.status = AgentStatus::Idle;
         self.message = None;
+        self.ask = None;
         self.inferred = true;
     }
 
@@ -1053,22 +1090,37 @@ impl AgentSessionState {
             self.cwd = Some(cwd.clone());
         }
         match ev.kind {
+            // A session starting or ending leaves nothing asked: a question
+            // it was stopped on went with the session that asked it.
             AgentEventKind::SessionStart => {
                 self.status = AgentStatus::Idle;
                 self.message = None;
+                self.ask = None;
+                self.question = false;
             }
             AgentEventKind::PromptSubmit => {
                 self.status = AgentStatus::Working;
                 self.message = None;
+                self.ask = None;
             }
+            // Claude sends its question tool through the permission dialog
+            // too, right after the `PreToolUse` that said it was a question.
+            // The hook reads that one as a question itself; this covers a
+            // hook from an older build. Nothing else can come between: the
+            // question is answered first, which fires `ToolComplete`.
+            AgentEventKind::PermissionRequest
+                if self.status == AgentStatus::Waiting && self.question => {}
             AgentEventKind::PermissionRequest | AgentEventKind::QuestionAsked => {
                 self.status = AgentStatus::Waiting;
                 self.message = ev.message.clone();
+                self.question = ev.kind == AgentEventKind::QuestionAsked;
+                self.ask = ev.ask.clone().filter(|_| self.question);
             }
             AgentEventKind::Notification => {
                 if self.status == AgentStatus::Working {
                     self.status = AgentStatus::Waiting;
                     self.message = ev.message.clone();
+                    self.question = false;
                 }
             }
             AgentEventKind::ToolComplete => {
@@ -1076,6 +1128,7 @@ impl AgentSessionState {
                 if self.status == AgentStatus::Waiting || guessed {
                     self.status = AgentStatus::Working;
                     self.message = None;
+                    self.ask = None;
                 }
             }
             AgentEventKind::Stop => {
@@ -1084,10 +1137,13 @@ impl AgentSessionState {
                 }
                 self.status = AgentStatus::Done;
                 self.message = ev.message.clone();
+                self.ask = None;
             }
             AgentEventKind::SessionEnd => {
                 self.status = AgentStatus::Idle;
                 self.message = None;
+                self.ask = None;
+                self.question = false;
                 self.cwd = None;
             }
         }
@@ -1121,6 +1177,8 @@ pub struct AgentEvent {
     /// Separate from `message`, which carries what the *agent* said and is
     /// deliberately cleared when a turn starts.
     pub prompt: Option<String>,
+    /// The question, on a `QuestionAsked` whose tool call spelled one out.
+    pub ask: Option<AgentAsk>,
 }
 
 pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
@@ -1144,6 +1202,8 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
         cwd: Option<String>,
         #[serde(default)]
         prompt: Option<String>,
+        #[serde(default)]
+        ask: Option<AgentAsk>,
     }
 
     let w: Wire = serde_json::from_slice(json).ok()?;
@@ -1156,6 +1216,7 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
         message: nonempty(w.message),
         cwd: nonempty(w.cwd).map(std::path::PathBuf::from),
         prompt: nonempty(w.prompt),
+        ask: w.ask.filter(|a| !a.question.trim().is_empty()),
     })
 }
 
@@ -1611,6 +1672,100 @@ mod tests {
     }
 
     #[test]
+    fn the_permission_dialog_a_question_goes_through_does_not_unmake_it() {
+        let ev = |kind| AgentEvent {
+            agent: Some(CLIAgent::Claude),
+            kind,
+            session_id: None,
+            message: None,
+            cwd: None,
+            prompt: None,
+            ask: None,
+        };
+        let mut s = AgentSessionState::default();
+        s.apply_event(&ev(AgentEventKind::PromptSubmit));
+        s.apply_event(&ev(AgentEventKind::QuestionAsked));
+        s.apply_event(&ev(AgentEventKind::PermissionRequest));
+        assert!(s.question);
+        s.apply_event(&ev(AgentEventKind::ToolComplete));
+        s.apply_event(&ev(AgentEventKind::PermissionRequest));
+        assert!(!s.question, "a real permission prompt later is one");
+    }
+
+    #[test]
+    fn a_prompt_that_looks_like_an_option_is_not_read_as_one() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(CLIAgent::Claude.prompt_args("fix it"), Some(v(&["fix it"])));
+        assert_eq!(
+            CLIAgent::Claude.prompt_args("--dry-run is ignored"),
+            Some(v(&["--", "--dry-run is ignored"]))
+        );
+        assert_eq!(
+            CLIAgent::Gemini.prompt_args("fix it"),
+            Some(v(&["-i", "fix it"]))
+        );
+        assert_eq!(
+            CLIAgent::Gemini.prompt_args("-v breaks"),
+            Some(v(&["--prompt-interactive=-v breaks"]))
+        );
+        assert_eq!(
+            CLIAgent::OpenCode.prompt_args("-v breaks"),
+            Some(v(&["--prompt=-v breaks"]))
+        );
+    }
+
+    #[test]
+    fn a_question_goes_with_the_session_that_asked_it() {
+        let ev = |kind| AgentEvent {
+            agent: Some(CLIAgent::Claude),
+            kind,
+            session_id: None,
+            message: None,
+            cwd: None,
+            prompt: None,
+            ask: Some(AgentAsk {
+                question: "Which one?".into(),
+                options: vec!["a".into(), "b".into()],
+                multi: false,
+            }),
+        };
+        for end in [AgentEventKind::SessionEnd, AgentEventKind::SessionStart] {
+            let mut s = AgentSessionState::default();
+            s.apply_event(&ev(AgentEventKind::PromptSubmit));
+            s.apply_event(&ev(AgentEventKind::QuestionAsked));
+            assert!(s.ask.is_some());
+            s.apply_event(&ev(end));
+            assert_eq!(s.ask, None, "{end:?}");
+            assert!(!s.question, "{end:?}");
+        }
+        let mut s = AgentSessionState::default();
+        s.apply_event(&ev(AgentEventKind::PromptSubmit));
+        s.apply_event(&ev(AgentEventKind::QuestionAsked));
+        s.assume_interrupted();
+        assert_eq!(s.ask, None, "an interrupt dismisses the question");
+    }
+
+    #[test]
+    fn a_waiting_agent_says_whether_it_asked_a_question_or_for_permission() {
+        let ev = |kind| AgentEvent {
+            agent: Some(CLIAgent::Claude),
+            kind,
+            session_id: None,
+            message: None,
+            cwd: None,
+            prompt: None,
+            ask: None,
+        };
+        let mut s = AgentSessionState::default();
+        s.apply_event(&ev(AgentEventKind::PromptSubmit));
+        s.apply_event(&ev(AgentEventKind::QuestionAsked));
+        assert!(s.question);
+        s.apply_event(&ev(AgentEventKind::ToolComplete));
+        s.apply_event(&ev(AgentEventKind::PermissionRequest));
+        assert!(!s.question);
+    }
+
+    #[test]
     fn session_state_machine_follows_the_turn() {
         let mut s = AgentSessionState::default();
         assert_eq!(s.status, AgentStatus::Idle);
@@ -1622,6 +1777,7 @@ mod tests {
             message: msg.map(String::from),
             cwd: None,
             prompt: None,
+            ask: None,
         };
 
         s.apply_event(&ev(AgentEventKind::SessionStart, None, Some("sid-1")));
@@ -1678,6 +1834,7 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            ask: None,
         };
 
         let mut s = AgentSessionState::default();
@@ -1712,6 +1869,7 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            ask: None,
         };
 
         let mut s = AgentSessionState::default();
@@ -1764,6 +1922,7 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            ask: None,
         };
 
         let mut s = AgentSessionState::default();
@@ -1801,6 +1960,7 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            ask: None,
         };
 
         let mut s = AgentSessionState::default();
@@ -1833,6 +1993,7 @@ mod tests {
             message: None,
             cwd: cwd.map(PathBuf::from),
             prompt: None,
+            ask: None,
         };
 
         let mut s = AgentSessionState::default();

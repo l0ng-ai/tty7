@@ -70,6 +70,14 @@ fn fixed_bindings() -> Vec<KeyBinding> {
     let search = Some(crate::ui::search::KEY_CONTEXT);
     bindings.push(KeyBinding::new("tab", SearchNextTab, search));
     bindings.push(KeyBinding::new("shift-tab", SearchPrevTab, search));
+    // The board's own undo, for what the board itself changed. On the
+    // board's context, so a text field inside it — the reply box, the new
+    // task sheet — keeps ⌘Z for its own text: `Input` is deeper and wins.
+    bindings.push(KeyBinding::new(
+        "secondary-z",
+        BoardUndo,
+        Some(crate::ui::board::KEY_CONTEXT),
+    ));
     // The code editor's multi-cursor chords, laid down again after tty7's
     // own table. gpui ranks a context-free binding as deep as the focused
     // context, and breaks the tie by whichever was added last — so the copies
@@ -659,6 +667,16 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         // terminal back, so a default chord here would only be one more thing
         // competing for a two-key combination nobody asked for.
         ("ToggleDocumentFill", ""),
+        // Board is B: ⌘B shows the sidebar the Board row lives in, ⇧⌘B goes
+        // straight to the board. Off macOS Ctrl+Shift+B is the sidebar
+        // already, and an Alt chord would be Meta to the shell — Alt+0 is
+        // readline's digit argument — so the board takes Ctrl+Shift+Y, free
+        // here and clear of Ctrl+Shift+U, the Linux input methods' Unicode
+        // entry.
+        (
+            "ToggleBoard",
+            per_platform("secondary-shift-b", "ctrl-shift-y"),
+        ),
         ("DocumentWidthThird", ""),
         ("DocumentWidthHalf", ""),
         ("DocumentWidthTwoThirds", ""),
@@ -946,6 +964,7 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             CommandGroup::View,
             t(L10nKey::CmdToggleDocumentFill).to_string(),
         ),
+        "ToggleBoard" => (CommandGroup::View, t(L10nKey::CmdToggleBoard).to_string()),
         "DocumentWidthThird" => (
             CommandGroup::View,
             t(L10nKey::CmdDocumentWidthThird).to_string(),
@@ -1799,6 +1818,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ShowSshForwards" => KeyBinding::new(keystroke, ShowSshForwards, None),
         "ToggleCodePanel" => KeyBinding::new(keystroke, ToggleCodePanel, None),
         "ToggleDocumentFill" => KeyBinding::new(keystroke, ToggleDocumentFill, None),
+        "ToggleBoard" => KeyBinding::new(keystroke, ToggleBoard, None),
         "DocumentWidthThird" => KeyBinding::new(keystroke, DocumentWidthThird, None),
         "DocumentWidthHalf" => KeyBinding::new(keystroke, DocumentWidthHalf, None),
         "DocumentWidthTwoThirds" => KeyBinding::new(keystroke, DocumentWidthTwoThirds, None),

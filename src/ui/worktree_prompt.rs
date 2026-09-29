@@ -39,10 +39,106 @@ struct Start {
 }
 
 /// A created worktree, and the setup script its checkout carries.
-struct Created {
-    wt: NewWorktree,
+pub(crate) struct Created {
+    pub wt: NewWorktree,
     setup: Option<(setup::Setup, Vec<(&'static str, String)>)>,
 }
+
+impl Created {
+    /// Reads `wt`'s setup script, on the thread that made it. The script is a
+    /// POSIX executable run through `env`; a Windows host has neither.
+    pub(crate) fn read(h: &dyn crate::ui::host_ops::Host, wt: NewWorktree) -> Created {
+        let setup = (h.separator() == '/')
+            .then(|| setup::find(h, &wt.path))
+            .flatten()
+            .zip(setup::env(h, &wt.main_root, &wt.path));
+        Created { wt, setup }
+    }
+}
+
+/// Why git would refuse a name for a new branch — `git check-ref-format
+/// --branch`'s rules, asked here so a bad name is caught while it is being
+/// typed, not after the sheet it was typed in has gone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum BranchProblem {
+    Space,
+    Control,
+    Contains(&'static str),
+    Starts(&'static str),
+    Ends(&'static str),
+    /// A part between `/`s starts with `.`.
+    PartDot,
+    /// A part between `/`s ends in `.lock`.
+    PartLock,
+    At,
+}
+
+impl BranchProblem {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            BranchProblem::Space => t(L10nKey::BranchNameSpace).to_string(),
+            BranchProblem::Control => t(L10nKey::BranchNameControl).to_string(),
+            BranchProblem::Contains(what) => t_fmt(L10nKey::BranchNameContains, &[("what", what)]),
+            BranchProblem::Starts(what) => t_fmt(L10nKey::BranchNameStarts, &[("what", what)]),
+            BranchProblem::Ends(what) => t_fmt(L10nKey::BranchNameEnds, &[("what", what)]),
+            BranchProblem::PartDot => t(L10nKey::BranchNamePartDot).to_string(),
+            BranchProblem::PartLock => t(L10nKey::BranchNamePartLock).to_string(),
+            BranchProblem::At => t(L10nKey::BranchNameAt).to_string(),
+        }
+    }
+}
+
+/// What is wrong with `name` as a new branch's name, or `None` when git
+/// would take it. Empty is not judged here: every caller has a name to fall
+/// back on.
+pub(crate) fn branch_problem(name: &str) -> Option<BranchProblem> {
+    if name.is_empty() {
+        return None;
+    }
+    if name == "@" {
+        return Some(BranchProblem::At);
+    }
+    if name.contains(' ') {
+        return Some(BranchProblem::Space);
+    }
+    if name.chars().any(|c| c.is_ascii_control()) {
+        return Some(BranchProblem::Control);
+    }
+    for what in ["..", "@{", "//"] {
+        if name.contains(what) {
+            return Some(BranchProblem::Contains(what));
+        }
+    }
+    for what in ["~", "^", ":", "?", "*", "[", "\\"] {
+        if name.contains(what) {
+            return Some(BranchProblem::Contains(what));
+        }
+    }
+    // `-` would be read as an option by the `git branch` it goes to.
+    for what in ["-", "/"] {
+        if name.starts_with(what) {
+            return Some(BranchProblem::Starts(what));
+        }
+    }
+    for what in ["/", "."] {
+        if name.ends_with(what) {
+            return Some(BranchProblem::Ends(what));
+        }
+    }
+    for part in name.split('/') {
+        if part.starts_with('.') {
+            return Some(BranchProblem::PartDot);
+        }
+        if part.ends_with(".lock") {
+            return Some(BranchProblem::PartLock);
+        }
+    }
+    None
+}
+
+/// What to do with a worktree's first line once it is settled.
+pub(crate) type OpenWith =
+    Box<dyn FnOnce(&mut Tty7App, NewWorktree, Option<String>, &mut Window, &mut Context<Tty7App>)>;
 
 impl Tty7App {
     pub(crate) fn open_worktree_prompt(
@@ -128,6 +224,10 @@ impl Tty7App {
             (false, true) => (name.clone(), name),
             (false, false) => (name, branch),
         };
+        if let Some(problem) = branch_problem(&branch) {
+            window.push_notification(problem.message(), cx);
+            return;
+        }
         let req = WorktreeRequest {
             name,
             branch,
@@ -153,18 +253,24 @@ impl Tty7App {
             cx,
             move |h| {
                 let wt = crate::core::worktree::create(h, &cwd, &req)?;
-                // The script is a POSIX executable run through `env`; a
-                // Windows host has neither.
-                let setup = (h.separator() == '/')
-                    .then(|| setup::find(h, &wt.path))
-                    .flatten()
-                    .zip(setup::env(h, &wt.main_root, &wt.path));
-                Ok::<_, String>(Created { wt, setup })
+                Ok::<_, String>(Created::read(h, wt))
             },
             move |this, result, window, cx| match result {
                 Ok(created) => {
                     this.worktree_prompt = None;
-                    this.start_worktree(host_id, created, start, window, cx);
+                    let agent = start.agent.map(|a| {
+                        setup::agent_line(a, &start.task, &cx.global::<Config>().agent_launch)
+                    });
+                    this.start_worktree(
+                        host_id,
+                        created,
+                        agent,
+                        Box::new(|this, wt, line, window, cx| {
+                            this.open_worktree_tab(wt, line, window, cx)
+                        }),
+                        window,
+                        cx,
+                    );
                 }
                 Err(e) => {
                     if let Some(p) = this.worktree_prompt.as_mut() {
@@ -183,13 +289,16 @@ impl Tty7App {
         );
     }
 
-    /// Open the worktree's tab, running its setup first — once the script's
-    /// content has been approved for this repo.
-    fn start_worktree(
+    /// Settle a new worktree's first line — its setup, once the script's
+    /// content has been approved for this repo, then `agent` — and hand it to
+    /// `open`. The New Worktree dialog opens a tab with it; the board opens
+    /// a task's run.
+    pub(crate) fn start_worktree(
         &mut self,
         host: HostId,
         created: Created,
-        start: Start,
+        agent: Option<String>,
+        open: OpenWith,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -207,18 +316,15 @@ impl Tty7App {
                 cx,
             );
         }
-        let agent = start
-            .agent
-            .map(|a| setup::agent_line(a, &start.task, &cx.global::<Config>().agent_launch));
         let Some((script, env)) = setup else {
             let line = setup::launch_line(&wt.path, None, agent);
-            self.open_worktree_tab(wt, line, window, cx);
+            open(self, wt, line, window, cx);
             return;
         };
         let key = setup::trust_key(host, &wt.main_root);
         if cx.global::<Config>().worktree_setup_trust.get(&key) == Some(&script.digest) {
             let line = setup::launch_line(&wt.path, Some((&script.script, &env)), agent);
-            self.open_worktree_tab(wt, line, window, cx);
+            open(self, wt, line, window, cx);
             return;
         }
         let answer = window.prompt(
@@ -244,7 +350,7 @@ impl Tty7App {
                 }
                 let setup = run.then_some((script.script.as_path(), env.as_slice()));
                 let line = setup::launch_line(&wt.path, setup, agent);
-                this.open_worktree_tab(wt, line, window, cx);
+                open(this, wt, line, window, cx);
             });
         })
         .detach();
@@ -321,6 +427,11 @@ impl Tty7App {
         // is enough; only both blank has nothing to name a worktree after.
         // Offering Create there is offering a click that can only fail.
         let nothing_to_name = name_now.is_empty() && branch_now.is_empty();
+        // The branch it would be cut on, by the same fallback.
+        let bad_branch = branch_problem(match branch_now.is_empty() {
+            true => name_now.as_str(),
+            false => branch_now.as_str(),
+        });
         // Preview what submitting would actually make, which is the same
         // fallback: with only a branch typed, the worktree takes its name, and
         // showing "…" there described a path that would never be created.
@@ -379,11 +490,24 @@ impl Tty7App {
                         dialog::labelled(t(L10nKey::WorktreePromptName), Input::new(&p.name), cx)
                             .child(meta(preview)),
                     )
-                    .child(dialog::labelled(
-                        t(L10nKey::WorktreePromptBranch),
-                        Input::new(&p.branch),
-                        cx,
-                    ))
+                    .child(
+                        dialog::labelled(
+                            t(L10nKey::WorktreePromptBranch),
+                            Input::new(&p.branch),
+                            cx,
+                        )
+                        .when_some(
+                            bad_branch.as_ref(),
+                            |field, problem| {
+                                field.child(
+                                    div()
+                                        .text_size(rems(META_MONO))
+                                        .text_color(cx.theme().danger)
+                                        .child(problem.message()),
+                                )
+                            },
+                        ),
+                    )
                     .child(
                         dialog::labelled(t(L10nKey::WorktreePromptBase), Input::new(&p.base), cx)
                             .children(setup_note.map(meta)),
@@ -416,7 +540,7 @@ impl Tty7App {
                             t(L10nKey::WorktreePromptCreate)
                         },
                         Tone::Primary,
-                        !(p.busy || nothing_to_name),
+                        !(p.busy || nothing_to_name || bad_branch.is_some()),
                         rungs,
                         cx,
                         cx.listener(|this, _, window, cx| this.submit_worktree_prompt(window, cx)),
@@ -457,5 +581,37 @@ impl Tty7App {
                 .child(card)
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_names_follow_git_check_ref_format() {
+        for ok in ["main", "feat/eu", "fix-1.2", "a.b/c", "user@host", "中文"] {
+            assert_eq!(branch_problem(ok), None, "{ok}");
+        }
+        let bad = |name: &str| branch_problem(name).unwrap_or_else(|| panic!("{name} passed"));
+        assert_eq!(bad("my branch"), BranchProblem::Space);
+        assert_eq!(bad("a\tb"), BranchProblem::Control);
+        assert_eq!(bad(".."), BranchProblem::Contains(".."));
+        assert_eq!(bad("a..b"), BranchProblem::Contains(".."));
+        assert_eq!(bad("a@{1}"), BranchProblem::Contains("@{"));
+        assert_eq!(bad("a//b"), BranchProblem::Contains("//"));
+        for c in ["~", "^", ":", "?", "*", "[", "\\"] {
+            assert_eq!(bad(&format!("a{c}b")), BranchProblem::Contains(c));
+        }
+        assert_eq!(bad("-x"), BranchProblem::Starts("-"));
+        assert_eq!(bad("/x"), BranchProblem::Starts("/"));
+        assert_eq!(bad("x/"), BranchProblem::Ends("/"));
+        assert_eq!(bad("x."), BranchProblem::Ends("."));
+        assert_eq!(bad(".x"), BranchProblem::PartDot);
+        assert_eq!(bad("feat/.x"), BranchProblem::PartDot);
+        assert_eq!(bad("x.lock"), BranchProblem::PartLock);
+        assert_eq!(bad("x.lock/y"), BranchProblem::PartLock);
+        assert_eq!(bad("@"), BranchProblem::At);
+        assert_eq!(branch_problem(""), None);
     }
 }

@@ -6573,6 +6573,8 @@ mod tests {
                 activity: 0,
                 turns: 0,
                 inferred: false,
+                question: false,
+                ask: None,
             }))
             .encode(daemon)
             .unwrap();
@@ -6635,6 +6637,8 @@ mod tests {
             activity: 0,
             turns: 0,
             inferred: false,
+            question: false,
+            ask: None,
         }))
         .encode(&mut daemon_side)
         .unwrap();
@@ -6686,6 +6690,8 @@ mod tests {
             activity: 0,
             turns: 0,
             inferred: false,
+            question: false,
+            ask: None,
         }))
         .encode(&mut daemon_side)
         .unwrap();
