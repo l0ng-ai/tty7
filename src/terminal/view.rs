@@ -2168,17 +2168,22 @@ impl TerminalView {
     }
 
     /// This pane sits somewhere the repo cache cannot place yet — neither a
-    /// repository nor "not one". A probe in flight looks the same, and the
-    /// throttle turns the retry away; the case this exists for is a probe that
-    /// failed, which leaves the answer open instead of recording a wrong one,
-    /// and would otherwise wait for the cwd to change or a command to finish
-    /// before anyone asked again.
-    fn git_repo_unanswered(&self, cx: &App) -> bool {
+    /// repository nor "not one" — and a retry is due. Only a failed probe
+    /// leaves a cwd that way; without this it would wait for the cwd to change
+    /// or a command to finish before anyone asked again.
+    ///
+    /// Read-only on purpose: this runs on every poll tick, and the cache is a
+    /// global whose every mutable touch redraws the window — while a probe is
+    /// in flight or throttled, the answer has to be "no" at no cost.
+    fn git_retry_due(&self, cx: &App) -> bool {
         let Some(cwd) = self.git_status_cwd.as_deref() else {
             return false;
         };
-        cx.try_global::<crate::terminal::git_status::GitStatusCache>()
-            .is_none_or(|cache| cache.known_repo_for(self.host_id, cwd).is_none())
+        let Some(cache) = cx.try_global::<crate::terminal::git_status::GitStatusCache>() else {
+            return false;
+        };
+        cache.known_repo_for(self.host_id, cwd).is_none()
+            && cache.probe_due(self.host_id, cwd, GIT_RETRY_GAP)
     }
 
     /// Plant the cwd the git-status poll would have found. For tests that
@@ -4035,7 +4040,7 @@ impl TerminalView {
             self.refresh_git_status(cwd_now, GitRefresh::Edge, cx);
         } else if tool_activity {
             self.refresh_git_status(cwd_now, GitRefresh::Opportunistic, cx);
-        } else if self.git_repo_unanswered(cx) {
+        } else if self.git_retry_due(cx) {
             self.refresh_git_status(cwd_now, GitRefresh::Retry, cx);
         }
 

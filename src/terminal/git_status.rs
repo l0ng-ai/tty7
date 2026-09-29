@@ -87,21 +87,32 @@ impl GitStatusCache {
         cwd: &Path,
         min_interval: Duration,
     ) -> bool {
+        if !self.probe_due(host, cwd, min_interval) {
+            return false;
+        }
+        let cwd = key(host, cwd);
+        let throttle = self.throttle_key(host, &cwd).to_path_buf();
+        self.last_probe.insert(host, throttle, Instant::now());
+        self.probes.begin((host, cwd.into_owned()));
+        true
+    }
+
+    /// Whether [`GitStatusCache::begin_probe_throttled`] would start a probe,
+    /// asked without claiming anything.
+    ///
+    /// For a caller polling on a timer: reaching this cache through
+    /// `update_global` wakes everything observing it even when the answer is
+    /// "not yet", and a pane asking three times a second redraws the window
+    /// three times a second to be told no.
+    pub fn probe_due(&self, host: HostId, cwd: &Path, min_interval: Duration) -> bool {
         let cwd = key(host, cwd);
         if self.probes.is_pending(&(host, cwd.to_path_buf())) {
             return false;
         }
-        let throttle = self.throttle_key(host, &cwd).to_path_buf();
-        if self
+        !self
             .last_probe
-            .get(host, throttle.as_path())
+            .get(host, self.throttle_key(host, &cwd))
             .is_some_and(|at| at.elapsed() < min_interval)
-        {
-            return false;
-        }
-        self.last_probe.insert(host, throttle, Instant::now());
-        self.probes.begin((host, cwd.into_owned()));
-        true
     }
 
     /// `cwd` is already in the cache's own spelling — every caller of this one
