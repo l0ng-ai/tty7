@@ -1208,12 +1208,17 @@ fn run_live(
         AgentStatus::Done => 1,
         AgentStatus::Idle => 0,
     };
-    tab.root
+    let live = tab
+        .root
         .pane_ids()
         .iter()
         .filter_map(|p| states.get(p))
         .max_by_key(|s| urgency(s.status))
-        .map(tty7_core::core::task::Live::from)
+        .map(tty7_core::core::task::Live::from);
+    // Its tab is open and nothing has reported yet: still starting.
+    let fresh = tty7_core::core::machine::unix_now().saturating_sub(run.started)
+        < tty7_core::core::task::START_GRACE_SECS;
+    live.or(fresh.then_some(tty7_core::core::task::STARTING))
 }
 
 fn column_name(column: tty7_core::core::task::Column) -> &'static str {
@@ -2650,6 +2655,29 @@ mod tests {
             .map(|t| t["column"].as_str().unwrap())
             .collect();
         assert_eq!(columns, vec!["queued", "needs-input"]);
+    }
+
+    #[test]
+    fn a_run_whose_agent_has_not_shown_up_yet_is_running_not_over() {
+        use tty7_core::core::task::{Run, Task};
+        let mut backend = mock();
+        let ws = &mut backend.machine.workspaces[0];
+        let tab = ws.tabs[0].id;
+        let mut fresh = Task::new("just started");
+        fresh.push_run(Run {
+            agent: CLIAgent::Claude,
+            tab: Some(tab),
+            session_id: None,
+            started: tty7_core::core::machine::unix_now(),
+            worktree: None,
+        });
+        ws.tasks = vec![fresh];
+        let out = json_of(run_cli(
+            &["tty7", "task", "ls", "api"],
+            &Context::default(),
+            &mut backend,
+        ));
+        assert_eq!(out["tasks"][0]["column"], "running");
     }
 
     #[test]

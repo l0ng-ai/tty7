@@ -366,7 +366,25 @@ impl Tty7App {
         let local = self.can_spawn_locally(cx);
         let mut cards = Vec::new();
         for task in &self.board.tasks {
-            let column = task::column(task, |run| find(run.tab).map(|f| f.live));
+            // A run whose tab is open but whose agent has not shown up yet —
+            // the shell is still starting, the command still being typed —
+            // is starting, not over. Read as an agent that has not taken its
+            // first turn, which `column` counts as Running. Past the grace a
+            // run that never started is over after all.
+            let now = unix_now();
+            let starting = |run: &Run| {
+                run.tab.is_some_and(|id| {
+                    find(Some(id)).is_none()
+                        && self.tabs.iter().any(|t| t.tree_id.get() == id)
+                        && now.saturating_sub(run.started) < task::START_GRACE_SECS
+                })
+            };
+            let column = task::column(task, |run| {
+                find(run.tab)
+                    .map(|f| f.live)
+                    .or_else(|| starting(run).then_some(task::STARTING))
+            });
+            let starting_tab = task.runs.last().filter(|r| starting(r)).and_then(|r| r.tab);
             // The run this card reports: the newest one still open, else the
             // newest one at all.
             let open = task.runs.iter().rev().find_map(|r| find(r.tab));
@@ -397,7 +415,7 @@ impl Tty7App {
                     Column::Queued => task.paused.or(Some(task.created)),
                     _ => last.map(|r| r.started),
                 },
-                tab: open.map(|f| f.id),
+                tab: open.map(|f| f.id).or(starting_tab),
                 resumable: open.is_none() && last.is_some_and(|r| r.session_id.is_some()),
                 paused: task.paused.is_some(),
                 worktree_gone: local

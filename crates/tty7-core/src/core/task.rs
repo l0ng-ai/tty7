@@ -36,6 +36,19 @@ pub const MAX_PROMPT_BYTES: usize = 16 * 1024;
 /// resumed and nobody resumes the tenth attempt at the same thing.
 pub const MAX_RUNS: usize = 8;
 
+/// How long a run's tab may take to show its agent before the run counts as
+/// never having started: a shell's startup, then the agent's own. Until then
+/// a run with its tab open and no agent in it is starting, not over — see
+/// [`STARTING`].
+pub const START_GRACE_SECS: u64 = 120;
+
+/// What a run that is still starting reads as: an agent that has not taken
+/// its first turn, which [`column`] puts in Running.
+pub const STARTING: Live = Live {
+    status: AgentStatus::Idle,
+    turns: 0,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TaskId(uuid::Uuid);
