@@ -661,6 +661,13 @@ const INTEGRATION_NOTICE_TIMEOUT: std::time::Duration = std::time::Duration::fro
 
 const OPPORTUNISTIC_GIT_GAP: std::time::Duration = std::time::Duration::from_millis(1500);
 
+/// How long a pane whose repository is still unanswered waits before asking
+/// again. Only a probe that failed leaves it that way, and whatever broke it
+/// (a remote link mid-reconnect, a `git` that would not start) is gone in
+/// seconds, not milliseconds — nor worth a request every poll tick while it
+/// lasts.
+const GIT_RETRY_GAP: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// How long a title the program set has to stand before the tab adopts it.
 ///
 /// Long enough that a command which is over almost as soon as it started never
@@ -705,6 +712,9 @@ const MAX_HISTORY_BYTES: u64 = 4 << 20;
 enum GitRefresh {
     Edge,
     Opportunistic,
+    /// Nothing happened; the cache just has no answer for this pane's cwd
+    /// yet, because the last probe failed. Throttled by [`GIT_RETRY_GAP`].
+    Retry,
 }
 
 fn known_pty_shim(fg: &str) -> Option<&'static str> {
@@ -2155,6 +2165,20 @@ impl TerminalView {
 
     pub fn git_status_cwd(&self) -> Option<&std::path::Path> {
         self.git_status_cwd.as_deref()
+    }
+
+    /// This pane sits somewhere the repo cache cannot place yet — neither a
+    /// repository nor "not one". A probe in flight looks the same, and the
+    /// throttle turns the retry away; the case this exists for is a probe that
+    /// failed, which leaves the answer open instead of recording a wrong one,
+    /// and would otherwise wait for the cwd to change or a command to finish
+    /// before anyone asked again.
+    fn git_repo_unanswered(&self, cx: &App) -> bool {
+        let Some(cwd) = self.git_status_cwd.as_deref() else {
+            return false;
+        };
+        cx.try_global::<crate::terminal::git_status::GitStatusCache>()
+            .is_none_or(|cache| cache.known_repo_for(self.host_id, cwd).is_none())
     }
 
     /// Plant the cwd the git-status poll would have found. For tests that
@@ -4011,6 +4035,8 @@ impl TerminalView {
             self.refresh_git_status(cwd_now, GitRefresh::Edge, cx);
         } else if tool_activity {
             self.refresh_git_status(cwd_now, GitRefresh::Opportunistic, cx);
+        } else if self.git_repo_unanswered(cx) {
+            self.refresh_git_status(cwd_now, GitRefresh::Retry, cx);
         }
 
         self.follow_history_scope(cx);
@@ -4219,6 +4245,7 @@ impl TerminalView {
             GitRefresh::Opportunistic => {
                 cache.begin_probe_throttled(id, &cwd, OPPORTUNISTIC_GIT_GAP)
             }
+            GitRefresh::Retry => cache.begin_probe_throttled(id, &cwd, GIT_RETRY_GAP),
         });
         if !claimed {
             return;
@@ -4228,10 +4255,13 @@ impl TerminalView {
         crate::ui::host_ops::HostOps::run_detached(
             host,
             cx,
-            move |h| crate::terminal::git_status::probe(h, &probe_cwd),
+            move |h| crate::terminal::git_status::probe_repo(h, &probe_cwd),
             move |cx, result| {
-                let rerun = cx.update_global::<GitStatusCache, _>(|cache, _| {
-                    cache.finish_probe(id, &cwd, result)
+                use crate::terminal::git_status::RepoProbe;
+                let rerun = cx.update_global::<GitStatusCache, _>(|cache, _| match result {
+                    RepoProbe::Repo(snap) => cache.finish_probe(id, &cwd, Some(snap)),
+                    RepoProbe::NotARepo => cache.finish_probe(id, &cwd, None),
+                    RepoProbe::Failed => cache.fail_probe(id, &cwd),
                 });
                 if rerun {
                     let _ = pane.update(cx, |view, cx| {
