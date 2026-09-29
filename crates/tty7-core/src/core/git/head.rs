@@ -92,7 +92,7 @@ fn branch_of(head: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::git::test_support::PINS;
+    use crate::core::git::test_support::{PINS, one_spelling};
 
     fn git(cwd: &Path, args: &[&str]) -> Option<String> {
         let mut full = PINS.to_vec();
@@ -155,9 +155,14 @@ mod tests {
             assert_eq!(got.root, canon(root), "root of {}", cwd.display());
             assert_eq!(got.home, canon(home), "home of {}", cwd.display());
             assert_eq!(got.branch.as_deref(), Some(branch));
+            // In one spelling: `canonicalize` answers `\\?\C:\…` on Windows and
+            // git `C:/…`. `probe_repo` folds the first into the local spelling
+            // before anything keys on it.
             assert_eq!(
-                got.root,
-                PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"]).unwrap()),
+                one_spelling(&got.root),
+                one_spelling(Path::new(
+                    &git(cwd, &["rev-parse", "--show-toplevel"]).unwrap()
+                )),
                 "and git names the same root"
             );
         }
