@@ -659,7 +659,11 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         // terminal back, so a default chord here would only be one more thing
         // competing for a two-key combination nobody asked for.
         ("ToggleDocumentFill", ""),
-        ("ToggleBoard", "secondary-alt-b"),
+        // Two keys, one hand, claimed by nothing else — not ⌘E, which Search
+        // Everywhere keeps for its edit gesture (see `search::view`). Not
+        // Ctrl+I elsewhere: that is Tab to every terminal. Alt+0 sits in
+        // front of Alt+1…9, which are the tabs there — the board as tab zero.
+        ("ToggleBoard", per_platform("secondary-i", "alt-0")),
         ("DocumentWidthThird", ""),
         ("DocumentWidthHalf", ""),
         ("DocumentWidthTwoThirds", ""),

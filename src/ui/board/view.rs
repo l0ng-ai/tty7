@@ -791,6 +791,12 @@ impl Tty7App {
         let warn = theme.warning;
         h_flex()
             .id("sidebar-board")
+            // The chord is whatever the keymap binds now, so a rebind shows.
+            .tooltip(|window, cx| {
+                gpui_component::tooltip::Tooltip::new(t(L10nKey::CmdToggleBoard))
+                    .action(&crate::core::actions::ToggleBoard, None)
+                    .build(window, cx)
+            })
             .w_full()
             .flex_shrink_0()
             .h(px(30.))
