@@ -371,11 +371,31 @@ function pairScreen() {
         h(
           "ol",
           { class: "steps" },
-          h("li", {}, h("span", {}, "On your computer, run ", h("code", {}, "tty7-gateway pair"), ".")),
+          // Named as the desktop's Settings names them: most people pair
+          // from there, not from the command line.
           h(
             "li",
             {},
-            h("span", {}, canScan ? "Scan the QR code it shows, or paste its code below." : "Copy the code it prints and paste it below."),
+            h(
+              "span",
+              {},
+              "In tty7 on your computer, open ",
+              h("strong", {}, "Settings → Mobile"),
+              " and turn on ",
+              h("strong", {}, "Allow phone access"),
+              ".",
+            ),
+          ),
+          h(
+            "li",
+            {},
+            h(
+              "span",
+              {},
+              "Click ",
+              h("strong", {}, "Show code"),
+              canScan ? ", then scan it here, or copy the code and paste it below." : ", copy the code and paste it below.",
+            ),
           ),
         ),
         h(
@@ -398,9 +418,9 @@ function pairScreen() {
           h(
             "p",
             { class: "group-note" },
-            "How this phone shows up in ",
-            h("code", {}, "tty7-gateway devices"),
-            ".",
+            "How this phone shows up under ",
+            h("strong", {}, "Paired phones"),
+            " on your computer.",
           ),
         ),
       ],
@@ -523,9 +543,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
           title: `Can't reach ${host.name}`,
           body: [
             sentence(message),
-            " Check that ",
-            h("code", {}, "tty7-gateway serve"),
-            ` is running on ${host.name}.`,
+            ` Check that tty7 is running on ${host.name} with phone access on.`,
           ],
           actions: [
             { label: "Try now", run: start },
@@ -553,9 +571,9 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
             noticeCard({
               title: `Still looking for ${host.name}`,
               body: [
-                "Check that ",
-                h("code", {}, "tty7-gateway serve"),
-                " is running there. If it restarted or the network changed since you paired, pairing again gives this phone its new address.",
+                "Check that tty7 is running there with phone access on (",
+                h("strong", {}, "Settings → Mobile"),
+                "). If the network changed since you paired, pairing again gives this phone its new address.",
               ],
               tone: "warn",
               actions: [{ label: "Pair again", run: () => pairScreen() }],
@@ -1195,12 +1213,26 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // cannot do: a full-screen program, a password prompt.
     const keyboard = h("button", { class: "round", ariaLabel: "Type into the terminal" }, ico("keyboard"));
     const compose = h("div", { class: "compose" }, field, sendKey, keyboard);
+    // What typing straight into the terminal goes through. xterm's own hidden
+    // textarea is not: iOS input methods never commit into it (a pinyin
+    // candidate stays unwritten), so this one, a plain field the keyboard
+    // treats like any other, takes the keys and hands them on as they are
+    // committed. Nothing is sent mid-composition.
+    const typing = h("textarea", {
+      class: "term-typing",
+      rows: 1,
+      autocapitalize: "off",
+      spellcheck: false,
+      ariaLabel: "Type into the terminal",
+    });
+    typing.setAttribute("autocorrect", "off");
+    typing.setAttribute("autocomplete", "off");
 
     const view = h(
       "div",
       { class: "screen term-screen" },
       bar,
-      h("div", { class: "term-wrap" }, screenEl, copyView, banner),
+      h("div", { class: "term-wrap" }, screenEl, typing, copyView, banner),
       h("div", { class: "term-dock" }, pages, dots, compose),
     );
 
@@ -1212,6 +1244,13 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       scrollback: 5000,
       cursorBlink: false,
       theme: terminalTheme(),
+      // Nothing reaches the pane from xterm itself. Keys come through `typing`
+      // and the key bar (iOS input methods never commit into xterm's own
+      // textarea). And xterm's answers to a program's queries — colours,
+      // device attributes, the cursor's position — stay unsent: the desktop,
+      // which owns the pane, answers those already, and a second answer from
+      // here arrives late, on a replay, and lands in the shell as typed text.
+      disableStdin: true,
     });
 
     let handle: number | null = null;
@@ -1266,9 +1305,10 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         ctrl = false;
         ctrlKey?.classList.remove("on");
       }
+      // Typing brings a pane scrolled back into its history to the prompt.
+      term.scrollToBottom();
       void input(data);
     };
-    term.onData(send);
 
     const canPaste = typeof navigator.clipboard?.readText === "function";
     const paste = async () => {
@@ -1282,7 +1322,10 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       if (document.activeElement === field) {
         field.setRangeText(text, field.selectionStart, field.selectionEnd, "end");
         edited();
-      } else term.paste(text);
+      } else {
+        const body = text.replace(/\r?\n/g, "\r");
+        send(term.modes.bracketedPasteMode ? `\x1b[200~${body}\x1b[201~` : body);
+      }
     };
 
     for (const page of KEY_PAGES) {
@@ -1353,9 +1396,50 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
 
     keyboard.onpointerdown = (e) => e.preventDefault();
     keyboard.onclick = () => {
-      if (screenEl.contains(document.activeElement)) term.blur();
-      else term.focus();
+      if (document.activeElement === typing) typing.blur();
+      else typing.focus({ preventScroll: true });
     };
+    typing.addEventListener("focus", () => keyboard.classList.add("on"));
+    typing.addEventListener("blur", () => keyboard.classList.remove("on"));
+
+    // Committed text goes to the pane and the field is emptied again; while
+    // an input method is composing, the field holds the candidate.
+    let imeOpen = false;
+    const flush = () => {
+      if (imeOpen || !typing.value) return;
+      const text = typing.value.replace(/\r?\n/g, "\r");
+      typing.value = "";
+      send(text);
+    };
+    typing.addEventListener("compositionstart", () => (imeOpen = true));
+    typing.addEventListener("compositionend", () => {
+      imeOpen = false;
+      // The committed text is in the field after this event, not during it.
+      setTimeout(flush);
+    });
+    typing.addEventListener("input", (e) => {
+      if (!(e as InputEvent).isComposing) flush();
+    });
+    // The keys a field would keep to itself, as the terminal's: a Backspace on
+    // the empty field is the pane's, and so on. An input method's own Enter
+    // and Backspace (keyCode 229) stay with it.
+    const TYPING_KEYS: Record<string, string> = {
+      Backspace: "\x7f",
+      Enter: "\r",
+      Tab: "\t",
+      Escape: "\x1b",
+      ArrowUp: "\x1b[A",
+      ArrowDown: "\x1b[B",
+      ArrowRight: "\x1b[C",
+      ArrowLeft: "\x1b[D",
+    };
+    typing.addEventListener("keydown", (e) => {
+      if (imeOpen || e.isComposing || e.keyCode === 229) return;
+      const seq = TYPING_KEYS[e.key];
+      if (!seq || (e.key === "Backspace" && typing.value)) return;
+      e.preventDefault();
+      send(e.shiftKey && e.key === "Tab" ? "\x1b[Z" : seq);
+    });
 
     // Two ways to show a pane wider than the phone. Fitted, the font shrinks
     // until every column shows; readable, the font stays legible and the view
@@ -1399,6 +1483,94 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       bar.style.translate = `${Math.min(0, edge - (box.offsetLeft + box.offsetWidth))}px 0`;
     };
     screenEl.addEventListener("scroll", pinScrollbar, { passive: true });
+
+    // Scrolling the scrollback by touch. xterm 6 carries a gesture recogniser
+    // but registers nothing with it, so a swipe over the terminal never
+    // reaches the scrollback. A swipe is claimed by its first few points:
+    // mostly vertical, it scrolls the buffer here, a row at a time, and
+    // coasts after the finger lifts; mostly sideways, it is left to the
+    // native pan of a pane wider than the phone.
+    let touch: { x: number; y: number; axis: "x" | "y" | null; carry: number; samples: [number, number][] } | null =
+      null;
+    let coast = 0;
+    const rowHeight = () => {
+      const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen");
+      return drawn && term.rows ? drawn.clientHeight / term.rows : 14;
+    };
+    // Moves the buffer by a distance in pixels, keeping what is short of a
+    // row for the next move. Dragging down goes back in the scrollback.
+    const scrollBy = (dy: number, carry: number) => {
+      const total = carry + dy;
+      const rows = Math.trunc(total / rowHeight());
+      if (rows) term.scrollLines(-rows);
+      return total - rows * rowHeight();
+    };
+    screenEl.addEventListener(
+      "touchstart",
+      (e) => {
+        cancelAnimationFrame(coast);
+        if (e.touches.length !== 1) return (touch = null);
+        const t = e.touches[0];
+        touch = { x: t.clientX, y: t.clientY, axis: null, carry: 0, samples: [[t.clientY, e.timeStamp]] };
+      },
+      { passive: true },
+    );
+    screenEl.addEventListener(
+      "touchmove",
+      (e) => {
+        if (!touch || e.touches.length !== 1) return;
+        const t = e.touches[0];
+        if (!touch.axis) {
+          const dx = Math.abs(t.clientX - touch.x);
+          const dy = Math.abs(t.clientY - touch.y);
+          if (Math.max(dx, dy) < 6) return;
+          touch.axis = dy > dx ? "y" : "x";
+        }
+        if (touch.axis !== "y") return;
+        e.preventDefault();
+        const last = touch.samples[touch.samples.length - 1][0];
+        touch.carry = scrollBy(t.clientY - last, touch.carry);
+        touch.samples.push([t.clientY, e.timeStamp]);
+        if (touch.samples.length > 5) touch.samples.shift();
+      },
+      { passive: false },
+    );
+    screenEl.addEventListener(
+      "touchend",
+      (e) => {
+        const lifted = touch;
+        touch = null;
+        // A tap: the keyboard comes up for typing into the pane. The mouse
+        // events the tap would turn into are cancelled, or xterm would move
+        // focus to its own textarea.
+        if (lifted && !lifted.axis && e.cancelable) {
+          e.preventDefault();
+          typing.focus({ preventScroll: true });
+          return;
+        }
+        if (lifted?.axis === "y") glide(lifted);
+      },
+      { passive: false },
+    );
+    const glide = (lifted: NonNullable<typeof touch>) => {
+      if (lifted.samples.length < 2) return;
+      const [y0, t0] = lifted.samples[0];
+      const [y1, t1] = lifted.samples[lifted.samples.length - 1];
+      // Pixels per millisecond at the lift, eased out over about a second.
+      let velocity = (y1 - y0) / Math.max(1, t1 - t0);
+      let carry = lifted.carry;
+      let at = performance.now();
+      const step = (now: number) => {
+        if (!alive) return;
+        const dt = now - at;
+        at = now;
+        velocity *= Math.pow(0.995, dt);
+        if (Math.abs(velocity) < 0.02) return;
+        carry = scrollBy(velocity * dt, carry);
+        coast = requestAnimationFrame(step);
+      };
+      coast = requestAnimationFrame(step);
+    };
     const follow = () => {
       if (!screenEl.classList.contains("panning")) return;
       const cell = screenEl.scrollWidth / cols;
@@ -1510,7 +1682,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         copyText.textContent = "";
         return;
       }
-      term.blur();
+      typing.blur();
       field.blur();
       copyText.textContent = bufferText();
       copyText.scrollTop = copyText.scrollHeight;
@@ -1656,9 +1828,6 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       document.fonts.load("12px Hack").finally(() => {
         if (!alive) return;
         term.open(screenEl);
-        // The keyboard button shows when the terminal has the keyboard.
-        term.textarea?.addEventListener("focus", () => keyboard.classList.add("on"));
-        term.textarea?.addEventListener("blur", () => keyboard.classList.remove("on"));
         fit();
         edited();
         open();

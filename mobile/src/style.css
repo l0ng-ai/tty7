@@ -137,6 +137,12 @@ h3 {
   margin: 0;
 }
 
+/* A control on the desktop, named where the text says to use it. */
+strong {
+  font-weight: 600;
+  color: var(--ink);
+}
+
 code {
   font: 0.82em var(--mono);
   padding: 0.12em 0.4em;
@@ -1174,6 +1180,25 @@ html.scanning #app {
 .term .xterm {
   -webkit-user-select: text;
   user-select: text;
+}
+
+/* The field typing into the terminal goes through: focusable, so the
+   keyboard and its input methods work, but never seen. 16px, or iOS zooms
+   the page when it takes focus. */
+.term-typing {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  resize: none;
+  pointer-events: none;
+  caret-color: transparent;
+  font-size: 16px;
 }
 
 .term-copy {
