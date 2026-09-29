@@ -132,7 +132,9 @@ impl State {
                     format!(" (pid {holder})")
                 };
                 // Read in Settings → Mobile: the app, not the process.
-                anyhow::bail!("another copy of tty7 is already serving phones{pid} — quit it first");
+                anyhow::bail!(
+                    "another copy of tty7 is already serving phones{pid} — quit it first"
+                );
             }
             Err(fs::TryLockError::Error(e)) => {
                 return Err(e).with_context(|| format!("locking {}", path.display()));

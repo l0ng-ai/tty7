@@ -38,7 +38,8 @@ pub struct Host {
 
 impl Host {
     fn addr(&self) -> Result<EndpointAddr> {
-        let id = EndpointId::from_str(&self.id).context("this machine's pairing is damaged — pair it again")?;
+        let id = EndpointId::from_str(&self.id)
+            .context("this machine's pairing is damaged — pair it again")?;
         let mut addr = EndpointAddr::new(id);
         if let Some(relay) = self
             .relay
