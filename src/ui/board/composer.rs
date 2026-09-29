@@ -451,7 +451,7 @@ impl Tty7App {
 fn short_name(agent: CLIAgent) -> &'static str {
     let name = agent.display_name();
     match name.split_once(' ') {
-        Some((first, rest)) if matches!(rest, "Code" | "CLI" | "Agent") => first,
+        Some((first, "Code" | "CLI" | "Agent")) => first,
         _ => name,
     }
 }
