@@ -77,9 +77,12 @@ body:
     attributes:
       label: Log output
       description: >
-        The tail of `~/.config/tty7/tty7.log`
-        (`%APPDATA%\tty7\tty7.log` on Windows), if it has anything from around
-        the time it broke. This is rendered as code, so no backticks needed.
+        tty7 only writes a log when `TTY7_LOG` is set (e.g. `TTY7_LOG=debug`),
+        so there is none by default: set it, quit tty7 completely, reproduce,
+        then paste the tail of `~/.config/tty7/tty7.log`
+        (`%APPDATA%\tty7\tty7.log` on Windows). After a crash, include
+        `crash.log` from the same folder — that one is always written. This is
+        rendered as code, so no backticks needed.
       render: shell
 
   - type: textarea
