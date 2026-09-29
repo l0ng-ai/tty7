@@ -351,8 +351,13 @@ impl Tty7App {
             });
 
         // What can be done from here, the move it would be first.
-        let (tab, question, resumable, column) =
-            (card.tab, card.question, card.resumable, card.column);
+        let (tab, question, resumable, column, gone) = (
+            card.tab,
+            card.question,
+            card.resumable,
+            card.column,
+            card.worktree_gone,
+        );
         let button =
             |id: &'static str,
              label: L10nKey,
@@ -446,26 +451,36 @@ impl Tty7App {
             Column::Done => {
                 if let CardRef::Task(id) = key {
                     actions.push(button(
-                        "board-peek-reopen",
-                        L10nKey::BoardReopen,
+                        "board-peek-clean",
+                        L10nKey::BoardCleanUp,
                         Tone::Secondary,
                         cx,
-                        Box::new(move |this, window, cx| this.reopen(id, window, cx)),
+                        Box::new(move |this, window, cx| this.clean_up(vec![id], window, cx)),
                     ));
-                    if resumable {
-                        actions.push(button(
-                            "board-peek-resume",
-                            L10nKey::BoardResume,
+                    // A worktree that is gone has nothing to go back to: the
+                    // way on is a fresh run, not a reopen.
+                    match gone {
+                        true => actions.push(button(
+                            "board-peek-again",
+                            L10nKey::BoardStartAgain,
                             Tone::Primary,
                             cx,
-                            Box::new(move |this, window, cx| this.resume_task(id, window, cx)),
-                        ));
+                            Box::new(move |this, window, cx| this.start_again(id, window, cx)),
+                        )),
+                        false => actions.push(button(
+                            "board-peek-reopen",
+                            L10nKey::BoardReopen,
+                            Tone::Primary,
+                            cx,
+                            Box::new(move |this, window, cx| this.reopen(id, window, cx)),
+                        )),
                     }
                 }
                 actions.extend(open_terminal(cx));
             }
         }
         if resumable
+            && !gone
             && column != Column::Done
             && let CardRef::Task(id) = key
         {

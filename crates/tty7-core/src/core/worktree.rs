@@ -112,6 +112,64 @@ pub fn remove(host: &dyn Host, wt: &ManagedWorktree, force: bool) -> Result<(), 
     Ok(())
 }
 
+/// What deleting a managed worktree would throw away, for the question asked
+/// before doing it.
+#[derive(Debug, Clone)]
+pub struct Discard {
+    pub worktree: ManagedWorktree,
+    /// The branch has commits the main checkout's current branch does not.
+    pub unmerged: bool,
+    /// The branch the main checkout is on — what "merged" was measured
+    /// against.
+    pub base: String,
+}
+
+impl Discard {
+    /// Anything that would be lost for good: work never committed, or
+    /// commits never merged.
+    pub fn loses_work(&self) -> bool {
+        self.worktree.dirty || self.unmerged
+    }
+}
+
+/// Looks at the managed worktree at `path` before it is deleted. `None` when
+/// there is none there any more (or it is not one tty7 made).
+pub fn discard_check(host: &dyn Host, path: &Path) -> Option<Discard> {
+    let worktree = managed(host, path)?;
+    let unmerged = git(
+        host,
+        &worktree.main_root,
+        &["merge-base", "--is-ancestor", &worktree.branch, "HEAD"],
+    )
+    .is_err();
+    let base = git(
+        host,
+        &worktree.main_root,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+    )
+    .unwrap_or_else(|_| "HEAD".to_string());
+    Some(Discard {
+        worktree,
+        unmerged,
+        base,
+    })
+}
+
+/// Deletes the worktree and its branch, whatever is in them — the caller has
+/// already asked (see [`Discard::loses_work`]).
+pub fn discard(host: &dyn Host, d: &Discard) -> Result<(), String> {
+    let wt = &d.worktree;
+    let path = wt.path.to_str().ok_or("worktree path is not valid UTF-8")?;
+    git(
+        host,
+        &wt.main_root,
+        &["worktree", "remove", "--force", path],
+    )?;
+    let flag = if d.unmerged { "-D" } else { "-d" };
+    let _ = git(host, &wt.main_root, &["branch", flag, &wt.branch]);
+    Ok(())
+}
+
 fn repo_dir(host: &dyn Host, cwd: &Path) -> Result<(PathBuf, PathBuf), String> {
     let repo_root = git(host, cwd, &["rev-parse", "--show-toplevel"])
         .map_err(|_| "not inside a git repository".to_string())?;
@@ -323,6 +381,32 @@ mod tests {
         assert_eq!(head, "feat/my-branch");
         assert!(wt.path.join("a.txt").exists());
         assert!(!wt.path.join("b.txt").exists());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn discard_says_what_would_be_lost_and_then_loses_it() {
+        let h = h();
+        let repo = temp_repo("discard");
+        let merged = create_for(&*h, &repo, Some("merged")).unwrap();
+        let check = discard_check(&*h, &merged.path).unwrap();
+        assert!(!check.loses_work(), "a fresh branch is already in HEAD");
+
+        let ahead = create_for(&*h, &repo, Some("ahead")).unwrap();
+        std::fs::write(ahead.path.join("b.txt"), "b").unwrap();
+        sh(&ahead.path, &["git", "add", "."]);
+        sh(&ahead.path, &["git", "commit", "-q", "-m", "work"]);
+        std::fs::write(ahead.path.join("c.txt"), "c").unwrap();
+        let check = discard_check(&*h, &ahead.path).unwrap();
+        assert!(check.unmerged && check.worktree.dirty);
+
+        discard(&*h, &check).unwrap();
+        assert!(!ahead.path.exists());
+        assert!(
+            !branch_exists(&*h, &repo, "ahead"),
+            "an unmerged branch goes too"
+        );
+        assert!(discard_check(&*h, &ahead.path).is_none());
         let _ = std::fs::remove_dir_all(&repo);
     }
 

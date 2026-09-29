@@ -9,7 +9,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use tty7_core::core::group_key::{GroupId, PinnedGroup};
-use tty7_core::core::task::Column;
+use tty7_core::core::task::{Column, TaskId};
 
 use super::{Card, CardDrag, CardRef, MainView, ago, move_verb, moves_from};
 use crate::core::cli_agent::{AgentStatus, CLIAgent};
@@ -391,7 +391,72 @@ impl Tty7App {
                     .text_color(muted)
                     .font_features(crate::ui::tab_sidebar::tabular())
                     .child(cards.len().to_string()),
-            );
+            )
+            .when(col == Column::Done && !cards.is_empty(), |head| {
+                let ids: Vec<TaskId> = cards
+                    .iter()
+                    .filter_map(|c| match c.key {
+                        CardRef::Task(id) => Some(id),
+                        CardRef::Loose(_) => None,
+                    })
+                    .collect();
+                head.child(div().flex_1()).child(
+                    div()
+                        .id("board-clean-all")
+                        .px(px(6.))
+                        .h(px(20.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(5.))
+                        .text_color(muted)
+                        .cursor_pointer()
+                        .hover(move |s| s.text_color(fg))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.clean_up(ids.clone(), window, cx)
+                        }))
+                        .child(t(L10nKey::BoardCleanUpAll)),
+                )
+            });
+        // Done keeps the last week on show; older cards fold into one row
+        // until asked for.
+        let (shown, folded): (Vec<&Card>, usize) = match col {
+            Column::Done if !self.board.show_old_done => {
+                let cutoff =
+                    crate::core::config::unix_now().saturating_sub(super::DONE_RECENT_SECS);
+                let recent: Vec<&Card> = cards
+                    .iter()
+                    .copied()
+                    .filter(|c| c.since.is_none_or(|at| at >= cutoff))
+                    .collect();
+                let folded = cards.len() - recent.len();
+                (recent, folded)
+            }
+            _ => (cards.to_vec(), 0),
+        };
+        let fold = (folded > 0).then(|| {
+            div()
+                .id("board-done-older")
+                .flex_none()
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.))
+                .text_size(rems(META))
+                .text_color(muted)
+                .cursor_pointer()
+                .hover(move |s| s.text_color(fg))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.board.show_old_done = true;
+                    cx.notify();
+                }))
+                .child(t_fmt(
+                    L10nKey::BoardOlderDone,
+                    &[("n", &folded.to_string())],
+                ))
+        });
         let list = v_flex()
             .id(("board-column-list", col as usize))
             .flex_1()
@@ -400,7 +465,8 @@ impl Tty7App {
             .gap(px(CARD_GAP))
             .pb(px(4.))
             .children(zone)
-            .children(cards.iter().map(|c| self.render_card(c, cx)))
+            .children(shown.iter().map(|c| self.render_card(c, cx)))
+            .children(fold)
             .children(empty);
         let over: Hsla = gpui::rgb(dialog::popover_rungs(cx).hover).into();
         v_flex()
@@ -571,7 +637,9 @@ impl Tty7App {
                         .child(div().text_color(danger).child(format!("−{removed}"))),
                 );
             }
-            if card.paused {
+            if card.worktree_gone {
+                row = row.child(t(L10nKey::BoardWorktreeGone));
+            } else if card.paused {
                 row = row.child(t(L10nKey::BoardStatusPaused));
             } else if card.resumable {
                 row = row.child(t(L10nKey::BoardResumable));

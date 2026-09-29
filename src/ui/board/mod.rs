@@ -18,6 +18,7 @@
 //! call it done. A drag, a button on the card and the peek panel all end in
 //! [`Tty7App::board_move`].
 
+mod cleanup;
 mod composer;
 mod peek;
 mod view;
@@ -70,6 +71,8 @@ pub(crate) struct Board {
     dragging: Option<CardDrag>,
     toast: Option<Toast>,
     toast_seq: u64,
+    /// Done cards older than [`DONE_RECENT_SECS`] are on show.
+    show_old_done: bool,
 }
 
 impl Board {
@@ -89,6 +92,7 @@ impl Board {
             dragging: None,
             toast: None,
             toast_seq: 0,
+            show_old_done: false,
         }
     }
 }
@@ -160,6 +164,9 @@ struct Card {
     /// A finished run this card could pick back up.
     resumable: bool,
     paused: bool,
+    /// Its last run worked in a worktree that is no longer there: nothing to
+    /// reopen or resume, only to start again.
+    worktree_gone: bool,
 }
 
 /// What the board reads off one open tab.
@@ -208,6 +215,9 @@ const CONTINUE: &str = "Continue where you left off.";
 const PAUSE_GRACE_SECS: u64 = 3;
 
 const TOAST_MS: u64 = 4500;
+
+/// How long a finished card stays on show in Done before it folds away.
+const DONE_RECENT_SECS: u64 = 7 * 24 * 3600;
 
 impl Tty7App {
     pub(crate) fn board_open(&self) -> bool {
@@ -351,6 +361,9 @@ impl Tty7App {
     fn board_cards(&self, window: Option<&Window>, full: bool, cx: &App) -> Vec<Card> {
         let facts = self.tab_facts(window, full, cx);
         let find = |tab: Option<TabId>| tab.and_then(|id| facts.iter().find(|f| f.id == id));
+        // Whether a worktree is still there can only be asked of this
+        // computer's disk; a remote one is taken to be.
+        let local = self.can_spawn_locally(cx);
         let mut cards = Vec::new();
         for task in &self.board.tasks {
             let column = task::column(task, |run| find(run.tab).map(|f| f.live));
@@ -387,6 +400,11 @@ impl Tty7App {
                 tab: open.map(|f| f.id),
                 resumable: open.is_none() && last.is_some_and(|r| r.session_id.is_some()),
                 paused: task.paused.is_some(),
+                worktree_gone: local
+                    && open.is_none()
+                    && last
+                        .and_then(|r| r.worktree.as_deref())
+                        .is_some_and(|p| !std::path::Path::new(p).exists()),
             });
         }
         let claimed = |id: TabId| self.board.tasks.iter().any(|t| t.runs_in(id));
@@ -413,6 +431,7 @@ impl Tty7App {
                 tab: Some(f.id),
                 resumable: false,
                 paused: false,
+                worktree_gone: false,
             });
         }
         if !self.board.agent_filter.is_empty() {
@@ -750,6 +769,18 @@ impl Tty7App {
                 Some(undo),
                 cx,
             );
+        }
+    }
+
+    /// Starts a finished task over: a new run, from where the task says it
+    /// runs — for one whose worktree is gone and has nothing to reopen.
+    fn start_again(&mut self, id: TaskId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut task) = self.task(id) else {
+            return;
+        };
+        task.done = None;
+        if self.save_task(task, window, cx) {
+            self.start_task(id, None, window, cx);
         }
     }
 

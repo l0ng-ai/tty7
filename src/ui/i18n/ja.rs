@@ -1842,6 +1842,20 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "このマシンのサーバーはまだタスクを保存できません。ボードを使うには更新してください"
         }
         L10nKey::BoardNow => "たった今",
+        L10nKey::BoardCleanUp => "クリーンアップ",
+        L10nKey::BoardCleanUpAll => "すべてクリーンアップ",
+        L10nKey::BoardStartAgain => "やり直す",
+        L10nKey::BoardWorktreeGone => "worktree は削除済み",
+        L10nKey::BoardOlderDone => "さらに古いもの {n} 件",
+        L10nKey::BoardCleanupTitle => "{n} 件のタスクをクリーンアップしますか？",
+        L10nKey::BoardCleanupDetail => {
+            "worktree とブランチが削除されます。次の内容は他に残っていません：\n\n{list}"
+        }
+        L10nKey::BoardCleanupDirty => "未コミットの変更あり",
+        L10nKey::BoardCleanupUnmerged => "{base} に未マージ",
+        L10nKey::BoardCleanupDelete => "削除",
+        L10nKey::BoardToastCleaned => "{n} 件をクリーンアップ",
+        L10nKey::BoardCleanupFailed => "{path} を削除できませんでした: {error}",
         L10nKey::BoardModeWorktree => "新しい worktree",
         L10nKey::BoardModeInPlace => "その場で実行",
         L10nKey::BoardComposerPlaceholder => "タスクを書いてください。1 行目がタイトルになります。",

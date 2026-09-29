@@ -1669,6 +1669,20 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "这台机器的 server 版本太旧，还不能保存任务——更新后即可使用看板"
         }
         L10nKey::BoardNow => "刚刚",
+        L10nKey::BoardCleanUp => "清理",
+        L10nKey::BoardCleanUpAll => "全部清理",
+        L10nKey::BoardStartAgain => "重新开始",
+        L10nKey::BoardWorktreeGone => "worktree 已删除",
+        L10nKey::BoardOlderDone => "还有 {n} 个更早的",
+        L10nKey::BoardCleanupTitle => "清理 {n} 个任务？",
+        L10nKey::BoardCleanupDetail => {
+            "它们的 worktree 和分支会被删除，以下内容在别处没有副本：\n\n{list}"
+        }
+        L10nKey::BoardCleanupDirty => "有未提交的改动",
+        L10nKey::BoardCleanupUnmerged => "未合并到 {base}",
+        L10nKey::BoardCleanupDelete => "删除",
+        L10nKey::BoardToastCleaned => "已清理 {n} 个",
+        L10nKey::BoardCleanupFailed => "无法删除 {path}：{error}",
         L10nKey::BoardModeWorktree => "新 worktree",
         L10nKey::BoardModeInPlace => "原地运行",
         L10nKey::BoardComposerPlaceholder => "描述任务，第一行会作为标题。",

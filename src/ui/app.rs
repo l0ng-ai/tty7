@@ -5197,6 +5197,22 @@ impl Tty7App {
             self.ask_before_closing(CloseTarget::Tab(id), reason, window, cx);
             return;
         }
+        self.close_tab_now(index, true, window, cx);
+    }
+
+    /// Closes tab `index` with no more questions. `offer_cleanup` asks, once
+    /// it is gone, whether to delete the worktree it was in — off for a caller
+    /// that is about to delete it anyway (the board cleaning up a task).
+    pub(crate) fn close_tab_now(
+        &mut self,
+        index: usize,
+        offer_cleanup: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if index >= self.tabs.len() {
+            return;
+        }
         self.maximized = None;
         let closing = self.tabs[index].tree_id.get();
         self.editor_close_tab_files(index, cx);
@@ -5231,7 +5247,9 @@ impl Tty7App {
         self.focus_active(window, cx);
         self.save_session(cx);
         cx.notify();
-        self.offer_worktree_cleanup(worktree_cwd, cx);
+        if offer_cleanup {
+            self.offer_worktree_cleanup(worktree_cwd, cx);
+        }
     }
 
     fn offer_worktree_cleanup(

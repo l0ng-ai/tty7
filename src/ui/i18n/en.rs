@@ -1797,6 +1797,20 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "This machine’s server can’t keep tasks yet — update it to use the board"
         }
         L10nKey::BoardNow => "now",
+        L10nKey::BoardCleanUp => "Clean up",
+        L10nKey::BoardCleanUpAll => "Clean up all",
+        L10nKey::BoardStartAgain => "Start again",
+        L10nKey::BoardWorktreeGone => "worktree deleted",
+        L10nKey::BoardOlderDone => "{n} older",
+        L10nKey::BoardCleanupTitle => "Clean up {n} task(s)?",
+        L10nKey::BoardCleanupDetail => {
+            "Their worktrees and branches will be deleted, and these hold work that exists nowhere else:\n\n{list}"
+        }
+        L10nKey::BoardCleanupDirty => "uncommitted changes",
+        L10nKey::BoardCleanupUnmerged => "not merged into {base}",
+        L10nKey::BoardCleanupDelete => "Delete",
+        L10nKey::BoardToastCleaned => "Cleaned up {n}",
+        L10nKey::BoardCleanupFailed => "Could not remove {path}: {error}",
         L10nKey::BoardModeWorktree => "New worktree",
         L10nKey::BoardModeInPlace => "In place",
         L10nKey::BoardComposerPlaceholder => "Describe the task. The first line becomes its title.",
