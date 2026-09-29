@@ -1797,6 +1797,14 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "This machine’s server can’t keep tasks yet — update it to use the board"
         }
         L10nKey::BoardNow => "now",
+        L10nKey::BoardNoPlace => "Pick where it runs",
+        L10nKey::BoardPlaceSearch => "Repository or path",
+        L10nKey::BoardNoMatches => "No matches",
+        L10nKey::BoardModeWorktreeTip => "An isolated worktree on a new branch",
+        L10nKey::BoardModeInPlaceTip => "Work directly in the current checkout",
+        L10nKey::BoardBranchEditTip => "Edit to override the generated branch name",
+        L10nKey::BoardBranchInPlaceTip => "Runs on the branch already checked out",
+        L10nKey::BoardCurrentBranch => "current branch",
         L10nKey::BoardAnswerInTerminal => "Answer in terminal",
         L10nKey::BoardEdit => "Edit…",
         L10nKey::BoardKeep => "Keep as task",

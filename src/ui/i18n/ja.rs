@@ -1842,6 +1842,14 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "このマシンのサーバーはまだタスクを保存できません。ボードを使うには更新してください"
         }
         L10nKey::BoardNow => "たった今",
+        L10nKey::BoardNoPlace => "実行場所を選択",
+        L10nKey::BoardPlaceSearch => "リポジトリまたはパス",
+        L10nKey::BoardNoMatches => "一致なし",
+        L10nKey::BoardModeWorktreeTip => "新しいブランチの独立した worktree で実行",
+        L10nKey::BoardModeInPlaceTip => "現在のチェックアウトで直接実行",
+        L10nKey::BoardBranchEditTip => "自動生成のブランチ名を上書きできます",
+        L10nKey::BoardBranchInPlaceTip => "チェックアウト済みのブランチで実行",
+        L10nKey::BoardCurrentBranch => "現在のブランチ",
         L10nKey::BoardAnswerInTerminal => "ターミナルで回答",
         L10nKey::BoardEdit => "編集…",
         L10nKey::BoardKeep => "タスクとして残す",

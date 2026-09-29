@@ -98,6 +98,10 @@ pub struct Task {
     /// user, never write into the same checkout.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub worktree: bool,
+    /// The branch a worktree run is cut on, when the user named one; `None`
+    /// names it after the title ([`branch_slug`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// Unix seconds.
     #[serde(default)]
     pub created: u64,
@@ -258,6 +262,7 @@ impl Task {
             agent: None,
             group: None,
             worktree: false,
+            branch: None,
             created: crate::core::machine::unix_now(),
             runs: Vec::new(),
             done: None,

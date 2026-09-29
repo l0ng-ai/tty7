@@ -994,7 +994,10 @@ impl Tty7App {
             window.push_notification(t(L10nKey::BoardUnavailable), cx);
             return;
         };
-        let slug = task::branch_slug(&task.title);
+        let slug = task
+            .branch
+            .clone()
+            .or_else(|| task::branch_slug(&task.title));
         crate::ui::host_ops::HostOps::run_in(
             host,
             window,

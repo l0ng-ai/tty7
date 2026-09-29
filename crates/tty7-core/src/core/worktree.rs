@@ -199,23 +199,26 @@ pub fn defaults(host: &dyn Host, cwd: &Path) -> Result<WorktreeDefaults, String>
     Ok(WorktreeDefaults { name, base, dir })
 }
 
-/// A new worktree off `cwd`'s repository, on a new branch of the same name,
-/// from whatever is checked out there now. Named `preferred` when that is
-/// free — with `-2`, `-3`, … when it is taken — and a generated name
-/// otherwise. What the board gives a task's run.
+/// A new worktree off `cwd`'s repository, on a new branch, from whatever is
+/// checked out there now. The branch is `preferred` when that is free — with
+/// `-2`, `-3`, … when it is taken — and a generated name otherwise. The
+/// worktree's folder is the branch with its `/`s as `-`s: `feat/eu` works in
+/// `…/worktrees/feat-eu`. What the board gives a task's run.
 pub fn create_for(
     host: &dyn Host,
     cwd: &Path,
     preferred: Option<&str>,
 ) -> Result<NewWorktree, String> {
     let (repo_root, dir) = repo_dir(host, cwd)?;
-    let taken =
-        |name: &str| branch_exists(host, &repo_root, name) || host.exists(&host.join(&dir, name));
-    let name = match preferred {
+    let folder = |branch: &str| branch.replace(['/', '\\'], "-");
+    let taken = |branch: &str| {
+        branch_exists(host, &repo_root, branch) || host.exists(&host.join(&dir, &folder(branch)))
+    };
+    let branch = match preferred.map(str::trim).filter(|p| !p.is_empty()) {
         Some(base) => std::iter::once(base.to_string())
             .chain((2..100).map(|n| format!("{base}-{n}")))
             .find(|name| !taken(name))
-            .ok_or_else(|| format!("every worktree name after {base} is taken"))?,
+            .ok_or_else(|| format!("every branch name after {base} is taken"))?,
         None => Names::new().unique(taken),
     };
     let base = git(host, &repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
@@ -224,11 +227,16 @@ pub fn create_for(
         host,
         cwd,
         &WorktreeRequest {
-            branch: name.clone(),
-            name,
+            name: folder(&branch),
+            branch,
             base,
         },
     )
+}
+
+/// The branch checked out at `cwd`, for showing where an in-place run lands.
+pub fn current_branch(host: &dyn Host, cwd: &Path) -> Option<String> {
+    git(host, cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()
 }
 
 pub fn create(host: &dyn Host, cwd: &Path, req: &WorktreeRequest) -> Result<NewWorktree, String> {
@@ -381,6 +389,19 @@ mod tests {
         assert_eq!(head, "feat/my-branch");
         assert!(wt.path.join("a.txt").exists());
         assert!(!wt.path.join("b.txt").exists());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn create_for_keeps_a_slashed_branch_and_flattens_its_folder() {
+        let h = h();
+        let repo = temp_repo("slash");
+        let wt = create_for(&*h, &repo, Some("feat/eu-regions")).unwrap();
+        assert_eq!(wt.branch, "feat/eu-regions");
+        assert_eq!(
+            wt.path.file_name().unwrap().to_str().unwrap(),
+            "feat-eu-regions"
+        );
         let _ = std::fs::remove_dir_all(&repo);
     }
 

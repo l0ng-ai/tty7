@@ -9682,7 +9682,7 @@ impl Render for Tty7App {
                 .when_some(self.render_worktree_prompt_overlay(cx), |this, el| {
                     this.child(el)
                 })
-                .when_some(self.render_composer(cx), |this, el| this.child(el))
+                .when_some(self.render_composer(window, cx), |this, el| this.child(el))
                 // Same reason, and the ssh prompt has more claim to it than any
                 // of them: nothing in the window can proceed until the password
                 // is answered, so the scrim has to cover the whole window and

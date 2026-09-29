@@ -2706,6 +2706,13 @@ impl Tty7App {
                 .and_then(|slot| slot.terminal().cloned())
         };
         let tab_cwd = |i: usize| leaf(i).and_then(|view| view.read(cx).spawnable_cwd());
+        let tab_branch = |i: usize| {
+            self.tabs
+                .get(i)
+                .and_then(|t| t.git_status(None, cx))
+                .map(|g| g.branch)
+        };
+        let first_branch = |tabs: &[usize]| tabs.iter().find_map(|&i| tab_branch(i));
         let mut places: Vec<TaskPlace> = Vec::new();
         let mut active = None;
         for section in sidebar_sections(&keys, &self.sidebar_groups) {
@@ -2726,6 +2733,7 @@ impl Tty7App {
                             name: section.name.clone().unwrap_or_default(),
                             cwd,
                             grouped: true,
+                            branch: first_branch(&section.tabs),
                         });
                     }
                 }
@@ -2738,6 +2746,7 @@ impl Tty7App {
                         name: section.name.clone().unwrap_or_default(),
                         cwd: root.clone(),
                         grouped: true,
+                        branch: first_branch(&section.tabs),
                     });
                 }
                 Some(GroupKey::Auto(AutoKey::SshHost(_))) => {}
@@ -2760,6 +2769,7 @@ impl Tty7App {
                                     name,
                                     cwd,
                                     grouped: false,
+                                    branch: tab_branch(i),
                                 });
                                 places.len() - 1
                             }
@@ -3017,6 +3027,8 @@ pub(crate) struct TaskPlace {
     /// A sidebar group (pinned or automatic), rather than the folder of a tab
     /// in none.
     pub grouped: bool,
+    /// The branch its tabs are on, as the sidebar knows it.
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]

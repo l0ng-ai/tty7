@@ -1669,6 +1669,14 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "这台机器的 server 版本太旧，还不能保存任务——更新后即可使用看板"
         }
         L10nKey::BoardNow => "刚刚",
+        L10nKey::BoardNoPlace => "选择运行位置",
+        L10nKey::BoardPlaceSearch => "仓库或路径",
+        L10nKey::BoardNoMatches => "没有匹配项",
+        L10nKey::BoardModeWorktreeTip => "在新分支上的独立 worktree 里运行",
+        L10nKey::BoardModeInPlaceTip => "直接在当前检出目录里运行",
+        L10nKey::BoardBranchEditTip => "可修改，覆盖自动生成的分支名",
+        L10nKey::BoardBranchInPlaceTip => "在当前已检出的分支上运行",
+        L10nKey::BoardCurrentBranch => "当前分支",
         L10nKey::BoardAnswerInTerminal => "去终端回答",
         L10nKey::BoardEdit => "编辑…",
         L10nKey::BoardKeep => "保留为任务",
