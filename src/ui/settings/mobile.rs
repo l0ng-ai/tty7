@@ -29,10 +29,32 @@ const START_POLL: Duration = Duration::from_millis(500);
 /// A pairing code on screen.
 pub(crate) struct Pairing {
     code: String,
+    /// The offer's secret, to ask the gateway's state whether it is still open.
+    secret: String,
     qr: Option<Arc<gpui::Image>>,
     /// The phones paired before this code was made, to tell the new one by.
     before: Vec<String>,
     until: Instant,
+    /// The code no longer pairs. It stays on screen, marked so, until it is
+    /// replaced or dismissed: a code that vanishes by itself leaves whoever
+    /// was about to scan it wondering where it went.
+    spent: Option<Spent>,
+}
+
+#[derive(Clone, Copy)]
+enum Spent {
+    Expired,
+    /// A phone tried it and it did not pair — mistyped, or the connection
+    /// dropped. Any attempt closes an offer.
+    Tried,
+    /// Something else opened a newer offer, which replaces this one.
+    Replaced,
+}
+
+/// Minutes and seconds, for the time a code has left.
+fn countdown(left: Duration) -> String {
+    let secs = left.as_secs();
+    format!("{}:{:02}", secs / 60, secs % 60)
 }
 
 /// What the switch shows: whether phones can actually reach this machine,
@@ -109,8 +131,8 @@ impl Tty7App {
     ) {
         if !on {
             self.update_config(cx, |cfg| cfg.mobile_access = false);
+            self.close_mobile_pairing(cx);
             if let Some(s) = self.active_settings_mut() {
-                s.mobile_pairing = None;
                 s.mobile_starting = false;
             }
             cx.notify();
@@ -164,12 +186,14 @@ impl Tty7App {
         .detach();
     }
 
+    /// Shows a fresh code, replacing any on screen — which the new offer
+    /// closes, since the gateway keeps only one open at a time.
     fn start_mobile_pairing(&mut self, cx: &mut Context<Self>) {
         let Some(state) = gateway_state(true) else {
             return;
         };
-        let code = match tty7_gateway::service::pair_code(&state, PAIR_TTL) {
-            Ok(code) => code,
+        let offer = match tty7_gateway::service::pair_code(&state, PAIR_TTL) {
+            Ok(offer) => offer,
             Err(e) => {
                 log::warn!("could not make a pairing code: {e:#}");
                 return;
@@ -183,18 +207,22 @@ impl Tty7App {
             .collect();
         if let Some(s) = self.active_settings_mut() {
             s.mobile_pairing = Some(Pairing {
-                qr: qr_image(&code),
-                code,
+                qr: qr_image(&offer.code),
+                code: offer.code,
+                secret: offer.secret.clone(),
                 before,
                 until: Instant::now() + PAIR_TTL,
+                spent: None,
             });
             s.mobile_paired = None;
             s.mobile_copied = false;
         }
         cx.notify();
 
-        // Watch for the phone that uses it; the code closes itself then, or
-        // when it runs out.
+        // Watch for the phone that uses it, closing the code then, and mark
+        // it spent once it can no longer pair. A code replaced or dismissed
+        // on screen ends its own watch.
+        let secret = offer.secret;
         cx.spawn(async move |this, cx| {
             loop {
                 smol::Timer::after(PAIR_POLL).await;
@@ -202,7 +230,8 @@ impl Tty7App {
                     let Some(s) = this.active_settings_mut() else {
                         return false;
                     };
-                    let Some(pairing) = &s.mobile_pairing else {
+                    let Some(pairing) = s.mobile_pairing.as_mut().filter(|p| p.secret == secret)
+                    else {
                         return false;
                     };
                     let new = state
@@ -210,16 +239,28 @@ impl Tty7App {
                         .unwrap_or_default()
                         .into_iter()
                         .find(|d| !pairing.before.contains(&d.id));
-                    let expired = Instant::now() >= pairing.until;
                     if let Some(device) = new {
                         s.mobile_paired = Some(device.name);
-                    }
-                    let done = s.mobile_paired.is_some() || expired;
-                    if done {
                         s.mobile_pairing = None;
+                        cx.notify();
+                        return false;
                     }
+                    let expired = Instant::now() >= pairing.until;
+                    if pairing.spent.is_none() {
+                        pairing.spent = if expired {
+                            Some(Spent::Expired)
+                        } else if state.pairing_is_open(&secret) {
+                            None
+                        } else if state.has_open_pairing() {
+                            Some(Spent::Replaced)
+                        } else {
+                            Some(Spent::Tried)
+                        };
+                    }
+                    // Ticks the countdown. Past expiry there is nothing left
+                    // to watch for: a spent offer pairs no phone.
                     cx.notify();
-                    !done
+                    !expired
                 });
                 if !matches!(alive, Ok(true)) {
                     return;
@@ -227,6 +268,21 @@ impl Tty7App {
             }
         })
         .detach();
+    }
+
+    /// Takes the code off screen and withdraws its offer, so a code dismissed
+    /// here cannot still be used from a photo of it.
+    fn close_mobile_pairing(&mut self, cx: &mut Context<Self>) {
+        let Some(pairing) = self
+            .active_settings_mut()
+            .and_then(|s| s.mobile_pairing.take())
+        else {
+            return;
+        };
+        if let Some(state) = gateway_state(false) {
+            state.close_pairing(&pairing.secret);
+        }
+        cx.notify();
     }
 
     fn unpair_mobile_device(&mut self, id: String, cx: &mut Context<Self>) {
@@ -265,15 +321,24 @@ impl Tty7App {
             .active_settings()
             .and_then(|s| s.mobile_pairing.as_ref());
         let paired = self.active_settings().and_then(|s| s.mobile_paired.clone());
-        let pair_button = self
-            .settings_button(
+        // A spent code carries its own "New code" beside the reason it is
+        // spent; a second one up here would be the same button twice.
+        let pair_button = if pairing.is_some_and(|p| p.spent.is_some()) {
+            div().into_any_element()
+        } else {
+            self.settings_button(
                 "mobile-pair",
-                t(L10nKey::SettingsMobileShowCode),
+                if pairing.is_some() {
+                    t(L10nKey::SettingsMobileNewCode)
+                } else {
+                    t(L10nKey::SettingsMobileShowCode)
+                },
                 cx,
                 |this, _, cx| this.start_mobile_pairing(cx),
             )
-            .disabled(!serving || pairing.is_some())
-            .into_any_element();
+            .disabled(!serving)
+            .into_any_element()
+        };
         let pair_desc = match (serving, &paired) {
             (_, Some(name)) => t_fmt(L10nKey::SettingsMobilePaired, &[("name", name)]),
             (true, None) => t(L10nKey::SettingsMobilePairDesc).to_string(),
@@ -350,41 +415,17 @@ impl Tty7App {
     ) -> AnyElement {
         let copied = self.active_settings().is_some_and(|s| s.mobile_copied);
         let code = pairing.code.clone();
-        let copy = kit::button(
-            "mobile-copy-code",
-            if copied {
-                t(L10nKey::SettingsCopied)
+        let close = kit::button(
+            "mobile-pair-cancel",
+            t(if pairing.spent.is_some() {
+                L10nKey::Close
             } else {
-                t(L10nKey::SettingsMobileCopyCode)
-            },
-            BtnKind::Secondary,
+                L10nKey::Cancel
+            }),
+            BtnKind::Link,
         )
-        .on_click(cx.listener(move |this, _, _w, cx| {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
-            if let Some(s) = this.active_settings_mut() {
-                s.mobile_copied = true;
-            }
-            cx.notify();
-            cx.spawn(async move |this, cx| {
-                smol::Timer::after(Duration::from_millis(1500)).await;
-                let _ = this.update(cx, |this, cx| {
-                    if let Some(s) = this.active_settings_mut() {
-                        s.mobile_copied = false;
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
-        }))
+        .on_click(cx.listener(|this, _, _w, cx| this.close_mobile_pairing(cx)))
         .into_any_element();
-        let cancel = kit::button("mobile-pair-cancel", t(L10nKey::Cancel), BtnKind::Link)
-            .on_click(cx.listener(|this, _, _w, cx| {
-                if let Some(s) = this.active_settings_mut() {
-                    s.mobile_pairing = None;
-                }
-                cx.notify();
-            }))
-            .into_any_element();
 
         let qr = match &pairing.qr {
             Some(image) => gpui::img(image.clone())
@@ -392,12 +433,103 @@ impl Tty7App {
                 .into_any_element(),
             None => div().size(px(QR_SIZE)).into_any_element(),
         };
+        let side = v_flex().flex_1().min_w_0().gap(px(12.));
+        let side = match pairing.spent {
+            // What happened, and the one way on from it.
+            Some(spent) => {
+                let renew = kit::button(
+                    "mobile-pair-renew",
+                    t(L10nKey::SettingsMobileNewCode),
+                    BtnKind::Primary,
+                )
+                .on_click(cx.listener(|this, _, _w, cx| this.start_mobile_pairing(cx)))
+                .into_any_element();
+                side.child(
+                    div()
+                        .text_size(fs(13.))
+                        .text_color(tk.fg)
+                        .child(t(match spent {
+                            Spent::Expired => L10nKey::SettingsMobilePairExpired,
+                            Spent::Tried => L10nKey::SettingsMobilePairTried,
+                            Spent::Replaced => L10nKey::SettingsMobilePairReplaced,
+                        })),
+                )
+                .child(
+                    h_flex()
+                        .gap(px(12.))
+                        .items_center()
+                        .child(renew)
+                        .child(close),
+                )
+            }
+            None => {
+                let copy = kit::button(
+                    "mobile-copy-code",
+                    if copied {
+                        t(L10nKey::SettingsCopied)
+                    } else {
+                        t(L10nKey::SettingsMobileCopyCode)
+                    },
+                    BtnKind::Secondary,
+                )
+                .on_click(cx.listener(move |this, _, _w, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
+                    if let Some(s) = this.active_settings_mut() {
+                        s.mobile_copied = true;
+                    }
+                    cx.notify();
+                    cx.spawn(async move |this, cx| {
+                        smol::Timer::after(Duration::from_millis(1500)).await;
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(s) = this.active_settings_mut() {
+                                s.mobile_copied = false;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }))
+                .into_any_element();
+                let left = pairing.until.saturating_duration_since(Instant::now());
+                side.child(
+                    div()
+                        .text_size(fs(13.))
+                        .text_color(tk.fg)
+                        .child(t(L10nKey::SettingsMobilePairScan)),
+                )
+                .child(
+                    div()
+                        .p(px(8.))
+                        .rounded(px(6.))
+                        .bg(tk.k04)
+                        .text_size(fs(11.))
+                        .font_family(Tk::mono(cx))
+                        .text_color(tk.k6)
+                        .line_clamp(3)
+                        .text_ellipsis()
+                        .child(pairing.code.clone()),
+                )
+                .child(
+                    h_flex()
+                        .gap(px(12.))
+                        .items_center()
+                        .child(copy)
+                        .child(close),
+                )
+                .child(div().text_size(fs(12.)).text_color(tk.k5).child(t_fmt(
+                    L10nKey::SettingsMobilePairValid,
+                    &[("time", &countdown(left))],
+                )))
+            }
+        };
+
         h_flex()
             .id("mobile-pairing")
             .mt(px(12.))
             .gap(px(24.))
             .items_start()
-            // White whatever the theme: a camera reads dark on light.
+            // White whatever the theme: a camera reads dark on light. Faded
+            // once spent, so nobody scans a code that will be refused.
             .child(
                 div()
                     .flex_none()
@@ -406,45 +538,10 @@ impl Tty7App {
                     .bg(gpui::white())
                     .border_1()
                     .border_color(tk.k08)
+                    .when(pairing.spent.is_some(), |d| d.opacity(0.15))
                     .child(qr),
             )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .text_size(fs(13.))
-                            .text_color(tk.fg)
-                            .child(t(L10nKey::SettingsMobilePairScan)),
-                    )
-                    .child(
-                        div()
-                            .p(px(8.))
-                            .rounded(px(6.))
-                            .bg(tk.k04)
-                            .text_size(fs(11.))
-                            .font_family(Tk::mono(cx))
-                            .text_color(tk.k6)
-                            .line_clamp(3)
-                            .text_ellipsis()
-                            .child(pairing.code.clone()),
-                    )
-                    .child(
-                        h_flex()
-                            .gap(px(12.))
-                            .items_center()
-                            .child(copy)
-                            .child(cancel),
-                    )
-                    .child(
-                        div()
-                            .text_size(fs(12.))
-                            .text_color(tk.k5)
-                            .child(t(L10nKey::SettingsMobilePairValid)),
-                    ),
-            )
+            .child(side)
             .into_any_element()
     }
 }

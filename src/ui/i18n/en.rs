@@ -65,7 +65,15 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsMobilePairScan => {
             "Scan this with the tty7 app on your phone, or copy the code and paste it there."
         }
-        L10nKey::SettingsMobilePairValid => "Valid for 10 minutes, for one phone.",
+        L10nKey::SettingsMobilePairValid => "Expires in {time}. Works for one phone.",
+        L10nKey::SettingsMobileNewCode => "New code",
+        L10nKey::SettingsMobilePairExpired => "This code has expired. Make a new one to pair.",
+        L10nKey::SettingsMobilePairTried => {
+            "This code was tried and no longer works — it may have been mistyped, or the connection dropped. Make a new one to pair."
+        }
+        L10nKey::SettingsMobilePairReplaced => {
+            "A newer code has replaced this one. Make a new one to pair."
+        }
         L10nKey::SettingsMobileCopyCode => "Copy code",
         L10nKey::SettingsMobilePaired => "Paired with {name}.",
         L10nKey::SettingsMobilePhones => "Paired phones",

@@ -59,7 +59,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsMobilePairDesc => "生成一个一次性配对码，给手机上的 tty7 app 用。",
         L10nKey::SettingsMobilePairNeedsAccess => "请先打开手机访问。",
         L10nKey::SettingsMobilePairScan => "用手机上的 tty7 app 扫描，或者复制配对码粘贴过去。",
-        L10nKey::SettingsMobilePairValid => "10 分钟内有效，只能配对一台手机。",
+        L10nKey::SettingsMobilePairValid => "{time} 后失效，只能配对一台手机。",
+        L10nKey::SettingsMobileNewCode => "换一个配对码",
+        L10nKey::SettingsMobilePairExpired => "这个配对码已过期。生成一个新的再配对。",
+        L10nKey::SettingsMobilePairTried => {
+            "这个配对码已被尝试过，不能再用了 —— 可能是输错了，或者连接中途断了。生成一个新的再配对。"
+        }
+        L10nKey::SettingsMobilePairReplaced => "已有更新的配对码替换了它。生成一个新的再配对。",
         L10nKey::SettingsMobileCopyCode => "复制配对码",
         L10nKey::SettingsMobilePaired => "已与 {name} 配对。",
         L10nKey::SettingsMobilePhones => "已配对的手机",

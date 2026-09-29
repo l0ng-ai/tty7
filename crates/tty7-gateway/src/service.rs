@@ -227,17 +227,26 @@ pub fn serve_until_stdin_closes(state: State) -> Result<()> {
     Ok(())
 }
 
-/// Opens a pairing offer valid for `ttl`, and returns the code a phone scans
-/// or pastes for it. The addresses in it are the ones the running gateway
-/// last wrote down; with none running the code still pairs once one starts.
-pub fn pair_code(state: &State, ttl: Duration) -> Result<String> {
+/// An open pairing offer: the code a phone scans or pastes, and the secret in
+/// it, which [`State::pairing_is_open`] and [`State::close_pairing`] take.
+pub struct PairOffer {
+    pub code: String,
+    pub secret: String,
+}
+
+/// Opens a pairing offer valid for `ttl`, replacing any earlier one. The
+/// addresses in its code are the ones the running gateway last wrote down;
+/// with none running the code still pairs once one starts.
+pub fn pair_code(state: &State, ttl: Duration) -> Result<PairOffer> {
     let reachable = state.reachable();
-    Ok(PairCode {
+    let secret = state.open_pairing(ttl.as_secs())?;
+    let code = PairCode {
         host_id: state.secret_key()?.public().to_string(),
         host_name: hostname(),
         relay: reachable.relay,
         addrs: reachable.addrs,
-        secret: state.open_pairing(ttl.as_secs())?,
+        secret: secret.clone(),
     }
-    .encode())
+    .encode();
+    Ok(PairOffer { code, secret })
 }

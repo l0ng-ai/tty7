@@ -197,6 +197,34 @@ impl State {
         Ok(secret)
     }
 
+    /// Whether the offer with `secret` is still open: not spent, not expired,
+    /// and not replaced by a newer one.
+    pub fn pairing_is_open(&self, secret: &str) -> bool {
+        matches!(
+            read_json::<Pairing>(&self.dir.join(PAIRING_FILE)),
+            Ok(Some(p)) if p.expires_at >= unix_now() && constant_time_eq(&p.secret, secret)
+        )
+    }
+
+    /// Whether any offer is open, whoever opened it.
+    pub fn has_open_pairing(&self) -> bool {
+        matches!(
+            read_json::<Pairing>(&self.dir.join(PAIRING_FILE)),
+            Ok(Some(p)) if p.expires_at >= unix_now()
+        )
+    }
+
+    /// Withdraws the offer with `secret`, if it is still the open one. An
+    /// offer someone else has opened since is theirs, and stays.
+    pub fn close_pairing(&self, secret: &str) {
+        let path = self.dir.join(PAIRING_FILE);
+        if let Ok(Some(p)) = read_json::<Pairing>(&path)
+            && constant_time_eq(&p.secret, secret)
+        {
+            let _ = fs::remove_file(&path);
+        }
+    }
+
     /// Spends the pairing offer if `secret` matches it and it has not expired.
     ///
     /// Any attempt at all closes the offer, right or wrong: a code is shown on
@@ -352,6 +380,26 @@ mod tests {
         let secret = state.open_pairing(60).unwrap();
         assert!(!state.take_pairing("nope"));
         assert!(!state.take_pairing(&secret));
+    }
+
+    #[test]
+    fn a_withdrawn_offer_cannot_be_spent() {
+        let (_tmp, state) = state();
+        let secret = state.open_pairing(60).unwrap();
+        assert!(state.pairing_is_open(&secret));
+        state.close_pairing(&secret);
+        assert!(!state.pairing_is_open(&secret));
+        assert!(!state.take_pairing(&secret));
+    }
+
+    #[test]
+    fn closing_a_replaced_offer_leaves_the_new_one() {
+        let (_tmp, state) = state();
+        let old = state.open_pairing(60).unwrap();
+        let new = state.open_pairing(60).unwrap();
+        assert!(!state.pairing_is_open(&old), "replaced");
+        state.close_pairing(&old);
+        assert!(state.pairing_is_open(&new));
     }
 
     #[test]

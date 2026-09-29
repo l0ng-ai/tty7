@@ -73,7 +73,19 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsMobilePairScan => {
             "スマートフォンの tty7 アプリでスキャンするか、コードをコピーして貼り付けてください。"
         }
-        L10nKey::SettingsMobilePairValid => "有効期限は 10 分、1 台のスマートフォンに限ります。",
+        L10nKey::SettingsMobilePairValid => {
+            "あと {time} で失効します。1 台のスマートフォンに限ります。"
+        }
+        L10nKey::SettingsMobileNewCode => "新しいコード",
+        L10nKey::SettingsMobilePairExpired => {
+            "このコードは期限切れです。新しいコードを作成してペアリングしてください。"
+        }
+        L10nKey::SettingsMobilePairTried => {
+            "このコードは一度試されたため使えなくなりました（入力ミスや接続の中断など）。新しいコードを作成してペアリングしてください。"
+        }
+        L10nKey::SettingsMobilePairReplaced => {
+            "新しいコードに置き換えられました。新しいコードを作成してペアリングしてください。"
+        }
         L10nKey::SettingsMobileCopyCode => "コードをコピー",
         L10nKey::SettingsMobilePaired => "{name} とペアリングしました。",
         L10nKey::SettingsMobilePhones => "ペアリング済みのスマートフォン",

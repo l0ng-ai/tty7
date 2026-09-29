@@ -80,7 +80,7 @@ fn main() -> Result<()> {
 }
 
 fn pair(state: &State, ttl: u64) -> Result<()> {
-    let code = service::pair_code(state, Duration::from_secs(ttl))?;
+    let code = service::pair_code(state, Duration::from_secs(ttl))?.code;
     let qr = qrcode::QrCode::new(code.as_bytes()).context("drawing the pairing code")?;
     let art = qr
         .render::<qrcode::render::unicode::Dense1x2>()
