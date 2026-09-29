@@ -1669,6 +1669,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "这台机器的 server 版本太旧，还不能保存任务——更新后即可使用看板"
         }
         L10nKey::BoardNow => "刚刚",
+        L10nKey::BoardEdit => "编辑…",
+        L10nKey::BoardKeep => "保留为任务",
+        L10nKey::BoardToastKept => "已保留为任务 · {title}",
         L10nKey::BoardCleanUp => "清理",
         L10nKey::BoardCleanUpAll => "全部清理",
         L10nKey::BoardStartAgain => "重新开始",

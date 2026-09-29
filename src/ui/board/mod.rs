@@ -837,6 +837,22 @@ impl Tty7App {
         Some(task)
     }
 
+    /// Files an agent started by hand as a task, so the board keeps it.
+    fn keep_loose(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task) = self.loose_task(tab, window, cx) else {
+            return;
+        };
+        let (id, title) = (task.id, task.title.clone());
+        if self.save_task(task, window, cx) {
+            self.board.selected = Some(CardRef::Task(id));
+            self.flash(
+                t_fmt(L10nKey::BoardToastKept, &[("title", &title)]),
+                Some(Undo::Remove(id)),
+                cx,
+            );
+        }
+    }
+
     fn resume_task(&mut self, id: TaskId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mut task) = self.task(id) else {
             return;

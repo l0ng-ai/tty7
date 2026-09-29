@@ -1842,6 +1842,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "このマシンのサーバーはまだタスクを保存できません。ボードを使うには更新してください"
         }
         L10nKey::BoardNow => "たった今",
+        L10nKey::BoardEdit => "編集…",
+        L10nKey::BoardKeep => "タスクとして残す",
+        L10nKey::BoardToastKept => "タスクとして残しました · {title}",
         L10nKey::BoardCleanUp => "クリーンアップ",
         L10nKey::BoardCleanUpAll => "すべてクリーンアップ",
         L10nKey::BoardStartAgain => "やり直す",

@@ -1797,6 +1797,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "This machine’s server can’t keep tasks yet — update it to use the board"
         }
         L10nKey::BoardNow => "now",
+        L10nKey::BoardEdit => "Edit…",
+        L10nKey::BoardKeep => "Keep as task",
+        L10nKey::BoardToastKept => "Kept as a task · {title}",
         L10nKey::BoardCleanUp => "Clean up",
         L10nKey::BoardCleanUpAll => "Clean up all",
         L10nKey::BoardStartAgain => "Start again",

@@ -6,9 +6,10 @@ use gpui::{
     rems,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use tty7_core::core::group_key::{GroupId, PinnedGroup};
+use tty7_core::core::machine::TabId;
 use tty7_core::core::task::{Column, TaskId};
 
 use super::{Card, CardDrag, CardRef, MainView, ago, move_verb, moves_from};
@@ -698,6 +699,18 @@ impl Tty7App {
                     cx.new(|_| ghost)
                 })
             })
+            .context_menu({
+                let menu_card = CardMenu {
+                    key,
+                    column: card.column,
+                    tab: card.tab,
+                    question: card.question,
+                    resumable: card.resumable,
+                    gone: card.worktree_gone,
+                };
+                let app = cx.entity().downgrade();
+                move |menu, _window, _cx| card_menu(menu, &menu_card, app.clone())
+            })
             .child(title_row)
             .children(place)
             .children(output)
@@ -799,6 +812,108 @@ impl Tty7App {
             })
             .on_click(cx.listener(|this, _, window, cx| this.toggle_board(window, cx)))
             .into_any_element()
+    }
+}
+
+/// What a card's right-click menu needs to know about it.
+struct CardMenu {
+    key: CardRef,
+    column: Column,
+    tab: Option<TabId>,
+    question: bool,
+    resumable: bool,
+    gone: bool,
+}
+
+type Act = Box<dyn Fn(&mut Tty7App, &mut Window, &mut Context<Tty7App>)>;
+
+/// The card's everyday moves, the same ones its panel and a drag offer, by
+/// the column it is in — then editing and removing, for a task.
+fn card_menu(menu: PopupMenu, c: &CardMenu, app: gpui::WeakEntity<Tty7App>) -> PopupMenu {
+    let item = |label: L10nKey, act: Act| {
+        let app = app.clone();
+        PopupMenuItem::new(t(label)).on_click(move |_, window, cx| {
+            let _ = app.update(cx, |this, cx| act(this, window, cx));
+        })
+    };
+    let key = c.key;
+    let to = |col: Column| -> Act {
+        Box::new(move |this, window, cx| this.board_move(key, col, window, cx))
+    };
+    let reply: Act = Box::new(move |this, window, cx| this.focus_reply(key, window, cx));
+    let mut menu = menu;
+    if let Some(tab) = c.tab {
+        menu = menu.item(item(
+            L10nKey::BoardOpenTerminal,
+            Box::new(move |this, window, cx| this.open_card_tab(tab, window, cx)),
+        ));
+    }
+    let task = match key {
+        CardRef::Task(id) => Some(id),
+        CardRef::Loose(_) => None,
+    };
+    menu = match c.column {
+        Column::Queued => menu.item(item(L10nKey::BoardVerbStart, to(Column::Running))),
+        Column::Running => menu
+            .item(item(L10nKey::BoardReply, reply))
+            .item(item(L10nKey::BoardVerbPause, to(Column::Queued))),
+        Column::NeedsInput => {
+            let menu = match c.question {
+                true => menu,
+                false => menu.item(item(L10nKey::BoardAllow, to(Column::Running))),
+            };
+            menu.item(item(L10nKey::BoardReply, reply))
+                .item(item(L10nKey::BoardVerbPause, to(Column::Queued)))
+        }
+        Column::Review => menu
+            .item(item(L10nKey::BoardVerbChanges, reply))
+            .item(item(L10nKey::BoardVerbDone, to(Column::Done))),
+        Column::Done => match task {
+            Some(id) => {
+                let menu = match c.gone {
+                    true => menu.item(item(
+                        L10nKey::BoardStartAgain,
+                        Box::new(move |this, window, cx| this.start_again(id, window, cx)),
+                    )),
+                    false => menu.item(item(
+                        L10nKey::BoardReopen,
+                        Box::new(move |this, window, cx| this.reopen(id, window, cx)),
+                    )),
+                };
+                menu.item(item(
+                    L10nKey::BoardCleanUp,
+                    Box::new(move |this, window, cx| this.clean_up(vec![id], window, cx)),
+                ))
+            }
+            None => menu,
+        },
+    };
+    if c.resumable
+        && !c.gone
+        && c.column != Column::Done
+        && let Some(id) = task
+    {
+        menu = menu.item(item(
+            L10nKey::BoardResume,
+            Box::new(move |this, window, cx| this.resume_task(id, window, cx)),
+        ));
+    }
+    match (key, task) {
+        (CardRef::Loose(tab), _) => menu.separator().item(item(
+            L10nKey::BoardKeep,
+            Box::new(move |this, window, cx| this.keep_loose(tab, window, cx)),
+        )),
+        (_, Some(id)) if c.column != Column::Done => menu
+            .separator()
+            .item(item(
+                L10nKey::BoardEdit,
+                Box::new(move |this, window, cx| this.open_composer(Some(id), window, cx)),
+            ))
+            .item(item(
+                L10nKey::BoardRemove,
+                Box::new(move |this, window, cx| this.remove_task(id, window, cx)),
+            )),
+        _ => menu,
     }
 }
 
