@@ -766,9 +766,8 @@ impl Tty7App {
         page: &Arc<CommitPage>,
         query: Option<&str>,
     ) -> Arc<Vec<usize>> {
-        let key = Arc::as_ptr(page) as usize;
         if let Some((held_query, held_page, rows)) = &self.scm.graph.filter_cache {
-            if *held_page == key && held_query.as_deref() == query {
+            if held_page.ptr_eq(&Arc::downgrade(page)) && held_query.as_deref() == query {
                 return rows.clone();
             }
         }
@@ -778,7 +777,11 @@ impl Tty7App {
                 .filter(|i| matches_query(&page.commits[*i], q))
                 .collect(),
         });
-        self.scm.graph.filter_cache = Some((query.map(str::to_string), key, rows.clone()));
+        self.scm.graph.filter_cache = Some((
+            query.map(str::to_string),
+            Arc::downgrade(page),
+            rows.clone(),
+        ));
         rows
     }
 
@@ -2240,6 +2243,38 @@ mod tests {
             assert!(
                 app.graph_query(cx).is_none(),
                 "a closed box went on cutting rows out of the list"
+            );
+        });
+    }
+
+    /// A new page must never be served the previous page's rows.
+    ///
+    /// The cache used to key on the page's address. Swap a three-commit page
+    /// for a one-commit one and the allocator hands the new page the freed
+    /// slot, the address matches, and the list indexes `commits[1]` of a
+    /// one-element history — the panic this guards against.
+    #[gpui::test]
+    fn a_replaced_page_does_not_inherit_the_old_rows(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        let page_of = |n: usize| {
+            let mut page = empty_page();
+            page.commits = (0..n)
+                .map(|i| commit_named("feat: x", "Ada", &format!("{i:040}")))
+                .collect();
+            Arc::new(page)
+        };
+
+        app.update(&mut vcx, |app, _| {
+            let long = page_of(3);
+            assert_eq!(*app.graph_visible_rows(&long, None), vec![0, 1, 2]);
+            drop(long);
+
+            let short = page_of(1);
+            assert_eq!(
+                *app.graph_visible_rows(&short, None),
+                vec![0],
+                "the shorter page was handed the longer page's rows"
             );
         });
     }

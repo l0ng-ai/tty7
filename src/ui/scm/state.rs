@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use gpui::Entity;
 use gpui_component::input::InputState;
@@ -223,7 +223,12 @@ pub(crate) struct GraphState {
     /// The filter case-folds every subject and author; re-running that over
     /// 5000 commits on every frame while the box is open is real work, and
     /// even the unfiltered identity list is 40KB of indices a frame.
-    pub(crate) filter_cache: Option<(Option<String>, usize, Arc<Vec<usize>>)>,
+    ///
+    /// The page is held as a `Weak`, not as its address: a freed page's
+    /// allocation gets reused by the next one, and a bare pointer then says
+    /// "same page" for a shorter history — indices past its end, and a panic.
+    /// While this `Weak` lives the allocation cannot be handed out again.
+    pub(crate) filter_cache: Option<(Option<String>, Weak<CommitPage>, Arc<Vec<usize>>)>,
     /// An open "name a branch at this commit" input, and the rev it starts
     /// from. The panel's own naming row cannot serve this: it always creates
     /// at HEAD, and the whole point here is the commit under the cursor.
