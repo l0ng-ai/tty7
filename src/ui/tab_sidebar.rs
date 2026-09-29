@@ -24,8 +24,8 @@ use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::right_panel::RESIZE_HANDLE_WIDTH;
 use crate::ui::tab_strip::{
-    DragTab, REORDER_SLIDE_MS, abbreviate_home, elide_label, elide_path_keep_tail,
-    elide_tail_clusters, measure_text,
+    DragTab, REORDER_SLIDE_MS, abbreviate_home, elide_end_clusters, elide_label,
+    elide_path_keep_tail, measure_text,
 };
 
 pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.;
@@ -68,7 +68,6 @@ const HEAD_CONTROL_HEIGHT: f32 = 28.;
 const HEAD_CONTROL_RADIUS: f32 = 7.;
 
 /// What sits between a group's branch and its diff counts.
-const META_SEP: &str = " · ";
 const META_SEP_TRIMMED: &str = "·";
 
 /// Tabular numerals, so a column of diff counts lines up digit for digit.
@@ -375,9 +374,17 @@ impl Tty7App {
         let rem = window.rem_size().as_f32();
         // Measure with the same interface scale used to paint the header.
         let header_size = rem * META_REM;
+        // The git lines and the group header paint with `tabular()` figures,
+        // which set a `1` as wide as an `8`; measuring them proportionally
+        // came out a few pixels short on counts like `+1565 −124`, and the
+        // front-elided branch then lost its tail to CSS truncation as well.
+        let meta_font = gpui::Font {
+            features: tabular(),
+            ..font.clone()
+        };
         let header_font = gpui::Font {
             weight: FontWeight::MEDIUM,
-            ..font.clone()
+            ..meta_font.clone()
         };
         // On the rail the diff counts are metadata like the branch beside
         // them, so they take its caption ink; the hover card, which is where
@@ -678,13 +685,12 @@ impl Tty7App {
                         .text_size(px(meta_size))
                         .text_color(cx.theme().muted_foreground)
                         .font_features(tabular());
-                    let counts_w = counts_width(&window.text_system(), &font, meta_size, &g);
-                    // Branch: cut from the front, so `…session-auth` keeps
-                    // the part that tells two branches off one prefix apart.
+                    let counts_w = counts_width(&window.text_system(), &meta_font, meta_size, &g);
+                    // Branch: cut from the end, the way any other label is.
                     let branch_avail = (label_avail - counts_w).max(0.);
-                    let shown = elide_tail_clusters(
+                    let shown = elide_end_clusters(
                         &window.text_system(),
-                        &font,
+                        &meta_font,
                         meta_size,
                         &g.branch,
                         branch_avail,
@@ -1236,24 +1242,23 @@ impl Tty7App {
                 }
                 let count_label = row_count.to_string();
                 if folded {
-                    avail -=
-                        measure_text(&ts, &font, header_size, &count_label) + row_metrics::META_GAP;
+                    avail -= measure_text(&ts, &meta_font, header_size, &count_label)
+                        + row_metrics::META_GAP;
                 }
                 let avail = avail.max(HEADER_NAME_FLOOR);
                 // What the shared branch would take if nothing were in its
-                // way: the icon, the gap after it, the branch itself, the
-                // counts, and the two gaps the spacer between the name and
-                // the branch sits in.
-                // What the shared branch would take if nothing were in its
-                // way: the branch itself, the ` · ` before its counts, the
+                // way: the branch itself, the `·` before its counts, the
                 // counts, and the gaps the spacer between the name and the
                 // branch sits in.
-                let sep_w = measure_text(&ts, &font, header_size, META_SEP);
+                // Drawn as a bare `·` with a gap on either side; the gap before
+                // it is the one `counts_width` already reserves.
+                let sep_w = measure_text(&ts, &meta_font, header_size, META_SEP_TRIMMED)
+                    + row_metrics::META_GAP;
                 let git_want = shared_git.as_ref().map(|shared| {
-                    let counts = counts_width(&ts, &font, header_size, &shared.status);
+                    let counts = counts_width(&ts, &meta_font, header_size, &shared.status);
                     let sep = if counts > 0. { sep_w } else { 0. };
                     2. * row_metrics::META_GAP
-                        + measure_text(&ts, &font, header_size, &shared.status.branch)
+                        + measure_text(&ts, &meta_font, header_size, &shared.status.branch)
                         + sep
                         + counts
                 });
@@ -1398,15 +1403,14 @@ impl Tty7App {
                             click,
                             rows,
                         } = shared;
-                        let counts_w = counts_width(&ts, &font, header_size, &status);
+                        let counts_w = counts_width(&ts, &meta_font, header_size, &status);
                         let sep = if counts_w > 0. { sep_w } else { 0. };
                         let branch_avail =
                             (avail - name_w - 2. * row_metrics::META_GAP - sep - counts_w).max(0.);
-                        // Cut from the front, like a row's: the tail is what
-                        // tells two branches off the same prefix apart.
-                        let branch = elide_tail_clusters(
+                        // Cut from the end, like a row's.
+                        let branch = elide_end_clusters(
                             &ts,
-                            &font,
+                            &meta_font,
                             header_size,
                             &status.branch,
                             branch_avail,

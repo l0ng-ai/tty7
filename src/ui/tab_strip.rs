@@ -471,6 +471,38 @@ pub(crate) fn elide_label(
     }
 }
 
+/// Keeps the longest head of `text` that fits before a trailing ellipsis —
+/// the plain cut a reader expects, for a string read left to right like a
+/// branch name.
+pub(crate) fn elide_end_clusters(
+    text_system: &gpui::WindowTextSystem,
+    font: &gpui::Font,
+    size: f32,
+    text: &str,
+    max_width: f32,
+) -> SharedString {
+    if measure_text(text_system, font, size, text) <= max_width {
+        return SharedString::from(text.to_string());
+    }
+    let budget = max_width - measure_text(text_system, font, size, "…");
+    if budget <= 0. {
+        return SharedString::from("…");
+    }
+    let cells = clusters(text);
+    let (mut lo, mut hi) = (0usize, cells.len());
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        if measure_text(text_system, font, size, &cells[..mid].concat()) <= budget {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let mut out = cells[..lo].concat();
+    out.push('…');
+    SharedString::from(out)
+}
+
 /// Keeps the longest tail of `text` that fits after a bare ellipsis. Shared
 /// by the path and token elisions as their last resort.
 pub(crate) fn elide_tail_clusters(
@@ -3221,6 +3253,19 @@ mod tests {
         assert!(out.contains('…'));
         assert!(measure_text(&ts, &font, size, &out) <= max);
         assert!(out.chars().count() < branch.chars().count());
+    }
+
+    #[gpui::test]
+    fn elide_end_keeps_the_head_of_a_branch(cx: &mut TestAppContext) {
+        let (ts, font, size) = elide_setup(cx);
+        let branch = "fix/rpc-proxy-and-error-classification";
+        let max = 140.;
+        let out = elide_end_clusters(&ts, &font, size, branch, max);
+        assert!(out.starts_with("fix/rpc-"), "head survives: {out}");
+        assert!(out.ends_with('…') && out.matches('…').count() == 1, "{out}");
+        assert!(measure_text(&ts, &font, size, &out) <= max);
+        let fits = measure_text(&ts, &font, size, branch);
+        assert_eq!(elide_end_clusters(&ts, &font, size, branch, fits), branch);
     }
 
     #[gpui::test]
