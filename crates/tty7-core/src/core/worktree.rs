@@ -141,6 +141,38 @@ pub fn defaults(host: &dyn Host, cwd: &Path) -> Result<WorktreeDefaults, String>
     Ok(WorktreeDefaults { name, base, dir })
 }
 
+/// A new worktree off `cwd`'s repository, on a new branch of the same name,
+/// from whatever is checked out there now. Named `preferred` when that is
+/// free — with `-2`, `-3`, … when it is taken — and a generated name
+/// otherwise. What the board gives a task's run.
+pub fn create_for(
+    host: &dyn Host,
+    cwd: &Path,
+    preferred: Option<&str>,
+) -> Result<NewWorktree, String> {
+    let (repo_root, dir) = repo_dir(host, cwd)?;
+    let taken =
+        |name: &str| branch_exists(host, &repo_root, name) || host.exists(&host.join(&dir, name));
+    let name = match preferred {
+        Some(base) => std::iter::once(base.to_string())
+            .chain((2..100).map(|n| format!("{base}-{n}")))
+            .find(|name| !taken(name))
+            .ok_or_else(|| format!("every worktree name after {base} is taken"))?,
+        None => Names::new().unique(taken),
+    };
+    let base = git(host, &repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "HEAD".to_string());
+    create(
+        host,
+        cwd,
+        &WorktreeRequest {
+            branch: name.clone(),
+            name,
+            base,
+        },
+    )
+}
+
 pub fn create(host: &dyn Host, cwd: &Path, req: &WorktreeRequest) -> Result<NewWorktree, String> {
     if req.name.is_empty() || req.name == "." || req.name == ".." || req.name.contains(['/', '\\'])
     {
@@ -291,6 +323,23 @@ mod tests {
         assert_eq!(head, "feat/my-branch");
         assert!(wt.path.join("a.txt").exists());
         assert!(!wt.path.join("b.txt").exists());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn create_for_takes_the_preferred_name_and_numbers_a_taken_one() {
+        let h = h();
+        let repo = temp_repo("for");
+        let first = create_for(&*h, &repo, Some("fix-restore")).unwrap();
+        let second = create_for(&*h, &repo, Some("fix-restore")).unwrap();
+        assert_eq!(first.branch, "fix-restore");
+        assert_eq!(second.branch, "fix-restore-2");
+        assert_eq!(
+            second.path.file_name().unwrap().to_str().unwrap(),
+            "fix-restore-2"
+        );
+        let generated = create_for(&*h, &repo, None).unwrap();
+        assert!(!generated.branch.is_empty());
         let _ = std::fs::remove_dir_all(&repo);
     }
 

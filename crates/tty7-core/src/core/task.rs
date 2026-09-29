@@ -80,6 +80,11 @@ pub struct Task {
     /// same automatic grouping a tab gets, worked out from [`Self::cwd`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<GroupId>,
+    /// Each run gets a git worktree of its own, cut from [`Self::cwd`]'s
+    /// repository — so two agents on the same repo, or one agent and the
+    /// user, never write into the same checkout.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worktree: bool,
     /// Unix seconds.
     #[serde(default)]
     pub created: u64,
@@ -104,6 +109,10 @@ pub struct Run {
     /// Unix seconds.
     #[serde(default)]
     pub started: u64,
+    /// The worktree this run was given, when its task asked for one — where
+    /// its work is, and what to clean up once it is merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
 }
 
 /// The user said the task is finished.
@@ -227,6 +236,7 @@ impl Task {
             cwd: None,
             agent: None,
             group: None,
+            worktree: false,
             created: crate::core::machine::unix_now(),
             runs: Vec::new(),
             done: None,
@@ -282,6 +292,28 @@ impl Task {
     }
 }
 
+/// A branch and worktree name made from a task's title: lowercase ASCII
+/// words joined by `-`, at most 40 characters. `None` for a title with no
+/// ASCII word in it (a Chinese one, say), which gets a generated name instead.
+pub fn branch_slug(title: &str) -> Option<String> {
+    let mut slug = String::new();
+    for word in title
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+    {
+        let word = word.to_ascii_lowercase();
+        let sep = usize::from(!slug.is_empty());
+        if slug.len() + sep + word.len() > 40 {
+            break;
+        }
+        if sep == 1 {
+            slug.push('-');
+        }
+        slug.push_str(&word);
+    }
+    (!slug.is_empty()).then_some(slug)
+}
+
 /// The argument that hands `agent` its first prompt while leaving it open for
 /// the conversation that follows, or `None` for an agent whose command line
 /// cannot do that — one that takes a prompt only to answer it and exit, or
@@ -315,6 +347,7 @@ mod tests {
                 tab: Some(tab),
                 session_id: None,
                 started: 0,
+                worktree: None,
             });
         }
         (t, tabs)
@@ -415,6 +448,21 @@ mod tests {
         t.prompt = "p".repeat(MAX_PROMPT_BYTES + 1);
         assert!(t.check().is_err());
         assert!(Task::new("ok").check().is_ok());
+    }
+
+    #[test]
+    fn a_branch_slug_keeps_the_ascii_words_of_a_title() {
+        assert_eq!(
+            branch_slug("Fix the flaky restore test!").as_deref(),
+            Some("fix-the-flaky-restore-test")
+        );
+        assert_eq!(
+            branch_slug("修复 #203 的 emoji 宽度").as_deref(),
+            Some("203-emoji")
+        );
+        assert_eq!(branch_slug("列出最大的文件"), None);
+        let long = branch_slug(&"word ".repeat(20)).unwrap();
+        assert!(long.len() <= 40 && !long.ends_with('-'), "{long}");
     }
 
     #[test]

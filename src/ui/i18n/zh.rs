@@ -1679,6 +1679,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "这台机器的 server 版本太旧，还不能保存任务——更新后即可使用看板"
         }
         L10nKey::BoardNow => "刚刚",
+        L10nKey::BoardFieldGroup => "分组",
+        L10nKey::BoardGroupAuto => "按仓库（自动）",
+        L10nKey::BoardAllGroups => "全部分组",
+        L10nKey::BoardWorktree => "在新的 git worktree 中运行",
+        L10nKey::BoardWorktreeNeedsRepo => "要用 worktree，任务的运行目录必须在 git 仓库里",
+        L10nKey::BoardWorktreeFailed => "创建 worktree 失败：{error}",
         L10nKey::CmdDocumentWidthThird => "文档：三分之一宽",
         L10nKey::CmdDocumentWidthHalf => "文档：一半宽",
         L10nKey::CmdDocumentWidthTwoThirds => "文档：三分之二宽",

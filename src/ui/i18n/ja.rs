@@ -1854,6 +1854,14 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "このマシンのサーバーはまだタスクを保存できません。ボードを使うには更新してください"
         }
         L10nKey::BoardNow => "たった今",
+        L10nKey::BoardFieldGroup => "グループ",
+        L10nKey::BoardGroupAuto => "リポジトリ別（自動）",
+        L10nKey::BoardAllGroups => "すべてのグループ",
+        L10nKey::BoardWorktree => "新しい git worktree で実行",
+        L10nKey::BoardWorktreeNeedsRepo => {
+            "worktree を使うには、タスクの実行場所が git リポジトリ内である必要があります"
+        }
+        L10nKey::BoardWorktreeFailed => "worktree を作成できませんでした: {error}",
         L10nKey::CmdDocumentWidthThird => "ドキュメント: 幅3分の1",
         L10nKey::CmdDocumentWidthHalf => "ドキュメント: 幅半分",
         L10nKey::CmdDocumentWidthTwoThirds => "ドキュメント: 幅3分の2",

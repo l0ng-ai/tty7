@@ -1809,6 +1809,14 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "This machine’s server can’t keep tasks yet — update it to use the board"
         }
         L10nKey::BoardNow => "now",
+        L10nKey::BoardFieldGroup => "Group",
+        L10nKey::BoardGroupAuto => "By repository",
+        L10nKey::BoardAllGroups => "All groups",
+        L10nKey::BoardWorktree => "Run in a new git worktree",
+        L10nKey::BoardWorktreeNeedsRepo => {
+            "A worktree needs the task to run inside a git repository"
+        }
+        L10nKey::BoardWorktreeFailed => "Could not create the worktree: {error}",
         L10nKey::CmdDocumentWidthThird => "Document: Third Width",
         L10nKey::CmdDocumentWidthHalf => "Document: Half Width",
         L10nKey::CmdDocumentWidthTwoThirds => "Document: Two-Thirds Width",

@@ -96,21 +96,23 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
             prompt_file,
             cwd,
             agent,
+            worktree,
+            group,
             ws,
         })) => {
             let prompt = match prompt_file {
                 Some(path) => Some(read_prompt_file(&path)?),
                 None => prompt,
             };
-            task_add(
+            let spec = NewTask {
                 title,
                 prompt,
                 cwd,
-                agent.as_deref(),
-                ws.as_deref(),
-                ctx,
-                backend,
-            )
+                agent,
+                worktree,
+                group,
+            };
+            task_add(spec, ws.as_deref(), ctx, backend)
         }
         Some(Command::Task(TaskCmd::Done { task })) => task_mark(&task, true, backend),
         Some(Command::Task(TaskCmd::Reopen { task })) => task_mark(&task, false, backend),
@@ -1301,11 +1303,18 @@ fn read_prompt_file(path: &str) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading the prompt from {path}"))
 }
 
-fn task_add(
+/// What `tty7 task add` was told.
+struct NewTask {
     title: String,
     prompt: Option<String>,
     cwd: Option<String>,
-    agent: Option<&str>,
+    agent: Option<String>,
+    worktree: bool,
+    group: Option<String>,
+}
+
+fn task_add(
+    spec: NewTask,
     explicit: Option<&str>,
     ctx: &Context,
     backend: &mut dyn Backend,
@@ -1313,10 +1322,27 @@ fn task_add(
     require_board(backend)?;
     let machine = fetch_machine(backend)?;
     let workspace = resolve_ws(explicit, ctx, &machine)?;
-    let mut task = tty7_core::core::task::Task::new(title.trim());
-    task.prompt = prompt.unwrap_or_default().trim().to_string();
-    task.cwd = cwd;
-    task.agent = match agent {
+    let ws = machine
+        .workspaces
+        .iter()
+        .find(|w| w.id == workspace)
+        .expect("resolve_ws returned an id straight out of this machine");
+    let mut task = tty7_core::core::task::Task::new(spec.title.trim());
+    task.prompt = spec.prompt.unwrap_or_default().trim().to_string();
+    task.cwd = spec.cwd;
+    task.worktree = spec.worktree;
+    task.group = match spec.group.as_deref() {
+        Some(name) => Some(
+            ws.groups
+                .pinned
+                .iter()
+                .find(|g| output::pinned_group_label(g) == name)
+                .map(|g| g.id)
+                .with_context(|| format!("workspace has no pinned group called {name:?}"))?,
+        ),
+        None => None,
+    };
+    task.agent = match spec.agent.as_deref() {
         Some(name) => Some(
             tty7_core::core::cli_agent::CLIAgent::from_slug(name)
                 .with_context(|| format!("no agent is called {name:?}"))?,
@@ -2599,6 +2625,7 @@ mod tests {
             tab: Some(build_tab),
             session_id: None,
             started: 0,
+            worktree: None,
         });
         ws.tasks = vec![queued, running];
         backend.replies.push_back(ReplyOk::AgentStates(vec![

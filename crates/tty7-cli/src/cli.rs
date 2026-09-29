@@ -620,6 +620,17 @@ pub enum TaskCmd {
             help = "Which agent runs it, e.g. claude, codex"
         )]
         agent: Option<String>,
+        #[arg(
+            long,
+            help = "Give each run a git worktree of its own, cut from --cwd's repository"
+        )]
+        worktree: bool,
+        #[arg(
+            long,
+            value_name = "GROUP",
+            help = "File it under a pinned sidebar group, by name"
+        )]
+        group: Option<String>,
         #[arg(long, value_name = "WORKSPACE")]
         ws: Option<String>,
     },

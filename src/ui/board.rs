@@ -22,6 +22,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
+use tty7_core::core::group_key::{GroupId, PinnedGroup};
 use tty7_core::core::machine::TabId;
 use tty7_core::core::task::{self, Column, Done, Live, Run, Task, TaskId};
 
@@ -47,7 +48,11 @@ pub(crate) struct Board {
     pub tasks: Vec<Task>,
     /// Only this agent's cards, or everyone's.
     pub agent_filter: Option<CLIAgent>,
+    /// Only this pinned group's cards, or every group's.
+    pub group_filter: Option<GroupId>,
     pub composer: Option<Composer>,
+    /// What the worktree switch last said, so the next task starts there.
+    pub last_worktree: bool,
     pub focus: FocusHandle,
 }
 
@@ -56,6 +61,8 @@ impl Board {
         Board {
             tasks: Vec::new(),
             agent_filter: None,
+            group_filter: None,
+            last_worktree: true,
             composer: None,
             focus: cx.focus_handle(),
         }
@@ -69,6 +76,9 @@ pub(crate) struct Composer {
     prompt: Entity<InputState>,
     agent: Option<CLIAgent>,
     cwd: Option<PathBuf>,
+    /// A pinned sidebar group, or `None` for the automatic one by repo.
+    group: Option<GroupId>,
+    worktree: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -111,6 +121,8 @@ struct Card {
     tab: Option<TabId>,
     /// A finished run this card could pick back up.
     resumable: bool,
+    /// The pinned group it is filed under.
+    group: Option<GroupId>,
 }
 
 /// What the board reads off one open tab.
@@ -124,6 +136,7 @@ struct TabFacts {
     branch: Option<String>,
     diff: Option<(u32, u32)>,
     label: Option<String>,
+    group: Option<GroupId>,
 }
 
 impl Tty7App {
@@ -250,6 +263,7 @@ impl Tty7App {
                         .map(|g| (g.added, g.removed))
                         .filter(|&(a, r)| a > 0 || r > 0),
                     label: full.then(|| self.full_tab_label(tab, window, cx)).flatten(),
+                    group: tab.group.get().filter(|g| self.sidebar_groups.contains(*g)),
                 })
             })
             .collect()
@@ -293,6 +307,7 @@ impl Tty7App {
                 },
                 tab: open.map(|f| f.id),
                 resumable: open.is_none() && last.is_some_and(|r| r.session_id.is_some()),
+                group: task.group.filter(|g| self.sidebar_groups.contains(*g)),
             });
         }
         let claimed = |id: TabId| self.board.tasks.iter().any(|t| t.runs_in(id));
@@ -319,10 +334,14 @@ impl Tty7App {
                 since: None,
                 tab: Some(f.id),
                 resumable: false,
+                group: f.group,
             });
         }
         if let Some(only) = self.board.agent_filter {
             cards.retain(|c| c.agent == Some(only));
+        }
+        if let Some(only) = self.board.group_filter {
+            cards.retain(|c| c.group == Some(only));
         }
         cards
     }
@@ -351,10 +370,8 @@ impl Tty7App {
         }
     }
 
-    /// Opens a new tab for `task` and starts its agent there, told what to do.
-    ///
-    /// The window stays on the board: the card moving to Running is the
-    /// answer, and whoever wants to watch can click it.
+    /// Starts an agent on `task`, told what to do — in a worktree of its own
+    /// when the task asks for one.
     fn start_task(
         &mut self,
         id: TaskId,
@@ -362,7 +379,7 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(mut task) = self.board.tasks.iter().find(|t| t.id == id).cloned() else {
+        let Some(task) = self.board.tasks.iter().find(|t| t.id == id).cloned() else {
             return;
         };
         let Some(agent) = agent
@@ -397,22 +414,87 @@ impl Tty7App {
             }
         };
         let cwd = task.cwd.as_ref().map(PathBuf::from);
+        if !task.worktree {
+            self.launch_run(task, agent, command, cwd, None, window, cx);
+            return;
+        }
+        // The worktree is cut first, off the thread — it is a `git worktree
+        // add` on whichever machine the workspace is on — and the run opens
+        // in it once it exists.
+        let Some(cwd) = cwd else {
+            window.push_notification(t(L10nKey::BoardWorktreeNeedsRepo), cx);
+            return;
+        };
+        let host_id = self.spawn_host(cx);
+        let Some(host) = crate::ui::host_registry::HostRegistry::get(cx, host_id) else {
+            window.push_notification(t(L10nKey::BoardUnavailable), cx);
+            return;
+        };
+        let slug = task::branch_slug(&task.title);
+        crate::ui::host_ops::HostOps::run_in(
+            host,
+            window,
+            cx,
+            move |h| crate::core::worktree::create_for(h, &cwd, slug.as_deref()),
+            move |this, made, window, cx| match made {
+                Ok(wt) => {
+                    let path = wt.path.clone();
+                    this.launch_run(
+                        task,
+                        agent,
+                        command,
+                        Some(path.clone()),
+                        Some(path),
+                        window,
+                        cx,
+                    )
+                }
+                Err(e) => window
+                    .push_notification(t_fmt(L10nKey::BoardWorktreeFailed, &[("error", &e)]), cx),
+            },
+        );
+    }
+
+    /// Opens the tab a run of `task` works in and starts `agent` there.
+    ///
+    /// The window stays on the board: the card moving to Running is the
+    /// answer, and whoever wants to watch can click it.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_run(
+        &mut self,
+        mut task: Task,
+        agent: CLIAgent,
+        command: String,
+        cwd: Option<PathBuf>,
+        worktree: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let on_board = self.board_open();
         let Some(slot) = self.new_tab_slot(cwd, None, window, cx) else {
             return;
         };
         // The tab is named for the task, so its sidebar row says what it is
-        // for rather than whatever the agent titles itself.
+        // for rather than whatever the agent titles itself, and it is filed
+        // where the task is.
+        let group = task.group.filter(|g| self.sidebar_groups.contains(*g));
         let tab = &mut self.tabs[self.active];
         tab.name = Some(task.title.clone());
+        if group.is_some() {
+            tab.group.set(group);
+        }
         let tab_id = tab.tree_id.get();
         crate::ui::agent_launch::run_when_ready(&slot, command, cx);
-        self.main_view = MainView::Board;
-        self.focus_active(window, cx);
+        if on_board {
+            self.main_view = MainView::Board;
+            self.focus_active(window, cx);
+        }
         task.push_run(Run {
             agent,
             tab: Some(tab_id),
             session_id: None,
             started: unix_now(),
+            worktree: worktree.map(|p| p.display().to_string()),
         });
         task.agent = Some(agent);
         task.done = None;
@@ -472,11 +554,13 @@ impl Tty7App {
         let mut task = Task::new(title);
         task.cwd = f.cwd.map(|p| p.display().to_string());
         task.agent = Some(f.agent);
+        task.group = f.group;
         task.push_run(Run {
             agent: f.agent,
             tab: Some(tab),
             session_id: None,
             started: unix_now(),
+            worktree: None,
         });
         Some(task)
     }
@@ -616,12 +700,27 @@ impl Tty7App {
             .as_ref()
             .and_then(|t| t.agent)
             .or_else(|| self.offered_agents(cx).first().copied());
+        // A new task goes where the board is looking, else where the active
+        // tab is filed — the group a new tab would land in.
+        let group = match &existing {
+            Some(t) => t.group,
+            None => self
+                .board
+                .group_filter
+                .or_else(|| self.tabs.get(self.active).and_then(|t| t.group.get())),
+        }
+        .filter(|g| self.sidebar_groups.contains(*g));
+        let worktree = existing
+            .as_ref()
+            .map_or(self.board.last_worktree, |t| t.worktree);
         self.board.composer = Some(Composer {
             editing,
             title,
             prompt,
             agent,
             cwd,
+            group,
+            worktree,
             _subs: subs,
         });
         cx.notify();
@@ -653,6 +752,9 @@ impl Tty7App {
         task.prompt = prompt;
         task.agent = c.agent;
         task.cwd = c.cwd.as_ref().map(|p| p.display().to_string());
+        task.group = c.group;
+        task.worktree = c.worktree;
+        self.board.last_worktree = c.worktree;
         let (id, agent) = (task.id, task.agent);
         if !self.save_task(task, window, cx) {
             return;
@@ -664,6 +766,28 @@ impl Tty7App {
             self.focus_active(window, cx);
         }
         cx.notify();
+    }
+
+    /// Files the composer's task under `group`. A group that keeps a folder
+    /// is where its tabs work, so the task runs there too.
+    fn set_composer_group(&mut self, group: Option<GroupId>, cx: &mut Context<Self>) {
+        let folder = group
+            .and_then(|g| self.sidebar_groups.get(g))
+            .and_then(|g| g.folder_path().map(PathBuf::from));
+        if let Some(c) = self.board.composer.as_mut() {
+            c.group = group;
+            if folder.is_some() {
+                c.cwd = folder;
+            }
+            cx.notify();
+        }
+    }
+
+    fn toggle_composer_worktree(&mut self, cx: &mut Context<Self>) {
+        if let Some(c) = self.board.composer.as_mut() {
+            c.worktree = !c.worktree;
+            cx.notify();
+        }
     }
 
     fn set_composer_agent(&mut self, agent: CLIAgent, cx: &mut Context<Self>) {
@@ -687,7 +811,8 @@ impl Tty7App {
         }
         let cards = self.board_cards(Some(window), true, cx);
         let header = self.render_board_header(&cards, cx);
-        let body = match cards.is_empty() && self.board.agent_filter.is_none() {
+        let filtered = self.board.agent_filter.is_some() || self.board.group_filter.is_some();
+        let body = match cards.is_empty() && !filtered {
             true => self.render_board_empty(cx),
             false => h_flex()
                 .flex_1()
@@ -763,6 +888,42 @@ impl Tty7App {
         agents.dedup();
         let app = cx.entity().downgrade();
         let rungs = dialog::popover_rungs(cx);
+        let groups: Vec<(GroupId, String)> = self
+            .sidebar_groups
+            .pinned
+            .iter()
+            .map(|g| (g.id, group_label(g)))
+            .collect();
+        let group_label_now: SharedString = self
+            .board
+            .group_filter
+            .and_then(|id| groups.iter().find(|(g, _)| *g == id))
+            .map(|(_, name)| name.clone().into())
+            .unwrap_or_else(|| t(L10nKey::BoardAllGroups).into());
+        let group_app = app.clone();
+        let group_filter = (!groups.is_empty()).then(|| {
+            Button::new("board-group-filter")
+                .label(group_label_now)
+                .ghost()
+                .small()
+                .dropdown_caret(true)
+                .dropdown_menu(move |menu: PopupMenu, _window, _cx| {
+                    let pick = |label: SharedString, g: Option<GroupId>| {
+                        let a = group_app.clone();
+                        PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                            let _ = a.update(cx, |this, cx| {
+                                this.board.group_filter = g;
+                                cx.notify();
+                            });
+                        })
+                    };
+                    let mut menu = menu.item(pick(t(L10nKey::BoardAllGroups).into(), None));
+                    for (id, name) in groups.clone() {
+                        menu = menu.item(pick(name.into(), Some(id)));
+                    }
+                    menu
+                })
+        });
         h_flex()
             .flex_none()
             .h(px(HEADER_H))
@@ -784,6 +945,7 @@ impl Tty7App {
                     .text_color(muted)
                     .child(summary),
             )
+            .children(group_filter)
             .child(
                 Button::new("board-agent-filter")
                     .label(filter_label)
@@ -940,6 +1102,10 @@ impl Tty7App {
                     .line_clamp(3)
                     .child(card.title.clone()),
             );
+        let group = card
+            .group
+            .and_then(|g| self.sidebar_groups.get(g))
+            .map(group_label);
         let place = card.place.clone().map(|p| {
             div()
                 .truncate()
@@ -1039,6 +1205,22 @@ impl Tty7App {
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, window, cx| this.click_card(key, window, cx)))
             .child(title_row)
+            .when_some(group, |c, name| {
+                c.child(
+                    h_flex().child(
+                        div()
+                            .px(px(6.))
+                            .h(px(18.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(4.))
+                            .bg(well)
+                            .text_size(rems(META_MONO))
+                            .text_color(muted)
+                            .child(name),
+                    ),
+                )
+            })
             .children(place)
             .children(doing)
             .children(ask)
@@ -1067,6 +1249,44 @@ impl Tty7App {
             .unwrap_or_default();
         let has_title = !c.title.read(cx).value().trim().is_empty();
         let editing = c.editing.is_some();
+        let groups: Vec<(GroupId, String)> = self
+            .sidebar_groups
+            .pinned
+            .iter()
+            .map(|g| (g.id, group_label(g)))
+            .collect();
+        let group_now: SharedString = c
+            .group
+            .and_then(|id| groups.iter().find(|(g, _)| *g == id))
+            .map(|(_, name)| name.clone().into())
+            .unwrap_or_else(|| t(L10nKey::BoardGroupAuto).into());
+        let group_app = cx.entity().downgrade();
+        let group_picker = Button::new("board-composer-group")
+            .label(group_now)
+            .small()
+            .ghost()
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu: PopupMenu, _window, _cx| {
+                let pick = |label: SharedString, g: Option<GroupId>| {
+                    let a = group_app.clone();
+                    PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                        let _ = a.update(cx, |this, cx| this.set_composer_group(g, cx));
+                    })
+                };
+                let mut menu = menu.item(pick(t(L10nKey::BoardGroupAuto).into(), None));
+                if !groups.is_empty() {
+                    menu = menu.separator();
+                }
+                for (id, name) in groups.clone() {
+                    menu = menu.item(pick(name.into(), Some(id)));
+                }
+                menu
+            });
+        let worktree_switch = gpui_component::checkbox::Checkbox::new("board-composer-worktree")
+            .label(t(L10nKey::BoardWorktree))
+            .small()
+            .checked(c.worktree)
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_composer_worktree(cx)));
         let well = dialog::well_fill(cx);
         let prompt_field = div()
             .h(px(PROMPT_H))
@@ -1122,6 +1342,15 @@ impl Tty7App {
                             .gap(px(10.))
                             .child(dialog::label(t(L10nKey::BoardFieldAgent), cx))
                             .child(agent_picker)
+                            .child(div().w(px(8.)))
+                            .child(dialog::label(t(L10nKey::BoardFieldGroup), cx))
+                            .child(group_picker),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(worktree_switch)
                             .child(div().flex_1())
                             .child(
                                 div()
@@ -1320,6 +1549,21 @@ fn card_menu(
                 Box::new(move |this, window, cx| this.mark_done(key, window, cx)),
             )),
     }
+}
+
+/// What a pinned group is called: its given name, else its folder's last
+/// component — the name its sidebar header shows.
+fn group_label(group: &PinnedGroup) -> String {
+    group
+        .given_name()
+        .map(str::to_string)
+        .or_else(|| {
+            group
+                .folder_path()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| t(L10nKey::BoardFieldGroup).to_string())
 }
 
 /// The dot a column heads itself with, and whether it is drawn as a ring.
