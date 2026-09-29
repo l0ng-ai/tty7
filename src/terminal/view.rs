@@ -2280,7 +2280,19 @@ impl TerminalView {
         let rows: Vec<String> = (0..grid.screen_lines() as i32)
             .map(|line| {
                 let row = &grid[Line(line)];
-                (0..cols).map(|c| row[Column(c)].c).collect()
+                // A wide character (CJK, emoji) takes two cells, the second
+                // a spacer holding a blank; kept, it put a space between
+                // every character of Chinese text.
+                (0..cols)
+                    .map(|c| &row[Column(c)])
+                    .filter(|cell| {
+                        !cell.flags.intersects(
+                            alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER
+                                | alacritty_terminal::term::cell::Flags::LEADING_WIDE_CHAR_SPACER,
+                        )
+                    })
+                    .map(|cell| cell.c)
+                    .collect()
             })
             .collect();
         output_tail(&rows, n)
@@ -10848,6 +10860,7 @@ mod gpui_tests {
                 turns: 0,
                 inferred: false,
                 question: false,
+                ask: None,
             }))
             .encode(daemon)
             .unwrap();
@@ -10906,6 +10919,7 @@ mod gpui_tests {
             turns: 0,
             inferred: false,
             question: false,
+            ask: None,
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -10975,6 +10989,7 @@ mod gpui_tests {
             turns,
             inferred: false,
             question: false,
+            ask: None,
         };
         DaemonMsg::AgentStatus(Some(state.clone()))
             .encode(daemon)
@@ -11434,6 +11449,7 @@ mod gpui_tests {
             turns: 0,
             inferred: false,
             question: false,
+            ask: None,
         }))
         .encode(&mut daemon)
         .unwrap();

@@ -155,6 +155,8 @@ struct Card {
     cwd: Option<PathBuf>,
     /// What the agent is stopped on.
     ask: Option<SharedString>,
+    /// The answers a waiting question offers, when its tool call named them.
+    options: Vec<String>,
     question: bool,
     diff: Option<(u32, u32)>,
     /// When this card's current state began, in Unix seconds, if known.
@@ -175,6 +177,7 @@ struct TabFacts {
     agent: CLIAgent,
     live: Live,
     ask: Option<String>,
+    options: Vec<String>,
     question: bool,
     cwd: Option<PathBuf>,
     branch: Option<String>,
@@ -198,7 +201,7 @@ pub(crate) fn moves_from(from: Column) -> &'static [Column] {
 /// What a move is called on the column it drops into.
 fn move_verb(from: Column, to: Column, question: bool) -> L10nKey {
     match (from, to) {
-        (Column::NeedsInput, Column::Running) if question => L10nKey::BoardVerbReply,
+        (Column::NeedsInput, Column::Running) if question => L10nKey::BoardAnswerInTerminal,
         (Column::NeedsInput, Column::Running) => L10nKey::BoardVerbAllow,
         (Column::Review, Column::Running) => L10nKey::BoardVerbChanges,
         (_, Column::Queued) => L10nKey::BoardVerbPause,
@@ -342,7 +345,25 @@ impl Tty7App {
                     id: tab.tree_id.get(),
                     agent: view.agent()?,
                     live: Live::from(&session),
-                    ask: waiting.then(|| session.message.clone()).flatten(),
+                    // A question says itself; a permission prompt says what
+                    // it would run.
+                    ask: waiting
+                        .then(|| {
+                            session
+                                .ask
+                                .as_ref()
+                                .map(|a| a.question.clone())
+                                .or_else(|| session.message.clone())
+                        })
+                        .flatten(),
+                    options: match waiting {
+                        true => session
+                            .ask
+                            .as_ref()
+                            .map(|a| a.options.clone())
+                            .unwrap_or_default(),
+                        false => Vec::new(),
+                    },
                     question: waiting && session.question,
                     cwd: view.cwd(),
                     branch: git.as_ref().map(|g| g.branch.clone()),
@@ -408,6 +429,7 @@ impl Tty7App {
                 branch: open.and_then(|f| f.branch.clone()),
                 cwd,
                 ask: open.and_then(|f| f.ask.clone()).map(Into::into),
+                options: open.map(|f| f.options.clone()).unwrap_or_default(),
                 question: open.is_some_and(|f| f.question),
                 diff: open.and_then(|f| f.diff),
                 since: match column {
@@ -443,6 +465,7 @@ impl Tty7App {
                 branch: f.branch.clone(),
                 cwd: f.cwd.clone(),
                 ask: f.ask.clone().map(Into::into),
+                options: f.options.clone(),
                 question: f.question,
                 diff: f.diff,
                 since: None,
@@ -636,9 +659,14 @@ impl Tty7App {
         match (card.column, to) {
             (Column::Queued, Column::Running) => self.start_card(&card, window, cx),
             (_, Column::Queued) => self.pause_card(&card, window, cx),
-            (Column::NeedsInput, Column::Running) if !card.question => {
-                self.allow_card(&card, window, cx)
+            // A question is answered where it is asked: its picker takes
+            // arrow keys and a choice, which the board does not fake.
+            (Column::NeedsInput, Column::Running) if card.question => {
+                if let Some(tab) = card.tab {
+                    self.open_card_tab(tab, window, cx)
+                }
             }
+            (Column::NeedsInput, Column::Running) => self.allow_card(&card, window, cx),
             (_, Column::Running) => self.focus_reply(key, window, cx),
             (_, Column::Done) => self.mark_done(key, window, cx),
             _ => {}
@@ -1249,7 +1277,7 @@ mod tests {
     fn a_waiting_question_is_answered_not_allowed() {
         assert_eq!(
             move_verb(Column::NeedsInput, Column::Running, true),
-            L10nKey::BoardVerbReply
+            L10nKey::BoardAnswerInTerminal
         );
         assert_eq!(
             move_verb(Column::NeedsInput, Column::Running, false),

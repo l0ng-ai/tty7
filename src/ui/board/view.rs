@@ -28,6 +28,8 @@ const CARD_RADIUS: f32 = 9.;
 const AVATAR: f32 = 16.;
 const DROP_H: f32 = 44.;
 const EMPTY_H: f32 = 64.;
+/// Answers a waiting card lists before it says how many more there are.
+const OPTIONS_SHOWN: usize = 4;
 
 impl Tty7App {
     /// The board over the terminal area, or `None` while the terminal shows.
@@ -565,63 +567,83 @@ impl Tty7App {
                     .text_color(muted)
                     .child(line)
             });
-        // A waiting agent's question, and the two ways to answer it.
+        // A waiting agent's question and its answers, or the command a
+        // permission prompt would run — and the way to answer each.
         let ask = (card.column == Column::NeedsInput).then(|| {
-            let (first, second) = match card.question {
-                // A question takes words; a permission prompt takes a yes.
-                true => ((L10nKey::BoardReply, true), (L10nKey::BoardOpen, false)),
-                false => ((L10nKey::BoardAllow, false), (L10nKey::BoardReply, true)),
-            };
             let tab = card.tab;
-            let action = |which: usize,
-                          (label, reply): (L10nKey, bool),
-                          tone: Tone,
-                          cx: &mut Context<Self>| {
-                dialog::button(
-                    SharedString::from(format!("{id}-act-{which}")),
-                    t(label),
-                    tone,
-                    true,
-                    rungs,
-                    cx,
-                    cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        match (label, reply, tab) {
-                            (_, true, _) => this.focus_reply(key, window, cx),
-                            (L10nKey::BoardAllow, _, _) => {
-                                this.board_move(key, Column::Running, window, cx)
+            let action =
+                |which: usize, label: L10nKey, tone: Tone, allow: bool, cx: &mut Context<Self>| {
+                    dialog::button(
+                        SharedString::from(format!("{id}-act-{which}")),
+                        t(label),
+                        tone,
+                        true,
+                        rungs,
+                        cx,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            match (allow, tab) {
+                                (true, _) => this.board_move(key, Column::Running, window, cx),
+                                (false, Some(tab)) => this.open_card_tab(tab, window, cx),
+                                (false, None) => {}
                             }
-                            (_, _, Some(tab)) => this.open_card_tab(tab, window, cx),
-                            _ => {}
-                        }
-                    }),
-                )
-                .flex_1()
-                .h(px(24.))
+                        }),
+                    )
+                    .flex_1()
+                    .h(px(24.))
+                };
+            let text = card.ask.clone().map(|ask| match card.question {
+                true => div()
+                    .text_size(rems(TAB_TEXT))
+                    .line_height(rems(TAB_TEXT * 1.4))
+                    .text_color(fg)
+                    .line_clamp(3)
+                    .child(ask),
+                false => div()
+                    .px(px(8.))
+                    .py(px(6.))
+                    .rounded(px(5.))
+                    .bg(well)
+                    .font_family(mono.clone())
+                    .text_size(rems(META_MONO))
+                    .line_height(rems(META_MONO * 1.5))
+                    .text_color(fg)
+                    .line_clamp(4)
+                    .child(ask),
+            });
+            let options = (!card.options.is_empty()).then(|| {
+                let more = card.options.len().saturating_sub(OPTIONS_SHOWN);
+                v_flex()
+                    .gap(px(2.))
+                    .text_size(rems(HEADING))
+                    .text_color(muted)
+                    .children(
+                        card.options
+                            .iter()
+                            .take(OPTIONS_SHOWN)
+                            .enumerate()
+                            .map(|(i, o)| div().truncate().child(format!("{}. {o}", i + 1))),
+                    )
+                    .when(more > 0, |v| v.child(format!("+{more}")))
+            });
+            let buttons = match card.question {
+                true => h_flex().child(action(
+                    0,
+                    L10nKey::BoardAnswerInTerminal,
+                    Tone::Primary,
+                    false,
+                    cx,
+                )),
+                false => h_flex()
+                    .gap(px(6.))
+                    .child(action(0, L10nKey::BoardAllow, Tone::Primary, true, cx))
+                    .child(action(1, L10nKey::BoardOpen, Tone::Secondary, false, cx)),
             };
             v_flex()
                 .gap(px(8.))
-                .when_some(card.ask.clone(), |v, ask| {
-                    v.child(
-                        div()
-                            .px(px(8.))
-                            .py(px(6.))
-                            .rounded(px(5.))
-                            .bg(well)
-                            .font_family(mono.clone())
-                            .text_size(rems(META_MONO))
-                            .line_height(rems(META_MONO * 1.5))
-                            .text_color(fg)
-                            .line_clamp(4)
-                            .child(ask),
-                    )
-                })
-                .child(
-                    h_flex()
-                        .gap(px(6.))
-                        .child(action(0, first, Tone::Primary, cx))
-                        .child(action(1, second, Tone::Secondary, cx)),
-                )
+                .children(text)
+                .children(options)
+                .child(buttons)
         });
         let footer = {
             let mut row = h_flex()
@@ -857,14 +879,14 @@ fn card_menu(menu: PopupMenu, c: &CardMenu, app: gpui::WeakEntity<Tty7App>) -> P
         Column::Running => menu
             .item(item(L10nKey::BoardReply, reply))
             .item(item(L10nKey::BoardVerbPause, to(Column::Queued))),
-        Column::NeedsInput => {
-            let menu = match c.question {
-                true => menu,
-                false => menu.item(item(L10nKey::BoardAllow, to(Column::Running))),
-            };
-            menu.item(item(L10nKey::BoardReply, reply))
-                .item(item(L10nKey::BoardVerbPause, to(Column::Queued)))
-        }
+        Column::NeedsInput => match c.question {
+            true => menu
+                .item(item(L10nKey::BoardAnswerInTerminal, to(Column::Running)))
+                .item(item(L10nKey::BoardVerbPause, to(Column::Queued))),
+            false => menu
+                .item(item(L10nKey::BoardAllow, to(Column::Running)))
+                .item(item(L10nKey::BoardVerbPause, to(Column::Queued))),
+        },
         Column::Review => menu
             .item(item(L10nKey::BoardVerbChanges, reply))
             .item(item(L10nKey::BoardVerbDone, to(Column::Done))),

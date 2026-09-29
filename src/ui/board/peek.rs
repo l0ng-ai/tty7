@@ -229,20 +229,38 @@ impl Tty7App {
                 )
             });
         let waiting = (card.column == Column::NeedsInput).then(|| {
-            section(
-                t(L10nKey::BoardPeekWaiting).into(),
-                theme.warning,
-                block()
+            let text = card
+                .ask
+                .clone()
+                .unwrap_or_else(|| t(L10nKey::BoardColNeedsInput).into());
+            let body = match card.question {
+                // A question reads as prose, its answers as a numbered list.
+                true => block()
+                    .line_height(rems(TAB_TEXT * 1.5))
+                    .text_color(fg)
+                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child(text))
+                    .when(!card.options.is_empty(), |b| {
+                        b.child(
+                            v_flex().mt(px(6.)).gap(px(2.)).text_color(muted).children(
+                                card.options
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, o)| div().child(format!("{}. {o}", i + 1))),
+                            ),
+                        )
+                    }),
+                // A permission prompt is a command: set as one.
+                false => block()
                     .font_family(mono.clone())
                     .text_size(rems(META_MONO))
                     .line_height(rems(META_MONO * 1.5))
                     .text_color(fg)
-                    .child(
-                        card.ask
-                            .clone()
-                            .unwrap_or_else(|| t(L10nKey::BoardColNeedsInput).into()),
-                    )
-                    .into_any_element(),
+                    .child(text),
+            };
+            section(
+                t(L10nKey::BoardPeekWaiting).into(),
+                theme.warning,
+                body.into_any_element(),
             )
         });
         let files = match &self.board.files {
@@ -297,9 +315,11 @@ impl Tty7App {
 
         // A line to the agent, while there is one open to hear it.
         let can_reply = card.tab.is_some()
+            // A waiting agent is in a picker or a permission dialog, which
+            // typed words would not answer.
             && matches!(
                 card.column,
-                Column::Running | Column::NeedsInput | Column::Review | Column::Queued
+                Column::Running | Column::Review | Column::Queued
             );
         let reply = self
             .board
@@ -426,9 +446,25 @@ impl Tty7App {
                 ));
                 actions.extend(open_terminal(cx));
             }
-            Column::NeedsInput => {
-                actions.extend(open_terminal(cx));
-                if !question {
+            Column::NeedsInput => match question {
+                true => {
+                    actions.push(move_to(
+                        "board-peek-pause",
+                        L10nKey::BoardVerbPause,
+                        Tone::Secondary,
+                        Column::Queued,
+                        cx,
+                    ));
+                    actions.push(move_to(
+                        "board-peek-answer",
+                        L10nKey::BoardAnswerInTerminal,
+                        Tone::Primary,
+                        Column::Running,
+                        cx,
+                    ));
+                }
+                false => {
+                    actions.extend(open_terminal(cx));
                     actions.push(move_to(
                         "board-peek-allow",
                         L10nKey::BoardAllow,
@@ -437,7 +473,7 @@ impl Tty7App {
                         cx,
                     ));
                 }
-            }
+            },
             Column::Review => {
                 actions.extend(open_terminal(cx));
                 actions.push(move_to(

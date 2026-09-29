@@ -1742,6 +1742,7 @@ mod tests {
                     turns: 1,
                     inferred: false,
                     question: false,
+                    ask: None,
                 },
             }])),
             ControlReply::Ok(ReplyOk::AgentStates(Vec::new())),

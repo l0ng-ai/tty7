@@ -984,6 +984,22 @@ pub struct AgentSessionState {
     /// anything offering a one-click "allow" has to tell them apart.
     #[serde(default)]
     pub question: bool,
+    /// The question itself, when the agent said what it is — from the
+    /// tool call that asks it, not from the screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<AgentAsk>,
+}
+
+/// A question an agent put to the user, as its tool call spelled it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAsk {
+    pub question: String,
+    /// The answers it offers, by label; empty for a free-text question.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// Any number of the options may be picked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multi: bool,
 }
 
 impl AgentStatus {
@@ -1054,11 +1070,20 @@ impl AgentSessionState {
             AgentEventKind::PromptSubmit => {
                 self.status = AgentStatus::Working;
                 self.message = None;
+                self.ask = None;
             }
+            // Claude sends its question tool through the permission dialog
+            // too, right after the `PreToolUse` that said it was a question.
+            // The hook reads that one as a question itself; this covers a
+            // hook from an older build. Nothing else can come between: the
+            // question is answered first, which fires `ToolComplete`.
+            AgentEventKind::PermissionRequest
+                if self.status == AgentStatus::Waiting && self.question => {}
             AgentEventKind::PermissionRequest | AgentEventKind::QuestionAsked => {
                 self.status = AgentStatus::Waiting;
                 self.message = ev.message.clone();
                 self.question = ev.kind == AgentEventKind::QuestionAsked;
+                self.ask = ev.ask.clone().filter(|_| self.question);
             }
             AgentEventKind::Notification => {
                 if self.status == AgentStatus::Working {
@@ -1072,6 +1097,7 @@ impl AgentSessionState {
                 if self.status == AgentStatus::Waiting || guessed {
                     self.status = AgentStatus::Working;
                     self.message = None;
+                    self.ask = None;
                 }
             }
             AgentEventKind::Stop => {
@@ -1080,6 +1106,7 @@ impl AgentSessionState {
                 }
                 self.status = AgentStatus::Done;
                 self.message = ev.message.clone();
+                self.ask = None;
             }
             AgentEventKind::SessionEnd => {
                 self.status = AgentStatus::Idle;
@@ -1117,6 +1144,8 @@ pub struct AgentEvent {
     /// Separate from `message`, which carries what the *agent* said and is
     /// deliberately cleared when a turn starts.
     pub prompt: Option<String>,
+    /// The question, on a `QuestionAsked` whose tool call spelled one out.
+    pub ask: Option<AgentAsk>,
 }
 
 pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
@@ -1140,6 +1169,8 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
         cwd: Option<String>,
         #[serde(default)]
         prompt: Option<String>,
+        #[serde(default)]
+        ask: Option<AgentAsk>,
     }
 
     let w: Wire = serde_json::from_slice(json).ok()?;
@@ -1152,6 +1183,7 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
         message: nonempty(w.message),
         cwd: nonempty(w.cwd).map(std::path::PathBuf::from),
         prompt: nonempty(w.prompt),
+        ask: w.ask.filter(|a| !a.question.trim().is_empty()),
     })
 }
 
@@ -1607,6 +1639,27 @@ mod tests {
     }
 
     #[test]
+    fn the_permission_dialog_a_question_goes_through_does_not_unmake_it() {
+        let ev = |kind| AgentEvent {
+            agent: Some(CLIAgent::Claude),
+            kind,
+            session_id: None,
+            message: None,
+            cwd: None,
+            prompt: None,
+            ask: None,
+        };
+        let mut s = AgentSessionState::default();
+        s.apply_event(&ev(AgentEventKind::PromptSubmit));
+        s.apply_event(&ev(AgentEventKind::QuestionAsked));
+        s.apply_event(&ev(AgentEventKind::PermissionRequest));
+        assert!(s.question);
+        s.apply_event(&ev(AgentEventKind::ToolComplete));
+        s.apply_event(&ev(AgentEventKind::PermissionRequest));
+        assert!(!s.question, "a real permission prompt later is one");
+    }
+
+    #[test]
     fn a_waiting_agent_says_whether_it_asked_a_question_or_for_permission() {
         let ev = |kind| AgentEvent {
             agent: Some(CLIAgent::Claude),
@@ -1615,11 +1668,13 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            ask: None,
         };
         let mut s = AgentSessionState::default();
         s.apply_event(&ev(AgentEventKind::PromptSubmit));
         s.apply_event(&ev(AgentEventKind::QuestionAsked));
         assert!(s.question);
+        s.apply_event(&ev(AgentEventKind::ToolComplete));
         s.apply_event(&ev(AgentEventKind::PermissionRequest));
         assert!(!s.question);
     }
@@ -1636,6 +1691,7 @@ mod tests {
             message: msg.map(String::from),
             cwd: None,
             prompt: None,
+            ask: None,
         };
 
         s.apply_event(&ev(AgentEventKind::SessionStart, None, Some("sid-1")));
@@ -1692,6 +1748,7 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            ask: None,
         };
 
         let mut s = AgentSessionState::default();
@@ -1726,6 +1783,7 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            ask: None,
         };
 
         let mut s = AgentSessionState::default();
@@ -1778,6 +1836,7 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            ask: None,
         };
 
         let mut s = AgentSessionState::default();
@@ -1815,6 +1874,7 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            ask: None,
         };
 
         let mut s = AgentSessionState::default();
@@ -1847,6 +1907,7 @@ mod tests {
             message: None,
             cwd: cwd.map(PathBuf::from),
             prompt: None,
+            ask: None,
         };
 
         let mut s = AgentSessionState::default();

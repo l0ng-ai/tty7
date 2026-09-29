@@ -5465,6 +5465,7 @@ mod tests {
                 message: None,
                 cwd: None,
                 prompt: None,
+                ask: None,
             }],
             None,
         );
@@ -5772,6 +5773,7 @@ mod tests {
             turns: 0,
             inferred: false,
             question: false,
+            ask: None,
         });
         apply_signals(&mut st, sniffer.feed(b"\x1b]9;noise\x07"));
         assert_eq!(

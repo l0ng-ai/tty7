@@ -1525,6 +1525,7 @@ l10n_keys! {
     BoardPromptCopied,
     BoardUnavailable,
     BoardNow,
+    BoardAnswerInTerminal,
     BoardEdit,
     BoardKeep,
     BoardToastKept,
