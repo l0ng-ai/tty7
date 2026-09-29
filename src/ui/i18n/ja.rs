@@ -1855,7 +1855,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::BoardNow => "たった今",
         L10nKey::BoardFieldGroup => "グループ",
-        L10nKey::BoardGroupAuto => "リポジトリ別（自動）",
+        L10nKey::BoardFieldWhere => "実行場所",
+        L10nKey::BoardNoPlace => "実行場所を選択",
         L10nKey::BoardAllGroups => "すべてのグループ",
         L10nKey::BoardWorktree => "新しい git worktree で実行",
         L10nKey::BoardWorktreeNeedsRepo => {

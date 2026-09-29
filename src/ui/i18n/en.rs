@@ -1810,7 +1810,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::BoardNow => "now",
         L10nKey::BoardFieldGroup => "Group",
-        L10nKey::BoardGroupAuto => "By repository",
+        L10nKey::BoardFieldWhere => "Where",
+        L10nKey::BoardNoPlace => "Pick where it runs",
         L10nKey::BoardAllGroups => "All groups",
         L10nKey::BoardWorktree => "Run in a new git worktree",
         L10nKey::BoardWorktreeNeedsRepo => {

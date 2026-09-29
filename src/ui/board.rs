@@ -32,6 +32,7 @@ use crate::ui::app::Tty7App;
 use crate::ui::dialog::{self, Tone};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::right_panel::{HEADING, META, META_MONO, TAB_TEXT, TEXT};
+use crate::ui::tab_sidebar::TaskPlace;
 
 /// What the main area is showing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -688,28 +689,28 @@ impl Tty7App {
                 }
             }),
         ];
-        let cwd = match &existing {
-            Some(t) => t.cwd.as_ref().map(PathBuf::from),
-            None => self.tabs.get(self.active).and_then(|t| {
-                t.pane
-                    .focused_or_first(window, cx)
-                    .and_then(|leaf| leaf.read(cx).spawnable_cwd())
-            }),
-        };
+        let (places, here) = self.task_places(cx);
+        let here = here.and_then(|i| places.get(i));
         let agent = existing
             .as_ref()
             .and_then(|t| t.agent)
             .or_else(|| self.offered_agents(cx).first().copied());
-        // A new task goes where the board is looking, else where the active
-        // tab is filed — the group a new tab would land in.
-        let group = match &existing {
-            Some(t) => t.group,
-            None => self
-                .board
-                .group_filter
-                .or_else(|| self.tabs.get(self.active).and_then(|t| t.group.get())),
-        }
-        .filter(|g| self.sidebar_groups.contains(*g));
+        // A new task goes to the group the board is filtered to, else to the
+        // place the active tab is in.
+        let (group, cwd) = match &existing {
+            Some(t) => (t.group, t.cwd.as_ref().map(PathBuf::from)),
+            None => {
+                let filtered = self
+                    .board
+                    .group_filter
+                    .and_then(|g| places.iter().find(|p| p.group == Some(g)));
+                match filtered.or(here) {
+                    Some(p) => (p.group, Some(p.cwd.clone())),
+                    None => (None, None),
+                }
+            }
+        };
+        let group = group.filter(|g| self.sidebar_groups.contains(*g));
         let worktree = existing
             .as_ref()
             .map_or(self.board.last_worktree, |t| t.worktree);
@@ -768,17 +769,12 @@ impl Tty7App {
         cx.notify();
     }
 
-    /// Files the composer's task under `group`. A group that keeps a folder
-    /// is where its tabs work, so the task runs there too.
-    fn set_composer_group(&mut self, group: Option<GroupId>, cx: &mut Context<Self>) {
-        let folder = group
-            .and_then(|g| self.sidebar_groups.get(g))
-            .and_then(|g| g.folder_path().map(PathBuf::from));
+    /// Where the composer's task runs, and the pinned group it is filed
+    /// under when the place is one.
+    fn set_composer_place(&mut self, place: TaskPlace, cx: &mut Context<Self>) {
         if let Some(c) = self.board.composer.as_mut() {
-            c.group = group;
-            if folder.is_some() {
-                c.cwd = folder;
-            }
+            c.group = place.group;
+            c.cwd = Some(place.cwd);
             cx.notify();
         }
     }
@@ -856,7 +852,6 @@ impl Tty7App {
                 }))
                 .child(header)
                 .child(body)
-                .when_some(self.render_composer(cx), |this, el| this.child(el))
                 .into_any_element(),
         )
     }
@@ -1231,7 +1226,8 @@ impl Tty7App {
             .into_any_element()
     }
 
-    fn render_composer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The New task card, over the whole window like every other sheet.
+    pub(crate) fn render_composer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let c = self.board.composer.as_ref()?;
         let theme = cx.theme();
         let muted = theme.muted_foreground;
@@ -1249,36 +1245,40 @@ impl Tty7App {
             .unwrap_or_default();
         let has_title = !c.title.read(cx).value().trim().is_empty();
         let editing = c.editing.is_some();
-        let groups: Vec<(GroupId, String)> = self
-            .sidebar_groups
-            .pinned
+        let (places, _) = self.task_places(cx);
+        let chosen = places
             .iter()
-            .map(|g| (g.id, group_label(g)))
-            .collect();
-        let group_now: SharedString = c
-            .group
-            .and_then(|id| groups.iter().find(|(g, _)| *g == id))
-            .map(|(_, name)| name.clone().into())
-            .unwrap_or_else(|| t(L10nKey::BoardGroupAuto).into());
-        let group_app = cx.entity().downgrade();
-        let group_picker = Button::new("board-composer-group")
-            .label(group_now)
+            .find(|p| p.group.is_some() && p.group == c.group)
+            .or_else(|| places.iter().find(|p| Some(&p.cwd) == c.cwd.as_ref()));
+        let place_now: SharedString = match (chosen, &c.cwd) {
+            (Some(p), _) => p.name.clone().into(),
+            (None, Some(cwd)) => cwd.display().to_string().into(),
+            (None, None) => t(L10nKey::BoardNoPlace).into(),
+        };
+        let place_app = cx.entity().downgrade();
+        let group_picker = Button::new("board-composer-place")
+            .label(place_now)
             .small()
             .ghost()
             .dropdown_caret(true)
             .dropdown_menu(move |menu: PopupMenu, _window, _cx| {
-                let pick = |label: SharedString, g: Option<GroupId>| {
-                    let a = group_app.clone();
-                    PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                        let _ = a.update(cx, |this, cx| this.set_composer_group(g, cx));
-                    })
-                };
-                let mut menu = menu.item(pick(t(L10nKey::BoardGroupAuto).into(), None));
-                if !groups.is_empty() {
-                    menu = menu.separator();
-                }
-                for (id, name) in groups.clone() {
-                    menu = menu.item(pick(name.into(), Some(id)));
+                let mut menu = menu;
+                let mut in_groups = true;
+                for place in places.clone() {
+                    // The groups first, as the sidebar lists them; then,
+                    // past a divider, the folders of tabs in no group.
+                    let label: SharedString = match place.grouped {
+                        true => format!("{}  —  {}", place.name, place.cwd.display()).into(),
+                        false => place.name.clone().into(),
+                    };
+                    if in_groups && !place.grouped {
+                        in_groups = false;
+                        menu = menu.separator();
+                    }
+                    let a = place_app.clone();
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                        let _ = a.update(cx, |this, cx| this.set_composer_place(place.clone(), cx));
+                    }));
                 }
                 menu
             });
@@ -1343,7 +1343,7 @@ impl Tty7App {
                             .child(dialog::label(t(L10nKey::BoardFieldAgent), cx))
                             .child(agent_picker)
                             .child(div().w(px(8.)))
-                            .child(dialog::label(t(L10nKey::BoardFieldGroup), cx))
+                            .child(dialog::label(t(L10nKey::BoardFieldWhere), cx))
                             .child(group_picker),
                     )
                     .child(
@@ -1402,7 +1402,14 @@ impl Tty7App {
             div()
                 .absolute()
                 .inset_0()
+                .occlude()
                 .bg(crate::ui::presets::scrim_fill(cx))
+                .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                    if ev.keystroke.key == "escape" {
+                        cx.stop_propagation();
+                        this.close_composer(window, cx);
+                    }
+                }))
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
@@ -1413,7 +1420,7 @@ impl Tty7App {
                 .flex_col()
                 .items_center()
                 .justify_start()
-                .pt(px(crate::ui::switcher::CARD_TOP - HEADER_H))
+                .pt(px(crate::ui::switcher::CARD_TOP))
                 .child(
                     card.on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()),
                 )

@@ -1680,7 +1680,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::BoardNow => "刚刚",
         L10nKey::BoardFieldGroup => "分组",
-        L10nKey::BoardGroupAuto => "按仓库（自动）",
+        L10nKey::BoardFieldWhere => "运行位置",
+        L10nKey::BoardNoPlace => "选择运行位置",
         L10nKey::BoardAllGroups => "全部分组",
         L10nKey::BoardWorktree => "在新的 git worktree 中运行",
         L10nKey::BoardWorktreeNeedsRepo => "要用 worktree，任务的运行目录必须在 git 仓库里",
