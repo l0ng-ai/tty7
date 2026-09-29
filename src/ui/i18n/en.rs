@@ -1901,10 +1901,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppWorktreeRemovedBranchKept => {
             "Removed worktree; kept branch \"{branch}\", which has unmerged commits"
         }
-        L10nKey::AppForkStillConnecting => "Could not fork: the pane is still connecting",
         L10nKey::AppPaneNoCodingAgent => "This pane isn't running a coding agent",
         L10nKey::AppForkNoCommand => "tty7 has no fork command for {name}",
-        L10nKey::AppForkLocalOnly => "{name} sessions can only be forked from a local pane",
+        L10nKey::AppForkLocalOnly => {
+            "{name} sessions can't be forked from inside an SSH or WSL session"
+        }
         L10nKey::AppForkNoSessionId => {
             "tty7 hasn't seen a {name} session id in this pane — install its hooks in Settings → Integrations"
         }

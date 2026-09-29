@@ -1946,11 +1946,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppWorktreeRemovedBranchKept => {
             "ワークツリーを削除しました。ブランチ「{branch}」には未マージのコミットがあるため残しました"
         }
-        L10nKey::AppForkStillConnecting => "フォークできませんでした: ペインはまだ接続中です",
         L10nKey::AppPaneNoCodingAgent => "このペインはコーディングエージェントを実行していません",
         L10nKey::AppForkNoCommand => "tty7 には {name} 用のフォークコマンドがありません",
         L10nKey::AppForkLocalOnly => {
-            "{name} のセッションはローカルペインからしかフォークできません"
+            "SSH または WSL セッション内の {name} のセッションはフォークできません"
         }
         L10nKey::AppForkNoSessionId => {
             "tty7 はこのペインで {name} のセッション ID を確認できていません — 設定 → 連携でフックをインストールしてください"

@@ -5456,9 +5456,12 @@ impl Tty7App {
             self.activate(index, window, cx);
         }
 
+        // The directory the source runs in, on whichever host it runs on: an
+        // agent keys its history by directory, and a fork started anywhere
+        // else finds nothing to branch.
         let (cwd, shell) = {
             let view = source.read(cx);
-            (view.local_cwd(), view.shell_spec())
+            (view.spawnable_cwd(), view.shell_spec())
         };
         let group = self.spawn_group(cwd.as_deref(), cx);
         let new = match new_terminal(
@@ -5484,12 +5487,9 @@ impl Tty7App {
                 return;
             }
         };
-        let Some(terminal) = new.terminal() else {
-            log::error!("fork spawn produced a pane that is still connecting");
-            window.push_notification(t(L10nKey::AppForkStillConnecting), cx);
-            return;
-        };
-        terminal.read(cx).run_command_line(&cmd);
+        // A remote workspace's pane is still dialling here; the fork runs
+        // the moment it lands.
+        crate::ui::agent_launch::run_when_ready(&new, cmd, cx);
 
         match placement {
             ForkPlacement::NewTab => {
