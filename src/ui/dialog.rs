@@ -159,6 +159,36 @@ pub(crate) fn labelled(name: impl IntoElement, input: Input, cx: &App) -> Div {
         .child(field(input, cx))
 }
 
+/// A label over a control that is not a text field.
+pub(crate) fn labelled_control(name: impl IntoElement, control: impl IntoElement, cx: &App) -> Div {
+    v_flex()
+        .gap(px(LABEL_GAP))
+        .child(label(name, cx))
+        .child(control)
+}
+
+/// A dropdown's closed face, in the same well as a text field, so a form of
+/// fields and choices still reads as one column.
+pub(crate) fn select_well(
+    id: impl Into<gpui::ElementId>,
+    value: impl Into<gpui::SharedString>,
+    cx: &App,
+) -> gpui::Stateful<Div> {
+    let tk = crate::ui::settings::kit::Tk::of(cx);
+    h_flex()
+        .id(id)
+        .h(px(FIELD_H))
+        .pl(px(10.))
+        .pr(px(9.))
+        .gap(px(8.))
+        .items_center()
+        .rounded(crate::ui::rounding::ROW_RADIUS)
+        .bg(well_fill(cx))
+        .cursor_pointer()
+        .child(div().flex_1().min_w_0().truncate().child(value.into()))
+        .child(crate::ui::settings::kit::chevron_down(&tk))
+}
+
 /// A block of read-only detail — a host and its key — set on the field's
 /// fill, so it reads as a value to check rather than a line of prose.
 pub(crate) fn well(cx: &App) -> Div {

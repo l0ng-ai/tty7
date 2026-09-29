@@ -332,6 +332,18 @@ pub trait Host: Send + Sync + 'static {
 
     fn git(&self, cwd: &Path, args: &[&str]) -> io::Result<Output>;
 
+    /// The repository `cwd` is in, answered without running `git` — or
+    /// `None` when this host cannot, and [`crate::core::git::probe_repo`]
+    /// asks `git` instead.
+    ///
+    /// Only this machine answers. A remote host could read the same files on
+    /// its side, but asking it to would be a request its server has never
+    /// heard of, and one of those takes the whole link down; the `git` it
+    /// runs over there has no Xcode shim to trip on anyway.
+    fn repo_head(&self, _cwd: &Path) -> Option<Option<crate::core::git::head::RepoHead>> {
+        None
+    }
+
     /// `git`, but with an explicit ceiling on how long to wait for the far side.
     ///
     /// Network verbs (`fetch`/`pull`/`push`) run for as long as the network

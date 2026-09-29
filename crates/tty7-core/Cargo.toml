@@ -42,6 +42,14 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # even though only the GUI computes one today.
 sha2 = "0.11"
 
+# Finding the repository a pane's cwd is in (`core::git::head`) without a
+# `git` process: the sidebar asks it of every pane, and a spawn that fails —
+# `/usr/bin/git` on macOS is a shim that dies whenever the selected Xcode is
+# mid-switch — used to read as "not a repository" and ungroup the tab. Only the
+# discovery crate: counts, diffs and every write still go through the `git`
+# CLI, so what the sidebar says stays the same answer the diff views give.
+gix-discover = { version = "0.56", features = ["sha1"] }
+
 # The gitignore matcher chain (`core::gitignore`) the file tree dims entries
 # with — the same crate ripgrep uses. Lives here rather than in the GUI because
 # the remote server has to answer "is this path ignored?" with the identical

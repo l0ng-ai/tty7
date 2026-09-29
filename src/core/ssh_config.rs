@@ -450,7 +450,8 @@ pub fn merge_imported(
                     || current.user != profile.user
                     || current.identity_files != profile.identity_files
                     || current.proxy_command != profile.proxy_command
-                    || current.agent_forward != profile.agent_forward;
+                    || current.agent_forward != profile.agent_forward
+                    || current.algorithms != profile.algorithms;
                 if changed {
                     stats.updated += 1;
                 } else {
@@ -462,6 +463,10 @@ pub fn merge_imported(
                 current.identity_files = profile.identity_files;
                 current.proxy_command = profile.proxy_command;
                 current.agent_forward = profile.agent_forward;
+                // ssh config owns these just like host/port/user: without this a
+                // `Compression yes` or `Ciphers` line removed from the file stuck
+                // to the saved profile for good (#997).
+                current.algorithms = profile.algorithms;
             }
             None => {
                 stats.added += 1;
@@ -1095,6 +1100,39 @@ mod tests {
                 unchanged: 2
             }
         );
+    }
+
+    /// #997: turning `Compression` off in ssh config and importing again has
+    /// to reach the saved profile, not leave zlib stuck on it.
+    #[test]
+    fn reimport_replaces_algorithms_on_an_existing_host() {
+        let root = temp_root("import-algorithms");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        let config = ssh.join("config");
+        std::fs::write(
+            &config,
+            "Host prod\n  HostName 10.0.0.5\n  Compression yes\n  Ciphers aes256-ctr\n",
+        )
+        .unwrap();
+
+        let mut existing = Vec::new();
+        merge_imported(&mut existing, import_profiles_from(config.clone(), &root));
+        assert!(!existing[0].algorithms.compression.is_empty());
+        assert_eq!(existing[0].algorithms.cipher, vec!["aes256-ctr"]);
+
+        std::fs::write(&config, "Host prod\n  HostName 10.0.0.5\n").unwrap();
+        let stats = merge_imported(&mut existing, import_profiles_from(config.clone(), &root));
+        assert_eq!(
+            stats,
+            MergeStats {
+                added: 0,
+                updated: 1,
+                unchanged: 0
+            }
+        );
+        assert!(existing[0].algorithms.compression.is_empty());
+        assert!(existing[0].algorithms.cipher.is_empty());
     }
 
     #[test]

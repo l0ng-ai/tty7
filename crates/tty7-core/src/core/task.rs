@@ -341,21 +341,6 @@ pub fn branch_slug(title: &str) -> Option<String> {
     (!slug.is_empty()).then_some(slug)
 }
 
-/// The argument that hands `agent` its first prompt while leaving it open for
-/// the conversation that follows, or `None` for an agent whose command line
-/// cannot do that — one that takes a prompt only to answer it and exit, or
-/// takes none at all.
-///
-/// The flag, when there is one, comes before the prompt: `gemini -i "…"`.
-pub fn prompt_flag(agent: CLIAgent) -> Option<Option<&'static str>> {
-    match agent {
-        CLIAgent::Claude | CLIAgent::Codex | CLIAgent::Cursor => Some(None),
-        CLIAgent::Gemini | CLIAgent::Qwen | CLIAgent::Copilot => Some(Some("-i")),
-        CLIAgent::OpenCode => Some(Some("--prompt")),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

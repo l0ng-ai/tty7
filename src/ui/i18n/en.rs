@@ -1797,6 +1797,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "This machine’s server can’t keep tasks yet — update it to use the board"
         }
         L10nKey::BoardNow => "now",
+        L10nKey::BoardToastCleanedKept => "Cleaned up {n} · kept unmerged branches: {branches}",
         L10nKey::BoardNoPlace => "Pick where it runs",
         L10nKey::BoardPlaceSearch => "Repository or path",
         L10nKey::BoardNoMatches => "No matches",
@@ -1814,13 +1815,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::BoardStartAgain => "Start again",
         L10nKey::BoardWorktreeGone => "worktree deleted",
         L10nKey::BoardOlderDone => "{n} older",
-        L10nKey::BoardCleanupTitle => "Clean up {n} task(s)?",
-        L10nKey::BoardCleanupDetail => {
-            "Their worktrees and branches will be deleted, and these hold work that exists nowhere else:\n\n{list}"
-        }
-        L10nKey::BoardCleanupDirty => "uncommitted changes",
-        L10nKey::BoardCleanupUnmerged => "not merged into {base}",
-        L10nKey::BoardCleanupDelete => "Delete",
         L10nKey::BoardToastCleaned => "Cleaned up {n}",
         L10nKey::BoardCleanupFailed => "Could not remove {path}: {error}",
         L10nKey::BoardModeWorktree => "New worktree",
@@ -1971,7 +1965,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "config.json could not be read. tty7 kept the settings it is running on and left the file exactly as it is. Fix its permissions or contents and tty7 reloads; saving a setting first overwrites it."
         }
         L10nKey::AppWorktreeRemoveDetailDirty => {
-            "The closed tab's worktree at {path} has uncommitted changes."
+            "The closed tab's worktree at {path} has uncommitted changes. They are saved to refs/tty7/trash/{name} before anything is deleted."
         }
         L10nKey::AppWorktreeRemoveDetailClean => "The closed tab's worktree at {path} is clean.",
         L10nKey::AppWorktreeRemoveTitle => "Remove worktree \"{branch}\"?",
@@ -1994,6 +1988,23 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PaneDragHandleTooltip => "Drag to move this pane",
         L10nKey::AppWorktreeRemoved => "Removed worktree \"{branch}\"",
         L10nKey::AppWorktreeRemoveFailed => "Worktree removal failed: {error}",
+        L10nKey::WorktreePromptAgent => "Start",
+        L10nKey::WorktreePromptShell => "Shell",
+        L10nKey::WorktreePromptTask => "Task",
+        L10nKey::WorktreePromptSetup => "Runs .tty7/setup first",
+        L10nKey::WorktreePromptSetupHint => {
+            "No .tty7/setup. Add one to run `{command}` in new worktrees"
+        }
+        L10nKey::AppWorktreeSetupTitle => "Run this repo's setup script?",
+        L10nKey::AppWorktreeSetupDetail => {
+            "{path} runs in the new tab before anything else. Approve it only if you trust this repo; tty7 asks again whenever the script changes."
+        }
+        L10nKey::AppWorktreeSetupRun => "Run Setup",
+        L10nKey::AppWorktreeSetupSkip => "Skip",
+        L10nKey::AppWorktreeNotCarried => "Not copied from .worktreeinclude: {paths}",
+        L10nKey::AppWorktreeRemovedBranchKept => {
+            "Removed worktree; kept branch \"{branch}\", which has unmerged commits"
+        }
         L10nKey::AppForkStillConnecting => "Could not fork: the pane is still connecting",
         L10nKey::AppPaneNoCodingAgent => "This pane isn't running a coding agent",
         L10nKey::AppForkNoCommand => "tty7 has no fork command for {name}",

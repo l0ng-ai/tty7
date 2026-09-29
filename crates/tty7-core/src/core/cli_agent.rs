@@ -677,6 +677,21 @@ impl CLIAgent {
             .map_or_else(|| self.binary().to_string(), str::to_string)
     }
 
+    /// The arguments that start an interactive session whose first message is
+    /// `prompt`. `None` for an agent whose positional prompt means a one-shot,
+    /// non-interactive run, or whose form is not known — the caller then
+    /// starts the agent bare rather than guess.
+    pub fn prompt_args(self, prompt: &str) -> Option<Vec<String>> {
+        match self {
+            CLIAgent::Claude | CLIAgent::Codex | CLIAgent::Cursor => Some(vec![prompt.to_string()]),
+            CLIAgent::Gemini | CLIAgent::Qwen | CLIAgent::Copilot => {
+                Some(vec!["-i".to_string(), prompt.to_string()])
+            }
+            CLIAgent::OpenCode => Some(vec!["--prompt".to_string(), prompt.to_string()]),
+            _ => None,
+        }
+    }
+
     /// `argv` as a command line worth launching this agent with again: its
     /// binary followed by the flags it ran with, minus everything that names
     /// one particular session (a resume, a fork, a session id) and minus

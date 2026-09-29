@@ -829,7 +829,14 @@ impl Tty7App {
                         .when(kind != SymbolKind::Impl, |d| {
                             d.child(div().text_color(muted).child(kind.tag()))
                         })
-                        .child(div().text_color(muted).child(name)),
+                        // The symbol is code, so it is set as code, a rung
+                        // darker than the path it hangs off.
+                        .child(
+                            div()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_color(fg.opacity(0.6))
+                                .child(name),
+                        ),
                 );
             }
             div()
@@ -859,7 +866,7 @@ impl Tty7App {
                 .id(("editor-breadcrumbs", slot))
                 .flex_none()
                 .w_full()
-                .h(px(26.))
+                .h(px(22.))
                 .items_center()
                 .overflow_hidden()
                 .px(px(crate::ui::app::CONTENT_INSET))

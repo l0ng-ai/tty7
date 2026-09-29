@@ -1,21 +1,24 @@
 ---
 title: "Worktrees"
-description: "An isolated checkout on a fresh branch, in one dialog and one tab."
+description: "One checkout per task: fresh branch, set up, and handed to an agent — in one dialog."
 ---
 
 Running two agents on the same repository at once means they fight over the
-working tree. A git worktree is the fix, and tty7 makes it a single dialog.
+working tree. A git worktree is the fix, and tty7 makes it a single dialog:
+create the checkout, make it runnable, and start the agent in it.
 
 ## Creating one
 
 **New Worktree Tab…** — in Search Everywhere, the tab's right-click menu, and
-the application menu — asks three things:
+the application menu — asks:
 
 | Field | Default |
 |---|---|
-| **Worktree Name** | A fresh name that does not collide with an existing branch or directory |
+| **Worktree Name** | A fresh name that no branch, directory or removed worktree has used |
 | **New Branch** | The same name, editable |
-| **Start From** | The branch you are currently on |
+| **Start From** | The remote's default branch (`origin/main`), fetched first; the current branch when there is no remote |
+| **Start** | A dropdown: Shell, or any agent on this machine — the last one used is picked |
+| **Task** | The agent's first message (Claude Code, Codex and Gemini take one) |
 
 Each field opens on a suggestion you can accept or type straight over.
 
@@ -23,9 +26,64 @@ Each field opens on a suggestion you can accept or type straight over.
   <img src="/images/new-worktree.webp" alt="Creating a worktree" />
 </Frame>
 
-Confirm and tty7 creates the worktree, opens a tab in it, and starts a shell
-there. The [sidebar](/window/sidebar) files it under the same repository group as
-its parent, on its own branch.
+Confirm and tty7 creates the worktree, copies in what `.worktreeinclude` asks
+for, opens a tab there, and runs `.tty7/setup` followed by the agent. The
+[sidebar](/window/sidebar) files it under the same repository group as its
+parent, on its own branch.
+
+The new branch does not track `origin/main`: its first `git push -u` goes to a
+branch of its own name.
+
+## Files a checkout needs: `.worktreeinclude`
+
+A fresh checkout has none of your gitignored files — no `.env`, no local
+settings. List the ones it needs in `.worktreeinclude` at the repository root,
+in gitignore syntax:
+
+```
+.env
+.env.local
+config/local/*.json
+```
+
+A path is copied only if it matches **and** git ignores it.
+
+Copies are copy-on-write where the filesystem supports it (APFS on macOS,
+btrfs and XFS on Linux): a copied directory costs no disk until one side
+changes it. Nothing is symlinked, because two checkouts sharing one dependency
+tree break each other the moment their lockfiles disagree. On a remote machine
+the files go over the connection, up to 64 MB in total — enough for
+configuration, not for `node_modules`.
+
+## Making it runnable: `.tty7/setup`
+
+Commit an executable at `.tty7/setup` — any language, with a shebang — and
+every new worktree runs it in its first tab, before the agent. Install
+dependencies there, rather than copying them:
+
+```sh
+#!/bin/sh
+set -e
+pnpm install
+echo "PORT=$TTY7_PORT" > .env.local
+```
+
+| Variable | Value |
+|---|---|
+| `TTY7_ROOT_PATH` | The main checkout |
+| `TTY7_WORKTREE_PATH` | The new worktree |
+| `TTY7_WORKTREE_NAME` | Its directory name |
+| `TTY7_PORT` | The first of ten ports this worktree has to itself |
+
+`TTY7_PORT` comes from the worktree's path, so a dev server started there does
+not collide with its siblings, and the same worktree always gets the same
+ports. The setup and the agent are chained with `&&`: if setup fails, the
+agent does not start and the error stays on screen.
+
+The script is code from the repository, so tty7 asks before running it the
+first time, and again whenever its content changes. Without a setup script,
+the dialog suggests one based on your lockfile (`pnpm install`, `uv sync`, …).
+Setup runs on macOS and Linux; Windows worktrees skip it.
 
 ## Where they go
 
@@ -35,8 +93,8 @@ Worktrees land inside the repository, under:
 <repo>/.tty7/worktrees/<name>
 ```
 
-`<repo>/.tty7/.gitignore` is created with `*` in it the first time, so the
-directory never shows up as an untracked mess in your own repository.
+The directory is listed in `.git/info/exclude`, so it never shows up in
+`git status`, and `.tty7/setup` next to it stays committable.
 
 ## Removing one
 
@@ -46,8 +104,26 @@ Closing a worktree tab offers to remove the worktree with it:
 - **Dirty tree** — the dialog says so, and removing requires the explicit
   *Discard Changes & Remove*.
 
-Nothing is removed silently, and *Keep* leaves the worktree on disk for `git
-worktree list` to find later.
+Before anything is deleted, the checkout's state — uncommitted and untracked
+files included — is saved under `refs/tty7/trash/<name>`. Even a discarded
+change can come back:
+
+```bash
+git checkout refs/tty7/trash/<name> -- .
+```
+
+The branch is deleted only if it is merged; otherwise tty7 says it kept it.
+*Keep* leaves the worktree on disk, and `tty7 worktree ls` finds it later.
+
+## From the command line
+
+```bash
+tty7 worktree new --agent claude --task "fix the flaky login test"
+tty7 worktree ls
+tty7 worktree rm quiet-otter
+```
+
+See the [CLI reference](/cli/reference#worktree--one-checkout-per-task).
 
 <Tip>
   Pair this with [agent sessions](/agents/sessions): a worktree per agent means

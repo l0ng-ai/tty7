@@ -1,25 +1,28 @@
 //! Clean up: where a finished task leaves the board for good.
 //!
 //! Done is still a card you can take back; cleaning up is not. It closes the
-//! tabs a task's runs opened in their worktrees, deletes those worktrees and
-//! their branches, and takes the card off the board. Nothing is lost without
-//! a word: when a worktree holds uncommitted changes, or its branch commits
-//! that never reached the main checkout, the user is told which and asked
-//! first. Otherwise it just happens — there is nothing to ask about.
+//! tabs a task's runs opened in their worktrees, removes those worktrees, and
+//! takes the card off the board.
+//!
+//! It asks nothing, because it loses nothing: removal goes through
+//! [`worktree::remove`], which files the checkout — uncommitted work
+//! included — under `refs/tty7/trash/<name>` before deleting it, and keeps a
+//! branch with commits nothing else has. The note that follows says when a
+//! branch was kept.
 
 use std::path::PathBuf;
 
-use gpui::{Context, PromptLevel, Window};
+use gpui::{Context, Window};
 use gpui_component::WindowExt as _;
 use tty7_core::core::task::TaskId;
-use tty7_core::core::worktree::Discard;
+use tty7_core::core::worktree;
 
 use crate::ui::app::Tty7App;
-use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::i18n::{L10nKey, t_fmt};
 
 impl Tty7App {
-    /// Cleans up `ids`: checks what deleting their worktrees would lose, asks
-    /// if anything, then closes, deletes and removes.
+    /// Cleans up `ids`: closes their worktree tabs, removes their worktrees,
+    /// takes the cards off the board.
     pub(super) fn clean_up(
         &mut self,
         ids: Vec<TaskId>,
@@ -34,75 +37,7 @@ impl Tty7App {
             .collect();
         worktrees.sort();
         worktrees.dedup();
-        if worktrees.is_empty() {
-            self.finish_clean_up(ids, Vec::new(), window, cx);
-            return;
-        }
-        let host_id = self.spawn_host(cx);
-        let Some(host) = crate::ui::host_registry::HostRegistry::get(cx, host_id) else {
-            window.push_notification(t(L10nKey::BoardUnavailable), cx);
-            return;
-        };
-        crate::ui::host_ops::HostOps::run_in(
-            host,
-            window,
-            cx,
-            move |h| {
-                worktrees
-                    .iter()
-                    .filter_map(|p| tty7_core::core::worktree::discard_check(h, p))
-                    .collect::<Vec<Discard>>()
-            },
-            move |this, checks, window, cx| {
-                let losing: Vec<String> = checks
-                    .iter()
-                    .filter(|d| d.loses_work())
-                    .map(|d| {
-                        let mut why = Vec::new();
-                        if d.worktree.dirty {
-                            why.push(t(L10nKey::BoardCleanupDirty).to_string());
-                        }
-                        if d.unmerged {
-                            why.push(t_fmt(L10nKey::BoardCleanupUnmerged, &[("base", &d.base)]));
-                        }
-                        format!("{} — {}", d.worktree.branch, why.join(", "))
-                    })
-                    .collect();
-                if losing.is_empty() {
-                    this.finish_clean_up(ids, checks, window, cx);
-                    return;
-                }
-                let title = t_fmt(L10nKey::BoardCleanupTitle, &[("n", &ids.len().to_string())]);
-                let detail = t_fmt(L10nKey::BoardCleanupDetail, &[("list", &losing.join("\n"))]);
-                let answer = window.prompt(
-                    PromptLevel::Warning,
-                    &title,
-                    Some(&detail),
-                    &crate::ui::confirm_answers(t(L10nKey::BoardCleanupDelete), t(L10nKey::Cancel)),
-                    cx,
-                );
-                cx.spawn_in(window, async move |this, cx| {
-                    if matches!(answer.await, Ok(0)) {
-                        let _ = this.update_in(cx, |this, window, cx| {
-                            this.finish_clean_up(ids, checks, window, cx)
-                        });
-                    }
-                })
-                .detach();
-            },
-        );
-    }
-
-    /// The part after any question: close the runs' tabs, delete their
-    /// worktrees, take the cards off the board.
-    fn finish_clean_up(
-        &mut self,
-        ids: Vec<TaskId>,
-        checks: Vec<Discard>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // A tab working inside a worktree holds it open; it closes first.
+        // A tab working inside a worktree holds it open, so it closes first.
         // Tabs of runs that worked in place are the user's own and stay.
         let tabs: Vec<_> = ids
             .iter()
@@ -122,43 +57,59 @@ impl Tty7App {
                 removed += 1;
             }
         }
-        if !checks.is_empty() {
-            let host_id = self.spawn_host(cx);
-            if let Some(host) = crate::ui::host_registry::HostRegistry::get(cx, host_id) {
-                crate::ui::host_ops::HostOps::run_in(
-                    host,
-                    window,
-                    cx,
-                    move |h| {
-                        checks
-                            .iter()
-                            .filter_map(|d| {
-                                tty7_core::core::worktree::discard(h, d)
-                                    .err()
-                                    .map(|e| (d.worktree.path.display().to_string(), e))
-                            })
-                            .collect::<Vec<_>>()
-                    },
-                    |_this, failed, window, cx| {
-                        for (path, error) in failed {
-                            window.push_notification(
-                                t_fmt(
-                                    L10nKey::BoardCleanupFailed,
-                                    &[("path", &path), ("error", &error)],
-                                ),
-                                cx,
-                            );
-                        }
-                    },
-                );
-            }
+        if removed == 0 {
+            return;
         }
-        if removed > 0 {
-            self.flash(
-                t_fmt(L10nKey::BoardToastCleaned, &[("n", &removed.to_string())]),
-                None,
-                cx,
-            );
+        let done = t_fmt(L10nKey::BoardToastCleaned, &[("n", &removed.to_string())]);
+        if worktrees.is_empty() {
+            self.flash(done, None, cx);
+            return;
         }
+        let host_id = self.spawn_host(cx);
+        let Some(host) = crate::ui::host_registry::HostRegistry::get(cx, host_id) else {
+            self.flash(done, None, cx);
+            return;
+        };
+        crate::ui::host_ops::HostOps::run_in(
+            host,
+            window,
+            cx,
+            move |h| {
+                let mut kept = Vec::new();
+                let mut failed = Vec::new();
+                for path in &worktrees {
+                    // Already gone — removed by hand, or by an earlier clean
+                    // up — is what was asked for.
+                    let Some(wt) = worktree::managed(h, path) else {
+                        continue;
+                    };
+                    match worktree::remove(h, &wt, true) {
+                        Ok(r) if r.branch_kept => kept.push(wt.branch),
+                        Ok(_) => {}
+                        Err(e) => failed.push((path.display().to_string(), e)),
+                    }
+                }
+                (kept, failed)
+            },
+            move |this, (kept, failed), window, cx| {
+                for (path, error) in failed {
+                    window.push_notification(
+                        t_fmt(
+                            L10nKey::BoardCleanupFailed,
+                            &[("path", &path), ("error", &error)],
+                        ),
+                        cx,
+                    );
+                }
+                let note = match kept.is_empty() {
+                    true => done,
+                    false => t_fmt(
+                        L10nKey::BoardToastCleanedKept,
+                        &[("n", &removed.to_string()), ("branches", &kept.join(", "))],
+                    ),
+                };
+                this.flash(note, None, cx);
+            },
+        );
     }
 }

@@ -10,6 +10,7 @@
 //! questions for a remote workspace that `LocalHost` answers for this machine,
 //! and the conformance suite holds the two to the same behaviour.
 pub mod diff;
+pub mod head;
 pub mod log;
 pub mod ops;
 pub mod status;
@@ -35,9 +36,59 @@ pub struct RepoSnapshot {
     pub counts: Option<(u32, u32)>,
 }
 
-pub fn probe(host: &dyn Host, cwd: &Path) -> Option<RepoSnapshot> {
-    let paths = git(
-        host,
+/// What asking a directory "which repository are you in" came back with.
+///
+/// Two ways of not getting a snapshot, and they must not be confused. "Not a
+/// repository" is an answer about the directory and holds until it moves; a
+/// probe that *failed* — `git` would not start, the Xcode shim behind
+/// `/usr/bin/git` had no developer directory to hand off to, a remote link
+/// dropped mid-call — says nothing about it at all. Filing the second as the
+/// first is what used to pull a tab sitting in a perfectly good repository out
+/// of its sidebar group, for good: an idle pane never asks again.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum RepoProbe {
+    Repo(RepoSnapshot),
+    NotARepo,
+    Failed,
+}
+
+/// Exit status of a `git` that ran and refused: `fatal: not a git repository`,
+/// and the handful of other fatals (a `safe.directory` refusal among them)
+/// that mean this directory is not one git will work in.
+const GIT_FATAL: i32 = 128;
+
+pub fn probe_repo(host: &dyn Host, cwd: &Path) -> RepoProbe {
+    let (root, home, branch) = match host.repo_head(cwd) {
+        Some(None) => return RepoProbe::NotARepo,
+        Some(Some(head)) => (
+            crate::core::path_spelling::spelling_on_buf(host.id(), &head.root),
+            crate::core::path_spelling::spelling_on_buf(host.id(), &head.home),
+            head.branch,
+        ),
+        None => match locate(host, cwd) {
+            Ok((root, home)) => (root, home, None),
+            Err(outcome) => return outcome,
+        },
+    };
+    // A branch the files could not spell plainly — a detached HEAD above all —
+    // is `git`'s to name, so it matches what the diff views print for it.
+    // `rev-parse` has already said this is a repository, so a branch that
+    // cannot be read is the probe failing, not the directory changing its mind.
+    let Some(branch) = branch.or_else(|| branch_name(host, cwd)) else {
+        return RepoProbe::Failed;
+    };
+    RepoProbe::Repo(RepoSnapshot {
+        home,
+        root,
+        branch,
+        counts: diff_numstat(host, cwd),
+    })
+}
+
+/// Root and home of `cwd`'s repository, asked of `git` — for a host that
+/// cannot read them in-process ([`Host::repo_head`]).
+fn locate(host: &dyn Host, cwd: &Path) -> Result<(PathBuf, PathBuf), RepoProbe> {
+    let out = match host.git(
         cwd,
         &[
             "rev-parse",
@@ -46,17 +97,42 @@ pub fn probe(host: &dyn Host, cwd: &Path) -> Option<RepoSnapshot> {
             "--git-dir",
             "--git-common-dir",
         ],
-    )?;
+    ) {
+        Ok(out) => out,
+        // A directory that is gone — a worktree removed under a pane still
+        // sitting in it — is not a repository, and never will be again.
+        Err(_)
+            if host
+                .stat(cwd)
+                .is_err_and(|e| e.kind() == io::ErrorKind::NotFound) =>
+        {
+            return Err(RepoProbe::NotARepo);
+        }
+        Err(_) => return Err(RepoProbe::Failed),
+    };
+    if !out.success() {
+        return Err(match out.status {
+            Some(GIT_FATAL) => RepoProbe::NotARepo,
+            _ => RepoProbe::Failed,
+        });
+    }
+    let Ok(paths) = String::from_utf8(out.stdout) else {
+        return Err(RepoProbe::Failed);
+    };
     let mut lines = paths.lines().map(|l| l.trim_end_matches(['\n', '\r']));
-    let root = git_path(host, lines.next()?);
+    let Some(root) = lines.next().map(|l| git_path(host, l)) else {
+        return Err(RepoProbe::Failed);
+    };
     let home = repo_home(host, &root, lines.next(), lines.next());
-    let branch = branch_name(host, cwd)?;
-    Some(RepoSnapshot {
-        home,
-        root,
-        branch,
-        counts: diff_numstat(host, cwd),
-    })
+    Ok((root, home))
+}
+
+/// [`probe_repo`] for a caller that only wants the snapshot.
+pub fn probe(host: &dyn Host, cwd: &Path) -> Option<RepoSnapshot> {
+    match probe_repo(host, cwd) {
+        RepoProbe::Repo(snap) => Some(snap),
+        RepoProbe::NotARepo | RepoProbe::Failed => None,
+    }
 }
 
 /// A path `git` just printed, in the spelling the rest of tty7 keys by.
@@ -495,6 +571,28 @@ mod tests {
             one_spelling(Path::new("/private/var/t/repo/.git")),
             "/private/var/t/repo/.git",
             "on unix it is the identity, which is why this never fired locally"
+        );
+    }
+
+    #[test]
+    fn a_plain_or_vanished_directory_is_not_a_repo() {
+        let host = h();
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        // A temp directory can sit under a repository of its own on some
+        // machine; git has nothing to say about this test's premise there.
+        if host
+            .git(&plain, &["rev-parse", "--git-dir"])
+            .is_ok_and(|o| o.success())
+        {
+            return;
+        }
+        assert_eq!(probe_repo(&*host, &plain), RepoProbe::NotARepo);
+        assert_eq!(
+            probe_repo(&*host, &dir.path().join("gone")),
+            RepoProbe::NotARepo,
+            "a removed worktree is not a failed probe"
         );
     }
 

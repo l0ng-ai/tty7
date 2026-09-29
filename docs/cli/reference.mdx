@@ -353,6 +353,28 @@ one, else the agent running there, else the last segment of the cwd, else the
 foreground process. `name` stays literal, so a script can tell a real name from
 a stand-in.
 
+## `worktree` — one checkout per task
+
+The same worktrees the GUI's **New Worktree Tab…** makes (see
+[Worktrees](/git/worktrees)), for scripts and for agents handing work to other
+agents. Runs git on this machine only; `-m` is refused.
+
+| Command | Effect | JSON |
+|---|---|---|
+| `worktree new [NAME] [--branch B] [--from REF] [--agent A] [--task TEXT] [--no-setup] [--ws WORKSPACE] [--repo DIR]` | Create the worktree, open a tab in it, run `.tty7/setup` then the agent there | `{"path","branch","base","tab","pane","setup","port","copied","skipped","command"}` |
+| `worktree ls [--repo DIR]` | Every checkout of the repo; tty7's are marked, with the panes working in each | `{"worktrees":[{"path","branch","main","managed","panes"}]}` |
+| `worktree rm NAME\|PATH [--force] [--close-panes] [--repo DIR]` | Remove a tty7 worktree, snapshotting it first | `{"path","branch","snapshot","branch_kept","closed_panes"}` |
+
+```bash
+tty7 worktree new --agent claude --task "fix the flaky login test"
+```
+
+`new` prints the path first, so `cd "$(tty7 worktree new | head -1)"` works.
+Setup runs unless `--no-setup`: the GUI asks before running a repo's script for
+the first time, but anyone who can run this command can already run the script
+by hand. `rm` refuses while a pane is still working inside the checkout; pass
+`--close-panes` to close them first.
+
 ## `pane` — panes
 
 | Command | Effect | JSON |

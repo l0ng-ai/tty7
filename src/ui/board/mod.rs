@@ -31,6 +31,7 @@ use gpui_component::input::InputState;
 use tty7_core::core::group_key::GroupId;
 use tty7_core::core::machine::TabId;
 use tty7_core::core::task::{self, Column, Done, Live, Run, Task, TaskId};
+use tty7_core::core::worktree::setup;
 
 use crate::core::cli_agent::{AgentStatus, CLIAgent};
 use crate::core::config::{Config, unix_now};
@@ -953,38 +954,30 @@ impl Tty7App {
             window.push_notification(t(L10nKey::BoardNoAgent), cx);
             return;
         };
-        let overrides = &cx.global::<Config>().agent_launch;
-        let launch = agent.launch_command(overrides);
-        let command = match task::prompt_flag(agent) {
-            Some(flag) => {
-                let ask = crate::core::shell_quote::quote_for_shell(&one_line(task.ask()), None);
-                match flag {
-                    Some(flag) => format!("{launch} {flag} {ask}"),
-                    None => format!("{launch} {ask}"),
-                }
-            }
-            // The agent takes no prompt it would stay open after answering,
-            // so it starts bare and the prompt waits on the clipboard.
-            None => {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(task.ask().to_string()));
-                window.push_notification(
-                    t_fmt(
-                        L10nKey::BoardPromptCopied,
-                        &[("agent", agent.display_name())],
-                    ),
-                    cx,
-                );
-                launch
-            }
-        };
+        // The same line the New Worktree dialog types: the agent, told the
+        // task when it takes a first message.
+        let ask = one_line(task.ask());
+        let command = setup::agent_line(agent, &ask, &cx.global::<Config>().agent_launch);
+        // One that takes none starts bare, and the task waits on the
+        // clipboard.
+        if agent.prompt_args(&ask).is_none() {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(task.ask().to_string()));
+            window.push_notification(
+                t_fmt(
+                    L10nKey::BoardPromptCopied,
+                    &[("agent", agent.display_name())],
+                ),
+                cx,
+            );
+        }
         let cwd = task.cwd.as_ref().map(PathBuf::from);
         if !task.worktree {
-            self.launch_run(task, agent, command, cwd, None, window, cx);
+            self.launch_run(task, agent, Some(command), cwd, None, window, cx);
             return;
         }
-        // The worktree is cut first, off the thread — it is a `git worktree
-        // add` on whichever machine the workspace is on — and the run opens
-        // in it once it exists.
+        // The worktree is cut first, off the thread — on whichever machine
+        // the workspace is on — and then opened the way the New Worktree
+        // dialog opens one: its setup, once approved, before the agent.
         let Some(cwd) = cwd else {
             window.push_notification(t(L10nKey::BoardWorktreeNeedsRepo), cx);
             return;
@@ -1002,20 +995,30 @@ impl Tty7App {
             host,
             window,
             cx,
-            move |h| crate::core::worktree::create_for(h, &cwd, slug.as_deref()),
+            move |h| {
+                crate::core::worktree::create_for(h, &cwd, slug.as_deref())
+                    .map(|wt| crate::ui::worktree_prompt::Created::read(h, wt))
+            },
             move |this, made, window, cx| match made {
-                Ok(wt) => {
-                    let path = wt.path.clone();
-                    this.launch_run(
-                        task,
-                        agent,
-                        command,
-                        Some(path.clone()),
-                        Some(path),
-                        window,
-                        cx,
-                    )
-                }
+                Ok(created) => this.start_worktree(
+                    host_id,
+                    created,
+                    Some(command),
+                    Box::new(move |this, wt, line, window, cx| {
+                        let path = wt.path.clone();
+                        this.launch_run(
+                            task,
+                            agent,
+                            line,
+                            Some(path.clone()),
+                            Some(path),
+                            window,
+                            cx,
+                        )
+                    }),
+                    window,
+                    cx,
+                ),
                 Err(e) => window
                     .push_notification(t_fmt(L10nKey::BoardWorktreeFailed, &[("error", &e)]), cx),
             },
@@ -1031,7 +1034,7 @@ impl Tty7App {
         &mut self,
         mut task: Task,
         agent: CLIAgent,
-        command: String,
+        command: Option<String>,
         cwd: Option<PathBuf>,
         worktree: Option<PathBuf>,
         window: &mut Window,
@@ -1051,7 +1054,9 @@ impl Tty7App {
             tab.group.set(group);
         }
         let tab_id = tab.tree_id.get();
-        crate::ui::agent_launch::run_when_ready(&slot, command, cx);
+        if let Some(command) = command {
+            crate::ui::agent_launch::run_when_ready(&slot, command, cx);
+        }
         if on_board {
             self.main_view = MainView::Board;
             self.focus_active(window, cx);

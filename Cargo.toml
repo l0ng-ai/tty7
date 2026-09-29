@@ -293,7 +293,7 @@ edition = "2024"
 # they must never drift apart. This is the line a release bump edits (and the
 # one nightly's `awk '/^version = /'` stamps: it is the first such line in the
 # file, since the package entries above are all `version.workspace = true`).
-version = "26.9.3"
+version = "26.9.4"
 
 [workspace.dependencies]
 # Our fork's `tty7` branch carries the local customizations tty7 relies on:
@@ -351,12 +351,15 @@ smallvec = "1"
 smol = "2"
 
 [patch.crates-io]
-# Temporary until upstream russh releases gssapi-with-mic client auth support
-# (https://github.com/Eugeny/russh/pull/737) — remove this patch and take the
-# crates.io release once it lands. Pinned to an exact rev (never a branch):
-# russh is the SSH protocol layer handling user credentials, and a moving
-# branch on a third-party fork could change what `cargo update` builds.
-russh = { git = "https://github.com/ayamir/russh", rev = "0d1d073350ed823069252075cbf3db9672d5b490" }
+# Our fork (l0ng-ai/russh, branch `tty7`): ayamir's gssapi-with-mic client auth
+# (0d1d073) plus Eugeny/russh 58886f4d + 24e2c374, which stop zlib from
+# truncating packets that inflate past 2x — without them a host with
+# `Compression yes` connects and never prints a byte (#997). GSSAPI has since
+# landed upstream (#738, in 0.62.7 / 0.63), but 0.62.7 lacks 24e2c374 and 0.63
+# changes `check_server_key`; drop this patch when moving to 0.63.2+. Pinned
+# to an exact rev (never a branch): russh is the SSH protocol layer handling
+# user credentials, and `cargo update` must not change what it builds.
+russh = { git = "https://github.com/l0ng-ai/russh", rev = "34f73e68d875b6fc2529654102ee65bafc691c59" }
 
 [workspace.lints.clippy]
 dbg_macro = "deny"

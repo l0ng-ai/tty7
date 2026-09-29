@@ -149,6 +149,12 @@ pub enum Command {
 
     #[command(
         subcommand,
+        about = "Git worktrees tty7 makes: one per task, set up and handed to an agent"
+    )]
+    Worktree(WorktreeCmd),
+
+    #[command(
+        subcommand,
         about = "The board: tasks for agents, and where each one stands"
     )]
     Task(TaskCmd),
@@ -578,6 +584,94 @@ pub enum TabCmd {
         tab: String,
         #[arg(value_name = "INDEX")]
         index: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorktreeCmd {
+    #[command(
+        about = "Create a worktree under <repo>/.tty7/worktrees, open a tab there, and run \
+                 .tty7/setup then the agent in it; print the path",
+        long_about = "Create a worktree under <repo>/.tty7/worktrees, open a tab there, and \
+                      run .tty7/setup then the agent in it; print the path.\n\n\
+                      Gitignored files listed in .worktreeinclude are copied over first \
+                      (copy-on-write where the filesystem can). The setup script gets \
+                      TTY7_ROOT_PATH, TTY7_WORKTREE_PATH, TTY7_WORKTREE_NAME and TTY7_PORT, \
+                      the first of ten ports this worktree has to itself."
+    )]
+    New {
+        #[arg(
+            value_name = "NAME",
+            help = "Directory name (default: a fresh two-word name)"
+        )]
+        name: Option<String>,
+        #[arg(long, value_name = "BRANCH", help = "Branch to create (default: NAME)")]
+        branch: Option<String>,
+        #[arg(
+            long,
+            value_name = "REF",
+            help = "Start point (default: the remote's default branch, fetched first)"
+        )]
+        from: Option<String>,
+        #[arg(
+            long,
+            value_name = "AGENT",
+            help = "Agent to start after setup: claude, codex, …"
+        )]
+        agent: Option<String>,
+        #[arg(
+            long,
+            value_name = "TEXT",
+            requires = "agent",
+            help = "The agent's first message (claude, codex and gemini take one)"
+        )]
+        task: Option<String>,
+        #[arg(long, help = "Do not run .tty7/setup")]
+        no_setup: bool,
+        #[arg(
+            long,
+            value_name = "WORKSPACE",
+            help = "Workspace for the tab (default: this one)"
+        )]
+        ws: Option<String>,
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Repository to branch (default: the current directory)"
+        )]
+        repo: Option<std::path::PathBuf>,
+    },
+
+    #[command(about = "Checkouts of the repository here; tty7's are marked")]
+    Ls {
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Repository (default: the current directory)"
+        )]
+        repo: Option<std::path::PathBuf>,
+    },
+
+    #[command(
+        about = "Remove a tty7 worktree and its branch if merged; its last state stays under \
+                 refs/tty7/trash/<name>"
+    )]
+    Rm {
+        #[arg(value_name = "NAME|PATH")]
+        target: String,
+        #[arg(
+            long,
+            help = "Remove even with uncommitted changes (they are still snapshotted)"
+        )]
+        force: bool,
+        #[arg(long, help = "Close the panes still working in it first")]
+        close_panes: bool,
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Repository (default: the current directory)"
+        )]
+        repo: Option<std::path::PathBuf>,
     },
 }
 

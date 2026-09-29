@@ -1228,6 +1228,56 @@ mod tests {
         assert!(!inv.shells[0].args_are_tty7_defaults);
     }
 
+    /// A remote host has no in-process answer, so the repo probe asks the
+    /// far side's `git` — and has to tell a refusal about the directory from
+    /// a `git` that never ran, or a tab loses its group to a flaky link.
+    #[test]
+    fn a_remote_repo_probe_tells_not_a_repo_from_a_failure() {
+        use crate::core::git::{RepoProbe, probe_repo};
+        let out = |status: i32, stdout: &str| {
+            ControlReply::Ok(ReplyOk::Output(Output {
+                status: Some(status),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            }))
+        };
+        let (host, _seen) = host_with_peer('/', move |req| {
+            let reply = match req {
+                ControlRequest::Git { cwd, args } => match (cwd.as_str(), args[0].as_str()) {
+                    ("/repo", "rev-parse") => out(0, "/repo\n/repo/.git\n/repo/.git\n"),
+                    ("/repo", "symbolic-ref") => out(0, "main\n"),
+                    ("/repo", _) => out(0, "3\t1\tsrc/main.rs\n"),
+                    ("/plain", _) => out(128, ""),
+                    ("/shim", _) => out(1, ""),
+                    ("/gone", _) => {
+                        ControlReply::Err(WireError::new(WireErrorKind::NotFound, "no cwd"))
+                    }
+                    _ => ControlReply::Err(WireError::new(WireErrorKind::ConnectionReset, "")),
+                },
+                ControlRequest::Stat { path } if path == "/gone" => {
+                    ControlReply::Err(WireError::new(WireErrorKind::NotFound, "gone"))
+                }
+                ControlRequest::Stat { .. } => ControlReply::Ok(ReplyOk::Meta(meta())),
+                other => panic!("unexpected request {other:?}"),
+            };
+            Some((reply, vec![]))
+        });
+        let h: &dyn Host = host.as_ref();
+
+        let RepoProbe::Repo(snap) = probe_repo(h, Path::new("/repo")) else {
+            panic!("/repo is a repository");
+        };
+        assert_eq!(
+            (snap.root.as_path(), snap.branch.as_str()),
+            (Path::new("/repo"), "main")
+        );
+        assert_eq!(snap.counts, Some((3, 1)));
+        assert_eq!(probe_repo(h, Path::new("/plain")), RepoProbe::NotARepo);
+        assert_eq!(probe_repo(h, Path::new("/gone")), RepoProbe::NotARepo);
+        assert_eq!(probe_repo(h, Path::new("/shim")), RepoProbe::Failed);
+        assert_eq!(probe_repo(h, Path::new("/flaky")), RepoProbe::Failed);
+    }
+
     #[test]
     fn agent_sessions_come_from_the_peer() {
         use crate::core::agent_history::PastSession;

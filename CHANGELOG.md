@@ -5,7 +5,7 @@ All notable changes to tty7 are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [26.9.4] - 2026-09-29
 
 ### Added
 
@@ -19,9 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   machine has no agent to offer. **New Agent Tab** (⌘⇧A) is unchanged: it
   still starts the one used last.
 
-- **Find in files, in the right panel's new Search tab.** Type and the active
-  tab's project — the same roots the Files tab shows — is searched as you go,
-  with hits grouped by file, a count per file, and each match highlighted in
+- **Find in files, from the right panel's Files tab.** Its field now matches
+  file names and file contents at once, in two sections. Type and the active
+  tab's project — the same roots the tree shows — is searched as you go, with
+  content hits grouped by file, a count per file, and each match highlighted in
   its line. Click a hit to open the file in the built-in editor at that line
   and column; Enter searches again. Toggles for match case, whole word and
   regular expressions sit at the end of the field. The walk honours
@@ -44,9 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signed out, and a private repository or a spent rate limit says to run
   `gh auth login`. Screenshots pasted into an issue are shown; images from
   any other host are shown as links rather than loaded, and non-web link
-  targets are disabled. The Info tab gains a GitHub
-  row that opens the branch you are on. The tab talks to `api.github.com` only
-  while you use it.
+  targets are disabled. The tab talks to `api.github.com` only while you use
+  it.
 
 - **Reorder the active tab from the keyboard** (`MoveTabLeft` / `MoveTabRight`).
   The tab moves one slot past its neighbour — the keyboard form of dragging it
@@ -92,14 +92,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A port forward can be switched off without losing its rule** (#439). A
   forward could only be removed, so pointing one local port at a different
   remote target meant deleting the rule and typing the other one in again. Each
-  forward in the Ports section, and each rule under Settings → SSH → Port
-  forwarding, now has a switch: off releases the listener and keeps the rule in
-  the list, on binds it again from the rule it was made from. Switching one on
-  while another switched-on forward holds its port is refused with a notice
-  naming that forward, rather than failing at bind time. A switch flipped in the
-  panel on a rule that came from a saved host is written back to that host, so
-  the next connection opens the same set; a rule saved switched off is listed
-  but not opened. Profiles saved before this load with every rule on.
+  forward in the Ports section now has a switch: off releases the listener and
+  keeps the rule in the list, on binds it again from the rule it was made from.
+  Switching one on while another switched-on forward holds its port is refused
+  with a notice naming that forward, rather than failing at bind time. A switch
+  flipped in the panel on a rule that came from a saved host is written back to
+  that host, so the next connection opens the same set; a rule saved switched
+  off is listed but not opened. Profiles saved before this load with every rule
+  on.
 
 - **Windows file paths are links** (#965). `C:\Users\me\a.png`,
   `c:/Users/me/a.png` and `\\server\share\a.png` underline and open like any
@@ -124,6 +124,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `link_file_open` makes "Open" do. Shown for files on this machine only, and
   not when "Open" already uses the system opener.
 
+- **The code editor talks to language servers** (#1002). Opening a local file
+  starts the server for its language — rust-analyzer,
+  typescript-language-server, pyright (or pylsp), gopls or clangd, whichever
+  is on `PATH` — one per project root, shared by every buffer under it.
+  Diagnostics are underlined with their message on hover and counted in the
+  status bar, and a Problems list (⌘⇧M, Ctrl+Shift+M elsewhere) gathers the
+  errors and warnings of every open file. Completion, hover, signature help,
+  go to definition (F12 or ⌘-click), Find All References (⇧F12), code actions
+  (⌘.), Format Document (⇧⌥F) and Rename Symbol (F2) work across files; the
+  keys are bound inside the editor only, so terminal programs keep F2 and F12.
+  A server missing from `PATH` costs only its language, with a one-line hint
+  in the status bar; a server whose last file closed shuts down after a grace
+  period, and one that crashes is restarted a few times. Files on a remote
+  workspace get no server. `editor_lsp` turns it all off.
+
+- **Multiple cursors, git change markers, symbols and a split in the code
+  editor** (#1002). ⌘D, ⌘⇧L and ⌘⌥↑ / ⌘⌥↓ add cursors, and the status bar
+  counts the selections. The gutter marks lines added, modified or deleted
+  against the file's staged version, on remote workspaces too; ⌥F5 / ⇧⌥F5 step
+  through the changes, ⌥F3 or a click on a marker peeks one, and Revert Change
+  undoes it as one step (`editor_git_gutter` turns the markers off). Go to
+  Symbol (⌘⇧O) lists the file's outline, previewing each symbol as it is
+  arrowed through, and once a query is typed adds the language server's
+  matches from across the project; a breadcrumb row over the text shows the
+  path and the symbols around the caret. Back and forward (Ctrl+− / Ctrl+⇧+−
+  on macOS, Alt+← / Alt+→ elsewhere) walk a per-tab history of jumps. ⌘\
+  (Ctrl+\ elsewhere, bound only in the editor so the terminal keeps SIGQUIT)
+  opens the file in a second group on the right, saved with the tab. The
+  right-click menu gains Toggle Comment, Move, Duplicate and Delete Line and
+  Go to Matching Bracket, and case transforms, Trim Trailing Whitespace and
+  Join Lines are bindable commands. **Settings → General → Editor** holds the
+  change markers, language servers, soft wrap and rendered Markdown.
+
+- **Quick open, Go to Line, New File and Save As in the code editor** (#984).
+  Go to File (⌘O on macOS, unbound elsewhere) finds any file in the active
+  tab's project by fuzzy name — on local, SSH and WSL workspaces alike,
+  skipping what the Files tree hides — and `name:line[:col]` jumps to that
+  spot. Go to Line is Ctrl+G. Save As uses the native panel locally and a
+  path bar on a remote workspace, and the files each tab has open are
+  remembered across restarts. Loading and saving keep a file's encoding
+  (UTF-8, GB18030, Windows-1252), byte-order mark and CRLF line endings as
+  they were, indentation is detected, `.editorconfig` is honoured, and the
+  status bar shows indentation, encoding and line ending.
+
+- **A local file pasted or dropped into a remote pane is uploaded there**
+  (#1004). Copying a file in Finder and pasting it into an SSH pane, or
+  dropping it on one, pasted this machine's path, which the remote program
+  cannot open; only clipboard images were uploaded. Every local path handed to
+  a pane now takes one route: on an SSH host it is uploaded into a directory
+  of its own under `~/.cache/tty7/clipboard`, so it keeps its real name, and
+  the remote path is pasted; in a WSL pane it is rewritten to `/mnt/<drive>/…`;
+  locally it is pasted as before. Folders upload recursively, a large file
+  appears at its path only once complete, a transfer is given up only after
+  it stops making progress, and staged pastes older than a week are pruned.
+  Rows dragged from a remote Files tree are no longer taken for local files.
+
+- **The GitHub tab shows a pull request's checks, reviews and merge state**
+  (#1000). The detail leads with the check runs and commit statuses on the
+  head commit, failures first, with durations and links to their logs; then
+  one row per reviewer; and a line under the branches such as "Waiting on 1
+  check", "Merge conflicts" or "Ready to merge". While a check is running the
+  checks are re-read every 20 seconds when signed in. The list pins the pull
+  request of the pane's branch under the repository row, found through the
+  branch's upstream so a fork's branch resolves under the fork's owner. Long
+  comment threads, descriptions, reviewer lists and file lists fold behind a
+  "show all" row.
+
+- **The GitHub tab tries every signed-in `gh` account** (#987). Only gh's
+  active account was used, so a private repository owned by an organisation
+  that another signed-in account belongs to read as a 404. On a 404, 401 or
+  403 the tab now retries with gh's other `github.com` accounts and remembers,
+  per owner, the one that got through. A token from `GH_TOKEN` or
+  `GITHUB_TOKEN` is still used on its own.
+
+- **A link a table wrapped inside its cell opens whole** (#1001). Markdown
+  tables — Claude Code's among them — wrap a long cell by hand, one bordered
+  row per line, so hovering or clicking a wrapped URL only ever got the
+  fragment on one row. A link now carries on from a row into the next when its
+  text reaches the cell's right border and resumes at the left one, with the
+  borders lined up; only `│`, `┃` and `║` count as borders, never a bare `|`.
+  The hover underline covers just the cell's text on each row.
+
+- **Qoder CN CLI support** (by @ArnoChenFx in #988). The mainland-China build
+  of Qoder (`qodercn`, `qoderclicn`, `qoder-cn`) is recognised, reports its
+  status through hooks and has its past sessions listed, honouring
+  `QODERCN_CONFIG_DIR`.
+
+- **Prime Agent and Empryo are recognised, and Antigravity reports its
+  status** (by @kalpakprod in #975). Prime Agent (`prime-agent`) resumes and
+  forks its sessions and reports status through the same extension bridge as
+  Pi. Empryo (`empryo`) is detected and resumed with `--session`; it gets no
+  status hooks yet, because it strips tty7's variables from hook processes.
+  Antigravity CLI (`agy`) gets a `tty7` hook set in
+  `~/.gemini/config/hooks.json`, beside the user's own, so its tab shows
+  working and done.
+
+- **A working agent's status dot blinks.** It alternates every 600 ms between
+  its colour and a paler blend of it, so a column of tabs shows at a glance
+  which agents are still going. The repaints stop once no agent is working.
+
 ### Changed
 
 - **Every pick-one setting is a dropdown.** Settings drew a single choice two
@@ -141,17 +241,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are unchanged.
 
 - **The command palette is now Search Everywhere, with tabs.** <kbd>⌘ P</kbd>
-  (<kbd>Ctrl ⇧ P</kbd> elsewhere) opens one search over four tabs — **All**,
-  **Actions**, **Terminals** and **Hosts** — walked with <kbd>⇥</kbd> /
-  <kbd>⇧ ⇥</kbd>, keeping what is typed. **Terminals** lists every open tab of
-  every workspace, this window's most recently used first, and jumps to it
-  wherever it lives; the shells and agents it can open follow. **Hosts** holds
-  the saved SSH hosts and whatever address or `ssh …` command line is typed,
-  which replaces the separate input *SSH: Add Connection…* used to open. **All**
-  shows the best few rows of each, the tab with the best match first, and folds
-  the rest into a row that opens its tab. With nothing typed, <kbd>⌘ P</kbd>
-  <kbd>⏎</kbd> goes back to the tab you were just in. The keybinding action is
-  still `TogglePalette`, so a custom binding keeps working.
+  (<kbd>Ctrl ⇧ P</kbd> elsewhere) opens one search over **All**, **Terminals**,
+  **Sessions**, **Hosts** and **Commands**, walked with <kbd>⇥</kbd> / <kbd>⇧
+  ⇥</kbd>, keeping what is typed. **Terminals** lists every open tab of every
+  workspace, this window's most recently used first, and jumps to it wherever it
+  lives; the shells and agents it can open follow. **Hosts** holds the saved SSH
+  hosts and whatever address or `ssh …` command line is typed, which replaces
+  the separate input *SSH: Add Connection…* used to open. **All** shows the best
+  few rows of each, the tab with the best match first, and folds the rest into a
+  row that opens its tab; before anything is typed it leads each section with
+  its recent rows and tops it up to five from the rest, so a fresh window is not
+  empty. With nothing typed, <kbd>⌘ P</kbd> <kbd>⏎</kbd> goes back to the tab
+  you were just in. The keybinding action is still `TogglePalette`, so a custom
+  binding keeps working.
 - **Resume a past agent session from Search Everywhere.** Its **Sessions** tab
   lists past sessions of Claude Code, Codex, Gemini CLI, Qwen Code, Qoder,
   CodeBuddy, Pi, Oh My Pi, Kimi Code, Copilot CLI, Droid, Cursor CLI and
@@ -184,16 +286,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#955). Groups now come in two halves. Below, every tab you have not pinned is
   filed under its git repository, and an SSH tab under the host it is on rather
   than its remote path — `/home/ubuntu` on two machines used to share a header.
-  Above sit the groups you keep, each marked ◆ beside its name, in the order you
-  drag them into, until you delete them. A pinned group can keep a folder: a tab
-  whose working directory enters it joins it (the deepest folder wins when they
-  nest, and a worktree of a pinned repo counts), while a tab you drag out stays
-  out until it leaves the folder and comes back. Pin an auto group with the ◆ on
-  its header or by dragging the header up among the pinned ones; pin a folder by
-  dropping it from Finder, with **Pin as Group** in the Files panel, or with
-  **Open Folder as Group…** in the palette. **New Group** in the palette or on a
-  tab's right-click makes a label group. Deleting a group closes nothing — its
-  tabs go back to auto grouping — and dragging a tab below the pinned groups
+  Above sit the groups you keep, each marked with a pin beside its name, in the
+  order you drag them into, until you delete them. A pinned group can keep a
+  folder: a tab whose working directory enters it joins it (the deepest folder
+  wins when they nest, and a worktree of a pinned repo counts), while a tab you
+  drag out stays out until it leaves the folder and comes back. Pin an auto
+  group with the pin on its header or by dragging the header up among the pinned
+  ones; pin a folder by dropping it from Finder, with **Pin as Group** in the
+  Files panel, or with **Open Folder as Group…** in the palette. **New Group**
+  in the palette, on a tab's right-click or on a right-click in the empty
+  sidebar below the tabs makes a label group. Deleting a group closes nothing —
+  its tabs go back to auto grouping — and dragging a tab below the pinned groups
   does the same for one tab. Groups, their order and which are folded are stored
   with the workspace, so every window onto it agrees. **Settings → General →
   Auto grouping** replaces the three-way *Sidebar grouping* choice; off,
@@ -268,6 +371,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a TUI that never sets a shape itself, such as Claude Code. A shell prompt in
   vi mode keeps its own insert/normal shapes.
 
+- **Agent status catches interrupts, stale turns and permission prompts**
+  (#1003). Claude Code's `Stop` hook skips user interrupts, so after Esc or
+  Ctrl+C a pane stayed on working until the next prompt. Now an Esc or Ctrl+C
+  on a pane whose agent is mid-turn, with no hook event in the second after
+  it, ends the turn; and a turn that has been working for 30 minutes without
+  a hook event goes idle. These guessed states raise no notification or
+  unread badge, and the agent's next real event overrides them. Claude Code
+  and Codex now report a permission prompt or a question the moment it opens
+  rather than seconds later (Codex never did), and Codex leaves waiting once
+  the approved tool has run. The "finished" notification waits 1.5 seconds
+  and is dropped if the next turn starts first. Existing hook installs are
+  refreshed at launch.
+
+- **Settings open in a window of their own, rebuilt.** Settings used to cover
+  the workspace, hiding the terminal a setting was being tried on. It is a
+  separate window now; opening it again raises it, and closing it with
+  unsaved forms or a theme draft still asks first. The page is rebuilt with a
+  searchable sidebar, per-page modified counts and a *Modified only* switch,
+  and an inline Reset on each changed row. Theme menus have a live preview,
+  search and swatches, and font menus draw each family in itself. Recording a
+  shortcut that another action already has asks Replace or Cancel instead of
+  taking it over silently. SSH hosts are one column of recent hosts, with
+  *Show all* by source and a search, and open in place. Integrations gets an
+  agent search and a menu per agent (Reinstall, Reveal hook file, Uninstall).
+  General gains startup and restore; updates and the server move to About.
+  (#973)
+
+- **The window is redesigned.** The side rails share the window's fill,
+  divided by a hairline; the current tab is a neutral selected step with a
+  semibold title instead of a blue wash, and tab titles are spelled out in
+  full wherever they fit. The right panel's tabs are words — Info, Files,
+  Changes, GitHub. The workspace switcher, Search Everywhere, the Changes tab,
+  the diff overlay, dialogs, menus, the SFTP browser and the home page follow
+  the same design: neutral selection instead of accent washes (the
+  switcher's hard-coded blue row is gone), an inverted neutral primary
+  button, lighter scrims and headings no longer in capitals. The default
+  Light theme takes a new ink and accent. (#973, #993)
+
+- **Search sits in the middle of the title bar** (#990). The centred path
+  repeated what the sidebar already says; it is now a field-shaped
+  **Search…** button, with its shortcut, that opens Search Everywhere —
+  centred over the terminal column on Windows and Linux. The trailing `…`
+  menu, which held only Search Everywhere and Settings, is gone: both keep
+  their shortcuts and the macOS menu bar entries.
+
+- **Every confirmation is tty7's own dialog, and failures say what failed**
+  (#985). Closing a busy tab fell through to a system alert (NSAlert on
+  macOS, TaskDialog on Windows) while every other question was one of tty7's
+  cards; all confirmations are that card now, on every platform, with Return
+  and Escape keeping their meaning and a destructive answer painted red.
+  About twenty failure notices were one plain line such as `push: fatal: …`;
+  they are error toasts now, titled with what failed ("git push failed") and
+  the reason beneath. The delete confirmation says the file is removed for
+  good rather than moved to the Trash.
+
+- **The code editor's header, menus and find bar match the rest of the
+  window** (#1005, #992). The file strip keeps only the files most recently
+  brought forward (three docked, seven filled, fewer with side panels open) in
+  a stable order; a `+N` button lists every open file with a filter, keyboard
+  navigation, *Close saved* and *Close others*. A Dock / Fill switch replaces
+  the header's right-click menu, and a filled editor leads with a pill naming
+  the terminal it covers that docks it back. The text's right-click menu,
+  which was the OS's own menu, is drawn like tty7's other menus and offers
+  Attach to Agent (the selected lines ride along as `#L3-9`), Find, Go to Line
+  and the file's own items; file tabs get Close, Close Others and Close to the
+  Right. The find bar is one filled pill with the match count and a clear
+  current-match colour, and ⌘⌥F / ⌘R (Ctrl+H elsewhere) opens it with the
+  replace row.
+
 ### Removed
 
 - **The Window & Tabs settings page.** Its three tab settings — New tab
@@ -286,6 +458,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and folds from earlier versions are not carried over. The control dialect
   moves to v11, so each remote host needs one Update Server, which ends the
   sessions on it.
+
+- **Editing a saved host's authentication, proxy, port forwarding and
+  advanced options in Settings.** The rebuilt SSH page edits Alias,
+  HostName, User, Port, IdentityFile and ProxyJump; values already saved for
+  the rest are kept and still used. (#973)
 
 ### Fixed
 
@@ -311,9 +488,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Settings → Agents" — a page that is called Integrations — now names it
   correctly in every language and in the `tty7` CLI.
 - **Return runs the top row after a search that found nothing.** Backspacing
-  from a query with no results to one with some — or opening the search
-  already filtered, as the New Tab menu's *Other Shells…* row does — left no row selected, so Return did nothing until an arrow key was
-  pressed.
+  from a query with no results to one with some — or opening the search already
+  filtered, as the New Tab menu's *Other Shells…* row does — left no row
+  selected, so Return did nothing until an arrow key was pressed.
 - **A typed `ssh -p 2222 me@box` is no longer offered as an address.** The
   address parser read everything before the `@` as the user name and offered
   to connect as `ssh -p 2222 me`; a line with spaces is now always taken as an
@@ -340,6 +517,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emoji, other text and the primary font's own icons are drawn as before.
   Not on Linux, where the text system reports a glyph's advance box rather
   than its ink.
+
+- **A host with `Compression yes` prints again** (reported by @RedwindA in
+  #997). It negotiated `zlib@openssh.com`, and the SSH library tty7 used cut
+  every packet that inflated past twice its compressed size, so the zlib
+  stream desynced right after authentication: the session showed as
+  connected and never printed a byte. The library is now pinned to a build
+  with the upstream fixes. Re-importing an ssh config now also updates the
+  algorithms of hosts that already exist.
+
+- **The OpenCode plugin loads on OpenCode 2.x** (reported by @ArnoChenFx in
+  #999). 2.x only loads a plugin's default export shaped `{ id, setup }` and
+  rejected tty7's with a load error. The generated plugin now serves 1.x and
+  2.x, follows 2.x's event API, and starts its helper without `sh`, which
+  Windows does not have.
+
+- **The code editor no longer loses edits** (#984). A save truncated the file
+  in place, so a crash or a full disk mid-save destroyed it; local saves now
+  go through a temporary file renamed over the target, falling back to an
+  in-place write only where a rename would change something visible. The
+  same file open in two tabs is one buffer, not two diverging copies.
+  Closing a tab, its last pane or the window, or quitting, asks about
+  unsaved files (Save / Cancel / Discard) instead of dropping them. Renaming
+  or deleting a file in the Files tree follows the open buffer, so a save no
+  longer recreates the old path, and a save asks before overwriting a change
+  made elsewhere. Undoing back to the saved text clears the unsaved mark, and
+  a reload keeps undo.
+
+- **Typing Chinese through an input method no longer crashes the code
+  editor** (#993). When a re-parse ran past its time budget, stale
+  highlighting could put a style boundary inside the committed character and
+  panic the app.
+
+- **Selecting text in rendered Markdown no longer blanks it out** (#991). The
+  selection was painted over the glyphs, so a multi-line selection in, say, a
+  pull request's description became a solid grey block.
+
+- **The Processes and Ports sections see the pane's shell on a busy Mac**
+  (reported by @zcyc in #731). The macOS process list read the pid count as a
+  byte count, so on a machine with about 700 processes only the newest 60 or
+  so were seen; a pane whose shell started earlier showed no processes and no
+  ports, with nothing flagged.
+
+- **A Files tree on a WSL distro stays in step with it** (reported by
+  @zt449569708 in #942). Copying a downloaded file onto the distro's share
+  no longer brings a `name:Zone.Identifier` file with it; a file removed from
+  the shell inside the distro leaves the tree (the share accepts a change
+  watch and never reports a change, so it is now polled every 2 seconds); and
+  right-clicking a row selects it.
+
+- **The quit confirmation on Linux is no longer cut off mid-sentence**
+  (reported by @XuJinNet in #920). Linux has no native dialog, and the
+  fallback set the message and detail as single unbreakable lines in a
+  fixed-width box. Its text wraps now.
+
+- **Fork no longer picks up the previous agent's session id** (by
+  @CodeHourra in #957). When the foreground agent in a pane changed, or
+  another agent's hook wrote to the same terminal, the old session id stayed
+  with the new agent.
+
+- **Windows no longer freeze for a round trip when a remote watch closes.**
+  Closing a watch on a remote workspace waited for the server's answer, often
+  on the UI thread, so every window stalled for a round trip — up to five
+  seconds on a quiet link. The request is now sent without waiting.
+
+- **A burst of pane output no longer holds up the UI.** The reader parsed each
+  batch, and a reconnect's whole replay of up to 8 MB, in one hold of the
+  grid lock that every UI handler touching the grid waits on. It now lets go
+  every 64 KB.
+
+- **A command named in the search leads over a session that mentions it**
+  (#985). Typing `worktree` and Return resumed a past agent session instead of
+  opening New Worktree Tab: the fuzzy matcher spent the first letter on its
+  leftmost occurrence and scored a title containing the whole word as a poor
+  match, and session titles often open with a command's name. The matcher now
+  keeps the best alignment, and on the All tab sessions yield to an equally
+  good command.
+
+- **Menu items bound to Return or Tab show the right shortcut on macOS.** A
+  menu item bound to ⌘↵, such as Toggle Fullscreen, read as ⌘E. (#973)
 
 ## [26.9.3] - 2026-09-23
 
