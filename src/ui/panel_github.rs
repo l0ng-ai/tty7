@@ -24,6 +24,10 @@ use crate::ui::scm::state::RepoKey;
 const ROW_H: f32 = 26.;
 /// How many label chips a hovered row shows before the age.
 const MAX_ROW_LABELS: usize = 3;
+/// The widest a hovered row lets its author get before truncating it.
+const AUTHOR_MAX_W: f32 = 96.;
+/// What a hovered row leaves of its title, however much meta it shows.
+const TITLE_MIN_W: f32 = 48.;
 /// The state glyph, and the column it sits in.
 const GLYPH: f32 = 14.;
 /// The pinned rows' height — the Info tab's row pitch.
@@ -535,10 +539,11 @@ impl Tty7App {
         body.into_any_element()
     }
 
-    /// One line per item: state glyph, `#number`, title. The labels and the
-    /// age of the last update wait for the pointer — the resting list reads
-    /// as a column of titles, and hovering a row answers "what labels, how
-    /// fresh" without a second line under every one of them.
+    /// One line per item: state glyph, `#number`, title. The labels, the
+    /// author and the age of the last update wait for the pointer — the
+    /// resting list reads as a column of titles, and hovering a row answers
+    /// "what labels, whose, how fresh" without a second line under every one
+    /// of them.
     fn github_item_row(
         &self,
         slug: &RepoSlug,
@@ -578,18 +583,34 @@ impl Tty7App {
                     }))
                     .child(label_chip(label, cx))
             });
+        let author = (!item.author.is_empty()).then(|| item.author.clone());
         let age = (item.updated_at > 0).then(|| relative_time(now, item.updated_at));
         // Out of the layout at rest, so the title has the whole row to
         // itself; on hover it takes its room from the title's tail. Built
         // from state rather than a `group_hover` display switch: an element
         // that is `display: none` at layout is never prepainted, and gpui
         // panics when a hover style then asks to paint it.
+        //
+        // When the row is too narrow for all of it, the author is what gives:
+        // capped, then truncated down to nothing, while the labels (they
+        // filter on click) and the age keep their width and the title keeps
+        // a stub to read.
         let meta = hovered.then(|| {
             h_flex()
-                .flex_none()
+                .min_w_0()
+                .overflow_hidden()
                 .items_center()
                 .gap(px(4.))
                 .children(labels)
+                .children(author.map(|author| {
+                    div()
+                        .min_w_0()
+                        .max_w(px(AUTHOR_MAX_W))
+                        .truncate()
+                        .text_size(rems(META))
+                        .text_color(muted)
+                        .child(author)
+                }))
                 .children(age.map(|age| {
                     div()
                         .flex_none()
@@ -641,7 +662,7 @@ impl Tty7App {
             .child(
                 div()
                     .flex_1()
-                    .min_w_0()
+                    .min_w(px(TITLE_MIN_W))
                     .truncate()
                     .text_size(rems(TEXT))
                     .text_color(gpui::rgb(sf.text_resting))
