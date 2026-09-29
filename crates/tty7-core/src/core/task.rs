@@ -153,6 +153,12 @@ pub struct Run {
     /// its work is, and what to clean up once it is merged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// Its agent was not handed the task's words when it started: it takes
+    /// no first message, or it was already running (a resumed session, a
+    /// tab filed as a task). Such an agent before its first turn is waiting
+    /// on the user, not picking a prompt up.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bare: bool,
 }
 
 /// The user said the task is finished.
@@ -298,8 +304,15 @@ pub fn column(task: &Task, live: impl Fn(&Run) -> Option<Live>) -> Column {
         return Column::Queued;
     }
     // An agent open on a run that has not taken a turn yet was just started
-    // for this task and is picking its prompt up.
-    if states.iter().any(|&s| live_column(s) == Column::Queued) {
+    // for this task and is picking its prompt up — unless it was never
+    // given one, when it waits on the user like any agent that has stopped.
+    if task
+        .runs
+        .iter()
+        .filter(|run| !run.bare)
+        .filter_map(&live)
+        .any(|s| live_column(s) == Column::Queued)
+    {
         return Column::Running;
     }
     Column::Review
@@ -536,6 +549,7 @@ mod tests {
                 session_id: None,
                 started: 0,
                 worktree: None,
+                bare: false,
             });
         }
         (t, tabs)
@@ -701,6 +715,7 @@ mod tests {
             session_id: None,
             started: 11,
             worktree: None,
+            bare: false,
         });
         assert_eq!(
             col(&t, &[(tab, live(AgentStatus::Done, 1))]),
@@ -745,6 +760,18 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_never_handed_the_task_waits_on_the_user() {
+        let (mut t, tabs) = task_with(1);
+        assert_eq!(col(&t, &[(tabs[0], STARTING)]), Column::Running);
+        t.runs[0].bare = true;
+        assert_eq!(col(&t, &[(tabs[0], STARTING)]), Column::Review);
+        assert_eq!(
+            col(&t, &[(tabs[0], live(AgentStatus::Working, 0))]),
+            Column::Running
+        );
+    }
+
+    #[test]
     fn a_start_in_the_future_is_not_a_start_forever() {
         let run = |started| Run {
             agent: CLIAgent::Claude,
@@ -752,6 +779,7 @@ mod tests {
             session_id: None,
             started,
             worktree: None,
+            bare: false,
         };
         assert!(just_started(&run(1_000), 1_000 + START_GRACE_SECS - 1));
         assert!(!just_started(&run(1_000), 1_000 + START_GRACE_SECS));

@@ -100,6 +100,10 @@ pub(crate) struct Board {
     /// The column each task was last drawn in, held while its tab's agent
     /// has gone quiet — see [`Held`].
     held: RefCell<HashMap<TaskId, Held>>,
+    /// Whether each finished run's worktree was still on disk, and when that
+    /// was asked — so a drawn board stats each one every few seconds rather
+    /// than every frame.
+    worktree_seen: RefCell<HashMap<String, (bool, std::time::Instant)>>,
     /// The zoom the active tab had when the board opened, put back when the
     /// board closes.
     zoom: Option<(TabId, Entity<TerminalView>)>,
@@ -131,6 +135,7 @@ impl Board {
             show_old_done: false,
             starting: HashSet::new(),
             held: RefCell::new(HashMap::new()),
+            worktree_seen: RefCell::new(HashMap::new()),
             zoom: None,
             menu: None,
         }
@@ -319,6 +324,9 @@ struct Held {
 
 const HOLD_SECS: u64 = 5;
 
+/// How long a worktree's being on disk, or not, is taken as read.
+const WORKTREE_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// One card, read off a task or a tab for this frame.
 struct Card {
     key: CardRef,
@@ -431,12 +439,7 @@ fn live_group_filter(filter: Option<GroupId>, pinned: impl Fn(GroupId) -> bool) 
 /// what the card's buttons send goes to it, so a split tab with two agents
 /// never shows one and answers the other.
 fn speaking_leaf(tab: &Tab, cx: &App) -> Option<Entity<TerminalView>> {
-    let urgency = |s: AgentStatus| match s {
-        AgentStatus::Waiting => 3,
-        AgentStatus::Working => 2,
-        AgentStatus::Done => 1,
-        AgentStatus::Idle => 0,
-    };
+    let urgency = crate::ui::tray::urgency;
     tab.pane
         .terminals()
         .into_iter()
@@ -655,7 +658,11 @@ impl Tty7App {
 
     /// Every card on the board this frame, filtered as the header says.
     fn board_cards(&self, window: Option<&Window>, full: bool, cx: &App) -> Vec<Card> {
-        let mut cards = self.all_cards(window, full, cx);
+        self.filter_cards(self.all_cards(window, full, cx))
+    }
+
+    /// `cards`, less those the header's filters hide.
+    fn filter_cards(&self, mut cards: Vec<Card>) -> Vec<Card> {
         if !self.board.agent_filter.is_empty() {
             cards.retain(|c| {
                 c.agent
@@ -681,6 +688,25 @@ impl Tty7App {
         // computer's disk; a remote one is taken to be.
         let local = full && self.can_spawn_locally(cx);
         let now = unix_now();
+        // Each tab's agent status as the machine tree last recorded it, for a
+        // tab whose terminal cannot say yet — see `Held`. Read only once
+        // such a tab turns up.
+        let remembered = std::cell::OnceCell::<HashMap<TabId, AgentStatus>>::new();
+        let remembered_status = |tab: TabId| {
+            remembered
+                .get_or_init(|| {
+                    crate::ui::machine_mirror::tab_views_for(cx, self.workspace)
+                        .map(|(views, _)| {
+                            views
+                                .into_iter()
+                                .filter_map(|v| Some((v.id, v.status?)))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+                .get(&tab)
+                .copied()
+        };
         let mut held = self.board.held.borrow_mut();
         let mut cards = Vec::new();
         for task in &self.board.tasks {
@@ -721,6 +747,24 @@ impl Tty7App {
                         h.column = computed;
                     }
                     h.column
+                }
+                // Nothing drawn yet to hold — the app just started onto a tab
+                // still connecting. What the machine last heard its agent say
+                // stands in until the agent can be read, then is held.
+                (Some(tab), None) if self.tab_connecting(tab, cx) => {
+                    let column = match remembered_status(tab) {
+                        Some(AgentStatus::Waiting) => Column::NeedsInput,
+                        Some(AgentStatus::Working) => Column::Running,
+                        _ => computed,
+                    };
+                    held.insert(
+                        task.id,
+                        Held {
+                            column,
+                            silent_since: None,
+                        },
+                    );
+                    column
                 }
                 (Some(_), None) => computed,
                 (None, _) => {
@@ -775,7 +819,7 @@ impl Tty7App {
                     && open.is_none()
                     && last
                         .and_then(|r| r.worktree.as_deref())
-                        .is_some_and(|p| !std::path::Path::new(p).exists()),
+                        .is_some_and(|p| !self.worktree_exists(p)),
                 starting: starting_now,
             });
         }
@@ -810,6 +854,20 @@ impl Tty7App {
             });
         }
         cards
+    }
+
+    /// Whether worktree `path` is on this computer's disk, as asked at most
+    /// [`WORKTREE_RECHECK`] ago.
+    fn worktree_exists(&self, path: &str) -> bool {
+        let mut seen = self.board.worktree_seen.borrow_mut();
+        match seen.get(path) {
+            Some(&(there, at)) if at.elapsed() < WORKTREE_RECHECK => there,
+            _ => {
+                let there = std::path::Path::new(path).exists();
+                seen.insert(path.to_string(), (there, std::time::Instant::now()));
+                there
+            }
+        }
     }
 
     fn card(&self, key: CardRef, window: &Window, cx: &App) -> Option<Card> {
@@ -1242,7 +1300,14 @@ impl Tty7App {
         let Some(card) = self.card(key, window, cx) else {
             return false;
         };
+        // Its agent's tab closed since the box was offered: say so rather
+        // than swallow what was typed, which stays in the box.
         let Some(view) = self.card_view(card.tab, card.leaf, cx) else {
+            self.flash(
+                t_fmt(L10nKey::BoardCardMoved, &[("title", &card.title)]),
+                None,
+                cx,
+            );
             return false;
         };
         let agent = card.agent.map_or("", |a| a.display_name());
@@ -1380,6 +1445,7 @@ impl Tty7App {
             session_id: None,
             started: unix_now(),
             worktree: None,
+            bare: true,
         });
         Some(task)
     }
@@ -1441,6 +1507,7 @@ impl Tty7App {
         task.push_run(Run {
             tab: Some(tab),
             started: unix_now(),
+            bare: true,
             ..run
         });
         task::reopen(&mut task);
@@ -1622,6 +1689,7 @@ impl Tty7App {
             session_id: None,
             started: unix_now(),
             worktree: worktree.map(|p| p.display().to_string()),
+            bare: agent.prompt_args(&one_line(task.ask())).is_none(),
         });
         task.agent = Some(agent);
         task::reopen(&mut task);
@@ -1646,37 +1714,52 @@ impl Tty7App {
         let now = unix_now();
         let mut changed = Vec::new();
         for task in &self.board.tasks {
-            let mut next = task.clone();
-            let mut dirty = false;
-            for run in next.runs.iter_mut() {
-                let Some(view) = self.card_view(run.tab, None, cx) else {
+            let mut next: Option<Task> = None;
+            for (i, run) in task.runs.iter().enumerate() {
+                let Some(view) = self.run_view(run, cx) else {
                     continue;
                 };
                 let session = view.read(cx).agent_session();
-                let id = session.as_ref().and_then(|s| s.session_id.clone());
-                if id.is_some() && id != run.session_id {
-                    run.session_id = id;
-                    dirty = true;
+                let id = session.as_ref().and_then(|s| s.session_id.as_ref());
+                if id.is_some() && id != run.session_id.as_ref() {
+                    next.get_or_insert_with(|| task.clone()).runs[i].session_id = id.cloned();
                 }
                 let working = session.is_some_and(|s| s.status == AgentStatus::Working);
-                if working
-                    && next
-                        .paused
-                        .is_some_and(|at| now.saturating_sub(at) > PAUSE_GRACE_SECS)
-                {
-                    next.paused = None;
-                    dirty = true;
+                let paused = next.as_ref().unwrap_or(task).paused;
+                if working && paused.is_some_and(|at| now.saturating_sub(at) > PAUSE_GRACE_SECS) {
+                    next.get_or_insert_with(|| task.clone()).paused = None;
                 }
             }
-            if dirty {
-                changed.push(next);
-            }
+            changed.extend(next);
         }
         for task in changed {
             if crate::ui::tree_sync::push_task(cx, self.workspace, task.clone()) {
                 self.board_task_put(task);
             }
         }
+    }
+
+    /// The pane `run`'s own agent runs in: one in its tab running the agent
+    /// it was started with — the one already known by its session, if that
+    /// is still there. Another agent started in the same tab, or beside it
+    /// in a split, is not this run's, and its session is not the one to
+    /// resume.
+    fn run_view(&self, run: &Run, cx: &App) -> Option<Entity<TerminalView>> {
+        let tab = self
+            .tabs
+            .iter()
+            .find(|t| Some(t.tree_id.get()) == run.tab)?;
+        let mine: Vec<_> = tab
+            .pane
+            .terminals()
+            .into_iter()
+            .filter(|l| l.read(cx).agent() == Some(run.agent))
+            .collect();
+        let known = mine.iter().find(|l| {
+            run.session_id.is_some()
+                && l.read(cx).agent_session().and_then(|s| s.session_id) == run.session_id
+        });
+        known.or(mine.first()).cloned()
     }
 
     // ---- toast --------------------------------------------------------------
@@ -1912,6 +1995,7 @@ mod tests {
             session_id: Some("s".into()),
             started: 10,
             worktree: None,
+            bare: false,
         });
         let Some(UndoStep::Save(put)) = undo.clone().step(Some(&now)) else {
             panic!("the card is still there to put back");

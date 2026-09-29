@@ -174,8 +174,14 @@ fn matching_places(places: Vec<TaskPlace>, query: &str, home: Option<&Path>) -> 
                 || p.cwd.to_string_lossy().to_lowercase().contains(&needle)
         })
         .collect();
+    // `~` and `~/…` are home; `~bob` is someone else's, which there is no
+    // telling from here.
     let path = match q.strip_prefix('~') {
-        Some(rest) => home.map(|home| PathBuf::from(format!("{}{rest}", home.display()))),
+        Some("") => home.map(Path::to_path_buf),
+        Some(rest) if rest.starts_with(['/', '\\']) => {
+            home.map(|home| PathBuf::from(format!("{}{rest}", home.display())))
+        }
+        Some(_) => None,
         None => (q.starts_with('/') || q.contains(":\\")).then(|| PathBuf::from(q)),
     };
     if let Some(path) = path
@@ -1341,6 +1347,11 @@ mod tests {
         assert!(
             matching_places(places.clone(), "~/src", None).is_empty(),
             "no `~` without a home to put it in"
+        );
+        let bob = matching_places(places.clone(), "~bob", Some(Path::new("/home/me")));
+        assert!(
+            bob.iter().all(|p| !p.cwd.starts_with("/home/me")),
+            "`~bob` is not under my home"
         );
     }
 }

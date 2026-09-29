@@ -714,12 +714,7 @@ impl Tab {
         crate::core::cli_agent::AgentStatus,
     )> {
         use crate::core::cli_agent::AgentStatus;
-        let urgency = |s: AgentStatus| match s {
-            AgentStatus::Waiting => 3,
-            AgentStatus::Working => 2,
-            AgentStatus::Done => 1,
-            AgentStatus::Idle => 0,
-        };
+        let urgency = crate::ui::tray::urgency;
         self.pane
             .terminals()
             .into_iter()

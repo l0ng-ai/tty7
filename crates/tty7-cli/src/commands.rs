@@ -1598,19 +1598,13 @@ struct NewTask {
 /// A `--cwd` as the board keeps it: a path on the workspace's own host, where
 /// the GUI will later open the run — so one relative to wherever this command
 /// happened to be typed is made absolute here, while that still means
-/// something. `local` says this CLI is on that host; across `-m` a relative
-/// path names nothing either side, and is refused.
+/// something. `local` says this CLI is on that host; across `-m` only a
+/// full path on that machine will do — nothing makes a relative one, or a
+/// `~`, absolute over there — and anything else is refused.
 fn task_cwd(cwd: String, local: bool) -> Result<String> {
-    let dotted = cwd == "."
-        || cwd == ".."
-        || ["./", "../", ".\\", "..\\"]
-            .iter()
-            .any(|p| cwd.starts_with(p));
     if !local {
-        if dotted {
-            bail!(
-                "--cwd {cwd:?} is relative to this computer, not the machine given with -m; give the full path there"
-            );
+        if !remote_absolute(&cwd) {
+            bail!("--cwd {cwd:?} is not a full path; across -m give the full path on that machine");
         }
         return Ok(cwd);
     }
@@ -1634,6 +1628,18 @@ fn task_cwd(cwd: String, local: bool) -> Result<String> {
         }
     }
     Ok(clean.to_string_lossy().into_owned())
+}
+
+/// Whether `path` is absolute on some machine this CLI cannot look at: a
+/// Unix root, or a Windows drive or share.
+fn remote_absolute(path: &str) -> bool {
+    let b = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with("\\\\")
+        || (b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && matches!(b[2], b'/' | b'\\'))
 }
 
 fn task_add(
@@ -2946,6 +2952,16 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_task_cwd_must_be_a_full_path_there() {
+        for ok in ["/srv/repo", "C:\\repo", "d:/repo", "\\\\host\\share"] {
+            assert_eq!(task_cwd(ok.into(), false).unwrap(), ok);
+        }
+        for bad in ["src/api", "~/repo", "~", ".", "../x", "C:repo"] {
+            assert!(task_cwd(bad.into(), false).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn task_ls_reads_each_column_off_the_agent_in_the_run_tab() {
         use tty7_core::core::cli_agent::{AgentSessionState, AgentStatus};
         use tty7_core::core::task::{Run, Task};
@@ -2960,6 +2976,7 @@ mod tests {
             session_id: None,
             started: 0,
             worktree: None,
+            bare: false,
         });
         ws.tasks = vec![queued, running];
         backend.replies.push_back(ReplyOk::AgentStates(vec![
@@ -2999,6 +3016,7 @@ mod tests {
             session_id: None,
             started: tty7_core::core::machine::unix_now(),
             worktree: None,
+            bare: false,
         });
         ws.tasks = vec![fresh];
         let out = json_of(run_cli(

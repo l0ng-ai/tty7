@@ -56,7 +56,11 @@ impl Tty7App {
         let groups = &self.sidebar_groups;
         self.board.group_filter =
             live_group_filter(self.board.group_filter, |g| groups.contains(g));
-        let cards = self.board_cards(Some(window), true, cx);
+        // Built once a frame: the header counts agents over every card, the
+        // columns draw the filtered ones.
+        let everyone = self.all_cards(Some(window), true, cx);
+        let agents = agent_counts(&everyone);
+        let cards = self.filter_cards(everyone);
         // A selection whose card is gone (removed, filtered out) goes too.
         if let Some(sel) = self.board.selected
             && !cards.iter().any(|c| c.key == sel)
@@ -77,7 +81,7 @@ impl Tty7App {
             .selected
             .and_then(|sel| cards.iter().find(|c| c.key == sel));
         self.sync_reply(selected, window, cx);
-        let header = self.render_board_header(&cards, cx);
+        let header = self.render_board_header(&cards, agents, cx);
         let filtered = !self.board.agent_filter.is_empty() || self.board.group_filter.is_some();
         let body = match cards.is_empty() && !filtered && self.board.dragging.is_none() {
             true => self.render_board_empty(cx),
@@ -137,7 +141,12 @@ impl Tty7App {
         )
     }
 
-    fn render_board_header(&self, cards: &[Card], cx: &mut Context<Self>) -> AnyElement {
+    fn render_board_header(
+        &self,
+        cards: &[Card],
+        agents: Vec<(CLIAgent, usize)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let count = |col: Column| cards.iter().filter(|c| c.column == col).count();
@@ -151,18 +160,6 @@ impl Tty7App {
         );
         let app = cx.entity().downgrade();
 
-        // Agents: a set to pick from, each with how many cards it has —
-        // counted over every card, or a picked agent would hide the rest
-        // from the very list that picks them.
-        let everyone = self.all_cards(None, false, cx);
-        let mut agents: Vec<(CLIAgent, usize)> = Vec::new();
-        for agent in everyone.iter().filter_map(|c| c.agent) {
-            match agents.iter_mut().find(|(a, _)| *a == agent) {
-                Some((_, n)) => *n += 1,
-                None => agents.push((agent, 1)),
-            }
-        }
-        agents.sort_by_key(|(a, _)| a.display_name());
         let picked = self.board.agent_filter.clone();
         let agent_label: SharedString = match picked.as_slice() {
             [] => t(L10nKey::BoardAllAgents).into(),
@@ -1124,4 +1121,19 @@ pub(super) fn column_dot(col: Column, cx: &App) -> (Hsla, bool) {
         Column::Review => (cx.theme().foreground, true),
         Column::Done => (muted.opacity(0.6), false),
     }
+}
+
+/// Agents: a set to pick from, each with how many cards it has — counted
+/// over every card, or a picked agent would hide the rest from the very list
+/// that picks them.
+fn agent_counts(everyone: &[Card]) -> Vec<(CLIAgent, usize)> {
+    let mut agents: Vec<(CLIAgent, usize)> = Vec::new();
+    for agent in everyone.iter().filter_map(|c| c.agent) {
+        match agents.iter_mut().find(|(a, _)| *a == agent) {
+            Some((_, n)) => *n += 1,
+            None => agents.push((agent, 1)),
+        }
+    }
+    agents.sort_by_key(|(a, _)| a.display_name());
+    agents
 }

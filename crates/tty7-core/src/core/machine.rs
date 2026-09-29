@@ -932,20 +932,18 @@ impl MachineStore {
         origin: Option<SubscriberId>,
     ) -> io::Result<()> {
         task.check().map_err(refuse)?;
-        self.mutate(None, |m| {
+        // Room is made and the task put in one commit: a put that is then
+        // refused never costs a card. The card dropped to make room is news
+        // to the window that asked as well, so that part goes to everyone.
+        self.mutate_split(origin, Persist::Now, |m| {
             let ws = find_workspace(m, workspace)?;
-            let Some(evicted) = crate::core::task::make_room(&ws.tasks, task.id).map_err(refuse)?
-            else {
-                return Ok(((), Vec::new()));
-            };
-            ws.tasks.retain(|t| t.id != evicted);
-            Ok((
-                (),
-                vec![(workspace, LayoutDelta::TaskRemoved { task: evicted })],
-            ))
-        })?;
-        self.mutate(origin, |m| {
-            let ws = find_workspace(m, workspace)?;
+            let mut everyone = Vec::new();
+            if let Some(evicted) =
+                crate::core::task::make_room(&ws.tasks, task.id).map_err(refuse)?
+            {
+                ws.tasks.retain(|t| t.id != evicted);
+                everyone.push((workspace, LayoutDelta::TaskRemoved { task: evicted }));
+            }
             match ws.tasks.iter().position(|t| t.id == task.id) {
                 Some(i) => ws.tasks[i] = task.clone(),
                 None if ws.tasks.len() >= crate::core::task::MAX_TASKS => {
@@ -956,7 +954,11 @@ impl MachineStore {
                 }
                 None => ws.tasks.push(task.clone()),
             }
-            Ok(((), vec![(workspace, LayoutDelta::TaskPut { task })]))
+            Ok((
+                (),
+                everyone,
+                vec![(workspace, LayoutDelta::TaskPut { task })],
+            ))
         })
     }
 
@@ -1280,7 +1282,29 @@ impl MachineStore {
         persist: Persist,
         op: impl FnOnce(&mut Machine) -> io::Result<(T, Vec<(WorkspaceId, LayoutDelta)>)>,
     ) -> io::Result<T> {
+        self.mutate_split(origin, persist, |m| {
+            op(m).map(|(value, deltas)| (value, Vec::new(), deltas))
+        })
+    }
+
+    /// [`Self::mutate_with`] for a change that tells its own `origin` part
+    /// of what it did: the first list of deltas goes to every subscriber,
+    /// the origin included, then the second to everyone else — both from
+    /// one commit, so no subscriber sees the first without the second.
+    fn mutate_split<T>(
+        &self,
+        origin: Option<SubscriberId>,
+        persist: Persist,
+        op: impl FnOnce(
+            &mut Machine,
+        ) -> io::Result<(
+            T,
+            Vec<(WorkspaceId, LayoutDelta)>,
+            Vec<(WorkspaceId, LayoutDelta)>,
+        )>,
+    ) -> io::Result<T> {
         let _order = self.notify_order.lock().unwrap_or_else(|e| e.into_inner());
+        let everyone;
         let deltas;
         let value;
         {
@@ -1295,8 +1319,9 @@ impl MachineStore {
                 }
                 Ok(out)
             }) {
-                Ok((v, d)) => {
+                Ok((v, all, d)) => {
                     value = v;
+                    everyone = all;
                     deltas = d;
                 }
                 Err(e) => {
@@ -1304,6 +1329,9 @@ impl MachineStore {
                     return Err(e);
                 }
             }
+        }
+        if !everyone.is_empty() {
+            self.notify_all(&everyone, None);
         }
         if !deltas.is_empty() {
             self.notify_all(&deltas, origin);

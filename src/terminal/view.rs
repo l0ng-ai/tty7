@@ -170,16 +170,6 @@ pub struct NativeSshParts {
 /// What a pane is called when nothing running in it has said otherwise.
 pub(crate) const DEFAULT_TITLE: &str = "tty7";
 
-/// What a pane is *saying* about itself, if anything — the reading behind
-/// [`TerminalView::stated_title`], split out so it can be pinned without a
-/// live pane.
-///
-/// Anything but the placeholder counts. That is wider than "arrived over OSC
-/// 0/2" on purpose: an SSH pane answers to the host it dialled and a workspace
-/// pane to its workspace's name, and those are names tty7 gave the pane
-/// deliberately (#438) rather than the absence of one. The literal string
-/// `tty7` is the only title that says nothing, because it is the app's own
-/// name standing in for a pane that has never introduced itself.
 /// The last `n` lines of a screen that are output rather than chrome.
 ///
 /// An agent's TUI keeps its own furniture at the bottom of the screen: an
@@ -219,6 +209,16 @@ pub(crate) fn output_tail(rows: &[String], n: usize) -> Vec<String> {
     out
 }
 
+/// What a pane is *saying* about itself, if anything — the reading behind
+/// [`TerminalView::stated_title`], split out so it can be pinned without a
+/// live pane.
+///
+/// Anything but the placeholder counts. That is wider than "arrived over OSC
+/// 0/2" on purpose: an SSH pane answers to the host it dialled and a workspace
+/// pane to its workspace's name, and those are names tty7 gave the pane
+/// deliberately (#438) rather than the absence of one. The literal string
+/// `tty7` is the only title that says nothing, because it is the app's own
+/// name standing in for a pane that has never introduced itself.
 pub(crate) fn stated_title(title: &str) -> Option<&str> {
     match title.trim() {
         "" => None,

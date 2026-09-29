@@ -18,7 +18,7 @@ use std::time::Duration;
 use gpui::{Context, Entity, PromptLevel, Window};
 use gpui_component::WindowExt as _;
 use tty7_core::core::machine::TabId;
-use tty7_core::core::task::{Task, TaskId};
+use tty7_core::core::task::{Column, Task, TaskId};
 use tty7_core::core::worktree;
 
 use crate::terminal::view::{PaneBusy, TerminalView};
@@ -72,6 +72,9 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Only what is still in Done: the ids were read off a frame that
+        // may be out of date by now.
+        let ids = self.still_done(ids, window, cx);
         let tasks: Vec<Task> = ids.iter().filter_map(|id| self.task(*id)).collect();
         if tasks.is_empty() {
             return;
@@ -116,10 +119,53 @@ impl Tty7App {
         );
         cx.spawn_in(window, async move |this, cx| {
             if matches!(answer.await, Ok(0)) {
-                let _ = this.update_in(cx, |this, window, cx| this.clean_up_now(ids, window, cx));
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.clean_up_confirmed(ids, plan, window, cx)
+                });
             }
         })
         .detach();
+    }
+
+    /// Cleans up what the user just agreed to — as far as it still stands.
+    /// A card that left Done while the question was up (an agent put back
+    /// to work, a reopen from elsewhere) is left alone; and if cleaning up
+    /// the rest would now end something the question never named, it is
+    /// asked again rather than done.
+    fn clean_up_confirmed(
+        &mut self,
+        ids: Vec<TaskId>,
+        agreed: Plan,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ids = self.still_done(ids, window, cx);
+        let tasks: Vec<Task> = ids.iter().filter_map(|id| self.task(*id)).collect();
+        if tasks.is_empty() {
+            return;
+        }
+        let plan = self.clean_up_plan(&tasks, cx);
+        let unnamed = plan.others > agreed.others
+            || plan
+                .running
+                .iter()
+                .any(|what| !agreed.running.contains(what));
+        match unnamed {
+            true => self.ask_clean_up(ids, true, window, cx),
+            false => self.clean_up_now(ids, window, cx),
+        }
+    }
+
+    /// Those of `ids` whose card is in Done now.
+    fn still_done(&self, ids: Vec<TaskId>, window: &Window, cx: &gpui::App) -> Vec<TaskId> {
+        let cards = self.all_cards(Some(window), false, cx);
+        ids.into_iter()
+            .filter(|id| {
+                cards
+                    .iter()
+                    .any(|c| c.key == super::CardRef::Task(*id) && c.column == Column::Done)
+            })
+            .collect()
     }
 
     fn clean_up_plan(&self, tasks: &[Task], cx: &gpui::App) -> Plan {
@@ -274,6 +320,7 @@ impl Tty7App {
                 (kept, saved, failed)
             },
             move |this, (kept, saved, failed), window, cx| {
+                this.board.worktree_seen.borrow_mut().clear();
                 for (path, error) in failed {
                     window.push_notification(
                         t_fmt(
