@@ -242,12 +242,13 @@ fn claude_readout(event: &str, payload: &serde_json::Value, body: &mut serde_jso
     // Claude says the level it is running at, when it says it — and at the
     // end of a turn it says it whenever the model takes one, so a finished
     // turn without it ran on a model that does not: that is reported as an
-    // empty level. Otherwise the environment wins over the settings file, as
-    // it does for Claude — read only for a model this event names, since the
-    // file may set it per model.
+    // empty level. So is one for a model Claude's own model catalog lists
+    // without effort levels. Otherwise the environment wins over the settings
+    // file, as it does for Claude — read only for a model this event names,
+    // since the file may set it per model.
     let effort = str_of(payload.get("effort").and_then(|e| e.get("level"))).or_else(|| {
         let model = model.as_deref()?;
-        if event == "stop" {
+        if event == "stop" || catalog_says_no_effort(&claude_model_catalogs(), model) {
             return Some(String::new());
         }
         std::env::var("CLAUDE_CODE_EFFORT_LEVEL")
@@ -282,14 +283,55 @@ fn configured_effort(settings: &serde_json::Value, model: Option<&str>) -> Optio
         .or_else(|| level(Some(settings)))
 }
 
-fn claude_settings() -> serde_json::Value {
-    let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+fn claude_config_dir() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|d| !d.is_empty())
         .map(PathBuf::from)
-        .or_else(|| home_dir().map(|h| h.join(".claude")));
-    dir.and_then(|d| std::fs::read(d.join("settings.json")).ok())
+        .or_else(|| home_dir().map(|h| h.join(".claude")))
+}
+
+fn claude_settings() -> serde_json::Value {
+    claude_config_dir()
+        .and_then(|d| std::fs::read(d.join("settings.json")).ok())
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or(serde_json::json!({}))
+}
+
+/// The model catalogs Claude Code keeps in its cache, one per account it
+/// has signed in with, as parsed JSON. None, if it has not fetched any.
+fn claude_model_catalogs() -> Vec<serde_json::Value> {
+    let Some(dir) = claude_config_dir().map(|d| d.join("cache").join("model-catalog")) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter(|e| e.metadata().is_ok_and(|m| m.len() <= MAX_CONFIG_BYTES))
+        .filter_map(|e| std::fs::read(e.path()).ok())
+        .filter_map(|b| serde_json::from_slice(&b).ok())
+        .collect()
+}
+
+/// Whether Claude's model catalogs list `model` as taking no effort level —
+/// Haiku, say. Only a model they list counts, and only when every catalog
+/// that lists it agrees: a model they do not know may well take one.
+fn catalog_says_no_effort(catalogs: &[serde_json::Value], model: &str) -> bool {
+    let model = model.trim_end_matches("[1m]");
+    let mut listed = catalogs
+        .iter()
+        .filter_map(|c| c.pointer("/catalog/config/models")?.as_array())
+        .flatten()
+        .filter(|m| m.get("id").and_then(|id| id.as_str()) == Some(model))
+        .peekable();
+    listed.peek().is_some()
+        && listed.all(|m| {
+            m.pointer("/thinking/effort_options")
+                .and_then(|o| o.as_array())
+                .is_none_or(|o| o.is_empty())
+        })
 }
 
 /// The model that wrote `reply` to the prompt `prompt_id`, once the
@@ -2289,6 +2331,35 @@ mod tests {
             Some(""),
             "a turn that ends without a level ran on a model that takes none"
         );
+    }
+
+    #[test]
+    fn a_model_the_catalog_lists_without_effort_levels_takes_none() {
+        let catalog = serde_json::json!({
+            "version": 2,
+            "catalog": { "config": { "models": [
+                {
+                    "id": "claude-opus-5-5",
+                    "thinking": {
+                        "type": "effort",
+                        "effort_options": [{ "id": "low" }, { "id": "high" }],
+                    },
+                },
+                { "id": "claude-haiku-4-5-20251001", "thinking": { "type": "none" } },
+            ] } },
+        });
+        let catalogs = [catalog];
+        assert!(catalog_says_no_effort(
+            &catalogs,
+            "claude-haiku-4-5-20251001"
+        ));
+        assert!(!catalog_says_no_effort(&catalogs, "claude-opus-5-5"));
+        assert!(!catalog_says_no_effort(&catalogs, "claude-opus-5-5[1m]"));
+        assert!(
+            !catalog_says_no_effort(&catalogs, "claude-new-model"),
+            "a model the catalog does not know may take a level"
+        );
+        assert!(!catalog_says_no_effort(&[], "claude-haiku-4-5-20251001"));
     }
 
     #[test]
