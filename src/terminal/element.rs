@@ -2260,6 +2260,13 @@ impl Element for TerminalElement {
                 window.scale_factor(),
                 cx,
             );
+            // Whatever lays itself over the bottom rows (the composer)
+            // measures up from the bottom, past this.
+            let slack = bounds.size.height - line_height * rows as f32;
+            if view.grid_slack != slack {
+                view.grid_slack = slack;
+                cx.notify();
+            }
         });
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);

@@ -1329,7 +1329,9 @@ impl TerminalView {
                 .left_0()
                 .right_0()
                 .bottom_0()
-                .min_h(self.line_height * rows as f32 + px(GRID_PAD_Y))
+                // Measured up from the pane's bottom edge: its padding, the
+                // part of a row the grid's height left over, then the rows.
+                .min_h(self.line_height * rows as f32 + self.grid_slack + px(GRID_PAD_Y))
                 .flex()
                 .flex_col()
                 .justify_end()

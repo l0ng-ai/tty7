@@ -321,6 +321,9 @@ pub struct TerminalView {
     pub line_height_mul: f32,
     pub cell_width: Pixels,
     pub(super) line_height: Pixels,
+    /// What the grid's height leaves under its last whole row: rows are
+    /// drawn from the top, so this is empty space above the bottom padding.
+    pub(super) grid_slack: Pixels,
     /// The grid the last frame painted, and the snapshot that went with it.
     /// A frame that cannot have the terminal lock repaints this rather than
     /// waiting on the pane's reader — see [`TerminalElement::build_grid`].
@@ -1859,6 +1862,7 @@ impl TerminalView {
             line_height_mul,
             cell_width: px(8.),
             line_height: px(17.),
+            grid_slack: px(0.),
             grid_buf: Vec::new(),
             grid_snap: None,
             frame_alt_screen: false,
