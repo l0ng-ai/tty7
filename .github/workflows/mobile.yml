@@ -108,9 +108,14 @@ jobs:
           set -euo pipefail
           APK=mobile/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
           APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner
-          CERT=$("$APKSIGNER" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
-          if [ "$CERT" != "$CERT_SHA256" ]; then
-            echo "::error::APK is signed with $CERT, not the release key"
+          # Newer apksigners name the signer by its SDK range ("Signer
+          # (minSdkVersion=24, …)") rather than "Signer #1", so only the
+          # digest itself is matched. Every signer must be the release key.
+          CERTS=$("$APKSIGNER" verify --print-certs "$APK")
+          DIGESTS=$(grep -o 'certificate SHA-256 digest: [0-9a-f]*' <<<"$CERTS" | awk '{print $NF}' | sort -u)
+          if [ "$DIGESTS" != "$CERT_SHA256" ]; then
+            echo "$CERTS"
+            echo "::error::APK is not signed with the release key alone"
             exit 1
           fi
           mkdir dist
