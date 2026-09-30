@@ -706,7 +706,7 @@ impl HookAgent {
     fn target_path(self, target: &HookTarget) -> PathBuf {
         match self {
             HookAgent::Claude => target.claude_settings_path(),
-            HookAgent::Codex => target.under_home(&[".codex", "hooks.json"]),
+            HookAgent::Codex => target.codex_hooks_path(),
             HookAgent::TraeCode => target.traecli_hooks_path(),
             HookAgent::Copilot => target.under_home(&[".copilot", "hooks", OWNED_FILE_STEM_JSON]),
             HookAgent::OpenCode => target.under(
@@ -822,6 +822,17 @@ impl<'a> HookTarget<'a> {
             return PathBuf::from(dir).join("settings.json");
         }
         self.under_home(&[".claude", "settings.json"])
+    }
+
+    /// Codex keeps its whole home, `hooks.json` included, in `CODEX_HOME`
+    /// when that is set. Local-only, like the other overrides.
+    fn codex_hooks_path(&self) -> PathBuf {
+        if self.is_local()
+            && let Some(dir) = std::env::var_os("CODEX_HOME").filter(|d| !d.is_empty())
+        {
+            return PathBuf::from(dir).join("hooks.json");
+        }
+        self.under_home(&[".codex", "hooks.json"])
     }
 
     fn xdg_config_dir(&self) -> PathBuf {
@@ -4204,6 +4215,31 @@ mod tests {
         uninstall_hooks(&t, HookAgent::Claude).expect("uninstall is idempotent");
 
         unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Codex moved to `CODEX_HOME` reads its hooks from there, and a
+    /// `hooks.json` under `~/.codex` is one it never looks at.
+    #[test]
+    fn codex_hooks_live_in_codex_home_when_it_is_set() {
+        let dir = std::env::temp_dir().join(format!("tty7-codex-home-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("CODEX_HOME", &dir) };
+
+        let host = local_host();
+        let t = HookTarget::local(&*host).expect("home resolves in tests");
+        assert_eq!(HookAgent::Codex.target_path(&t), dir.join("hooks.json"));
+        assert_eq!(hooks_state(&t, HookAgent::Codex), HooksState::NotInstalled);
+        let remote_host = FakeRemote::shared();
+        let remote = HookTarget::remote(&*remote_host, PathBuf::from("/home/me"));
+        assert_eq!(
+            HookAgent::Codex.target_path(&remote),
+            PathBuf::from("/home/me/.codex/hooks.json"),
+            "a local CODEX_HOME says nothing about a remote machine"
+        );
+
+        unsafe { std::env::remove_var("CODEX_HOME") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 
