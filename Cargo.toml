@@ -436,6 +436,12 @@ codegen-units = 1
 #    Without them NSMenuItem got the literal string "enter" and took its first
 #    character, so a `secondary-enter` item (ToggleFullscreen) read as ⌘E.
 #
+# 7. A right- or center-aligned line paints into a layer that covers where its
+#    glyphs land. The layer was sized from the unaligned origin, so an opaque
+#    quad painted over the glyphs later got no higher draw order than them, and
+#    the text showed through — the Changes panel's flush-right directory drew
+#    through the hover action buttons.
+#
 # Patching by source rather than editing the `gpui`/`gpui_platform` pins above is
 # deliberate: `gpui-component` declares its own `gpui` from the upstream URL, and
 # a plain pin swap would put two incompatible copies of gpui in the tree. `[patch]`
