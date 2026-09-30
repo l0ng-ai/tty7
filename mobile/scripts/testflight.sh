@@ -19,13 +19,13 @@
 #
 # The default build number is the time — year, day of the year, hour, minute —
 # so each upload is higher than the last without keeping a counter, and it
-# stays under 2^31.
+# stays under 2^31. In UTC, so a laptop and CI agree on the order.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 UPLOAD=1
-N=$(date +%y%j%H%M)
+N=$(date -u +%y%j%H%M)
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-upload) UPLOAD=0 ;;
