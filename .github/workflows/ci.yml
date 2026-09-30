@@ -180,7 +180,8 @@ jobs:
         run: |
           & ./.github/scripts/assert-no-vcruntime.ps1 `
             "target/${{ matrix.target }}/debug/tty7-app.exe" `
-            "target/${{ matrix.target }}/debug/tty7.exe"
+            "target/${{ matrix.target }}/debug/tty7.exe" `
+            "target/${{ matrix.target }}/debug/tty7-server.exe"
 
       # `cargo test` has no timeout of its own, so one hung test is
       # indistinguishable from a slow suite until the job hits GitHub's six-hour

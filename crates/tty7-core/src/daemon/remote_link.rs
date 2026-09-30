@@ -144,6 +144,20 @@ pub fn choose_entry(
     }
 }
 
+/// The entry a server's location settles without asking the remote anything,
+/// or `None` when [`REMOTE_ENV_PROBE`] and [`choose_entry`] have to decide.
+///
+/// A Windows server is always reached by session exec. The probe is a POSIX
+/// `sh` script that no Windows shell runs, and the stream-local forward it
+/// would find a socket for does not exist there: a Windows daemon listens on a
+/// loopback TCP port guarded by a token, not on a unix socket. Asking anyway
+/// would only spend a round trip learning that.
+pub fn fixed_entry(server_binary: &str, command: &str) -> Option<RemoteEntry> {
+    super::install::asset::is_windows_sftp_path(server_binary).then(|| RemoteEntry::SessionExec {
+        command: command.to_string(),
+    })
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RemoteEnv {
     pub control_sock: Option<String>,
@@ -374,6 +388,28 @@ mod tests {
             RemoteEntry::SessionExec {
                 command: cmd.into()
             }
+        );
+    }
+
+    #[test]
+    fn a_windows_server_is_reached_by_session_exec_without_a_probe() {
+        let command = r#""C:\Users\me\AppData\Local\tty7\bin\tty7-server-c3p4.exe" --stdio"#;
+        assert_eq!(
+            fixed_entry(
+                "/C:/Users/me/AppData/Local/tty7/bin/tty7-server-c3p4.exe",
+                command
+            ),
+            Some(RemoteEntry::SessionExec {
+                command: command.into()
+            })
+        );
+        assert_eq!(
+            fixed_entry(
+                "/home/me/.local/share/tty7/bin/tty7-server-c3p4",
+                "'/home/me/.local/share/tty7/bin/tty7-server-c3p4' --stdio"
+            ),
+            None,
+            "a unix server still goes through the probe"
         );
     }
 

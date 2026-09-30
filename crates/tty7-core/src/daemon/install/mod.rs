@@ -10,9 +10,10 @@ pub mod outcome;
 #[cfg(feature = "remote-install")]
 pub mod proxy;
 pub mod ssh_ops;
+pub mod windows_host;
 pub mod wsl;
 
-pub use asset::{RemotePaths, UnsupportedTarget};
+pub use asset::{RemotePaths, RemotePlatform, UnsupportedTarget};
 pub use checksums::ChecksumError;
 
 use crate::daemon::ssh::SshConnection;
@@ -665,8 +666,62 @@ impl<'a> Installer<'a> {
         self
     }
 
-    fn paths_for(&self, home: &str) -> RemotePaths {
-        asset::remote_paths(home, self.dialect.control, self.dialect.protocol)
+    fn paths_for(&self, platform: RemotePlatform, home: &str) -> RemotePaths {
+        asset::remote_paths_on(platform, home, self.dialect.control, self.dialect.protocol)
+    }
+
+    /// Which server this machine needs, and what kind of machine it is.
+    ///
+    /// `uname -sm` first, exactly as before, so a Linux or macOS host is asked
+    /// nothing new. Only when that fails — `cmd.exe` and PowerShell have no
+    /// `uname` — or answers from a POSIX layer on Windows (Git for Windows,
+    /// MSYS2, Cygwin) is the Windows probe tried. And if that does not answer
+    /// either, the error is `uname`'s: on a machine that is neither, it is the
+    /// more useful of the two to read.
+    fn detect_target(&self) -> Result<(RemotePlatform, &'static str), InstallError> {
+        let unix_error = match self.ops.run("uname -sm") {
+            Ok(out) if out.success() => match asset::asset_for_uname(&out.stdout) {
+                Ok(asset) => return Ok((RemotePlatform::Unix, asset)),
+                Err(target) if asset::uname_reports_windows(&out.stdout) => {
+                    InstallError::Unsupported(target)
+                }
+                Err(target) => return Err(InstallError::Unsupported(target)),
+            },
+            Ok(out) => InstallError::Probe(out.failure_reason()),
+            Err(reason) => InstallError::Probe(reason),
+        };
+        let arch = self
+            .ops
+            .run(&windows_host::probe_command())
+            .ok()
+            .filter(ExecOutput::success)
+            .and_then(|out| windows_host::parse_probe(&out.stdout));
+        match arch {
+            Some(arch) => asset::asset_for_windows_arch(&arch)
+                .map(|asset| (RemotePlatform::Windows, asset))
+                .map_err(InstallError::Unsupported),
+            None => Err(unix_error),
+        }
+    }
+
+    /// The platform the probe found has to be the one SFTP is serving, or the
+    /// binary would land where the shell running it cannot see it.
+    ///
+    /// The case this exists for is a Windows host whose OpenSSH `DefaultShell`
+    /// is WSL's `bash.exe`: `uname` answers Linux, while SFTP is Windows's and
+    /// writes to `C:\`. Installing a Linux server at `/C:/Users/…` would leave a
+    /// file no Linux path reaches.
+    fn check_platform(&self, detected: RemotePlatform, home: &str) -> Result<(), InstallError> {
+        let served = RemotePlatform::of_sftp_home(home);
+        if detected == served {
+            return Ok(());
+        }
+        Err(InstallError::Probe(format!(
+            "the login shell answers like a {detected:?} machine, but SFTP reports a home of \
+             {home:?}, which is a {served:?} path; a remote workspace needs the shell and SFTP \
+             to see the same file system (on Windows, set OpenSSH's DefaultShell back to \
+             cmd.exe or PowerShell)"
+        )))
     }
 
     pub fn replace(&self) -> Result<(), InstallError> {
@@ -690,21 +745,11 @@ impl<'a> Installer<'a> {
 
     fn put_ours_and_cycle(&self, force: bool) -> Result<(), InstallError> {
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
-        let paths = self.paths_for(&home);
+        let paths = self.paths_for(RemotePlatform::of_sftp_home(&home), &home);
 
         if force || !self.published_binary_serves_us(&paths)? {
-            let uname = self
-                .ops
-                .run("uname -sm")
-                .map_err(InstallError::Probe)
-                .and_then(|out| {
-                    if out.success() {
-                        Ok(out.stdout)
-                    } else {
-                        Err(InstallError::Probe(out.failure_reason()))
-                    }
-                })?;
-            let asset = asset::asset_for_uname(&uname).map_err(InstallError::Unsupported)?;
+            let (platform, asset) = self.detect_target()?;
+            self.check_platform(platform, &home)?;
             self.install(asset, &paths)?;
         }
 
@@ -722,11 +767,11 @@ impl<'a> Installer<'a> {
                 path: paths.binary.clone(),
                 reason,
             })?;
-        if !stat.is_some_and(|s| !s.is_dir && s.mode & 0o100 != 0) {
+        if !stat.is_some_and(|s| runnable(paths.platform, s)) {
             return Ok(false);
         }
         Ok(self
-            .probe_protocol(&paths.binary)
+            .probe_protocol(paths.platform, &paths.binary)
             .is_some_and(|spoken| spoken.serves(&self.dialect)))
     }
 
@@ -746,21 +791,11 @@ impl<'a> Installer<'a> {
     }
 
     pub fn run(&self) -> Result<InstallReport, InstallError> {
-        let uname = self
-            .ops
-            .run("uname -sm")
-            .map_err(InstallError::Probe)
-            .and_then(|out| {
-                if out.success() {
-                    Ok(out.stdout)
-                } else {
-                    Err(InstallError::Probe(out.failure_reason()))
-                }
-            })?;
-        let asset = asset::asset_for_uname(&uname).map_err(InstallError::Unsupported)?;
+        let (platform, asset) = self.detect_target()?;
 
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
-        let paths = self.paths_for(&home);
+        self.check_platform(platform, &home)?;
+        let paths = self.paths_for(platform, &home);
 
         let already = self
             .ops
@@ -780,9 +815,9 @@ impl<'a> Installer<'a> {
             reused: None,
         };
 
-        let usable = already.is_some_and(|stat| !stat.is_dir && stat.mode & 0o100 != 0);
+        let usable = already.is_some_and(|stat| runnable(platform, stat));
         if !usable {
-            match self.adoptable_running_server()? {
+            match self.adoptable_running_server(platform)? {
                 Some((exe, spoken)) => {
                     log::info!(
                         "remote {}: adopting the running {} (control {}, protocol {}) \
@@ -793,7 +828,8 @@ impl<'a> Installer<'a> {
                         spoken.protocol,
                         self.version,
                     );
-                    report.paths = asset::remote_paths_for_binary(
+                    report.paths = asset::remote_paths_for_binary_on(
+                        platform,
                         &home,
                         &exe,
                         self.dialect.control,
@@ -880,11 +916,14 @@ impl<'a> Installer<'a> {
         })
     }
 
-    fn adoptable_running_server(&self) -> Result<Option<(String, RemoteProtocol)>, InstallError> {
-        let Some(exe) = self.running_server_exe() else {
+    fn adoptable_running_server(
+        &self,
+        platform: RemotePlatform,
+    ) -> Result<Option<(String, RemoteProtocol)>, InstallError> {
+        let Some(exe) = self.running_server_exe(platform) else {
             return Ok(None);
         };
-        let Some(spoken) = self.probe_protocol(&exe) else {
+        let Some(spoken) = self.probe_protocol(platform, &exe) else {
             return Ok(None);
         };
         if !spoken.serves(&self.dialect) {
@@ -893,8 +932,11 @@ impl<'a> Installer<'a> {
         Ok(Some((exe, spoken)))
     }
 
-    fn probe_protocol(&self, exe: &str) -> Option<RemoteProtocol> {
-        let cmd = format!("{} {PROTOCOL_FLAG}", shell_quote(exe));
+    fn probe_protocol(&self, platform: RemotePlatform, exe: &str) -> Option<RemoteProtocol> {
+        let cmd = match platform {
+            RemotePlatform::Unix => format!("{} {PROTOCOL_FLAG}", shell_quote(exe)),
+            RemotePlatform::Windows => windows_host::protocol_command(exe),
+        };
         let out = self.ops.run(&cmd).ok()?;
         if !out.success() {
             return None;
@@ -902,10 +944,21 @@ impl<'a> Installer<'a> {
         RemoteProtocol::parse(&out.stdout)
     }
 
-    fn running_server_exe(&self) -> Option<String> {
-        let out = self.ops.run(RUNNING_EXE_COMMAND).ok()?;
-        let exe = out.stdout.trim();
-        (!exe.is_empty()).then(|| exe.to_string())
+    /// The running server's image, in the same spelling as the paths the
+    /// installer keeps — on Windows the native path the process list reports
+    /// is turned back into SFTP's, so it compares equal to ours.
+    fn running_server_exe(&self, platform: RemotePlatform) -> Option<String> {
+        match platform {
+            RemotePlatform::Unix => {
+                let out = self.ops.run(RUNNING_EXE_COMMAND).ok()?;
+                let exe = out.stdout.trim();
+                (!exe.is_empty()).then(|| exe.to_string())
+            }
+            RemotePlatform::Windows => {
+                let out = self.ops.run(&windows_host::running_exe_command()).ok()?;
+                asset::sftp_path_from_windows(out.stdout.trim())
+            }
+        }
     }
 
     fn install(
@@ -946,7 +999,14 @@ impl<'a> Installer<'a> {
                 reason,
             })?;
         }
-        let _ = self.ops.chmod(&paths.bin_dir, DIR_MODE);
+        match paths.platform {
+            RemotePlatform::Unix => {
+                let _ = self.ops.chmod(&paths.bin_dir, DIR_MODE);
+            }
+            // Mode bits mean nothing to NTFS; what needs doing there instead is
+            // clearing out the images earlier upgrades had to move aside.
+            RemotePlatform::Windows => self.sweep_moved_aside(paths),
+        }
 
         let temp = unique_temp(&paths.temp);
 
@@ -961,14 +1021,16 @@ impl<'a> Installer<'a> {
                 reason,
             })?;
 
-        self.ops
-            .chmod(&temp, BINARY_MODE)
-            .map_err(|reason| InstallError::Write {
-                path: temp.clone(),
-                reason,
-            })?;
+        if paths.platform == RemotePlatform::Unix {
+            self.ops
+                .chmod(&temp, BINARY_MODE)
+                .map_err(|reason| InstallError::Write {
+                    path: temp.clone(),
+                    reason,
+                })?;
+        }
 
-        let spoke = self.probe_protocol(&temp);
+        let spoke = self.probe_protocol(paths.platform, &temp);
         if !spoke.as_ref().is_some_and(|s| s.serves(&self.dialect)) {
             let _ = self.ops.remove_file(&temp);
             return Err(InstallError::DialectMismatch {
@@ -979,7 +1041,22 @@ impl<'a> Installer<'a> {
         }
 
         if let Err(reason) = self.ops.rename(&temp, &paths.binary) {
-            let _ = self.ops.remove_file(&paths.binary);
+            match paths.platform {
+                RemotePlatform::Unix => {
+                    let _ = self.ops.remove_file(&paths.binary);
+                }
+                // Windows will not delete an image that is running — and the
+                // one at this path is running whenever this is an update — but
+                // it will rename one. Moving it aside frees the name while the
+                // old daemon keeps executing from the moved file until the
+                // restart that follows.
+                RemotePlatform::Windows => {
+                    let aside = moved_aside(&paths.binary);
+                    if self.ops.rename(&paths.binary, &aside).is_err() {
+                        let _ = self.ops.remove_file(&paths.binary);
+                    }
+                }
+            }
             self.ops
                 .rename(&temp, &paths.binary)
                 .map_err(|_| InstallError::Write {
@@ -989,6 +1066,20 @@ impl<'a> Installer<'a> {
         }
 
         Ok((confirmed, bytes))
+    }
+
+    /// Best-effort removal of images [`Installer::install`] moved aside on
+    /// earlier upgrades. One still running refuses, and stays for the next
+    /// install to try again.
+    fn sweep_moved_aside(&self, paths: &RemotePaths) {
+        let Ok(Some(entries)) = self.ops.list_dir(&paths.bin_dir) else {
+            return;
+        };
+        for name in entries {
+            if name.starts_with(".tty7-server-") && name.ends_with(MOVED_ASIDE_SUFFIX) {
+                let _ = self.ops.remove_file(&format!("{}/{name}", paths.bin_dir));
+            }
+        }
     }
 
     fn load_binary(&self, asset: &'static str) -> Result<LoadedBinary, InstallError> {
@@ -1079,10 +1170,13 @@ impl<'a> Installer<'a> {
 
     /// `None` when the control socket answered, `Some(why)` when it did not.
     fn control_probe(&self, paths: &RemotePaths) -> Result<Option<String>, InstallError> {
-        let cmd = format!(
-            "{} --stdio --bridge < /dev/null",
-            shell_quote(&paths.binary)
-        );
+        let cmd = match paths.platform {
+            RemotePlatform::Unix => format!(
+                "{} --stdio --bridge < /dev/null",
+                shell_quote(&paths.binary)
+            ),
+            RemotePlatform::Windows => windows_host::control_probe_command(&paths.binary),
+        };
         match self.ops.run(&cmd) {
             Ok(out) if out.success() => Ok(None),
             Ok(out) => Ok(Some(out.failure_reason())),
@@ -1096,20 +1190,28 @@ impl<'a> Installer<'a> {
 
     fn launch_daemon(&self, paths: &RemotePaths) -> Result<StartupLog, InstallError> {
         let log = StartupLog::for_binary(&paths.binary);
-        let settle = self.ops.launch_settle(&paths.binary);
+        let script = match paths.platform {
+            RemotePlatform::Unix => {
+                let settle = self.ops.launch_settle(&paths.binary);
+                launch_script(&paths.binary, &log, settle)
+            }
+            RemotePlatform::Windows => {
+                windows_host::launch_command(&paths.binary, &log.log, &log.exit, &log.nonce)
+            }
+        };
         self.ops
-            .spawn_detached(&launch_script(&paths.binary, &log, settle))
+            .spawn_detached(&script)
             .map_err(|reason| InstallError::Launch { reason })?;
         Ok(log)
     }
 
     fn check_running_build(&self, paths: &RemotePaths) -> Option<MismatchedRemoteDaemon> {
-        let exe = self.running_server_exe()?;
+        let exe = self.running_server_exe(paths.platform)?;
         let exe = exe.as_str();
         if asset::dialect_from_path(exe) == Some(self.dialect.dialect()) || exe == paths.binary {
             return None;
         }
-        let spoken = self.probe_protocol(exe);
+        let spoken = self.probe_protocol(paths.platform, exe);
         if spoken.as_ref().is_some_and(|s| s.serves(&self.dialect)) {
             log::info!(
                 "remote {} is served by {exe}, a different build this client speaks to anyway",
@@ -1147,7 +1249,7 @@ impl<'a> Installer<'a> {
     /// left exactly as it was, and told to install one first.
     pub fn restart_daemon(&self) -> Result<(), InstallError> {
         let home = self.ops.home_dir().map_err(InstallError::NoHome)?;
-        let paths = self.paths_for(&home);
+        let paths = self.paths_for(RemotePlatform::of_sftp_home(&home), &home);
         if !self.published_binary_serves_us(&paths)? {
             return Err(InstallError::NoServerToRestart {
                 host: self.host.clone(),
@@ -1169,7 +1271,11 @@ impl<'a> Installer<'a> {
         // a report instead of one glance at a log: the only thing anyone ever
         // saw was the timeout below, and it blames a daemon for not stopping
         // when nothing had asked it to.
-        let stop_failure = match self.ops.run(TERMINATE_RUNNING_COMMAND) {
+        let stop = match paths.platform {
+            RemotePlatform::Unix => TERMINATE_RUNNING_COMMAND.to_string(),
+            RemotePlatform::Windows => windows_host::stop_command(&paths.binary),
+        };
+        let stop_failure = match self.ops.run(&stop) {
             Ok(out) if out.success() => None,
             Ok(out) => Some(out.failure_reason()),
             Err(reason) => Some(reason),
@@ -1286,13 +1392,21 @@ impl StartupLog {
     /// once it has waited for the daemon, so a status carrying this launch's
     /// nonce is the death certificate.
     fn exit_status(&self, ops: &dyn RemoteOps) -> Option<String> {
-        let cmd = format!("cat {} 2>/dev/null", shell_quote(&self.exit));
+        let cmd = if asset::is_windows_sftp_path(&self.exit) {
+            windows_host::read_exit_command(&self.exit)
+        } else {
+            format!("cat {} 2>/dev/null", shell_quote(&self.exit))
+        };
         let out = ops.run(&cmd).ok()?;
         let (nonce, status) = out.stdout.trim().split_once(' ')?;
         (nonce == self.nonce && !status.is_empty()).then(|| status.to_string())
     }
 
     fn tail(&self, ops: &dyn RemoteOps) -> String {
+        if asset::is_windows_sftp_path(&self.log) {
+            let cmd = windows_host::tail_command(&self.log, TAIL_BYTES);
+            return ops.run(&cmd).map(|out| out.stdout).unwrap_or_default();
+        }
         let cmd = format!(
             "tail -c {TAIL_BYTES} {} 2>/dev/null",
             shell_quote(&self.log)
@@ -1403,9 +1517,48 @@ fn launch_script(binary: &str, log: &StartupLog, settle: Option<String>) -> Stri
 
 fn unique_temp(shared: &str) -> String {
     let pid = std::process::id();
+    if let Some(stem) = shared.strip_suffix(".tmp.exe") {
+        return format!("{stem}.{pid}.tmp.exe");
+    }
     match shared.strip_suffix(".tmp") {
         Some(stem) => format!("{stem}.{pid}.tmp"),
         None => format!("{shared}.{pid}"),
+    }
+}
+
+/// Whether a file SFTP describes can be run as the server. Unix wants the
+/// owner's execute bit; Windows has none to want — an `.exe` runs because of
+/// its name, and SFTP's mode bits there are a translation of ACLs that says
+/// nothing reliable about it.
+fn runnable(platform: RemotePlatform, stat: RemoteStat) -> bool {
+    !stat.is_dir
+        && match platform {
+            RemotePlatform::Unix => stat.mode & 0o100 != 0,
+            RemotePlatform::Windows => true,
+        }
+}
+
+const MOVED_ASIDE_SUFFIX: &str = ".old";
+
+/// Where a running Windows image is renamed to make room for its upgrade: a
+/// hidden sibling, so [`Installer::is_first_install`] never counts it, and
+/// unique per attempt: an image still running from an earlier move-aside
+/// holds its name, and a second upgrade must not need it.
+fn moved_aside(binary: &str) -> String {
+    let (dir, name) = binary.rsplit_once('/').unwrap_or(("", binary));
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    format!("{dir}/.{name}.{}{MOVED_ASIDE_SUFFIX}", &id[..12])
+}
+
+/// The command a routed link runs on the remote to reach its server:
+/// `'<binary>' --stdio` for a POSIX shell, `"<binary>" --stdio` for the
+/// `cmd.exe` Windows OpenSSH runs commands through. See
+/// [`windows_host::stdio_command`] for why not PowerShell.
+pub fn server_stdio_command(binary: &str) -> String {
+    if asset::is_windows_sftp_path(binary) {
+        windows_host::stdio_command(binary)
+    } else {
+        format!("{} --stdio", shell_quote(binary))
     }
 }
 
@@ -1650,3 +1803,6 @@ fn default_fetcher() -> Arc<dyn AssetFetcher> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod windows_tests;

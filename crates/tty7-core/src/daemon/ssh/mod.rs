@@ -446,10 +446,7 @@ impl SshManager {
 
         let base = match server_command {
             Some(explicit) => explicit.to_string(),
-            None => format!(
-                "{} --stdio",
-                crate::daemon::install::shell_quote(&installed)
-            ),
+            None => crate::daemon::install::server_stdio_command(&installed),
         };
         let command = setup.channel.bridge_command(&base);
 
@@ -457,14 +454,17 @@ impl SshManager {
             RouteChannel::Pane => RemoteEntry::SessionExec {
                 command: command.clone(),
             },
-            RouteChannel::Control => {
-                conn.remote_entry_or_init(|| async {
-                    let env = probe_remote_env(conn).await;
-                    let socket = env.as_ref().and_then(remote_link::remote_control_socket);
-                    remote_link::choose_entry(socket.as_deref(), true, &command)
-                })
-                .await
-            }
+            RouteChannel::Control => match remote_link::fixed_entry(&installed, &command) {
+                Some(entry) => entry,
+                None => {
+                    conn.remote_entry_or_init(|| async {
+                        let env = probe_remote_env(conn).await;
+                        let socket = env.as_ref().and_then(remote_link::remote_control_socket);
+                        remote_link::choose_entry(socket.as_deref(), true, &command)
+                    })
+                    .await
+                }
+            },
         };
 
         if let RemoteEntry::StreamLocal { socket } = &entry {

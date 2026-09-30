@@ -579,13 +579,25 @@ impl<'a> HookTarget<'a> {
     }
 
     pub fn remote(host: &'a dyn Host, home: PathBuf) -> HookTarget<'a> {
+        use crate::daemon::install::asset;
         let dialect = crate::daemon::install::RemoteProtocol::of_this_build();
-        let binary = crate::daemon::install::asset::remote_paths(
-            &home.to_string_lossy(),
-            dialect.control,
-            dialect.protocol,
-        )
-        .binary;
+        let home_str = home.to_string_lossy();
+        // A Windows server reports its home natively (`C:\Users\me`), and the
+        // hook command runs there, so the binary is named the way that
+        // machine's installer put it — and spelled natively again.
+        let binary = match asset::sftp_path_from_windows(&home_str) {
+            Some(sftp_home) => {
+                let installed = asset::remote_paths_on(
+                    asset::RemotePlatform::Windows,
+                    &sftp_home,
+                    dialect.control,
+                    dialect.protocol,
+                )
+                .binary;
+                asset::windows_native_path(&installed).unwrap_or(installed)
+            }
+            None => asset::remote_paths(&home_str, dialect.control, dialect.protocol).binary,
+        };
         HookTarget {
             host,
             home,
@@ -2150,6 +2162,25 @@ mod tests {
             let kind_json = serde_json::to_value(ev.kind).unwrap();
             assert_eq!(kind_json, serde_json::Value::String(event.to_string()));
         }
+    }
+
+    #[test]
+    fn a_remote_hook_names_the_server_its_own_installer_placed() {
+        let host = FakeRemote::shared();
+        let dialect = crate::daemon::install::RemoteProtocol::of_this_build();
+        let name = crate::daemon::install::asset::binary_name(dialect.control, dialect.protocol);
+
+        let unix = HookTarget::remote(&*host, PathBuf::from("/home/me"));
+        assert_eq!(
+            unix.exe,
+            PathBuf::from(format!("/home/me/.local/share/tty7/bin/{name}"))
+        );
+
+        let windows = HookTarget::remote(&*host, PathBuf::from(r"C:\Users\me"));
+        assert_eq!(
+            windows.exe,
+            PathBuf::from(format!(r"C:\Users\me\AppData\Local\tty7\bin\{name}.exe"))
+        );
     }
 
     #[test]

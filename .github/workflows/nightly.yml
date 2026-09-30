@@ -422,11 +422,72 @@ jobs:
           path: tty7/dist/${{ matrix.asset }}
           if-no-files-found: error
 
+  # Mirrors release.yml's server-windows job; keep the two in sync when editing.
+  # No RUSTFLAGS, for the reason spelled out there: it would drop `+crt-static`.
+  server-windows:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            asset: tty7-server-windows-x86_64.exe
+            experimental: false
+          - target: aarch64-pc-windows-msvc
+            asset: tty7-server-windows-aarch64.exe
+            experimental: true
+    runs-on: windows-latest
+    continue-on-error: ${{ matrix.experimental }}
+    env:
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+    steps:
+      - name: Checkout tty7
+        uses: actions/checkout@v4
+        with:
+          path: tty7
+
+      - name: Stamp nightly version
+        working-directory: tty7
+        shell: bash
+        run: bash .github/scripts/stamp-version.sh "${{ needs.plan.outputs.version }}"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tty7
+          key: ${{ matrix.target }}
+
+      - name: Build tty7-server
+        working-directory: tty7
+        run: cargo build --release -p tty7-server --target ${{ matrix.target }}
+
+      - name: Assert the binary needs no VC++ redistributable
+        working-directory: tty7
+        shell: pwsh
+        run: '& ./.github/scripts/assert-no-vcruntime.ps1 "target/${{ matrix.target }}/release/tty7-server.exe"'
+
+      - name: Stage the asset
+        working-directory: tty7
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/tty7-server.exe" "dist/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nightly-${{ matrix.asset }}
+          path: tty7/dist/${{ matrix.asset }}
+          if-no-files-found: error
+
   # Single publish step after all platforms succeed, so the rolling release is
   # always complete — a failed platform means tonight's nightly is skipped
   # entirely and users keep yesterday's, never a partial asset set.
   publish:
-    needs: [plan, build, server-musl, server-macos]
+    needs: [plan, build, server-musl, server-macos, server-windows]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}

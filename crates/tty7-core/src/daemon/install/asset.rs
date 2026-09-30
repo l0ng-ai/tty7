@@ -10,17 +10,69 @@ pub const ASSET_LINUX_AARCH64: &str = "tty7-server-linux-aarch64-musl";
 pub const ASSET_MACOS_X86_64: &str = "tty7-server-macos-x86_64";
 pub const ASSET_MACOS_AARCH64: &str = "tty7-server-macos-aarch64";
 
+/// Windows servers keep the `.exe` suffix in the published name as well as on
+/// disk: it is what makes the file runnable over there, and a checksum line is
+/// looked up by exactly this name.
+pub const ASSET_WINDOWS_X86_64: &str = "tty7-server-windows-x86_64.exe";
+pub const ASSET_WINDOWS_AARCH64: &str = "tty7-server-windows-aarch64.exe";
+
 pub const CHECKSUMS_ASSET: &str = "checksums.txt";
 
 pub const RELEASE_BASE: &str = "https://github.com/l0ng-ai/tty7/releases/download";
 
 pub const INSTALL_DIR_COMPONENTS: [&str; 4] = [".local", "share", "tty7", "bin"];
 
+/// `%LOCALAPPDATA%\tty7\bin`, spelled from the profile directory SFTP reports
+/// as home rather than read from the environment: the installer only ever sees
+/// the far end through SFTP paths, and `%LOCALAPPDATA%` is this directory on
+/// every profile that has not been redirected by policy.
+pub const WINDOWS_INSTALL_DIR_COMPONENTS: [&str; 4] = ["AppData", "Local", "tty7", "bin"];
+
+/// Which family of machine a remote workspace installs onto. It decides the
+/// install directory, the binary's file name, and — in `install` — the shell
+/// every command is phrased for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RemotePlatform {
+    /// Linux and macOS: a POSIX `sh`, `uname`, and SFTP paths that are the
+    /// machine's own paths.
+    #[default]
+    Unix,
+    /// Windows OpenSSH: no POSIX shell to count on, and SFTP spells every path
+    /// with a leading slash before the drive (`/C:/Users/me`).
+    Windows,
+}
+
+impl RemotePlatform {
+    /// What an SFTP home directory says about the machine behind it.
+    ///
+    /// Windows OpenSSH's SFTP server is the only one that answers `realpath .`
+    /// with a drive letter, so the shape of the home alone tells the two apart
+    /// without a round trip.
+    pub fn of_sftp_home(home: &str) -> RemotePlatform {
+        if is_windows_sftp_path(home) {
+            RemotePlatform::Windows
+        } else {
+            RemotePlatform::Unix
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsupportedTarget {
-    UnsupportedSystem { raw: String },
-    UnknownMachine { raw: String },
-    Unparseable { raw: String },
+    UnsupportedSystem {
+        raw: String,
+    },
+    UnknownMachine {
+        raw: String,
+    },
+    /// A Windows host whose `PROCESSOR_ARCHITECTURE` names something no server
+    /// is published for (32-bit x86, Itanium).
+    UnknownWindowsMachine {
+        raw: String,
+    },
+    Unparseable {
+        raw: String,
+    },
 }
 
 impl UnsupportedTarget {
@@ -28,6 +80,7 @@ impl UnsupportedTarget {
         match self {
             Self::UnsupportedSystem { raw }
             | Self::UnknownMachine { raw }
+            | Self::UnknownWindowsMachine { raw }
             | Self::Unparseable { raw } => raw,
         }
     }
@@ -38,8 +91,13 @@ impl fmt::Display for UnsupportedTarget {
         match self {
             Self::UnsupportedSystem { raw } => write!(
                 f,
-                "a remote tty7 workspace needs a Linux or macOS host; this machine reports \
-                 `uname -sm` = {raw:?}"
+                "a remote tty7 workspace needs a Linux, macOS or Windows host; this machine \
+                 reports `uname -sm` = {raw:?}"
+            ),
+            Self::UnknownWindowsMachine { raw } => write!(
+                f,
+                "no tty7-server is published for this Windows architecture \
+                 (`PROCESSOR_ARCHITECTURE` = {raw:?}); supported: AMD64 and ARM64"
             ),
             Self::UnknownMachine { raw } => write!(
                 f,
@@ -80,12 +138,41 @@ pub fn asset_for_uname(uname_sm: &str) -> Result<&'static str, UnsupportedTarget
     }
 }
 
+/// Whether `uname -sm` came from a POSIX layer on top of Windows — Git for
+/// Windows, MSYS2 or Cygwin on the `PATH` of the account being logged into.
+/// The machine is still Windows, and the server it needs is the Windows one.
+pub fn uname_reports_windows(uname_sm: &str) -> bool {
+    let system = uname_sm.split_whitespace().next().unwrap_or("");
+    ["MINGW", "MSYS_NT", "CYGWIN_NT", "Windows_NT"]
+        .iter()
+        .any(|prefix| system.starts_with(prefix))
+}
+
+/// The server for a Windows host, from `PROCESSOR_ARCHITECTURE` (or
+/// `PROCESSOR_ARCHITEW6432` when the probing shell is a 32-bit process on a
+/// 64-bit machine).
+///
+/// An x64 shell on an ARM64 machine reports `AMD64`, and taking it at its word
+/// is right for the same reason as a Rosetta shell on a Mac: the x64 server
+/// runs under the emulation the shell asking for it already runs under.
+pub fn asset_for_windows_arch(arch: &str) -> Result<&'static str, UnsupportedTarget> {
+    let raw = arch.trim().to_string();
+    match raw.to_ascii_uppercase().as_str() {
+        "AMD64" | "X64" | "EM64T" => Ok(ASSET_WINDOWS_X86_64),
+        "ARM64" => Ok(ASSET_WINDOWS_AARCH64),
+        "" => Err(UnsupportedTarget::Unparseable { raw }),
+        _ => Err(UnsupportedTarget::UnknownWindowsMachine { raw }),
+    }
+}
+
 pub fn interned(name: &str) -> &'static str {
     match name {
         _ if name == ASSET_LINUX_X86_64 => ASSET_LINUX_X86_64,
         _ if name == ASSET_LINUX_AARCH64 => ASSET_LINUX_AARCH64,
         _ if name == ASSET_MACOS_X86_64 => ASSET_MACOS_X86_64,
         _ if name == ASSET_MACOS_AARCH64 => ASSET_MACOS_AARCH64,
+        _ if name == ASSET_WINDOWS_X86_64 => ASSET_WINDOWS_X86_64,
+        _ if name == ASSET_WINDOWS_AARCH64 => ASSET_WINDOWS_AARCH64,
         _ => Box::leak(name.to_string().into_boxed_str()),
     }
 }
@@ -108,23 +195,57 @@ pub struct RemotePaths {
     pub binary: String,
     pub temp: String,
     pub dir_chain: Vec<String>,
+    /// The machine these paths are on, which is also how every command that
+    /// names one of them has to be phrased.
+    pub platform: RemotePlatform,
 }
 
 pub fn remote_paths(home: &str, control: u32, protocol: u32) -> RemotePaths {
+    remote_paths_on(RemotePlatform::Unix, home, control, protocol)
+}
+
+/// [`remote_paths`] for either kind of machine. The paths are always in the
+/// SFTP spelling — forward slashes, and on Windows a leading `/C:` — because
+/// SFTP is what writes them; [`windows_native_path`] turns one into what a
+/// Windows command line wants.
+pub fn remote_paths_on(
+    platform: RemotePlatform,
+    home: &str,
+    control: u32,
+    protocol: u32,
+) -> RemotePaths {
     let home = home.trim_end_matches('/');
-    let mut dir_chain = Vec::with_capacity(INSTALL_DIR_COMPONENTS.len());
+    let components = match platform {
+        RemotePlatform::Unix => INSTALL_DIR_COMPONENTS,
+        RemotePlatform::Windows => WINDOWS_INSTALL_DIR_COMPONENTS,
+    };
+    let mut dir_chain = Vec::with_capacity(components.len());
     let mut cursor = home.to_string();
-    for part in INSTALL_DIR_COMPONENTS {
+    for part in components {
         cursor = format!("{cursor}/{part}");
         dir_chain.push(cursor.clone());
     }
     let bin_dir = cursor;
     let name = binary_name(control, protocol);
+    let (binary, temp) = match platform {
+        RemotePlatform::Unix => (
+            format!("{bin_dir}/{name}"),
+            format!("{bin_dir}/.{name}.tmp"),
+        ),
+        // The temp name keeps `.exe` last: a Windows shell hands a file with
+        // any other extension to its file association instead of running it,
+        // and the upload is run (`--protocol`) before it is renamed into place.
+        RemotePlatform::Windows => (
+            format!("{bin_dir}/{name}.exe"),
+            format!("{bin_dir}/.{name}.tmp.exe"),
+        ),
+    };
     RemotePaths {
-        binary: format!("{bin_dir}/{name}"),
-        temp: format!("{bin_dir}/.{name}.tmp"),
+        binary,
+        temp,
         dir_chain,
         bin_dir,
+        platform,
     }
 }
 
@@ -138,13 +259,75 @@ pub fn remote_paths_for_binary(
     control: u32,
     protocol: u32,
 ) -> RemotePaths {
-    let mut paths = remote_paths(home, control, protocol);
+    remote_paths_for_binary_on(RemotePlatform::Unix, home, binary, control, protocol)
+}
+
+pub fn remote_paths_for_binary_on(
+    platform: RemotePlatform,
+    home: &str,
+    binary: &str,
+    control: u32,
+    protocol: u32,
+) -> RemotePaths {
+    let mut paths = remote_paths_on(platform, home, control, protocol);
     paths.binary = binary.to_string();
     paths
 }
 
+/// Whether `path` is a Windows path as Windows OpenSSH's SFTP server spells
+/// it: `/C:` alone or followed by `/`.
+pub fn is_windows_sftp_path(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 3
+        && b[0] == b'/'
+        && b[1].is_ascii_alphabetic()
+        && b[2] == b':'
+        && (b.len() == 3 || b[3] == b'/')
+}
+
+/// `/C:/Users/me/x.exe` → `C:\Users\me\x.exe`, the spelling a Windows command
+/// line takes. `None` for anything that is not an SFTP Windows path, so a
+/// caller can never hand a POSIX path to a Windows shell by accident.
+pub fn windows_native_path(sftp: &str) -> Option<String> {
+    if !is_windows_sftp_path(sftp) {
+        return None;
+    }
+    let mut native = sftp[1..].replace('/', "\\");
+    if native.len() == 2 {
+        native.push('\\');
+    }
+    Some(native)
+}
+
+/// The inverse of [`windows_native_path`]: `C:\x\y.exe` → `/C:/x/y.exe`, for
+/// the paths a Windows command reports (the running server's image), so they
+/// compare equal to the SFTP paths the installer keeps.
+pub fn sftp_path_from_windows(native: &str) -> Option<String> {
+    let native = native.trim();
+    let b = native.as_bytes();
+    if b.len() < 2 || !b[0].is_ascii_alphabetic() || b[1] != b':' {
+        return None;
+    }
+    if b.len() > 2 && b[2] != b'\\' && b[2] != b'/' {
+        return None;
+    }
+    let sftp = format!("/{}", native.replace('\\', "/"));
+    Some(if sftp.len() > 4 {
+        sftp.trim_end_matches('/').to_string()
+    } else {
+        sftp
+    })
+}
+
+fn strip_exe(name: &str) -> &str {
+    match name.len().checked_sub(4) {
+        Some(i) if name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(".exe") => &name[..i],
+        _ => name,
+    }
+}
+
 pub fn dialect_from_path(path: &str) -> Option<(u32, u32)> {
-    let name = path.rsplit('/').next()?;
+    let name = strip_exe(path.rsplit(['/', '\\']).next()?);
     let (control, protocol) = name.strip_prefix("tty7-server-c")?.split_once('p')?;
     Some((control.parse().ok()?, protocol.parse().ok()?))
 }
@@ -389,6 +572,175 @@ mod tests {
         for (c, p) in [(1u32, 1u32), (3, 4), (26, 7)] {
             let paths = remote_paths("/home/me", c, p);
             assert_eq!(dialect_from_path(&paths.binary), Some((c, p)));
+            let paths = remote_paths_on(RemotePlatform::Windows, "/C:/Users/me", c, p);
+            assert_eq!(dialect_from_path(&paths.binary), Some((c, p)));
+        }
+    }
+
+    #[test]
+    fn windows_architectures_map_to_the_published_assets() {
+        for raw in ["AMD64", "amd64", "x64", "EM64T", " AMD64\r\n"] {
+            assert_eq!(
+                asset_for_windows_arch(raw).unwrap(),
+                ASSET_WINDOWS_X86_64,
+                "{raw:?}"
+            );
+        }
+        assert_eq!(
+            asset_for_windows_arch("ARM64").unwrap(),
+            ASSET_WINDOWS_AARCH64
+        );
+        for raw in ["x86", "IA64", "ARM"] {
+            let err = asset_for_windows_arch(raw).unwrap_err();
+            assert!(
+                matches!(err, UnsupportedTarget::UnknownWindowsMachine { .. }),
+                "{raw}: {err:?}"
+            );
+            assert_eq!(err.raw(), raw);
+        }
+        assert!(matches!(
+            asset_for_windows_arch("  ").unwrap_err(),
+            UnsupportedTarget::Unparseable { .. }
+        ));
+    }
+
+    /// Git for Windows, MSYS2 and Cygwin all answer `uname` with a system
+    /// name that is not `Linux`, and what they sit on is still Windows.
+    #[test]
+    fn a_posix_layer_on_windows_is_recognised_as_windows() {
+        for raw in [
+            "MINGW64_NT-10.0-19045 x86_64",
+            "MSYS_NT-10.0-22631 x86_64",
+            "CYGWIN_NT-10.0 x86_64",
+            "Windows_NT x86_64",
+        ] {
+            assert!(uname_reports_windows(raw), "{raw}");
+            assert!(
+                matches!(
+                    asset_for_uname(raw).unwrap_err(),
+                    UnsupportedTarget::UnsupportedSystem { .. }
+                ),
+                "{raw}: uname alone must not pick a Windows server"
+            );
+        }
+        for raw in ["Linux x86_64", "Darwin arm64", "FreeBSD amd64", ""] {
+            assert!(!uname_reports_windows(raw), "{raw}");
+        }
+    }
+
+    #[test]
+    fn windows_remote_paths_live_under_local_app_data_and_end_in_exe() {
+        let p = remote_paths_on(RemotePlatform::Windows, "/C:/Users/me/", 3, 4);
+        assert_eq!(p.platform, RemotePlatform::Windows);
+        assert_eq!(p.bin_dir, "/C:/Users/me/AppData/Local/tty7/bin");
+        assert_eq!(
+            p.binary,
+            "/C:/Users/me/AppData/Local/tty7/bin/tty7-server-c3p4.exe"
+        );
+        assert_eq!(
+            p.temp,
+            "/C:/Users/me/AppData/Local/tty7/bin/.tty7-server-c3p4.tmp.exe"
+        );
+        assert_eq!(
+            p.dir_chain,
+            vec![
+                "/C:/Users/me/AppData",
+                "/C:/Users/me/AppData/Local",
+                "/C:/Users/me/AppData/Local/tty7",
+                "/C:/Users/me/AppData/Local/tty7/bin",
+            ]
+        );
+        assert_eq!(
+            remote_paths("/home/me", 3, 4).platform,
+            RemotePlatform::Unix,
+            "the unix spelling is unchanged and says so"
+        );
+    }
+
+    #[test]
+    fn an_sftp_home_says_which_platform_it_is_on() {
+        for home in ["/C:/Users/me", "/c:/Users/me", "/D:", "/C:/"] {
+            assert_eq!(
+                RemotePlatform::of_sftp_home(home),
+                RemotePlatform::Windows,
+                "{home}"
+            );
+        }
+        for home in ["/home/me", "/", "/C", "/CD:/x", "C:/Users/me", "/Users/c:"] {
+            assert_eq!(
+                RemotePlatform::of_sftp_home(home),
+                RemotePlatform::Unix,
+                "{home}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_paths_convert_between_sftp_and_native_spelling() {
+        assert_eq!(
+            windows_native_path("/C:/Users/me/AppData/Local/tty7/bin/x.exe").as_deref(),
+            Some(r"C:\Users\me\AppData\Local\tty7\bin\x.exe")
+        );
+        assert_eq!(windows_native_path("/D:").as_deref(), Some(r"D:\"));
+        assert_eq!(windows_native_path("/home/me/x"), None);
+
+        assert_eq!(
+            sftp_path_from_windows(r"C:\Users\me\AppData\Local\tty7\bin\x.exe").as_deref(),
+            Some("/C:/Users/me/AppData/Local/tty7/bin/x.exe")
+        );
+        assert_eq!(
+            sftp_path_from_windows("C:/Users/me/\r\n").as_deref(),
+            Some("/C:/Users/me")
+        );
+        assert_eq!(sftp_path_from_windows(r"C:\").as_deref(), Some("/C:/"));
+        for not_a_drive in [
+            "",
+            "/home/me",
+            r"\\server\share\x.exe",
+            "C",
+            "CD:\\x",
+            "C:x",
+        ] {
+            assert_eq!(sftp_path_from_windows(not_a_drive), None, "{not_a_drive:?}");
+        }
+
+        let sftp = "/C:/Users/me/AppData/Local/tty7/bin/tty7-server-c3p4.exe";
+        assert_eq!(
+            sftp_path_from_windows(&windows_native_path(sftp).unwrap()).as_deref(),
+            Some(sftp)
+        );
+    }
+
+    #[test]
+    fn dialects_are_recoverable_from_a_windows_install_path() {
+        assert_eq!(
+            dialect_from_path(r"C:\Users\me\AppData\Local\tty7\bin\tty7-server-c3p4.exe"),
+            Some((3, 4))
+        );
+        assert_eq!(
+            dialect_from_path("/C:/Users/me/AppData/Local/tty7/bin/tty7-server-c3p4.EXE"),
+            Some((3, 4))
+        );
+        assert_eq!(dialect_from_path(r"C:\tools\tty7-server.exe"), None);
+    }
+
+    #[test]
+    fn windows_asset_names_are_distinct_and_intern_to_themselves() {
+        assert_eq!(ASSET_WINDOWS_X86_64, "tty7-server-windows-x86_64.exe");
+        assert_eq!(ASSET_WINDOWS_AARCH64, "tty7-server-windows-aarch64.exe");
+        let all = [
+            ASSET_LINUX_X86_64,
+            ASSET_LINUX_AARCH64,
+            ASSET_MACOS_X86_64,
+            ASSET_MACOS_AARCH64,
+            ASSET_WINDOWS_X86_64,
+            ASSET_WINDOWS_AARCH64,
+        ];
+        for a in all {
+            assert_eq!(a, interned(a));
+            for b in all {
+                assert!(a == b || !a.contains(b), "{a} contains {b}");
+            }
         }
     }
 }

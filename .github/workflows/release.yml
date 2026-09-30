@@ -377,6 +377,72 @@ jobs:
           path: tty7/dist/${{ matrix.asset }}
           if-no-files-found: error
 
+  # The server for remote Windows hosts (Windows OpenSSH), under the same
+  # contract: flat, version-free names that `install::asset` derives from the
+  # host's `PROCESSOR_ARCHITECTURE`. They keep `.exe` because the installer
+  # writes the file under that name, and the checksum line is looked up by it.
+  #
+  # No RUSTFLAGS here, unlike the other server jobs: setting it would replace
+  # `.cargo/config.toml`'s `+crt-static` wholesale, and a server that imports
+  # VCRUNTIME140.dll will not start on a Windows host without the Visual C++
+  # redistributable — which a headless server is the likeliest machine to lack.
+  # Symbols are stripped through the profile instead.
+  #
+  # ARM64 is new ground for this repository's Windows builds (the app itself
+  # ships x64 only), so its leg may fail without holding up the release; an
+  # ARM64 host then gets a clear "could not download" instead of a server.
+  server-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            asset: tty7-server-windows-x86_64.exe
+            experimental: false
+          - target: aarch64-pc-windows-msvc
+            asset: tty7-server-windows-aarch64.exe
+            experimental: true
+    runs-on: windows-latest
+    continue-on-error: ${{ matrix.experimental }}
+    env:
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+    steps:
+      - name: Checkout tty7
+        uses: actions/checkout@v4
+        with:
+          path: tty7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tty7
+          key: ${{ matrix.target }}
+
+      - name: Build tty7-server
+        working-directory: tty7
+        run: cargo build --release --locked -p tty7-server --target ${{ matrix.target }}
+
+      - name: Assert the binary needs no VC++ redistributable
+        working-directory: tty7
+        shell: pwsh
+        run: '& ./.github/scripts/assert-no-vcruntime.ps1 "target/${{ matrix.target }}/release/tty7-server.exe"'
+
+      - name: Stage the asset
+        working-directory: tty7
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/tty7-server.exe" "dist/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.asset }}
+          path: tty7/dist/${{ matrix.asset }}
+          if-no-files-found: error
+
   # Single assembly step, after every GUI platform and every server slice
   # succeeds. The release object is
   # created as a **draft** and left that way: a draft is invisible to both
@@ -385,7 +451,7 @@ jobs:
   # empty. Publishing is the release skill's job — it verifies the platform assets and
   # writes the body first, then flips the draft. See .claude/skills/release/SKILL.md.
   draft-release:
-    needs: [build, server-musl, server-macos]
+    needs: [build, server-musl, server-macos, server-windows]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     env:

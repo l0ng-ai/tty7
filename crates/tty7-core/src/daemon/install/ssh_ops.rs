@@ -54,7 +54,8 @@ impl RemoteOps for SshRemoteOps {
             match tokio::time::timeout(COMMAND_TIMEOUT, exec(&conn, &cmd)).await {
                 Ok(result) => result,
                 Err(_) => Err(format!(
-                    "the remote did not finish `{cmd}` within {COMMAND_TIMEOUT:?}"
+                    "the remote did not finish `{}` within {COMMAND_TIMEOUT:?}",
+                    super::windows_host::label(&cmd)
                 )),
             }
         })
@@ -164,7 +165,7 @@ async fn exec(conn: &Arc<SshConnection>, cmd: &str) -> Result<ExecOutput, String
     channel
         .exec(true, cmd)
         .await
-        .map_err(|e| format!("could not run `{cmd}`: {e}"))?;
+        .map_err(|e| format!("could not run `{}`: {e}", super::windows_host::label(cmd)))?;
     let _ = channel.eof().await;
 
     let mut stdout = Vec::new();
