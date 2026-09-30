@@ -40,6 +40,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, h_fle
 
 use super::view::{GRID_PAD_X, GRID_PAD_Y, TerminalView, pasted_paths_text, types_cleanly};
 use crate::core::cli_agent::{AgentStatus, CLIAgent};
+use crate::core::shell_quote::{Quoting, quoting_for};
 use crate::ui::host_ops::{HostId, HostOps};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::search::files::{FileIndex, FileList, IndexedFile, rank, walk};
@@ -132,6 +133,10 @@ pub(super) struct Step {
 /// - **A leading `!` goes to Claude Code on its own.** It switches the input
 ///   into shell mode only when it is typed into an empty box as a key of its
 ///   own; arriving with the rest of the line it is just a character.
+/// - **A message with an `@` mention gets a space after it for Gemini.**
+///   With the caret at the end of an `@` word it lists matching files, and
+///   Enter then takes the list's pick instead of sending — so a message whose
+///   attachments close it would sit in the input, under the box, unsent.
 ///
 /// Without bracketed paste switched on, line breaks go as LF: to every agent
 /// input that is Ctrl+J, a newline in the message, where a CR would send each
@@ -159,6 +164,15 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
         delay = SETTLE;
     }
 
+    let spaced;
+    // Where the last word starts is a matter of Gemini's escaping and quoting,
+    // so any `@` will do: a space after the message costs nothing. Not after a
+    // command, though, where it would open the list of its arguments.
+    if agent == CLIAgent::Gemini && body.contains('@') && !body.starts_with('/') {
+        spaced = format!("{body} ");
+        body = &spaced;
+    }
+
     let mut pasted = false;
     if !body.is_empty() {
         pasted = bracketed && (agent == CLIAgent::Codex || !types_cleanly(body));
@@ -184,12 +198,29 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
 /// The message that goes out: what was written, then the attachments as the
 /// words a drop onto the terminal would have typed — which is how an agent is
 /// pointed at a file or shown an image.
-pub(super) fn compose_message(text: &str, attached: &[String], shell: Option<&str>) -> String {
+///
+/// Gemini is the exception. It turns a drop into `@` mentions itself, but only
+/// a paste that is nothing but paths; after the message's text, a path is
+/// just words to it and the file never reaches the model. So its attachments
+/// go as the mentions it would have made.
+pub(super) fn compose_message(
+    agent: CLIAgent,
+    text: &str,
+    attached: &[String],
+    shell: Option<&str>,
+) -> String {
     let text = text.trim_end();
     if attached.is_empty() {
         return text.to_string();
     }
-    let words = pasted_paths_text(attached, shell);
+    let words = match agent {
+        CLIAgent::Gemini => attached
+            .iter()
+            .map(|p| mention(Some(agent), p, shell))
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => pasted_paths_text(attached, shell),
+    };
     let words = words.trim_end();
     match text.is_empty() {
         true => words.to_string(),
@@ -542,9 +573,47 @@ pub(super) fn command_items(commands: &[(String, String)], query: &str) -> Vec<M
         .collect()
 }
 
+/// `path` as an `@` mention `agent` reads back as that one file.
+///
+/// Gemini CLI ends a mention at the first unescaped space, and reads it back
+/// through its own `escapePath`: a backslash before each character a shell
+/// would take, or — on Windows — the whole path in double quotes. The others
+/// take the path as it is.
+pub(super) fn mention(agent: Option<CLIAgent>, path: &str, shell: Option<&str>) -> String {
+    if agent != Some(CLIAgent::Gemini) {
+        return format!("@{path}");
+    }
+    let spelled = match quoting_for(shell) {
+        Quoting::Posix => {
+            let mut out = String::with_capacity(path.len());
+            for c in path.chars() {
+                if " \t()[]{};|*?$`'\"#&<>!~\\".contains(c) {
+                    out.push('\\');
+                }
+                out.push(c);
+            }
+            out
+        }
+        _ if path
+            .chars()
+            .any(|c| c.is_whitespace() || "&()[]{}^=;!'+,`~%$@#".contains(c)) =>
+        {
+            format!("\"{path}\"")
+        }
+        _ => path.to_string(),
+    };
+    format!("@{spelled}")
+}
+
 /// The `@` menu for `query`. The mention is spelled relative to `cwd` — which
 /// is what the agent resolves it against — and in full for a file outside it.
-fn file_items(index: &FileIndex, query: &str, cwd: Option<&Path>) -> Vec<MenuItem> {
+fn file_items(
+    index: &FileIndex,
+    query: &str,
+    cwd: Option<&Path>,
+    agent: Option<CLIAgent>,
+    shell: Option<&str>,
+) -> Vec<MenuItem> {
     let spell = |path: &Path| -> String {
         cwd.and_then(|c| path.strip_prefix(c).ok())
             .unwrap_or(path)
@@ -554,7 +623,7 @@ fn file_items(index: &FileIndex, query: &str, cwd: Option<&Path>) -> Vec<MenuIte
     let item = |f: &IndexedFile| MenuItem {
         label: f.name().to_string(),
         detail: f.dir().to_string(),
-        insert: format!("@{}", spell(&f.path)),
+        insert: mention(agent, &spell(&f.path), shell),
         is_file: true,
     };
     match query.is_empty() {
@@ -1258,9 +1327,13 @@ impl TerminalView {
                 command_items(&all, &trigger.query)
             }
             _ => match &c.files {
-                Files::Ready(index, _) => {
-                    file_items(index, &trigger.query, self.files_cwd().as_deref())
-                }
+                Files::Ready(index, _) => file_items(
+                    index,
+                    &trigger.query,
+                    self.files_cwd().as_deref(),
+                    self.agent(),
+                    self.shell_program().as_deref(),
+                ),
                 _ => Vec::new(),
             },
         };
@@ -1335,7 +1408,12 @@ impl TerminalView {
         let Some(c) = self.composer.as_mut() else {
             return;
         };
-        let message = compose_message(&c.input.read(cx).value(), &c.attached, shell.as_deref());
+        let message = compose_message(
+            agent,
+            &c.input.read(cx).value(),
+            &c.attached,
+            shell.as_deref(),
+        );
         let bracketed = self
             .terminal
             .term
@@ -2152,17 +2230,55 @@ mod tests {
     #[test]
     fn attachments_follow_the_text_as_shell_words() {
         let attached = vec!["/tmp/a b.png".to_string(), "/src/x.rs".to_string()];
+        let claude = CLIAgent::Claude;
         assert_eq!(
-            compose_message("look at these\n", &attached, Some("zsh")),
+            compose_message(claude, "look at these\n", &attached, Some("zsh")),
             "look at these '/tmp/a b.png' /src/x.rs"
         );
         assert_eq!(
-            compose_message("", &attached[1..], Some("zsh")),
+            compose_message(claude, "", &attached[1..], Some("zsh")),
             "/src/x.rs"
         );
         assert_eq!(
-            compose_message("just text  ", &[], Some("zsh")),
+            compose_message(claude, "just text  ", &[], Some("zsh")),
             "just text"
+        );
+    }
+
+    #[test]
+    fn a_closing_mention_is_left_behind_before_gemini_gets_enter() {
+        let steps = submit_plan(CLIAgent::Gemini, r"read @my\ notes.txt", true);
+        assert_eq!(bytes(&steps), [&br"read @my\ notes.txt "[..], b"\r"]);
+        let steps = submit_plan(CLIAgent::Gemini, r#"read @"C:\My Files\a.rs""#, true);
+        assert_eq!(bytes(&steps)[0], br#"read @"C:\My Files\a.rs" "#);
+        // Nothing to close without a mention, and a command's space would
+        // open its arguments.
+        let steps = submit_plan(CLIAgent::Gemini, "read it", true);
+        assert_eq!(bytes(&steps), [&b"read it"[..], b"\r"]);
+        let steps = submit_plan(CLIAgent::Gemini, "/memory", true);
+        assert_eq!(bytes(&steps), [&b"/memory"[..], b"\r"]);
+        let steps = submit_plan(CLIAgent::Claude, "read @a.rs", true);
+        assert_eq!(bytes(&steps), [&b"read @a.rs"[..], b"\r"]);
+    }
+
+    #[test]
+    fn gemini_gets_its_attachments_as_mentions() {
+        let attached = vec!["/tmp/a b.png".to_string(), "/src/x(1).rs".to_string()];
+        assert_eq!(
+            compose_message(CLIAgent::Gemini, "look at these", &attached, Some("zsh")),
+            r"look at these @/tmp/a\ b.png @/src/x\(1\).rs"
+        );
+        assert_eq!(
+            mention(Some(CLIAgent::Gemini), r"C:\My Files\a.png", Some("pwsh")),
+            r#"@"C:\My Files\a.png""#
+        );
+        assert_eq!(
+            mention(Some(CLIAgent::Gemini), r"C:\src\a.rs", Some("pwsh")),
+            r"@C:\src\a.rs"
+        );
+        assert_eq!(
+            mention(Some(CLIAgent::Claude), "my notes.md", Some("zsh")),
+            "@my notes.md"
         );
     }
 
@@ -2474,9 +2590,9 @@ mod tests {
             ],
             false,
         );
-        let items = file_items(&index, "main", Some(Path::new("/repo/app")));
+        let items = file_items(&index, "main", Some(Path::new("/repo/app")), None, None);
         assert_eq!(items[0].insert, "@src/main.rs");
-        let items = file_items(&index, "readme", Some(Path::new("/repo/app")));
+        let items = file_items(&index, "readme", Some(Path::new("/repo/app")), None, None);
         assert_eq!(
             items[0].insert, "@/repo/README.md",
             "outside the cwd: in full"
