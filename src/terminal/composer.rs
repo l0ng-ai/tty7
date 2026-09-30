@@ -395,9 +395,10 @@ fn builtin_commands(agent: CLIAgent) -> &'static [(&'static str, &'static str)] 
         ],
         CLIAgent::Codex => &[
             ("/model", "Choose model and reasoning effort"),
-            ("/approvals", "Choose what Codex may do without asking"),
+            ("/permissions", "Choose what Codex is allowed to do"),
             ("/review", "Review the current changes"),
             ("/new", "Start a new chat"),
+            ("/resume", "Resume a saved chat"),
             ("/compact", "Summarize to free up context"),
             ("/init", "Create an AGENTS.md for this repo"),
             ("/diff", "Show the git diff"),
