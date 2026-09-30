@@ -1,14 +1,16 @@
 name: Mobile
 
-# The phone app's Android build: a signed APK people install by hand. A
-# `mobile-v<x.y.z>` tag builds it at that version and attaches it to a draft
-# release of the same name; a manual run builds it at the version in
-# tauri.conf.json and keeps it as a workflow artifact only.
+# The phone app, both platforms at one version. A `mobile-v<x.y.z>` tag, cut
+# from a commit whose tauri.conf.json says x.y.z:
+# - Android: a signed APK, attached to a draft release of the same name.
+# - iOS: a build uploaded to TestFlight, as <x.y.z>.<build number>.
+# A manual run builds both at tauri.conf.json's version and uploads nothing:
+# the APK is kept as a workflow artifact, the iOS build is only signed.
 #
 # The mobile app is versioned apart from the desktop's `v*` tags. Android
 # installs one build over another only when its versionCode is higher, and
 # Tauri derives it from the version (major * 1000000 + minor * 1000 + patch),
-# so each tag must be higher than the last.
+# so each version must be higher than the last.
 
 on:
   push:
@@ -25,24 +27,35 @@ env:
   NDK_VERSION: 28.2.13676358
 
 jobs:
-  android:
+  # The version is the one in the tagged commit, so the repo always says what
+  # was shipped; a tag that disagrees with it is a mistake, not an override.
+  version:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Version
+      - id: version
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REF" == refs/tags/mobile-v* ]]; then
-            VERSION="${GITHUB_REF_NAME#mobile-v}"
-            if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "::error::tag must be mobile-v<major>.<minor>.<patch>, got $GITHUB_REF_NAME"
-              exit 1
-            fi
-          else
-            VERSION=$(jq -r .version mobile/src-tauri/tauri.conf.json)
+          VERSION=$(jq -r .version mobile/src-tauri/tauri.conf.json)
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tauri.conf.json's version must be <major>.<minor>.<patch>, got $VERSION"
+            exit 1
           fi
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_REF" == refs/tags/mobile-v* && "$GITHUB_REF_NAME" != "mobile-v$VERSION" ]]; then
+            echo "::error::$GITHUB_REF_NAME is on a commit whose tauri.conf.json says $VERSION"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  android:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-java@v4
         with:
@@ -101,7 +114,7 @@ jobs:
         run: |
           set -euo pipefail
           npm ci
-          npx tauri android build --apk --target aarch64 --config "{\"version\":\"$VERSION\"}"
+          npx tauri android build --apk --target aarch64
 
       - name: Check and name the APK
         run: |
@@ -146,3 +159,54 @@ jobs:
               --notes-file .github/mobile-install.md
           fi
           gh release upload "$GITHUB_REF_NAME" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+  ios:
+    needs: version
+    # Xcode 26: App Store Connect takes only builds made with the iOS 26 SDK.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mobile/src-tauri
+
+      # An App Store Connect API key signs in for Xcode: it signs the build
+      # with a certificate Apple keeps, and uploads it.
+      - name: App Store Connect key
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ASC_KEY_P8" ]; then
+            echo "::error::the ASC_* secrets are not set"
+            exit 1
+          fi
+          printf '%s\n' "$ASC_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          echo "ASC_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+
+      # The build number defaults to the time (scripts/testflight.sh), so it
+      # rises from any machine without a counter.
+      - name: Build and upload
+        working-directory: mobile
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          npm ci
+          if [[ "$GITHUB_REF" == refs/tags/mobile-v* ]]; then
+            scripts/testflight.sh
+          else
+            scripts/testflight.sh --no-upload
+          fi

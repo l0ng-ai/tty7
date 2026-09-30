@@ -5,7 +5,12 @@
 #   --build-number N  the build is <version>.N (default: the time, yyjjjHHMM)
 #   --no-upload       export a signed .ipa into build/testflight/ instead
 #
-# Needs Xcode signed in (Settings → Accounts) to an account on team 78SZC3DQ7B.
+# Signs in one of two ways:
+# - Xcode signed in (Settings → Accounts) to an account on team 78SZC3DQ7B.
+# - An App Store Connect API key, as CI does: ASC_KEY_ID and ASC_ISSUER_ID set,
+#   and the key at ASC_KEY_PATH (default
+#   ~/.appstoreconnect/private_keys/AuthKey_<ASC_KEY_ID>.p8). Xcode then signs
+#   with a certificate Apple keeps in the cloud, so no keychain is needed.
 #
 # Why not just `tauri ios build --export-method app-store-connect`:
 # - The archive is signed with a development profile first, and the team has
@@ -36,7 +41,15 @@ ARCHIVE=src-tauri/gen/apple/build/tty7-mobile_iOS.xcarchive
 OUT=build/testflight
 mkdir -p "$OUT"
 
-[ -f "$PROJECT" ] || npm run tauri ios init
+[ -f "$PROJECT" ] || npm run tauri ios init -- --ci
+
+AUTH=()
+if [ -n "${ASC_KEY_ID:-}" ]; then
+  KEY="${ASC_KEY_PATH:-$HOME/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8}"
+  [ -f "$KEY" ] || { echo "no App Store Connect key at $KEY" >&2; exit 1; }
+  AUTH=(-authenticationKeyPath "$KEY" -authenticationKeyID "$ASC_KEY_ID"
+    -authenticationKeyIssuerID "${ASC_ISSUER_ID:?ASC_ISSUER_ID is needed with ASC_KEY_ID}")
+fi
 
 # `tauri ios init` fills the asset catalog with Tauri's placeholder icon;
 # put ours back so a regenerated gen/ never ships it.
@@ -80,7 +93,8 @@ xcodebuild -exportArchive \
   -archivePath "$ARCHIVE" \
   -exportOptionsPlist "$OUT/ExportOptions.plist" \
   -exportPath "$OUT" \
-  -allowProvisioningUpdates
+  -allowProvisioningUpdates \
+  ${AUTH[@]+"${AUTH[@]}"}
 
 if [ "$UPLOAD" = 1 ]; then
   echo "==> Uploaded $VERSION ($BUILD); it shows in TestFlight once App Store Connect has processed it"
