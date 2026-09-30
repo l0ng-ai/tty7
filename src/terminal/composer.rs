@@ -1368,10 +1368,7 @@ impl TerminalView {
         let ink = theme.foreground;
         let muted = theme.muted_foreground;
         let amber = theme.warning;
-        let (ring, ring_w) = match focused {
-            true => (ink.opacity(0.22), px(1.)),
-            false => (ink.opacity(0.15), crate::ui::theme::hairline(window)),
-        };
+        let hairline = crate::ui::theme::hairline(window);
         let menu = self.composer_menu(cx);
 
         let chips = (!c.attached.is_empty()).then(|| {
@@ -1927,18 +1924,12 @@ impl TerminalView {
                         .flex_col()
                         .rounded(px(12.))
                         .bg(ink.opacity(0.035))
-                        .border_t(ring_w)
-                        .border_b(ring_w)
-                        .border_l(ring_w)
-                        .border_r(ring_w)
-                        .border_color(ring)
-                        .drag_over::<ExternalPaths>(move |s, _, _, _| {
-                            s.border_t(px(1.))
-                                .border_b(px(1.))
-                                .border_l(px(1.))
-                                .border_r(px(1.))
-                                .border_color(ink.opacity(0.48))
-                        })
+                        .relative()
+                        .border_t(hairline)
+                        .border_b(hairline)
+                        .border_l(hairline)
+                        .border_r(hairline)
+                        .border_color(ink.opacity(0.15))
                         .children(chips)
                         .child(
                             div()
@@ -1966,6 +1957,27 @@ impl TerminalView {
                                 .child(div().flex_1())
                                 .children(context)
                                 .child(send),
+                        )
+                        // Focus and a drag over the box thicken the ring. Drawn
+                        // as a layer over the hairline, not as a wider border,
+                        // so the box's contents stay where they are.
+                        .child(
+                            // Laid out inside the hairline, so pulled out over it.
+                            div()
+                                .absolute()
+                                .top(-hairline)
+                                .bottom(-hairline)
+                                .left(-hairline)
+                                .right(-hairline)
+                                .rounded(px(12.))
+                                .border_1()
+                                .border_color(match focused {
+                                    true => ink.opacity(0.22),
+                                    false => gpui::transparent_black(),
+                                })
+                                .drag_over::<ExternalPaths>(move |s, _, _, _| {
+                                    s.border_color(ink.opacity(0.48))
+                                }),
                         ),
                 )
                 .into_any_element(),
