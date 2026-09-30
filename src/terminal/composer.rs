@@ -601,9 +601,10 @@ pub(super) struct Composer {
     dismissed: Option<String>,
     files: Files,
     commands: Option<(Vec<(String, String)>, Instant)>,
-    /// The effort level last picked from the toolbar. What the settings say
-    /// catches up at the agent's next event; until then this is the truth.
-    effort: Option<String>,
+    /// The effort level last picked from the toolbar, with the level the
+    /// agent reported then. Once it reports another, the pick has landed (or
+    /// been overridden) and the report is the truth again.
+    effort: Option<(&'static str, Option<String>)>,
     /// The model alias last picked from the toolbar, with the model the agent
     /// reported then. Once it reports another, the pick has landed (or been
     /// overridden) and the report is the truth again.
@@ -917,17 +918,17 @@ impl TerminalView {
             .lock()
             .mode()
             .contains(TermMode::BRACKETED_PASTE);
-        let reported = self.agent_session().and_then(|s| s.readout.model);
+        let reported = self.agent_session().map(|s| s.readout).unwrap_or_default();
         let Some(c) = self.composer.as_mut() else {
             return;
         };
         let command = match picker {
             Picker::Model => {
-                c.model = Some((value, reported));
+                c.model = Some((value, reported.model));
                 format!("/model {value}")
             }
             Picker::Effort => {
-                c.effort = Some(value.to_string());
+                c.effort = Some((value, reported.effort));
                 format!("/effort {value}")
             }
         };
@@ -1646,7 +1647,14 @@ impl TerminalView {
                 cx,
             )
         });
-        let current_effort = c.effort.clone().or_else(|| readout.effort.clone());
+        let current_effort = c
+            .effort
+            .as_ref()
+            .filter(|(_, then)| *then == readout.effort)
+            .map(|(level, _)| level.to_string())
+            .or_else(|| readout.effort.clone())
+            // A model that takes no effort level has none to show.
+            .filter(|level| !level.is_empty());
         let effort = claude.then(|| {
             // The level alone, as the model button shows the model alone;
             // the tooltip and the list's title say what it is.

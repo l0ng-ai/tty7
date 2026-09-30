@@ -159,7 +159,7 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
         body["prompt"] = serde_json::Value::String(prompt);
     }
     if agent == "claude" {
-        claude_readout(&payload, &mut body);
+        claude_readout(event, &payload, &mut body);
     }
     format!("\x1b]777;notify;{AGENT_EVENT_SENTINEL};{body}\x07").into_bytes()
 }
@@ -168,12 +168,17 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
 /// assistant entry is a few KiB; this is room for a long tool result after it.
 const TRANSCRIPT_TAIL: u64 = 512 * 1024;
 
+/// How long `Stop` waits for its turn's reply to reach the transcript, and
+/// how often it looks meanwhile.
+const TRANSCRIPT_CATCH_UP: std::time::Duration = std::time::Duration::from_millis(600);
+const TRANSCRIPT_POLL: std::time::Duration = std::time::Duration::from_millis(40);
+
 /// What Claude Code says about its settings, for the composer's toolbar:
 /// permission mode, model, the effort level.
 ///
 /// Worked out here, in the hook, because the hook runs where the agent runs —
 /// on a remote host its transcript and settings are only readable there.
-fn claude_readout(payload: &serde_json::Value, body: &mut serde_json::Value) {
+fn claude_readout(event: &str, payload: &serde_json::Value, body: &mut serde_json::Value) {
     let str_of = |v: Option<&serde_json::Value>| {
         v.and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
@@ -182,28 +187,39 @@ fn claude_readout(payload: &serde_json::Value, body: &mut serde_json::Value) {
     if let Some(mode) = str_of(payload.get("permission_mode")) {
         body["permission_mode"] = mode.into();
     }
-    let settings = claude_settings();
-    // Only `SessionStart` names the model; after a `/model` the transcript's
-    // latest reply is the one that says which it is now.
+    // A new session names its model. After that only a finished turn says
+    // which it is: the model that wrote the reply `Stop` carries. Any other
+    // reply in the transcript may be from before a `/model`, or from before
+    // a resume under another `--model` — and saying nothing beats that.
     let model = str_of(payload.get("model")).or_else(|| {
-        payload
-            .get("transcript_path")
-            .and_then(|p| p.as_str())
-            .and_then(|p| last_reply_model(Path::new(p)))
+        if event != "stop" {
+            return None;
+        }
+        let reply = str_of(payload.get("last_assistant_message"))?;
+        let path = str_of(payload.get("transcript_path"))?;
+        let prompt_id = str_of(payload.get("prompt_id"));
+        turn_reply_model(Path::new(&path), &reply, prompt_id.as_deref())
     });
     if let Some(model) = &model {
         body["model"] = model.clone().into();
     }
-    // Claude says the level it is running at, when it says it. Otherwise the
-    // environment wins over the settings file, as it does for Claude.
-    if let Some(effort) = str_of(payload.get("effort").and_then(|e| e.get("level")))
-        .or_else(|| {
-            std::env::var("CLAUDE_CODE_EFFORT_LEVEL")
-                .ok()
-                .filter(|e| !e.is_empty())
-        })
-        .or_else(|| configured_effort(&settings, model.as_deref()))
-    {
+    // Claude says the level it is running at, when it says it — and at the
+    // end of a turn it says it whenever the model takes one, so a finished
+    // turn without it ran on a model that does not: that is reported as an
+    // empty level. Otherwise the environment wins over the settings file, as
+    // it does for Claude — read only for a model this event names, since the
+    // file may set it per model.
+    let effort = str_of(payload.get("effort").and_then(|e| e.get("level"))).or_else(|| {
+        let model = model.as_deref()?;
+        if event == "stop" {
+            return Some(String::new());
+        }
+        std::env::var("CLAUDE_CODE_EFFORT_LEVEL")
+            .ok()
+            .filter(|e| !e.is_empty())
+            .or_else(|| configured_effort(&claude_settings(), Some(model)))
+    });
+    if let Some(effort) = effort {
         body["effort"] = effort.into();
     }
 }
@@ -240,9 +256,25 @@ fn claude_settings() -> serde_json::Value {
         .unwrap_or(serde_json::json!({}))
 }
 
-/// The model of the last reply in a transcript. Subagents' entries are
-/// skipped — they may run on a model of their own.
-fn last_reply_model(path: &Path) -> Option<String> {
+/// The model that wrote `reply` to the prompt `prompt_id`, once the
+/// transcript has it as its latest words. Claude Code runs `Stop` before
+/// that write is always on disk, so this waits a little for it.
+fn turn_reply_model(path: &Path, reply: &str, prompt_id: Option<&str>) -> Option<String> {
+    let deadline = std::time::Instant::now() + TRANSCRIPT_CATCH_UP;
+    loop {
+        if let Some(model) =
+            transcript_tail(path).and_then(|t| reply_model_in(&t, reply, prompt_id))
+        {
+            return Some(model);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(TRANSCRIPT_POLL);
+    }
+}
+
+fn transcript_tail(path: &Path) -> Option<String> {
     use std::io::{Seek as _, SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
@@ -250,21 +282,54 @@ fn last_reply_model(path: &Path) -> Option<String> {
         .ok()?;
     let mut tail = Vec::new();
     file.read_to_end(&mut tail).ok()?;
-    last_model_in(&String::from_utf8_lossy(&tail))
+    Some(String::from_utf8_lossy(&tail).into_owned())
 }
 
-fn last_model_in(jsonl: &str) -> Option<String> {
-    jsonl.lines().rev().find_map(|line| {
-        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
-        if entry.get("type")?.as_str()? != "assistant"
+/// The model of the transcript's latest main-thread words, when those words
+/// are `reply` and come after the prompt `prompt_id` names — the same words
+/// can close an earlier turn too. Subagents' entries are skipped — they may
+/// run on a model of their own — and so are the notices Claude Code writes
+/// as replies.
+fn reply_model_in(jsonl: &str, reply: &str, prompt_id: Option<&str>) -> Option<String> {
+    let mut words = None;
+    let mut prompted = prompt_id.is_none();
+    for line in jsonl.lines() {
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let kind = entry.get("type").and_then(|t| t.as_str());
+        if kind == Some("user") {
+            if prompt_id.is_some() && entry.get("promptId").and_then(|p| p.as_str()) == prompt_id {
+                prompted = true;
+                words = None;
+            }
+            continue;
+        }
+        if kind != Some("assistant")
             || entry.get("isSidechain").and_then(|v| v.as_bool()) == Some(true)
         {
-            return None;
+            continue;
         }
-        let model = entry.get("message")?.get("model")?.as_str()?.to_string();
-        // Claude Code writes its own error notices as assistant entries.
-        (model != "<synthetic>").then_some(model)
-    })
+        let Some(message) = entry.get("message") else {
+            continue;
+        };
+        let model = message.get("model").and_then(|m| m.as_str());
+        let text: String = message
+            .get("content")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect();
+        if let Some(model) = model.filter(|m| *m != "<synthetic>")
+            && !text.trim().is_empty()
+        {
+            words = Some((model.to_string(), text));
+        }
+    }
+    let (model, text) = words.filter(|_| prompted)?;
+    (text.trim() == reply.trim()).then_some(model)
 }
 
 /// How much of a prompt rides back to the terminal.
@@ -2051,20 +2116,47 @@ export default function (pi: ExtensionAPI) {{
 mod tests {
     use super::*;
 
-    /// The last real reply wins: a subagent's entry after it and Claude
-    /// Code's own synthetic notices are not the conversation's context.
+    /// The turn's reply names the model: a subagent's entry after it and
+    /// Claude Code's own synthetic notices are not the conversation's, and
+    /// the thinking entry before the words carries none.
     #[test]
-    fn the_readout_takes_the_last_main_thread_reply() {
+    fn the_readout_takes_the_model_that_wrote_the_turns_reply() {
         let jsonl = [
-            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_creation_input_tokens":100,"cache_read_input_tokens":60000,"output_tokens":400}}}"#,
-            r#"{"type":"user","message":{"content":"hi"}}"#,
-            r#"{"type":"assistant","isSidechain":true,"message":{"model":"claude-haiku-4-5","usage":{"input_tokens":9000}}}"#,
-            r#"{"type":"assistant","message":{"model":"<synthetic>","usage":{"input_tokens":0}}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-haiku-4-5","content":[{"type":"text","text":"Earlier."}]}}"#,
+            r#"{"type":"user","promptId":"p2","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"thinking","thinking":""}]}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"Hi there!\n"}]}}"#,
+            r#"{"type":"assistant","isSidechain":true,"message":{"model":"claude-haiku-4-5","content":[{"type":"text","text":"Hi there!"}]}}"#,
+            r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}"#,
             "not json",
         ]
         .join("\n");
-        assert_eq!(last_model_in(&jsonl).as_deref(), Some("claude-opus-5-5"));
-        assert_eq!(last_model_in(""), None);
+        assert_eq!(
+            reply_model_in(&jsonl, "Hi there!", Some("p2")).as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            reply_model_in(&jsonl, "Hi there!", None).as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(reply_model_in("", "Hi there!", Some("p2")), None);
+    }
+
+    /// Until the reply is written, the transcript's latest words are the
+    /// previous turn's — possibly under another model, possibly the very
+    /// same words — and say nothing.
+    #[test]
+    fn a_transcript_behind_the_turn_names_no_model() {
+        let jsonl = [
+            r#"{"type":"user","promptId":"p1","message":{"content":"say hi"}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-haiku-4-5","content":[{"type":"text","text":"Hi!"}]}}"#,
+        ]
+        .join("\n");
+        assert_eq!(reply_model_in(&jsonl, "Hello.", Some("p1")), None);
+        assert_eq!(reply_model_in(&jsonl, "Hi!", Some("p2")), None);
+        let asked =
+            jsonl + "\n" + r#"{"type":"user","promptId":"p2","message":{"content":"say hi"}}"#;
+        assert_eq!(reply_model_in(&asked, "Hi!", Some("p2")), None);
     }
 
     #[test]
@@ -2074,31 +2166,61 @@ mod tests {
         let transcript = dir.join("t.jsonl");
         std::fs::write(
             &transcript,
-            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":250000}}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"Done."}]}}"#,
         )
         .unwrap();
-        let stdin = serde_json::json!({
-            "session_id": "s",
-            "permission_mode": "plan",
-            "transcript_path": transcript,
-            "effort": { "level": "xhigh" },
-        })
-        .to_string();
-        let seq = build_hook_sequence("claude", "stop", &stdin);
-        let _ = std::fs::remove_dir_all(&dir);
-        let ev = crate::core::cli_agent::parse_agent_event(
-            seq.strip_prefix(b"\x1b]")
+        let stdin = |extra: serde_json::Value| {
+            let mut payload = serde_json::json!({
+                "session_id": "s",
+                "permission_mode": "plan",
+                "transcript_path": transcript,
+            });
+            payload
+                .as_object_mut()
                 .unwrap()
-                .strip_suffix(b"\x07")
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(ev.readout.permission_mode.as_deref(), Some("plan"));
-        assert_eq!(ev.readout.model.as_deref(), Some("claude-opus-5-5"));
+                .extend(extra.as_object().unwrap().clone());
+            payload.to_string()
+        };
+        let readout = |event: &str, stdin: &str| {
+            let seq = build_hook_sequence("claude", event, stdin);
+            crate::core::cli_agent::parse_agent_event(
+                seq.strip_prefix(b"\x1b]")
+                    .unwrap()
+                    .strip_suffix(b"\x07")
+                    .unwrap(),
+            )
+            .unwrap()
+            .readout
+        };
+        let stop = readout(
+            "stop",
+            &stdin(serde_json::json!({
+                "last_assistant_message": "Done.",
+                "effort": { "level": "xhigh" },
+            })),
+        );
+        let submit = readout("prompt-submit", &stdin(serde_json::json!({})));
+        let no_effort = readout(
+            "stop",
+            &stdin(serde_json::json!({ "last_assistant_message": "Done." })),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(stop.permission_mode.as_deref(), Some("plan"));
+        assert_eq!(stop.model.as_deref(), Some("claude-opus-5-5"));
         assert_eq!(
-            ev.readout.effort.as_deref(),
+            stop.effort.as_deref(),
             Some("xhigh"),
             "the level Claude reports is the one it runs at"
+        );
+        assert_eq!(
+            (submit.model, submit.effort),
+            (None, None),
+            "before its reply a turn says nothing of the model it runs on"
+        );
+        assert_eq!(
+            no_effort.effort.as_deref(),
+            Some(""),
+            "a turn that ends without a level ran on a model that takes none"
         );
     }
 

@@ -1049,7 +1049,8 @@ pub struct AgentReadout {
     /// The model id, as the agent's transcript records it.
     #[serde(default)]
     pub model: Option<String>,
-    /// The reasoning effort level (`low`, `medium`, `high`, …).
+    /// The reasoning effort level (`low`, `medium`, `high`, …); empty when
+    /// the agent runs a model that takes none.
     #[serde(default)]
     pub effort: Option<String>,
 }
