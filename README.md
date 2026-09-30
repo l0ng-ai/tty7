@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="assets/app-icon.svg" alt="tty7" width="88" height="88" />
+<img src="assets/app-icon.svg" alt="" width="96" height="96" />
 
-### tty7
+<h1>tty7</h1>
 
-**A terminal workbench: persistent sessions, remote work, agents.**
+**The terminal that outlives its window.**
 
 <sub>Pure Rust · GPU rendering on Zed's gpui · VT core from Alacritty</sub>
 
@@ -12,9 +12,8 @@
 
 [![CI](https://github.com/l0ng-ai/tty7/actions/workflows/ci.yml/badge.svg)](https://github.com/l0ng-ai/tty7/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/github/v/release/l0ng-ai/tty7?label=version&color=3FDD8C)](https://github.com/l0ng-ai/tty7/releases)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-blue)](https://github.com/l0ng-ai/tty7/releases)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Discord](https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/s3dethqz2V)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-3FDD8C)](https://github.com/l0ng-ai/tty7/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-3FDD8C)](LICENSE)
 
 <sub>English · [简体中文](README.zh-CN.md)</sub>
 
@@ -22,113 +21,84 @@
 
 <a href="assets/tour.mp4"><img src="assets/tour.webp" alt="One-minute tour of tty7: agents across repos, one agent driving another through the CLI, the prompt editor, diffs, dragging panes, and sessions that survive quitting the app" width="900" /></a>
 
-<sub>▶ <a href="assets/tour.mp4">Watch in full quality</a></sub>
-
 </div>
 
-## Why
+<br />
 
-A background server owns your shells and panes — not the window. Everything
-below follows from that.
+Most terminals tie your shells to a window. Close the window and the shells die
+with it. So people run tmux inside their terminal to keep them alive, which
+works, but it means learning a second set of keys and keeping a second config
+file, just to get around the window.
 
-- **Performance** — ~2× the throughput of Alacritty, Ghostty, or Kitty ([benchmarks](#benchmarks))
-- **Persistent sessions** — quit or reboot; your shells and supported agent sessions keep running, no tmux
-- **Agent-aware** — Claude Code, Codex & co.: status, notifications, and git context for every repo at once
-- **Scriptable by agents** — one agent opens a pane for another, hands off a task, waits, and reads the result, with or without the GUI running
-- **Editor-grade input** — suggestions, completion, highlighting, history search, with no plugin to install
-- **Remote development** — files, repos, panes, and git data stay on the remote machine, over a native SSH stack
+tty7 takes a simpler approach. The shells belong to a server running in the
+background, and the window only shows them. Close the window and nothing happens
+to the shells. Most of what's interesting about tty7 follows from that one
+decision.
 
-## Install
+## Quitting doesn't kill anything
 
-Native builds for macOS, Windows, and Linux on [**Releases**](https://github.com/l0ng-ai/tty7/releases):
+Quit tty7 and every shell keeps running. Your build doesn't notice.
 
-| | | |
-|---|---|---|
-| **macOS** | `…-macos-arm64.dmg` · `…-x86_64.dmg` | drag into Applications |
-| **Windows** | `…-setup.exe` · portable `….zip` | |
-| **Linux** | `…-x86_64.AppImage` | `chmod +x` and run — X11/Wayland libraries bundled |
+A reboot is different. The processes are gone, because that's what a reboot
+does. But each pane comes back with its layout and the last of what was on
+screen, and supported agents pick up the same conversation where they left off.
 
-## What's inside
+You don't need tmux for any of this, and there's nothing to configure.
 
-| | |
-|---|---|
-| **Agent-aware** | per-pane detection (26 CLIs) · status dot · notifications · branch + diff · tray icon when input is needed · resume after reboot · reopen any past session from Search Everywhere · one-key launch · tab sidebar grouped by repository, with pinned groups |
-| **CLI + Skills** | bundled `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · `run` streams a command and exits with its code · `split` · `send` · `wait --until free` · `capture` |
-| **Editor-grade input** | ghost suggestions from history · explained tab completion · syntax highlighting · multi-line editing · click places the caret · <kbd>⌃ R</kbd> fuzzy history |
-| **Window** | tabs & splits · <kbd>⌘ P</kbd> Search Everywhere · <kbd>⌘ F</kbd> scrollback search · hibernate a tab to free its memory · IME |
-| **Side panel** | <kbd>⌘ J</kbd> · process tree and listening ports · file tree · changes and diffs · find in files · GitHub issues and pull requests, read-only, signed in through `gh` |
-| **Shell integration** | injected when a pane starts, nothing to install · prompt marks · working directory · exit codes · command-finished notifications · zsh, bash, fish, PowerShell, WSL, remote panes |
-| **Remote workspaces** | remote files, repos, changes, diffs, worktrees, tabs, and panes · reconnect from any client and continue where you left off |
-| **SSH** | native russh stack: profiles with keychain secrets · SFTP panel · port forwarding · jump hosts · one-time, unprivileged `tty7-server` install |
+→ [What survives what](docs/getting-started/concepts.mdx)
 
-## Supported agents
+## Agents that run agents
 
-**Detection** is free: brand avatar, branch + diff, tab title.
-**Status** takes one click under Settings → Integrations to install that agent's hook,
-and brings the status dot, notifications, the tray icon, `tty7 wait`, and resume
-after a reboot. **Fork** needs both — the agent's own fork command, and the hook
-that tells tty7 which session to fork.
+A lot of people now run several coding agents at once, in several repos. Which
+means spending the day switching between windows to see which one finished and
+which one is waiting for an answer. That's not work a person should have to do.
 
-<details>
-<summary>The full support matrix, all twenty-six</summary>
+tty7 recognizes 26 coding CLIs, including Claude Code, Codex, Gemini, Cursor,
+and OpenCode, and puts all of them in one sidebar: whether each is working or
+waiting, a notification when one needs you, and its branch and diff. You can see
+at a glance which one wants you.
 
-| Agent | Detected | Status · resume | Fork |
-|---|:-:|:-:|:-:|
-| **Claude Code** | ✓ | ✓ | ✓ |
-| **Codex** | ✓ | ✓ | ✓ |
-| **TraeCode** | ✓ | ✓ | ✓ |
-| **Grok** | ✓ | ✓ | ✓ |
-| **OpenCode** | ✓ | ✓ | ✓ |
-| **Oh My Pi** | ✓ | ✓ | ✓ |
-| **Prime Agent** | ✓ | ✓ | ✓ |
-| **Droid** | ✓ | ✓ | ✓ |
-| **Qwen Code** | ✓ | ✓ | ✓ |
-| **Goose** | ✓ | ✓ | ✓ |
-| **Qoder CLI** | ✓ | ✓ | ✓ |
-| **Qoder CN CLI** | ✓ | ✓ | ✓ |
-| **CodeBuddy** | ✓ | ✓ | ✓ |
-| **Gemini** | ✓ | ✓ | |
-| **Copilot** | ✓ | ✓ | |
-| **Kimi Code** | ✓ | ✓ | |
-| **Pi** | ✓ | ✓ | |
-| **Crush** | ✓ | ✓ | |
-| **Antigravity** | ✓ | ✓ | |
-| **Cursor** | ✓ | ✓ | |
-| Aider | ✓ | | |
-| Amp | ✓ | | |
-| Auggie | ✓ | | |
-| Hermes | ✓ | | |
-| Vibe | ✓ | | |
-| Empryo | ✓ | | |
-
-</details>
-
-None of them are wrapped or proxied — the agent you start is the agent you get,
-in a normal PTY, with its own interface. An agent launched through a wrapper
-script can be mapped to one by name with `agent_commands` in `config.json`.
-Every agent on your `PATH` is also a row in Search Everywhere (**Agent: Claude Code**, …)
-that opens it in a new tab, and the New Tab menu names the ones you have actually
-run. `agent_launch` sets the command line it starts with.
-
-## Documentation
-
-Full documentation lives in [**`docs/`**](docs/) —
-[keyboard shortcuts](docs/reference/keyboard-shortcuts.mdx) ·
-[config.json](docs/reference/configuration.mdx) ·
-[CLI reference](docs/cli/reference.mdx). The agent-facing CLI interface is also
-documented in [skills/tty7/SKILL.md](skills/tty7/SKILL.md).
-
-Install the skill with:
+Once an agent's status is something a program can ask about, the one asking
+doesn't have to be you. It can be another agent. The whole loop is four
+commands, with no framework, and it works whether or not the GUI is open:
 
 ```sh
-npx skills add l0ng-ai/tty7    # install
-npx skills update tty7         # update later
+PANE=$(tty7 split --v)                                       # give the worker a pane
+tty7 send "$PANE" 'claude "add tests for the parser"' --enter
+tty7 wait "$PANE" --until waiting,done --changed --timeout 600  # until it's done or stuck
+tty7 capture "$PANE" --plain                                 # read what happened
 ```
 
-## Benchmarks
+tty7 doesn't wrap the agents or sit between you and them. The agent you start
+is the real one, running in an ordinary PTY. Simple things are more likely to
+keep working.
 
-Same machine, same day, same 155×40 grid — Apple M1 Pro, macOS 26.3.1,
-five-run averages (2026-07-04):
+→ [Orchestrating agents](docs/agents/orchestration.mdx) ·
+[agent skill](skills/tty7/SKILL.md) · [full support matrix](#supported-agents)
+
+## Remote is the same thing
+
+A remote workspace is the same server, running on the other machine. The window
+here just shows it. Tabs, panes, the file tree, git, and diffs all live over
+there, and no files get synced. Connect from a different laptop and everything
+is where you left it.
+
+So remote isn't really a separate feature. It's the local case with the server
+somewhere else.
+
+The SSH client is tty7's own, written in Rust, so it doesn't depend on the
+system's ssh. It has profiles with keychain secrets, jump hosts, SFTP, and
+automatic port forwarding. The remote `tty7-server` installs once and doesn't
+need root.
+
+→ [Remote workspaces](docs/remote/workspaces.mdx)
+
+## Speed
+
+Speed isn't the point of tty7, but it shouldn't be a weakness either, and it
+turns out not to be. `cat` on an 11 MB file takes 95 ms; the next fastest
+terminal we measured takes 179. DOOM-fire runs at 888 fps; the next best manages
+617. The method and scripts are public, and one command reproduces them.
 
 | | **tty7** | Alacritty | Ghostty | Kitty |
 |---|---:|---:|---:|---:|
@@ -136,9 +106,81 @@ five-run averages (2026-07-04):
 | [DOOM-fire](https://github.com/const-void/DOOM-fire-zig) frame rate <sub>(higher = better)</sub> | **888 fps** | 485 fps | 552 fps | 617 fps |
 | Cold-launch memory | 116 MB¹ | 105 MB | 128 MB | 130 MB |
 
-<sub>¹ GUI 105 MB + the persistent server 11 MB.</sub>
+<sub>Apple M1 Pro, macOS 26.3.1, 155×40 grid, five-run averages, 2026-07-04. ¹ GUI 105 MB + the persistent server 11 MB.
+Methodology and one-command reproduction: [`scripts/bench/`](scripts/bench/README.md).</sub>
 
-Methodology and one-command reproduction: [`scripts/bench/`](scripts/bench/README.md).
+## Everything else
+
+The rest is details, but details are most of what makes a tool pleasant to use.
+The prompt has suggestions from your history, tab completion that explains each
+option, syntax highlighting, and real multi-line editing, and <kbd>⌃ R</kbd>
+searches your history. <kbd>⌘ P</kbd> searches everything. <kbd>⌘ J</kbd> opens
+a side panel with processes, ports, files, changes, and GitHub issues and PRs.
+Shell integration works in zsh, bash, fish, PowerShell, and WSL without
+installing anything.
+
+→ [Full documentation](docs/) · [keyboard shortcuts](docs/reference/keyboard-shortcuts.mdx) ·
+[config.json](docs/reference/configuration.mdx) · [CLI reference](docs/cli/reference.mdx)
+
+## Install
+
+Native builds on [**Releases**](https://github.com/l0ng-ai/tty7/releases/latest):
+
+| | |
+|---|---|
+| **macOS** | `.dmg` for Apple silicon or Intel — drag into Applications |
+| **Windows** | `-setup.exe`, or the portable `.zip` |
+| **Linux** | `.AppImage` — `chmod +x` and run; X11/Wayland libraries bundled |
+
+Give your agents the CLI skill:
+
+```sh
+npx skills add l0ng-ai/tty7    # install
+npx skills update tty7         # update later
+```
+
+## Supported agents
+
+**Detection** is free: brand avatar, branch + diff, tab title.
+**Status** takes one click under Settings → Integrations to install that agent's hook,
+and brings the status dot, notifications, the tray icon, `tty7 wait`, and resume
+after a reboot. **Fork** needs both — the agent's own fork command, and the hook
+that tells tty7 which session to fork. **Past sessions** are read from the agent's
+own history files and listed in Search Everywhere, where <kbd>⏎</kbd> resumes one.
+
+<details>
+<summary>The full support matrix</summary>
+
+| Agent | Detected | Status · resume | Fork | Past sessions |
+|---|:-:|:-:|:-:|:-:|
+| **Claude Code** | ✓ | ✓ | ✓ | ✓ |
+| **Codex** | ✓ | ✓ | ✓ | ✓ |
+| **TraeCode** | ✓ | ✓ | ✓ | |
+| **Grok** | ✓ | ✓ | ✓ | |
+| **OpenCode** | ✓ | ✓ | ✓ | ✓ |
+| **Oh My Pi** | ✓ | ✓ | ✓ | ✓ |
+| **Prime Agent** | ✓ | ✓ | ✓ | |
+| **Droid** | ✓ | ✓ | ✓ | ✓ |
+| **Qwen Code** | ✓ | ✓ | ✓ | ✓ |
+| **Goose** | ✓ | ✓ | ✓ | |
+| **Qoder CLI** | ✓ | ✓ | ✓ | ✓ |
+| **Qoder CN CLI** | ✓ | ✓ | ✓ | ✓ |
+| **CodeBuddy** | ✓ | ✓ | ✓ | ✓ |
+| **Gemini** | ✓ | ✓ | | ✓ |
+| **Copilot** | ✓ | ✓ | | ✓ |
+| **Kimi Code** | ✓ | ✓ | | ✓ |
+| **Pi** | ✓ | ✓ | | ✓ |
+| **Crush** | ✓ | ✓ | | |
+| **Antigravity** | ✓ | ✓ | | |
+| **Cursor** | ✓ | ✓ | | ✓ |
+| Aider | ✓ | | | |
+| Amp | ✓ | | | |
+| Auggie | ✓ | | | |
+| Hermes | ✓ | | | |
+| Vibe | ✓ | | | |
+| Empryo | ✓ | | | |
+
+</details>
 
 ---
 
