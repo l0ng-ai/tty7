@@ -247,6 +247,17 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
         }
         CLIAgent::Codex => {
             let line = (floor..rows.len()).rev().find(|&i| starts(i, '›'))?;
+            // Codex points at the selected row of its own lists — approvals,
+            // `/model`, `/permissions`, the hook review, the update offer —
+            // with the same `›`. Such a row is a numbered option with its
+            // siblings around it; the input is not.
+            let option = |row: &str| numbered_option(row.trim_start().trim_start_matches('›'));
+            if option(&rows[line])
+                && (line.saturating_sub(CODEX_LIST_REACH)..rows.len())
+                    .any(|i| i != line && option(&rows[i]))
+            {
+                return None;
+            }
             let top = match line > 0 && rows[line - 1].trim().is_empty() {
                 true => line - 1,
                 false => line,
@@ -268,6 +279,17 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
         }
         _ => None,
     }
+}
+
+/// How far above Codex's selected row the rest of its list can start: the
+/// options before it, each with a description that may wrap.
+const CODEX_LIST_REACH: usize = 16;
+
+/// Whether `text` opens the way a numbered list option does: `2. Skip`.
+fn numbered_option(text: &str) -> bool {
+    let text = text.trim_start();
+    let digits = text.chars().take_while(char::is_ascii_digit).count();
+    digits > 0 && text[digits..].starts_with(". ")
 }
 
 /// Claude Code's permission mode, off the status rows under its input. The
@@ -2147,6 +2169,49 @@ mod tests {
             "",
             "  ⏎ send",
         ]);
+        assert_eq!(
+            input_area(CLIAgent::Codex, &rows, 40),
+            Some(InputArea { top: 1, mode: None })
+        );
+    }
+
+    #[test]
+    fn codex_lists_are_not_its_input() {
+        let lists = [
+            // The hook review at launch.
+            &[
+                "  Hooks need review",
+                "",
+                "› 1. Review hooks",
+                "  2. Trust all and continue",
+                "  3. Continue without trusting (hooks won't run)",
+                "",
+                "  Press enter to confirm or esc to go back",
+            ][..],
+            // `/permissions`, its descriptions wrapping, the last one picked.
+            &[
+                "  Update Model Permissions",
+                "  1. Ask for approval (current)  Read and edit workspace files",
+                "                                 required for internet access",
+                "  2. Approve for me              Only ask for actions",
+                "› 3. Full Access                 Use with caution: Codex can",
+                "                                 and access the internet",
+                "  enter select · esc back",
+            ][..],
+            // A command waiting for approval.
+            &[
+                "  Would you like to run the following command?",
+                "  $ touch a.txt",
+                "› 1. Yes, proceed (y)",
+                "  2. Yes, and don't ask again for these files (p)",
+                "  3. No, and tell Codex what to do differently (esc)",
+            ][..],
+        ];
+        for rows in lists {
+            assert_eq!(input_area(CLIAgent::Codex, &screen(rows), 40), None);
+        }
+        // A message of the user's own that happens to open like an option.
+        let rows = screen(&["• Done.", "", "› 1. fix the build", "", "  ⏎ send"]);
         assert_eq!(
             input_area(CLIAgent::Codex, &rows, 40),
             Some(InputArea { top: 1, mode: None })
