@@ -210,10 +210,14 @@ fn claude_readout(payload: &serde_json::Value, body: &mut serde_json::Value) {
         }
         .into();
     }
-    // The environment wins over the settings file, as it does for Claude.
-    if let Some(effort) = std::env::var("CLAUDE_CODE_EFFORT_LEVEL")
-        .ok()
-        .filter(|e| !e.is_empty())
+    // Claude says the level it is running at, when it says it. Otherwise the
+    // environment wins over the settings file, as it does for Claude.
+    if let Some(effort) = str_of(payload.get("effort").and_then(|e| e.get("level")))
+        .or_else(|| {
+            std::env::var("CLAUDE_CODE_EFFORT_LEVEL")
+                .ok()
+                .filter(|e| !e.is_empty())
+        })
         .or_else(|| configured_effort(&settings, model.as_deref()))
     {
         body["effort"] = effort.into();
@@ -2104,6 +2108,7 @@ mod tests {
             "session_id": "s",
             "permission_mode": "plan",
             "transcript_path": transcript,
+            "effort": { "level": "xhigh" },
         })
         .to_string();
         let seq = build_hook_sequence("claude", "stop", &stdin);
@@ -2118,6 +2123,11 @@ mod tests {
         assert_eq!(ev.readout.permission_mode.as_deref(), Some("plan"));
         assert_eq!(ev.readout.model.as_deref(), Some("claude-opus-5-5"));
         assert_eq!(ev.readout.context_tokens, Some(250_000));
+        assert_eq!(
+            ev.readout.effort.as_deref(),
+            Some("xhigh"),
+            "the level Claude reports is the one it runs at"
+        );
         assert_eq!(
             ev.readout.context_window,
             Some(LONG_WINDOW),
