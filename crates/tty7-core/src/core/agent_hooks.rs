@@ -214,10 +214,32 @@ fn claude_readout(payload: &serde_json::Value, body: &mut serde_json::Value) {
     if let Some(effort) = std::env::var("CLAUDE_CODE_EFFORT_LEVEL")
         .ok()
         .filter(|e| !e.is_empty())
-        .or_else(|| str_of(settings.get("effortLevel")))
+        .or_else(|| configured_effort(&settings, model.as_deref()))
     {
         body["effort"] = effort.into();
     }
+}
+
+/// The effort level Claude's settings give a model: the one set for that
+/// model if there is one, the general one otherwise.
+fn configured_effort(settings: &serde_json::Value, model: Option<&str>) -> Option<String> {
+    let level = |v: Option<&serde_json::Value>| {
+        v.and_then(|v| v.get("effortLevel"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let per_model = settings.get("modelSettings");
+    model
+        .and_then(|m| {
+            let per_model = per_model?;
+            level(
+                per_model
+                    .get(m)
+                    .or_else(|| per_model.get(m.trim_end_matches("[1m]"))),
+            )
+        })
+        .or_else(|| level(Some(settings)))
 }
 
 fn claude_settings() -> serde_json::Value {
@@ -2101,6 +2123,28 @@ mod tests {
             Some(LONG_WINDOW),
             "past 200k it can only be the long window"
         );
+    }
+
+    #[test]
+    fn an_effort_set_for_the_model_wins_over_the_general_one() {
+        let settings = serde_json::json!({
+            "effortLevel": "high",
+            "modelSettings": { "claude-opus-5-5": { "effortLevel": "medium" } },
+        });
+        assert_eq!(
+            configured_effort(&settings, Some("claude-opus-5-5")).as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            configured_effort(&settings, Some("claude-opus-5-5[1m]")).as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            configured_effort(&settings, Some("claude-sonnet-5-5")).as_deref(),
+            Some("high")
+        );
+        assert_eq!(configured_effort(&settings, None).as_deref(), Some("high"));
+        assert_eq!(configured_effort(&serde_json::json!({}), None), None);
     }
 
     #[test]

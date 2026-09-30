@@ -1526,6 +1526,10 @@ impl TerminalView {
                 .left_0()
                 .bottom_full()
                 .mb(px(8.))
+                .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                })
                 .min_w(px(180.))
                 .p(px(5.))
                 .flex()
@@ -1582,6 +1586,16 @@ impl TerminalView {
             div()
                 .relative()
                 .flex_none()
+                // A click anywhere else closes the list, as a menu's would.
+                // The button and the list stop their own clicks short of this.
+                .when(open, |s| {
+                    s.on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _w, cx| {
+                        if let Some(c) = this.composer.as_mut() {
+                            c.picker = None;
+                        }
+                        cx.notify();
+                    }))
+                })
                 .child(
                     tool(id)
                         .gap(px(5.))
@@ -1643,16 +1657,15 @@ impl TerminalView {
         });
         let current_effort = c.effort.clone().or_else(|| readout.effort.clone());
         let effort = claude.then(|| {
-            // "Effort" in the toolbar's grey, the level in the text's ink.
+            // The level alone, as the model button shows the model alone;
+            // the tooltip and the list's title say what it is.
+            let name = match current_effort.as_deref() {
+                Some(level) => effort_label(level),
+                None => t(L10nKey::ComposerEffort).to_string(),
+            };
             let label = h_flex()
                 .gap(px(5.))
-                .text_color(ink.opacity(0.45))
-                .child(t(L10nKey::ComposerEffort))
-                .children(
-                    current_effort
-                        .as_deref()
-                        .map(|level| div().text_color(ink).child(effort_label(level))),
-                )
+                .child(name)
                 .child(
                     Icon::new(IconName::ChevronDown)
                         .size(px(8.))
