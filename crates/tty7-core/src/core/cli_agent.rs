@@ -1055,8 +1055,9 @@ pub struct AgentReadout {
     pub context_tokens: Option<u64>,
     #[serde(default)]
     pub context_window: Option<u64>,
+    /// The reasoning effort level (`low`, `medium`, `high`, …).
     #[serde(default)]
-    pub thinking: Option<bool>,
+    pub effort: Option<String>,
 }
 
 impl AgentReadout {
@@ -1072,7 +1073,7 @@ impl AgentReadout {
         take(&mut self.model, &newer.model);
         take(&mut self.context_tokens, &newer.context_tokens);
         take(&mut self.context_window, &newer.context_window);
-        take(&mut self.thinking, &newer.thinking);
+        take(&mut self.effort, &newer.effort);
     }
 }
 

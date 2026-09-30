@@ -173,7 +173,7 @@ const STANDARD_WINDOW: u64 = 200_000;
 const LONG_WINDOW: u64 = 1_000_000;
 
 /// What Claude Code says about its settings, for the composer's toolbar:
-/// permission mode, model, how full the context is, whether thinking is on.
+/// permission mode, model, how full the context is, the effort level.
 ///
 /// Worked out here, in the hook, because the hook runs where the agent runs —
 /// on a remote host its transcript and settings are only readable there.
@@ -210,12 +210,14 @@ fn claude_readout(payload: &serde_json::Value, body: &mut serde_json::Value) {
         }
         .into();
     }
-    // Absent means on: the setting exists to turn thinking off.
-    body["thinking"] = settings
-        .get("alwaysThinkingEnabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true)
-        .into();
+    // The environment wins over the settings file, as it does for Claude.
+    if let Some(effort) = std::env::var("CLAUDE_CODE_EFFORT_LEVEL")
+        .ok()
+        .filter(|e| !e.is_empty())
+        .or_else(|| str_of(settings.get("effortLevel")))
+    {
+        body["effort"] = effort.into();
+    }
 }
 
 fn claude_settings() -> serde_json::Value {
@@ -2099,7 +2101,6 @@ mod tests {
             Some(LONG_WINDOW),
             "past 200k it can only be the long window"
         );
-        assert!(ev.readout.thinking.is_some());
     }
 
     #[test]

@@ -15,7 +15,7 @@
 //! **What it sends.** Sending is typing, not an API: the text and then Enter,
 //! written to the pty — see [`submit_plan`] for why each agent is spoken to
 //! slightly differently. The toolbar's controls are the agent's own keys
-//! (Shift+Tab, its model picker, its thinking toggle), and what they show is
+//! (Shift+Tab, its model picker, its `/effort` command), and what they show is
 //! what the agent said: the mode off the status row the box covers, the model
 //! and context off what its hooks report ([`crate::core::cli_agent::AgentReadout`]). Nothing reported
 //! means nothing shown.
@@ -82,11 +82,13 @@ const INPUT_PAD_X: f32 = 8.;
 const INPUT_PAD_Y: f32 = 2.;
 
 /// The keys the toolbar sends. Shift+Tab cycles the permission mode in every
-/// agent that has one; Alt+P and Alt+T are Claude Code's model picker and
-/// thinking toggle.
+/// agent that has one; Alt+P is Claude Code's model picker.
 const BACK_TAB: &[u8] = b"\x1b[Z";
 const CLAUDE_MODEL_PICKER: &[u8] = b"\x1bp";
-const CLAUDE_THINKING_TOGGLE: &[u8] = b"\x1bt";
+
+/// Claude Code's effort levels, lowest first. A model that takes fewer says so
+/// itself when `/effort` names one it does not.
+const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 // ---------------------------------------------------------------------------
 // Sending
@@ -598,9 +600,10 @@ pub(super) struct Composer {
     dismissed: Option<String>,
     files: Files,
     commands: Option<(Vec<(String, String)>, Instant)>,
-    /// Thinking as toggled from the toolbar, over what the settings say —
-    /// the agent does not report the toggle, only the setting.
-    thinking: Option<bool>,
+    /// The effort level last picked from the toolbar. What the settings say
+    /// catches up at the agent's next event; until then this is the truth.
+    effort: Option<String>,
+    effort_menu: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -660,7 +663,8 @@ impl TerminalView {
             dismissed: None,
             files: Files::Unwalked,
             commands: None,
-            thinking: None,
+            effort: None,
+            effort_menu: false,
             _subs: subs,
         });
     }
@@ -825,12 +829,36 @@ impl TerminalView {
         self.focus_composer(window, cx);
     }
 
-    fn toggle_thinking(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let reported = self.agent_session().and_then(|s| s.readout.thinking);
+    fn toggle_effort_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(c) = self.composer.as_mut() {
-            c.thinking = Some(!c.thinking.or(reported).unwrap_or(true));
+            c.effort_menu = !c.effort_menu;
         }
-        self.toolbar_key(CLAUDE_THINKING_TOGGLE, window, cx);
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    /// Set the effort level the way the agent sets it: its `/effort` command,
+    /// sent like any message.
+    fn pick_effort(&mut self, level: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(agent) = self.agent() else {
+            return;
+        };
+        let bracketed = self
+            .terminal
+            .term
+            .lock()
+            .mode()
+            .contains(TermMode::BRACKETED_PASTE);
+        let Some(c) = self.composer.as_mut() else {
+            return;
+        };
+        c.effort = Some(level.to_string());
+        c.effort_menu = false;
+        c.queue
+            .extend(submit_plan(agent, &format!("/effort {level}"), bracketed));
+        self.pump_composer(agent, cx);
+        self.focus_composer(window, cx);
+        cx.notify();
     }
 
     /// Per-frame upkeep: restore a box the pane had open before this view
@@ -1415,14 +1443,23 @@ impl TerminalView {
                         .text_color(ink.opacity(0.4)),
                 )
         });
-        let think = claude.then(|| {
-            let on = c.thinking.or(readout.thinking).unwrap_or(true);
-            tool("composer-think")
-                .when(on, |s| s.bg(ink.opacity(0.05)).text_color(ink))
-                .when(!on, |s| s.text_color(ink.opacity(0.45)))
-                .tooltip(|window, cx| Tooltip::new(t(L10nKey::ComposerThinkTip)).build(window, cx))
-                .on_click(cx.listener(|this, _, window, cx| this.toggle_thinking(window, cx)))
-                .child(t(L10nKey::ComposerThink))
+        let current_effort = c.effort.clone().or_else(|| readout.effort.clone());
+        let effort = claude.then(|| {
+            let label = match &current_effort {
+                Some(level) => t_fmt(L10nKey::ComposerEffortLevel, &[("level", level)]),
+                None => t(L10nKey::ComposerEffort).to_string(),
+            };
+            tool("composer-effort")
+                .gap(px(5.))
+                .when(c.effort_menu, |s| s.bg(ink.opacity(0.05)))
+                .tooltip(|window, cx| Tooltip::new(t(L10nKey::ComposerEffortTip)).build(window, cx))
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_effort_menu(window, cx)))
+                .child(label)
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(9.))
+                        .text_color(ink.opacity(0.4)),
+                )
         });
         let context = readout
             .context_tokens
@@ -1573,6 +1610,61 @@ impl TerminalView {
                 }))
         });
 
+        let effort_popup = (claude && c.effort_menu).then(|| {
+            div()
+                .absolute()
+                .left_0()
+                .bottom_full()
+                .mb(px(6.))
+                .w(px(200.))
+                .p(px(5.))
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .rounded(px(10.))
+                .bg(theme.popover)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_md()
+                .text_size(px(13.))
+                .child(
+                    div()
+                        .h(px(24.))
+                        .px(px(9.))
+                        .flex()
+                        .items_center()
+                        .text_size(px(11.5))
+                        .text_color(ink.opacity(0.4))
+                        .child(t(L10nKey::ComposerEffort)),
+                )
+                .children(EFFORT_LEVELS.iter().enumerate().map(|(i, level)| {
+                    let on = current_effort.as_deref() == Some(*level);
+                    h_flex()
+                        .id(("composer-effort-level", i))
+                        .h(px(30.))
+                        .px(px(9.))
+                        .gap(px(10.))
+                        .rounded(px(6.))
+                        .hover(move |s| s.bg(ink.opacity(0.05)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                this.pick_effort(level, window, cx);
+                            }),
+                        )
+                        .child(div().flex_1().child(*level))
+                        .when(on, |s| {
+                            s.child(
+                                Icon::new(IconName::Check)
+                                    .size(px(12.))
+                                    .text_color(ink.opacity(0.6)),
+                            )
+                        })
+                }))
+        });
+
         let menu_open = menu.is_some();
         Some(
             div()
@@ -1647,6 +1739,15 @@ impl TerminalView {
                         this.detach(last, cx);
                     }
                 }))
+                .when(c.effort_menu, |el| {
+                    el.capture_action(cx.listener(|this, _: &input::Escape, _w, cx| {
+                        cx.stop_propagation();
+                        if let Some(c) = this.composer.as_mut() {
+                            c.effort_menu = false;
+                        }
+                        cx.notify();
+                    }))
+                })
                 .when(menu_open, |el| {
                     el.capture_action(cx.listener(|this, _: &input::MoveUp, _w, cx| {
                         if this.step_menu(false, cx) {
@@ -1682,6 +1783,7 @@ impl TerminalView {
                     ))
                 })
                 .children(popup)
+                .children(effort_popup)
                 .child(
                     div()
                         .flex()
@@ -1715,7 +1817,7 @@ impl TerminalView {
                                 .children(mode)
                                 .children(divider)
                                 .children(model)
-                                .children(think)
+                                .children(effort)
                                 .children(asking)
                                 .child(div().flex_1())
                                 .children(context)
