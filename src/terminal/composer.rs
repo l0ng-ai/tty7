@@ -497,9 +497,11 @@ fn builtin_commands(agent: CLIAgent) -> &'static [(&'static str, &'static str)] 
         ],
         CLIAgent::Gemini => &[
             ("/compress", "Summarize to free up context"),
-            ("/clear", "Clear the screen and history"),
+            ("/clear", "Clear the screen and start a new session"),
+            ("/model", "Choose the model"),
+            ("/resume", "Browse and resume saved conversations"),
+            ("/init", "Create a GEMINI.md for this repo"),
             ("/memory", "Manage memory"),
-            ("/chat", "Save or resume a conversation"),
             ("/tools", "List available tools"),
             ("/mcp", "List MCP servers"),
             ("/stats", "Show session statistics"),
