@@ -35,7 +35,6 @@ use gpui::{
     Subscription, Window, div, prelude::*, px,
 };
 use gpui_component::input::{self, Input, InputEvent, InputState, RopeExt as _};
-use gpui_component::progress::ProgressCircle;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, h_flex};
 
@@ -516,16 +515,6 @@ pub(super) fn model_label(id: &str) -> String {
     name
 }
 
-/// Tokens the way the status rows count them: `62k`, `1M`.
-pub(super) fn tokens_label(n: u64) -> String {
-    match n {
-        n if n >= 1_000_000 && n % 1_000_000 == 0 => format!("{}M", n / 1_000_000),
-        n if n >= 1_000_000 => format!("{:.1}M", n as f64 / 1_000_000.),
-        n if n >= 1_000 => format!("{}k", n / 1_000),
-        n => n.to_string(),
-    }
-}
-
 fn mode_label(mode: &str) -> String {
     match mode {
         "default" => t(L10nKey::ComposerModeDefault).to_string(),
@@ -631,9 +620,9 @@ enum Picker {
 }
 
 /// Which of [`CLAUDE_MODELS`] a reported model is: its family, and the 1M
-/// variant when the context window says so.
-fn model_alias(model: &str, window: Option<u64>) -> Option<&'static str> {
-    let long = model.contains("[1m]") || window.is_some_and(|w| w >= 1_000_000);
+/// variant when its id says so.
+fn model_alias(model: &str) -> Option<&'static str> {
+    let long = model.contains("[1m]");
     let pair = if model.contains("opus") {
         ["opus", "opus[1m]"]
     } else if model.contains("sonnet") {
@@ -1621,12 +1610,7 @@ impl TerminalView {
                 .as_ref()
                 .filter(|(_, then)| *then == readout.model)
                 .map(|(alias, _)| *alias);
-            let current = picked.or_else(|| {
-                readout
-                    .model
-                    .as_deref()
-                    .and_then(|m| model_alias(m, readout.context_window))
-            });
+            let current = picked.or_else(|| readout.model.as_deref().and_then(model_alias));
             let name = match (picked, readout.model.as_deref()) {
                 (Some(alias), _) => alias_label(alias),
                 (None, Some(model)) => model_label(model),
@@ -1689,38 +1673,6 @@ impl TerminalView {
                 cx,
             )
         });
-        let context = readout
-            .context_tokens
-            .zip(readout.context_window)
-            .filter(|(_, window)| *window > 0)
-            .map(|(used, window)| {
-                let pct = (used as f64 / window as f64 * 100.).min(100.);
-                let tip: SharedString = t_fmt(
-                    L10nKey::ComposerContextTip,
-                    &[
-                        ("used", &tokens_label(used)),
-                        ("window", &tokens_label(window)),
-                    ],
-                )
-                .into();
-                h_flex()
-                    .id("composer-context")
-                    .flex_none()
-                    .h(px(28.))
-                    .gap(px(6.))
-                    .px(px(8.))
-                    .text_size(px(11.5))
-                    .text_color(ink.opacity(0.4))
-                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                    .child(
-                        ProgressCircle::new("composer-context-ring")
-                            .value(pct as f32)
-                            .color(ink.opacity(0.5))
-                            .size(px(12.)),
-                    )
-                    .child(format!("{}%", pct.round() as u64))
-            });
-
         let send = div()
             .id("composer-send")
             .flex_none()
@@ -1992,7 +1944,6 @@ impl TerminalView {
                                 .children(effort)
                                 .children(asking)
                                 .child(div().flex_1())
-                                .children(context)
                                 .child(send),
                         )
                         // Focus and a drag over the box thicken the ring. Drawn
@@ -2192,32 +2143,14 @@ mod tests {
 
     #[test]
     fn a_reported_model_is_checked_under_its_alias() {
-        assert_eq!(model_alias("claude-opus-5-5", Some(200_000)), Some("opus"));
-        assert_eq!(
-            model_alias("claude-opus-5-5", Some(1_000_000)),
-            Some("opus[1m]")
-        );
-        assert_eq!(
-            model_alias("claude-sonnet-5-5[1m]", None),
-            Some("sonnet[1m]")
-        );
-        assert_eq!(
-            model_alias("claude-haiku-4-5-20251001", None),
-            Some("haiku")
-        );
-        assert_eq!(model_alias("claude-fable-5-1", None), None);
+        assert_eq!(model_alias("claude-opus-5-5"), Some("opus"));
+        assert_eq!(model_alias("claude-sonnet-5-5[1m]"), Some("sonnet[1m]"));
+        assert_eq!(model_alias("claude-haiku-4-5-20251001"), Some("haiku"));
+        assert_eq!(model_alias("claude-fable-5-1"), None);
         assert_eq!(alias_label("sonnet[1m]"), "Sonnet · 1M");
         assert_eq!(alias_label("haiku"), "Haiku");
         assert_eq!(effort_label("medium"), "Medium");
         assert_eq!(effort_label("xhigh"), "Extra high");
-    }
-
-    #[test]
-    fn token_counts_read_the_way_status_rows_count_them() {
-        assert_eq!(tokens_label(62_400), "62k");
-        assert_eq!(tokens_label(1_000_000), "1M");
-        assert_eq!(tokens_label(1_250_000), "1.2M");
-        assert_eq!(tokens_label(900), "900");
     }
 
     #[test]

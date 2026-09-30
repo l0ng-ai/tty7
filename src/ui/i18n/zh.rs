@@ -1731,7 +1731,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ComposerModelDefault => "默认（推荐）",
         L10nKey::ComposerEffort => "推理强度",
         L10nKey::ComposerEffortTip => "推理强度  ·  点击切换",
-        L10nKey::ComposerContextTip => "上下文 {used} / {window}",
         L10nKey::ComposerPlaceholder => "给 {agent} 发消息   ·   @ 文件   / 命令",
         L10nKey::ComposerPlaceholderFiles => "给 {agent} 发消息   ·   @ 文件",
         L10nKey::ComposerSendTip => "发送（Enter）  ·  Shift+Enter 换行",

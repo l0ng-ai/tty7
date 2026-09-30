@@ -1049,12 +1049,6 @@ pub struct AgentReadout {
     /// The model id, as the agent's transcript records it.
     #[serde(default)]
     pub model: Option<String>,
-    /// How much context the last reply used: its input, cache and output
-    /// tokens together.
-    #[serde(default)]
-    pub context_tokens: Option<u64>,
-    #[serde(default)]
-    pub context_window: Option<u64>,
     /// The reasoning effort level (`low`, `medium`, `high`, …).
     #[serde(default)]
     pub effort: Option<String>,
@@ -1071,8 +1065,6 @@ impl AgentReadout {
         }
         take(&mut self.permission_mode, &newer.permission_mode);
         take(&mut self.model, &newer.model);
-        take(&mut self.context_tokens, &newer.context_tokens);
-        take(&mut self.context_window, &newer.context_window);
         take(&mut self.effort, &newer.effort);
     }
 }
@@ -1272,12 +1264,12 @@ mod tests {
             ..Default::default()
         }));
         state.apply_event(&event(AgentReadout {
-            context_tokens: Some(1200),
+            effort: Some("high".into()),
             ..Default::default()
         }));
         assert_eq!(state.readout.permission_mode.as_deref(), Some("plan"));
         assert_eq!(state.readout.model.as_deref(), Some("claude-opus-5-5"));
-        assert_eq!(state.readout.context_tokens, Some(1200));
+        assert_eq!(state.readout.effort.as_deref(), Some("high"));
     }
 
     #[test]

@@ -164,16 +164,12 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
     format!("\x1b]777;notify;{AGENT_EVENT_SENTINEL};{body}\x07").into_bytes()
 }
 
-/// How much of the end of a transcript is read for the latest usage. One
+/// How much of the end of a transcript is read for the latest reply. One
 /// assistant entry is a few KiB; this is room for a long tool result after it.
 const TRANSCRIPT_TAIL: u64 = 512 * 1024;
 
-/// A context window past this is the long-context one.
-const STANDARD_WINDOW: u64 = 200_000;
-const LONG_WINDOW: u64 = 1_000_000;
-
 /// What Claude Code says about its settings, for the composer's toolbar:
-/// permission mode, model, how full the context is, the effort level.
+/// permission mode, model, the effort level.
 ///
 /// Worked out here, in the hook, because the hook runs where the agent runs —
 /// on a remote host its transcript and settings are only readable there.
@@ -187,28 +183,16 @@ fn claude_readout(payload: &serde_json::Value, body: &mut serde_json::Value) {
         body["permission_mode"] = mode.into();
     }
     let settings = claude_settings();
-    let configured = str_of(settings.get("model"))
-        .or_else(|| std::env::var("ANTHROPIC_MODEL").ok())
-        .unwrap_or_default();
-    let latest = payload
-        .get("transcript_path")
-        .and_then(|p| p.as_str())
-        .and_then(|p| last_assistant_usage(Path::new(p)));
-    let model = str_of(payload.get("model")).or_else(|| latest.as_ref().map(|l| l.0.clone()));
+    // Only `SessionStart` names the model; after a `/model` the transcript's
+    // latest reply is the one that says which it is now.
+    let model = str_of(payload.get("model")).or_else(|| {
+        payload
+            .get("transcript_path")
+            .and_then(|p| p.as_str())
+            .and_then(|p| last_reply_model(Path::new(p)))
+    });
     if let Some(model) = &model {
         body["model"] = model.clone().into();
-    }
-    if let Some((_, tokens)) = latest {
-        body["context_tokens"] = tokens.into();
-        let long = [model.as_deref().unwrap_or(""), configured.as_str()]
-            .iter()
-            .any(|m| m.contains("[1m]"))
-            || tokens > STANDARD_WINDOW;
-        body["context_window"] = match long {
-            true => LONG_WINDOW,
-            false => STANDARD_WINDOW,
-        }
-        .into();
     }
     // Claude says the level it is running at, when it says it. Otherwise the
     // environment wins over the settings file, as it does for Claude.
@@ -256,10 +240,9 @@ fn claude_settings() -> serde_json::Value {
         .unwrap_or(serde_json::json!({}))
 }
 
-/// The model and context size of the last reply in a transcript: its input,
-/// cache and output tokens together, which is what the next request carries.
-/// Subagents' entries are skipped — they run in contexts of their own.
-fn last_assistant_usage(path: &Path) -> Option<(String, u64)> {
+/// The model of the last reply in a transcript. Subagents' entries are
+/// skipped — they may run on a model of their own.
+fn last_reply_model(path: &Path) -> Option<String> {
     use std::io::{Seek as _, SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
@@ -267,10 +250,10 @@ fn last_assistant_usage(path: &Path) -> Option<(String, u64)> {
         .ok()?;
     let mut tail = Vec::new();
     file.read_to_end(&mut tail).ok()?;
-    last_usage_in(&String::from_utf8_lossy(&tail))
+    last_model_in(&String::from_utf8_lossy(&tail))
 }
 
-fn last_usage_in(jsonl: &str) -> Option<(String, u64)> {
+fn last_model_in(jsonl: &str) -> Option<String> {
     jsonl.lines().rev().find_map(|line| {
         let entry: serde_json::Value = serde_json::from_str(line).ok()?;
         if entry.get("type")?.as_str()? != "assistant"
@@ -278,16 +261,9 @@ fn last_usage_in(jsonl: &str) -> Option<(String, u64)> {
         {
             return None;
         }
-        let message = entry.get("message")?;
-        let usage = message.get("usage")?;
-        let n = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-        let tokens = n("input_tokens")
-            + n("cache_creation_input_tokens")
-            + n("cache_read_input_tokens")
-            + n("output_tokens");
-        let model = message.get("model")?.as_str()?.to_string();
+        let model = entry.get("message")?.get("model")?.as_str()?.to_string();
         // Claude Code writes its own error notices as assistant entries.
-        (model != "<synthetic>").then_some((model, tokens))
+        (model != "<synthetic>").then_some(model)
     })
 }
 
@@ -2087,11 +2063,8 @@ mod tests {
             "not json",
         ]
         .join("\n");
-        assert_eq!(
-            last_usage_in(&jsonl),
-            Some(("claude-opus-5-5".to_string(), 60502))
-        );
-        assert_eq!(last_usage_in(""), None);
+        assert_eq!(last_model_in(&jsonl).as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(last_model_in(""), None);
     }
 
     #[test]
@@ -2122,16 +2095,10 @@ mod tests {
         .unwrap();
         assert_eq!(ev.readout.permission_mode.as_deref(), Some("plan"));
         assert_eq!(ev.readout.model.as_deref(), Some("claude-opus-5-5"));
-        assert_eq!(ev.readout.context_tokens, Some(250_000));
         assert_eq!(
             ev.readout.effort.as_deref(),
             Some("xhigh"),
             "the level Claude reports is the one it runs at"
-        );
-        assert_eq!(
-            ev.readout.context_window,
-            Some(LONG_WINDOW),
-            "past 200k it can only be the long window"
         );
     }
 

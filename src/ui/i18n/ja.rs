@@ -1919,7 +1919,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ComposerModelDefault => "デフォルト（推奨）",
         L10nKey::ComposerEffort => "推論の強さ",
         L10nKey::ComposerEffortTip => "推論の強さ  ·  クリックして変更",
-        L10nKey::ComposerContextTip => "コンテキスト {used} / {window}",
         L10nKey::ComposerPlaceholder => "{agent} にメッセージ   ·   @ ファイル   / コマンド",
         L10nKey::ComposerPlaceholderFiles => "{agent} にメッセージ   ·   @ ファイル",
         L10nKey::ComposerSendTip => "送信（Enter）  ·  Shift+Enter で改行",

@@ -1866,7 +1866,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ComposerModelDefault => "Default (recommended)",
         L10nKey::ComposerEffort => "Effort",
         L10nKey::ComposerEffortTip => "Reasoning effort  ·  click to change",
-        L10nKey::ComposerContextTip => "Context {used} / {window}",
         L10nKey::ComposerPlaceholder => "Message {agent}   ·   @ files   / commands",
         L10nKey::ComposerPlaceholderFiles => "Message {agent}   ·   @ files",
         L10nKey::ComposerSendTip => "Send (Enter)  ·  Shift+Enter for a new line",

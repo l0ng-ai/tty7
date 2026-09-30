@@ -1588,7 +1588,6 @@ l10n_keys! {
     ComposerModelDefault,
     ComposerEffort,
     ComposerEffortTip,
-    ComposerContextTip,
     CmdFindNext,
     CmdFindPrevious,
     CmdCopy,
