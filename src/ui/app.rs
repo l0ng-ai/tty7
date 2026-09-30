@@ -2000,6 +2000,9 @@ impl Tty7App {
         let claimed = WorkspaceStore::claim(cx, id);
         crate::ui::windows::WindowRegistry::rebind(cx, previous, claimed);
         crate::ui::remote_workspace::RemoteLinks::supervise(cx, claimed);
+        // Switching to a workspace is asking for it: if a remote client is
+        // driving it, this window takes it over (a no-op for a remote one).
+        crate::ui::local_link::LocalLink::open_explicitly(cx, claimed);
         // Forgotten on the way in as well as on the way out. `adopt_workspace`
         // puts the empty session up before the pull below orders the real one,
         // and it saves what it put up: a window showing nothing, syncing

@@ -2434,6 +2434,29 @@ fn settle_hydration(
     };
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
+    // A workspace on this computer that another client is driving keeps its
+    // panes to that client: attaching to them here, even for the moment before
+    // the takeover is noticed, would resize them under it. A window restored or
+    // reconnected onto one opens taken over instead, with Take Back.
+    if host.is_local() {
+        let holder = machine
+            .workspaces
+            .iter()
+            .find(|w| w.id == machine_ws)
+            .and_then(|w| w.attachment.as_ref())
+            .map(|a| a.hostname.clone());
+        if !crate::ui::local_link::LocalLink::hydration_may_proceed(
+            cx,
+            client_ws,
+            holder.as_deref(),
+        ) {
+            crate::ui::machine_mirror::MachineMirrors::install(cx, host, machine);
+            // Unprimed and not priming: the window speaks for nothing until a
+            // Take Back rebuilds it from the tree.
+            on_preempted(cx, client_ws);
+            return false;
+        }
+    }
     // What the tree that is about to be installed calls this workspace, which
     // for a pull that had to create it is the name that create proposed.
     let answered = machine
@@ -2831,6 +2854,11 @@ pub(crate) fn resync_after_local_daemon_change(cx: &mut App) {
 pub(crate) fn resync_local_windows_from_tree(cx: &mut App) {
     for (workspace, _) in crate::ui::windows::WindowRegistry::open_windows(cx) {
         if WorkspaceStore::host_of(cx, workspace) != HostId::LOCAL {
+            continue;
+        }
+        // Taken over: its panes belong to another client, and only a Take
+        // Back rebuilds it.
+        if crate::ui::remote_workspace::workspace_is_preempted(cx, workspace) {
             continue;
         }
         resync_window_from_tree(cx, workspace);

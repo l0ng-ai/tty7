@@ -912,6 +912,15 @@ impl Tty7App {
         for group in &mut groups {
             let Some(target) = group.target.clone() else {
                 group.link = Link::Local;
+                // A remote client can take one of this computer's workspaces
+                // too, and the row says so the same way.
+                let taken: HashSet<WorkspaceId> =
+                    RemoteLinks::preempted_on(cx, crate::core::session::HostId::LOCAL)
+                        .into_iter()
+                        .collect();
+                for row in &mut group.rows {
+                    row.preempted = taken.contains(&row.id);
+                }
                 continue;
             };
             if let Some(known) = configured.iter().find(|h| h.target == target) {

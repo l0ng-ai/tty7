@@ -201,7 +201,22 @@ impl WindowRegistry {
 }
 
 pub fn open(cx: &mut App, workspace: Option<WorkspaceId>) {
+    note_opened_on_purpose(cx, workspace);
     open_at(cx, workspace, None);
+}
+
+/// Everything that reaches [`open`] or [`open_at_tab`] is somebody asking for
+/// that workspace — the switcher, a menu, `tty7 open` — so a window that starts
+/// showing it takes it over from any other client driving it. Session restore
+/// and relaunch go through [`open_at`] directly and do not: they only claim a
+/// workspace nobody else holds. A window already on the workspace is merely
+/// brought forward, which takes nothing.
+fn note_opened_on_purpose(cx: &mut App, workspace: Option<WorkspaceId>) {
+    if let Some(id) = workspace
+        && WindowRegistry::window_for(cx, id).is_none()
+    {
+        crate::ui::local_link::LocalLink::open_explicitly(cx, id);
+    }
 }
 
 /// Reveals `workspace` and activates one of its tabs. The window may already be
@@ -209,6 +224,7 @@ pub fn open(cx: &mut App, workspace: Option<WorkspaceId>) {
 /// caller does not care which. The tab is named by id rather than position
 /// because the caller read it out of the machine tree, not out of that window.
 pub fn open_at_tab(cx: &mut App, workspace: WorkspaceId, tab: tty7_core::core::machine::TabId) {
+    note_opened_on_purpose(cx, Some(workspace));
     open_at(cx, Some(workspace), None);
     let Some(handle) = WindowRegistry::window_for(cx, workspace) else {
         return;

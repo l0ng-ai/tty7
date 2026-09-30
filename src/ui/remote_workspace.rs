@@ -489,7 +489,12 @@ impl Tty7App {
     }
 
     pub(crate) fn remote_status(&self, cx: &gpui::App) -> Option<RemoteStatus> {
-        let own = WorkspaceStore::remote_ref(cx, self.workspace)?;
+        // A workspace on this computer has no link of its own to report on,
+        // only whether another client took it: the same strip, the same pill
+        // and the same Take Back as a remote workspace that was taken over.
+        let Some(own) = WorkspaceStore::remote_ref(cx, self.workspace) else {
+            return crate::ui::local_link::LocalLink::status_of(cx, self.workspace);
+        };
         let supervised = RemoteLinks::status_of(cx, self.workspace);
         let resolvable = remote_connect::route_resolvable(cx, &own.target);
         resolve_status(self.connect.as_ref(), &own.target, supervised, resolvable)
@@ -559,6 +564,12 @@ impl Tty7App {
     }
 
     pub(crate) fn remote_retry(&mut self, cx: &mut Context<Self>) {
+        // The only button a local workspace's strip ever wears is Take Back.
+        if WorkspaceStore::remote_ref(cx, self.workspace).is_none() {
+            crate::ui::local_link::LocalLink::take_back(cx, self.workspace);
+            cx.notify();
+            return;
+        }
         match &self.connect {
             Some(ConnectFlow::Failed { choice, .. }) => {
                 let choice = choice.clone();
@@ -1446,6 +1457,9 @@ impl RemoteLinks {
 
     /// The open workspaces on this machine that another client is holding.
     pub(crate) fn preempted_on(cx: &gpui::App, host: HostId) -> Vec<WorkspaceId> {
+        if host.is_local() {
+            return crate::ui::local_link::LocalLink::preempted(cx);
+        }
         let Some(links) = cx.try_global::<RemoteLinks>() else {
             return Vec::new();
         };
@@ -1869,6 +1883,11 @@ pub(crate) fn drain_events(cx: &mut gpui::App) {
     };
     for (host, event) in events {
         match event {
+            // This computer's own daemon: the windows here hold its workspaces
+            // by their tree ids, through `LocalLink`'s claims.
+            ControlEvent::Preempted { workspace, by } if host.is_local() => {
+                crate::ui::local_link::LocalLink::on_preempted(cx, &workspace, by);
+            }
             ControlEvent::Preempted { workspace, by } => {
                 let Some(id) = client_id_for(cx, host, &workspace) else {
                     log::warn!(
@@ -2352,7 +2371,9 @@ fn refresh_window_shells(cx: &mut gpui::App, workspace: WorkspaceId) {
     app.update(cx, |app, cx| app.refresh_shells(cx));
 }
 
-fn release_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
+/// Detaches every pane of `workspace`'s window from its daemon. A detach ends
+/// the stream only; the process in the pane runs on for whoever drives it next.
+pub(crate) fn release_panes(cx: &mut gpui::App, workspace: WorkspaceId) {
     for view in panes_of(cx, workspace) {
         view.update(cx, |view, cx| view.detach_link(cx));
     }
@@ -2478,12 +2499,17 @@ fn panes_of(
     reason = "the five keystroke entry points that call this live in terminal/view.rs"
 )]
 pub(crate) fn workspace_accepts_input(cx: &gpui::App, workspace: WorkspaceId) -> bool {
-    RemoteLinks::status_of(cx, workspace).is_none_or(|s| s.accepts_input())
+    RemoteLinks::status_of(cx, workspace)
+        .or_else(|| crate::ui::local_link::LocalLink::status_of(cx, workspace))
+        .is_none_or(|s| s.accepts_input())
 }
 
+/// Whether another client is driving `workspace` — on a remote machine, or on
+/// this one.
 pub(crate) fn workspace_is_preempted(cx: &gpui::App, workspace: WorkspaceId) -> bool {
     cx.try_global::<RemoteLinks>()
         .is_some_and(|links| links.preempted.contains_key(&workspace))
+        || crate::ui::local_link::LocalLink::is_preempted(cx, workspace)
 }
 
 #[cfg(test)]

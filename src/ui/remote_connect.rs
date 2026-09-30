@@ -436,7 +436,7 @@ fn new_session_token() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-fn client_hostname() -> String {
+pub(crate) fn client_hostname() -> String {
     static NAME: OnceLock<String> = OnceLock::new();
     NAME.get_or_init(|| {
         // Windows publishes the name in the environment, so the usual case

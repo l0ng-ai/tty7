@@ -2036,7 +2036,13 @@ impl TerminalView {
     }
 
     fn accepts_input(&self, cx: &gpui::App) -> bool {
-        let Some(ws) = self.workspace().map(|w| w.workspace) else {
+        // A local pane has no `PaneWorkspace`, but the window that owns it can
+        // still have been taken over by a remote client.
+        let Some(ws) = self
+            .workspace()
+            .map(|w| w.workspace)
+            .or(self.owner_workspace)
+        else {
             return true;
         };
         crate::ui::remote_workspace::workspace_accepts_input(cx, ws)

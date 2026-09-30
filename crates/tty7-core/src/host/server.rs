@@ -3692,6 +3692,96 @@ mod tests {
         );
     }
 
+    /// The machine's own GUI is one more client of its daemon: it claims the
+    /// workspaces its windows show, is taken over like anyone else, and takes
+    /// them back the same way — one window drives a workspace at a time.
+    /// Neither side is hung up on: both are shared (non-dedicated) links.
+    #[test]
+    fn the_machines_own_gui_and_a_remote_client_take_a_workspace_from_each_other() {
+        let (services, _dir) = workspace_services();
+        let registry = Arc::clone(&services.attachments);
+        let w = tree_workspace(&services);
+        let id: crate::core::session::WorkspaceId = w.parse().unwrap();
+
+        let ((mut gui, _), _g) =
+            raw_hello(services.clone(), ControlHello::gui("tok-gui", "studio"));
+        let (reply, _) = round_trip(
+            &mut gui,
+            1,
+            ControlRequest::WorkspaceAttach { id: w.clone() },
+        );
+        assert_eq!(
+            reply,
+            ControlReply::Ok(ReplyOk::Attached {
+                took_over_from: None
+            })
+        );
+
+        // A remote client opens the same workspace.
+        let ((mut laptop, _), _l) = raw_hello(
+            services.clone(),
+            ControlHello::host_rpc("tok-laptop", "laptop"),
+        );
+        let (reply, _) = round_trip(
+            &mut laptop,
+            1,
+            ControlRequest::WorkspaceAttach { id: w.clone() },
+        );
+        assert_eq!(
+            reply,
+            ControlReply::Ok(ReplyOk::Attached {
+                took_over_from: Some("studio".into())
+            }),
+            "the remote is told it took the workspace from the machine itself, by name"
+        );
+        assert_eq!(
+            await_preempted(&mut gui),
+            Some(ControlEvent::Preempted {
+                workspace: w.clone(),
+                by: "laptop".into(),
+            })
+        );
+
+        // What a restored or reconnected local window reads before claiming:
+        // the holder, by name, so it can open taken over instead of grabbing.
+        let (reply, _) = round_trip(&mut gui, 2, ControlRequest::WorkspaceTree { workspace: id });
+        match reply {
+            ControlReply::Ok(ReplyOk::WorkspaceTree(ws)) => {
+                assert_eq!(ws.attachment.map(|a| a.hostname).as_deref(), Some("laptop"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let (reply, _) = round_trip(&mut gui, 3, ControlRequest::Ping);
+        assert_eq!(
+            reply,
+            ControlReply::Ok(ReplyOk::Pong),
+            "a GUI that was taken over keeps its link"
+        );
+
+        // Take Back from the machine's own window.
+        let (reply, _) = round_trip(
+            &mut gui,
+            4,
+            ControlRequest::WorkspaceAttach { id: w.clone() },
+        );
+        assert_eq!(
+            reply,
+            ControlReply::Ok(ReplyOk::Attached {
+                took_over_from: Some("laptop".into())
+            })
+        );
+        assert_eq!(
+            await_preempted(&mut laptop),
+            Some(ControlEvent::Preempted {
+                workspace: w.clone(),
+                by: "studio".into(),
+            })
+        );
+        assert_eq!(registry.holder(&w).map(|(t, _)| t), Some("tok-gui".into()));
+        let (reply, _) = round_trip(&mut laptop, 2, ControlRequest::Ping);
+        assert_eq!(reply, ControlReply::Ok(ReplyOk::Pong));
+    }
+
     #[test]
     fn a_displaced_session_tidying_up_does_not_evict_the_new_owner() {
         let (services, _dir) = workspace_services();
