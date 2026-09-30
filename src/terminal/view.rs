@@ -1493,8 +1493,24 @@ impl TerminalView {
                     log::warn!("attach to pane {id} went unanswered ({e:#}); spawning fresh");
                     None
                 }
-                Err(e) => {
+                Err(e) if crate::terminal::attach_refused(&e) => {
                     log::info!("pane {id} is gone on its machine ({e:#}); spawning fresh");
+                    None
+                }
+                // The daemon never got to say either way: the link to its
+                // machine would not open, or broke before it answered. The pane
+                // is most likely still running over there, so a fresh shell in
+                // its place would orphan it — its scrollback, its agent session,
+                // whatever it was doing — and put a stranger in its tab. Fail,
+                // and let a retry reach the pane itself.
+                Err(e) if !route.is_local() => {
+                    log::info!("pane {id} could not be reached to reattach ({e:#})");
+                    return Err(e.context(format!(
+                        "could not reach pane {id}, which may still be running"
+                    )));
+                }
+                Err(e) => {
+                    log::info!("pane {id} is gone ({e:#}); spawning fresh");
                     None
                 }
             },

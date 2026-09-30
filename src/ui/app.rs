@@ -3886,7 +3886,28 @@ impl Tty7App {
         let parts = match parts {
             Ok(parts) => parts,
             Err(reason) => {
-                pending.update(cx, |p, cx| p.fail(reason, cx));
+                let retry = pending.update(cx, |p, cx| {
+                    p.fail(reason, cx);
+                    p.next_auto_retry()
+                });
+                if let Some(delay) = retry {
+                    let pending = pending.clone();
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(delay).await;
+                        let _ = this.update_in(cx, |app, window, cx| {
+                            let still_there = app.tabs.iter().any(|tab| {
+                                tab.pane.leaves().iter().any(|l| l.entity_id() == slot_id)
+                            });
+                            // Try Again got there first, or the tab is gone.
+                            if !still_there || !pending.read(cx).is_failed() {
+                                return;
+                            }
+                            pending.update(cx, |p, cx| p.retrying(cx));
+                            start_pane_spawn(pending.clone(), window, cx);
+                        });
+                    })
+                    .detach();
+                }
                 return;
             }
         };

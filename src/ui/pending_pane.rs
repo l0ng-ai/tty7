@@ -40,6 +40,19 @@ pub struct PendingPane {
     pub machine: SharedString,
     pub state: PendingState,
     pub spawn: PendingSpawn,
+    /// Retries made without anyone pressing Try Again. See
+    /// [`PendingPane::next_auto_retry`].
+    auto_retries: u32,
+}
+
+/// How many times a pane standing in for one that may still be running asks
+/// again on its own before it leaves the question to Try Again.
+const AUTO_RETRY_LIMIT: u32 = 5;
+
+/// 2s, 4s, 8s, 16s, 16s — about three quarters of a minute in all, which
+/// covers a reconnect without keeping a machine that is really gone busy.
+fn auto_retry_delay(restores: bool, made: u32) -> Option<Duration> {
+    (restores && made < AUTO_RETRY_LIMIT).then(|| Duration::from_secs(1 << (made + 1).min(4)))
 }
 
 impl EventEmitter<RetryRequested> for PendingPane {}
@@ -55,7 +68,24 @@ impl PendingPane {
             machine: machine.into(),
             state: PendingState::Connecting,
             spawn,
+            auto_retries: 0,
         }
+    }
+
+    /// How long to wait before asking again on its own, or `None` once it has
+    /// asked enough. Only a pane that stands in for one already running on its
+    /// machine retries by itself: the failure that leaves it here is the link,
+    /// not the pane, and the link usually comes back within seconds — the
+    /// pane behind it has been running the whole time. A brand-new pane that
+    /// failed has nothing waiting for it; Try Again is the user's call.
+    pub fn next_auto_retry(&mut self) -> Option<Duration> {
+        let delay = auto_retry_delay(self.spawn.restore_pane.is_some(), self.auto_retries)?;
+        self.auto_retries += 1;
+        Some(delay)
+    }
+
+    pub fn is_failed(&self) -> bool {
+        matches!(self.state, PendingState::Failed(_))
     }
 
     pub fn fail(&mut self, reason: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -137,5 +167,28 @@ impl Render for PendingPane {
             .items_center()
             .justify_center()
             .child(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_pane_standing_in_for_a_running_one_retries_by_itself() {
+        assert_eq!(
+            auto_retry_delay(false, 0),
+            None,
+            "a new pane has nothing waiting"
+        );
+        let delays: Vec<u64> = (0..)
+            .map_while(|made| auto_retry_delay(true, made))
+            .map(|d| d.as_secs())
+            .collect();
+        assert_eq!(
+            delays,
+            vec![2, 4, 8, 16, 16],
+            "then Try Again is the user's"
+        );
     }
 }
