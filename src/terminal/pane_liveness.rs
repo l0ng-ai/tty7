@@ -142,21 +142,72 @@ fn probe_host(cx: &mut App, host: HostId, workspace: WorkspaceId) {
     {
         return;
     }
-    if !host.is_local() && crate::ui::remote_connect::HostLinks::get(cx, host).is_none() {
-        cx.update_global::<PaneLivenessCache, _>(|cache, _| cache.finish_probe(host, None));
-        return;
-    }
-    let route = crate::ui::remote_workspace::pane_route_for(cx, workspace);
+    // A remote machine is asked over the control link it already has. Asking
+    // on a pane route instead opened an SSH session channel every ten seconds
+    // — one of the few the server allows per connection, and once those were
+    // all taken by panes, a whole new connection with its handshake each time.
+    let probe = if host.is_local() {
+        Probe::Route(crate::ui::remote_workspace::pane_route_for(cx, workspace))
+    } else {
+        match crate::ui::remote_connect::HostLinks::get(cx, host) {
+            Some(link) => Probe::Control(std::sync::Arc::clone(link.client())),
+            None => {
+                cx.update_global::<PaneLivenessCache, _>(|cache, _| cache.finish_probe(host, None));
+                return;
+            }
+        }
+    };
     if !cx.global_mut::<PaneLivenessCache>().begin_probe(host) {
         return;
     }
     cx.spawn(async move |cx| {
-        let alive = cx.background_spawn(async move { query(&route) }).await;
+        let alive = cx.background_spawn(async move { probe.query() }).await;
         cx.update(|cx| {
             cx.update_global::<PaneLivenessCache, _>(|cache, _| cache.finish_probe(host, alive));
         });
     })
     .detach();
+}
+
+enum Probe {
+    Route(PaneRoute),
+    Control(std::sync::Arc<tty7_core::daemon::control::ControlClient>),
+}
+
+impl Probe {
+    fn query(&self) -> Option<HashSet<u64>> {
+        match self {
+            Probe::Route(route) => query(route),
+            Probe::Control(client) => query_control(client),
+        }
+    }
+}
+
+/// The machine tree marks each pane record with whether its daemon is running
+/// it — overlaid from the daemon's own pane list, and cleared on load — which
+/// is the same answer the pane socket's `List` gives.
+fn query_control(client: &tty7_core::daemon::control::ControlClient) -> Option<HashSet<u64>> {
+    use tty7_core::daemon::control::{ControlRequest, ReplyOk};
+    match client.call(ControlRequest::MachineGet) {
+        Ok(ReplyOk::MachineTree(machine)) => Some(live_panes(&machine)),
+        Ok(other) => {
+            log::debug!("pane liveness query got an unexpected reply: {other:?}");
+            None
+        }
+        Err(e) => {
+            log::debug!("pane liveness query failed: {e}");
+            None
+        }
+    }
+}
+
+fn live_panes(machine: &crate::core::machine::Machine) -> HashSet<u64> {
+    machine
+        .panes
+        .iter()
+        .filter(|p| p.live)
+        .map(|p| p.id)
+        .collect()
 }
 
 fn query(route: &PaneRoute) -> Option<HashSet<u64>> {
@@ -184,6 +235,18 @@ mod tests {
     }
     fn box_b() -> HostId {
         HostId::from_connection_key("ssh-direct:me@b:22")
+    }
+
+    #[test]
+    fn a_machine_tree_answers_with_the_panes_its_daemon_is_running() {
+        let mut running = crate::core::machine::PaneRecord::new(3);
+        running.live = true;
+        let exited = crate::core::machine::PaneRecord::new(4);
+        let machine = crate::core::machine::Machine {
+            workspaces: Vec::new(),
+            panes: vec![running, exited],
+        };
+        assert_eq!(live_panes(&machine), HashSet::from([3]));
     }
 
     #[test]
