@@ -134,10 +134,17 @@ pub(super) struct Step {
 ///   was before the burst, so every `?` in a typed line reads as the key that
 ///   opens its shortcuts on an empty input and is lost, and every `!` as the
 ///   one that switches it into shell mode — "hi! there" would run `there`.
-/// - **A leading `!` goes to Claude Code and Gemini on its own.** It switches
-///   the input into shell mode only when it is typed into an empty box as a
-///   key of its own; arriving with the rest of the line it is just a
-///   character.
+/// - **So are OpenCode and Amp.** OpenCode reads a typed burst the same way
+///   Gemini does — the `!` in "PONG! ok" switches it into shell mode and the
+///   line runs as a command — and Amp takes a typed leading `?` for the key
+///   that opens its shortcuts, and a typed leading `/` for the one that opens
+///   its command palette, with the rest of the burst landing in the input
+///   under it and Enter running whatever the palette had on top.
+/// - **A leading `!` goes to Claude Code, Gemini and OpenCode on its own.** It
+///   switches the input into shell mode only when it is typed into an empty
+///   box as a key of its own; arriving with the rest of the line it is just a
+///   character. (Amp's shell mode is a leading `$`, which it reads off a paste
+///   as well.)
 /// - **A message with an `@` mention gets a space after it for Gemini.**
 ///   With the caret at the end of an `@` word it lists matching files, and
 ///   Enter then takes the list's pick instead of sending — so a message whose
@@ -157,8 +164,10 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
     let mut steps = Vec::new();
     let mut delay = Duration::ZERO;
 
-    if matches!(agent, CLIAgent::Claude | CLIAgent::Gemini)
-        && let Some(rest) = body.strip_prefix('!')
+    if matches!(
+        agent,
+        CLIAgent::Claude | CLIAgent::Gemini | CLIAgent::OpenCode
+    ) && let Some(rest) = body.strip_prefix('!')
         && !rest.is_empty()
     {
         steps.push(Step {
@@ -181,7 +190,10 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
     let mut pasted = false;
     if !body.is_empty() {
         pasted = bracketed
-            && (matches!(agent, CLIAgent::Codex | CLIAgent::Gemini) || !types_cleanly(body));
+            && (matches!(
+                agent,
+                CLIAgent::Codex | CLIAgent::Gemini | CLIAgent::OpenCode | CLIAgent::Amp
+            ) || !types_cleanly(body));
         let bytes = match pasted {
             true => tty7_core::core::paste::bracket(body.as_bytes()),
             false => body.as_bytes().to_vec(),
@@ -2242,6 +2254,28 @@ mod tests {
         // open its shortcuts: each reads the input as empty.
         let steps = submit_plan(CLIAgent::Gemini, "hi! ok?", true);
         assert_eq!(bytes(&steps), [&b"\x1b[200~hi! ok?\x1b[201~"[..], b"\r"]);
+    }
+
+    #[test]
+    fn opencode_and_amp_are_always_pasted() {
+        // Typed, OpenCode would take the `!` for its shell mode, and Amp the
+        // leading `?` for its shortcuts and a leading `/` for its palette.
+        for (agent, text) in [
+            (CLIAgent::OpenCode, "PONG! ok?"),
+            (CLIAgent::Amp, "?why"),
+            (CLIAgent::Amp, "/new"),
+        ] {
+            let steps = submit_plan(agent, text, true);
+            let pasted = format!("\x1b[200~{text}\x1b[201~");
+            assert_eq!(bytes(&steps), [pasted.as_bytes(), b"\r"], "{agent:?}");
+            assert_eq!(steps[1].delay, SETTLE, "{agent:?}");
+        }
+        // A leading `!` is still OpenCode's shell-mode key; Amp's `$` works
+        // pasted.
+        let steps = submit_plan(CLIAgent::OpenCode, "!ls", true);
+        assert_eq!(bytes(&steps), [&b"!"[..], b"\x1b[200~ls\x1b[201~", b"\r"]);
+        let steps = submit_plan(CLIAgent::Amp, "$ls", true);
+        assert_eq!(bytes(&steps), [&b"\x1b[200~$ls\x1b[201~"[..], b"\r"]);
     }
 
     #[test]
