@@ -1610,6 +1610,13 @@ impl Tty7App {
         let app_id = cx.entity_id();
         cx.on_release(move |_, cx| crate::ui::lsp::LspStore::sync_window(app_id, Vec::new(), cx))
             .detach();
+        cx.on_release(move |_, cx| {
+            if cx.has_global::<crate::terminal::git_data::ScmData>() {
+                cx.global_mut::<crate::terminal::git_data::ScmData>()
+                    .release_window(app_id.as_u64());
+            }
+        })
+        .detach();
         cx.on_app_quit(|app, cx| {
             app.save_session(cx);
             crate::core::window_state::WindowState::from_bounds(app.window_bounds).save();

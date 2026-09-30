@@ -232,7 +232,14 @@ pub enum ScmWatcher {
 pub struct GitSubscriptions {
     refs: ByHost<PathBuf, u32>,
     sub_gen: ByHost<PathBuf, u64>,
-    held: HashMap<ScmWatcher, (HostId, PathBuf)>,
+    /// Per window, then per watcher. Every window reconciles this one global
+    /// every frame, so a watcher is only "the same one" within its window:
+    /// keyed by the watcher alone, two windows whose file trees sit in
+    /// different directories took the hold from each other on every frame,
+    /// and each hand-over dropped the repository's watch and opened it again —
+    /// four round trips to a remote machine, several times a second, for as
+    /// long as both windows were open.
+    held: HashMap<(u64, ScmWatcher), (HostId, PathBuf)>,
 }
 
 impl GitSubscriptions {
@@ -273,25 +280,41 @@ impl GitSubscriptions {
     /// caller can tear down what was keeping it alive.
     pub fn declare(
         &mut self,
+        window: u64,
         who: ScmWatcher,
         target: Option<(HostId, PathBuf)>,
     ) -> Option<(HostId, PathBuf)> {
-        let previous = self.held.get(&who).cloned();
+        let key = (window, who);
+        let previous = self.held.get(&key).cloned();
         if previous == target {
             return None;
         }
         match &target {
             Some((host, root)) => {
                 self.acquire(*host, root);
-                self.held.insert(who, (*host, root.clone()));
+                self.held.insert(key, (*host, root.clone()));
             }
             None => {
-                self.held.remove(&who);
+                self.held.remove(&key);
             }
         }
         let (host, root) = previous?;
         self.release(host, &root);
         (!self.is_subscribed(host, &root)).then_some((host, root))
+    }
+
+    /// Give back everything a closed window held, reporting the repositories
+    /// nobody holds any more.
+    pub fn release_window(&mut self, window: u64) -> Vec<(HostId, PathBuf)> {
+        let mine: Vec<ScmWatcher> = self
+            .held
+            .keys()
+            .filter(|(owner, _)| *owner == window)
+            .map(|(_, who)| *who)
+            .collect();
+        mine.into_iter()
+            .filter_map(|who| self.declare(window, who, None))
+            .collect()
     }
 
     fn clear_host(&mut self, host: HostId) {
@@ -488,6 +511,13 @@ impl ScmData {
 
     pub fn is_subscribed(&self, host: HostId, root: &Path) -> bool {
         self.subs.is_subscribed(host, root)
+    }
+
+    /// A window is gone: whatever it was holding open, it holds no longer.
+    pub fn release_window(&mut self, window: u64) {
+        for (host, root) in self.subs.release_window(window) {
+            self.drop_watch(host, &root);
+        }
     }
 
     /// Nobody is holding a repository open and nothing is watching one.
@@ -812,11 +842,12 @@ impl Tty7App {
         {
             return;
         }
+        let window_key = cx.entity_id().as_u64();
         for (who, target) in wanted {
             let dropped = cx
                 .default_global::<ScmData>()
                 .subscriptions()
-                .declare(who, target);
+                .declare(window_key, who, target);
             if let Some((host, root)) = dropped {
                 cx.default_global::<ScmData>().drop_watch(host, &root);
             }
@@ -1504,7 +1535,7 @@ mod tests {
         let mut subs = GitSubscriptions::default();
         let here = Some((HostId::LOCAL, root()));
         for _ in 0..30 {
-            assert_eq!(subs.declare(ScmWatcher::Panel, here.clone()), None);
+            assert_eq!(subs.declare(1, ScmWatcher::Panel, here.clone()), None);
         }
         assert_eq!(
             subs.count(HostId::LOCAL, &root()),
@@ -1512,27 +1543,75 @@ mod tests {
             "render runs every frame; a hold is a statement, not an event"
         );
 
-        subs.declare(ScmWatcher::FileTree, here.clone());
+        subs.declare(1, ScmWatcher::FileTree, here.clone());
         assert_eq!(subs.count(HostId::LOCAL, &root()), 2);
         assert_eq!(
-            subs.declare(ScmWatcher::Panel, None),
+            subs.declare(1, ScmWatcher::Panel, None),
             None,
             "the file tree is still looking"
         );
         assert_eq!(
-            subs.declare(ScmWatcher::FileTree, None),
+            subs.declare(1, ScmWatcher::FileTree, None),
             Some((HostId::LOCAL, root())),
             "the last one out reports the repository to tear down"
         );
+    }
+
+    /// Two windows, each with its file tree in its own directory: the
+    /// global must hold both, not hand one hold back and forth between them
+    /// every frame.
+    #[test]
+    fn two_windows_watching_different_repositories_keep_both() {
+        let mut subs = GitSubscriptions::default();
+        let other = PathBuf::from("/elsewhere");
+        for _ in 0..30 {
+            assert_eq!(
+                subs.declare(1, ScmWatcher::FileTree, Some((HostId::LOCAL, root()))),
+                None
+            );
+            assert_eq!(
+                subs.declare(
+                    2,
+                    ScmWatcher::FileTree,
+                    Some((HostId::LOCAL, other.clone()))
+                ),
+                None,
+                "the other window's frame must not take this one's hold"
+            );
+        }
+        let generation = subs.generation(HostId::LOCAL, &root());
+        assert_eq!(
+            subs.declare(2, ScmWatcher::FileTree, None),
+            Some((HostId::LOCAL, other))
+        );
+        assert_eq!(subs.count(HostId::LOCAL, &root()), 1);
+        assert_eq!(
+            subs.generation(HostId::LOCAL, &root()),
+            generation,
+            "nothing in flight for the first window's repository was invalidated"
+        );
+    }
+
+    #[test]
+    fn a_closed_window_gives_back_what_it_held() {
+        let mut subs = GitSubscriptions::default();
+        subs.declare(1, ScmWatcher::FileTree, Some((HostId::LOCAL, root())));
+        subs.declare(1, ScmWatcher::Panel, Some((HostId::LOCAL, root())));
+        subs.declare(2, ScmWatcher::Panel, Some((HostId::LOCAL, root())));
+
+        assert!(subs.release_window(1).is_empty(), "window 2 still holds it");
+        assert_eq!(subs.count(HostId::LOCAL, &root()), 1);
+        assert_eq!(subs.release_window(2), vec![(HostId::LOCAL, root())]);
+        assert!(subs.is_empty());
     }
 
     #[test]
     fn moving_a_subscriber_to_another_repository_releases_the_first() {
         let mut subs = GitSubscriptions::default();
         let other = PathBuf::from("/elsewhere");
-        subs.declare(ScmWatcher::Panel, Some((HostId::LOCAL, root())));
+        subs.declare(1, ScmWatcher::Panel, Some((HostId::LOCAL, root())));
         assert_eq!(
-            subs.declare(ScmWatcher::Panel, Some((HostId::LOCAL, other.clone()))),
+            subs.declare(1, ScmWatcher::Panel, Some((HostId::LOCAL, other.clone()))),
             Some((HostId::LOCAL, root()))
         );
         assert_eq!(subs.count(HostId::LOCAL, &root()), 0);
