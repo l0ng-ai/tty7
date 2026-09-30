@@ -1278,12 +1278,17 @@ fn left_cuts(chars: &[char]) -> Vec<usize> {
         // follows has to be spelled like a path too, or `branch:main` and
         // `remote:origin` become links the moment the pane's directory holds
         // a `main/` or an `origin/`.
-        if let Some(i) = rest.iter().position(|&c| c == ':')
-            && i >= 2
-            && rest[0].is_ascii_alphabetic()
+        //
+        // CJK prose writes the label with no space and either colon:
+        // `原型:/tmp/a.html`, `原型：/tmp/a.html`. A one-character label is
+        // only a drive when it is an ASCII letter, so `图:/tmp/a.png` still
+        // counts as a label.
+        if let Some(i) = rest.iter().position(|&c| matches!(c, ':' | '：'))
+            && (i >= 2 || (i == 1 && !rest[0].is_ascii()))
+            && rest[0].is_alphabetic()
             && rest[..i]
                 .iter()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+'))
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '+'))
             && rest[i + 1..]
                 .iter()
                 .any(|c| matches!(c, '/' | '\\' | '.' | '~'))
@@ -2130,6 +2135,18 @@ mod tests {
         let col = line.chars().position(|c| c == '/').unwrap_or(5);
 
         assert_file_link(&line, col, Path::new("/"), &path, Some(42), None);
+    }
+
+    /// An agent reporting the file it wrote puts a CJK label and a colon
+    /// straight in front of the path, full-width or not.
+    #[test]
+    fn link_at_peels_a_cjk_label_off_an_absolute_path() {
+        let path = temp_file("cjk-label/mock.html");
+        for label in ["原型:", "原型：", "图:", "图："] {
+            let line = format!("交互 HTML {label}{}", path.display());
+            let col = line.chars().position(|c| c == '/').unwrap() + 3;
+            assert_file_link(&line, col, Path::new("/"), &path, None, None);
+        }
     }
 
     #[test]
