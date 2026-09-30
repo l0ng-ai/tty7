@@ -603,15 +603,18 @@ pub(super) struct Composer {
     dismissed: Option<String>,
     files: Files,
     commands: Option<(Vec<(String, String)>, Instant)>,
-    /// The effort level last picked from the toolbar, with the level the
-    /// agent reported then. Once it reports another, the pick has landed (or
-    /// been overridden) and the report is the truth again.
-    effort: Option<(&'static str, Option<String>)>,
-    /// The model alias last picked from the toolbar, with the model the agent
-    /// reported then. Once it reports another, the pick has landed (or been
-    /// overridden) and the report is the truth again.
-    model: Option<(&'static str, Option<String>)>,
+    /// The effort level last picked from the toolbar, with how many turns the
+    /// agent had finished then. The next finished turn reports the level it
+    /// ran at — the pick, or whatever the agent made of it, declined included
+    /// — and from then on the report is the truth again.
+    effort: Option<(&'static str, u64)>,
+    /// The model alias last picked from the toolbar, and the turns finished
+    /// then, the same way.
+    model: Option<(&'static str, u64)>,
     picker: Option<Picker>,
+    /// The agent session the picks above were made in. A pick says nothing
+    /// about the next session, which starts from its own settings.
+    session: Option<String>,
     _subs: Vec<Subscription>,
 }
 
@@ -724,6 +727,7 @@ impl TerminalView {
             effort: None,
             model: None,
             picker: None,
+            session: None,
             _subs: subs,
         });
     }
@@ -922,17 +926,17 @@ impl TerminalView {
             .lock()
             .mode()
             .contains(TermMode::BRACKETED_PASTE);
-        let reported = self.agent_session().map(|s| s.readout).unwrap_or_default();
+        let turns = self.agent_session().map_or(0, |s| s.turns);
         let Some(c) = self.composer.as_mut() else {
             return;
         };
         let command = match picker {
             Picker::Model => {
-                c.model = Some((value, reported.model));
+                c.model = Some((value, turns));
                 format!("/model {value}")
             }
             Picker::Effort => {
-                c.effort = Some((value, reported.effort));
+                c.effort = Some((value, turns));
                 format!("/effort {value}")
             }
         };
@@ -957,6 +961,9 @@ impl TerminalView {
             self.ensure_composer(window, cx);
         }
         let asking = self.agent_is_asking();
+        let session = agent
+            .and_then(|_| self.agent_session())
+            .and_then(|s| s.session_id);
         let (found, screen_lines, offset) = {
             let term = self.terminal.term.lock();
             let found = agent
@@ -967,6 +974,11 @@ impl TerminalView {
         let Some(c) = self.composer.as_mut() else {
             return;
         };
+        if c.session != session {
+            c.session = session;
+            c.model = None;
+            c.effort = None;
+        }
 
         // The area, with a grace period before it counts as gone.
         let now = Instant::now();
@@ -1374,7 +1386,10 @@ impl TerminalView {
     ) -> Option<gpui::AnyElement> {
         let c = self.composer.as_ref()?;
         let agent = self.agent()?;
-        let readout = self.agent_session().map(|s| s.readout).unwrap_or_default();
+        let (readout, turns) = self
+            .agent_session()
+            .map(|s| (s.readout, s.turns))
+            .unwrap_or_default();
         let theme = cx.theme();
         let focused = c.input.read(cx).focus_handle(cx).is_focused(window);
         let can_send = self.composer_can_send(cx);
@@ -1620,7 +1635,7 @@ impl TerminalView {
             let picked = c
                 .model
                 .as_ref()
-                .filter(|(_, then)| *then == readout.model)
+                .filter(|(_, then)| *then == turns)
                 .map(|(alias, _)| *alias);
             let current = picked.or_else(|| readout.model.as_deref().and_then(model_alias));
             let name = match (picked, readout.model.as_deref()) {
@@ -1654,7 +1669,7 @@ impl TerminalView {
         let current_effort = c
             .effort
             .as_ref()
-            .filter(|(_, then)| *then == readout.effort)
+            .filter(|(_, then)| *then == turns)
             .map(|(level, _)| level.to_string())
             .or_else(|| readout.effort.clone())
             // A model that takes no effort level has none to show.
