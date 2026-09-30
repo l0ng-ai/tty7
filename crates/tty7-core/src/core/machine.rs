@@ -861,6 +861,13 @@ impl MachineStore {
             if let Some(active) = heal_active_tab(ws, index) {
                 deltas.push((workspace, LayoutDelta::ActiveTabChanged { tab: active }));
             }
+            // The caller stops these panes as soon as this returns. The records
+            // stay for the reopen, but must not go on saying the panes run:
+            // `tty7 wait` reads `live` to tell a shell from an exited pane, and
+            // would otherwise wait on a closed one forever.
+            for record in m.panes.iter_mut().filter(|p| stopped.contains(&p.id)) {
+                record.live = false;
+            }
             let outgrown = prune_closed(m, now);
             let orphans = collect_orphan_panes(m);
             m.panes.retain(|p| !orphans.contains(&p.id));
@@ -3340,6 +3347,7 @@ mod tests {
         store
             .pane_split(ws, 1, Axis::Horizontal, 0.5, seed(2, "/else"), false, None)
             .unwrap();
+        assert!(store.machine().panes.iter().all(|p| p.live));
         let (_sub, heard) = recorded(&store);
 
         let closed = store
@@ -3357,6 +3365,10 @@ mod tests {
         assert!(
             m.panes.iter().any(|p| p.id == 1) && m.panes.iter().any(|p| p.id == 2),
             "the records are what the reopen restores cwd and shell from"
+        );
+        assert!(
+            m.panes.iter().all(|p| !p.live),
+            "a stopped pane's record must not read as running to `tty7 wait`"
         );
         let heard = heard.lock().unwrap();
         assert!(matches!(&heard[0].1, LayoutDelta::TabClosed { tab: t } if *t == tab.id));
