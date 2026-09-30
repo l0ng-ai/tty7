@@ -1,6 +1,7 @@
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use russh::client::Msg;
 use russh::{Channel, ChannelMsg};
@@ -13,6 +14,12 @@ use super::ConnectionKey;
 use super::forward::RemoteForwardTable;
 
 const DATA_CHANNEL_DEPTH: usize = 16;
+
+/// How long a connection the server refused a session on is passed over when
+/// the cache hands one out. Nothing tells us when one of its sessions closes,
+/// so after this it is asked again: one refused round trip if it is still
+/// full, a free slot if a pane on it has gone since.
+const SATURATION_HOLD: Duration = Duration::from_secs(30);
 
 pub type SharedConnection = Arc<Mutex<Weak<SshConnection>>>;
 
@@ -216,7 +223,8 @@ impl Drop for CommandChannel {
 
 /// sshd's answer to a session open once the connection's `MaxSessions` are
 /// all taken, by channels still running or by ones never closed. It says
-/// nothing about this channel and everything about the connection.
+/// nothing about this channel and everything about the connection — which is
+/// full, not broken: every session already on it keeps working.
 fn refuses_every_session(e: &russh::Error) -> bool {
     matches!(
         e,
@@ -234,6 +242,9 @@ pub struct SshConnection {
     /// What this connection's server probe proved, once it has. See
     /// [`SshConnection::proved_server`].
     proved_server: Mutex<Option<ProvedServer>>,
+    /// When the server last refused a session here for being at its limit.
+    /// See [`SshConnection::is_saturated`].
+    saturated_at: Mutex<Option<Instant>>,
 }
 
 impl SshConnection {
@@ -249,6 +260,7 @@ impl SshConnection {
             alive: AtomicBool::new(true),
             remote_entry: tokio::sync::Mutex::new(None),
             proved_server: Mutex::new(None),
+            saturated_at: Mutex::new(None),
         })
     }
 
@@ -271,13 +283,36 @@ impl SshConnection {
         self.alive.store(false, Ordering::SeqCst);
     }
 
+    /// Whether the server recently refused a session here because every one
+    /// it allows on this connection is taken (sshd's `MaxSessions`, ten by
+    /// default — one per remote pane).
+    ///
+    /// A full connection is not a dead one. Retiring it used to be the answer,
+    /// and it took the connection out of the cache while every pane on it was
+    /// still using it: the next pane dialled a fresh link and paid a whole
+    /// handshake and server probe for it, and so did everything short-lived
+    /// after that, because nothing held the replacement. The cache passes a
+    /// full connection over instead and adds another beside it.
+    pub fn is_saturated(&self) -> bool {
+        self.saturated_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some_and(|at| at.elapsed() < SATURATION_HOLD)
+    }
+
+    fn set_saturated(&self, saturated: bool) {
+        *self
+            .saturated_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = saturated.then(Instant::now);
+    }
+
     pub async fn open_session_channel(&self) -> Result<Channel<Msg>, russh::Error> {
         let opened = self.handle.lock().await.channel_open_session().await;
-        // `is_alive` is what decides whether the cache hands this connection
-        // out again, and one that refuses sessions keeps refusing them until
-        // it is dropped: every retry on it would fail exactly this way.
-        if opened.as_ref().is_err_and(refuses_every_session) {
-            self.mark_dead();
+        match &opened {
+            Ok(_) => self.set_saturated(false),
+            Err(e) if refuses_every_session(e) => self.set_saturated(true),
+            Err(_) => {}
         }
         opened
     }
@@ -500,9 +535,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_link_that_refuses_a_session_is_not_handed_out_again() {
+    async fn a_link_at_its_session_limit_is_full_not_dead() {
         let sshd = FakeSshd::connect(Exec::Hangs, Some(1)).await;
-        let _held = sshd
+        let held = sshd
             .conn
             .open_session_channel()
             .await
@@ -520,10 +555,26 @@ mod tests {
             "the fake answers like sshd at MaxSessions: {refused:?}"
         );
         assert!(
-            !sshd.conn.is_alive(),
-            "the cache must dial afresh rather than retry this link"
+            sshd.conn.is_saturated(),
+            "the cache must pass this link over for the next session"
+        );
+        assert!(
+            sshd.conn.is_alive(),
+            "the session already on it is still in use"
         );
         assert_eq!(sshd.refused(), 1);
+
+        held.close().await.expect("close the held session");
+        sshd.wait_for_closed(1).await;
+        let _again = sshd
+            .conn
+            .open_session_channel()
+            .await
+            .expect("a slot freed up");
+        assert!(
+            !sshd.conn.is_saturated(),
+            "a session that opens says the link has room again"
+        );
     }
 
     #[test]

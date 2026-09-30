@@ -904,8 +904,9 @@ impl SshManager {
         let key = ConnectionKey::from_spec(spec);
         let slot = self.conns.lock().unwrap().get(&key).cloned()?;
         let guard = slot.try_lock().ok()?;
-        let conn = guard.upgrade()?;
-        conn.is_alive().then_some(conn)
+        // Any live one: a forward rides a tcpip channel, which the server's
+        // session limit does not count.
+        guard.live().next()
     }
 
     pub fn add_workspace_forward(

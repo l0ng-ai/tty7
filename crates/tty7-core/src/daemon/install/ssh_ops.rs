@@ -261,7 +261,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refused_command_channel_retires_the_connection() {
+    async fn a_refused_command_channel_marks_the_connection_full() {
         let sshd = FakeSshd::connect(Exec::Hangs, Some(0)).await;
         let err = exec(&sshd.conn, "true")
             .await
@@ -271,8 +271,8 @@ mod tests {
             "{err}"
         );
         assert!(
-            !sshd.conn.is_alive(),
-            "Try Again must dial afresh, not retry the spent link"
+            sshd.conn.is_saturated(),
+            "Try Again must be handed another connection, not this full one"
         );
     }
 }

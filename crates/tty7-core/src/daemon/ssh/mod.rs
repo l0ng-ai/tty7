@@ -66,7 +66,52 @@ impl ConnectionKey {
     }
 }
 
-type ConnSlot = Arc<tokio::sync::Mutex<Weak<SshConnection>>>;
+/// Every connection held open to one destination, oldest first.
+///
+/// Usually one. A second appears when the first is at the server's session
+/// limit: sshd allows ten sessions per connection by default and each remote
+/// pane is one of them, so a workspace with more panes than that spans several
+/// connections. Weak, like the single connection this used to be — a link
+/// lives as long as something is using it, not as long as the cache.
+#[derive(Default)]
+struct ConnPool {
+    conns: Vec<Weak<SshConnection>>,
+}
+
+impl ConnPool {
+    fn live(&self) -> impl Iterator<Item = Arc<SshConnection>> + '_ {
+        self.conns
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|conn| conn.is_alive())
+    }
+
+    /// A connection that can take another session, as far as anyone knows.
+    fn usable(&self) -> Option<Arc<SshConnection>> {
+        self.live().find(|conn| !conn.is_saturated())
+    }
+
+    fn any_live(&self) -> bool {
+        self.live().next().is_some()
+    }
+
+    fn add(&mut self, conn: &Arc<SshConnection>) {
+        self.prune();
+        self.conns.push(Arc::downgrade(conn));
+    }
+
+    fn prune(&mut self) {
+        self.conns
+            .retain(|weak| weak.upgrade().is_some_and(|conn| conn.is_alive()));
+    }
+}
+
+type ConnSlot = Arc<tokio::sync::Mutex<ConnPool>>;
+
+/// How many times one open goes back to the cache after a connection turned
+/// out to be full. Each refusal takes that connection out of rotation for a
+/// while, so this only bounds a pathological server, not ordinary use.
+const MAX_SATURATED_RETRIES: usize = 8;
 
 pub struct SshManager {
     runtime: tokio::runtime::Runtime,
@@ -250,8 +295,24 @@ impl SshManager {
 
         broker.status(SshPhase::Connected);
 
-        let channel = match conn.open_session_channel().await {
+        let mut channel = conn.open_session_channel().await;
+        let mut retries = 0;
+        while channel.is_err() && conn.is_saturated() && reused && retries < MAX_SATURATED_RETRIES {
+            retries += 1;
+            (conn, _) = self
+                .open_connection(spec, broker)
+                .await
+                .map_err(|e| format!("{e}"))?;
+            *conn_slot.lock().unwrap() = Arc::downgrade(&conn);
+            channel = conn.open_session_channel().await;
+        }
+        let channel = match channel {
             Ok(channel) => channel,
+            Err(e) if conn.is_saturated() => {
+                return Err(format!(
+                    "open shell channel failed: the server refused another session ({e})"
+                ));
+            }
             Err(e) if reused => {
                 log::info!(
                     "reused ssh connection to {}:{} was dead ({e}); reconnecting",
@@ -335,8 +396,33 @@ impl SshManager {
         setup: &RouteSetup,
         server_command: Option<&str>,
     ) -> anyhow::Result<(RemoteLink, Arc<SshConnection>)> {
-        let (conn, _reused) = self.open_connection(spec, &setup.broker).await?;
+        let mut retries = 0;
+        loop {
+            let (conn, reused) = self.open_connection(spec, &setup.broker).await?;
+            match self.open_remote_link_on(&conn, setup, server_command).await {
+                // Full, not broken: the cache passes this one over now, so
+                // asking again lands on a connection with room, or a new one.
+                // A connection dialled just for this that refuses its very
+                // first sessions will refuse the next one too.
+                Err(e) if conn.is_saturated() && reused && retries < MAX_SATURATED_RETRIES => {
+                    retries += 1;
+                    log::info!(
+                        "ssh {:?}: this connection is at the server's session limit ({e}); \
+                         trying another",
+                        conn.key()
+                    );
+                }
+                result => return result.map(|link| (link, conn)),
+            }
+        }
+    }
 
+    async fn open_remote_link_on(
+        &self,
+        conn: &Arc<SshConnection>,
+        setup: &RouteSetup,
+        server_command: Option<&str>,
+    ) -> anyhow::Result<RemoteLink> {
         let installed = {
             let install_conn = conn.clone();
             setup
@@ -359,7 +445,7 @@ impl SshManager {
             },
             RouteChannel::Control => {
                 conn.remote_entry_or_init(|| async {
-                    let env = probe_remote_env(&conn).await;
+                    let env = probe_remote_env(conn).await;
                     let socket = env.as_ref().and_then(remote_link::remote_control_socket);
                     remote_link::choose_entry(socket.as_deref(), true, &command)
                 })
@@ -369,7 +455,7 @@ impl SshManager {
 
         if let RemoteEntry::StreamLocal { socket } = &entry {
             match conn.open_direct_streamlocal(socket).await {
-                Ok(channel) => return Ok((RemoteLink::stream_local(channel), conn)),
+                Ok(channel) => return Ok(RemoteLink::stream_local(channel)),
                 Err(e) => {
                     log::info!(
                         "ssh {:?}: direct-streamlocal to {socket} refused ({e}); \
@@ -390,7 +476,7 @@ impl SshManager {
             .exec(false, command.as_bytes())
             .await
             .map_err(|e| anyhow::anyhow!("exec `{command}` on the remote failed: {e}"))?;
-        Ok((RemoteLink::session_exec(channel), conn))
+        Ok(RemoteLink::session_exec(channel))
     }
 
     pub async fn restart_remote_server(
@@ -467,7 +553,7 @@ impl SshManager {
         if let Some(slot) = slot
             && let Ok(mut held) = slot.try_lock()
         {
-            *held = Weak::new();
+            held.prune();
         }
     }
 
@@ -477,7 +563,7 @@ impl SshManager {
             .iter()
             .map(|(key, slot)| {
                 let connected = match slot.try_lock() {
-                    Ok(weak) => weak.upgrade().is_some_and(|conn| conn.is_alive()),
+                    Ok(pool) => pool.any_live(),
                     // The slot is held by whoever is opening or using this link
                     // right now. Busy is not down — and callers act on this:
                     // the CLI's `-m <machine>` refuses to route over a link it
@@ -513,7 +599,7 @@ impl SshManager {
                 // A probe the link would not carry says nothing about the
                 // shell. Remembered, its nothing would keep integration off
                 // this host for the rest of the run, fresh links included.
-                if probed.is_some() || conn.is_alive() {
+                if probed.is_some() || (conn.is_alive() && !conn.is_saturated()) {
                     self.probes.lock().unwrap().insert(key, probed.clone());
                 }
                 probed
@@ -554,15 +640,17 @@ impl SshManager {
                 true => {
                     let slot: ConnSlot = {
                         let mut map = self.conns.lock().unwrap();
-                        map.entry(key.clone())
-                            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(Weak::new())))
-                            .clone()
+                        map.entry(key.clone()).or_default().clone()
                     };
                     let guard = slot.lock_owned().await;
-                    if let Some(conn) = guard.upgrade()
-                        && conn.is_alive()
-                    {
+                    if let Some(conn) = guard.usable() {
                         return Ok((conn, true));
+                    }
+                    if guard.any_live() {
+                        log::info!(
+                            "ssh {key:?}: every connection is at the server's session limit; \
+                             dialling another beside them"
+                        );
                     }
                     Some(guard)
                 }
@@ -623,7 +711,7 @@ impl SshManager {
 
             let conn = SshConnection::new(handle, key, remote_forwards);
             if let Some(guard) = guard.as_mut() {
-                **guard = Arc::downgrade(&conn);
+                guard.add(&conn);
             }
             Ok((conn, false))
         })
@@ -763,7 +851,10 @@ mod tests {
         mgr.runtime.block_on(async {
             let sshd = FakeSshd::connect(Exec::Hangs, Some(0)).await;
             assert!(mgr.remote_bootstrap(&sshd.conn).await.is_none());
-            assert!(!sshd.conn.is_alive(), "a refused session retires the link");
+            assert!(
+                sshd.conn.is_saturated(),
+                "a refused session marks the link full"
+            );
             assert!(
                 !mgr.probes.lock().unwrap().contains_key(sshd.conn.key()),
                 "the next session, on a fresh link, must ask again"
@@ -834,7 +925,7 @@ mod tests {
     fn evict_connection_empties_the_slot_without_replacing_it() {
         let mgr = bare_manager();
         let key = ConnectionKey::from_spec(&base_spec());
-        let slot: ConnSlot = Arc::new(tokio::sync::Mutex::new(Weak::new()));
+        let slot: ConnSlot = ConnSlot::default();
         mgr.conns.lock().unwrap().insert(key.clone(), slot.clone());
 
         mgr.evict_connection(&key);
@@ -850,7 +941,7 @@ mod tests {
         assert!(
             held.try_lock()
                 .expect("nobody holds it here")
-                .upgrade()
+                .usable()
                 .is_none(),
             "what the slot pointed at is gone, so the next dial does not reuse it"
         );
@@ -863,7 +954,7 @@ mod tests {
     fn evict_connection_leaves_a_slot_that_is_being_dialled_on_alone() {
         let mgr = bare_manager();
         let key = ConnectionKey::from_spec(&base_spec());
-        let slot: ConnSlot = Arc::new(tokio::sync::Mutex::new(Weak::new()));
+        let slot: ConnSlot = ConnSlot::default();
         mgr.conns.lock().unwrap().insert(key.clone(), slot.clone());
 
         let _dialling = slot.try_lock().expect("nobody else holds it in this test");
@@ -892,10 +983,10 @@ mod tests {
         let mut other = base_spec();
         other.host = "build-box".into();
         for spec in [&base_spec(), &other] {
-            mgr.conns.lock().unwrap().insert(
-                ConnectionKey::from_spec(spec),
-                Arc::new(tokio::sync::Mutex::new(Weak::new())),
-            );
+            mgr.conns
+                .lock()
+                .unwrap()
+                .insert(ConnectionKey::from_spec(spec), ConnSlot::default());
         }
 
         let routes = mgr.routes();
@@ -925,7 +1016,7 @@ mod tests {
             forwards: SshForwardRegistry::default(),
             probes: Mutex::new(HashMap::new()),
         };
-        let slot: ConnSlot = Arc::new(tokio::sync::Mutex::new(Weak::new()));
+        let slot: ConnSlot = ConnSlot::default();
         mgr.conns
             .lock()
             .unwrap()
@@ -942,6 +1033,58 @@ mod tests {
             "a link whose slot is momentarily held is busy, not down — calling it \
              down makes `tty7 -m <machine>` refuse to route over a live connection"
         );
+    }
+
+    /// A workspace with more panes than the server's `MaxSessions` fills its
+    /// first connection. The pool has to hand the next pane the connection
+    /// with room rather than the full one — and must not drop the full one,
+    /// which is carrying every pane that fit.
+    #[tokio::test]
+    async fn a_full_connection_is_passed_over_for_one_with_room() {
+        let full = FakeSshd::connect(Exec::Hangs, Some(1)).await;
+        let roomy = FakeSshd::connect(Exec::Hangs, None).await;
+        let _pane = full
+            .conn
+            .open_session_channel()
+            .await
+            .expect("the one slot");
+        assert!(full.conn.open_session_channel().await.is_err());
+
+        let mut pool = ConnPool::default();
+        pool.add(&full.conn);
+        pool.add(&roomy.conn);
+
+        let picked = pool.usable().expect("the second connection has room");
+        assert!(Arc::ptr_eq(&picked, &roomy.conn));
+        assert_eq!(pool.live().count(), 2, "the full one stays in the pool");
+        assert!(pool.any_live(), "and the machine still reads as connected");
+    }
+
+    /// Only full connections: nothing to hand out, so the caller dials one
+    /// more — but the machine is not down.
+    #[tokio::test]
+    async fn a_pool_of_full_connections_asks_for_another_without_reading_as_down() {
+        let full = FakeSshd::connect(Exec::Hangs, Some(0)).await;
+        assert!(full.conn.open_session_channel().await.is_err());
+
+        let mut pool = ConnPool::default();
+        pool.add(&full.conn);
+        assert!(pool.usable().is_none());
+        assert!(pool.any_live());
+    }
+
+    #[tokio::test]
+    async fn a_dead_connection_leaves_the_pool() {
+        let gone = FakeSshd::connect(Exec::Hangs, None).await;
+        let kept = FakeSshd::connect(Exec::Hangs, None).await;
+        let mut pool = ConnPool::default();
+        pool.add(&gone.conn);
+        pool.add(&kept.conn);
+
+        gone.conn.mark_dead();
+        pool.prune();
+        assert_eq!(pool.conns.len(), 1);
+        assert!(Arc::ptr_eq(&pool.usable().unwrap(), &kept.conn));
     }
 
     #[test]
