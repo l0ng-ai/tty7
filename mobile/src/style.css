@@ -55,7 +55,14 @@
 
   /* The home indicator's gap; none while the keyboard is up, which covers
      it (main.ts sets `keyboard` on <html>). */
-  --safe-bottom: env(safe-area-inset-bottom);
+  --safe-bottom: var(--inset-bottom);
+
+  /* The system bars. main.ts sets these on Android, whose older WebViews
+     report the safe areas as 0 even edge to edge. */
+  --inset-top: env(safe-area-inset-top);
+  --inset-right: env(safe-area-inset-right);
+  --inset-bottom: env(safe-area-inset-bottom);
+  --inset-left: env(safe-area-inset-left);
 
   color-scheme: light;
   font: 17px/1.35 var(--ui);
@@ -196,9 +203,9 @@ code {
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
   gap: 8px;
-  height: calc(44px + env(safe-area-inset-top));
-  padding: env(safe-area-inset-top) max(16px, env(safe-area-inset-right)) 0
-    max(16px, env(safe-area-inset-left));
+  height: calc(44px + var(--inset-top));
+  padding: var(--inset-top) max(16px, var(--inset-right)) 0
+    max(16px, var(--inset-left));
   background: var(--canvas);
   box-shadow: 0 1px 0 transparent;
   transition:
@@ -326,8 +333,8 @@ code {
   overflow-y: auto;
   overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
-  padding: 0 max(0px, env(safe-area-inset-right)) calc(32px + var(--safe-bottom))
-    max(0px, env(safe-area-inset-left));
+  padding: 0 max(0px, var(--inset-right)) calc(32px + var(--safe-bottom))
+    max(0px, var(--inset-left));
 }
 
 .title-block {
@@ -351,7 +358,7 @@ code {
 }
 
 .screen.root .scroll {
-  padding-top: env(safe-area-inset-top);
+  padding-top: var(--inset-top);
 }
 
 .screen.root .title-block {
@@ -945,7 +952,7 @@ html.scanning #app {
   justify-items: center;
   align-items: center;
   gap: 24px;
-  padding: env(safe-area-inset-top) 24px calc(28px + var(--safe-bottom));
+  padding: var(--inset-top) 24px calc(28px + var(--safe-bottom));
   color: #fff;
 }
 
@@ -1054,8 +1061,8 @@ html.scanning #app {
 
 .dock {
   flex: none;
-  padding: 12px max(16px, env(safe-area-inset-right)) calc(12px + var(--safe-bottom))
-    max(16px, env(safe-area-inset-left));
+  padding: 12px max(16px, var(--inset-right)) calc(12px + var(--safe-bottom))
+    max(16px, var(--inset-left));
   background: var(--canvas);
 }
 
@@ -1198,9 +1205,9 @@ html.scanning #app {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: calc(56px + env(safe-area-inset-top));
-  padding: env(safe-area-inset-top) max(16px, env(safe-area-inset-right)) 0
-    max(16px, env(safe-area-inset-left));
+  height: calc(56px + var(--inset-top));
+  padding: var(--inset-top) max(16px, var(--inset-right)) 0
+    max(16px, var(--inset-left));
   background: var(--term);
   box-shadow: 0 0.5px 0 var(--hair);
   position: relative;
@@ -1405,8 +1412,8 @@ html.scanning #app {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px max(12px, env(safe-area-inset-right)) calc(10px + var(--safe-bottom))
-    max(12px, env(safe-area-inset-left));
+  padding: 10px max(12px, var(--inset-right)) calc(10px + var(--safe-bottom))
+    max(12px, var(--inset-left));
   background: var(--canvas);
   box-shadow: 0 -0.5px 0 var(--hair);
 }
@@ -1550,8 +1557,8 @@ html.scanning #app {
 .float-bar {
   position: absolute;
   z-index: 3;
-  left: max(16px, env(safe-area-inset-left));
-  right: max(16px, env(safe-area-inset-right));
+  left: max(16px, var(--inset-left));
+  right: max(16px, var(--inset-right));
   bottom: calc(12px + var(--safe-bottom));
   display: flex;
   align-items: center;
@@ -1667,7 +1674,7 @@ html.scanning #app {
   flex-direction: column;
   gap: 20px;
   width: 100%;
-  max-height: calc(100% - env(safe-area-inset-top) - 24px);
+  max-height: calc(100% - var(--inset-top) - 24px);
   padding: 10px 20px calc(20px + var(--safe-bottom));
   border-radius: 44px;
   background: var(--canvas);

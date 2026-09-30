@@ -9,7 +9,7 @@ import { authenticate, checkStatus } from "@tauri-apps/plugin-biometric";
 import type { ITheme } from "@xterm/xterm";
 import * as scanner from "@tauri-apps/plugin-barcode-scanner";
 
-import { getVersion } from "@tauri-apps/api/app";
+import { getVersion, onBackButtonPress } from "@tauri-apps/api/app";
 
 import * as api from "./api";
 import { MAX_UPLOAD } from "./api";
@@ -29,17 +29,21 @@ import logoUrl from "./assets/logo.svg?url";
 
 const app = document.getElementById("app")!;
 
+const android = /Android/.test(navigator.userAgent);
+
 // The keyboard. The WebView runs edge to edge and is never resized for it
 // (lib.rs `edge_to_edge`): the keyboard simply covers the bottom of the page.
 // What is left is the visual viewport, so the app is sized to that, and the
 // dock and the message box sit on top of the keyboard. Screens that lay out
-// by size hear it as a window resize.
+// by size hear it as a window resize. Android's WebView leaves the visual
+// viewport whole, so the keyboard's height comes from the app (MainActivity).
 {
   const view = window.visualViewport;
   let last = 0;
+  let androidKeyboard = 0;
   const fitView = () => {
     if (!view) return;
-    const height = Math.round(view.height);
+    const height = Math.round(android ? window.innerHeight - androidKeyboard : view.height);
     // iOS scrolls the page to show a focused field; the app does its own.
     if (window.scrollY) window.scrollTo(0, 0);
     if (height === last) return;
@@ -53,6 +57,26 @@ const app = document.getElementById("app")!;
   };
   view?.addEventListener("resize", fitView);
   view?.addEventListener("scroll", fitView);
+  window.addEventListener("android-keyboard", (e) => {
+    androidKeyboard = (e as CustomEvent<number>).detail;
+    fitView();
+  });
+}
+
+// Android's system bars. The WebView runs under them edge to edge, but older
+// WebViews report the safe areas as 0, so their size is asked of the system
+// (style.css `--inset-*`). Asked again on a resize: turning the phone moves them.
+if (android) {
+  const fitInsets = () =>
+    api
+      .insets()
+      .then((insets) => {
+        for (const [side, px] of Object.entries(insets))
+          document.documentElement.style.setProperty(`--inset-${side}`, `${px}px`);
+      })
+      .catch(() => {});
+  void fitInsets();
+  window.addEventListener("resize", () => void fitInsets());
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +341,24 @@ document.addEventListener(
 );
 document.addEventListener("touchcancel", () => (edgeSwipe = null), { capture: true, passive: true });
 
+// Android's Back button and gesture. Left to the WebView, they would leave the
+// app, since it has no history. Back closes what is open over the screen
+// first, then goes back a screen, and from the first one puts the app away.
+if (android)
+  void onBackButtonPress(() => {
+    const scanning = document.querySelector<HTMLElement>(".scanner-cancel");
+    const sheet = [...document.querySelectorAll<HTMLElement>("body > .scrim:not(.leaving)")].pop();
+    const menu = document.querySelector(".menu:not([hidden])");
+    if (document.querySelector(".lock-cover")) void api.toBackground();
+    else if (scanning) scanning.click();
+    // Tapping the scrim itself, outside the sheet, is what closes it.
+    else if (sheet) sheet.click();
+    // A menu closes on a press anywhere outside it.
+    else if (menu) document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    else if (onBack) onBack();
+    else void api.toBackground();
+  }).catch(() => {});
+
 interface ScreenParts {
   title: string;
   back?: { label: string; onclick: () => void };
@@ -362,20 +404,15 @@ function screen(parts: ScreenParts) {
     h("div", { class: "title-block" }, heading, parts.subtitle),
     ...parts.body,
   );
-  if (root) {
-    // The bar floats over a top-level screen, empty until the title has
-    // scrolled up under it.
-    scroll.addEventListener(
-      "scroll",
-      () => bar.classList.toggle("folded", scroll.scrollTop > large.offsetTop + large.offsetHeight - bar.offsetHeight),
-      { passive: true },
-    );
-  } else {
-    new IntersectionObserver(
-      ([entry]) => bar.classList.toggle("folded", !entry.isIntersecting),
-      { root: scroll, threshold: 0, rootMargin: "-8px 0px 0px 0px" },
-    ).observe(large);
-  }
+  // The title folds into the bar once it has scrolled up under it. On a
+  // top-level screen the bar floats over the list, empty until then. Worked
+  // out from the scroll, not observed: Android's WebView reported a title in
+  // plain view as out of sight when it was observed.
+  scroll.addEventListener(
+    "scroll",
+    () => bar.classList.toggle("folded", scroll.scrollTop > large.offsetTop + large.offsetHeight - bar.offsetHeight),
+    { passive: true },
+  );
   const view = h("div", { class: "screen" }, bar, scroll, parts.footer, parts.dock);
   if (parts.dock) view.classList.add("docked");
   if (root) view.classList.add("root");

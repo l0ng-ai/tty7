@@ -540,8 +540,22 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            hosts, pair, forget, watch, unwatch, refresh, tab_new, upload, diff, pane_open,
-            pane_input, pane_lease, pane_close, appearance
+            hosts,
+            pair,
+            forget,
+            watch,
+            unwatch,
+            refresh,
+            tab_new,
+            upload,
+            diff,
+            pane_open,
+            pane_input,
+            pane_lease,
+            pane_close,
+            appearance,
+            insets,
+            to_background
         ])
         .run(tauri::generate_context!())
         .expect("error while running tty7");
@@ -596,4 +610,145 @@ fn edge_to_edge(window: &tauri::WebviewWindow) {
             let _: () = msg_send![scroll, setContentInsetAdjustmentBehavior: NEVER];
         }
     });
+}
+
+/// The system bars and display cutout the page is drawn under, in CSS pixels.
+/// Android runs the WebView edge to edge, yet WebViews before 140 report
+/// `env(safe-area-inset-*)` as 0, so the page asks here. Zero elsewhere: iOS's
+/// WebView reports its own.
+#[derive(Serialize, Default)]
+struct Insets {
+    top: f64,
+    right: f64,
+    bottom: f64,
+    left: f64,
+}
+
+#[tauri::command]
+async fn insets(window: tauri::WebviewWindow) -> Insets {
+    #[cfg(target_os = "android")]
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = window.with_webview(move |webview| {
+            webview.jni_handle().exec(move |env, activity, _| {
+                let insets = android::insets(env, activity).unwrap_or_else(|_| {
+                    let _ = env.exception_clear();
+                    Insets::default()
+                });
+                let _ = tx.send(insets);
+            })
+        });
+        rx.await.unwrap_or_default()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = window;
+        Insets::default()
+    }
+}
+
+/// Back from the first screen: the app goes to the background, as Android's
+/// own apps do, rather than being closed.
+#[tauri::command]
+fn to_background(window: tauri::WebviewWindow) {
+    #[cfg(target_os = "android")]
+    let _ = window.with_webview(|webview| {
+        webview.jni_handle().exec(|env, activity, _| {
+            if env
+                .call_method(activity, "moveTaskToBack", "(Z)Z", &[true.into()])
+                .is_err()
+            {
+                let _ = env.exception_clear();
+            }
+        })
+    });
+    #[cfg(not(target_os = "android"))]
+    let _ = window;
+}
+
+#[cfg(target_os = "android")]
+mod android {
+    use jni::JNIEnv;
+    use jni::errors::Result;
+    use jni::objects::JObject;
+
+    use super::Insets;
+
+    pub fn insets(env: &mut JNIEnv, activity: &JObject) -> Result<Insets> {
+        let window = env
+            .call_method(activity, "getWindow", "()Landroid/view/Window;", &[])?
+            .l()?;
+        let decor = env
+            .call_method(&window, "getDecorView", "()Landroid/view/View;", &[])?
+            .l()?;
+        let insets = env
+            .call_method(
+                &decor,
+                "getRootWindowInsets",
+                "()Landroid/view/WindowInsets;",
+                &[],
+            )?
+            .l()?;
+        // Not attached yet: nothing to avoid.
+        if insets.is_null() {
+            return Ok(Insets::default());
+        }
+        let sdk = env
+            .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?
+            .i()?;
+        let [top, right, bottom, left] = if sdk >= 30 {
+            let types = "android/view/WindowInsets$Type";
+            let bars = env
+                .call_static_method(types, "systemBars", "()I", &[])?
+                .i()?;
+            let cutout = env
+                .call_static_method(types, "displayCutout", "()I", &[])?
+                .i()?;
+            let edges = env
+                .call_method(
+                    &insets,
+                    "getInsets",
+                    "(I)Landroid/graphics/Insets;",
+                    &[(bars | cutout).into()],
+                )?
+                .l()?;
+            let mut side = |name| env.get_field(&edges, name, "I").and_then(|v| v.i());
+            [side("top")?, side("right")?, side("bottom")?, side("left")?]
+        } else {
+            let mut side = |name| {
+                env.call_method(&insets, name, "()I", &[])
+                    .and_then(|v| v.i())
+            };
+            [
+                side("getSystemWindowInsetTop")?,
+                side("getSystemWindowInsetRight")?,
+                side("getSystemWindowInsetBottom")?,
+                side("getSystemWindowInsetLeft")?,
+            ]
+        };
+        let resources = env
+            .call_method(
+                activity,
+                "getResources",
+                "()Landroid/content/res/Resources;",
+                &[],
+            )?
+            .l()?;
+        let metrics = env
+            .call_method(
+                &resources,
+                "getDisplayMetrics",
+                "()Landroid/util/DisplayMetrics;",
+                &[],
+            )?
+            .l()?;
+        let density = f64::from(env.get_field(&metrics, "density", "F")?.f()?).max(1.0);
+        let css = |px: i32| f64::from(px) / density;
+        Ok(Insets {
+            top: css(top),
+            right: css(right),
+            bottom: css(bottom),
+            left: css(left),
+        })
+    }
 }

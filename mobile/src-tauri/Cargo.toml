@@ -38,6 +38,11 @@ tauri-plugin-barcode-scanner = "2"
 # Face ID / passcode before the app shows anything, when turned on.
 tauri-plugin-biometric = "2"
 
+# Reading the system bars' size and leaving for the background (`insets`,
+# `to_background`), which the Tauri API does not reach.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
 # Setting one WKWebView property the Tauri API does not reach (`edge_to_edge`).
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"

@@ -86,6 +86,19 @@ export const forget = (hostId: string) => invoke<void>("forget", { hostId });
 /** Sets the style of what the page does not draw: status bar, keyboard. */
 export const appearance = (style: "system" | "light" | "dark") => invoke<void>("appearance", { style });
 
+export interface Insets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+/** What the system bars cover, in CSS pixels. Android only: zero elsewhere. */
+export const insets = () => invoke<Insets>("insets");
+
+/** Sends the app to the background, as Back from the first screen does. */
+export const toBackground = () => invoke<void>("to_background");
+
 export function watch(hostId: string, onMsg: (msg: TreeMsg) => void) {
   const onEvent = new Channel<TreeMsg>();
   onEvent.onmessage = onMsg;

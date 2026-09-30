@@ -5809,6 +5809,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "iroh",
+ "jni 0.21.1",
  "objc2",
  "rustls",
  "serde",

@@ -83,14 +83,19 @@ last. `--build-number 7` picks it.
 
 ### Android
 
-Needs Android Studio's SDK and NDK, with `ANDROID_HOME` and `NDK_HOME` set.
+Needs the Android SDK and NDK, with `ANDROID_HOME` and `NDK_HOME` set, and a JDK 17 to 21
+as `JAVA_HOME`.
 
 ```sh
-rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
 cd mobile
-npm run tauri android init
-npm run tauri android dev
+npm run tauri android dev                                        # emulator or a connected phone
+npm run tauri android build -- --debug --apk --target aarch64   # an installable .apk
 ```
+
+`src-tauri/gen/android` is kept in the repo, unlike `gen/apple`: its `MainActivity` hands the
+keyboard's height to the page, which the WebView does not report edge to edge. Don't re-run
+`android init` over it.
 
 ### Without a phone
 
