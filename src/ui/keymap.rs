@@ -4,7 +4,7 @@ use crate::core::actions::*;
 use crate::core::config::{Config, KeybindingOverride};
 use crate::terminal::view::{
     AlternatePaste, ClearScrollback, CopyText, FindInTerminal, FindNext, FindPrevious,
-    InsertNewline, InsertNewlineFallback, PasteText,
+    InsertNewline, InsertNewlineFallback, PasteText, ToggleComposer,
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::palette;
@@ -594,6 +594,13 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
             per_platform("secondary-k", "secondary-shift-k"),
         ),
         ("InsertNewline", INSERT_NEWLINE_DEFAULT),
+        // ⌘I for "input". Nothing in the table holds it, and no shell or agent
+        // reads Cmd at all. Off macOS Ctrl+I is Tab, so the chord takes Shift
+        // like every other terminal command there.
+        (
+            "ToggleComposer",
+            per_platform("secondary-i", "secondary-shift-i"),
+        ),
         ("CopyText", per_platform("", "ctrl-shift-c")),
         ("PasteText", paste_text_default()),
         ("AlternatePaste", alternate_paste_default()),
@@ -993,6 +1000,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             t(L10nKey::CmdFindInTerminal).to_string(),
         ),
         "FindNext" => (CommandGroup::Terminal, t(L10nKey::CmdFindNext).to_string()),
+        "ToggleComposer" => (
+            CommandGroup::Terminal,
+            t(L10nKey::CmdToggleComposer).to_string(),
+        ),
         "FindPrevious" => (
             CommandGroup::Terminal,
             t(L10nKey::CmdFindPrevious).to_string(),
@@ -1665,7 +1676,7 @@ fn keystroke_is_valid(s: &str) -> bool {
 fn action_context(action: &str) -> Option<&'static str> {
     match action {
         "FindInTerminal" | "FindNext" | "FindPrevious" | "ClearScrollback" | "InsertNewline"
-        | "CopyText" | "PasteText" => Some("Terminal"),
+        | "CopyText" | "PasteText" | "ToggleComposer" => Some("Terminal"),
         // `alt_screen` is declared by the pane whenever a full-screen program
         // owns the grid, so this binding is simply absent there and Ctrl+V
         // carries on to the PTY as SYN (#677).
@@ -1779,6 +1790,7 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ToggleDiffViewMode" => KeyBinding::new(keystroke, ToggleDiffViewMode, None),
         "FindInTerminal" => KeyBinding::new(keystroke, FindInTerminal, action_context(action)),
         "FindNext" => KeyBinding::new(keystroke, FindNext, action_context(action)),
+        "ToggleComposer" => KeyBinding::new(keystroke, ToggleComposer, action_context(action)),
         "FindPrevious" => KeyBinding::new(keystroke, FindPrevious, action_context(action)),
         "ClearScrollback" => KeyBinding::new(keystroke, ClearScrollback, action_context(action)),
         "InsertNewline" => KeyBinding::new(keystroke, InsertNewline, action_context(action)),

@@ -6772,6 +6772,11 @@ impl Tty7App {
                     leaf.update(cx, |view, cx| view.open_search(window, cx));
                 }
             }
+            ToggleComposer => {
+                if let Some(leaf) = self.focused_leaf(window, cx) {
+                    leaf.update(cx, |view, cx| view.toggle_composer(window, cx));
+                }
+            }
             FindNext => {
                 if let Some(leaf) = self.focused_leaf(window, cx) {
                     leaf.update(cx, |view, cx| view.find_step(true, cx));

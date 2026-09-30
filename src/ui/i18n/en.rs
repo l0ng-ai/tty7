@@ -1854,6 +1854,14 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdGitToggleGraph => "Git: Toggle Commit History",
         L10nKey::CmdClearScrollback => "Clear Scrollback",
         L10nKey::CmdFindInTerminal => "Find in Terminal…",
+        L10nKey::CmdToggleComposer => "Toggle Message Composer",
+        L10nKey::ComposerPlaceholder => "Message {agent}…",
+        L10nKey::ComposerKeys => {
+            "Enter to send · Shift+Enter for a new line · Esc to go back to the terminal"
+        }
+        L10nKey::ComposerAgentAsking => {
+            "{agent} is asking something. Answer it in the terminal, then send."
+        }
         L10nKey::CmdFindNext => "Find Next",
         L10nKey::CmdFindPrevious => "Find Previous",
         L10nKey::CmdCopy => "Copy",

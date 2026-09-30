@@ -3,6 +3,7 @@ mod cmd_editor;
 mod color_scheme;
 mod command_cursor;
 mod completion;
+mod composer;
 pub mod element;
 pub mod fps;
 mod fuzzy;
