@@ -9,7 +9,7 @@
 //! - [`view`]: the modal — the tab row, the list, the theme picker.
 
 mod command;
-mod files;
+pub(crate) mod files;
 mod score;
 mod sources;
 mod view;

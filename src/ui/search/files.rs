@@ -365,7 +365,7 @@ pub(crate) struct FileIndexStore {
 
 /// Walks the project the panes in `cwds` are in, on the host that has it.
 /// Runs off the UI thread.
-fn walk(h: &dyn Host, cwds: &[PathBuf], home: Option<&Path>) -> FileList {
+pub(crate) fn walk(h: &dyn Host, cwds: &[PathBuf], home: Option<&Path>) -> FileList {
     let resolved = cwds
         .iter()
         .map(|cwd| {

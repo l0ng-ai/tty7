@@ -1028,7 +1028,7 @@ fn clipboard_paths(item: &ClipboardItem) -> Vec<std::path::PathBuf> {
 
 /// Paths as one line of shell words, trailing space included so whatever is
 /// typed next starts a word of its own.
-fn pasted_paths_text(paths: &[String], shell: Option<&str>) -> String {
+pub(super) fn pasted_paths_text(paths: &[String], shell: Option<&str>) -> String {
     let words: Vec<String> = paths.iter().map(|p| quote_for_shell(p, shell)).collect();
     format!("{} ", words.join(" "))
 }
@@ -2362,7 +2362,7 @@ impl TerminalView {
     /// answers from the platform — PowerShell on Windows, POSIX elsewhere.
     /// The one pane that guess is wrong for is a cmd.exe pane that has not
     /// reported in yet.
-    fn shell_program(&self) -> Option<String> {
+    pub(super) fn shell_program(&self) -> Option<String> {
         self.shell_spec.as_ref().map(|s| s.program.clone())
     }
 
@@ -3371,9 +3371,6 @@ impl TerminalView {
         if !self.accepts_input(cx) {
             return;
         }
-        let Some(text) = self.composer_takes_paste(text, cx) else {
-            return;
-        };
         // Same reason as `commit_text`: what is pasted lands on the prompt, so
         // the prompt is what has to be on screen. Neither branch below moved
         // the viewport, and a paste is a bigger change than a keystroke to
@@ -3636,29 +3633,42 @@ impl TerminalView {
         }
     }
 
-    fn drop_files(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
+    pub(super) fn drop_files(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
         self.paste_local_paths(paths.paths().to_vec(), cx);
     }
 
     /// A row dragged out of a remote Files tree names a file on that remote,
     /// not here: there is nothing to upload, and the path is pasted as the
     /// tree spells it.
-    fn drop_remote_path(
+    pub(super) fn drop_remote_path(
         &mut self,
         drag: &crate::ui::file_tree::RemotePathDrag,
         cx: &mut Context<Self>,
     ) {
-        let text = pasted_paths_text(
-            &[drag.path.to_string_lossy().into_owned()],
-            self.shell_program().as_deref(),
-        );
+        self.paste_paths(vec![drag.path.to_string_lossy().into_owned()], cx);
+    }
+
+    /// Paste paths already spelled the way the pane's host reads them: into
+    /// the composer as attachments when it has the keyboard, and as shell
+    /// words onto the line otherwise. Every route that turns files into
+    /// something to paste — a drop, a copied file, a screenshot, an upload to
+    /// a remote pane — ends here.
+    fn paste_paths(&mut self, spelled: Vec<String>, cx: &mut Context<Self>) {
+        let Some(spelled) = self.composer_takes_paths(spelled, cx) else {
+            return;
+        };
+        let text = pasted_paths_text(&spelled, self.shell_program().as_deref());
         self.paste(text, cx);
     }
 
     /// Paste files that live on this machine so the pane's program can open
     /// them: uploaded first when the pane runs on an SSH host, renamed for a
     /// WSL pane, and pasted as they are everywhere else.
-    fn paste_local_paths(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
+    pub(super) fn paste_local_paths(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         if paths.is_empty() {
             return;
         }
@@ -3679,8 +3689,7 @@ impl TerminalView {
             .iter()
             .map(|p| local_path_for_pane(&p.to_string_lossy(), shares_localhost))
             .collect();
-        let text = pasted_paths_text(&spelled, self.shell_program().as_deref());
-        self.paste(text, cx);
+        self.paste_paths(spelled, cx);
     }
 
     fn paste_clipboard_image(&mut self, img: &gpui::Image, cx: &mut Context<Self>) {
@@ -3788,8 +3797,7 @@ impl TerminalView {
                 })
                 .collect();
             let pasted = this.update_in(cx, |view, window, cx| {
-                let text = pasted_paths_text(&spelled, view.shell_program().as_deref());
-                view.paste(text, cx);
+                view.paste_paths(spelled, cx);
                 for u in &uploads {
                     if let Err(reason) = &u.started {
                         view.warn_paste_upload_failed(&u.local, &host, reason, window, cx);
@@ -3826,8 +3834,7 @@ impl TerminalView {
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
         let _ = this.update_in(cx, |view, window, cx| {
-            let text = pasted_paths_text(&spelled, view.shell_program().as_deref());
-            view.paste(text, cx);
+            view.paste_paths(spelled, cx);
             if let Some(first) = sources.first() {
                 view.warn_paste_upload_failed(first, host, reason, window, cx);
             }

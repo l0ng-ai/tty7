@@ -1,7 +1,7 @@
 //! The message composer: a real text box docked under a pane that is running a
 //! coding agent, for writing a prompt the way a chat box lets you — mouse
 //! selection, the platform's own editing keys, an IME with its candidates in
-//! place, pasting a screenshot — and handing it over whole.
+//! place, files attached as chips — and handing it over whole.
 //!
 //! The agent's own TUI stays exactly where it was. The box docks *below* the
 //! grid rather than floating over it, so the grid gives up the rows the box
@@ -10,27 +10,34 @@
 //!
 //! Sending is typing, not an API. What leaves the box is written to the pane's
 //! pty as the text and then Enter, as two writes — see [`submit_plan`] for why
-//! each agent needs to be spoken to slightly differently.
+//! each agent needs to be spoken to slightly differently. That is also why the
+//! box carries no model picker, no mode label and no context meter: tty7 can
+//! only say what the agent has told it, and none of those are among the
+//! things it tells. The agent's own `/model` is one `/` away, and Shift+Tab is
+//! passed through to cycle its permission mode where it can be seen changing.
 
 use std::collections::{HashMap, VecDeque};
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::term::TermMode;
 use gpui::{
-    Context, Entity, Focusable as _, MouseButton, MouseDownEvent, Subscription, Window, div,
-    prelude::*, px,
+    Context, Entity, ExternalPaths, Focusable as _, MouseButton, MouseDownEvent, SharedString,
+    Subscription, Window, div, prelude::*, px,
 };
-use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, h_flex};
+use gpui_component::input::{self, Input, InputEvent, InputState, RopeExt as _};
+use gpui_component::tooltip::Tooltip;
+use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex};
 
-use super::view::{TerminalView, types_cleanly};
+use super::view::{TerminalView, pasted_paths_text, types_cleanly};
 use crate::core::cli_agent::{AgentStatus, CLIAgent};
-use crate::ui::host_ops::HostId;
+use crate::ui::host_ops::{HostId, HostOps};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::search::files::{FileIndex, FileList, rank, walk};
 
-/// How tall the box may grow, in lines of text, before it scrolls instead.
-/// Every row it grows is a row the agent loses, and a resize the agent has to
-/// redraw for, so this stays well short of a page.
+/// How tall the text may grow, in lines, before it scrolls instead. Every row
+/// the box grows is a row the agent loses, and a resize it has to redraw for.
 const MAX_ROWS: usize = 8;
 
 /// The pause between two writes that must not arrive as one read.
@@ -44,6 +51,15 @@ const SETTLE: Duration = Duration::from_millis(50);
 
 /// Copilot's input treats a CR that follows a paste too closely as part of it.
 const SETTLE_AFTER_PASTE_SLOW: Duration = Duration::from_millis(300);
+
+/// Rows the `/` and `@` menu shows at once.
+const MENU_ROWS: usize = 8;
+
+/// A file walk this recent answers the next `@` without walking again.
+const FILES_FRESH_FOR: Duration = Duration::from_secs(30);
+
+/// Shift+Tab as a terminal sends it — what cycles an agent's permission mode.
+const BACK_TAB: &[u8] = b"\x1b[Z";
 
 /// One write of a submission, and how long to wait before making it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +134,203 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
     steps
 }
 
+/// The message that goes out: what was written, then the attachments as the
+/// words a drop onto the terminal would have typed — which is how an agent is
+/// pointed at a file or shown an image.
+pub(super) fn compose_message(text: &str, attached: &[String], shell: Option<&str>) -> String {
+    let text = text.trim_end();
+    if attached.is_empty() {
+        return text.to_string();
+    }
+    let words = pasted_paths_text(attached, shell);
+    let words = words.trim_end();
+    match text.is_empty() {
+        true => words.to_string(),
+        false => format!("{text} {words}"),
+    }
+}
+
+/// A `/` or `@` being typed at the caret: which one, where it starts, and what
+/// follows it so far.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Trigger {
+    pub sigil: char,
+    /// Byte offset of the sigil.
+    pub start: usize,
+    pub query: String,
+}
+
+/// The word the caret is at the end of, when it opens with `/` or `@`.
+///
+/// A `/` counts only as the first thing in the message: that is the only
+/// place an agent reads a slash command, and anywhere else it is a path or a
+/// fraction. An `@` counts at the start of any word.
+pub(super) fn trigger_at(text: &str, cursor: usize) -> Option<Trigger> {
+    let before = text.get(..cursor)?;
+    let start = before
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let word = &before[start..];
+    let sigil = word.chars().next()?;
+    let valid = match sigil {
+        '/' => before[..start].trim().is_empty(),
+        '@' => true,
+        _ => false,
+    };
+    valid.then(|| Trigger {
+        sigil,
+        start,
+        query: word[1..].to_string(),
+    })
+}
+
+/// One row of the `/` or `@` menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MenuItem {
+    pub label: String,
+    pub detail: String,
+    /// What replaces the trigger word when the row is picked.
+    pub insert: String,
+    pub is_file: bool,
+}
+
+/// The agent's own commands, the ones it ships with. Descriptions stay in the
+/// agent's language — they name what its UI will do, in the words it uses.
+fn builtin_commands(agent: CLIAgent) -> &'static [(&'static str, &'static str)] {
+    match agent {
+        CLIAgent::Claude => &[
+            ("/compact", "Summarize and free up context"),
+            ("/clear", "Start a fresh conversation"),
+            ("/review", "Review the current changes"),
+            ("/model", "Switch model"),
+            ("/init", "Create a CLAUDE.md for this repo"),
+            ("/context", "Show context usage"),
+            ("/cost", "Show token usage"),
+            ("/resume", "Resume a previous conversation"),
+            ("/memory", "Edit memory files"),
+            ("/permissions", "Manage tool permissions"),
+            ("/mcp", "Manage MCP servers"),
+            ("/agents", "Manage subagents"),
+            ("/config", "Open settings"),
+            ("/help", "Show help"),
+        ],
+        CLIAgent::Codex => &[
+            ("/model", "Choose model and reasoning effort"),
+            ("/approvals", "Choose what Codex may do without asking"),
+            ("/review", "Review the current changes"),
+            ("/new", "Start a new chat"),
+            ("/compact", "Summarize to free up context"),
+            ("/init", "Create an AGENTS.md for this repo"),
+            ("/diff", "Show the git diff"),
+            ("/mention", "Mention a file"),
+            ("/status", "Show session configuration and usage"),
+            ("/mcp", "List MCP tools"),
+        ],
+        CLIAgent::Gemini => &[
+            ("/compress", "Summarize to free up context"),
+            ("/clear", "Clear the screen and history"),
+            ("/memory", "Manage memory"),
+            ("/chat", "Save or resume a conversation"),
+            ("/tools", "List available tools"),
+            ("/mcp", "List MCP servers"),
+            ("/stats", "Show session statistics"),
+            ("/help", "Show help"),
+        ],
+        _ => &[],
+    }
+}
+
+/// Custom slash commands Claude Code reads from `.claude/commands` — the
+/// project's under `cwd`, the user's under `home`. A file's name is its
+/// command; subdirectories only namespace the description.
+fn custom_commands(cwd: Option<&Path>, home: Option<&Path>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let roots = [
+        (
+            cwd.map(|c| c.join(".claude/commands")),
+            L10nKey::ComposerCmdProject,
+        ),
+        (
+            home.map(|h| h.join(".claude/commands")),
+            L10nKey::ComposerCmdUser,
+        ),
+    ];
+    for (dir, scope) in roots {
+        let Some(dir) = dir else { continue };
+        let mut stack = vec![dir];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "md")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                {
+                    let name = format!("/{stem}");
+                    if !out.iter().any(|(n, _)| *n == name) {
+                        out.push((name, t(scope).to_string()));
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The `/` menu for `query`: names starting with it first, in the order the
+/// agent lists them, then names that merely contain it.
+pub(super) fn command_items(commands: &[(String, String)], query: &str) -> Vec<MenuItem> {
+    let q = query.to_lowercase();
+    let starts = commands
+        .iter()
+        .filter(|(n, _)| n[1..].to_lowercase().starts_with(&q));
+    let contains = commands.iter().filter(|(n, _)| {
+        let n = n[1..].to_lowercase();
+        !n.starts_with(&q) && n.contains(&q)
+    });
+    starts
+        .chain(contains)
+        .take(MENU_ROWS)
+        .map(|(name, detail)| MenuItem {
+            label: name.clone(),
+            detail: detail.clone(),
+            insert: name.clone(),
+            is_file: false,
+        })
+        .collect()
+}
+
+/// The `@` menu for `query`. The mention is spelled relative to `cwd` — which
+/// is what the agent resolves it against — and in full for a file outside it.
+fn file_items(index: &FileIndex, query: &str, cwd: Option<&Path>) -> Vec<MenuItem> {
+    let spell = |path: &Path| -> String {
+        cwd.and_then(|c| path.strip_prefix(c).ok())
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let item = |f: &crate::ui::search::files::IndexedFile| MenuItem {
+        label: f.name().to_string(),
+        detail: f.dir().to_string(),
+        insert: format!("@{}", spell(&f.path)),
+        is_file: true,
+    };
+    match query.is_empty() {
+        // The walk is breadth-first, so its head is the top of the project.
+        true => index.files.iter().take(MENU_ROWS).map(item).collect(),
+        false => rank(index, query, MENU_ROWS)
+            .into_iter()
+            .map(|(_, f)| item(f))
+            .collect(),
+    }
+}
+
 /// What a pane's composer holds that outlives the view drawing it.
 ///
 /// A view is rebuilt over the same daemon pane whenever its workspace is
@@ -131,7 +344,15 @@ impl gpui::Global for ComposerMemory {}
 #[derive(Default, Clone)]
 struct Remembered {
     draft: String,
+    attached: Vec<String>,
     open: bool,
+}
+
+enum Files {
+    Unwalked,
+    Walking,
+    Ready(Arc<FileIndex>, Instant),
+    Failed(Instant),
 }
 
 pub(super) struct Composer {
@@ -140,18 +361,24 @@ pub(super) struct Composer {
     /// an agent is in the foreground, so a pane that goes back to its shell
     /// hides it and the next agent started there gets it back.
     open: bool,
+    /// Files to send with the message, spelled the way the pane's host reads
+    /// them — uploaded already, for a remote pane.
+    attached: Vec<String>,
     /// Writes waiting their turn. Submissions queue rather than interleave, so
     /// a second message sent inside the first one's settle time cannot land
     /// its text between the first one's text and its Enter.
     queue: VecDeque<Step>,
     pumping: bool,
-    /// Text for the box from paths that cannot reach it directly — a paste
-    /// resolved on a background task, a file upload — taken in at the next
-    /// draw, which is the first place with a window to edit it in.
-    pending: Vec<String>,
     /// Whose name the placeholder carries. A pane can run one agent after
-    /// another, and "Message Codex…" over Claude Code would be a lie.
+    /// another, and "Message Codex" over Claude Code would be a lie.
     named: Option<CLIAgent>,
+    /// The row of the `/` or `@` menu the keyboard is on.
+    highlighted: usize,
+    /// The text as it stood when Esc closed the menu. The menu stays shut
+    /// until the text moves on from there.
+    dismissed: Option<String>,
+    files: Files,
+    commands: Option<(Vec<(String, String)>, Instant)>,
     _subs: Vec<Subscription>,
 }
 
@@ -166,11 +393,12 @@ impl TerminalView {
         };
         let entry = Remembered {
             draft: c.input.read(cx).value().to_string(),
+            attached: c.attached.clone(),
             open: c.open,
         };
         let key = self.composer_key();
         let memory = cx.default_global::<ComposerMemory>();
-        match entry.draft.is_empty() && !entry.open {
+        match entry.draft.is_empty() && entry.attached.is_empty() && !entry.open {
             true => memory.0.remove(&key),
             false => memory.0.insert(key, entry),
         };
@@ -196,10 +424,14 @@ impl TerminalView {
         self.composer = Some(Composer {
             input,
             open: remembered.open,
+            attached: remembered.attached,
             queue: VecDeque::new(),
             pumping: false,
-            pending: Vec::new(),
             named: None,
+            highlighted: 0,
+            dismissed: None,
+            files: Files::Unwalked,
+            commands: None,
             _subs: subs,
         });
     }
@@ -207,6 +439,18 @@ impl TerminalView {
     /// Whether the box is on screen: wanted, and an agent to talk to.
     pub(super) fn composer_shown(&self) -> bool {
         self.composer.as_ref().is_some_and(|c| c.open) && self.agent().is_some()
+    }
+
+    fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(c) = self.composer.as_ref() else {
+            return;
+        };
+        let focus = c.input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        // Said here as well as by the input's own Focus event, which only
+        // comes round on the next frame: what is about to land — a drop, a
+        // picked file — has to find the box already holding the keyboard.
+        self.composer_focused = true;
     }
 
     /// Open the box and put the caret in it; from inside it, close it; with
@@ -222,15 +466,15 @@ impl TerminalView {
         let Some(c) = self.composer.as_mut() else {
             return;
         };
-        let focus = c.input.read(cx).focus_handle(cx);
-        match (c.open, focus.is_focused(window)) {
+        let focused = c.input.read(cx).focus_handle(cx).is_focused(window);
+        match (c.open, focused) {
             (true, true) => {
                 c.open = false;
                 window.focus(&self.focus_handle, cx);
             }
             _ => {
                 c.open = true;
-                window.focus(&focus, cx);
+                self.focus_composer(window, cx);
             }
         }
         self.remember_composer(cx);
@@ -246,28 +490,63 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Text arriving for the box by way of the terminal's paste path — files
-    /// dropped on it, a pasted screenshot saved to disk, an upload to a remote
-    /// pane — so every route the terminal already knows lands in the box
-    /// instead when the box has the keyboard.
-    ///
-    /// Hands `text` back when the box is not the one taking it.
-    pub(super) fn composer_takes_paste(
+    /// Files arriving by way of the terminal's paste path — dropped on the
+    /// box, a copied file or a screenshot pasted into it, an upload to a
+    /// remote pane landing — become attachments while the box has the
+    /// keyboard. Hands them back otherwise, for the terminal to paste.
+    pub(super) fn composer_takes_paths(
         &mut self,
-        text: String,
+        spelled: Vec<String>,
         cx: &mut Context<Self>,
-    ) -> Option<String> {
+    ) -> Option<Vec<String>> {
         if !self.composer_focused || !self.composer_shown() {
-            return Some(text);
+            return Some(spelled);
         }
-        self.composer.as_mut()?.pending.push(text);
+        let c = self.composer.as_mut()?;
+        for path in spelled {
+            if !c.attached.contains(&path) {
+                c.attached.push(path);
+            }
+        }
+        self.remember_composer(cx);
         cx.notify();
         None
     }
 
+    fn detach(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(c) = self.composer.as_mut()
+            && index < c.attached.len()
+        {
+            c.attached.remove(index);
+        }
+        self.remember_composer(cx);
+        cx.notify();
+    }
+
+    /// The attach button: pick files on this computer, which then go the way
+    /// dropped files do — uploaded first for a remote pane.
+    fn pick_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_composer(window, cx);
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                let _ = this.update_in(cx, |view, window, cx| {
+                    view.focus_composer(window, cx);
+                    view.paste_local_paths(paths, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
     /// Per-frame upkeep: restore a box the pane had open before this view
-    /// existed, take in pending text, and give the keyboard back to the
-    /// terminal when the agent the box was for has gone.
+    /// existed, keep the placeholder naming the agent in front, and give the
+    /// keyboard back to the terminal when the agent the box was for has gone.
     pub(super) fn sync_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.composer.is_none()
             && self.agent().is_some()
@@ -286,18 +565,14 @@ impl TerminalView {
             && c.named != Some(agent)
         {
             c.named = Some(agent);
-            let placeholder = t_fmt(
-                L10nKey::ComposerPlaceholder,
-                &[("agent", agent.display_name())],
-            );
+            let key = match builtin_commands(agent).is_empty() {
+                true => L10nKey::ComposerPlaceholderFiles,
+                false => L10nKey::ComposerPlaceholder,
+            };
+            let placeholder = t_fmt(key, &[("agent", agent.display_name())]);
             c.input.update(cx, |state, cx| {
                 state.set_placeholder(placeholder, window, cx)
             });
-        }
-        if !c.pending.is_empty() {
-            let text = std::mem::take(&mut c.pending).concat();
-            c.input
-                .update(cx, |state, cx| state.insert(text, window, cx));
         }
         if !shown && self.composer_focused {
             self.composer_focused = false;
@@ -313,7 +588,13 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            InputEvent::Change => self.remember_composer(cx),
+            InputEvent::Change => {
+                if let Some(c) = self.composer.as_mut() {
+                    c.highlighted = 0;
+                }
+                self.remember_composer(cx);
+                self.warm_menu_sources(cx);
+            }
             InputEvent::PressEnter { shift: false, .. } => self.submit_composer(window, cx),
             InputEvent::PressEnter { .. } => {}
             InputEvent::Focus => {
@@ -327,6 +608,160 @@ impl TerminalView {
         }
     }
 
+    fn composer_trigger(&self, cx: &gpui::App) -> Option<Trigger> {
+        let c = self.composer.as_ref()?;
+        let state = c.input.read(cx);
+        let text = state.value();
+        if c.dismissed.as_deref() == Some(text.as_ref()) {
+            return None;
+        }
+        trigger_at(&text, state.cursor())
+    }
+
+    /// Start what the menu about to open needs: the file walk for `@`, the
+    /// custom command list for `/`. Both are kept a while, so typing through
+    /// a query does not walk the project once per keystroke.
+    fn warm_menu_sources(&mut self, cx: &mut Context<Self>) {
+        let Some(trigger) = self.composer_trigger(cx) else {
+            return;
+        };
+        let host_id = self.host_id();
+        let local = host_id.is_local();
+        let cwd = self.files_cwd();
+        let agent = self.agent();
+        match trigger.sigil {
+            '/' => {
+                let Some(c) = self.composer.as_mut() else {
+                    return;
+                };
+                if c.commands
+                    .as_ref()
+                    .is_some_and(|(_, at)| at.elapsed() < FILES_FRESH_FOR)
+                {
+                    return;
+                }
+                let custom = match (local, agent) {
+                    (true, Some(CLIAgent::Claude)) => {
+                        let home = std::env::var_os("HOME").map(PathBuf::from);
+                        custom_commands(cwd.as_deref(), home.as_deref())
+                    }
+                    _ => Vec::new(),
+                };
+                c.commands = Some((custom, Instant::now()));
+            }
+            '@' => {
+                let Some(c) = self.composer.as_mut() else {
+                    return;
+                };
+                let stale = match &c.files {
+                    Files::Unwalked => true,
+                    Files::Walking => false,
+                    Files::Ready(_, at) | Files::Failed(at) => at.elapsed() > FILES_FRESH_FOR,
+                };
+                let Some(cwd) = cwd.filter(|_| stale) else {
+                    return;
+                };
+                let Some(host) = crate::ui::host_registry::HostRegistry::lookup(cx, host_id) else {
+                    return;
+                };
+                if !matches!(c.files, Files::Ready(..)) {
+                    c.files = Files::Walking;
+                }
+                let home = local
+                    .then(|| std::env::var_os("HOME").map(PathBuf::from))
+                    .flatten();
+                HostOps::run(
+                    host,
+                    cx,
+                    move |h| walk(h, &[cwd], home.as_deref()),
+                    |view: &mut TerminalView, list, cx| {
+                        let Some(c) = view.composer.as_mut() else {
+                            return;
+                        };
+                        c.files = match list {
+                            FileList::Ready(index) => Files::Ready(index, Instant::now()),
+                            _ => Files::Failed(Instant::now()),
+                        };
+                        cx.notify();
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// The `/` or `@` menu as it stands at the caret, if one is open.
+    fn composer_menu(&self, cx: &gpui::App) -> Option<(Trigger, Vec<MenuItem>)> {
+        let trigger = self.composer_trigger(cx)?;
+        let c = self.composer.as_ref()?;
+        let items = match trigger.sigil {
+            '/' => {
+                let agent = self.agent()?;
+                let mut all: Vec<(String, String)> = builtin_commands(agent)
+                    .iter()
+                    .map(|(n, d)| (n.to_string(), d.to_string()))
+                    .collect();
+                if let Some((custom, _)) = &c.commands {
+                    for (name, detail) in custom {
+                        if !all.iter().any(|(n, _)| n == name) {
+                            all.push((name.clone(), detail.clone()));
+                        }
+                    }
+                }
+                command_items(&all, &trigger.query)
+            }
+            _ => match &c.files {
+                Files::Ready(index, _) => {
+                    file_items(index, &trigger.query, self.files_cwd().as_deref())
+                }
+                _ => Vec::new(),
+            },
+        };
+        (!items.is_empty()).then_some((trigger, items))
+    }
+
+    /// Replace the word being typed with the picked row, and a space after it
+    /// so the next word starts clean.
+    fn pick_menu_item(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((trigger, items)) = self.composer_menu(cx) else {
+            return;
+        };
+        let Some(item) = items.get(index) else {
+            return;
+        };
+        let Some(c) = self.composer.as_ref() else {
+            return;
+        };
+        let input = c.input.clone();
+        input.update(cx, |state, cx| {
+            let text = state.value().to_string();
+            let cursor = state.cursor().min(text.len());
+            let inserted = format!("{} ", item.insert);
+            let next = format!("{}{inserted}{}", &text[..trigger.start], &text[cursor..]);
+            let caret = trigger.start + inserted.len();
+            state.set_value(next, window, cx);
+            let position = state.text().offset_to_position(caret);
+            state.set_cursor_position(position, window, cx);
+        });
+    }
+
+    fn step_menu(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
+        let Some((_, items)) = self.composer_menu(cx) else {
+            return false;
+        };
+        let Some(c) = self.composer.as_mut() else {
+            return false;
+        };
+        let n = items.len();
+        let at = c.highlighted.min(n - 1);
+        c.highlighted = match forward {
+            true => (at + 1) % n,
+            false => (at + n - 1) % n,
+        };
+        cx.notify();
+        true
+    }
+
     /// The agent is asking a question only its TUI can put — a permission
     /// prompt, a choice. Whatever the box sent would be taken as the answer,
     /// so Enter holds the message until the question is gone.
@@ -335,30 +770,38 @@ impl TerminalView {
             .is_some_and(|s| s.status == AgentStatus::Waiting)
     }
 
+    fn composer_can_send(&self, cx: &gpui::App) -> bool {
+        self.composer
+            .as_ref()
+            .is_some_and(|c| !c.attached.is_empty() || !c.input.read(cx).value().trim().is_empty())
+            && !self.agent_is_asking()
+    }
+
     pub(super) fn submit_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(agent) = self.agent() else {
             return;
         };
-        if self.agent_is_asking() {
+        if !self.composer_can_send(cx) {
             return;
         }
-        let Some(c) = self.composer.as_ref() else {
+        let shell = self.shell_program();
+        let Some(c) = self.composer.as_mut() else {
             return;
         };
-        let text = c.input.read(cx).value().to_string();
+        let message = compose_message(&c.input.read(cx).value(), &c.attached, shell.as_deref());
         let bracketed = self
             .terminal
             .term
             .lock()
             .mode()
             .contains(TermMode::BRACKETED_PASTE);
-        let steps = submit_plan(agent, &text, bracketed);
+        let steps = submit_plan(agent, &message, bracketed);
+        c.attached.clear();
+        c.dismissed = None;
+        c.queue.extend(steps);
         c.input
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.remember_composer(cx);
-        if let Some(c) = self.composer.as_mut() {
-            c.queue.extend(steps);
-        }
         self.pump_composer(agent, cx);
     }
 
@@ -424,28 +867,186 @@ impl TerminalView {
         let theme = cx.theme();
         let focused = c.input.read(cx).focus_handle(cx).is_focused(window);
         let asking = self.agent_is_asking();
-        let border = match (asking, focused) {
+        let can_send = self.composer_can_send(cx);
+        let ink = theme.foreground;
+        let muted = theme.muted_foreground;
+        let ring = match (asking, focused) {
             (true, _) => theme.warning,
-            (false, true) => theme.ring,
-            (false, false) => theme.border,
+            (false, true) => ink.opacity(0.22),
+            (false, false) => ink.opacity(0.12),
         };
-        let hint = match asking {
-            true => t_fmt(
-                L10nKey::ComposerAgentAsking,
-                &[("agent", agent.display_name())],
-            ),
-            false => t(L10nKey::ComposerKeys).to_string(),
-        };
-        let hint_color = match asking {
-            true => theme.warning,
-            false => theme.muted_foreground,
-        };
+        let menu = self.composer_menu(cx);
+
+        let chips = (!c.attached.is_empty()).then(|| {
+            h_flex()
+                .flex_wrap()
+                .gap(px(6.))
+                .px(px(10.))
+                .pt(px(10.))
+                .children(c.attached.iter().enumerate().map(|(i, path)| {
+                    let name = path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
+                    h_flex()
+                        .id(("composer-chip", i))
+                        .h(px(28.))
+                        .max_w(px(260.))
+                        .gap(px(7.))
+                        .pl(px(8.))
+                        .pr(px(4.))
+                        .rounded(px(7.))
+                        .bg(ink.opacity(0.05))
+                        .text_size(px(12.))
+                        .tooltip({
+                            let path: SharedString = path.clone().into();
+                            move |window, cx| Tooltip::new(path.clone()).build(window, cx)
+                        })
+                        .child(Icon::new(IconName::File).size(px(12.)).text_color(muted))
+                        .child(div().min_w_0().truncate().child(name))
+                        .child(
+                            div()
+                                .id(("composer-chip-remove", i))
+                                .size(px(18.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(4.))
+                                .hover(|s| s.bg(ink.opacity(0.07)))
+                                .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                                    window.prevent_default();
+                                    cx.stop_propagation();
+                                })
+                                .on_click(cx.listener(move |this, _, _w, cx| this.detach(i, cx)))
+                                .child(Icon::new(IconName::Close).size(px(9.)).text_color(muted)),
+                        )
+                }))
+        });
+
+        let attach = div()
+            .id("composer-attach")
+            .size(px(28.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(7.))
+            .hover(|s| s.bg(ink.opacity(0.05)))
+            .tooltip(|window, cx| Tooltip::new(t(L10nKey::ComposerAttach)).build(window, cx))
+            .on_click(cx.listener(|this, _, window, cx| this.pick_attachments(window, cx)))
+            .child(Icon::new(IconName::Plus).size(px(12.)).text_color(muted));
+
+        let notice = asking.then(|| {
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(12.))
+                .text_color(theme.warning)
+                .child(t_fmt(
+                    L10nKey::ComposerAgentAsking,
+                    &[("agent", agent.display_name())],
+                ))
+        });
+
+        let send = div()
+            .id("composer-send")
+            .flex_none()
+            .size(px(28.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(match can_send {
+                true => theme.primary,
+                false => ink.opacity(0.07),
+            })
+            .tooltip(|window, cx| Tooltip::new(t(L10nKey::ComposerSendTip)).build(window, cx))
+            .on_click(cx.listener(|this, _, window, cx| this.submit_composer(window, cx)))
+            .child(
+                Icon::new(IconName::ArrowUp)
+                    .size(px(12.))
+                    .text_color(match can_send {
+                        true => theme.primary_foreground,
+                        false => muted.opacity(0.7),
+                    }),
+            );
+
+        let popup = menu.as_ref().map(|(trigger, items)| {
+            let highlighted = c.highlighted.min(items.len() - 1);
+            let title = match trigger.sigil {
+                '/' => t(L10nKey::ComposerMenuCommands),
+                _ => t(L10nKey::ComposerMenuFiles),
+            };
+            div()
+                .absolute()
+                .left_0()
+                .bottom_full()
+                .mb(px(6.))
+                .w(px(380.))
+                .max_w_full()
+                .p(px(5.))
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .rounded(px(10.))
+                .bg(theme.popover)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_md()
+                .text_size(px(13.))
+                .child(
+                    div()
+                        .h(px(24.))
+                        .px(px(9.))
+                        .flex()
+                        .items_center()
+                        .text_size(px(11.5))
+                        .text_color(muted)
+                        .child(title),
+                )
+                .children(items.iter().enumerate().map(|(i, item)| {
+                    h_flex()
+                        .id(("composer-menu", i))
+                        .h(px(30.))
+                        .px(px(9.))
+                        .gap(px(10.))
+                        .rounded(px(6.))
+                        .when(i == highlighted, |s| s.bg(ink.opacity(0.06)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                this.pick_menu_item(i, window, cx);
+                            }),
+                        )
+                        .when(item.is_file, |s| {
+                            s.child(Icon::new(IconName::File).size(px(12.)).text_color(muted))
+                        })
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_family(self.font.family.clone())
+                                .text_size(px(12.))
+                                .child(item.label.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_right()
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .child(item.detail.clone()),
+                        )
+                }))
+        });
+
+        let menu_open = menu.is_some();
         Some(
             div()
                 .id("composer")
+                .relative()
                 .flex_none()
                 .w_full()
-                .pt(px(6.))
+                .pt(px(8.))
                 // The terminal surface this sits in focuses the grid on any
                 // click and opens its own context menu on a right one. Neither
                 // is right for a click on the box.
@@ -455,11 +1056,8 @@ impl TerminalView {
                         window.prevent_default();
                         // A click on the frame around the text, not only on
                         // the text, is a click on the box.
-                        if let Some(c) = this.composer.as_ref()
-                            && !this.composer_focused
-                        {
-                            let focus = c.input.read(cx).focus_handle(cx);
-                            window.focus(&focus, cx);
+                        if !this.composer_focused {
+                            this.focus_composer(window, cx);
                         }
                     }),
                 )
@@ -471,39 +1069,118 @@ impl TerminalView {
                     }),
                 )
                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                .capture_action(
-                    cx.listener(|this, _: &gpui_component::input::Paste, _w, cx| {
-                        // Text pastes are the box's own. A copied file or a
-                        // screenshot has no text to paste, and the terminal
-                        // already knows how to turn those into a path.
-                        let Some(item) = cx.read_from_clipboard() else {
-                            return;
-                        };
-                        if item.text().is_some() && !super::view::clipboard_has_paths(&item) {
+                // Files dropped on the box are attachments, not words for the
+                // terminal's line; the surface's own drop handler would focus
+                // the grid first.
+                .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                    cx.stop_propagation();
+                    this.focus_composer(window, cx);
+                    this.drop_files(paths, cx);
+                }))
+                .on_drop(cx.listener(
+                    |this, drag: &crate::ui::file_tree::RemotePathDrag, window, cx| {
+                        cx.stop_propagation();
+                        this.focus_composer(window, cx);
+                        this.drop_remote_path(drag, cx);
+                    },
+                ))
+                .capture_action(cx.listener(|this, _: &input::Paste, _w, cx| {
+                    // Text pastes are the box's own. A copied file or a
+                    // screenshot has no text to paste, and the terminal
+                    // already knows how to turn those into a path.
+                    let Some(item) = cx.read_from_clipboard() else {
+                        return;
+                    };
+                    if item.text().is_some() && !super::view::clipboard_has_paths(&item) {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    this.paste_from_clipboard(cx);
+                }))
+                // Shift+Tab is the agent's: it cycles the permission mode, and
+                // the mode shows where it changes — in the TUI above.
+                .capture_action(cx.listener(|this, _: &input::OutdentInline, _w, cx| {
+                    cx.stop_propagation();
+                    this.send_to_pty(BACK_TAB, cx);
+                }))
+                .capture_action(cx.listener(|this, _: &input::Backspace, _w, cx| {
+                    let Some(c) = this.composer.as_ref() else {
+                        return;
+                    };
+                    let state = c.input.read(cx);
+                    if state.cursor() != 0 || !state.selected_range().is_empty() {
+                        return;
+                    }
+                    if let Some(last) = c.attached.len().checked_sub(1) {
+                        cx.stop_propagation();
+                        this.detach(last, cx);
+                    }
+                }))
+                .when(menu_open, |el| {
+                    el.capture_action(cx.listener(|this, _: &input::MoveUp, _w, cx| {
+                        if this.step_menu(false, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|this, _: &input::MoveDown, _w, cx| {
+                        if this.step_menu(true, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|this, action: &input::Enter, window, cx| {
+                        if action.shift {
                             return;
                         }
                         cx.stop_propagation();
-                        this.paste_from_clipboard(cx);
-                    }),
-                )
+                        let at = this.composer.as_ref().map_or(0, |c| c.highlighted);
+                        this.pick_menu_item(at, window, cx);
+                    }))
+                    .capture_action(cx.listener(|this, _: &input::IndentInline, window, cx| {
+                        cx.stop_propagation();
+                        let at = this.composer.as_ref().map_or(0, |c| c.highlighted);
+                        this.pick_menu_item(at, window, cx);
+                    }))
+                    .capture_action(cx.listener(
+                        |this, _: &input::Escape, _w, cx| {
+                            cx.stop_propagation();
+                            if let Some(c) = this.composer.as_mut() {
+                                c.dismissed = Some(c.input.read(cx).value().to_string());
+                            }
+                            cx.notify();
+                        },
+                    ))
+                })
+                .children(popup)
                 .child(
                     div()
                         .flex()
                         .flex_col()
-                        .gap_1()
-                        .px_3()
-                        .py_2()
-                        .rounded_lg()
+                        .rounded(px(12.))
+                        .bg(ink.opacity(0.035))
                         .border_1()
-                        .border_color(border)
-                        .bg(theme.popover)
-                        .child(Input::new(&c.input).appearance(false))
+                        .border_color(ring)
+                        .drag_over::<ExternalPaths>(move |s, _, _, _| {
+                            s.border_color(ink.opacity(0.45))
+                        })
+                        .children(chips)
+                        .child(
+                            div()
+                                .px(px(14.))
+                                .pt(px(12.))
+                                .pb(px(4.))
+                                .text_size(px(13.5))
+                                .line_height(px(20.))
+                                .child(Input::new(&c.input).appearance(false)),
+                        )
                         .child(
                             h_flex()
-                                .justify_end()
-                                .text_xs()
-                                .text_color(hint_color)
-                                .child(hint),
+                                .h(px(40.))
+                                .px(px(6.))
+                                .gap(px(2.))
+                                .child(attach)
+                                .children(notice)
+                                .child(div().flex_1())
+                                .child(send),
                         ),
                 )
                 .into_any_element(),
@@ -556,18 +1233,6 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_box_sends_enter_alone() {
-        let steps = submit_plan(CLIAgent::Claude, "  \n", true);
-        assert_eq!(
-            steps,
-            [Step {
-                delay: Duration::ZERO,
-                bytes: b"\r".to_vec()
-            }]
-        );
-    }
-
-    #[test]
     fn escapes_cannot_close_the_paste_early() {
         let steps = submit_plan(CLIAgent::Claude, "a\n\x1b[201~b", true);
         assert_eq!(bytes(&steps)[0], b"\x1b[200~a\n[201~b\x1b[201~");
@@ -579,5 +1244,113 @@ mod tests {
         assert_eq!(steps[1].delay, SETTLE_AFTER_PASTE_SLOW);
         let steps = submit_plan(CLIAgent::Copilot, "ab", true);
         assert_eq!(steps[1].delay, SETTLE);
+    }
+
+    #[test]
+    fn attachments_follow_the_text_as_shell_words() {
+        let attached = vec!["/tmp/a b.png".to_string(), "/src/x.rs".to_string()];
+        assert_eq!(
+            compose_message("look at these\n", &attached, Some("zsh")),
+            "look at these '/tmp/a b.png' /src/x.rs"
+        );
+        assert_eq!(
+            compose_message("", &attached[1..], Some("zsh")),
+            "/src/x.rs"
+        );
+        assert_eq!(
+            compose_message("just text  ", &[], Some("zsh")),
+            "just text"
+        );
+    }
+
+    #[test]
+    fn a_slash_opens_the_menu_only_at_the_start_of_the_message() {
+        let t = |text: &str| trigger_at(text, text.len());
+        assert_eq!(
+            t("/comp"),
+            Some(Trigger {
+                sigil: '/',
+                start: 0,
+                query: "comp".into()
+            })
+        );
+        assert_eq!(t("  /").map(|t| t.start), Some(2));
+        assert_eq!(t("see src/main.rs"), None);
+        assert_eq!(t("fix /tmp"), None);
+    }
+
+    #[test]
+    fn an_at_opens_the_menu_at_the_start_of_any_word() {
+        let text = "look at @src/ma and";
+        let cursor = "look at @src/ma".len();
+        assert_eq!(
+            trigger_at(text, cursor),
+            Some(Trigger {
+                sigil: '@',
+                start: 8,
+                query: "src/ma".into()
+            })
+        );
+        assert_eq!(trigger_at("mail me@host", 12), None);
+        assert_eq!(
+            trigger_at("done @x ", 8),
+            None,
+            "a finished word is not a query"
+        );
+    }
+
+    #[test]
+    fn commands_that_start_with_the_query_come_before_ones_that_contain_it() {
+        let all: Vec<(String, String)> = [("/compact", ""), ("/clear", ""), ("/memory", "")]
+            .iter()
+            .map(|(n, d)| (n.to_string(), d.to_string()))
+            .collect();
+        let labels = |q| {
+            command_items(&all, q)
+                .into_iter()
+                .map(|i| i.label)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(labels("c"), ["/compact", "/clear"]);
+        assert_eq!(labels("m"), ["/memory", "/compact"]);
+        assert_eq!(labels(""), ["/compact", "/clear", "/memory"]);
+    }
+
+    #[test]
+    fn a_file_mention_is_spelled_from_the_panes_directory() {
+        let index = crate::ui::search::files::build_index(
+            &[PathBuf::from("/repo")],
+            vec![
+                PathBuf::from("/repo/app/src/main.rs"),
+                PathBuf::from("/repo/README.md"),
+            ],
+            false,
+        );
+        let items = file_items(&index, "main", Some(Path::new("/repo/app")));
+        assert_eq!(items[0].insert, "@src/main.rs");
+        let items = file_items(&index, "readme", Some(Path::new("/repo/app")));
+        assert_eq!(
+            items[0].insert, "@/repo/README.md",
+            "outside the cwd: in full"
+        );
+    }
+
+    #[test]
+    fn claude_custom_commands_come_from_the_project_and_the_user() {
+        let dir = std::env::temp_dir().join(format!("tty7-cmds-{}", std::process::id()));
+        let project = dir.join("proj");
+        let home = dir.join("home");
+        std::fs::create_dir_all(project.join(".claude/commands/team")).unwrap();
+        std::fs::create_dir_all(home.join(".claude/commands")).unwrap();
+        std::fs::write(project.join(".claude/commands/ship.md"), "").unwrap();
+        std::fs::write(project.join(".claude/commands/team/triage.md"), "").unwrap();
+        std::fs::write(home.join(".claude/commands/standup.md"), "").unwrap();
+        std::fs::write(home.join(".claude/commands/notes.txt"), "").unwrap();
+        let names: Vec<String> = custom_commands(Some(&project), Some(&home))
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(names, ["/ship", "/standup", "/triage"]);
     }
 }

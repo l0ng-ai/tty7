@@ -1855,10 +1855,14 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdClearScrollback => "Clear Scrollback",
         L10nKey::CmdFindInTerminal => "Find in Terminal…",
         L10nKey::CmdToggleComposer => "Toggle Message Composer",
-        L10nKey::ComposerPlaceholder => "Message {agent}…",
-        L10nKey::ComposerKeys => {
-            "Enter to send · Shift+Enter for a new line · Esc to go back to the terminal"
-        }
+        L10nKey::ComposerPlaceholder => "Message {agent}   ·   @ files   / commands",
+        L10nKey::ComposerPlaceholderFiles => "Message {agent}   ·   @ files",
+        L10nKey::ComposerSendTip => "Send (Enter)  ·  Shift+Enter for a new line",
+        L10nKey::ComposerAttach => "Attach files or images",
+        L10nKey::ComposerMenuCommands => "Commands",
+        L10nKey::ComposerMenuFiles => "Files",
+        L10nKey::ComposerCmdProject => "Project command",
+        L10nKey::ComposerCmdUser => "User command",
         L10nKey::ComposerAgentAsking => {
             "{agent} is asking something. Answer it in the terminal, then send."
         }

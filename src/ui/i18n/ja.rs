@@ -1908,8 +1908,14 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdClearScrollback => "スクロールバックをクリア",
         L10nKey::CmdFindInTerminal => "ターミナル内を検索…",
         L10nKey::CmdToggleComposer => "メッセージ入力欄の切り替え",
-        L10nKey::ComposerPlaceholder => "{agent} にメッセージ…",
-        L10nKey::ComposerKeys => "Enter で送信 · Shift+Enter で改行 · Esc でターミナルに戻る",
+        L10nKey::ComposerPlaceholder => "{agent} にメッセージ   ·   @ ファイル   / コマンド",
+        L10nKey::ComposerPlaceholderFiles => "{agent} にメッセージ   ·   @ ファイル",
+        L10nKey::ComposerSendTip => "送信（Enter）  ·  Shift+Enter で改行",
+        L10nKey::ComposerAttach => "ファイルや画像を添付",
+        L10nKey::ComposerMenuCommands => "コマンド",
+        L10nKey::ComposerMenuFiles => "ファイル",
+        L10nKey::ComposerCmdProject => "プロジェクトのコマンド",
+        L10nKey::ComposerCmdUser => "ユーザーのコマンド",
         L10nKey::ComposerAgentAsking => {
             "{agent} が質問しています。ターミナルで答えてから送信してください。"
         }
