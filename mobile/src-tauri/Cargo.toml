@@ -46,3 +46,8 @@ jni = "0.21"
 # Setting one WKWebView property the Tauri API does not reach (`edge_to_edge`).
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"
+
+# The Android library ships as built: stripping takes it from 30 MB to 20, and
+# the APK from 32 to 23. iOS strips at export either way.
+[profile.release]
+strip = true

@@ -97,6 +97,23 @@ npm run tauri android build -- --debug --apk --target aarch64   # an installable
 keyboard's height to the page, which the WebView does not report edge to edge. Don't re-run
 `android init` over it.
 
+To release an APK, push a `mobile-v<x.y.z>` tag, higher than the last. `.github/workflows/mobile.yml`
+builds it at that version, signs it with the release key and attaches it to a draft
+release, which is never marked latest, so the desktop updater doesn't see it. People
+download the APK on the phone and open it. A later one installs over it only if it's
+signed with the same key and its version is higher.
+
+The release key is in the `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD` and
+`ANDROID_KEY_ALIAS` secrets, with a copy kept outside GitHub. A local release build signs
+with it when `src-tauri/gen/android/keystore.properties` (ignored by git) names it:
+
+```properties
+storeFile=/path/to/tty7-release.jks
+storePassword=…
+keyAlias=tty7
+keyPassword=…
+```
+
 ### Without a phone
 
 `crates/tty7-mobile-client/examples/probe.rs` is a phone in a shell. It pairs, prints the

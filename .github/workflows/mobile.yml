@@ -1,0 +1,140 @@
+name: Mobile
+
+# The phone app's Android build: a signed APK people install by hand. A
+# `mobile-v<x.y.z>` tag builds it at that version and attaches it to a draft
+# release of the same name; a manual run builds it at the version in
+# tauri.conf.json and keeps it as a workflow artifact only.
+#
+# The mobile app is versioned apart from the desktop's `v*` tags. Android
+# installs one build over another only when its versionCode is higher, and
+# Tauri derives it from the version (major * 1000000 + minor * 1000 + patch),
+# so each tag must be higher than the last.
+
+on:
+  push:
+    tags: ["mobile-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # The release key's certificate. A build signed with any other key could not
+  # be installed over the ones people already have, so it is refused here.
+  CERT_SHA256: c54b8b466e7ac45bac2c9d79e44ec3e6ab8fef1d00818adafa11bb747163d75f
+  NDK_VERSION: 28.2.13676358
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/mobile-v* ]]; then
+            VERSION="${GITHUB_REF_NAME#mobile-v}"
+            if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::tag must be mobile-v<major>.<minor>.<patch>, got $GITHUB_REF_NAME"
+              exit 1
+            fi
+          else
+            VERSION=$(jq -r .version mobile/src-tauri/tauri.conf.json)
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mobile/src-tauri
+
+      # The runner has an SDK and some NDK; the NDK is pinned so a runner image
+      # update cannot change the toolchain under a release.
+      - name: Android NDK
+        run: |
+          set -euo pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "::error::the ANDROID_KEYSTORE_* secrets are not set"
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          # Read by gen/android/app/build.gradle.kts; git ignores it.
+          {
+            echo "storeFile=$RUNNER_TEMP/release.jks"
+            echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
+            echo "keyAlias=$ANDROID_KEY_ALIAS"
+            echo "keyPassword=$ANDROID_KEYSTORE_PASSWORD"
+          } > mobile/src-tauri/gen/android/keystore.properties
+
+      # arm64 only: every phone of the last several years, with one copy of
+      # the native library instead of four.
+      - name: Build
+        working-directory: mobile
+        run: |
+          set -euo pipefail
+          npm ci
+          npx tauri android build --apk --target aarch64 --config "{\"version\":\"$VERSION\"}"
+
+      - name: Check and name the APK
+        run: |
+          set -euo pipefail
+          APK=mobile/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner
+          CERT=$("$APKSIGNER" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          if [ "$CERT" != "$CERT_SHA256" ]; then
+            echo "::error::APK is signed with $CERT, not the release key"
+            exit 1
+          fi
+          mkdir dist
+          cp "$APK" "dist/tty7-$VERSION-android-arm64.apk"
+          (cd dist && sha256sum *.apk > SHA256SUMS)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tty7-android-${{ env.VERSION }}
+          path: dist/*
+
+      # A draft, published by hand as the desktop's are. Never marked latest:
+      # the desktop updater reads /releases/latest and would take this for a
+      # desktop release.
+      - name: Draft release
+        if: startsWith(github.ref, 'refs/tags/mobile-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          EXISTING=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName -q '.[].tagName')
+          if grep -Fxq "$GITHUB_REF_NAME" <<<"$EXISTING"; then
+            echo "release $GITHUB_REF_NAME already exists; reusing it"
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --draft --latest=false --title "tty7 mobile $VERSION" \
+              --notes "Android: download the APK below on the phone and open it. Android asks once to allow installing apps from your browser or file manager. A later APK installs over this one and keeps your paired machines."
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber --repo "$GITHUB_REPOSITORY"
