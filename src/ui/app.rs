@@ -10344,11 +10344,19 @@ fn session_to_pane(
                     }
                 }
             }
+            // Past here the leaf comes back as a shell on the window's own
+            // machine: reattached, or spawned fresh in place of one that is
+            // gone. A native SSH leaf's cwd is a path on the far host, so a
+            // fresh shell standing in for one must not start in it here.
+            let local_cwd = match ssh_spec {
+                Some(_) => None,
+                None => cwd.clone(),
+            };
             let view = match new_terminal(
                 workspace.cloned(),
                 Some(owner),
                 font_size,
-                cwd.clone(),
+                local_cwd,
                 restore,
                 shell.clone(),
                 window,
