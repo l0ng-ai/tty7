@@ -233,7 +233,12 @@ fn refuses_every_session(e: &russh::Error) -> bool {
 }
 
 pub struct SshConnection {
-    handle: tokio::sync::Mutex<russh::client::Handle<super::handler::ClientHandler>>,
+    /// Not behind a lock. Every request on it takes `&self` and waits on a
+    /// reply of its own, and a lock held across that wait — a full network
+    /// round trip — made every pane on the connection open its channel after
+    /// the one before it: a workspace of twenty tabs on a 300ms link took ten
+    /// seconds to come back, one tab at a time.
+    handle: russh::client::Handle<super::handler::ClientHandler>,
     #[allow(dead_code)]
     key: ConnectionKey,
     remote_forwards: RemoteForwardTable,
@@ -254,7 +259,7 @@ impl SshConnection {
         remote_forwards: RemoteForwardTable,
     ) -> Arc<Self> {
         Arc::new(Self {
-            handle: tokio::sync::Mutex::new(handle),
+            handle,
             key,
             remote_forwards,
             alive: AtomicBool::new(true),
@@ -273,10 +278,7 @@ impl SshConnection {
         if !self.alive.load(Ordering::SeqCst) {
             return false;
         }
-        match self.handle.try_lock() {
-            Ok(handle) => !handle.is_closed(),
-            Err(_) => true,
-        }
+        !self.handle.is_closed()
     }
 
     pub(super) fn mark_dead(&self) {
@@ -308,7 +310,7 @@ impl SshConnection {
     }
 
     pub async fn open_session_channel(&self) -> Result<Channel<Msg>, russh::Error> {
-        let opened = self.handle.lock().await.channel_open_session().await;
+        let opened = self.handle.channel_open_session().await;
         match &opened {
             Ok(_) => self.set_saturated(false),
             Err(e) if refuses_every_session(e) => self.set_saturated(true),
@@ -329,8 +331,6 @@ impl SshConnection {
         port: u16,
     ) -> Result<Channel<Msg>, russh::Error> {
         self.handle
-            .lock()
-            .await
             .channel_open_direct_tcpip(
                 host.to_string(),
                 u32::from(port),
@@ -345,8 +345,6 @@ impl SshConnection {
         socket_path: &str,
     ) -> Result<Channel<Msg>, russh::Error> {
         self.handle
-            .lock()
-            .await
             .channel_open_direct_streamlocal(socket_path.to_string())
             .await
     }
@@ -423,8 +421,6 @@ impl SshConnection {
         }
         let requested = self
             .handle
-            .lock()
-            .await
             .tcpip_forward(bind_host.to_string(), u32::from(bind_port))
             .await;
         match requested {
@@ -450,8 +446,6 @@ impl SshConnection {
         self.remote_forwards.unregister(bind_host, bind_port);
         let _ = self
             .handle
-            .lock()
-            .await
             .cancel_tcpip_forward(bind_host.to_string(), u32::from(bind_port))
             .await;
     }
