@@ -576,7 +576,7 @@ impl Tty7App {
                 .h_full()
                 .child(backing)
                 .bg(crate::ui::theme::workspace_surface_color(cx))
-                .border_l_1()
+                .border_l(crate::ui::theme::hairline(window))
                 .border_color(cx.theme().sidebar_border)
                 .children(cfg!(target_os = "macos").then(|| {
                     let row = h_flex()

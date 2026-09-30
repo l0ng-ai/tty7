@@ -9678,7 +9678,7 @@ impl Render for Tty7App {
                                         .right_0()
                                         .w(px(panel_px))
                                         .bg(crate::ui::theme::workspace_surface_color(cx))
-                                        .border_l_1()
+                                        .border_l(crate::ui::theme::hairline(window))
                                         .border_color(cx.theme().sidebar_border),
                                 )
                             })
@@ -9691,7 +9691,7 @@ impl Render for Tty7App {
                                         .right(px(panel_px))
                                         .w(px(document_px))
                                         .bg(crate::ui::theme::workspace_surface_color(cx))
-                                        .border_l_1()
+                                        .border_l(crate::ui::theme::hairline(window))
                                         .border_color(cx.theme().sidebar_border),
                                 )
                             })

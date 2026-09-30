@@ -1921,7 +1921,7 @@ impl Tty7App {
             .w(px(width))
             .h_full()
             .bg(crate::ui::theme::rail_surface_color(cx))
-            .border_r_1()
+            .border_r(crate::ui::theme::hairline(window))
             .border_color(cx.theme().sidebar_border)
             .child(backing)
             .child(
