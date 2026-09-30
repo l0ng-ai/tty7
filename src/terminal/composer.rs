@@ -223,7 +223,8 @@ fn is_rule(row: &str, width: usize) -> bool {
 /// - **Claude Code** draws its input between two full-width rules with `❯`
 ///   on the first line, and its status rows under the lower rule.
 /// - **Codex** starts its input line with `›`, on a padded block.
-/// - **Gemini** frames it in a rounded box whose first line is `> `.
+/// - **Gemini** shades it as a block whose first line is `> ` — see
+///   [`gemini_input_top`] for its other drawings.
 ///
 /// `None` is the agent showing something else there — which is exactly when
 /// the box must get out of the way.
@@ -265,20 +266,74 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
             Some(InputArea { top, mode: None })
         }
         CLIAgent::Gemini => {
-            let bottom = (floor..rows.len()).rev().find(|&i| starts(i, '╰'))?;
-            let top = (floor..bottom).rev().find(|&i| starts(i, '╭'))?;
-            (top + 1..bottom)
-                .any(|i| {
-                    rows[i]
-                        .trim_start()
-                        .trim_start_matches('│')
-                        .trim_start()
-                        .starts_with('>')
-                })
-                .then_some(InputArea { top, mode: None })
+            gemini_input_top(rows, floor, width).map(|top| InputArea { top, mode: None })
         }
         _ => None,
     }
+}
+
+/// How many rows Gemini's footer — the workspace, sandbox and model, under
+/// its labels — takes below the input at most.
+const GEMINI_FOOTER_MAX_ROWS: usize = 4;
+
+/// Where Gemini's input starts, in whichever of its drawings is on screen.
+///
+/// - **A shaded block**, the usual one: a row of `▄` and a row of `▀`, as wide
+///   as the screen, round the prompt line. A message already sent is drawn the
+///   same way in the transcript, so the block counts only with nothing under
+///   it but the footer — a permission prompt or a list in the input's place
+///   puts itself below the last message instead.
+/// - **A rule over the prompt line**, where the block has no colour to shade
+///   with (`NO_COLOR`, or its background colour switched off).
+/// - **A rounded frame**, `╭ … ╰` with `> ` inside, in versions before the
+///   block.
+///
+/// The prompt line opens with `>`, or with `!` in shell mode, `*` in YOLO
+/// mode and `(r:)` while searching the history.
+fn gemini_input_top(rows: &[String], floor: usize, width: usize) -> Option<usize> {
+    let prompt = |row: &str| {
+        let t = row.trim_start();
+        ['>', '!', '*'].iter().any(|p| t.starts_with(*p)) || t.starts_with("(r:)")
+    };
+    let band = |row: &str, c: char| {
+        let t = row.trim();
+        t.chars().count() >= width * 3 / 5 && t.chars().all(|x| x == c)
+    };
+
+    // Shading is on for the whole screen or off for all of it, so a band
+    // anywhere says which drawing to look for.
+    if let Some(lower) = (floor..rows.len()).rev().find(|&i| band(&rows[i], '▀')) {
+        let footer = rows[lower + 1..]
+            .iter()
+            .filter(|r| !r.trim().is_empty())
+            .count();
+        let upper = (floor..lower).rev().find(|&i| band(&rows[i], '▄'))?;
+        return (footer <= GEMINI_FOOTER_MAX_ROWS && upper + 1 < lower && prompt(&rows[upper + 1]))
+            .then_some(upper);
+    }
+
+    if let Some(line) = (floor + 1..rows.len())
+        .rev()
+        .find(|&i| prompt(&rows[i]) && is_rule(&rows[i - 1], width))
+    {
+        return Some(line - 1);
+    }
+
+    let bottom = (floor..rows.len())
+        .rev()
+        .find(|&i| rows[i].trim_start().starts_with('╰'))?;
+    let top = (floor..bottom)
+        .rev()
+        .find(|&i| rows[i].trim_start().starts_with('╭'))?;
+    (top + 1..bottom)
+        .any(|i| {
+            rows[i]
+                .trim_start()
+                .trim_start_matches('│')
+                .trim_start()
+                .starts_with('>')
+        })
+        .then_some(top)
 }
 
 /// How far above Codex's selected row the rest of its list can start: the
@@ -2231,6 +2286,85 @@ mod tests {
         assert_eq!(
             input_area(CLIAgent::Gemini, &rows, 40),
             Some(InputArea { top: 1, mode: None })
+        );
+    }
+
+    const LOWER_HALVES: &str = "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄";
+    const UPPER_HALVES: &str = "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀";
+
+    #[test]
+    fn geminis_input_is_its_shaded_block_over_the_footer() {
+        let rows = screen(&[
+            LOWER_HALVES,
+            " > say pong",
+            UPPER_HALVES,
+            "",
+            "✦ pong",
+            "",
+            "? for shortcuts",
+            RULE,
+            " Shift+Tab to accept edits",
+            LOWER_HALVES,
+            " >   Type your message or @path/to/file",
+            UPPER_HALVES,
+            " workspace (/directory)   sandbox   /model",
+            " ~/proj                   no sandbox gpt-5",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::Gemini, &rows, 40),
+            Some(InputArea { top: 9, mode: None })
+        );
+        // Shell mode and YOLO mode change only the prompt's mark.
+        for mark in [" ! ls", " * fix it"] {
+            let mut rows = rows.clone();
+            rows[10] = mark.to_string();
+            assert_eq!(
+                input_area(CLIAgent::Gemini, &rows, 40).map(|a| a.top),
+                Some(9)
+            );
+        }
+        // Without a footer, too.
+        assert_eq!(
+            input_area(CLIAgent::Gemini, &rows[..12], 40).map(|a| a.top),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn a_sent_gemini_message_is_not_its_input() {
+        // The input gives its place to a permission prompt; the last message
+        // sent, shaded like the input, is still on screen above it.
+        let rows = screen(&[
+            LOWER_HALVES,
+            " > make hello.txt",
+            UPPER_HALVES,
+            "",
+            "╭──────────────────────────────────────╮",
+            "│ ?  WriteFile Writing to hello.txt     │",
+            "│ Allow this change?                    │",
+            "│ ● 1. Allow once                       │",
+            "│   2. Allow for this session           │",
+            "│   3. No, suggest changes (esc)        │",
+            "╰──────────────────────────────────────╯",
+        ]);
+        assert_eq!(input_area(CLIAgent::Gemini, &rows, 40), None);
+    }
+
+    #[test]
+    fn geminis_unshaded_input_is_the_prompt_under_its_rule() {
+        let rows = screen(&[
+            "✦ pong",
+            "",
+            "? for shortcuts",
+            RULE,
+            " Shift+Tab to accept edits",
+            RULE,
+            " >   Type your message or @path/to/file",
+            " workspace (/directory)   sandbox   /model",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::Gemini, &rows, 40),
+            Some(InputArea { top: 5, mode: None })
         );
     }
 
