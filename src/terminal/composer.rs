@@ -581,15 +581,27 @@ pub(super) fn command_items(commands: &[(String, String)], query: &str) -> Vec<M
         .collect()
 }
 
-/// `path` as an `@` mention `agent` reads back as that one file.
+/// `path` as an `@` mention `agent` reads back as that one file — spelled the
+/// way the agent's own `@` list would have put it in.
 ///
-/// Gemini CLI ends a mention at the first unescaped space, and reads it back
-/// through its own `escapePath`: a backslash before each character a shell
-/// would take, or — on Windows — the whole path in double quotes. The others
-/// take the path as it is.
+/// - **Claude Code** ends a bare mention at the first whitespace; a path with
+///   a space in it goes in double quotes, `@"my notes.md"`.
+/// - **Codex** hands its mentions to the model as they are, and its list puts
+///   in the path alone — without the `@`, in double quotes when it has a
+///   space in it.
+/// - **Gemini CLI** ends a mention at the first unescaped space, and reads it
+///   back through its own `escapePath`: a backslash before each character a
+///   shell would take, or — on Windows — the whole path in double quotes.
+///
+/// The others take the path as it is.
 pub(super) fn mention(agent: Option<CLIAgent>, path: &str, shell: Option<&str>) -> String {
-    if agent != Some(CLIAgent::Gemini) {
-        return format!("@{path}");
+    let spaced = path.chars().any(char::is_whitespace);
+    match agent {
+        Some(CLIAgent::Gemini) => {}
+        Some(CLIAgent::Claude) if spaced => return format!("@\"{path}\""),
+        Some(CLIAgent::Codex) if spaced && !path.contains('"') => return format!("\"{path}\""),
+        Some(CLIAgent::Codex) => return path.to_string(),
+        _ => return format!("@{path}"),
     }
     let spelled = match quoting_for(shell) {
         Quoting::Posix => {
@@ -2297,10 +2309,29 @@ mod tests {
             mention(Some(CLIAgent::Gemini), r"C:\src\a.rs", Some("pwsh")),
             r"@C:\src\a.rs"
         );
+    }
+
+    #[test]
+    fn a_mention_with_a_space_is_spelled_the_way_each_agent_reads_it() {
+        let zsh = Some("zsh");
         assert_eq!(
-            mention(Some(CLIAgent::Claude), "my notes.md", Some("zsh")),
-            "@my notes.md"
+            mention(Some(CLIAgent::Claude), "my notes.md", zsh),
+            r#"@"my notes.md""#
         );
+        assert_eq!(
+            mention(Some(CLIAgent::Claude), "src/a.rs", zsh),
+            "@src/a.rs"
+        );
+        assert_eq!(
+            mention(Some(CLIAgent::Codex), "my notes.md", zsh),
+            r#""my notes.md""#
+        );
+        assert_eq!(mention(Some(CLIAgent::Codex), "src/a.rs", zsh), "src/a.rs");
+        assert_eq!(
+            mention(Some(CLIAgent::Gemini), "my notes.md", zsh),
+            r"@my\ notes.md"
+        );
+        assert_eq!(mention(None, "my notes.md", zsh), "@my notes.md");
     }
 
     fn screen(lines: &[&str]) -> Vec<String> {
