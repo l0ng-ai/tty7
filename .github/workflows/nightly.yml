@@ -561,7 +561,25 @@ jobs:
           git push -f origin "$GITHUB_SHA:refs/tags/nightly"
 
           TITLE="Nightly $VERSION"
+
+          # The same download table as a stable release's, built from what
+          # tonight actually produced: a file that did not build is left out
+          # rather than linked dead.
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly"
+          link() { if [ -e "dist/$2" ]; then printf '[%s](%s/%s)' "$1" "$URL" "$2"; fi; }
+          cell() { local out="" x; for x in "$@"; do [ -z "$x" ] || out="${out:+$out · }$x"; done; printf '%s' "$out"; }
+          V="$VERSION"
+          ARM64="| **ARM64** (Apple silicon) | $(cell "$(link DMG "tty7-$V-macos-arm64.dmg")" "$(link ZIP "tty7-$V-macos-arm64.zip")") | | | $(cell "$(link Linux tty7-server-linux-aarch64-musl)" "$(link macOS tty7-server-macos-aarch64)" "$(link Windows tty7-server-windows-aarch64.exe)") |"
+          X64="| **x86-64** (Intel / AMD) | $(cell "$(link DMG "tty7-$V-macos-x86_64.dmg")" "$(link ZIP "tty7-$V-macos-x86_64.zip")") | $(cell "$(link Installer "tty7-$V-windows-x86_64-setup.exe")" "$(link "Portable ZIP" "tty7-$V-windows-x86_64.zip")") | $(cell "$(link AppImage "tty7-$V-linux-x86_64.AppImage")" "$(link tar.gz "tty7-$V-linux-x86_64.tar.gz")") | $(cell "$(link Linux tty7-server-linux-x86_64-musl)" "$(link macOS tty7-server-macos-x86_64)" "$(link Windows tty7-server-windows-x86_64.exe)") |"
+
           NOTES="Automated nightly build of \`main\` @ ${GITHUB_SHA::7} ($(date -u +%F)). Rolling prerelease — assets are replaced every night; for the latest stable release see https://github.com/${GITHUB_REPOSITORY}/releases/latest.
+
+          | Architecture | macOS | Windows | Linux | tty7-server (remote host) |
+          |---|---|---|---|---|
+          $ARM64
+          $X64
+
+          tty7 installs \`tty7-server\` on a remote host by itself — download it by hand only for an offline box. SHA-256 for every file: [checksums.txt]($URL/checksums.txt)
 
           $(cat .github/mobile-install.md)"
 
