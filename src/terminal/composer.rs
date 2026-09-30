@@ -130,9 +130,14 @@ pub(super) struct Step {
 /// - **Codex is always pasted.** It watches for bursts of fast keystrokes to
 ///   spot pastes from terminals that do not bracket them, and the Enter after
 ///   a typed burst is swallowed into it.
-/// - **A leading `!` goes to Claude Code on its own.** It switches the input
-///   into shell mode only when it is typed into an empty box as a key of its
-///   own; arriving with the rest of the line it is just a character.
+/// - **So is Gemini.** It judges each key of a burst against the input as it
+///   was before the burst, so every `?` in a typed line reads as the key that
+///   opens its shortcuts on an empty input and is lost, and every `!` as the
+///   one that switches it into shell mode — "hi! there" would run `there`.
+/// - **A leading `!` goes to Claude Code and Gemini on its own.** It switches
+///   the input into shell mode only when it is typed into an empty box as a
+///   key of its own; arriving with the rest of the line it is just a
+///   character.
 /// - **A message with an `@` mention gets a space after it for Gemini.**
 ///   With the caret at the end of an `@` word it lists matching files, and
 ///   Enter then takes the list's pick instead of sending — so a message whose
@@ -152,7 +157,7 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
     let mut steps = Vec::new();
     let mut delay = Duration::ZERO;
 
-    if agent == CLIAgent::Claude
+    if matches!(agent, CLIAgent::Claude | CLIAgent::Gemini)
         && let Some(rest) = body.strip_prefix('!')
         && !rest.is_empty()
     {
@@ -175,7 +180,8 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
 
     let mut pasted = false;
     if !body.is_empty() {
-        pasted = bracketed && (agent == CLIAgent::Codex || !types_cleanly(body));
+        pasted = bracketed
+            && (matches!(agent, CLIAgent::Codex | CLIAgent::Gemini) || !types_cleanly(body));
         let bytes = match pasted {
             true => tty7_core::core::paste::bracket(body.as_bytes()),
             false => body.as_bytes().to_vec(),
@@ -2204,13 +2210,26 @@ mod tests {
     }
 
     #[test]
-    fn a_leading_bang_reaches_claude_as_a_key_of_its_own() {
+    fn a_leading_bang_reaches_claude_and_gemini_as_a_key_of_its_own() {
         let steps = submit_plan(CLIAgent::Claude, "!git status", true);
         assert_eq!(bytes(&steps), [&b"!"[..], b"git status", b"\r"]);
         assert_eq!(steps[1].delay, SETTLE);
-        // Anyone else gets the line as written.
         let steps = submit_plan(CLIAgent::Gemini, "!git status", true);
+        assert_eq!(
+            bytes(&steps),
+            [&b"!"[..], b"\x1b[200~git status\x1b[201~", b"\r"]
+        );
+        // Anyone else gets the line as written.
+        let steps = submit_plan(CLIAgent::Copilot, "!git status", true);
         assert_eq!(bytes(&steps), [&b"!git status"[..], b"\r"]);
+    }
+
+    #[test]
+    fn gemini_is_always_pasted() {
+        // Typed, the `!` would switch it into shell mode and the `?` would
+        // open its shortcuts: each reads the input as empty.
+        let steps = submit_plan(CLIAgent::Gemini, "hi! ok?", true);
+        assert_eq!(bytes(&steps), [&b"\x1b[200~hi! ok?\x1b[201~"[..], b"\r"]);
     }
 
     #[test]
@@ -2224,9 +2243,9 @@ mod tests {
         for agent in [CLIAgent::Copilot, CLIAgent::Gemini] {
             let steps = submit_plan(agent, "a\nb", true);
             assert_eq!(steps[1].delay, SETTLE_AFTER_PASTE_SLOW, "{agent:?}");
-            let steps = submit_plan(agent, "ab", true);
-            assert_eq!(steps[1].delay, SETTLE, "{agent:?}");
         }
+        let steps = submit_plan(CLIAgent::Copilot, "ab", true);
+        assert_eq!(steps[1].delay, SETTLE);
     }
 
     #[test]
@@ -2249,15 +2268,15 @@ mod tests {
 
     #[test]
     fn a_closing_mention_is_left_behind_before_gemini_gets_enter() {
-        let steps = submit_plan(CLIAgent::Gemini, r"read @my\ notes.txt", true);
+        let steps = submit_plan(CLIAgent::Gemini, r"read @my\ notes.txt", false);
         assert_eq!(bytes(&steps), [&br"read @my\ notes.txt "[..], b"\r"]);
-        let steps = submit_plan(CLIAgent::Gemini, r#"read @"C:\My Files\a.rs""#, true);
+        let steps = submit_plan(CLIAgent::Gemini, r#"read @"C:\My Files\a.rs""#, false);
         assert_eq!(bytes(&steps)[0], br#"read @"C:\My Files\a.rs" "#);
         // Nothing to close without a mention, and a command's space would
         // open its arguments.
-        let steps = submit_plan(CLIAgent::Gemini, "read it", true);
+        let steps = submit_plan(CLIAgent::Gemini, "read it", false);
         assert_eq!(bytes(&steps), [&b"read it"[..], b"\r"]);
-        let steps = submit_plan(CLIAgent::Gemini, "/memory", true);
+        let steps = submit_plan(CLIAgent::Gemini, "/memory", false);
         assert_eq!(bytes(&steps), [&b"/memory"[..], b"\r"]);
         let steps = submit_plan(CLIAgent::Claude, "read @a.rs", true);
         assert_eq!(bytes(&steps), [&b"read @a.rs"[..], b"\r"]);
