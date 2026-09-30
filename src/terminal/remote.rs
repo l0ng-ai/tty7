@@ -47,6 +47,7 @@ impl EventListener for EventProxy {
                 event,
                 AlacEvent::PtyWrite(_)
                     | AlacEvent::ColorRequest(..)
+                    | AlacEvent::TextAreaSizeRequest(_)
                     | AlacEvent::ClipboardStore(..)
                     | AlacEvent::ClipboardLoad(..)
                     | AlacEvent::Bell
@@ -5763,12 +5764,19 @@ mod tests {
 
     #[test]
     fn snapshot_replay_suppresses_query_replies_and_side_effects() {
+        crate::core::config::pin_test_config_dir();
         let (client_side, mut daemon_side) = UnixStream::pair().unwrap();
         let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
 
-        DaemonMsg::Snapshot(b"\x1b[6n\x1b]11;?\x07\x1b]52;c;aGk=\x07\x07replayed".to_vec())
-            .encode(&mut daemon_side)
-            .unwrap();
+        // `CSI 14t` is the one query alacritty hands out as its own event
+        // (the pixel size lives with the view) rather than as a `PtyWrite`;
+        // answered from a replay, its `CSI 4;h;w t` lands on whatever reads
+        // the pane now — a shell prompt, once the TUI that asked has quit.
+        DaemonMsg::Snapshot(
+            b"\x1b[6n\x1b]11;?\x07\x1b[14t\x1b[16t\x1b[18t\x1b]52;c;aGk=\x07\x07replayed".to_vec(),
+        )
+        .encode(&mut daemon_side)
+        .unwrap();
         daemon_side.flush().unwrap();
 
         let mut events = Vec::new();
@@ -5790,11 +5798,33 @@ mod tests {
                 e,
                 AlacEvent::PtyWrite(_)
                     | AlacEvent::ColorRequest(..)
+                    | AlacEvent::TextAreaSizeRequest(_)
                     | AlacEvent::ClipboardStore(..)
                     | AlacEvent::ClipboardLoad(..)
                     | AlacEvent::Bell
             )),
             "replayed history must not re-answer queries or replay side effects"
+        );
+
+        DaemonMsg::Output(b"\x1b[14t".to_vec())
+            .encode(&mut daemon_side)
+            .unwrap();
+        daemon_side.flush().unwrap();
+        let mut got_size_request = false;
+        for _ in 0..200 {
+            while let Ok(ev) = term.events.try_recv() {
+                if matches!(ev, AlacEvent::TextAreaSizeRequest(_)) {
+                    got_size_request = true;
+                }
+            }
+            if got_size_request {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            got_size_request,
+            "a live pixel-size query must still be answered"
         );
 
         DaemonMsg::Output(b"\x1b[6n".to_vec())
