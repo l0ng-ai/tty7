@@ -9065,6 +9065,19 @@ impl Render for Tty7App {
         // two spellings of "is the rail up" is one more than the layout can
         // afford to have disagree.
         let rail = self.sidebar_open(cx);
+        // A hover flag is only written by its sheet, and only on a change of
+        // state it saw. A sheet that is not in the tree sees none: the rail
+        // hidden by its own tile with the pointer on it, or the switch turned
+        // off mid-hover, would leave its flag set, and the tiles would come
+        // back painted, with nobody pointing at them, the next time the sheet
+        // does. Clear the flag of every sheet not built this frame.
+        let auto_hide_chrome = cx.global::<Config>().auto_hide_titlebar_buttons;
+        if !auto_hide_chrome || !rail {
+            self.sidebar_chrome_hover.set(false);
+        }
+        if !auto_hide_chrome {
+            self.strip_chrome_hover.set(false);
+        }
         // Both read before the strip and the sidebar are built: a tab held out
         // over the layout suspends the reorder, which is what those two ask
         // what to draw, and a pane held over *them* is measured against where
