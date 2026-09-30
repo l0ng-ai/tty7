@@ -1971,6 +1971,7 @@ mod tests {
                 activity: 12,
                 turns: 4,
                 inferred: false,
+                readout: Default::default(),
             })),
             DaemonMsg::AgentStatus(None),
             DaemonMsg::LoopbackForward(LoopbackForward { local_port: 49152 }),

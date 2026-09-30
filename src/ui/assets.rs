@@ -45,6 +45,7 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/copy.svg" => include_bytes!("../../assets/icons/copy.svg"),
         "icons/folder.svg" => include_bytes!("../../assets/icons/folder.svg"),
         "icons/file.svg" => include_bytes!("../../assets/icons/file.svg"),
+        "icons/image.svg" => include_bytes!("../../assets/icons/image.svg"),
         "icons/circle-info.svg" => include_bytes!("../../assets/icons/circle-info.svg"),
         "icons/machine-local.svg" => include_bytes!("../../assets/icons/machine-local.svg"),
         "icons/machine-remote.svg" => include_bytes!("../../assets/icons/machine-remote.svg"),

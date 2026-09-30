@@ -6694,6 +6694,7 @@ mod tests {
                 activity: 0,
                 turns: 0,
                 inferred: false,
+                readout: Default::default(),
             }))
             .encode(daemon)
             .unwrap();
@@ -6756,6 +6757,7 @@ mod tests {
             activity: 0,
             turns: 0,
             inferred: false,
+            readout: Default::default(),
         }))
         .encode(&mut daemon_side)
         .unwrap();
@@ -6807,6 +6809,7 @@ mod tests {
             activity: 0,
             turns: 0,
             inferred: false,
+            readout: Default::default(),
         }))
         .encode(&mut daemon_side)
         .unwrap();

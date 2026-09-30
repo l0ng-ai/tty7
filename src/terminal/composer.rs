@@ -1,43 +1,51 @@
-//! The message composer: a real text box docked under a pane that is running a
-//! coding agent, for writing a prompt the way a chat box lets you — mouse
-//! selection, the platform's own editing keys, an IME with its candidates in
-//! place, files attached as chips — and handing it over whole.
+//! The message composer: a real text box for writing a prompt to a coding
+//! agent the way a chat box lets you — mouse selection, the platform's own
+//! editing keys, an IME with its candidates in place, files attached as chips,
+//! `/` and `@` menus — and handing it over whole.
 //!
-//! The agent's own TUI stays exactly where it was. The box docks *below* the
-//! grid rather than floating over it, so the grid gives up the rows the box
-//! takes and the agent reflows into what is left: nothing it draws is hidden,
-//! including the permission prompts that have to be answered in the TUI itself.
+//! **Where it sits.** For an agent whose input area tty7 can find on the grid
+//! (Claude Code, Codex, Gemini) the box is laid *over* that area: the agent's
+//! own input line and the status rows under it are covered, so the pane has
+//! one input rather than two. Whenever the agent puts something else there —
+//! a permission prompt, a model picker, a question — the area stops looking
+//! like an input, the box steps aside, and the keyboard goes to the TUI until
+//! the input comes back. Any other agent gets the box docked under the grid,
+//! taking its rows from it.
 //!
-//! Sending is typing, not an API. What leaves the box is written to the pane's
-//! pty as the text and then Enter, as two writes — see [`submit_plan`] for why
-//! each agent needs to be spoken to slightly differently. That is also why the
-//! box carries no model picker, no mode label and no context meter: tty7 can
-//! only say what the agent has told it, and none of those are among the
-//! things it tells. The agent's own `/model` is one `/` away, and Shift+Tab is
-//! passed through to cycle its permission mode where it can be seen changing.
+//! **What it sends.** Sending is typing, not an API: the text and then Enter,
+//! written to the pty — see [`submit_plan`] for why each agent is spoken to
+//! slightly differently. The toolbar's controls are the agent's own keys
+//! (Shift+Tab, its model picker, its thinking toggle), and what they show is
+//! what the agent said: the mode off the status row the box covers, the model
+//! and context off what its hooks report ([`crate::core::cli_agent::AgentReadout`]). Nothing reported
+//! means nothing shown.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use alacritty_terminal::term::TermMode;
+use alacritty_terminal::event::EventListener;
+use alacritty_terminal::grid::Dimensions as _;
+use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::{Term, TermMode};
 use gpui::{
     Context, Entity, ExternalPaths, Focusable as _, MouseButton, MouseDownEvent, SharedString,
     Subscription, Window, div, prelude::*, px,
 };
 use gpui_component::input::{self, Input, InputEvent, InputState, RopeExt as _};
+use gpui_component::progress::ProgressCircle;
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, h_flex};
 
-use super::view::{TerminalView, pasted_paths_text, types_cleanly};
+use super::view::{GRID_PAD_X, GRID_PAD_Y, TerminalView, pasted_paths_text, types_cleanly};
 use crate::core::cli_agent::{AgentStatus, CLIAgent};
 use crate::ui::host_ops::{HostId, HostOps};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use crate::ui::search::files::{FileIndex, FileList, rank, walk};
+use crate::ui::search::files::{FileIndex, FileList, IndexedFile, rank, walk};
 
-/// How tall the text may grow, in lines, before it scrolls instead. Every row
-/// the box grows is a row the agent loses, and a resize it has to redraw for.
+/// How tall the text may grow, in lines, before it scrolls instead.
 const MAX_ROWS: usize = 8;
 
 /// The pause between two writes that must not arrive as one read.
@@ -52,14 +60,36 @@ const SETTLE: Duration = Duration::from_millis(50);
 /// Copilot's input treats a CR that follows a paste too closely as part of it.
 const SETTLE_AFTER_PASTE_SLOW: Duration = Duration::from_millis(300);
 
+/// How long the agent's input area has to stay gone before the box steps
+/// aside. An agent redrawing its screen can pass through a frame without the
+/// input on it; a picker or a prompt stays.
+pub(super) const STEP_ASIDE_AFTER: Duration = Duration::from_millis(250);
+
 /// Rows the `/` and `@` menu shows at once.
 const MENU_ROWS: usize = 8;
 
-/// A file walk this recent answers the next `@` without walking again.
-const FILES_FRESH_FOR: Duration = Duration::from_secs(30);
+/// A file walk or command scan this recent answers the next menu as it is.
+const SOURCES_FRESH_FOR: Duration = Duration::from_secs(30);
 
-/// Shift+Tab as a terminal sends it — what cycles an agent's permission mode.
+/// How far up from the bottom of the screen an agent's input area can start.
+/// Past this the thing found is transcript, not the input.
+const INPUT_AREA_MAX_ROWS: usize = 40;
+
+/// The design's type: 13.5px text in the box. gpui-component sizes an input's
+/// text at 7/8 of a custom size, and pads it 8px across and 2px down.
+const TEXT_PX: f32 = 13.5;
+const INPUT_PAD_X: f32 = 8.;
+const INPUT_PAD_Y: f32 = 2.;
+
+/// The keys the toolbar sends. Shift+Tab cycles the permission mode in every
+/// agent that has one; Alt+P and Alt+T are Claude Code's model picker and
+/// thinking toggle.
 const BACK_TAB: &[u8] = b"\x1b[Z";
+const CLAUDE_MODEL_PICKER: &[u8] = b"\x1bp";
+const CLAUDE_THINKING_TOGGLE: &[u8] = b"\x1bt";
+
+// ---------------------------------------------------------------------------
+// Sending
 
 /// One write of a submission, and how long to wait before making it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,8 +107,7 @@ pub(super) struct Step {
 ///   command opens its menu, nothing is folded into a "pasted text"
 ///   placeholder. Anything with a line break, a tab or other control
 ///   character, or past [`types_cleanly`]'s bound goes as one bracketed paste,
-///   so the lines are the message's rather than a series of Enters. That is
-///   the same line the prompt editor draws for the shell.
+///   so the lines are the message's rather than a series of Enters.
 /// - **Codex is always pasted.** It watches for bursts of fast keystrokes to
 ///   spot pastes from terminals that do not bracket them, and the Enter after
 ///   a typed burst is swallowed into it.
@@ -149,6 +178,116 @@ pub(super) fn compose_message(text: &str, attached: &[String], shell: Option<&st
         false => format!("{text} {words}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Finding the agent's input area
+
+/// Where an agent's input area starts on the screen, and what its status rows
+/// say about the permission mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct InputArea {
+    /// Screen row of the area's first line.
+    pub top: usize,
+    /// The permission mode, in the agent's own words (`acceptEdits`, …),
+    /// when its status rows name one.
+    pub mode: Option<&'static str>,
+}
+
+/// Whether the box can be laid over this agent's input.
+fn covers(agent: CLIAgent) -> bool {
+    matches!(agent, CLIAgent::Claude | CLIAgent::Codex | CLIAgent::Gemini)
+}
+
+fn is_rule(row: &str, width: usize) -> bool {
+    let t = row.trim();
+    t.chars().count() >= width * 3 / 5 && t.chars().all(|c| c == '─')
+}
+
+/// Find `agent`'s input area in `rows`, the screen's lines top to bottom.
+///
+/// - **Claude Code** draws its input between two full-width rules with `❯`
+///   on the first line, and its status rows under the lower rule.
+/// - **Codex** starts its input line with `›`, on a padded block.
+/// - **Gemini** frames it in a rounded box whose first line is `> `.
+///
+/// `None` is the agent showing something else there — which is exactly when
+/// the box must get out of the way.
+pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Option<InputArea> {
+    let floor = rows.len().saturating_sub(INPUT_AREA_MAX_ROWS);
+    let starts = |i: usize, p: char| rows[i].trim_start().starts_with(p);
+    match agent {
+        CLIAgent::Claude => {
+            let rules: Vec<usize> = (floor..rows.len())
+                .filter(|&i| is_rule(&rows[i], width))
+                .collect();
+            rules.windows(2).rev().find_map(|pair| {
+                let (upper, lower) = (pair[0], pair[1]);
+                (upper + 1..lower)
+                    .any(|i| starts(i, '❯'))
+                    .then(|| InputArea {
+                        top: upper,
+                        mode: Some(claude_mode(&rows[lower + 1..])),
+                    })
+            })
+        }
+        CLIAgent::Codex => {
+            let line = (floor..rows.len()).rev().find(|&i| starts(i, '›'))?;
+            let top = match line > 0 && rows[line - 1].trim().is_empty() {
+                true => line - 1,
+                false => line,
+            };
+            Some(InputArea { top, mode: None })
+        }
+        CLIAgent::Gemini => {
+            let bottom = (floor..rows.len()).rev().find(|&i| starts(i, '╰'))?;
+            let top = (floor..bottom).rev().find(|&i| starts(i, '╭'))?;
+            (top + 1..bottom)
+                .any(|i| {
+                    rows[i]
+                        .trim_start()
+                        .trim_start_matches('│')
+                        .trim_start()
+                        .starts_with('>')
+                })
+                .then_some(InputArea { top, mode: None })
+        }
+        _ => None,
+    }
+}
+
+/// Claude Code's permission mode, off the status rows under its input. The
+/// default mode is the one it does not name.
+fn claude_mode(status_rows: &[String]) -> &'static str {
+    let text = status_rows.join(" ").to_lowercase();
+    [
+        ("bypass permissions on", "bypassPermissions"),
+        ("accept edits on", "acceptEdits"),
+        ("plan mode on", "plan"),
+        ("auto mode on", "auto"),
+    ]
+    .iter()
+    .find(|(said, _)| text.contains(said))
+    .map_or("default", |(_, mode)| mode)
+}
+
+/// The screen as text, one string per line, wide characters' spacer cells
+/// left out.
+fn screen_rows<T: EventListener>(term: &Term<T>) -> Vec<String> {
+    let grid = term.grid();
+    (0..grid.screen_lines())
+        .map(|l| {
+            let row = &grid[Line(l as i32)];
+            (0..grid.columns())
+                .map(|c| &row[Column(c)])
+                .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
+                .map(|cell| cell.c)
+                .collect()
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Menus
 
 /// A `/` or `@` being typed at the caret: which one, where it starts, and what
 /// follows it so far.
@@ -315,7 +454,7 @@ fn file_items(index: &FileIndex, query: &str, cwd: Option<&Path>) -> Vec<MenuIte
             .to_string_lossy()
             .into_owned()
     };
-    let item = |f: &crate::ui::search::files::IndexedFile| MenuItem {
+    let item = |f: &IndexedFile| MenuItem {
         label: f.name().to_string(),
         detail: f.dir().to_string(),
         insert: format!("@{}", spell(&f.path)),
@@ -330,6 +469,62 @@ fn file_items(index: &FileIndex, query: &str, cwd: Option<&Path>) -> Vec<MenuIte
             .collect(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// The toolbar's readings
+
+/// A model id the way a person says it: `claude-opus-5-5` is Opus 5.5.
+/// Anything that is not a Claude id is shown as the agent spelled it.
+pub(super) fn model_label(id: &str) -> String {
+    let id = id.trim_end_matches("[1m]");
+    let Some(rest) = id.strip_prefix("claude-") else {
+        return id.to_string();
+    };
+    let mut parts: Vec<&str> = rest.split('-').collect();
+    if parts
+        .last()
+        .is_some_and(|p| p.len() == 8 && p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        parts.pop();
+    }
+    let Some((family, version)) = parts.split_first() else {
+        return id.to_string();
+    };
+    let mut name: String = family
+        .chars()
+        .enumerate()
+        .map(|(i, c)| if i == 0 { c.to_ascii_uppercase() } else { c })
+        .collect();
+    if !version.is_empty() {
+        name.push(' ');
+        name.push_str(&version.join("."));
+    }
+    name
+}
+
+/// Tokens the way the status rows count them: `62k`, `1M`.
+pub(super) fn tokens_label(n: u64) -> String {
+    match n {
+        n if n >= 1_000_000 && n % 1_000_000 == 0 => format!("{}M", n / 1_000_000),
+        n if n >= 1_000_000 => format!("{:.1}M", n as f64 / 1_000_000.),
+        n if n >= 1_000 => format!("{}k", n / 1_000),
+        n => n.to_string(),
+    }
+}
+
+fn mode_label(mode: &str) -> String {
+    match mode {
+        "default" => t(L10nKey::ComposerModeDefault).to_string(),
+        "acceptEdits" => t(L10nKey::ComposerModeAcceptEdits).to_string(),
+        "plan" => t(L10nKey::ComposerModePlan).to_string(),
+        "bypassPermissions" => t(L10nKey::ComposerModeBypass).to_string(),
+        "auto" => t(L10nKey::ComposerModeAuto).to_string(),
+        other => other.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// State
 
 /// What a pane's composer holds that outlives the view drawing it.
 ///
@@ -355,22 +550,46 @@ enum Files {
     Failed(Instant),
 }
 
+/// How the box is on screen this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Presence {
+    /// Not wanted, or no agent to talk to.
+    Hidden,
+    /// Under the grid, taking its rows.
+    Docked,
+    /// Over the agent's input area, which starts this many rows up from the
+    /// bottom of the screen.
+    Covering(usize),
+    /// Wanted, but the agent is showing something else where its input goes —
+    /// the box waits for it to come back.
+    SteppedAside,
+}
+
 pub(super) struct Composer {
     pub(super) input: Entity<InputState>,
-    /// Whether the user wants the box on this pane. It is only *shown* while
-    /// an agent is in the foreground, so a pane that goes back to its shell
-    /// hides it and the next agent started there gets it back.
+    /// Whether the user wants the box on this pane.
     open: bool,
+    presence: Presence,
+    /// The input area as last found, and since when it has been missing.
+    area: Option<InputArea>,
+    missing_since: Option<Instant>,
+    /// The box had the keyboard when it stepped aside, and gets it back when
+    /// it returns.
+    refocus: bool,
     /// Files to send with the message, spelled the way the pane's host reads
     /// them — uploaded already, for a remote pane.
     attached: Vec<String>,
+    /// Text typed at the grid while the box covers the input, and whether the
+    /// box should take the keyboard with it. Taken in at the next draw, the
+    /// first place with a window to edit and focus in.
+    typed: String,
+    grab: bool,
     /// Writes waiting their turn. Submissions queue rather than interleave, so
     /// a second message sent inside the first one's settle time cannot land
     /// its text between the first one's text and its Enter.
     queue: VecDeque<Step>,
     pumping: bool,
-    /// Whose name the placeholder carries. A pane can run one agent after
-    /// another, and "Message Codex" over Claude Code would be a lie.
+    /// Whose name the placeholder carries.
     named: Option<CLIAgent>,
     /// The row of the `/` or `@` menu the keyboard is on.
     highlighted: usize,
@@ -379,6 +598,9 @@ pub(super) struct Composer {
     dismissed: Option<String>,
     files: Files,
     commands: Option<(Vec<(String, String)>, Instant)>,
+    /// Thinking as toggled from the toolbar, over what the settings say —
+    /// the agent does not report the toggle, only the setting.
+    thinking: Option<bool>,
     _subs: Vec<Subscription>,
 }
 
@@ -424,7 +646,13 @@ impl TerminalView {
         self.composer = Some(Composer {
             input,
             open: remembered.open,
+            presence: Presence::Hidden,
+            area: None,
+            missing_since: None,
+            refocus: false,
             attached: remembered.attached,
+            typed: String::new(),
+            grab: false,
             queue: VecDeque::new(),
             pumping: false,
             named: None,
@@ -432,13 +660,20 @@ impl TerminalView {
             dismissed: None,
             files: Files::Unwalked,
             commands: None,
+            thinking: None,
             _subs: subs,
         });
     }
 
-    /// Whether the box is on screen: wanted, and an agent to talk to.
+    pub(super) fn presence(&self) -> Presence {
+        self.composer
+            .as_ref()
+            .map_or(Presence::Hidden, |c| c.presence)
+    }
+
+    /// Whether the box is on screen.
     pub(super) fn composer_shown(&self) -> bool {
-        self.composer.as_ref().is_some_and(|c| c.open) && self.agent().is_some()
+        matches!(self.presence(), Presence::Docked | Presence::Covering(_))
     }
 
     fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -470,10 +705,12 @@ impl TerminalView {
         match (c.open, focused) {
             (true, true) => {
                 c.open = false;
+                c.refocus = false;
                 window.focus(&self.focus_handle, cx);
             }
             _ => {
                 c.open = true;
+                c.refocus = true;
                 self.focus_composer(window, cx);
             }
         }
@@ -481,13 +718,50 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Esc in the box: hand the keyboard back to the terminal and leave the
-    /// box where it is. Esc is also what interrupts an agent, and a box that
-    /// closed on it would put the next Esc — the one meant for the agent — a
-    /// keystroke further away than the user expects.
-    pub(super) fn leave_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus_handle, cx);
+    /// Esc in the box. Over the agent's input it is the agent's Esc — the one
+    /// that interrupts a turn — since the box is standing in for that input.
+    /// Docked, it hands the keyboard back to the terminal and leaves the box
+    /// where it is, so the next Esc is the agent's.
+    pub(super) fn composer_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.presence() {
+            Presence::Covering(_) => self.send_to_pty(b"\x1b", cx),
+            _ => {
+                window.focus(&self.focus_handle, cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Ctrl+C in the box: clear what is written, or — with nothing written —
+    /// the agent's Ctrl+C.
+    pub(super) fn composer_interrupt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(c) = self.composer.as_mut() else {
+            return;
+        };
+        let empty = c.input.read(cx).value().is_empty() && c.attached.is_empty();
+        if empty {
+            self.send_to_pty(b"\x03", cx);
+            return;
+        }
+        c.attached.clear();
+        c.input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.remember_composer(cx);
+    }
+
+    /// Typing at the grid while the box covers the agent's input: the input
+    /// the keys were meant for is under the box, so they go into the box.
+    pub(super) fn composer_takes_typing(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        if self.composer_focused || !matches!(self.presence(), Presence::Covering(_)) {
+            return false;
+        }
+        let Some(c) = self.composer.as_mut() else {
+            return false;
+        };
+        c.typed.push_str(text);
+        c.grab = true;
         cx.notify();
+        true
     }
 
     /// Files arriving by way of the terminal's paste path — dropped on the
@@ -544,23 +818,75 @@ impl TerminalView {
         .detach();
     }
 
+    /// Send one of the agent's own keys from the toolbar, keeping the caret in
+    /// the box.
+    fn toolbar_key(&mut self, bytes: &'static [u8], window: &mut Window, cx: &mut Context<Self>) {
+        self.send_to_pty(bytes, cx);
+        self.focus_composer(window, cx);
+    }
+
+    fn toggle_thinking(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let reported = self.agent_session().and_then(|s| s.readout.thinking);
+        if let Some(c) = self.composer.as_mut() {
+            c.thinking = Some(!c.thinking.or(reported).unwrap_or(true));
+        }
+        self.toolbar_key(CLAUDE_THINKING_TOGGLE, window, cx);
+    }
+
     /// Per-frame upkeep: restore a box the pane had open before this view
-    /// existed, keep the placeholder naming the agent in front, and give the
-    /// keyboard back to the terminal when the agent the box was for has gone.
+    /// existed, find the agent's input area, decide where the box goes, and
+    /// move the keyboard with it.
     pub(super) fn sync_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let agent = self.agent();
         if self.composer.is_none()
-            && self.agent().is_some()
+            && agent.is_some()
             && cx
                 .try_global::<ComposerMemory>()
                 .is_some_and(|m| m.0.contains_key(&self.composer_key()))
         {
             self.ensure_composer(window, cx);
         }
-        let shown = self.composer_shown();
-        let agent = self.agent();
+        let asking = self.agent_is_asking();
+        let (found, screen_lines, offset) = {
+            let term = self.terminal.term.lock();
+            let found = agent
+                .filter(|a| covers(*a))
+                .and_then(|a| input_area(a, &screen_rows(&term), term.columns()));
+            (found, term.screen_lines(), term.grid().display_offset())
+        };
         let Some(c) = self.composer.as_mut() else {
             return;
         };
+
+        // The area, with a grace period before it counts as gone.
+        let now = Instant::now();
+        let mut recheck = None;
+        match found {
+            Some(area) => {
+                c.area = Some(area);
+                c.missing_since = None;
+            }
+            None => {
+                let since = *c.missing_since.get_or_insert(now);
+                if now.duration_since(since) >= STEP_ASIDE_AFTER {
+                    c.area = None;
+                } else {
+                    recheck = Some(STEP_ASIDE_AFTER - now.duration_since(since));
+                }
+            }
+        }
+
+        c.presence = match agent {
+            _ if !c.open => Presence::Hidden,
+            None => Presence::Hidden,
+            Some(a) if !covers(a) => Presence::Docked,
+            Some(_) if asking => Presence::SteppedAside,
+            Some(_) => match &c.area {
+                Some(area) => Presence::Covering(screen_lines.saturating_sub(area.top + offset)),
+                None => Presence::SteppedAside,
+            },
+        };
+
         if let Some(agent) = agent
             && c.named != Some(agent)
         {
@@ -574,9 +900,29 @@ impl TerminalView {
                 state.set_placeholder(placeholder, window, cx)
             });
         }
+
+        let shown = matches!(c.presence, Presence::Docked | Presence::Covering(_));
         if !shown && self.composer_focused {
+            c.refocus = c.presence == Presence::SteppedAside;
             self.composer_focused = false;
             window.focus(&self.focus_handle, cx);
+        } else if shown && (c.refocus || c.grab) && !self.composer_focused {
+            c.refocus = false;
+            c.grab = false;
+            let typed = std::mem::take(&mut c.typed);
+            let input = c.input.clone();
+            if !typed.is_empty() {
+                input.update(cx, |state, cx| state.insert(typed, window, cx));
+            }
+            self.focus_composer(window, cx);
+        }
+
+        if let Some(wait) = recheck {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
         }
     }
 
@@ -629,14 +975,14 @@ impl TerminalView {
         let local = host_id.is_local();
         let cwd = self.files_cwd();
         let agent = self.agent();
+        let Some(c) = self.composer.as_mut() else {
+            return;
+        };
         match trigger.sigil {
             '/' => {
-                let Some(c) = self.composer.as_mut() else {
-                    return;
-                };
                 if c.commands
                     .as_ref()
-                    .is_some_and(|(_, at)| at.elapsed() < FILES_FRESH_FOR)
+                    .is_some_and(|(_, at)| at.elapsed() < SOURCES_FRESH_FOR)
                 {
                     return;
                 }
@@ -650,13 +996,10 @@ impl TerminalView {
                 c.commands = Some((custom, Instant::now()));
             }
             '@' => {
-                let Some(c) = self.composer.as_mut() else {
-                    return;
-                };
                 let stale = match &c.files {
                     Files::Unwalked => true,
                     Files::Walking => false,
-                    Files::Ready(_, at) | Files::Failed(at) => at.elapsed() > FILES_FRESH_FOR,
+                    Files::Ready(_, at) | Files::Failed(at) => at.elapsed() > SOURCES_FRESH_FOR,
                 };
                 let Some(cwd) = cwd.filter(|_| stale) else {
                     return;
@@ -764,7 +1107,7 @@ impl TerminalView {
 
     /// The agent is asking a question only its TUI can put — a permission
     /// prompt, a choice. Whatever the box sent would be taken as the answer,
-    /// so Enter holds the message until the question is gone.
+    /// so nothing is sent until the question is gone.
     fn agent_is_asking(&self) -> bool {
         self.agent_session()
             .is_some_and(|s| s.status == AgentStatus::Waiting)
@@ -854,26 +1197,70 @@ impl TerminalView {
         .detach();
     }
 
+    // -----------------------------------------------------------------------
+    // Drawing
+
+    /// The box, and whether it is docked (laid out under the grid) rather
+    /// than laid over it.
     pub(super) fn render_composer(
         &self,
         window: &Window,
         cx: &mut Context<Self>,
+    ) -> Option<(gpui::AnyElement, bool)> {
+        let presence = self.presence();
+        let covering = match presence {
+            Presence::Covering(rows) => Some(rows),
+            Presence::Docked => None,
+            Presence::Hidden | Presence::SteppedAside => return None,
+        };
+        let frame = self.render_composer_frame(window, cx)?;
+        let element = match covering {
+            // Over the input area, painted in the grid's own background so
+            // what is under it is gone rather than showing through. At least
+            // as tall as the area; taller when the box needs it.
+            Some(rows) => div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .min_h(self.line_height * rows as f32 + px(GRID_PAD_Y))
+                .flex()
+                .flex_col()
+                .justify_end()
+                .px(px(GRID_PAD_X))
+                .pb(px(12.))
+                .bg(cx.theme().background)
+                .occlude()
+                .child(frame)
+                .into_any_element(),
+            None => div()
+                .flex_none()
+                .w_full()
+                .pt(px(8.))
+                .pb(px(8.))
+                .child(frame)
+                .into_any_element(),
+        };
+        Some((element, covering.is_none()))
+    }
+
+    fn render_composer_frame(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if !self.composer_shown() {
-            return None;
-        }
         let c = self.composer.as_ref()?;
         let agent = self.agent()?;
+        let readout = self.agent_session().map(|s| s.readout).unwrap_or_default();
         let theme = cx.theme();
         let focused = c.input.read(cx).focus_handle(cx).is_focused(window);
-        let asking = self.agent_is_asking();
         let can_send = self.composer_can_send(cx);
         let ink = theme.foreground;
         let muted = theme.muted_foreground;
-        let ring = match (asking, focused) {
-            (true, _) => theme.warning,
-            (false, true) => ink.opacity(0.22),
-            (false, false) => ink.opacity(0.12),
+        let amber = theme.warning;
+        let ring = match focused {
+            true => ink.opacity(0.22),
+            false => ink.opacity(0.12),
         };
         let menu = self.composer_menu(cx);
 
@@ -884,13 +1271,43 @@ impl TerminalView {
                 .px(px(10.))
                 .pt(px(10.))
                 .children(c.attached.iter().enumerate().map(|(i, path)| {
-                    let name = path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
+                    let name = path
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or(path)
+                        .trim_matches('\'')
+                        .to_string();
+                    let image = ["png", "jpg", "jpeg", "gif", "webp"]
+                        .iter()
+                        .any(|ext| name.to_lowercase().ends_with(&format!(".{ext}")));
+                    let glyph = match image {
+                        true => div()
+                            .size(px(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.))
+                            .bg(ink.opacity(0.08))
+                            .child(
+                                gpui::svg()
+                                    .path("icons/image.svg")
+                                    .size(px(11.))
+                                    .text_color(muted),
+                            )
+                            .into_any_element(),
+                        false => gpui::svg()
+                            .path("icons/file.svg")
+                            .mx(px(2.))
+                            .size(px(12.))
+                            .text_color(muted)
+                            .into_any_element(),
+                    };
                     h_flex()
                         .id(("composer-chip", i))
                         .h(px(28.))
                         .max_w(px(260.))
                         .gap(px(7.))
-                        .pl(px(8.))
+                        .pl(px(6.))
                         .pr(px(4.))
                         .rounded(px(7.))
                         .bg(ink.opacity(0.05))
@@ -899,7 +1316,7 @@ impl TerminalView {
                             let path: SharedString = path.clone().into();
                             move |window, cx| Tooltip::new(path.clone()).build(window, cx)
                         })
-                        .child(Icon::new(IconName::File).size(px(12.)).text_color(muted))
+                        .child(glyph)
                         .child(div().min_w_0().truncate().child(name))
                         .child(
                             div()
@@ -920,29 +1337,124 @@ impl TerminalView {
                 }))
         });
 
-        let attach = div()
-            .id("composer-attach")
-            .size(px(28.))
-            .flex()
-            .items_center()
+        // A toolbar button: 28px tall, the box's own hover tint.
+        let tool = |id: &'static str| {
+            h_flex()
+                .id(id)
+                .flex_none()
+                .h(px(28.))
+                .gap(px(6.))
+                .px(px(9.))
+                .rounded(px(7.))
+                .text_size(px(12.))
+                .text_color(ink.opacity(0.5))
+                .hover(move |s| s.bg(ink.opacity(0.05)))
+                .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                })
+        };
+
+        let attach = tool("composer-attach")
+            .w(px(28.))
+            .px_0()
             .justify_center()
-            .rounded(px(7.))
-            .hover(|s| s.bg(ink.opacity(0.05)))
             .tooltip(|window, cx| Tooltip::new(t(L10nKey::ComposerAttach)).build(window, cx))
             .on_click(cx.listener(|this, _, window, cx| this.pick_attachments(window, cx)))
-            .child(Icon::new(IconName::Plus).size(px(12.)).text_color(muted));
+            .child(
+                Icon::new(IconName::Plus)
+                    .size(px(12.))
+                    .text_color(ink.opacity(0.5)),
+            );
 
-        let notice = asking.then(|| {
-            div()
-                .min_w_0()
-                .truncate()
-                .text_size(px(12.))
-                .text_color(theme.warning)
-                .child(t_fmt(
-                    L10nKey::ComposerAgentAsking,
-                    &[("agent", agent.display_name())],
-                ))
+        let claude = agent == CLIAgent::Claude;
+        let mode = claude.then(|| {
+            // The status row under the input says it as it changes; the
+            // hooks only say it at the next event.
+            let mode = c
+                .area
+                .as_ref()
+                .and_then(|a| a.mode)
+                .map(str::to_string)
+                .or_else(|| readout.permission_mode.clone())
+                .unwrap_or_else(|| "default".into());
+            let bypass = mode == "bypassPermissions";
+            tool("composer-mode")
+                .when(bypass, |s| s.text_color(amber))
+                .tooltip(|window, cx| Tooltip::new(t(L10nKey::ComposerModeTip)).build(window, cx))
+                .on_click(cx.listener(|this, _, window, cx| this.toolbar_key(BACK_TAB, window, cx)))
+                .when(bypass, |s| {
+                    s.child(div().size(px(5.)).rounded_full().bg(amber))
+                })
+                .child(mode_label(&mode))
         });
+        let divider = claude.then(|| {
+            div()
+                .flex_none()
+                .w(px(1.))
+                .h(px(14.))
+                .mx(px(4.))
+                .bg(ink.opacity(0.12))
+        });
+        let model = claude.then(|| {
+            let label = readout
+                .model
+                .as_deref()
+                .map(model_label)
+                .unwrap_or_else(|| t(L10nKey::ComposerModel).to_string());
+            tool("composer-model")
+                .gap(px(5.))
+                .tooltip(|window, cx| Tooltip::new(t(L10nKey::ComposerModelTip)).build(window, cx))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toolbar_key(CLAUDE_MODEL_PICKER, window, cx)
+                }))
+                .child(label)
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(9.))
+                        .text_color(ink.opacity(0.4)),
+                )
+        });
+        let think = claude.then(|| {
+            let on = c.thinking.or(readout.thinking).unwrap_or(true);
+            tool("composer-think")
+                .when(on, |s| s.bg(ink.opacity(0.05)).text_color(ink))
+                .when(!on, |s| s.text_color(ink.opacity(0.45)))
+                .tooltip(|window, cx| Tooltip::new(t(L10nKey::ComposerThinkTip)).build(window, cx))
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_thinking(window, cx)))
+                .child(t(L10nKey::ComposerThink))
+        });
+        let context = readout
+            .context_tokens
+            .zip(readout.context_window)
+            .filter(|(_, window)| *window > 0)
+            .map(|(used, window)| {
+                let pct = (used as f64 / window as f64 * 100.).min(100.);
+                let tip: SharedString = t_fmt(
+                    L10nKey::ComposerContextTip,
+                    &[
+                        ("used", &tokens_label(used)),
+                        ("window", &tokens_label(window)),
+                    ],
+                )
+                .into();
+                h_flex()
+                    .id("composer-context")
+                    .flex_none()
+                    .h(px(28.))
+                    .gap(px(6.))
+                    .px(px(8.))
+                    .text_size(px(11.5))
+                    .text_color(ink.opacity(0.4))
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                    .child(
+                        ProgressCircle::new("composer-context-ring")
+                            .value(pct as f32)
+                            .color(ink.opacity(0.5))
+                            .size(px(12.)),
+                    )
+                    .child(format!("{}%", pct.round() as u64))
+            });
 
         let send = div()
             .id("composer-send")
@@ -953,19 +1465,36 @@ impl TerminalView {
             .justify_center()
             .rounded_full()
             .bg(match can_send {
-                true => theme.primary,
+                true => ink,
                 false => ink.opacity(0.07),
             })
             .tooltip(|window, cx| Tooltip::new(t(L10nKey::ComposerSendTip)).build(window, cx))
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
             .on_click(cx.listener(|this, _, window, cx| this.submit_composer(window, cx)))
             .child(
                 Icon::new(IconName::ArrowUp)
                     .size(px(12.))
                     .text_color(match can_send {
-                        true => theme.primary_foreground,
-                        false => muted.opacity(0.7),
+                        true => theme.background,
+                        false => ink.opacity(0.35),
                     }),
             );
+
+        let asking = self.agent_is_asking().then(|| {
+            div()
+                .min_w_0()
+                .truncate()
+                .px(px(6.))
+                .text_size(px(12.))
+                .text_color(amber)
+                .child(t_fmt(
+                    L10nKey::ComposerAgentAsking,
+                    &[("agent", agent.display_name())],
+                ))
+        });
 
         let popup = menu.as_ref().map(|(trigger, items)| {
             let highlighted = c.highlighted.min(items.len() - 1);
@@ -997,7 +1526,7 @@ impl TerminalView {
                         .flex()
                         .items_center()
                         .text_size(px(11.5))
-                        .text_color(muted)
+                        .text_color(ink.opacity(0.4))
                         .child(title),
                 )
                 .children(items.iter().enumerate().map(|(i, item)| {
@@ -1007,7 +1536,7 @@ impl TerminalView {
                         .px(px(9.))
                         .gap(px(10.))
                         .rounded(px(6.))
-                        .when(i == highlighted, |s| s.bg(ink.opacity(0.06)))
+                        .when(i == highlighted, |s| s.bg(ink.opacity(0.05)))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -1017,7 +1546,12 @@ impl TerminalView {
                             }),
                         )
                         .when(item.is_file, |s| {
-                            s.child(Icon::new(IconName::File).size(px(12.)).text_color(muted))
+                            s.child(
+                                gpui::svg()
+                                    .path("icons/file.svg")
+                                    .size(px(12.))
+                                    .text_color(ink.opacity(0.4)),
+                            )
                         })
                         .child(
                             div()
@@ -1033,7 +1567,7 @@ impl TerminalView {
                                 .truncate()
                                 .text_right()
                                 .text_size(px(12.))
-                                .text_color(muted)
+                                .text_color(ink.opacity(0.4))
                                 .child(item.detail.clone()),
                         )
                 }))
@@ -1044,9 +1578,7 @@ impl TerminalView {
             div()
                 .id("composer")
                 .relative()
-                .flex_none()
                 .w_full()
-                .pt(px(8.))
                 // The terminal surface this sits in focuses the grid on any
                 // click and opens its own context menu on a right one. Neither
                 // is right for a click on the box.
@@ -1097,8 +1629,7 @@ impl TerminalView {
                     cx.stop_propagation();
                     this.paste_from_clipboard(cx);
                 }))
-                // Shift+Tab is the agent's: it cycles the permission mode, and
-                // the mode shows where it changes — in the TUI above.
+                // Shift+Tab is the agent's: it cycles the permission mode.
                 .capture_action(cx.listener(|this, _: &input::OutdentInline, _w, cx| {
                     cx.stop_propagation();
                     this.send_to_pty(BACK_TAB, cx);
@@ -1165,12 +1696,15 @@ impl TerminalView {
                         .children(chips)
                         .child(
                             div()
-                                .px(px(14.))
-                                .pt(px(12.))
-                                .pb(px(4.))
-                                .text_size(px(13.5))
-                                .line_height(px(20.))
-                                .child(Input::new(&c.input).appearance(false)),
+                                .min_h(px(44.))
+                                .px(px(14. - INPUT_PAD_X))
+                                .pt(px(12. - INPUT_PAD_Y))
+                                .pb(px(4. - INPUT_PAD_Y))
+                                .child(
+                                    Input::new(&c.input)
+                                        .appearance(false)
+                                        .with_size(Size::Size(px(TEXT_PX / 0.875))),
+                                ),
                         )
                         .child(
                             h_flex()
@@ -1178,8 +1712,13 @@ impl TerminalView {
                                 .px(px(6.))
                                 .gap(px(2.))
                                 .child(attach)
-                                .children(notice)
+                                .children(mode)
+                                .children(divider)
+                                .children(model)
+                                .children(think)
+                                .children(asking)
                                 .child(div().flex_1())
+                                .children(context)
                                 .child(send),
                         ),
                 )
@@ -1261,6 +1800,107 @@ mod tests {
             compose_message("just text  ", &[], Some("zsh")),
             "just text"
         );
+    }
+
+    fn screen(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|l| l.to_string()).collect()
+    }
+
+    const RULE: &str = "────────────────────────────────────────";
+
+    #[test]
+    fn claudes_input_is_the_ruled_block_with_the_prompt_in_it() {
+        let rows = screen(&[
+            "⏺ Done. The tests pass.",
+            "",
+            RULE,
+            "❯ Try \"fix lint errors\"",
+            RULE,
+            "  ⚠ Transcript saving is off",
+            "  ►► bypass permissions on (shift+tab to cycle)",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::Claude, &rows, 40),
+            Some(InputArea {
+                top: 2,
+                mode: Some("bypassPermissions")
+            })
+        );
+    }
+
+    #[test]
+    fn claudes_default_mode_is_the_one_it_does_not_name() {
+        let rows = screen(&[RULE, "❯ ", RULE, "  ? for shortcuts"]);
+        assert_eq!(
+            input_area(CLIAgent::Claude, &rows, 40).and_then(|a| a.mode),
+            Some("default")
+        );
+        let rows = screen(&[RULE, "❯ ", RULE, "  ⏸ plan mode on (shift+tab to cycle)"]);
+        assert_eq!(
+            input_area(CLIAgent::Claude, &rows, 40).and_then(|a| a.mode),
+            Some("plan")
+        );
+    }
+
+    /// A permission prompt or a picker takes the input's place: no prompt
+    /// line between the rules, so no input area, so the box steps aside.
+    #[test]
+    fn claude_asking_something_is_not_an_input_area() {
+        let rows = screen(&[
+            RULE,
+            " Do you want to make this edit to route.py?",
+            " ❯ 1. Yes",
+            "   2. No",
+        ]);
+        assert_eq!(input_area(CLIAgent::Claude, &rows, 40), None);
+        let rows = screen(&["some output", "", "  ────── a short rule ──"]);
+        assert_eq!(input_area(CLIAgent::Claude, &rows, 40), None);
+    }
+
+    #[test]
+    fn codex_input_starts_on_its_prompt_line_or_the_padding_above_it() {
+        let rows = screen(&[
+            "• Ran tests",
+            "",
+            "› Ask Codex to do anything",
+            "",
+            "  ⏎ send",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::Codex, &rows, 40),
+            Some(InputArea { top: 1, mode: None })
+        );
+    }
+
+    #[test]
+    fn geminis_input_is_its_framed_prompt() {
+        let rows = screen(&[
+            "✦ Here you go.",
+            "╭──────────────────────╮",
+            "│ >   Type your message │",
+            "╰──────────────────────╯",
+            "~/code  (main)  gemini-2.5-pro",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::Gemini, &rows, 40),
+            Some(InputArea { top: 1, mode: None })
+        );
+    }
+
+    #[test]
+    fn model_ids_read_the_way_people_say_them() {
+        assert_eq!(model_label("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(model_label("claude-sonnet-5-5[1m]"), "Sonnet 5.5");
+        assert_eq!(model_label("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        assert_eq!(model_label("gpt-5-codex"), "gpt-5-codex");
+    }
+
+    #[test]
+    fn token_counts_read_the_way_status_rows_count_them() {
+        assert_eq!(tokens_label(62_400), "62k");
+        assert_eq!(tokens_label(1_000_000), "1M");
+        assert_eq!(tokens_label(1_250_000), "1.2M");
+        assert_eq!(tokens_label(900), "900");
     }
 
     #[test]

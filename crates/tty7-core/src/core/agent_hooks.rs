@@ -158,7 +158,109 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
     {
         body["prompt"] = serde_json::Value::String(prompt);
     }
+    if agent == "claude" {
+        claude_readout(&payload, &mut body);
+    }
     format!("\x1b]777;notify;{AGENT_EVENT_SENTINEL};{body}\x07").into_bytes()
+}
+
+/// How much of the end of a transcript is read for the latest usage. One
+/// assistant entry is a few KiB; this is room for a long tool result after it.
+const TRANSCRIPT_TAIL: u64 = 512 * 1024;
+
+/// A context window past this is the long-context one.
+const STANDARD_WINDOW: u64 = 200_000;
+const LONG_WINDOW: u64 = 1_000_000;
+
+/// What Claude Code says about its settings, for the composer's toolbar:
+/// permission mode, model, how full the context is, whether thinking is on.
+///
+/// Worked out here, in the hook, because the hook runs where the agent runs —
+/// on a remote host its transcript and settings are only readable there.
+fn claude_readout(payload: &serde_json::Value, body: &mut serde_json::Value) {
+    let str_of = |v: Option<&serde_json::Value>| {
+        v.and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(mode) = str_of(payload.get("permission_mode")) {
+        body["permission_mode"] = mode.into();
+    }
+    let settings = claude_settings();
+    let configured = str_of(settings.get("model"))
+        .or_else(|| std::env::var("ANTHROPIC_MODEL").ok())
+        .unwrap_or_default();
+    let latest = payload
+        .get("transcript_path")
+        .and_then(|p| p.as_str())
+        .and_then(|p| last_assistant_usage(Path::new(p)));
+    let model = str_of(payload.get("model")).or_else(|| latest.as_ref().map(|l| l.0.clone()));
+    if let Some(model) = &model {
+        body["model"] = model.clone().into();
+    }
+    if let Some((_, tokens)) = latest {
+        body["context_tokens"] = tokens.into();
+        let long = [model.as_deref().unwrap_or(""), configured.as_str()]
+            .iter()
+            .any(|m| m.contains("[1m]"))
+            || tokens > STANDARD_WINDOW;
+        body["context_window"] = match long {
+            true => LONG_WINDOW,
+            false => STANDARD_WINDOW,
+        }
+        .into();
+    }
+    // Absent means on: the setting exists to turn thinking off.
+    body["thinking"] = settings
+        .get("alwaysThinkingEnabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+        .into();
+}
+
+fn claude_settings() -> serde_json::Value {
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|h| h.join(".claude")));
+    dir.and_then(|d| std::fs::read(d.join("settings.json")).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(serde_json::json!({}))
+}
+
+/// The model and context size of the last reply in a transcript: its input,
+/// cache and output tokens together, which is what the next request carries.
+/// Subagents' entries are skipped — they run in contexts of their own.
+fn last_assistant_usage(path: &Path) -> Option<(String, u64)> {
+    use std::io::{Seek as _, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(TRANSCRIPT_TAIL)))
+        .ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    last_usage_in(&String::from_utf8_lossy(&tail))
+}
+
+fn last_usage_in(jsonl: &str) -> Option<(String, u64)> {
+    jsonl.lines().rev().find_map(|line| {
+        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+        if entry.get("type")?.as_str()? != "assistant"
+            || entry.get("isSidechain").and_then(|v| v.as_bool()) == Some(true)
+        {
+            return None;
+        }
+        let message = entry.get("message")?;
+        let usage = message.get("usage")?;
+        let n = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        let tokens = n("input_tokens")
+            + n("cache_creation_input_tokens")
+            + n("cache_read_input_tokens")
+            + n("output_tokens");
+        let model = message.get("model")?.as_str()?.to_string();
+        // Claude Code writes its own error notices as assistant entries.
+        (model != "<synthetic>").then_some((model, tokens))
+    })
 }
 
 /// How much of a prompt rides back to the terminal.
@@ -1944,6 +2046,75 @@ export default function (pi: ExtensionAPI) {{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The last real reply wins: a subagent's entry after it and Claude
+    /// Code's own synthetic notices are not the conversation's context.
+    #[test]
+    fn the_readout_takes_the_last_main_thread_reply() {
+        let jsonl = [
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_creation_input_tokens":100,"cache_read_input_tokens":60000,"output_tokens":400}}}"#,
+            r#"{"type":"user","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","isSidechain":true,"message":{"model":"claude-haiku-4-5","usage":{"input_tokens":9000}}}"#,
+            r#"{"type":"assistant","message":{"model":"<synthetic>","usage":{"input_tokens":0}}}"#,
+            "not json",
+        ]
+        .join("\n");
+        assert_eq!(
+            last_usage_in(&jsonl),
+            Some(("claude-opus-5-5".to_string(), 60502))
+        );
+        assert_eq!(last_usage_in(""), None);
+    }
+
+    #[test]
+    fn the_readout_rides_the_hook_sequence() {
+        let dir = std::env::temp_dir().join(format!("tty7-readout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("t.jsonl");
+        std::fs::write(
+            &transcript,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":250000}}}"#,
+        )
+        .unwrap();
+        let stdin = serde_json::json!({
+            "session_id": "s",
+            "permission_mode": "plan",
+            "transcript_path": transcript,
+        })
+        .to_string();
+        let seq = build_hook_sequence("claude", "stop", &stdin);
+        let _ = std::fs::remove_dir_all(&dir);
+        let ev = crate::core::cli_agent::parse_agent_event(
+            seq.strip_prefix(b"\x1b]")
+                .unwrap()
+                .strip_suffix(b"\x07")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ev.readout.permission_mode.as_deref(), Some("plan"));
+        assert_eq!(ev.readout.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(ev.readout.context_tokens, Some(250_000));
+        assert_eq!(
+            ev.readout.context_window,
+            Some(LONG_WINDOW),
+            "past 200k it can only be the long window"
+        );
+        assert!(ev.readout.thinking.is_some());
+    }
+
+    #[test]
+    fn other_agents_carry_no_readout() {
+        let stdin = r#"{"session_id":"s","permission_mode":"plan"}"#;
+        let seq = build_hook_sequence("codex", "stop", stdin);
+        let ev = crate::core::cli_agent::parse_agent_event(
+            seq.strip_prefix(b"\x1b]")
+                .unwrap()
+                .strip_suffix(b"\x07")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ev.readout, Default::default());
+    }
 
     /// The exhaustive match keeps every detected agent mapped; this keeps the
     /// other direction honest, so a hooked agent cannot become unreachable

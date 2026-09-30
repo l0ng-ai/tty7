@@ -1031,6 +1031,49 @@ pub struct AgentSessionState {
     /// the turn back on [`AgentStatus::Working`].
     #[serde(default)]
     pub inferred: bool,
+    /// The agent's settings as its hooks last described them. Only Claude
+    /// Code's hooks carry these today.
+    #[serde(default)]
+    pub readout: AgentReadout,
+}
+
+/// What an agent says about how it is set up — what the message composer's
+/// toolbar shows. Each field is only ever what the agent reported; a field
+/// it has not reported stays `None` rather than being guessed at.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentReadout {
+    /// The agent's own word for it: `default`, `acceptEdits`, `plan`,
+    /// `bypassPermissions`, …
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    /// The model id, as the agent's transcript records it.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// How much context the last reply used: its input, cache and output
+    /// tokens together.
+    #[serde(default)]
+    pub context_tokens: Option<u64>,
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    #[serde(default)]
+    pub thinking: Option<bool>,
+}
+
+impl AgentReadout {
+    /// Take what `newer` reports and keep the rest: one event rarely carries
+    /// every field, and a missing one says nothing about its value.
+    pub fn merge(&mut self, newer: &AgentReadout) {
+        fn take<T: Clone>(slot: &mut Option<T>, newer: &Option<T>) {
+            if newer.is_some() {
+                slot.clone_from(newer);
+            }
+        }
+        take(&mut self.permission_mode, &newer.permission_mode);
+        take(&mut self.model, &newer.model);
+        take(&mut self.context_tokens, &newer.context_tokens);
+        take(&mut self.context_window, &newer.context_window);
+        take(&mut self.thinking, &newer.thinking);
+    }
 }
 
 impl AgentStatus {
@@ -1093,6 +1136,7 @@ impl AgentSessionState {
         if let Some(cwd) = &ev.cwd {
             self.cwd = Some(cwd.clone());
         }
+        self.readout.merge(&ev.readout);
         match ev.kind {
             AgentEventKind::SessionStart => {
                 self.status = AgentStatus::Idle;
@@ -1162,6 +1206,7 @@ pub struct AgentEvent {
     /// Separate from `message`, which carries what the *agent* said and is
     /// deliberately cleared when a turn starts.
     pub prompt: Option<String>,
+    pub readout: AgentReadout,
 }
 
 pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
@@ -1185,6 +1230,8 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
         cwd: Option<String>,
         #[serde(default)]
         prompt: Option<String>,
+        #[serde(flatten)]
+        readout: AgentReadout,
     }
 
     let w: Wire = serde_json::from_slice(json).ok()?;
@@ -1197,12 +1244,40 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
         message: nonempty(w.message),
         cwd: nonempty(w.cwd).map(std::path::PathBuf::from),
         prompt: nonempty(w.prompt),
+        readout: w.readout,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A later event that leaves a field out keeps what an earlier one said.
+    #[test]
+    fn the_readout_keeps_what_later_events_leave_out() {
+        let mut state = AgentSessionState::default();
+        let event = |readout: AgentReadout| AgentEvent {
+            agent: Some(CLIAgent::Claude),
+            kind: AgentEventKind::ToolComplete,
+            session_id: None,
+            message: None,
+            cwd: None,
+            prompt: None,
+            readout,
+        };
+        state.apply_event(&event(AgentReadout {
+            permission_mode: Some("plan".into()),
+            model: Some("claude-opus-5-5".into()),
+            ..Default::default()
+        }));
+        state.apply_event(&event(AgentReadout {
+            context_tokens: Some(1200),
+            ..Default::default()
+        }));
+        assert_eq!(state.readout.permission_mode.as_deref(), Some("plan"));
+        assert_eq!(state.readout.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(state.readout.context_tokens, Some(1200));
+    }
 
     #[test]
     fn claude_starts_fresh_under_the_same_id_with_its_flags() {
@@ -1700,6 +1775,7 @@ mod tests {
             message: msg.map(String::from),
             cwd: None,
             prompt: None,
+            readout: Default::default(),
         };
 
         s.apply_event(&ev(AgentEventKind::SessionStart, None, Some("sid-1")));
@@ -1756,6 +1832,7 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            readout: Default::default(),
         };
 
         let mut s = AgentSessionState::default();
@@ -1790,6 +1867,7 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            readout: Default::default(),
         };
 
         let mut s = AgentSessionState::default();
@@ -1842,6 +1920,7 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            readout: Default::default(),
         };
 
         let mut s = AgentSessionState::default();
@@ -1879,6 +1958,7 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            readout: Default::default(),
         };
 
         let mut s = AgentSessionState::default();
@@ -1911,6 +1991,7 @@ mod tests {
             message: None,
             cwd: cwd.map(PathBuf::from),
             prompt: None,
+            readout: Default::default(),
         };
 
         let mut s = AgentSessionState::default();
