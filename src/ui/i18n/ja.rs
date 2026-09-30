@@ -1719,6 +1719,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherCopyingServer => "tty7 のサーバーをコピー中… {done} / {total}",
         L10nKey::SwitcherThisWindow => "このウィンドウ",
         L10nKey::SwitcherOpen => "開く",
+        L10nKey::SwitcherOffline => "オフライン",
         L10nKey::SwitcherDisconnect => "切断",
         L10nKey::SwitcherEditHost => "ホストを編集…",
         L10nKey::SwitcherSaveAsHost => "SSH ホストとして保存…",

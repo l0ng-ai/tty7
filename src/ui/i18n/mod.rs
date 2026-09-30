@@ -1396,6 +1396,7 @@ l10n_keys! {
     SwitcherCopyingServer,
     SwitcherThisWindow,
     SwitcherOpen,
+    SwitcherOffline,
     SwitcherDisconnect,
     SwitcherEditHost,
     SwitcherSaveAsHost,

@@ -2403,6 +2403,11 @@ impl Tty7App {
             Some((t(L10nKey::SwitcherThisWindow), true))
         } else if row.open {
             Some((t(L10nKey::SwitcherOpen), false))
+        } else if group.target.is_some() && group.link == Link::Offline {
+            // Said in words where the other states go, not as a dot: the
+            // normal case carries nothing extra, so the exception is the
+            // only thing that speaks.
+            Some((t(L10nKey::SwitcherOffline), false))
         } else {
             None
         };
@@ -2411,21 +2416,15 @@ impl Tty7App {
         // workspace name plus path plus badge plus timestamp on one row pushes
         // the trailing pieces straight out over the divider. The second line
         // leads with the machine the workspace lives on — the flat list's only
-        // grouping. Its link state rides on the disc as a dot: green while the
-        // workspace is reachable, faint while it is not, and the warning or
-        // danger ink while a connect is in flight or has failed.
-        let faint = fg.opacity(0.22);
-        let live: gpui::Hsla = gpui::rgb(crate::ui::tab_strip::LIVE_DOT).into();
+        // grouping. A reachable workspace carries nothing extra; an offline
+        // one says so in the state column and dims its disc. Only the states
+        // that want attention — a connect in flight, a failure, a machine
+        // another client took over — keep a dot on the disc.
         let state_dot = match group.link {
-            Link::Local => match row.live {
-                Liveness::Alive => live,
-                Liveness::Unknown | Liveness::Stopped => faint,
-            },
-            Link::Connected if group.preempted => warn,
-            Link::Connected => live,
-            Link::Connecting | Link::Reconnecting { .. } => warn,
-            Link::Failed => theme.danger,
-            Link::Offline => faint,
+            Link::Connected if group.preempted => Some(warn),
+            Link::Connecting | Link::Reconnecting { .. } => Some(warn),
+            Link::Failed => Some(theme.danger),
+            Link::Local | Link::Connected | Link::Offline => None,
         };
         let host_label = match group.target.is_some() {
             true => group.label.clone(),
@@ -2453,6 +2452,7 @@ impl Tty7App {
             .child(
                 div()
                     .size(px(WS_AVATAR))
+                    .when(unlit, |d| d.opacity(0.5))
                     .rounded_full()
                     .bg(theme.secondary)
                     .flex()
@@ -2463,7 +2463,7 @@ impl Tty7App {
                     .text_color(fg.opacity(0.6))
                     .child(initial),
             )
-            .child(
+            .children(state_dot.map(|state_dot| {
                 // The ring is the row's own fill, so the dot reads as cut
                 // out of the disc whichever state the row is in.
                 div()
@@ -2477,8 +2477,8 @@ impl Tty7App {
                     .when(!picked, |d| {
                         d.group_hover("switcher-row", move |d| d.border_color(hover))
                     })
-                    .bg(state_dot),
-            );
+                    .bg(state_dot)
+            }));
 
         let line = h_flex()
             .id(("switcher-row", key))

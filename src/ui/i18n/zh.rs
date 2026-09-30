@@ -1539,6 +1539,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherCopyingServer => "正在复制 tty7 server… {done} / {total}",
         L10nKey::SwitcherThisWindow => "当前窗口",
         L10nKey::SwitcherOpen => "已打开",
+        L10nKey::SwitcherOffline => "离线",
         L10nKey::SwitcherDisconnect => "断开连接",
         L10nKey::SwitcherEditHost => "编辑主机…",
         L10nKey::SwitcherSaveAsHost => "保存为 SSH 主机…",

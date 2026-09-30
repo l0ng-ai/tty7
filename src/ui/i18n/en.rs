@@ -1664,6 +1664,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherCopyingServer => "Copying tty7's server… {done} / {total}",
         L10nKey::SwitcherThisWindow => "This window",
         L10nKey::SwitcherOpen => "Open",
+        L10nKey::SwitcherOffline => "Offline",
         L10nKey::SwitcherDisconnect => "Disconnect",
         L10nKey::SwitcherEditHost => "Edit Host…",
         L10nKey::SwitcherSaveAsHost => "Save as SSH Host…",
