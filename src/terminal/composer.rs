@@ -57,6 +57,9 @@ const MAX_ROWS: usize = 8;
 const SETTLE: Duration = Duration::from_millis(50);
 
 /// Copilot's input treats a CR that follows a paste too closely as part of it.
+/// So does Gemini's: it takes an Enter within 40ms of a paste it has finished
+/// reading for a line break — and a long paste takes it a while to read, so
+/// [`SETTLE`] after the write is not 40ms after that.
 const SETTLE_AFTER_PASTE_SLOW: Duration = Duration::from_millis(300);
 
 /// How long the agent's input area has to stay gone before the box steps
@@ -168,7 +171,7 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
 
     let enter_delay = match (steps.is_empty(), agent) {
         (true, _) => Duration::ZERO,
-        (false, CLIAgent::Copilot) if pasted => SETTLE_AFTER_PASTE_SLOW,
+        (false, CLIAgent::Copilot | CLIAgent::Gemini) if pasted => SETTLE_AFTER_PASTE_SLOW,
         (false, _) => SETTLE,
     };
     steps.push(Step {
@@ -2137,11 +2140,13 @@ mod tests {
     }
 
     #[test]
-    fn copilot_waits_longer_after_a_paste() {
-        let steps = submit_plan(CLIAgent::Copilot, "a\nb", true);
-        assert_eq!(steps[1].delay, SETTLE_AFTER_PASTE_SLOW);
-        let steps = submit_plan(CLIAgent::Copilot, "ab", true);
-        assert_eq!(steps[1].delay, SETTLE);
+    fn copilot_and_gemini_wait_longer_after_a_paste() {
+        for agent in [CLIAgent::Copilot, CLIAgent::Gemini] {
+            let steps = submit_plan(agent, "a\nb", true);
+            assert_eq!(steps[1].delay, SETTLE_AFTER_PASTE_SLOW, "{agent:?}");
+            let steps = submit_plan(agent, "ab", true);
+            assert_eq!(steps[1].delay, SETTLE, "{agent:?}");
+        }
     }
 
     #[test]
