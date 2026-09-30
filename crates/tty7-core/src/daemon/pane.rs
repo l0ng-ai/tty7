@@ -5728,7 +5728,6 @@ mod tests {
                 session_id: None,
                 message: None,
                 cwd: None,
-                prompt: None,
                 readout: Default::default(),
             }],
             None,

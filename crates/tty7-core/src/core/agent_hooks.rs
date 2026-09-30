@@ -124,6 +124,11 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
             body[key] = serde_json::Value::String(v.to_string());
         }
     }
+    if let Some(message) = body.get_mut("message")
+        && let Some(text) = message.as_str()
+    {
+        *message = clip_chars(text, MESSAGE_MAX).into();
+    }
     // Antigravity names the session after the conversation, in camelCase.
     // Scoped to it: the alias table is last-write-wins, and another agent's
     // unrelated `conversationId` must not replace its real session id.
@@ -149,14 +154,6 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
             .filter(|r| !r.is_empty())
     {
         body["cwd"] = serde_json::Value::String(root.to_string());
-    }
-    if let Some(prompt) = ["prompt", "userPrompt", "user_prompt"]
-        .iter()
-        .find_map(|k| payload.get(*k))
-        .and_then(|v| v.as_str())
-        .and_then(prompt_label)
-    {
-        body["prompt"] = serde_json::Value::String(prompt);
     }
     if agent == "claude" {
         claude_readout(event, &payload, &mut body);
@@ -332,28 +329,15 @@ fn reply_model_in(jsonl: &str, reply: &str, prompt_id: Option<&str>) -> Option<S
     (text.trim() == reply.trim()).then_some(model)
 }
 
-/// How much of a prompt rides back to the terminal.
-///
-/// Two reasons it is short. The payload goes out as an OSC, and the tokenizer
-/// reading it *abandons* anything past 8 KiB rather than truncating — a pasted
-/// file would silently cost the whole event, not just its tail. And what the
-/// client does with this is label one row of a list and look for that text in
-/// the scrollback, neither of which can use more than a line.
-const PROMPT_LABEL_MAX: usize = 200;
+/// How much of an agent's message rides back to the terminal. It only ever
+/// fills a status line, and every byte of the sequence is a byte another
+/// writer on the same tty can cut in on.
+const MESSAGE_MAX: usize = 200;
 
-/// The first line of what the user typed, which is both the label an outline
-/// row shows and the needle that finds the turn again in the scrollback.
-///
-/// A line rather than the whole prompt because the terminal wrapped it across
-/// rows: a needle spanning a line break matches no single row, so the later
-/// lines would only make the search fail.
-fn prompt_label(text: &str) -> Option<String> {
-    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
-    let end = line
-        .char_indices()
-        .nth(PROMPT_LABEL_MAX)
-        .map_or(line.len(), |(i, _)| i);
-    Some(line[..end].to_string())
+fn clip_chars(text: &str, max: usize) -> &str {
+    text.char_indices()
+        .nth(max)
+        .map_or(text, |(i, _)| &text[..i])
 }
 
 #[cfg(unix)]
@@ -2328,68 +2312,40 @@ mod tests {
         crate::core::cli_agent::parse_agent_event(&seq[2..seq.len() - 1]).expect("parses")
     }
 
+    /// What the user typed never rides along: nothing downstream reads it,
+    /// and a pasted prompt made the sequence long enough for the agent's own
+    /// output to land in the middle of it.
     #[test]
-    fn a_submitted_prompt_rides_back_as_the_turns_label() {
-        let ev = round_trip(
-            "claude",
-            "prompt-submit",
-            r#"{"prompt":"restore the outline","session_id":"s-1"}"#,
-        );
-        assert_eq!(ev.prompt.as_deref(), Some("restore the outline"));
-        assert_eq!(
-            ev.message, None,
-            "a prompt is not a message; the turn starts with nothing said back"
-        );
-    }
-
-    #[test]
-    fn a_prompt_is_cut_to_its_first_line() {
-        let ev = round_trip(
-            "claude",
-            "prompt-submit",
-            r#"{"prompt":"\n\n  what did we decide  \nand then some more\nand more"}"#,
-        );
-        assert_eq!(
-            ev.prompt.as_deref(),
-            Some("what did we decide"),
-            "later lines wrapped when they were drawn and would only fail the search"
-        );
-    }
-
-    #[test]
-    fn a_pasted_file_cannot_cost_the_whole_event() {
+    fn a_submitted_prompt_stays_out_of_the_sequence() {
         let prompt = "x".repeat(64 * 1024);
+        let seq = build_hook_sequence(
+            "claude",
+            "prompt-submit",
+            &serde_json::json!({ "prompt": prompt, "session_id": "s-1" }).to_string(),
+        );
+        assert!(!String::from_utf8_lossy(&seq).contains("xxxx"));
+        assert!(seq.len() < 200, "{} bytes", seq.len());
         let ev = round_trip(
             "claude",
             "prompt-submit",
-            &serde_json::json!({ "prompt": prompt }).to_string(),
+            r#"{"prompt":"hi","session_id":"s-1"}"#,
         );
         assert_eq!(
-            ev.prompt.map(|p| p.chars().count()),
-            Some(PROMPT_LABEL_MAX),
-            "the tokenizer abandons an oversized payload rather than truncating it"
+            ev.kind,
+            crate::core::cli_agent::AgentEventKind::PromptSubmit
         );
+        assert_eq!(ev.message, None, "a prompt is not a message");
     }
 
     #[test]
-    fn a_prompt_of_wide_characters_is_cut_on_a_character_boundary() {
-        let prompt = "把大纲恢复一下".repeat(100);
+    fn a_long_message_is_cut_on_a_character_boundary() {
         let ev = round_trip(
-            "claude",
-            "prompt-submit",
-            &serde_json::json!({ "prompt": prompt }).to_string(),
+            "gemini",
+            "permission-request",
+            &serde_json::json!({ "message": "允许".repeat(1000) }).to_string(),
         );
-        assert_eq!(ev.prompt.map(|p| p.chars().count()), Some(PROMPT_LABEL_MAX));
-    }
-
-    #[test]
-    fn an_agent_that_reports_no_prompt_carries_none() {
-        assert_eq!(round_trip("codex", "stop", "{}").prompt, None);
-        assert_eq!(
-            round_trip("claude", "prompt-submit", r#"{"prompt":"   "}"#).prompt,
-            None,
-            "whitespace is not a label"
-        );
+        assert_eq!(ev.message.map(|m| m.chars().count()), Some(MESSAGE_MAX));
+        assert_eq!(clip_chars("short", MESSAGE_MAX), "short");
     }
 
     #[test]
