@@ -1594,7 +1594,11 @@ impl TerminalView {
                         }))
                         .child(label),
                 )
-                .when(open, |s| s.child(popup(picker, title, rows, cx)))
+                // Painted after everything else, so the box's ring and whatever
+                // else is under the list stays under it.
+                .when(open, |s| {
+                    s.child(gpui::deferred(popup(picker, title, rows, cx)).with_priority(1))
+                })
         };
 
         let model = claude.then(|| {
@@ -1648,6 +1652,11 @@ impl TerminalView {
                     current_effort
                         .as_deref()
                         .map(|level| div().text_color(ink).child(effort_label(level))),
+                )
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(8.))
+                        .text_color(ink.opacity(0.4)),
                 )
                 .into_any_element();
             let rows = EFFORT_LEVELS
@@ -1932,7 +1941,7 @@ impl TerminalView {
                         },
                     ))
                 })
-                .children(popup)
+                .children(popup.map(|p| gpui::deferred(p).with_priority(1)))
                 .child(
                     div()
                         .flex()
