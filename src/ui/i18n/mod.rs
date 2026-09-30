@@ -1587,7 +1587,6 @@ l10n_keys! {
     ComposerModelTip,
     ComposerModelDefault,
     ComposerEffort,
-    ComposerEffortLevel,
     ComposerEffortTip,
     ComposerContextTip,
     CmdFindNext,

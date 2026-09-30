@@ -80,6 +80,8 @@ const INPUT_AREA_MAX_ROWS: usize = 40;
 const TEXT_PX: f32 = 13.5;
 const INPUT_PAD_X: f32 = 8.;
 const INPUT_PAD_Y: f32 = 2.;
+/// How far the box stands in from the pane's sides and bottom.
+const BOX_INSET: f32 = 16.;
 
 /// The key the toolbar sends: Shift+Tab cycles the permission mode in every
 /// agent that has one.
@@ -642,6 +644,15 @@ fn model_alias(model: &str, window: Option<u64>) -> Option<&'static str> {
         return None;
     };
     Some(pair[long as usize])
+}
+
+/// How the toolbar spells an effort level: capitalized, as the model names
+/// and modes are.
+fn effort_label(level: &str) -> String {
+    match level {
+        "xhigh" => "Extra high".into(),
+        _ => level[..1].to_uppercase() + &level[1..],
+    }
 }
 
 /// How the model list spells an alias.
@@ -1315,7 +1326,7 @@ impl TerminalView {
             // Over the input area, painted in the grid's own background so
             // what is under it is gone rather than showing through. At least
             // as tall as the area; taller when the box needs it. The box sits
-            // at its top, where the agent's own input starts.
+            // at the bottom of the pane, where a chat's input sits.
             Some(rows) => div()
                 .absolute()
                 .left_0()
@@ -1324,8 +1335,9 @@ impl TerminalView {
                 .min_h(self.line_height * rows as f32 + px(GRID_PAD_Y))
                 .flex()
                 .flex_col()
-                .px(px(GRID_PAD_X))
-                .pb(px(8.))
+                .justify_end()
+                .px(px(BOX_INSET))
+                .pb(px(BOX_INSET))
                 .bg(cx.theme().background)
                 .occlude()
                 .child(frame)
@@ -1334,7 +1346,8 @@ impl TerminalView {
                 .flex_none()
                 .w_full()
                 .pt(px(8.))
-                .pb(px(8.))
+                .px(px(BOX_INSET - GRID_PAD_X))
+                .pb(px(BOX_INSET))
                 .child(frame)
                 .into_any_element(),
         };
@@ -1355,9 +1368,9 @@ impl TerminalView {
         let ink = theme.foreground;
         let muted = theme.muted_foreground;
         let amber = theme.warning;
-        let ring = match focused {
-            true => ink.opacity(0.22),
-            false => ink.opacity(0.12),
+        let (ring, ring_w) = match focused {
+            true => (ink.opacity(0.22), px(1.)),
+            false => (ink.opacity(0.15), crate::ui::theme::hairline(window)),
         };
         let menu = self.composer_menu(cx);
 
@@ -1488,17 +1501,18 @@ impl TerminalView {
         let divider = claude.then(|| {
             div()
                 .flex_none()
-                .w(px(1.))
+                .w(crate::ui::theme::hairline(window))
                 .h(px(14.))
                 .mx(px(4.))
-                .bg(ink.opacity(0.12))
+                .bg(ink.opacity(0.15))
         });
         // A toolbar list, opened over its own button.
         let popup = |picker: Picker,
                      title: L10nKey,
                      rows: Vec<(&'static str, String, bool)>,
                      cx: &Context<Self>| {
-            div()
+            crate::ui::theme::floating_surface(div(), cx)
+                .rounded(px(10.))
                 .absolute()
                 .left_0()
                 .bottom_full()
@@ -1508,11 +1522,6 @@ impl TerminalView {
                 .flex()
                 .flex_col()
                 .gap(px(1.))
-                .rounded(px(10.))
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.border)
-                .shadow_md()
                 .text_size(px(13.))
                 .text_color(ink)
                 .occlude()
@@ -1552,11 +1561,10 @@ impl TerminalView {
                         }))
                 }))
         };
-        // A toolbar button that opens a list: the label, a chevron, and the
-        // list itself when it is open.
+        // A toolbar button that opens a list over itself.
         let picker_button = |picker: Picker,
                              id: &'static str,
-                             label: String,
+                             label: gpui::AnyElement,
                              tip: L10nKey,
                              title: L10nKey,
                              rows: Vec<(&'static str, String, bool)>,
@@ -1575,12 +1583,7 @@ impl TerminalView {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.toggle_picker(picker, window, cx)
                         }))
-                        .child(label)
-                        .child(
-                            Icon::new(IconName::ChevronDown)
-                                .size(px(9.))
-                                .text_color(ink.opacity(0.4)),
-                        ),
+                        .child(label),
                 )
                 .when(open, |s| s.child(popup(picker, title, rows, cx)))
         };
@@ -1597,11 +1600,20 @@ impl TerminalView {
                     .as_deref()
                     .and_then(|m| model_alias(m, readout.context_window))
             });
-            let label = match (picked, readout.model.as_deref()) {
+            let name = match (picked, readout.model.as_deref()) {
                 (Some(alias), _) => alias_label(alias),
                 (None, Some(model)) => model_label(model),
                 (None, None) => t(L10nKey::ComposerModel).to_string(),
             };
+            let label = h_flex()
+                .gap(px(5.))
+                .child(name)
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(8.))
+                        .text_color(ink.opacity(0.4)),
+                )
+                .into_any_element();
             let rows = CLAUDE_MODELS
                 .iter()
                 .map(|&alias| (alias, alias_label(alias), current == Some(alias)))
@@ -1618,15 +1630,22 @@ impl TerminalView {
         });
         let current_effort = c.effort.clone().or_else(|| readout.effort.clone());
         let effort = claude.then(|| {
-            let label = match &current_effort {
-                Some(level) => t_fmt(L10nKey::ComposerEffortLevel, &[("level", level)]),
-                None => t(L10nKey::ComposerEffort).to_string(),
-            };
+            // "Effort" in the toolbar's grey, the level in the text's ink.
+            let label = h_flex()
+                .gap(px(5.))
+                .text_color(ink.opacity(0.45))
+                .child(t(L10nKey::ComposerEffort))
+                .children(
+                    current_effort
+                        .as_deref()
+                        .map(|level| div().text_color(ink).child(effort_label(level))),
+                )
+                .into_any_element();
             let rows = EFFORT_LEVELS
                 .iter()
                 .map(|&level| {
                     let on = current_effort.as_deref() == Some(level);
-                    (level, level.to_string(), on)
+                    (level, effort_label(level), on)
                 })
                 .collect();
             picker_button(
@@ -1717,7 +1736,8 @@ impl TerminalView {
                 '/' => t(L10nKey::ComposerMenuCommands),
                 _ => t(L10nKey::ComposerMenuFiles),
             };
-            div()
+            crate::ui::theme::floating_surface(div(), cx)
+                .rounded(px(10.))
                 .absolute()
                 .left_0()
                 .bottom_full()
@@ -1728,11 +1748,6 @@ impl TerminalView {
                 .flex()
                 .flex_col()
                 .gap(px(1.))
-                .rounded(px(10.))
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.border)
-                .shadow_md()
                 .text_size(px(13.))
                 .child(
                     div()
@@ -1912,10 +1927,17 @@ impl TerminalView {
                         .flex_col()
                         .rounded(px(12.))
                         .bg(ink.opacity(0.035))
-                        .border_1()
+                        .border_t(ring_w)
+                        .border_b(ring_w)
+                        .border_l(ring_w)
+                        .border_r(ring_w)
                         .border_color(ring)
                         .drag_over::<ExternalPaths>(move |s, _, _, _| {
-                            s.border_color(ink.opacity(0.45))
+                            s.border_t(px(1.))
+                                .border_b(px(1.))
+                                .border_l(px(1.))
+                                .border_r(px(1.))
+                                .border_color(ink.opacity(0.48))
                         })
                         .children(chips)
                         .child(
@@ -2137,6 +2159,8 @@ mod tests {
         assert_eq!(model_alias("claude-fable-5-1", None), None);
         assert_eq!(alias_label("sonnet[1m]"), "Sonnet · 1M");
         assert_eq!(alias_label("haiku"), "Haiku");
+        assert_eq!(effort_label("medium"), "Medium");
+        assert_eq!(effort_label("xhigh"), "Extra high");
     }
 
     #[test]
