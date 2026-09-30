@@ -2101,21 +2101,29 @@ impl RemoteTerminal {
         }
     }
 
+    /// `remote_start_dir` is a directory on the far host, carried as
+    /// [`ClientMsg::SpawnNativeSsh`]'s `cwd`.
     pub fn spawn_native_ssh(
         size: TermSize,
         cell_w: u16,
         cell_h: u16,
-        cwd: Option<PathBuf>,
+        remote_start_dir: Option<PathBuf>,
         spec: Box<NativeSshSpec>,
     ) -> anyhow::Result<(Self, u64)> {
-        match Self::spawn_native_ssh_once(size, cell_w, cell_h, cwd.clone(), spec.clone()) {
+        match Self::spawn_native_ssh_once(
+            size,
+            cell_w,
+            cell_h,
+            remote_start_dir.clone(),
+            spec.clone(),
+        ) {
             Err(first_err) if daemon_disconnected_before_spawn_reply(&first_err) => {
                 if let Err(restart_err) = crate::daemon::spawn::restart() {
                     return Err(anyhow::anyhow!(
                         "daemon disconnected before SpawnNativeSsh reply ({first_err}); restart failed: {restart_err}"
                     ));
                 }
-                Self::spawn_native_ssh_once(size, cell_w, cell_h, cwd, spec).map_err(|second_err| {
+                Self::spawn_native_ssh_once(size, cell_w, cell_h, remote_start_dir, spec).map_err(|second_err| {
                     anyhow::anyhow!(
                         "daemon disconnected before SpawnNativeSsh reply ({first_err}); restarted daemon but it still failed: {second_err}"
                     )
@@ -2129,7 +2137,7 @@ impl RemoteTerminal {
         size: TermSize,
         cell_w: u16,
         cell_h: u16,
-        cwd: Option<PathBuf>,
+        remote_start_dir: Option<PathBuf>,
         spec: Box<NativeSshSpec>,
     ) -> anyhow::Result<(Self, u64)> {
         let mut stream = connect()?;
@@ -2139,7 +2147,7 @@ impl RemoteTerminal {
         let auto_supplied_password = spec.password.is_some();
 
         ClientMsg::SpawnNativeSsh {
-            cwd,
+            cwd: remote_start_dir,
             size: win,
             spec,
         }

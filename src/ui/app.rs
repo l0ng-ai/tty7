@@ -43,6 +43,39 @@ pub(crate) enum SpawnAs {
     Ssh(Box<crate::daemon::protocol::NativeSshSpec>),
 }
 
+/// How a pane being opened relates to the pane it was opened from — which is
+/// what decides whether it may start in that pane's directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenedFrom {
+    /// A local shell.
+    LocalShell,
+    /// The source pane's own SSH host, dialled again (⌘T, ⌘D on an SSH pane).
+    SameSshHost,
+    /// A saved host or quick connect: a connection of its own, whatever pane
+    /// happened to be in front when it was asked for.
+    FreshSshHost,
+}
+
+/// The directory a pane opened from another one starts in.
+///
+/// `source_cwd` is the source pane's last reported directory, and on a remote
+/// pane that is a path on the far host. It carries over only to a pane on the
+/// same side of the link: a local shell takes a local pane's directory, and a
+/// redial of the same host takes the far shell's. Anything else starts where a
+/// fresh pane would — a local path handed to a remote `cd` names nothing there,
+/// and a remote one handed to a local spawn names nothing here.
+fn inherited_start_dir(
+    opened: OpenedFrom,
+    source_cwd: Option<std::path::PathBuf>,
+    source_is_remote: bool,
+) -> Option<std::path::PathBuf> {
+    match opened {
+        OpenedFrom::LocalShell => source_cwd.filter(|_| !source_is_remote),
+        OpenedFrom::SameSshHost => source_cwd,
+        OpenedFrom::FreshSshHost => None,
+    }
+}
+
 /// Where a row taken out of the new-tab menu lands.
 ///
 /// Windows Terminal's rule, and the reason this is a parameter rather than two
@@ -3525,7 +3558,7 @@ impl Tty7App {
                     verify,
                     &crate::ui::ssh_connect::config_alias_resolver,
                 );
-                self.open_native_ssh_tab(Box::new(spec), window, cx);
+                self.open_native_ssh_tab(Box::new(spec), None, window, cx);
             }
             Err(reason) => self.push_ssh_connect_error(reason, cx),
         }
@@ -3975,6 +4008,8 @@ impl Tty7App {
     /// ⌘T. From an SSH pane it dials the same host again, the way ⌘D does:
     /// a local shell opened from one would land in a directory the pane never
     /// showed, and in Ungrouped rather than under the host the user was on.
+    /// The new session starts in the far directory the pane was in, as a
+    /// local ⌘T starts in the local one.
     pub(crate) fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let source = self
             .tabs
@@ -3988,11 +4023,12 @@ impl Tty7App {
                 (view.ssh_spec(), remote, view.cwd())
             });
         match source {
-            Some((Some(spec), remote, _)) => {
+            Some((Some(spec), remote, cwd)) => {
+                let start_dir = inherited_start_dir(OpenedFrom::SameSshHost, cwd, true);
                 let place = self.spawn_group(None, cx).on_host(remote.map(|r| r.target));
                 let spec = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
                 let before = self.tabs.len();
-                self.open_native_ssh_tab(spec, window, cx);
+                self.open_native_ssh_tab(spec, start_dir, window, cx);
                 if self.tabs.len() > before
                     && let Some(tab) = self.tabs.get(self.active)
                 {
@@ -4154,18 +4190,18 @@ impl Tty7App {
         Some(tab)
     }
 
+    /// A tab dialling `spec`, whose shell starts in `remote_start_dir` on the
+    /// far host. A connection opened from a saved host or quick connect
+    /// passes `None`: the pane in front belongs to some other machine (usually
+    /// this one), and its directory means nothing over there.
     pub(crate) fn open_native_ssh_tab(
         &mut self,
         spec: Box<crate::daemon::protocol::NativeSshSpec>,
+        remote_start_dir: Option<std::path::PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let cwd = self.tabs.get(self.active).and_then(|t| {
-            t.pane
-                .focused_or_first(window, cx)
-                .and_then(|leaf| leaf.read(cx).cwd())
-        });
-        let view = match new_terminal_native(self.font_size, cwd, spec, window, cx) {
+        let view = match new_terminal_native(self.font_size, remote_start_dir, spec, window, cx) {
             Ok(view) => view,
             Err(e) => {
                 log::error!("native SSH spawn failed: {e}");
@@ -4200,8 +4236,10 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let cwd = dead.read(cx).cwd();
-        let fresh = match new_terminal_native(self.font_size, cwd, spec, window, cx) {
+        // The far shell's last report, not a local path: a native SSH pane's
+        // cwd only ever comes from OSC 7 sent across the link.
+        let remote_start_dir = dead.read(cx).cwd();
+        let fresh = match new_terminal_native(self.font_size, remote_start_dir, spec, window, cx) {
             Ok(view) => view,
             Err(e) => {
                 log::error!("native SSH respawn failed: {e}");
@@ -4260,18 +4298,31 @@ impl Tty7App {
         if !self.guard_local_spawn(window, cx) {
             return None;
         }
-        let cwd = target.read(cx).spawnable_cwd();
-        let spawn = match spawn {
-            Some(spawn) => spawn,
+        let (spawn, opened) = match spawn {
+            Some(spawn) => {
+                let opened = match spawn {
+                    SpawnAs::Ssh(_) => OpenedFrom::FreshSshHost,
+                    SpawnAs::Shell(_) => OpenedFrom::LocalShell,
+                };
+                (spawn, opened)
+            }
             // A stored spec is resolved against the saved host before it is
             // dialled; one handed in by a caller was just built from that host
             // and needs no second pass.
             None => match target.read(cx).ssh_spec() {
-                Some(spec) => {
-                    SpawnAs::Ssh(crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx))
-                }
-                None => SpawnAs::Shell(target.read(cx).shell_spec()),
+                Some(spec) => (
+                    SpawnAs::Ssh(crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx)),
+                    OpenedFrom::SameSshHost,
+                ),
+                None => (
+                    SpawnAs::Shell(target.read(cx).shell_spec()),
+                    OpenedFrom::LocalShell,
+                ),
             },
+        };
+        let cwd = {
+            let target = target.read(cx);
+            inherited_start_dir(opened, target.cwd(), target.remote_context().is_some())
         };
         let new = match spawn {
             SpawnAs::Ssh(spec) => {
@@ -9951,7 +10002,16 @@ fn pane_to_session(pane: &Pane, cx: &App) -> SessionPane {
         Pane::Leaf(PaneSlot::Ready(view)) => {
             let view = view.read(cx);
             SessionPane::Leaf {
-                cwd: view.spawnable_cwd(),
+                // A native SSH leaf keeps the far shell's directory, so a
+                // sleeping SSH tab wakes where it was: the redial that wakes it
+                // takes this as its start directory on the same host, and the
+                // tree record it seeds holds the far directory for such a pane
+                // anyway. Any other remote pane's cwd is on a host no restore
+                // dials, so it is still left out.
+                cwd: match view.ssh_spec() {
+                    Some(_) => view.cwd(),
+                    None => view.spawnable_cwd(),
+                },
                 pane_id: Some(view.pane_id),
                 // `None` for a pane this window attached to rather than
                 // spawned: it never knew what was on the other end. The tree
@@ -10276,6 +10336,8 @@ fn session_to_pane(
             if restore.is_none() {
                 if let Some(spec) = ssh_spec.clone() {
                     let resolved = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
+                    // A native SSH leaf's recorded cwd is the far shell's own
+                    // report, so it is where the redialled shell starts.
                     match new_terminal_native(font_size, cwd.clone(), resolved, window, cx) {
                         Ok(view) => return Some(Pane::leaf(PaneSlot::Ready(view))),
                         Err(e) => log::error!("restoring native SSH pane failed: {e}"),
@@ -10563,14 +10625,17 @@ fn watch_pane_focus(
         .detach();
 }
 
+/// A pane dialling `spec`. `remote_start_dir` is a directory on the far host
+/// for its shell to start in — never a local path; see
+/// [`inherited_start_dir`] for which openings carry one.
 pub(crate) fn new_terminal_native(
     font_size: f32,
-    working_directory: Option<std::path::PathBuf>,
+    remote_start_dir: Option<std::path::PathBuf>,
     spec: Box<crate::daemon::protocol::NativeSshSpec>,
     window: &mut Window,
     cx: &mut Context<Tty7App>,
 ) -> anyhow::Result<Entity<TerminalView>> {
-    let parts = TerminalView::spawn_native_ssh_terminal(spec, working_directory)?;
+    let parts = TerminalView::spawn_native_ssh_terminal(spec, remote_start_dir)?;
     let view = cx.new(|cx| {
         let mut view = TerminalView::from_native_ssh_parts(parts, window, cx);
         view.font_size = px(font_size);
@@ -11093,12 +11158,12 @@ mod window_drag_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseReason, DOCUMENT_MIN_W, Dir, Pane, Rename, TERMINAL_MIN_W, TITLE_BAR_HEIGHT, Tab,
-        TabAgentSession, clear_window_override_values, close_prompt, document_column_px,
-        join_shell_args, leaf_shares_the_window_daemon, mru_order, native_ssh_pane_alive,
-        one_slot_move, pane_free_for, parse_ssh_connect_input, parse_ssh_option_words,
-        rename_outcome, side_panel_max, split_shell_args, step_in_order, strip_band,
-        wd_path_saveable,
+        CloseReason, DOCUMENT_MIN_W, Dir, OpenedFrom, Pane, Rename, TERMINAL_MIN_W,
+        TITLE_BAR_HEIGHT, Tab, TabAgentSession, clear_window_override_values, close_prompt,
+        document_column_px, inherited_start_dir, join_shell_args, leaf_shares_the_window_daemon,
+        mru_order, native_ssh_pane_alive, one_slot_move, pane_free_for, parse_ssh_connect_input,
+        parse_ssh_option_words, rename_outcome, side_panel_max, split_shell_args, step_in_order,
+        strip_band, wd_path_saveable,
     };
     use gpui::{Edges, point, px, size};
 
@@ -11587,6 +11652,48 @@ mod tests {
         assert!(leaf_shares_the_window_daemon(true, false));
         assert!(leaf_shares_the_window_daemon(false, true));
         assert!(leaf_shares_the_window_daemon(false, false));
+    }
+
+    #[test]
+    fn a_saved_host_opened_from_a_local_pane_does_not_start_in_its_local_directory() {
+        let local = Some(std::path::PathBuf::from("/Users/alice/dev/tty7"));
+        assert_eq!(
+            inherited_start_dir(OpenedFrom::FreshSshHost, local.clone(), false),
+            None
+        );
+        let remote = Some(std::path::PathBuf::from("/home/alice/my_service"));
+        assert_eq!(
+            inherited_start_dir(OpenedFrom::FreshSshHost, remote, true),
+            None,
+            "another host's directory means nothing on the one being dialled"
+        );
+    }
+
+    #[test]
+    fn redialling_the_same_ssh_host_starts_in_the_far_directory_it_was_in() {
+        let remote = Some(std::path::PathBuf::from("/home/alice/my_service"));
+        assert_eq!(
+            inherited_start_dir(OpenedFrom::SameSshHost, remote.clone(), true),
+            remote
+        );
+        assert_eq!(
+            inherited_start_dir(OpenedFrom::SameSshHost, None, true),
+            None
+        );
+    }
+
+    #[test]
+    fn a_local_shell_inherits_only_a_local_directory() {
+        let dir = Some(std::path::PathBuf::from("/work/repo"));
+        assert_eq!(
+            inherited_start_dir(OpenedFrom::LocalShell, dir.clone(), false),
+            dir
+        );
+        assert_eq!(
+            inherited_start_dir(OpenedFrom::LocalShell, dir, true),
+            None,
+            "a remote pane's directory is on the far host"
+        );
     }
 
     #[test]

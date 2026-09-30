@@ -830,8 +830,13 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             )
         }
 
-        ClientMsg::SpawnNativeSsh { cwd: _, size, spec } => {
+        ClientMsg::SpawnNativeSsh { cwd, size, spec } => {
             let allow_remote_clipboard_write = spec.remote_clipboard_write;
+            // A far-host path that only travels as a `PathBuf`: taken as the
+            // text it was sent as, never resolved against this machine. One
+            // that is not UTF-8 could only reach the far shell mangled, so it
+            // is dropped and the shell starts where it would have anyway.
+            let remote_start_dir = cwd.and_then(|p| p.into_os_string().into_string().ok());
             let id = registry.alloc_id();
             let on_dead = {
                 let registry = registry.clone();
@@ -844,7 +849,8 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
                         .ok();
                 }
             };
-            let pane = match DaemonPane::spawn_native_ssh(id, size, spec, on_dead) {
+            let pane = match DaemonPane::spawn_native_ssh(id, size, spec, remote_start_dir, on_dead)
+            {
                 Ok(p) => p,
                 Err(e) => {
                     let mut w = write_stream;

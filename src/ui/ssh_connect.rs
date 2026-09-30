@@ -59,7 +59,7 @@ impl Tty7App {
         self.bump_ssh_frecency(profile_id, cx);
         let spec = Box::new(self.native_ssh_spec_for_profile(&profile, cx));
         match at {
-            SpawnWhere::NewTab => self.open_native_ssh_tab(spec, window, cx),
+            SpawnWhere::NewTab => self.open_native_ssh_tab(spec, None, window, cx),
             SpawnWhere::Split => {
                 self.split_into(gpui::Axis::Horizontal, Some(SpawnAs::Ssh(spec)), window, cx)
             }
@@ -87,7 +87,7 @@ impl Tty7App {
                 cx.global::<Config>().verify_host_keys,
                 &config_alias_resolver,
             );
-            self.open_native_ssh_tab(Box::new(spec), window, cx);
+            self.open_native_ssh_tab(Box::new(spec), None, window, cx);
             return;
         }
         let port = qc.port_or_default();
@@ -98,7 +98,7 @@ impl Tty7App {
             profile.user = user;
         }
         let spec = Box::new(self.native_ssh_spec_for_profile(&profile, cx));
-        self.open_native_ssh_tab(spec, window, cx);
+        self.open_native_ssh_tab(spec, None, window, cx);
     }
 
     pub(crate) fn restart_ssh_session(

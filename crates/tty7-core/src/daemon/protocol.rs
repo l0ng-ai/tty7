@@ -905,6 +905,15 @@ pub enum ClientMsg {
     },
     EnsureLoopbackForward(LoopbackForwardRequest),
     SpawnNativeSsh {
+        /// The directory *on the remote host* for the shell to start in —
+        /// where a pane being dialled again (restore, Reconnect, a split, ⌘T)
+        /// last reported it was. Never a path on this machine: it is not
+        /// checked or canonicalized here, only handed to the far shell, and a
+        /// fresh connection from a saved host sends `None`.
+        ///
+        /// Honoured only when the session gets a shell-integration bootstrap
+        /// to carry it; a relative path is ignored, and one that no longer
+        /// exists leaves the shell in the login directory.
         cwd: Option<PathBuf>,
         size: WinSize,
         spec: Box<NativeSshSpec>,

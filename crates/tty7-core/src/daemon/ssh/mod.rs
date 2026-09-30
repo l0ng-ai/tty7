@@ -200,10 +200,17 @@ impl SshManager {
         ))
     }
 
+    /// Dial `spec` and bridge its shell channel into the pane's pipes.
+    ///
+    /// `remote_start_dir` is a directory on the far host for the shell to
+    /// start in — see [`remote::bootstrap_command`] for how it gets there and
+    /// why a session without shell integration ignores it.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_native_session(
         &'static self,
         pane_id: u64,
         spec: Box<NativeSshSpec>,
+        remote_start_dir: Option<String>,
         size: WinSize,
         broker: Arc<PromptBroker>,
         data_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
@@ -215,6 +222,7 @@ impl SshManager {
                 .run_session(
                     pane_id,
                     &spec,
+                    remote_start_dir.as_deref(),
                     size,
                     &broker,
                     data_tx.clone(),
@@ -274,10 +282,12 @@ impl SshManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_session(
         &'static self,
         pane_id: u64,
         spec: &NativeSshSpec,
+        remote_start_dir: Option<&str>,
         size: WinSize,
         broker: &Arc<PromptBroker>,
         data_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
@@ -365,8 +375,12 @@ impl SshManager {
             let _ = channel.agent_forward(false).await;
         }
 
+        // Only a bootstrap can carry the start directory. A bare shell request
+        // has nowhere to put it short of typing a `cd` at the prompt, which
+        // would show on screen, land in history, and go to whatever answers
+        // first — a jump host's menu as readily as a shell.
         let bootstrap = match spec.shell_integration {
-            true => self.remote_bootstrap(&conn).await,
+            true => self.remote_bootstrap(&conn, remote_start_dir).await,
             false => None,
         };
         match bootstrap {
@@ -583,7 +597,14 @@ impl SshManager {
         routes
     }
 
-    async fn remote_bootstrap(&self, conn: &Arc<SshConnection>) -> Option<String> {
+    /// The bootstrap for a new session on `conn`, starting in `start_dir` on
+    /// the far host. What is cached per connection is the probed shell only:
+    /// the start directory belongs to the pane being dialled, not the host.
+    async fn remote_bootstrap(
+        &self,
+        conn: &Arc<SshConnection>,
+        start_dir: Option<&str>,
+    ) -> Option<String> {
         let key = conn.key().clone();
         let cached = { self.probes.lock().unwrap().get(&key).cloned() };
         let probed = match cached {
@@ -605,7 +626,7 @@ impl SshManager {
                 probed
             }
         };
-        probed.map(|(shell, path)| remote::bootstrap_command(shell, &path))
+        probed.map(|(shell, path)| remote::bootstrap_command(shell, &path, start_dir))
     }
 
     fn open_connection<'a>(
@@ -850,7 +871,7 @@ mod tests {
         let mgr = manager();
         mgr.runtime.block_on(async {
             let sshd = FakeSshd::connect(Exec::Hangs, Some(0)).await;
-            assert!(mgr.remote_bootstrap(&sshd.conn).await.is_none());
+            assert!(mgr.remote_bootstrap(&sshd.conn, None).await.is_none());
             assert!(
                 sshd.conn.is_saturated(),
                 "a refused session marks the link full"
@@ -867,7 +888,7 @@ mod tests {
         let mgr = manager();
         mgr.runtime.block_on(async {
             let sshd = FakeSshd::connect(Exec::Exits, None).await;
-            assert!(mgr.remote_bootstrap(&sshd.conn).await.is_none());
+            assert!(mgr.remote_bootstrap(&sshd.conn, None).await.is_none());
             assert!(sshd.conn.is_alive());
             assert!(mgr.probes.lock().unwrap().contains_key(sshd.conn.key()));
             sshd.wait_for_closed(1).await;

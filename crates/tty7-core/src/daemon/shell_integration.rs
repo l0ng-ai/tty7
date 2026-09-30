@@ -1309,12 +1309,56 @@ pub mod remote {
         RemoteShell::from_path(path).map(|shell| (shell, path.to_string()))
     }
 
-    pub fn bootstrap_command(shell: RemoteShell, shell_path: &str) -> String {
-        match shell {
+    /// The script a native SSH session execs in place of a bare shell request.
+    ///
+    /// `start_dir` is a directory *on the remote host* — where the pane was the
+    /// last time the far shell reported its cwd — and the session moves there
+    /// before the user's shell is exec'd, so a redialled pane comes back where
+    /// it was instead of in the login directory. It rides in the bootstrap
+    /// rather than being typed at the prompt so it never shows on screen or
+    /// lands in history, and a directory that has gone away since fails the
+    /// `cd` quietly and leaves the session in the login directory, exactly as
+    /// if nothing had been asked.
+    ///
+    /// The `cd` is the script's first line, ahead of the rc staging: a
+    /// relative `$TMPDIR` then resolves against one directory for every line
+    /// that follows, not one before the `cd` and another after it.
+    pub fn bootstrap_command(
+        shell: RemoteShell,
+        shell_path: &str,
+        start_dir: Option<&str>,
+    ) -> String {
+        let mut out = start_dir
+            .and_then(usable_start_dir)
+            .map(|dir| cd_line(shell, dir))
+            .unwrap_or_default();
+        out.push_str(&match shell {
             RemoteShell::Zsh => zsh_bootstrap(shell_path),
             RemoteShell::Bash => bash_bootstrap(shell_path),
             RemoteShell::Fish => fish_bootstrap(shell_path),
-        }
+        });
+        out
+    }
+
+    /// `dir`, if it can only mean one place on the far host.
+    ///
+    /// Absolute paths only: a relative one would resolve against the login
+    /// directory and through `CDPATH`, and a `~` would reach the shell quoted
+    /// and never expand. Neither is anything OSC 7 reports, so honouring one
+    /// would be a guess. A NUL cannot travel in an exec request at all.
+    fn usable_start_dir(dir: &str) -> Option<&str> {
+        (dir.starts_with('/') && !dir.contains('\0')).then_some(dir)
+    }
+
+    /// `builtin`, so a `cd` wrapper defined in a file the `-c` shell already
+    /// read (`.zshenv`, fish's `config.fish`) cannot print, prompt or refuse;
+    /// `--`, so no directory name is ever taken for an option.
+    fn cd_line(shell: RemoteShell, dir: &str) -> String {
+        let quoted = match shell {
+            RemoteShell::Zsh | RemoteShell::Bash => shell_quote(dir),
+            RemoteShell::Fish => fish_quote(dir),
+        };
+        format!("builtin cd -- {quoted} 2>/dev/null\n")
     }
 
     fn fish_quote(s: &str) -> String {
@@ -1438,7 +1482,7 @@ fi
 
         #[test]
         fn zsh_bootstrap_gates_zdotdir_on_every_redirector_landing() {
-            let script = bootstrap_command(RemoteShell::Zsh, "/bin/zsh");
+            let script = bootstrap_command(RemoteShell::Zsh, "/bin/zsh", None);
             for name in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
                 assert!(
                     script.contains(&format!("[ -s \"$__tty7_d/{name}\" ] &&")),
@@ -1457,7 +1501,7 @@ fi
                 (RemoteShell::Zsh, "/bin/zsh"),
                 (RemoteShell::Bash, "/bin/bash"),
             ] {
-                let script = bootstrap_command(shell, path);
+                let script = bootstrap_command(shell, path, None);
                 let last = script.trim_end().lines().last().unwrap();
                 assert_eq!(
                     last,
@@ -1469,14 +1513,14 @@ fi
 
         #[test]
         fn bash_bootstrap_forces_a_non_login_shell_through_the_rcfile() {
-            let script = bootstrap_command(RemoteShell::Bash, "/bin/bash");
+            let script = bootstrap_command(RemoteShell::Bash, "/bin/bash", None);
             assert!(script.contains("exec '/bin/bash' --rcfile \"$__tty7_d/bashrc\" -i"));
             assert!(script.contains("source /etc/profile"));
         }
 
         #[test]
         fn fish_bootstrap_is_one_exec_carrying_the_escaped_body() {
-            let script = bootstrap_command(RemoteShell::Fish, "/usr/bin/fish");
+            let script = bootstrap_command(RemoteShell::Fish, "/usr/bin/fish", None);
             assert!(script.starts_with("exec '/usr/bin/fish' -C '"));
             assert!(script.trim_end().ends_with("' -l"));
             assert!(!script.contains("mkdir"));
@@ -1536,10 +1580,141 @@ fi
                 (RemoteShell::Fish, "fish", "--no-execute", "/usr/bin/fish"),
             ];
             for (shell, bin, flag, path) in cases {
-                let script = bootstrap_command(shell, path);
-                if let Some((ok, stderr)) = parse_check(bin, flag, &script) {
-                    assert!(ok, "{bin} rejected its bootstrap script:\n{stderr}");
+                for start_dir in [None, Some(AWKWARD_DIR)] {
+                    let script = bootstrap_command(shell, path, start_dir);
+                    if let Some((ok, stderr)) = parse_check(bin, flag, &script) {
+                        assert!(
+                            ok,
+                            "{bin} rejected its bootstrap script (start dir {start_dir:?}):\n{stderr}"
+                        );
+                    }
                 }
+            }
+        }
+
+        /// A remote directory with everything in it that quoting has to get
+        /// right: a space, a single quote, a backslash and a `$`.
+        const AWKWARD_DIR: &str = r"/srv/my service/it's \n $HOME";
+
+        #[test]
+        fn a_start_dir_opens_every_bootstrap_with_one_quiet_cd() {
+            for (shell, path, expected) in [
+                (
+                    RemoteShell::Zsh,
+                    "/bin/zsh",
+                    r"builtin cd -- '/srv/my service/it'\''s \n $HOME' 2>/dev/null",
+                ),
+                (
+                    RemoteShell::Bash,
+                    "/bin/bash",
+                    r"builtin cd -- '/srv/my service/it'\''s \n $HOME' 2>/dev/null",
+                ),
+                (
+                    RemoteShell::Fish,
+                    "/usr/bin/fish",
+                    r"builtin cd -- '/srv/my service/it\'s \\n $HOME' 2>/dev/null",
+                ),
+            ] {
+                let script = bootstrap_command(shell, path, Some(AWKWARD_DIR));
+                let (first, rest) = script.split_once('\n').expect("more than one line");
+                assert_eq!(first, expected, "{shell:?}");
+                assert_eq!(
+                    rest,
+                    bootstrap_command(shell, path, None),
+                    "{shell:?}: the cd is added in front, and nothing else changes"
+                );
+            }
+        }
+
+        #[test]
+        fn without_a_start_dir_the_bootstrap_has_no_cd_at_all() {
+            for (shell, path) in [
+                (RemoteShell::Zsh, "/bin/zsh"),
+                (RemoteShell::Bash, "/bin/bash"),
+                (RemoteShell::Fish, "/usr/bin/fish"),
+            ] {
+                assert!(!bootstrap_command(shell, path, None).contains("builtin cd"));
+            }
+        }
+
+        #[test]
+        fn a_start_dir_that_is_not_an_absolute_path_is_ignored() {
+            for dir in ["", "~/my_service", "my_service", "./x", "/a\0b"] {
+                let script = bootstrap_command(RemoteShell::Bash, "/bin/bash", Some(dir));
+                assert_eq!(
+                    script,
+                    bootstrap_command(RemoteShell::Bash, "/bin/bash", None),
+                    "{dir:?} must not be turned into a cd"
+                );
+            }
+        }
+
+        /// Runs the bootstrap's own `cd` line, then `pwd`, in `bin` the way
+        /// sshd runs an exec request: `<shell> -c <script>`, started in the
+        /// login directory. `None` when `bin` is not installed here.
+        #[cfg(unix)]
+        fn land(
+            shell: RemoteShell,
+            bin: &str,
+            home: &std::path::Path,
+            start_dir: &str,
+        ) -> Option<std::process::Output> {
+            use std::process::Command;
+            let script = format!("{}pwd\n", cd_line(shell, start_dir));
+            Command::new(bin)
+                .arg("-c")
+                .arg(script)
+                .current_dir(home)
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("HOME", home)
+                .env("XDG_CONFIG_HOME", home.join(".config"))
+                .env("XDG_DATA_HOME", home.join(".local/share"))
+                .output()
+                .ok()
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_real_shell_lands_in_the_start_dir_and_falls_back_home_without_a_word() {
+            let root = tempfile::tempdir().expect("tempdir");
+            // Canonical, so `pwd` has no symlinked `/var` to disagree about.
+            let root = root.path().canonicalize().expect("canonical tempdir");
+            let home = root.join("home");
+            let target = root.join(r"my service/it's \n $HOME");
+            std::fs::create_dir_all(&home).expect("home");
+            std::fs::create_dir_all(&target).expect("target");
+            let target_str = target.to_str().expect("utf-8 temp path");
+            let missing = root.join("gone since");
+            let missing_str = missing.to_str().expect("utf-8 temp path");
+
+            for (shell, bin) in [
+                (RemoteShell::Bash, "bash"),
+                (RemoteShell::Zsh, "zsh"),
+                (RemoteShell::Fish, "fish"),
+            ] {
+                let Some(out) = land(shell, bin, &home, target_str) else {
+                    continue;
+                };
+                assert!(out.status.success(), "{bin}: {out:?}");
+                assert_eq!(
+                    String::from_utf8_lossy(&out.stdout).trim_end(),
+                    target_str,
+                    "{bin} did not land in the start dir"
+                );
+
+                let out = land(shell, bin, &home, missing_str).expect("ran once already");
+                assert!(out.status.success(), "{bin}: {out:?}");
+                assert_eq!(
+                    String::from_utf8_lossy(&out.stdout).trim_end(),
+                    home.to_str().unwrap(),
+                    "{bin} left the login directory for a directory that is gone"
+                );
+                assert!(
+                    out.stderr.is_empty(),
+                    "{bin} complained about the missing directory: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
             }
         }
 

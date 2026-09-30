@@ -2030,10 +2030,17 @@ impl DaemonPane {
         ))
     }
 
+    /// A pane bridged to a shell channel on `spec`'s host.
+    ///
+    /// `remote_start_dir` is a directory on that host for the shell to start
+    /// in. The pane's own `cwd` is deliberately left unknown until the far
+    /// shell reports one: the `cd` that takes it there can quietly fail, and a
+    /// guess recorded now would be persisted as fact.
     pub fn spawn_native_ssh(
         id: u64,
         size: WinSize,
         spec: Box<NativeSshSpec>,
+        remote_start_dir: Option<String>,
         on_dead: impl FnOnce() + Send + 'static,
     ) -> anyhow::Result<Arc<Self>> {
         let allow_remote_clipboard_write = spec.remote_clipboard_write;
@@ -2137,6 +2144,7 @@ impl DaemonPane {
         crate::daemon::ssh::SshManager::global().spawn_native_session(
             id,
             spec,
+            remote_start_dir,
             size,
             broker,
             bridge.data_tx,
@@ -3123,9 +3131,6 @@ fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>, foreground_comma
         let _ = subscriber.send(DaemonMsg::Snapshot(modes));
     }
     st.ring.replay(subscriber);
-    if let Some(cwd) = &st.cwd {
-        let _ = subscriber.send(DaemonMsg::Cwd(cwd.clone()));
-    }
     if st.shell.active {
         let _ = subscriber.send(DaemonMsg::Prompt {
             active: st.shell.active,
@@ -3135,6 +3140,17 @@ fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>, foreground_comma
     }
     if st.remote.is_some() {
         let _ = subscriber.send(DaemonMsg::RemoteContext(st.remote.clone()));
+    }
+    // After the remote context, never before it. A client drops its cwd on
+    // every `RemoteContext`, because live that frame means the pane just hopped
+    // and the old directory belongs to the other side. Replayed, it is only
+    // the standing context, and `st.cwd` is already the far shell's own report
+    // (`apply_remote_context` clears it on every hop). Sent first, it would be
+    // wiped, and a native SSH pane reopened by a client would have no remote
+    // directory for ⌘T or a split to start the new pane in until its next
+    // prompt.
+    if let Some(cwd) = &st.cwd {
+        let _ = subscriber.send(DaemonMsg::Cwd(cwd.clone()));
     }
     if let Some(phase) = &st.ssh_phase {
         let _ = subscriber.send(DaemonMsg::SshStatus {
@@ -4945,6 +4961,31 @@ mod tests {
             )),
             "the replay must carry the connection phase"
         );
+    }
+
+    /// The client forgets its cwd on every `RemoteContext`, so a replay that
+    /// sent the far shell's directory first would have it wiped straight away.
+    #[test]
+    fn a_window_reattaching_to_an_ssh_pane_keeps_its_remote_directory() {
+        let mut st = test_state(true);
+        st.remote = Some(RemoteContext {
+            kind: RemoteKind::NativeSsh,
+            argv: Vec::new(),
+            target: "alice@box".into(),
+        });
+        st.cwd = Some(PathBuf::from("/home/alice/my_service"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        replay_state(&st, &tx, false);
+        drop(tx);
+        let order: Vec<&str> = rx
+            .iter()
+            .filter_map(|m| match m {
+                DaemonMsg::RemoteContext(_) => Some("remote"),
+                DaemonMsg::Cwd(_) => Some("cwd"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(order, ["remote", "cwd"]);
     }
 
     #[test]
