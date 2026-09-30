@@ -2515,6 +2515,15 @@ impl DaemonPane {
         }
         let event = crate::core::cli_agent::parse_agent_event_body(body.as_bytes())
             .ok_or_else(|| "not an agent event".to_string())?;
+        self.apply_reported_agent_event(event)
+    }
+
+    /// Apply a hook's report this pane was found to own some other way than
+    /// by where the hook runs — see [`codex_report_target`].
+    pub fn apply_reported_agent_event(
+        &self,
+        event: crate::core::cli_agent::AgentEvent,
+    ) -> Result<(), String> {
         let mut st = self.state.lock().unwrap();
         if !st.alive {
             return Err(format!("pane {} is not running", self.id));
@@ -2527,6 +2536,17 @@ impl DaemonPane {
             publish_facts(self.id, true, after);
         }
         Ok(())
+    }
+
+    /// This pane as a Codex report sees it, for [`codex_report_target`].
+    pub fn codex_candidate(&self) -> CodexCandidate {
+        let st = self.state.lock().unwrap();
+        CodexCandidate {
+            pane: self.id,
+            runs_codex: st.alive && st.agent == Some(crate::core::cli_agent::CLIAgent::Codex),
+            cwd: st.cwd.clone(),
+            session: st.agent_session.as_ref().and_then(|s| s.session_id.clone()),
+        }
     }
 
     pub fn gate(&self) -> Arc<OutputGate> {
@@ -3527,6 +3547,57 @@ fn apply_probed_cwd(st: &mut PaneState, probed: Option<PathBuf>) {
     st.cwd = Some(probed);
 }
 
+/// A pane as a Codex hook report sees it: whether Codex runs in it, where,
+/// and which session it last reported.
+#[derive(Debug, Clone)]
+pub struct CodexCandidate {
+    pub pane: u64,
+    pub runs_codex: bool,
+    pub cwd: Option<PathBuf>,
+    pub session: Option<String>,
+}
+
+/// The pane a Codex hook's report belongs to.
+///
+/// Codex runs its hooks in its app-server: one background process that every
+/// Codex session on the machine talks to, started by whichever session came
+/// first and outliving it. A hook therefore carries that first session's
+/// environment — its `$TTY7_PANE` — and runs under that pane's shell only for
+/// as long as that session lasts, so neither says which pane the report is
+/// about. The report does: its session, then its directory. A pane that has
+/// already reported the session owns it; otherwise it is the one pane running
+/// Codex in that directory — the one yet to report a session, when there are
+/// several, and the named pane when that still leaves a tie. `None` is no
+/// pane, or no telling which.
+pub fn codex_report_target(
+    panes: &[CodexCandidate],
+    named: u64,
+    session: Option<&str>,
+    cwd: Option<&Path>,
+) -> Option<u64> {
+    let codex = || panes.iter().filter(|p| p.runs_codex);
+    if let Some(session) = session
+        && let Some(owner) = codex().find(|p| p.session.as_deref() == Some(session))
+    {
+        return Some(owner.pane);
+    }
+    let cwd = cwd?;
+    let here: Vec<&CodexCandidate> = codex()
+        .filter(|p| p.cwd.as_deref().is_some_and(|c| same_dir(c, cwd)))
+        .collect();
+    let fresh: Vec<&CodexCandidate> = here
+        .iter()
+        .copied()
+        .filter(|p| p.session.is_none())
+        .collect();
+    let pool = if fresh.is_empty() { here } else { fresh };
+    match pool.as_slice() {
+        [only] => Some(only.pane),
+        [] => None,
+        several => several.iter().find(|p| p.pane == named).map(|p| p.pane),
+    }
+}
+
 fn same_dir(a: &Path, b: &Path) -> bool {
     a == b
         || match (a.canonicalize(), b.canonicalize()) {
@@ -4091,6 +4162,59 @@ mod tests {
     /// A hook's report that arrives over the socket lands like one read off
     /// the output — but only from a process that runs in the pane.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_codex_report_finds_its_pane_by_session_then_directory() {
+        let pane = |pane: u64, codex: bool, cwd: &str, session: Option<&str>| CodexCandidate {
+            pane,
+            runs_codex: codex,
+            cwd: Some(PathBuf::from(cwd)),
+            session: session.map(str::to_string),
+        };
+        let panes = [
+            pane(1, true, "/work/a", Some("s-a")),
+            pane(2, true, "/work/b", None),
+            pane(3, false, "/work/b", None),
+            pane(4, true, "/work/c", Some("s-c")),
+            pane(5, true, "/work/c", None),
+        ];
+        let target = |named: u64, session: Option<&str>, cwd: &str| {
+            codex_report_target(&panes, named, session, Some(Path::new(cwd)))
+        };
+
+        // The app-server was started in pane 1, so every hook names it.
+        assert_eq!(target(1, Some("s-a"), "/work/a"), Some(1));
+        assert_eq!(
+            target(1, Some("s-c"), "/work/elsewhere"),
+            Some(4),
+            "a reported session stays with its pane"
+        );
+        assert_eq!(
+            target(1, Some("s-new"), "/work/b"),
+            Some(2),
+            "a new session goes to the one Codex pane in its directory"
+        );
+        assert_eq!(
+            target(1, Some("s-new"), "/work/c"),
+            Some(5),
+            "of two there, the one yet to report a session"
+        );
+        assert_eq!(
+            target(1, Some("s-next"), "/work/a"),
+            Some(1),
+            "a new session in a pane that had one before (/new) is still that pane's"
+        );
+        assert_eq!(target(1, Some("s-new"), "/work/none"), None);
+
+        let twins = [
+            pane(6, true, "/work/d", None),
+            pane(7, true, "/work/d", None),
+        ];
+        let twin =
+            |named| codex_report_target(&twins, named, Some("s"), Some(Path::new("/work/d")));
+        assert_eq!(twin(7), Some(7), "a tie goes to the pane the hook named");
+        assert_eq!(twin(1), None, "and is no one's otherwise");
+    }
+
     #[test]
     fn a_hook_report_counts_only_from_inside_the_pane() {
         let (tx, rx) = mpsc::channel();

@@ -126,6 +126,31 @@ impl crate::host::server::PaneDirectory for Registry {
 /// so being up to a minute late to notice costs nothing.
 const AGENT_STALE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// The pane a Codex hook's report is about, found from the report itself —
+/// where a hook runs says nothing for Codex (see
+/// [`crate::daemon::pane::codex_report_target`]). `None` for any other agent's
+/// report, which goes to the pane the hook named.
+fn codex_report_pane(
+    registry: &Registry,
+    named: u64,
+    body: &str,
+) -> Option<(Arc<DaemonPane>, crate::core::cli_agent::AgentEvent)> {
+    let event = crate::core::cli_agent::parse_agent_event_body(body.as_bytes())?;
+    if event.agent != Some(crate::core::cli_agent::CLIAgent::Codex) {
+        return None;
+    }
+    let panes = registry.all();
+    let candidates: Vec<_> = panes.iter().map(|p| p.codex_candidate()).collect();
+    let target = crate::daemon::pane::codex_report_target(
+        &candidates,
+        named,
+        event.session_id.as_deref(),
+        event.cwd.as_deref(),
+    )?;
+    let pane = panes.into_iter().find(|p| p.id == target)?;
+    Some((pane, event))
+}
+
 fn spawn_agent_stale_sweep(registry: Arc<Registry>) {
     let spawned = std::thread::Builder::new()
         .name("tty7-agent-stale".into())
@@ -1158,9 +1183,12 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             event,
         } => {
             let mut w = write_stream;
-            let applied = match registry.get(pane_id) {
-                Some(pane) => pane.report_agent_event(pid, &event),
-                None => Err(format!("no such pane {pane_id}")),
+            let applied = match codex_report_pane(&registry, pane_id, &event) {
+                Some((pane, parsed)) => pane.apply_reported_agent_event(parsed),
+                None => match registry.get(pane_id) {
+                    Some(pane) => pane.report_agent_event(pid, &event),
+                    None => Err(format!("no such pane {pane_id}")),
+                },
             };
             match applied {
                 Ok(()) => DaemonMsg::InputAck { pane_id }.encode(&mut w)?,
