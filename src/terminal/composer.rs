@@ -359,14 +359,15 @@ fn builtin_commands(agent: CLIAgent) -> &'static [(&'static str, &'static str)] 
             ("/clear", "Start a fresh conversation"),
             ("/review", "Review the current changes"),
             ("/model", "Switch model"),
+            ("/effort", "Set reasoning effort"),
             ("/init", "Create a CLAUDE.md for this repo"),
             ("/context", "Show context usage"),
-            ("/cost", "Show token usage"),
+            ("/usage", "Show cost and plan usage"),
             ("/resume", "Resume a previous conversation"),
+            ("/rewind", "Rewind the conversation or code"),
             ("/memory", "Edit memory files"),
             ("/permissions", "Manage tool permissions"),
             ("/mcp", "Manage MCP servers"),
-            ("/agents", "Manage subagents"),
             ("/config", "Open settings"),
             ("/help", "Show help"),
         ],
@@ -2186,6 +2187,23 @@ mod tests {
         assert_eq!(alias_label("haiku"), "Haiku");
         assert_eq!(effort_label("medium"), "Medium");
         assert_eq!(effort_label("xhigh"), "Extra high");
+    }
+
+    #[test]
+    fn each_agents_builtin_commands_are_distinct_slash_words() {
+        for agent in [CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Gemini] {
+            let names: Vec<&str> = builtin_commands(agent).iter().map(|(n, _)| *n).collect();
+            for (i, name) in names.iter().enumerate() {
+                assert!(name.starts_with('/') && !name.contains(' '), "{name}");
+                assert!(!names[..i].contains(name), "{agent:?} lists {name} twice");
+            }
+        }
+        // The toolbar's effort picker types it; the menu should offer it too.
+        assert!(
+            builtin_commands(CLIAgent::Claude)
+                .iter()
+                .any(|(n, _)| *n == "/effort")
+        );
     }
 
     #[test]
