@@ -335,6 +335,14 @@ pub(crate) struct EditorPanelState {
     problems: problems::ProblemsPane,
     /// The header's list of every open file, while it is open.
     strip_picker: Option<strip::StripPicker>,
+    /// The focus of a panel with no file in it. Without one there is nothing
+    /// in the panel to hold the focus, so closing the last file handed it to
+    /// the terminal and the next ⌘W closed the terminal instead of the panel.
+    empty_focus: gpui::FocusHandle,
+    /// The tab whose panel held the focus when it was last drawn, so the
+    /// frame after its last file closes knows whether to take the focus over
+    /// — and a tab switched to does not take it from its own terminal.
+    had_focus: Option<TabId>,
 }
 
 impl EditorPanelState {
@@ -380,6 +388,8 @@ impl EditorPanelState {
             nav: nav::EditorNav::new(cx),
             problems: Default::default(),
             strip_picker: None,
+            empty_focus: cx.focus_handle(),
+            had_focus: None,
         }
     }
 }
@@ -1494,6 +1504,7 @@ impl Tty7App {
         let code = tab.code.get_or_insert_with(|| Box::new(TabCode::new()));
         if code.visible {
             code.visible = false;
+            self.editor.had_focus = None;
             self.editor.bar = None;
             self.file_tree.editing = None;
             self.focus_active(window, cx);
@@ -1723,6 +1734,7 @@ impl Tty7App {
     /// whole: ⌘S from the find box should still save.
     pub(crate) fn editor_panel_has_focus(&self, window: &Window, cx: &Context<Self>) -> bool {
         self.editor_has_focus(window, cx)
+            || (self.code_panel_visible() && self.editor.empty_focus.is_focused(window))
             || self.editor.bar.as_ref().is_some_and(|b| {
                 b.input
                     .read(cx)
@@ -2508,7 +2520,13 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.editor_panel_has_focus(window, cx) {
+        let empty = self
+            .tab_code()
+            .is_some_and(|c| c.visible && c.files.is_empty());
+        // ⌘⇧E on an empty panel hands the focus to the file tree, so from
+        // there ⌘W is the empty panel's too.
+        let tree = empty && self.file_tree.focus_handle.contains_focused(window, cx);
+        if !(tree || self.editor_panel_has_focus(window, cx)) {
             return false;
         }
         let Some(code) = self.tab_code_mut() else {
@@ -2516,6 +2534,10 @@ impl Tty7App {
         };
         if code.files.is_empty() {
             code.visible = false;
+            self.editor.had_focus = None;
+            self.editor.bar = None;
+            self.file_tree.editing = None;
+            self.focus_active(window, cx);
             cx.notify();
             return true;
         }
@@ -3157,6 +3179,13 @@ impl Tty7App {
         if !self.code_panel_visible() {
             return None;
         }
+        // The last file closed with the focus in it: keep the focus in the
+        // panel, or gpui reports it lost and it falls back to the terminal.
+        let tab = self.tabs.get(self.active).map(|t| t.tree_id.get());
+        if tab.is_some() && self.editor.had_focus == tab && self.active_buffer().is_none() {
+            self.editor.empty_focus.focus(window, cx);
+        }
+        self.editor.had_focus = tab.filter(|_| self.editor_panel_has_focus(window, cx));
         self.editor_split_follow_focus(window, cx);
         self.editor_gutter_sync(cx);
         self.editor_nav_tick(cx);
@@ -3720,6 +3749,11 @@ impl Tty7App {
 
     fn render_editor_empty(&self, cx: &Context<Self>) -> gpui::Div {
         v_flex()
+            .track_focus(&self.editor.empty_focus)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.editor.empty_focus.focus(window, cx)),
+            )
             .size_full()
             .items_center()
             .justify_center()
@@ -4061,5 +4095,117 @@ mod tests {
             4,
             "a file already listed is not listed twice"
         );
+    }
+}
+
+#[cfg(test)]
+mod close_gpui_tests {
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    use super::nav::gpui_tests::open_rs;
+    use super::*;
+    use crate::core::actions::CloseActiveTab;
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    fn panel(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> (bool, usize) {
+        app.read_with(vcx, |app, _| {
+            let code = app.tab_code().expect("the tab is still there");
+            (code.visible, code.files.len())
+        })
+    }
+
+    /// Runs what is pending and paints a frame: the panel notes whether it
+    /// holds the focus as it is drawn.
+    fn settle(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx));
+        vcx.run_until_parked();
+    }
+
+    fn terminal_focused(app: &Entity<Tty7App>, vcx: &mut VisualTestContext) -> bool {
+        app.update_in(vcx, |app, window, cx| {
+            app.tabs[app.active]
+                .pane
+                .leaves()
+                .iter()
+                .any(|l| l.contains_focused(window, cx))
+        })
+    }
+
+    /// ⌘W, ⌘W on an editor with one file closes the file and then the empty
+    /// editor. The second one used to close the terminal: closing the last
+    /// file left nothing in the panel to hold the focus, so it fell back to
+    /// the terminal pane.
+    #[gpui::test]
+    fn closing_the_last_file_keeps_close_on_the_editor(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        open_rs(&app, &mut vcx, "/close/a.rs");
+        settle(&mut vcx);
+        assert_eq!(panel(&app, &mut vcx), (true, 1));
+
+        vcx.dispatch_action(CloseActiveTab);
+        settle(&mut vcx);
+        assert_eq!(panel(&app, &mut vcx), (true, 0), "the file closes first");
+        assert!(!terminal_focused(&app, &mut vcx));
+
+        vcx.dispatch_action(CloseActiveTab);
+        settle(&mut vcx);
+        assert_eq!(panel(&app, &mut vcx), (false, 0), "then the empty editor");
+        assert!(
+            terminal_focused(&app, &mut vcx),
+            "and the terminal has it back"
+        );
+
+        let tab = app.read_with(&vcx, |app, _| app.tabs[0].tree_id.get());
+        vcx.dispatch_action(CloseActiveTab);
+        settle(&mut vcx);
+        assert!(
+            app.read_with(&vcx, |app, _| app
+                .tabs
+                .iter()
+                .all(|t| t.tree_id.get() != tab)),
+            "only now is ⌘W the terminal's"
+        );
+    }
+
+    /// A tab switched to keeps its focus in its terminal, even with an empty
+    /// editor showing and the focus in the editor of the tab left behind.
+    #[gpui::test]
+    fn switching_to_an_empty_editor_leaves_the_focus_alone(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        crate::ui::i18n::set_locale("en");
+        app.update_in(&mut vcx, |app, _, _| {
+            app.active = 1;
+            app.tab_code_mut_or_init().unwrap().visible = true;
+            app.active = 0;
+        });
+        open_rs(&app, &mut vcx, "/close/a.rs");
+        settle(&mut vcx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.active = 1;
+            app.focus_active(window, cx);
+        });
+        settle(&mut vcx);
+        assert_eq!(panel(&app, &mut vcx), (true, 0));
+        assert!(terminal_focused(&app, &mut vcx));
+    }
+
+    /// With the focus in the terminal beside an empty editor, ⌘W is still
+    /// the terminal's.
+    #[gpui::test]
+    fn close_from_the_terminal_is_still_the_terminals(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.tab_code_mut_or_init().unwrap().visible = true;
+            app.focus_active(window, cx);
+        });
+        vcx.run_until_parked();
+        assert!(terminal_focused(&app, &mut vcx));
+        assert!(!app.update_in(&mut vcx, |app, window, cx| {
+            app.editor_close_active_if_focused(window, cx)
+        }));
+        assert_eq!(panel(&app, &mut vcx), (true, 0));
     }
 }
