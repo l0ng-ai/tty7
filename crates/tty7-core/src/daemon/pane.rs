@@ -3446,17 +3446,6 @@ fn apply_agent_signals(
         {
             continue;
         }
-        // A readout comes a moment behind the turn it describes, by which time
-        // the agent may have quit. It says nothing about whether one is
-        // running, nor is it activity: it only fills in the session there is.
-        if event.kind == crate::core::cli_agent::AgentEventKind::Readout {
-            if st.agent.is_some()
-                && let Some(sess) = &mut st.agent_session
-            {
-                sess.apply_event(event);
-            }
-            continue;
-        }
         if st.agent.is_none() && event.agent.is_some() {
             st.agent = event.agent;
             notify(st, DaemonMsg::Agent(st.agent));
