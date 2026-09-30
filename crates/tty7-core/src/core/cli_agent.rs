@@ -1129,6 +1129,10 @@ impl AgentSessionState {
     }
 
     pub fn apply_event(&mut self, ev: &AgentEvent) {
+        if ev.kind == AgentEventKind::Readout {
+            self.readout.merge(&ev.readout);
+            return;
+        }
         self.rich = true;
         let guessed = std::mem::take(&mut self.inferred);
         if let Some(id) = &ev.session_id {
@@ -1176,6 +1180,7 @@ impl AgentSessionState {
                 self.message = None;
                 self.cwd = None;
             }
+            AgentEventKind::Readout => {}
         }
     }
 }
@@ -1191,6 +1196,10 @@ pub enum AgentEventKind {
     Notification,
     Stop,
     SessionEnd,
+    /// Only the readout, sent after the fact: Claude writes its transcript
+    /// after the hooks of the turn that produced it have run, so the context
+    /// size of a finished turn comes in a moment behind its `Stop`.
+    Readout,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

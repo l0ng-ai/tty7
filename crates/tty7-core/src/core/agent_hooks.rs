@@ -21,10 +21,96 @@ pub fn run_agent_hook(agent: &str, event: &str) {
     if !std::io::stdin().is_terminal() {
         let _ = std::io::stdin().take(MAX_STDIN).read_to_string(&mut input);
     }
+    if agent == "claude" && event == LATE_READOUT {
+        if let Some(seq) = late_readout(&input) {
+            write_to_controlling_tty(&seq);
+        }
+        return;
+    }
     let Some(event) = effective_event(agent, event, &input) else {
         return;
     };
     write_to_controlling_tty(&build_hook_sequence(agent, event, &input));
+    if agent == "claude" && event == "stop" && !reply_is_written(&input) {
+        spawn_late_readout(&input);
+    }
+}
+
+/// The hook's own follow-up to a Claude `stop`, run as a second process.
+const LATE_READOUT: &str = "readout";
+
+/// How long the follow-up waits for the turn's reply to reach the transcript.
+const LATE_READOUT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Whether the transcript already holds the reply a `stop` payload names.
+/// Claude writes the transcript on its own schedule, and at `stop` the reply
+/// that ended the turn is usually not in it yet.
+fn reply_is_written(stdin_json: &str) -> bool {
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(stdin_json) else {
+        return true;
+    };
+    let Some(path) = payload.get("transcript_path").and_then(|p| p.as_str()) else {
+        return true;
+    };
+    let Some(said) = payload
+        .get("last_assistant_message")
+        .and_then(|m| m.as_str())
+        .filter(|m| !m.trim().is_empty())
+    else {
+        return true;
+    };
+    last_assistant_reply(Path::new(path)).is_some_and(|reply| reply.says(said))
+}
+
+/// Hand the wait to a process of its own, so the agent is not held up by
+/// it. Its output goes nowhere: an inherited pipe would keep the agent
+/// waiting on this hook until the follow-up is done.
+fn spawn_late_readout(stdin_json: &str) {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Ok(mut child) = Command::new(exe)
+        .args(["agent-hook", "claude", LATE_READOUT])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(stdin_json.as_bytes());
+    }
+}
+
+/// The follow-up: wait for the reply to reach the transcript, then send what
+/// it says about the context as a readout of its own.
+fn late_readout(stdin_json: &str) -> Option<Vec<u8>> {
+    let payload: serde_json::Value = serde_json::from_str(stdin_json).ok()?;
+    let path = PathBuf::from(payload.get("transcript_path")?.as_str()?);
+    let said = payload
+        .get("last_assistant_message")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let deadline = std::time::Instant::now() + LATE_READOUT_WAIT;
+    loop {
+        if last_assistant_reply(&path).is_some_and(|reply| reply.says(&said)) {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let mut body = serde_json::json!({ "v": 1, "agent": "claude", "event": LATE_READOUT });
+    if let Some(id) = payload.get("session_id").and_then(|v| v.as_str()) {
+        body["session_id"] = id.into();
+    }
+    claude_readout(&payload, &mut body);
+    Some(format!("\x1b]777;notify;{AGENT_EVENT_SENTINEL};{body}\x07").into_bytes())
 }
 
 #[cfg(not(unix))]
@@ -256,10 +342,30 @@ fn claude_settings() -> serde_json::Value {
         .unwrap_or(serde_json::json!({}))
 }
 
-/// The model and context size of the last reply in a transcript: its input,
-/// cache and output tokens together, which is what the next request carries.
-/// Subagents' entries are skipped — they run in contexts of their own.
+/// The last reply in a transcript: its model, how much context it used (its
+/// input, cache and output tokens together, which is what the next request
+/// carries), and its text.
+struct Reply {
+    model: String,
+    tokens: u64,
+    text: String,
+}
+
+impl Reply {
+    /// Whether this is the reply a hook payload quotes. The payload may clip
+    /// it, and the transcript may split it, so either may hold the other.
+    fn says(&self, said: &str) -> bool {
+        let (text, said) = (self.text.trim(), said.trim());
+        !text.is_empty() && !said.is_empty() && (text.contains(said) || said.contains(text))
+    }
+}
+
 fn last_assistant_usage(path: &Path) -> Option<(String, u64)> {
+    last_assistant_reply(path).map(|r| (r.model, r.tokens))
+}
+
+/// Subagents' entries are skipped — they run in contexts of their own.
+fn last_assistant_reply(path: &Path) -> Option<Reply> {
     use std::io::{Seek as _, SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
@@ -267,10 +373,14 @@ fn last_assistant_usage(path: &Path) -> Option<(String, u64)> {
         .ok()?;
     let mut tail = Vec::new();
     file.read_to_end(&mut tail).ok()?;
-    last_usage_in(&String::from_utf8_lossy(&tail))
+    last_reply_in(&String::from_utf8_lossy(&tail))
 }
 
 fn last_usage_in(jsonl: &str) -> Option<(String, u64)> {
+    last_reply_in(jsonl).map(|r| (r.model, r.tokens))
+}
+
+fn last_reply_in(jsonl: &str) -> Option<Reply> {
     jsonl.lines().rev().find_map(|line| {
         let entry: serde_json::Value = serde_json::from_str(line).ok()?;
         if entry.get("type")?.as_str()? != "assistant"
@@ -286,8 +396,24 @@ fn last_usage_in(jsonl: &str) -> Option<(String, u64)> {
             + n("cache_read_input_tokens")
             + n("output_tokens");
         let model = message.get("model")?.as_str()?.to_string();
+        let text = message
+            .get("content")
+            .and_then(|c| c.as_array())
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
         // Claude Code writes its own error notices as assistant entries.
-        (model != "<synthetic>").then_some((model, tokens))
+        (model != "<synthetic>").then_some(Reply {
+            model,
+            tokens,
+            text,
+        })
     })
 }
 
@@ -2155,6 +2281,69 @@ mod tests {
         );
         assert_eq!(configured_effort(&settings, None).as_deref(), Some("high"));
         assert_eq!(configured_effort(&serde_json::json!({}), None), None);
+    }
+
+    #[test]
+    fn a_stop_the_transcript_has_not_caught_up_with_gets_its_readout_late() {
+        let dir = std::env::temp_dir().join(format!("tty7-late-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("t.jsonl");
+        let reply = |text: &str, tokens: u64| {
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "model": "claude-sonnet-5-5",
+                    "content": [{ "type": "text", "text": text }],
+                    "usage": { "input_tokens": tokens },
+                },
+            })
+            .to_string()
+        };
+        std::fs::write(&transcript, reply("An earlier answer.", 1000) + "\n").unwrap();
+        let stdin = serde_json::json!({
+            "session_id": "s",
+            "transcript_path": transcript,
+            "last_assistant_message": "Hi! What would you like to work on?",
+        })
+        .to_string();
+        assert!(
+            !reply_is_written(&stdin),
+            "the transcript still ends on the turn before"
+        );
+        assert_eq!(
+            late_readout_now(&stdin),
+            None,
+            "nothing to send until the reply lands"
+        );
+
+        std::fs::write(
+            &transcript,
+            reply("An earlier answer.", 1000)
+                + "\n"
+                + &reply("Hi! What would you like to work on?", 58_849)
+                + "\n",
+        )
+        .unwrap();
+        assert!(reply_is_written(&stdin));
+        let seq = late_readout(&stdin).expect("the reply is there now");
+        let _ = std::fs::remove_dir_all(&dir);
+        let ev = crate::core::cli_agent::parse_agent_event(
+            seq.strip_prefix(b"\x1b]")
+                .unwrap()
+                .strip_suffix(b"\x07")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ev.kind, crate::core::cli_agent::AgentEventKind::Readout);
+        assert_eq!(ev.readout.context_tokens, Some(58_849));
+        assert_eq!(ev.session_id.as_deref(), Some("s"));
+    }
+
+    /// `late_readout` without its wait, for the case that must not send.
+    fn late_readout_now(stdin: &str) -> Option<Vec<u8>> {
+        reply_is_written(stdin)
+            .then(|| late_readout(stdin))
+            .flatten()
     }
 
     #[test]
