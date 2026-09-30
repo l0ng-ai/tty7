@@ -1343,6 +1343,15 @@ impl TerminalView {
                 .pb(px(BOX_INSET))
                 .bg(cx.theme().background)
                 .occlude()
+                // Around the box is the terminal as far as a click goes: it
+                // takes the keyboard out of the box, as a click on the rows
+                // above does. The layer only hides what is under it.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        window.focus(&this.focus_handle, cx);
+                    }),
+                )
                 .child(frame)
                 .into_any_element(),
             None => div()
@@ -1816,6 +1825,9 @@ impl TerminalView {
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, window, cx| {
                         window.prevent_default();
+                        // Not the layer under it, which takes a click as one
+                        // on the terminal.
+                        cx.stop_propagation();
                         // A click on the frame around the text, not only on
                         // the text, is a click on the box.
                         if !this.composer_focused {
