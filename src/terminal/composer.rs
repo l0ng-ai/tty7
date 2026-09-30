@@ -246,6 +246,58 @@ pub(super) fn compose_message(
     }
 }
 
+/// Whether `agent` takes a file only from a paste that is nothing but its
+/// path. OpenCode and Amp turn such a paste of an image into an attached
+/// image, and leave a path that follows the message's text as words — the
+/// image never reaches the model.
+fn attaches_pasted_paths(agent: CLIAgent) -> bool {
+    matches!(agent, CLIAgent::OpenCode | CLIAgent::Amp)
+}
+
+/// The writes that send `text` with `attached` — [`compose_message`] handed
+/// to [`submit_plan`], except for an agent that takes a file only from a
+/// paste of its own ([`attaches_pasted_paths`]). That one gets the text, then
+/// each path as a paste by itself after a typed space, and Enter once the
+/// last of them has had time to land.
+pub(super) fn submit_message(
+    agent: CLIAgent,
+    text: &str,
+    attached: &[String],
+    shell: Option<&str>,
+    bracketed: bool,
+) -> Vec<Step> {
+    if attached.is_empty() || !bracketed || !attaches_pasted_paths(agent) {
+        return submit_plan(
+            agent,
+            &compose_message(agent, text, attached, shell),
+            bracketed,
+        );
+    }
+    let mut steps = submit_plan(agent, text, bracketed);
+    let enter = steps.pop();
+    for path in attached {
+        if !steps.is_empty() {
+            steps.push(Step {
+                delay: SETTLE,
+                bytes: b" ".to_vec(),
+            });
+        }
+        let delay = match steps.is_empty() {
+            true => Duration::ZERO,
+            false => SETTLE,
+        };
+        steps.push(Step {
+            delay,
+            bytes: tty7_core::core::paste::bracket(path.as_bytes()),
+        });
+    }
+    steps.extend(enter.map(|enter| Step {
+        delay: SETTLE_AFTER_PASTE_SLOW,
+        ..enter
+    }));
+    steps
+}
+
 // ---------------------------------------------------------------------------
 // Finding the agent's input area
 
@@ -1456,19 +1508,19 @@ impl TerminalView {
         let Some(c) = self.composer.as_mut() else {
             return;
         };
-        let message = compose_message(
-            agent,
-            &c.input.read(cx).value(),
-            &c.attached,
-            shell.as_deref(),
-        );
         let bracketed = self
             .terminal
             .term
             .lock()
             .mode()
             .contains(TermMode::BRACKETED_PASTE);
-        let steps = submit_plan(agent, &message, bracketed);
+        let steps = submit_message(
+            agent,
+            &c.input.read(cx).value(),
+            &c.attached,
+            shell.as_deref(),
+            bracketed,
+        );
         c.attached.clear();
         c.dismissed = None;
         c.queue.extend(steps);
@@ -2326,6 +2378,41 @@ mod tests {
         assert_eq!(
             compose_message(claude, "just text  ", &[], Some("zsh")),
             "just text"
+        );
+    }
+
+    #[test]
+    fn opencode_and_amp_get_each_attachment_as_a_paste_of_its_own() {
+        let attached = vec!["/tmp/a b.png".to_string(), "/src/x.rs".to_string()];
+        for agent in [CLIAgent::OpenCode, CLIAgent::Amp] {
+            let steps = submit_message(agent, "look\n", &attached, Some("zsh"), true);
+            assert_eq!(
+                bytes(&steps),
+                [
+                    &b"\x1b[200~look\x1b[201~"[..],
+                    b" ",
+                    b"\x1b[200~/tmp/a b.png\x1b[201~",
+                    b" ",
+                    b"\x1b[200~/src/x.rs\x1b[201~",
+                    b"\r",
+                ],
+                "{agent:?}"
+            );
+            assert!(steps[1..].iter().all(|s| s.delay >= SETTLE));
+            assert_eq!(steps.last().unwrap().delay, SETTLE_AFTER_PASTE_SLOW);
+            // Attachments alone: nothing to space them from.
+            let steps = submit_message(agent, "", &attached[..1], None, true);
+            assert_eq!(
+                bytes(&steps),
+                [&b"\x1b[200~/tmp/a b.png\x1b[201~"[..], b"\r"]
+            );
+            assert_eq!(steps[0].delay, Duration::ZERO);
+        }
+        // Everyone else still gets them as words after the text.
+        let steps = submit_message(CLIAgent::Claude, "look", &attached, Some("zsh"), true);
+        assert_eq!(
+            bytes(&steps),
+            [&b"look '/tmp/a b.png' /src/x.rs"[..], b"\r"]
         );
     }
 
