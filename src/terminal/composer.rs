@@ -525,6 +525,22 @@ fn builtin_commands(agent: CLIAgent) -> &'static [(&'static str, &'static str)] 
             ("/stats", "Show session statistics"),
             ("/help", "Show help"),
         ],
+        CLIAgent::OpenCode => &[
+            ("/new", "New session"),
+            ("/models", "Switch model"),
+            ("/agents", "Switch agent"),
+            ("/sessions", "Switch session"),
+            ("/compact", "Compact session"),
+            ("/undo", "Undo previous message"),
+            ("/review", "Review changes"),
+            ("/init", "Guided AGENTS.md setup"),
+            ("/share", "Share session"),
+            ("/status", "View status"),
+            ("/mcps", "Toggle MCPs"),
+            ("/help", "Help"),
+        ],
+        // Amp has no typed commands: `/` on an empty input opens its command
+        // palette, which a message cannot drive.
         _ => &[],
     }
 }
@@ -2599,7 +2615,12 @@ mod tests {
 
     #[test]
     fn each_agents_builtin_commands_are_distinct_slash_words() {
-        for agent in [CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Gemini] {
+        for agent in [
+            CLIAgent::Claude,
+            CLIAgent::Codex,
+            CLIAgent::Gemini,
+            CLIAgent::OpenCode,
+        ] {
             let names: Vec<&str> = builtin_commands(agent).iter().map(|(n, _)| *n).collect();
             for (i, name) in names.iter().enumerate() {
                 assert!(name.starts_with('/') && !name.contains(' '), "{name}");
