@@ -764,6 +764,91 @@ const MENU_AGENTS: usize = 3;
 const TITLEBAR_SEARCH_W: f32 = 360.;
 const TITLEBAR_SEARCH_H: f32 = 28.;
 
+/// Air between the search box and the nearest chrome tile when the bar is too
+/// narrow for the box to sit at its full width.
+const TITLEBAR_SEARCH_CLEAR_GAP: f32 = 8.;
+
+/// Where the title-bar search box is centred, as offsets from the tab strip it
+/// is drawn inside.
+///
+/// The strip does not start at the terminal column's left edge. The title bar
+/// leaves a lead before it — 80pt on macOS for the traffic lights, whether or
+/// not the rail is standing in front of them, plus the bar's own inset in
+/// fullscreen; 12 elsewhere — and a box centred on the strip was centred that
+/// much too far right by half: 40pt on macOS, which is plainly visible with
+/// the rail collapsed and the box standing alone in an empty bar (#1033).
+/// So the band reaches back over the lead, and its left edge is the column's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SearchBand {
+    /// `left` for the band, against the strip's left edge: the lead, negated.
+    pub(crate) left: f32,
+    /// `right` for the band, against the strip's right edge.
+    pub(crate) right: f32,
+    /// How much of *each* end of the band the box keeps clear of, so that in
+    /// a narrow bar it shrinks rather than slides under the chrome tiles. The
+    /// same at both ends, because a box clear of only one is no longer
+    /// centred.
+    pub(crate) clear: f32,
+}
+
+/// [`SearchBand`] for a strip that starts `lead` in from the terminal column's
+/// left edge.
+///
+/// `docked_right` is what is docked to the right of the terminal — the detail
+/// panel and a document column. Off macOS the bar spans those too, so the band
+/// stops at the terminal column: the strip already stops short of the window
+/// controls, so they come off the columns' share. On macOS the bar is inside
+/// the terminal column already and the strip runs to its end.
+///
+/// `leading_w` is the collapsed rail's group at the strip's left end, measured
+/// from the strip's left edge; `trailing_w` the chrome tiles at the band's
+/// right end, when they are there rather than off over a docked column.
+pub(crate) fn search_band(
+    macos: bool,
+    lead: f32,
+    docked_right: f32,
+    controls_w: f32,
+    leading_w: Option<f32>,
+    trailing_w: Option<f32>,
+) -> SearchBand {
+    let right = match !macos && docked_right > 0. {
+        true => (docked_right - controls_w).max(0.),
+        false => 0.,
+    };
+    let leading = leading_w.map_or(0., |w| lead + w + TITLEBAR_SEARCH_CLEAR_GAP);
+    let trailing = trailing_w.map_or(0., |w| w + TITLEBAR_SEARCH_CLEAR_GAP);
+    SearchBand {
+        left: -lead,
+        right,
+        clear: leading.max(trailing),
+    }
+}
+
+/// How far the title bar's lead reaches before the tab strip starts: the room
+/// `TitleBar` leaves for the traffic lights on macOS, and the bar's own inset
+/// that gpui-component adds to it in fullscreen, where the lights are gone but
+/// the room is not; `TITLE_BAR_LEAD` elsewhere, in both of the rows the strip
+/// can sit in.
+fn title_bar_strip_lead(fullscreen: bool, rem: f32) -> f32 {
+    match cfg!(target_os = "macos") && fullscreen {
+        // `pl_3` on the bar inside `TitleBar`.
+        true => crate::ui::app::TITLE_BAR_LEAD + 0.75 * rem,
+        false => crate::ui::app::TITLE_BAR_LEAD,
+    }
+}
+
+/// How wide the collapsed rail's group at the start of the strip is: the
+/// window mark where there is one, then New Tab and Show Sidebar. Mirrors the
+/// `left_group` built in `tab_strip`, `ml` included.
+fn collapsed_rail_group_w() -> f32 {
+    use crate::ui::app::{CONTENT_INSET, TILE_SIZE, WINDOW_MARK_SIZE, tile_trailing_inset};
+    let mark = match cfg!(target_os = "macos") {
+        true => 0.,
+        false => (CONTENT_INSET - tile_trailing_inset()) + WINDOW_MARK_SIZE + 4. + 2.,
+    };
+    crate::ui::app::title_bar_hug_offset() + mark + TILE_SIZE + 2. + TILE_SIZE
+}
+
 /// How wide the New Tab menu is allowed to get.
 const MENU_W: Pixels = px(360.);
 
@@ -2597,44 +2682,46 @@ impl Tty7App {
         // names every tab, so the bar has no title of its own to repeat. The
         // box alone takes the pointer; the rest of the bar still drags.
         //
-        // Centred over the terminal column, not the bar. Off macOS the bar
-        // spans the workspace while a document or the detail panel is docked,
-        // and centred on all of it the box landed under the document's
-        // hoisted header, which has no fill to hide it. The strip already
-        // stops short of the window controls, so they come off the columns'
-        // share.
-        let search_right = match cfg!(target_os = "macos") {
-            true => 0.,
-            false => {
-                let panel = match self.right_panel_open(cx) {
-                    true => self.right_panel_px(window, cx),
-                    false => 0.,
-                };
-                match panel + document_w > 0. {
-                    true => (panel + document_w - controls_w).max(0.),
-                    false => 0.,
-                }
-            }
-        };
+        // Centred over the terminal column, not the bar: see `search_band`.
+        // Off macOS the bar spans the workspace while a document or the detail
+        // panel is docked, and centred on all of it the box landed under the
+        // document's hoisted header, which has no fill to hide it.
+        let docked_right = document_w
+            + match self.right_panel_open(cx) {
+                true => self.right_panel_px(window, cx),
+                false => 0.,
+            };
+        let band = search_band(
+            cfg!(target_os = "macos"),
+            title_bar_strip_lead(window.is_fullscreen(), window.rem_size().as_f32()),
+            docked_right,
+            controls_w,
+            rail_collapsed.then(collapsed_rail_group_w),
+            (strip_chrome && docked_right <= 0.).then(trailing_chrome_tiles_w),
+        );
         let centre_search = (!show_chips).then(|| {
             // The chord as text, not caps: a cap's fill is this box's own
             // grey, so on it a cap is only a gap between two letters.
             let chord = crate::ui::keymap::effective_key("TogglePalette", cx)
                 .map(|spec| crate::ui::keymap::key_tokens(&spec).join(""));
+            // Two equal springs either side keep the box centred; each stops
+            // at the band's `clear`, and past that it is the box that gives.
+            let spring = || div().flex_1().min_w(px(band.clear));
             div()
                 .absolute()
                 .top_0()
                 .bottom_0()
-                .left_0()
-                .right(px(search_right))
+                .left(px(band.left))
+                .right(px(band.right))
                 .flex()
                 .items_center()
-                .justify_center()
+                .child(spring())
                 .child(
                     h_flex()
                         .id("titlebar-search")
                         .occlude()
                         .w(px(TITLEBAR_SEARCH_W))
+                        .min_w_0()
                         // Enough of the bar that the label and its chord still
                         // fit with a document docked beside the terminal; at a
                         // half it read `Search Everywhe…` in exactly the
@@ -2675,6 +2762,7 @@ impl Tty7App {
                             }),
                         ),
                 )
+                .child(spring())
         });
 
         h_flex()
@@ -3002,6 +3090,75 @@ mod tests {
     use gpui::TestAppContext;
     use std::path::Path;
     use unicode_segmentation::UnicodeSegmentation;
+
+    /// Where a band lands in the terminal column, for a strip that starts
+    /// `lead` in and ends `strip_end` from the column's left edge.
+    fn band_in_column(band: SearchBand, lead: f32, strip_end: f32) -> (f32, f32) {
+        (lead + band.left, strip_end - band.right)
+    }
+
+    /// #1033, with the reporter's window: 1946pt wide, the rail collapsed.
+    /// The strip starts 80pt in, after the traffic lights, and centred on it
+    /// the box sat at 1013 — 40pt right of the window's middle at 973.
+    #[test]
+    fn with_the_rail_collapsed_on_macos_the_search_box_centres_on_the_window() {
+        let (w, lead) = (1946., 80.);
+        let band = search_band(true, lead, 0., 0., Some(58.), Some(49.));
+        let (l, r) = band_in_column(band, lead, w);
+        assert_eq!((l, r), (0., w));
+        assert_eq!((l + r) / 2., 973.);
+        // Clear of the traffic lights and the two tiles after them, at both
+        // ends so that clearing them does not pull the box off centre.
+        assert_eq!(band.clear, lead + 58. + TITLEBAR_SEARCH_CLEAR_GAP);
+    }
+
+    /// With the rail open, the title bar sits in the terminal column but
+    /// still leaves the traffic lights' 80pt before the strip, over nothing
+    /// — the lights are over the rail. The band reaches back over that too,
+    /// and centres on the column.
+    #[test]
+    fn with_the_rail_open_on_macos_the_search_box_centres_on_the_terminal_column() {
+        let (column, lead) = (1200., 80.);
+        let band = search_band(true, lead, 0., 0., None, Some(49.));
+        assert_eq!(band_in_column(band, lead, column), (0., column));
+        assert_eq!(band.clear, 49. + TITLEBAR_SEARCH_CLEAR_GAP);
+
+        // A docked panel on macOS is beside the column, not under its bar:
+        // nothing to subtract from the strip's end.
+        let docked = search_band(true, lead, 360., 0., None, None);
+        assert_eq!(band_in_column(docked, lead, column), (0., column));
+        assert_eq!(docked.clear, 0.);
+    }
+
+    /// Fullscreen keeps `TitleBar`'s 80pt and adds the bar's own inset.
+    #[test]
+    fn fullscreen_on_macos_reaches_back_over_the_bars_extra_inset_as_well() {
+        let lead = 80. + 12.;
+        let band = search_band(true, lead, 0., 0., Some(58.), Some(49.));
+        assert_eq!(band_in_column(band, lead, 1440.), (0., 1440.));
+    }
+
+    /// Off macOS the bar spans the docked columns and stops short of the
+    /// window buttons; the band ends where the terminal column does, as it
+    /// always has, and now starts where it does too.
+    #[test]
+    fn off_macos_the_band_is_the_terminal_column_beside_a_docked_panel() {
+        let (w, lead, controls, panel) = (1600., 12., 102., 360.);
+        let strip_end = w - controls;
+        let band = search_band(false, lead, panel, controls, None, None);
+        assert_eq!(band.right, panel - controls);
+        assert_eq!(band_in_column(band, lead, strip_end), (0., w - panel));
+
+        // Nothing docked: the band runs to the end of the strip, short of
+        // the window buttons, and keeps clear of the tiles standing there.
+        let bare = search_band(false, lead, 0., controls, None, Some(38.));
+        assert_eq!(band_in_column(bare, lead, strip_end), (0., strip_end));
+        assert_eq!(bare.clear, 38. + TITLEBAR_SEARCH_CLEAR_GAP);
+
+        // A panel narrower than the buttons leaves no room to take off.
+        let thin = search_band(false, lead, 80., controls, None, None);
+        assert_eq!(thin.right, 0.);
+    }
 
     /// Most of these tests are about where a title is *cut*, not about what
     /// `~` means: the paths they pass either already start with `~` or are
