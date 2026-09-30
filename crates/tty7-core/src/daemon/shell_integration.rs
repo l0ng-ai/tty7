@@ -1270,19 +1270,62 @@ pub fn setup(program: Option<&str>, args: &[String], has_custom_args: bool) -> O
 }
 
 pub mod remote {
-    use super::{FISH_INTEGRATION, bash_rcfile, shell_quote, zsh_redirectors};
+    use super::{
+        FISH_INTEGRATION, POWERSHELL_INTEGRATION, bash_rcfile, powershell_encoded_command,
+        shell_quote, zsh_redirectors,
+    };
 
-    pub const PROBE_COMMAND: &str = "echo __tty7_shell; echo $SHELL";
+    /// Asks the far host which shell it runs, and is written to be read by
+    /// every shell sshd might hand it to — the exec request runs through the
+    /// account's default shell, and on Windows OpenSSH that is `cmd.exe /c`,
+    /// `powershell.exe -c` or `pwsh -c`, not a POSIX `-c`. So it sticks to
+    /// words all of them read without complaint, and each answers differently:
+    ///
+    /// - a POSIX shell (and fish) prints the marker, `$SHELL`, and the two
+    ///   `__tty7_ps*=` keys with nothing after the `=` (fish drops the word
+    ///   outright and prints an empty line);
+    /// - PowerShell has no `$SHELL` variable, so that `echo` prints nothing,
+    ///   and fills the keys from its own automatic variables — the edition
+    ///   (`Desktop` is Windows PowerShell 5.1, `Core` is pwsh) and the
+    ///   directory its executable lives in;
+    /// - cmd.exe has no `;` separator: it echoes the whole line back verbatim,
+    ///   marker and all, on one line.
+    ///
+    /// The shape of each word is load-bearing. No quotes: Windows OpenSSH
+    /// hands the command to the shell through a Win32 command line, and `"`s
+    /// there are argv syntax, gone before PowerShell reads the text. No
+    /// parentheses or pipes: a POSIX shell parses the whole line before
+    /// running any of it, so one construct it rejects would cost the answer
+    /// it does give. `key=$VAR` expands in every dialect that expands at all
+    /// (PowerShell's argument mode included), the `=` ending the key.
+    pub const PROBE_COMMAND: &str = "echo __tty7_shell; echo $SHELL; \
+         echo __tty7_psedition=$PSEdition; echo __tty7_pshome=$PSHOME";
 
     const PROBE_MARKER: &str = "__tty7_shell";
 
+    const PS_EDITION_KEY: &str = "__tty7_psedition=";
+
+    const PS_HOME_KEY: &str = "__tty7_pshome=";
+
     const HEREDOC: &str = "__TTY7_RC_EOF__";
+
+    /// The longest bootstrap sent to a PowerShell host. Windows caps a
+    /// process command line at 32,767 UTF-16 units, and the bootstrap rides
+    /// inside two of them: sshd's `<shell> -c <bootstrap>`, then that shell's
+    /// launch of the interactive PowerShell, which is a little shorter. The
+    /// headroom is for sshd's part — the shell's path and switch — with room
+    /// to spare for any quoting it adds. cmd.exe's far smaller 8,191 never
+    /// applies: nothing is sent through cmd.
+    const POWERSHELL_COMMAND_LINE_BUDGET: usize = 30_000;
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum RemoteShell {
         Zsh,
         Bash,
         Fish,
+        /// Windows PowerShell or pwsh as a Windows account's default shell.
+        /// The path the probe pairs with it is the executable, `C:\…\pwsh.exe`.
+        PowerShell,
     }
 
     impl RemoteShell {
@@ -1302,11 +1345,61 @@ pub mod remote {
             .map(|l| l.trim_end_matches('\r').trim())
             .skip_while(|l| *l != PROBE_MARKER);
         lines.next()?;
-        let path = lines.find(|l| !l.is_empty())?;
+        let lines: Vec<&str> = lines.collect();
+        if let Some(exe) = powershell_from_probe(&lines) {
+            return Some((RemoteShell::PowerShell, exe));
+        }
+        let path = *lines.iter().find(|l| !l.is_empty())?;
         if !path.starts_with('/') {
             return None;
         }
         RemoteShell::from_path(path).map(|shell| (shell, path.to_string()))
+    }
+
+    /// Whether the probe was answered by cmd.exe — Windows OpenSSH's default
+    /// shell out of the box. Such a host is left a plain shell, on purpose:
+    /// cmd has no hook that could carry the integration, and starting
+    /// PowerShell where the account asked for cmd would change the user's
+    /// shell rather than instrument it. A host whose `DefaultShell` names
+    /// PowerShell gets it. Only for the log, so the absence explains itself.
+    pub fn probe_answered_by_cmd(output: &str) -> bool {
+        let echoed = format!("{PROBE_MARKER};");
+        output.lines().any(|l| l.trim().starts_with(&echoed))
+    }
+
+    /// The PowerShell executable a probe describes, if PowerShell answered.
+    ///
+    /// The edition names the binary — `powershell.exe` is only ever Windows
+    /// PowerShell, `pwsh` only ever Core — and `$PSHOME` is the directory it
+    /// sits in, so the path is exactly the shell that ran the probe: the one
+    /// the account is configured with, whatever other edition is installed
+    /// beside it. A Windows host with pwsh installed but Windows PowerShell as
+    /// its default stays on Windows PowerShell, just as a plain shell request
+    /// would have left it.
+    ///
+    /// Windows hosts only. pwsh as a Unix login shell answers the probe too,
+    /// but there the binary in `$PSHOME` is not always runnable on its own —
+    /// a package manager's install launches it through a wrapper that sets up
+    /// the .NET runtime first, and the wrapper is what `$SHELL` names, where
+    /// the probe cannot read it — so such a host keeps its plain shell.
+    fn powershell_from_probe(lines: &[&str]) -> Option<String> {
+        let field = |key: &str| lines.iter().find_map(|l| l.strip_prefix(key));
+        let edition = field(PS_EDITION_KEY)?;
+        let home = field(PS_HOME_KEY)?.trim_end_matches(['/', '\\']);
+        if !is_windows_path(home) || home.contains('\0') {
+            return None;
+        }
+        match edition {
+            "Desktop" => Some(format!(r"{home}\powershell.exe")),
+            "Core" => Some(format!(r"{home}\pwsh.exe")),
+            _ => None,
+        }
+    }
+
+    /// A drive (`C:\…`, `C:/…`) or UNC (`\\server\…`) path.
+    fn is_windows_path(path: &str) -> bool {
+        let b = path.as_bytes();
+        (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':') || path.starts_with(r"\\")
     }
 
     /// The script a native SSH session execs in place of a bare shell request.
@@ -1328,6 +1421,9 @@ pub mod remote {
         shell_path: &str,
         start_dir: Option<&str>,
     ) -> String {
+        if shell == RemoteShell::PowerShell {
+            return powershell_bootstrap(shell_path, start_dir);
+        }
         let mut out = start_dir
             .and_then(usable_start_dir)
             .map(|dir| cd_line(shell, dir))
@@ -1336,6 +1432,7 @@ pub mod remote {
             RemoteShell::Zsh => zsh_bootstrap(shell_path),
             RemoteShell::Bash => bash_bootstrap(shell_path),
             RemoteShell::Fish => fish_bootstrap(shell_path),
+            RemoteShell::PowerShell => unreachable!("returned above"),
         });
         out
     }
@@ -1357,8 +1454,125 @@ pub mod remote {
         let quoted = match shell {
             RemoteShell::Zsh | RemoteShell::Bash => shell_quote(dir),
             RemoteShell::Fish => fish_quote(dir),
+            RemoteShell::PowerShell => unreachable!("PowerShell moves with Set-Location"),
         };
         format!("builtin cd -- {quoted} 2>/dev/null\n")
+    }
+
+    /// The command the host's default PowerShell runs: start a second,
+    /// interactive PowerShell — the same executable — carrying the
+    /// integration.
+    ///
+    /// A second process because Windows has no `exec`: the shell sshd started
+    /// was told `-c`, which runs one command and leaves, and nothing can turn
+    /// it interactive after the fact. It waits on the child and hands back its
+    /// exit code, so the session ends when the user's shell does.
+    ///
+    /// The child is started the way a local PowerShell pane is (`-NoLogo
+    /// -NoExit -EncodedCommand`), so the user's profile loads first and the
+    /// integration wraps whatever prompt it settled on. The start directory
+    /// rides inside the encoded script too — base64 carries any path through
+    /// the Win32 command line untouched, where a literal would be at the
+    /// mercy of sshd's quoting — which puts it after the profile: a profile
+    /// that moves somewhere is overruled for a redialled pane, which is the
+    /// point of asking for a directory at all. One that has gone away fails
+    /// quietly into wherever the profile left the session.
+    fn powershell_bootstrap(exe: &str, start_dir: Option<&str>) -> String {
+        let build = |dir: Option<&str>| {
+            let mut script = dir.map(set_location_line).unwrap_or_default();
+            script.push_str(&compact_powershell(POWERSHELL_INTEGRATION));
+            format!(
+                "& {} -NoLogo -NoExit -EncodedCommand {}; exit $LASTEXITCODE",
+                ps_quote(exe),
+                powershell_encoded_command(&script)
+            )
+        };
+        let dir = start_dir.and_then(powershell_start_dir);
+        let with_dir = build(dir.as_deref());
+        // A start directory long enough to push the command line past what
+        // Windows will run is dropped rather than costing the session: the
+        // pane opens where the login leaves it, still integrated.
+        if dir.is_some() && with_dir.chars().count() > POWERSHELL_COMMAND_LINE_BUDGET {
+            return build(None);
+        }
+        with_dir
+    }
+
+    /// `dir` as a path the far Windows host can only read as one place.
+    ///
+    /// The integration reports its cwd the way a `file://` URI spells a drive
+    /// path — `/C:/Users/ann` — and the local side may have kept it that way
+    /// (a Unix tty7) or already unwrapped it to `C:/Users/ann` (a Windows
+    /// one); both mean drive C. A UNC share comes back as `//server/share/…`.
+    /// Anything else is refused as ambiguous: `/Users/ann` is relative to
+    /// whichever drive is current, and a bare `C:` means wherever drive C
+    /// last was.
+    fn powershell_start_dir(dir: &str) -> Option<String> {
+        if dir.contains('\0') {
+            return None;
+        }
+        let drive = |b: &[u8]| {
+            b.len() >= 3
+                && b[0].is_ascii_alphabetic()
+                && b[1] == b':'
+                && matches!(b[2], b'/' | b'\\')
+        };
+        if drive(dir.as_bytes()) {
+            return Some(dir.to_string());
+        }
+        if let Some(rest) = dir.strip_prefix('/')
+            && drive(rest.as_bytes())
+        {
+            return Some(rest.to_string());
+        }
+        let unc = dir.replace('/', r"\");
+        let (server, rest) = unc.strip_prefix(r"\\")?.split_once('\\')?;
+        let share = rest.split('\\').next().unwrap_or_default();
+        // `\\?\` and `\\.\` are device namespaces, not a server's shares.
+        let named = |s: &str| !s.is_empty() && s != "?" && s != ".";
+        (named(server) && named(share)).then_some(unc)
+    }
+
+    /// `-LiteralPath`, so brackets and `*` in a directory name are only
+    /// characters; a directory that is gone is caught rather than reported,
+    /// and `Stop` makes sure it is catchable — without it, a missing path is a
+    /// non-terminating error that prints straight past the `try`.
+    fn set_location_line(dir: &str) -> String {
+        format!(
+            "try {{ Set-Location -LiteralPath {} -ErrorAction Stop }} catch {{ }}\n",
+            ps_quote(dir)
+        )
+    }
+
+    /// PowerShell single-quoting. PowerShell takes the typographic single
+    /// quotes for quote marks as well, so they are doubled along with `'`.
+    fn ps_quote(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('\'');
+        for c in s.chars() {
+            if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+                out.push(c);
+            }
+            out.push(c);
+        }
+        out.push('\'');
+        out
+    }
+
+    /// The integration with its comments, blank lines and indentation
+    /// dropped. It travels as base64 of UTF-16 — each character costs 8/3 of
+    /// one on the command line — and the commentary is half of it. The script
+    /// has no here-strings and no string that breaks onto a line starting
+    /// with `#`, so such a line is always a comment.
+    fn compact_powershell(script: &str) -> String {
+        let mut out = String::with_capacity(script.len());
+        for line in script.lines().map(str::trim) {
+            if !line.is_empty() && !line.starts_with('#') {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
     }
 
     fn fish_quote(s: &str) -> String {
@@ -1734,6 +1948,346 @@ fi
             let rcfile = format!("{}{BASH_CLEANUP_HOOK}", bash_rcfile());
             if let Some((ok, stderr)) = parse_check("bash", "-n", &rcfile) {
                 assert!(ok, "bash rejected the remote rcfile:\n{stderr}");
+            }
+        }
+
+        // --- Windows OpenSSH hosts ---
+
+        const WIN_PS51: &str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+        const WIN_PWSH: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
+
+        #[test]
+        fn probe_names_the_powershell_that_answered_it() {
+            // What each edition prints for PROBE_COMMAND: no line at all for
+            // `echo $SHELL`, then the two keys. Windows output is CRLF.
+            assert_eq!(
+                parse_probe(
+                    "__tty7_shell\r\n__tty7_psedition=Desktop\r\n\
+                     __tty7_pshome=C:\\Windows\\System32\\WindowsPowerShell\\v1.0\r\n"
+                ),
+                Some((RemoteShell::PowerShell, WIN_PS51.to_string()))
+            );
+            assert_eq!(
+                parse_probe(
+                    "__tty7_shell\r\n__tty7_psedition=Core\r\n\
+                     __tty7_pshome=C:\\Program Files\\PowerShell\\7\\\r\n"
+                ),
+                Some((RemoteShell::PowerShell, WIN_PWSH.to_string()))
+            );
+            // A profile that talks on the way in.
+            assert_eq!(
+                parse_probe(
+                    "Loading personal and system profiles took 412ms.\r\n__tty7_shell\r\n\
+                     __tty7_psedition=Core\r\n__tty7_pshome=D:\\tools\\pwsh\r\n"
+                ),
+                Some((
+                    RemoteShell::PowerShell,
+                    r"D:\tools\pwsh\pwsh.exe".to_string()
+                ))
+            );
+        }
+
+        #[test]
+        fn probe_declines_powershell_answers_it_cannot_place() {
+            for out in [
+                // pwsh as a Unix login shell keeps its plain shell.
+                "__tty7_shell\n__tty7_psedition=Core\n__tty7_pshome=/opt/microsoft/powershell/7\n",
+                "__tty7_shell\n__tty7_psedition=Desktop\n__tty7_pshome=/opt/ps\n",
+                "__tty7_shell\n__tty7_psedition=Core\n__tty7_pshome=\n",
+                "__tty7_shell\n__tty7_psedition=Classic\n__tty7_pshome=C:\\ps\n",
+                "__tty7_shell\n__tty7_psedition=Core\n__tty7_pshome=relative\\ps\n",
+                // Keys before the marker are someone's banner, not an answer.
+                "__tty7_psedition=Core\n__tty7_pshome=C:\\ps\n__tty7_shell\n",
+            ] {
+                assert_eq!(parse_probe(out), None, "{out:?}");
+            }
+        }
+
+        #[test]
+        fn cmd_answers_the_probe_with_its_own_echo_and_is_left_alone() {
+            // cmd has no `;`: the first `echo` prints the rest of the line.
+            let echoed = PROBE_COMMAND.strip_prefix("echo ").unwrap();
+            let out = format!("{echoed}\r\n");
+            assert_eq!(parse_probe(&out), None);
+            assert!(probe_answered_by_cmd(&out));
+            // sshd may hand cmd the command in quotes; cmd echoes the tail one.
+            assert!(probe_answered_by_cmd(&format!("{echoed}\"\r\n")));
+
+            assert!(!probe_answered_by_cmd("__tty7_shell\n/bin/zsh\n"));
+            assert!(!probe_answered_by_cmd(
+                "__tty7_shell\n__tty7_psedition=Core\n__tty7_pshome=C:\\ps\n"
+            ));
+        }
+
+        #[test]
+        fn posix_answers_are_read_as_before_with_the_empty_keys_trailing() {
+            assert_eq!(
+                parse_probe("__tty7_shell\n/bin/zsh\n__tty7_psedition=\n__tty7_pshome=\n"),
+                Some((RemoteShell::Zsh, "/bin/zsh".to_string()))
+            );
+            // fish drops a word whose variable is unset: two empty lines.
+            assert_eq!(
+                parse_probe("__tty7_shell\n/usr/bin/fish\n\n\n"),
+                Some((RemoteShell::Fish, "/usr/bin/fish".to_string()))
+            );
+            // An unset $SHELL must not promote a key line to the shell path.
+            assert_eq!(
+                parse_probe("__tty7_shell\n\n__tty7_psedition=\n__tty7_pshome=\n"),
+                None
+            );
+        }
+
+        /// Runs PROBE_COMMAND through every shell installed here the way sshd
+        /// would (`<shell> -c <command>`), and checks each is recognised as
+        /// itself. A Unix pwsh is declined like any Unix PowerShell, but what
+        /// it prints shows the probe's words expand in PowerShell's argument
+        /// mode — the same parser Windows PowerShell and a Windows pwsh use.
+        #[cfg(unix)]
+        #[test]
+        fn real_shells_answer_the_probe_as_themselves() {
+            use std::process::Command;
+            let run = |bin: &str, args: &[&str]| {
+                Command::new(bin)
+                    .args(args)
+                    .arg("-c")
+                    .arg(PROBE_COMMAND)
+                    .env("SHELL", format!("/usr/bin/{bin}"))
+                    .output()
+                    .ok()
+            };
+            for (bin, shell) in [
+                ("sh", None),
+                ("dash", None),
+                ("bash", Some(RemoteShell::Bash)),
+                ("zsh", Some(RemoteShell::Zsh)),
+                ("fish", Some(RemoteShell::Fish)),
+            ] {
+                let Some(out) = run(bin, &[]) else { continue };
+                let parsed = parse_probe(&String::from_utf8_lossy(&out.stdout));
+                assert_eq!(parsed.map(|(s, _)| s), shell, "{bin}: {out:?}");
+            }
+            if let Some(out) = run("pwsh", &["-NoProfile", "-NonInteractive"]) {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let lines: Vec<&str> = text.lines().collect();
+                assert_eq!(lines.first(), Some(&PROBE_MARKER), "{text:?}");
+                assert_eq!(lines.get(1), Some(&"__tty7_psedition=Core"), "{text:?}");
+                let home = lines
+                    .get(2)
+                    .and_then(|l| l.strip_prefix(PS_HOME_KEY))
+                    .unwrap_or_default();
+                assert!(
+                    std::path::Path::new(home).join("pwsh").is_file(),
+                    "{home:?} is not pwsh's home ({text:?})"
+                );
+                assert_eq!(parse_probe(&text), None);
+                assert!(!probe_answered_by_cmd(&text));
+            }
+        }
+
+        /// The script inside `-EncodedCommand`, and everything around it.
+        fn split_powershell_bootstrap(script: &str) -> (&str, String, &str) {
+            let (head, rest) = script
+                .split_once("-EncodedCommand ")
+                .expect("carries an encoded command");
+            let (b64, tail) = rest.split_once(';').expect("ends with the exit");
+            (head, super::super::tests::decode_utf16le_base64(b64), tail)
+        }
+
+        #[test]
+        fn powershell_bootstrap_starts_the_same_powershell_with_the_integration() {
+            let script = bootstrap_command(RemoteShell::PowerShell, WIN_PWSH, None);
+            assert!(
+                !script.contains('\n'),
+                "one line through the Win32 command line"
+            );
+            assert!(!script.contains('"'), "no argv quoting for sshd to eat");
+            let (head, body, tail) = split_powershell_bootstrap(&script);
+            assert_eq!(
+                head,
+                r"& 'C:\Program Files\PowerShell\7\pwsh.exe' -NoLogo -NoExit "
+            );
+            assert_eq!(tail, " exit $LASTEXITCODE");
+            assert_eq!(body, compact_powershell(POWERSHELL_INTEGRATION));
+            for needle in ["]133;A", "]133;B", "]133;C", "]133;D", "]7;file://", "]0;"] {
+                assert!(body.contains(needle), "compacted away {needle}");
+            }
+            assert!(!body.lines().any(|l| l.starts_with('#')));
+
+            let ps51 = bootstrap_command(RemoteShell::PowerShell, WIN_PS51, None);
+            assert!(ps51.starts_with(&format!("& '{WIN_PS51}' -NoLogo -NoExit ")));
+        }
+
+        #[test]
+        fn windows_start_dirs_are_taken_only_when_they_name_one_place() {
+            let cases = [
+                ("/C:/Users/ann/my dir", Some("C:/Users/ann/my dir")),
+                ("C:/Users/ann", Some("C:/Users/ann")),
+                (r"d:\work", Some(r"d:\work")),
+                ("/C:/", Some("C:/")),
+                ("//fs01/share/team", Some(r"\\fs01\share\team")),
+                (r"\\fs01\share", Some(r"\\fs01\share")),
+                // Relative to whichever drive is current.
+                ("/Users/ann", None),
+                // Wherever drive C last was.
+                ("C:", None),
+                ("/C:", None),
+                ("C:Users", None),
+                ("~/x", None),
+                ("x", None),
+                ("", None),
+                ("//fs01", None),
+                ("//fs01/", None),
+                (r"\\?\C:\x", None),
+                (r"\\.\pipe\x", None),
+                ("C:/a\0b", None),
+            ];
+            for (dir, want) in cases {
+                assert_eq!(powershell_start_dir(dir).as_deref(), want, "{dir:?}");
+            }
+        }
+
+        #[test]
+        fn a_start_dir_opens_the_encoded_script_with_one_quiet_set_location() {
+            let dir = "/C:/Users/ann/it's ‘quoted’ $HOME";
+            let script = bootstrap_command(RemoteShell::PowerShell, WIN_PWSH, Some(dir));
+            let (_, body, _) = split_powershell_bootstrap(&script);
+            let (first, rest) = body.split_once('\n').unwrap();
+            assert_eq!(
+                first,
+                "try { Set-Location -LiteralPath 'C:/Users/ann/it''s ‘‘quoted’’ $HOME' \
+                 -ErrorAction Stop } catch { }"
+            );
+            assert_eq!(rest, compact_powershell(POWERSHELL_INTEGRATION));
+
+            for refused in ["/Users/ann", "C:", "relative"] {
+                assert_eq!(
+                    bootstrap_command(RemoteShell::PowerShell, WIN_PWSH, Some(refused)),
+                    bootstrap_command(RemoteShell::PowerShell, WIN_PWSH, None),
+                    "{refused:?} must not become a Set-Location"
+                );
+            }
+        }
+
+        #[test]
+        fn powershell_bootstrap_fits_a_windows_command_line() {
+            // sshd's own part: the shell's path and its `-c`.
+            let sshd = WIN_PWSH.len() + " -c ".len() + 2;
+            let longest_classic = format!("C:/{}", "d".repeat(257));
+            for dir in [None, Some(longest_classic.as_str())] {
+                let script = bootstrap_command(RemoteShell::PowerShell, WIN_PWSH, dir);
+                let len = script.chars().count();
+                assert!(
+                    len <= POWERSHELL_COMMAND_LINE_BUDGET && len + sshd < 32_767,
+                    "{len} chars with start dir {dir:?}"
+                );
+            }
+            // A long-path-aware host can report a far longer cwd. It costs the
+            // start dir, not the session.
+            let huge = format!("C:/{}", "d/".repeat(8_000));
+            assert_eq!(
+                bootstrap_command(RemoteShell::PowerShell, WIN_PWSH, Some(&huge)),
+                bootstrap_command(RemoteShell::PowerShell, WIN_PWSH, None),
+            );
+        }
+
+        #[test]
+        fn ps_quote_doubles_every_single_quote_powershell_honours() {
+            assert_eq!(ps_quote("a'b"), "'a''b'");
+            assert_eq!(ps_quote("a\u{2019}b"), "'a\u{2019}\u{2019}b'");
+            assert_eq!(ps_quote(r"C:\x $y"), r"'C:\x $y'");
+        }
+
+        /// A throwaway home for a pwsh run, so no real profile is read.
+        #[cfg(unix)]
+        fn pwsh(home: &std::path::Path) -> std::process::Command {
+            let mut cmd = std::process::Command::new("pwsh");
+            cmd.current_dir(home)
+                .env("HOME", home)
+                .env("XDG_CONFIG_HOME", home.join(".config"))
+                .env("XDG_DATA_HOME", home.join(".local/share"))
+                .env("XDG_CACHE_HOME", home.join(".cache"))
+                .env_remove("TTY7_SHELL_INTEGRATION");
+            cmd
+        }
+
+        /// Runs the bootstrap in a real pwsh the way a PowerShell default
+        /// shell runs an exec request (`<shell> -c <bootstrap>`), with the
+        /// Windows executable swapped for the local one and commands on stdin
+        /// in place of a user, and checks the child decodes and runs the
+        /// integration and hands its exit code back out through the parent.
+        #[cfg(unix)]
+        #[test]
+        fn a_real_pwsh_runs_the_bootstrap_end_to_end() {
+            use std::io::Write as _;
+            use std::process::Stdio;
+
+            let home = tempfile::tempdir().expect("tempdir");
+            let script = bootstrap_command(RemoteShell::PowerShell, WIN_PWSH, None).replacen(
+                &ps_quote(WIN_PWSH),
+                "'pwsh'",
+                1,
+            );
+            let Ok(mut child) = pwsh(home.path())
+                .args(["-NoProfile", "-c", &script])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+            else {
+                return;
+            };
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(
+                    b"Write-Output \"integrated=$env:TTY7_SHELL_INTEGRATION\"\n\
+                      Write-Output \"prompt=$((Get-Command prompt).ScriptBlock -match '133;A')\"\n\
+                      exit 7\n",
+                )
+                .unwrap();
+            let out = child.wait_with_output().expect("pwsh ran");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(stdout.contains("integrated=1"), "{stdout}\n{stderr}");
+            assert!(stdout.contains("prompt=True"), "{stdout}\n{stderr}");
+            assert_eq!(out.status.code(), Some(7), "{stdout}\n{stderr}");
+        }
+
+        /// The start directory line in a real pwsh: it lands in a directory
+        /// that is there, and says nothing and stays put for one that is gone.
+        #[cfg(unix)]
+        #[test]
+        fn a_real_pwsh_lands_in_the_start_dir_and_stays_quiet_without_it() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let root = root.path().canonicalize().expect("canonical tempdir");
+            let home = root.join("home");
+            let target = root.join("it's [a] ‘dir’");
+            std::fs::create_dir_all(&home).expect("home");
+            std::fs::create_dir_all(&target).expect("target");
+            let missing = root.join("gone since");
+
+            for (dir, want) in [(&target, &target), (&missing, &home)] {
+                let script = format!(
+                    "{}(Get-Location).Path",
+                    set_location_line(dir.to_str().unwrap())
+                );
+                let Ok(out) = pwsh(&home)
+                    .args(["-NoProfile", "-NonInteractive", "-c", &script])
+                    .output()
+                else {
+                    return;
+                };
+                assert!(out.status.success(), "{out:?}");
+                assert_eq!(
+                    String::from_utf8_lossy(&out.stdout).trim_end(),
+                    want.to_str().unwrap()
+                );
+                assert!(
+                    out.stderr.is_empty(),
+                    "{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
             }
         }
     }
@@ -2856,7 +3410,7 @@ mod tests {
         );
     }
 
-    fn decode_utf16le_base64(b64: &str) -> String {
+    pub(super) fn decode_utf16le_base64(b64: &str) -> String {
         fn val(c: u8) -> Option<u32> {
             match c {
                 b'A'..=b'Z' => Some((c - b'A') as u32),

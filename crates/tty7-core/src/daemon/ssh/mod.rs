@@ -800,7 +800,14 @@ async fn probe_remote_shell(conn: &SshConnection) -> Option<(remote::RemoteShell
     };
     let _ = tokio::time::timeout(PROBE_TIMEOUT, collect).await;
 
-    remote::parse_probe(&String::from_utf8_lossy(&out))
+    let out = String::from_utf8_lossy(&out);
+    if remote::probe_answered_by_cmd(&out) {
+        log::debug!(
+            "ssh {:?}: default shell is cmd.exe, left as it is",
+            conn.key()
+        );
+    }
+    remote::parse_probe(&out)
 }
 
 async fn probe_remote_env(conn: &SshConnection) -> Option<remote_link::RemoteEnv> {
