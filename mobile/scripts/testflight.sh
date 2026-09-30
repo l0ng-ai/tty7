@@ -38,6 +38,10 @@ mkdir -p "$OUT"
 
 [ -f "$PROJECT" ] || npm run tauri ios init
 
+# `tauri ios init` fills the asset catalog with Tauri's placeholder icon;
+# put ours back so a regenerated gen/ never ships it.
+cp src-tauri/icons/ios/*.png src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/
+
 # Release signing off for the archive only; the project is put back however
 # this exits.
 cp "$PROJECT" "$OUT/project.pbxproj.orig"
