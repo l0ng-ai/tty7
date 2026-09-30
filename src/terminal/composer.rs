@@ -828,16 +828,21 @@ impl TerminalView {
     /// Files arriving by way of the terminal's paste path — dropped on the
     /// box, a copied file or a screenshot pasted into it, an upload to a
     /// remote pane landing — become attachments while the box has the
-    /// keyboard. Hands them back otherwise, for the terminal to paste.
+    /// keyboard, or covers the input they would otherwise be pasted into
+    /// (taking the keyboard with them, as typing there does). Hands them
+    /// back otherwise, for the terminal to paste.
     pub(super) fn composer_takes_paths(
         &mut self,
         spelled: Vec<String>,
         cx: &mut Context<Self>,
     ) -> Option<Vec<String>> {
-        if !self.composer_focused || !self.composer_shown() {
+        let covering = matches!(self.presence(), Presence::Covering(_));
+        if !(self.composer_focused && self.composer_shown() || covering) {
             return Some(spelled);
         }
+        let focused = self.composer_focused;
         let c = self.composer.as_mut()?;
+        c.grab |= !focused;
         for path in spelled {
             if !c.attached.contains(&path) {
                 c.attached.push(path);

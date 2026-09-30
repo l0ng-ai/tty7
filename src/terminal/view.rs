@@ -3374,6 +3374,11 @@ impl TerminalView {
         if !self.accepts_input(cx) {
             return;
         }
+        // The agent's input is under the box, so a paste meant for it goes
+        // into the box — out of sight under it, it would be sent unseen.
+        if self.composer_takes_typing(&text, cx) {
+            return;
+        }
         // Same reason as `commit_text`: what is pasted lands on the prompt, so
         // the prompt is what has to be on screen. Neither branch below moved
         // the viewport, and a paste is a bigger change than a keystroke to
@@ -15820,12 +15825,21 @@ mod gpui_tests {
                 });
             })
             .unwrap();
+
+        // A paste at the grid is for the input under the box: it goes into
+        // the box, and the keyboard with it — never unseen into the agent.
+        view.update(cx, |v, cx| v.paste("pasted\nhere".into(), cx));
+        draw(cx);
         window
             .update(cx, |_, window, cx| {
-                view.update(cx, |v, cx| v.toggle_composer(window, cx));
+                view.update(cx, |v, cx| {
+                    let input = v.composer.as_ref().unwrap().input.clone();
+                    assert_eq!(input.read(cx).value(), "pasted\nhere");
+                    assert!(input.read(cx).focus_handle(cx).is_focused(window));
+                    input.update(cx, |s, cx| s.set_value("", window, cx));
+                });
             })
             .unwrap();
-        draw(cx);
 
         // A picker takes the input's place. Past the grace period the box
         // steps aside and the keyboard goes to the TUI.
