@@ -722,7 +722,7 @@ impl HookAgent {
             HookAgent::OhMyPi => {
                 target.under_home(&[".omp", "agent", "extensions", "tty7", "index.ts"])
             }
-            HookAgent::Gemini => target.under_home(&[".gemini", "settings.json"]),
+            HookAgent::Gemini => target.gemini_settings_path(),
             HookAgent::Droid => target.under_home(&[".factory", "settings.json"]),
             HookAgent::Qwen => target.under_home(&[".qwen", "settings.json"]),
             // The Open Plugins layout, which Goose implements rather than
@@ -833,6 +833,18 @@ impl<'a> HookTarget<'a> {
             return PathBuf::from(dir).join("hooks.json");
         }
         self.under_home(&[".codex", "hooks.json"])
+    }
+
+    /// Gemini CLI roots its user-level `.gemini` directory, settings included,
+    /// at `GEMINI_CLI_HOME` in place of the user's home when that is set.
+    /// Local-only, like the other overrides.
+    fn gemini_settings_path(&self) -> PathBuf {
+        if self.is_local()
+            && let Some(dir) = std::env::var_os("GEMINI_CLI_HOME").filter(|d| !d.is_empty())
+        {
+            return PathBuf::from(dir).join(".gemini").join("settings.json");
+        }
+        self.under_home(&[".gemini", "settings.json"])
     }
 
     fn xdg_config_dir(&self) -> PathBuf {
@@ -4240,6 +4252,35 @@ mod tests {
         );
 
         unsafe { std::env::remove_var("CODEX_HOME") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Gemini CLI moved to `GEMINI_CLI_HOME` keeps its `.gemini` directory
+    /// there, and `~/.gemini/settings.json` is a file it never reads.
+    #[test]
+    fn gemini_hooks_live_under_gemini_cli_home_when_it_is_set() {
+        let dir =
+            std::env::temp_dir().join(format!("tty7-gemini-home-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("GEMINI_CLI_HOME", &dir) };
+
+        let host = local_host();
+        let t = HookTarget::local(&*host).expect("home resolves in tests");
+        assert_eq!(
+            HookAgent::Gemini.target_path(&t),
+            dir.join(".gemini").join("settings.json")
+        );
+        assert_eq!(hooks_state(&t, HookAgent::Gemini), HooksState::NotInstalled);
+        let remote_host = FakeRemote::shared();
+        let remote = HookTarget::remote(&*remote_host, PathBuf::from("/home/me"));
+        assert_eq!(
+            HookAgent::Gemini.target_path(&remote),
+            PathBuf::from("/home/me/.gemini/settings.json"),
+            "a local GEMINI_CLI_HOME says nothing about a remote machine"
+        );
+
+        unsafe { std::env::remove_var("GEMINI_CLI_HOME") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 
