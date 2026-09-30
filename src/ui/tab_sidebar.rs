@@ -1696,7 +1696,14 @@ impl Tty7App {
             );
         }
 
-        // Keep navigation discoverable without requiring a hover over the rail.
+        // On screen at rest unless the Appearance switch says otherwise; then
+        // these two tiles wait for the pointer to reach the rail. The mark
+        // stays either way — it names the window rather than doing anything.
+        let auto_hide_chrome = cx.global::<Config>().auto_hide_titlebar_buttons;
+        let chrome_shown = crate::ui::app::titlebar_chrome_shown(
+            auto_hide_chrome,
+            self.sidebar_chrome_hover.get(),
+        );
         let controls = h_flex()
             .flex_shrink_0()
             .h(px(TITLE_BAR_HEIGHT))
@@ -1716,9 +1723,7 @@ impl Tty7App {
                 .child(div().flex_1().min_w(px(GRAB_HANDLE_W)))
             })
             .child(
-                div()
-                    .occlude()
-                    .flex_shrink_0()
+                crate::ui::app::resting_chrome(div().occlude().flex_shrink_0(), chrome_shown)
                     .child(self.new_tab_button_sized(
                         "sidebar-add",
                         crate::ui::tab_strip::RAIL_TILE,
@@ -1726,24 +1731,25 @@ impl Tty7App {
                     )),
             )
             .child(
-                div().occlude().flex_shrink_0().child(
-                    crate::ui::tab_strip::chrome_tile_sized(
-                        Button::new("sidebar-collapse")
-                            .icon(Icon::empty().path("icons/panel-left.svg")),
-                        crate::ui::tab_strip::RAIL_TILE,
-                        crate::ui::tab_strip::RAIL_TILE_GLYPH,
-                        false,
-                        cx,
-                    )
-                    .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
-                    .accessible_label(t(L10nKey::TabTooltipHideSidebar))
-                    .tooltip_element(crate::ui::tab_strip::chord_tooltip(
-                        t(L10nKey::TabTooltipHideSidebar),
-                        "ToggleLeftPanel",
-                        cx,
-                    ))
-                    .on_click(cx.listener(|this, _, _window, cx| this.toggle_left_panel(cx))),
-                ),
+                crate::ui::app::resting_chrome(div().occlude().flex_shrink_0(), chrome_shown)
+                    .child(
+                        crate::ui::tab_strip::chrome_tile_sized(
+                            Button::new("sidebar-collapse")
+                                .icon(Icon::empty().path("icons/panel-left.svg")),
+                            crate::ui::tab_strip::RAIL_TILE,
+                            crate::ui::tab_strip::RAIL_TILE_GLYPH,
+                            false,
+                            cx,
+                        )
+                        .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
+                        .accessible_label(t(L10nKey::TabTooltipHideSidebar))
+                        .tooltip_element(crate::ui::tab_strip::chord_tooltip(
+                            t(L10nKey::TabTooltipHideSidebar),
+                            "ToggleLeftPanel",
+                            cx,
+                        ))
+                        .on_click(cx.listener(|this, _, _window, cx| this.toggle_left_panel(cx))),
+                    ),
             );
         // The tile inside asks for `w_full`, and a percentage is only a width
         // while some box above it has a real one. This row used to have none of
@@ -1912,6 +1918,12 @@ impl Tty7App {
                     )),
             )
             .child(handle)
+            .when(auto_hide_chrome, |rail| {
+                rail.child(crate::ui::app::hover_sheet(
+                    "sidebar-chrome-hover",
+                    &self.sidebar_chrome_hover,
+                ))
+            })
     }
 
     /// The boundary between the kept groups and the derived ones, recording

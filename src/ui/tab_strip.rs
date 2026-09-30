@@ -2520,6 +2520,13 @@ impl Tty7App {
             .flex_shrink_0()
             .child(self.new_tab_button("tab-add", cx));
 
+        // Same bargain the rail's own tiles keep when the Appearance switch is
+        // on: present in the layout, painted only while the pointer is on the
+        // bar. The New Tab button that trails the chips is left alone — it is
+        // part of the row of tabs, not of the window's chrome.
+        let auto_hide_chrome = cx.global::<Config>().auto_hide_titlebar_buttons;
+        let strip_chrome_shown =
+            crate::ui::app::titlebar_chrome_shown(auto_hide_chrome, self.strip_chrome_hover.get());
         let rail_collapsed = !show_chips && !self.left_panel_open(cx);
         let left_group = rail_collapsed.then(|| {
             h_flex()
@@ -2541,13 +2548,18 @@ impl Tty7App {
                 // control, and a window that loses its identity when nobody is
                 // pointing at it reads as a different window.
                 .child(
-                    div()
-                        .occlude()
-                        .flex_shrink_0()
-                        .child(self.new_tab_button("titlebar-add-collapsed", cx)),
+                    crate::ui::app::resting_chrome(
+                        div().occlude().flex_shrink_0(),
+                        strip_chrome_shown,
+                    )
+                    .child(self.new_tab_button("titlebar-add-collapsed", cx)),
                 )
                 .child(
-                    div().occlude().flex_shrink_0().child(
+                    crate::ui::app::resting_chrome(
+                        div().occlude().flex_shrink_0(),
+                        strip_chrome_shown,
+                    )
+                    .child(
                         chrome_tile(
                             Button::new("titlebar-expand-sidebar")
                                 .icon(Icon::empty().path("icons/panel-left.svg")),
@@ -2568,7 +2580,16 @@ impl Tty7App {
 
         // macOS places these controls in the open panel's own title bar, and
         // drops them while a docked document holds the right edge.
-        let right_chrome = strip_chrome.then(|| self.window_chrome(cx));
+        //
+        // Elsewhere, with the panel open, they stand in the band above it,
+        // beside the panel's own tab row — which is painted whenever the panel
+        // is, so a band that grew a button on hover read as a glitch next to
+        // it. Once the panel is open they belong to its chrome, and stay.
+        let right_chrome_shown = strip_chrome_shown || self.right_panel_open(cx);
+        let right_chrome = strip_chrome.then(|| {
+            crate::ui::app::resting_chrome(div().flex_shrink_0(), right_chrome_shown)
+                .child(self.window_chrome(cx))
+        });
 
         // With the tabs in the rail, the middle of the bar over the terminal
         // is the way into Search Everywhere: a field-shaped button, centred,
@@ -2680,6 +2701,12 @@ impl Tty7App {
                         .child(chrome),
                 ),
                 None => this.child(chrome),
+            })
+            .when(auto_hide_chrome, |this| {
+                this.child(crate::ui::app::hover_sheet(
+                    "strip-chrome-hover",
+                    &self.strip_chrome_hover,
+                ))
             })
     }
 }

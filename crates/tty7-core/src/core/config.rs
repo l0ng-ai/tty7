@@ -177,6 +177,14 @@ pub struct Config {
     pub window_backdrop: WindowBackdrop,
     #[serde(default = "default_true")]
     pub dim_inactive_panes: bool,
+    /// Paint the title bar's buttons — new tab and the two panel toggles —
+    /// only while the pointer is over the bar they sit in. Off by default: a
+    /// button that is not on screen is a button nobody finds, and the switch
+    /// is for those who already know where it is and would rather rest their
+    /// eyes on a bare bar. The struct-level `serde(default)` reads a file
+    /// written before the key existed as off, which is how every window drew
+    /// then.
+    pub auto_hide_titlebar_buttons: bool,
     /// Lenient one entry at a time, for the same reason the nested keys below
     /// are: this is hand-edited, and it used to be all-or-nothing. A single
     /// value serde could not read — `"ActivateTab1": null`, a number, an object
@@ -756,6 +764,7 @@ impl Default for Config {
             window_blur: None,
             window_backdrop: WindowBackdrop::default(),
             dim_inactive_panes: true,
+            auto_hide_titlebar_buttons: false,
             keybindings: HashMap::new(),
             keybinding_preset: default_preset(),
             prefix: default_prefix(),
@@ -1849,6 +1858,21 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.dim_inactive_panes);
+    }
+
+    #[test]
+    fn auto_hide_titlebar_buttons_defaults_off_and_round_trips() {
+        assert!(!Config::default().auto_hide_titlebar_buttons);
+
+        // A file from before the key existed keeps its buttons on screen.
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert!(!old.auto_hide_titlebar_buttons);
+
+        let on: Config = serde_json::from_str(r#"{"auto_hide_titlebar_buttons": true}"#).unwrap();
+        assert!(on.auto_hide_titlebar_buttons);
+        let json = serde_json::to_string(&on).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert!(back.auto_hide_titlebar_buttons, "persisted");
     }
 
     #[test]

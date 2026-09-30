@@ -556,6 +556,7 @@ impl Tty7App {
         let config = cx.global::<Config>();
         let overridden = window_overrides_active(config, cfg!(target_os = "windows"));
         let dim_inactive_panes = config.dim_inactive_panes;
+        let auto_hide_titlebar_buttons = config.auto_hide_titlebar_buttons;
         let opacity = Tty7App::effective_window_opacity(cx);
 
         const MIN: f32 = 0.2;
@@ -638,6 +639,12 @@ impl Tty7App {
             cx,
             |this, on, _, cx| this.set_dim_inactive_panes(on, cx),
         );
+        let auto_hide_chrome = self.settings_switch(
+            "auto-hide-titlebar-buttons",
+            auto_hide_titlebar_buttons,
+            cx,
+            |this, on, _, cx| this.set_auto_hide_titlebar_buttons(on, cx),
+        );
         let follow_theme = overridden.then(|| {
             h_flex()
                 .pt(px(4.))
@@ -686,6 +693,15 @@ impl Tty7App {
                 t(L10nKey::SettingsDimInactivePanes),
                 t(L10nKey::SettingsDimInactivePanesDesc),
                 dim,
+                cx,
+            )
+            .into_any_element(),
+        );
+        rows.push(
+            self.settings_row(
+                t(L10nKey::SettingsAutoHideTitlebarButtons),
+                t(L10nKey::SettingsAutoHideTitlebarButtonsDesc),
+                auto_hide_chrome,
                 cx,
             )
             .into_any_element(),

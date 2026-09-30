@@ -363,6 +363,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Appearance,
+            title: SettingsAutoHideTitlebarButtons,
+            keywords: SettingsSearchAutoHideTitlebarButtonsKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
             title: SettingsFontSize,
             keywords: SettingsSearchFontSizeKeywords,
         },
@@ -792,6 +797,7 @@ impl SearchEntry {
     fn config_key(&self) -> &'static str {
         match self.title {
             L10nKey::SettingsDimInactivePanes => "dim_inactive_panes",
+            L10nKey::SettingsAutoHideTitlebarButtons => "auto_hide_titlebar_buttons",
             L10nKey::SettingsCursorBlink => "cursor_blink",
             L10nKey::SettingsCursorShape => "cursor_style",
             L10nKey::SettingsPromptCursorShape => "prompt_cursor_style",
@@ -875,6 +881,9 @@ impl SearchEntry {
             L10nKey::SettingsBlur => t(L10nKey::SettingsBlurDesc),
             L10nKey::SettingsBackdrop => t(L10nKey::SettingsBackdropDesc),
             L10nKey::SettingsDimInactivePanes => t(L10nKey::SettingsDimInactivePanesDesc),
+            L10nKey::SettingsAutoHideTitlebarButtons => {
+                t(L10nKey::SettingsAutoHideTitlebarButtonsDesc)
+            }
             L10nKey::SettingsFontSize => t(L10nKey::SettingsFontSizeDesc),
             L10nKey::SettingsUiFontFamily => t(L10nKey::SettingsUiFontFamilyDesc),
             L10nKey::SettingsLineHeight => t(L10nKey::SettingsLineHeightDesc),
@@ -950,6 +959,9 @@ impl SearchEntry {
         match self.title {
             L10nKey::SettingsDimInactivePanes => {
                 cfg.dim_inactive_panes != defaults.dim_inactive_panes
+            }
+            L10nKey::SettingsAutoHideTitlebarButtons => {
+                cfg.auto_hide_titlebar_buttons != defaults.auto_hide_titlebar_buttons
             }
             L10nKey::SettingsCursorBlink => cfg.cursor_blink != defaults.cursor_blink,
             L10nKey::SettingsCursorShape => cfg.cursor_style != defaults.cursor_style,
@@ -2922,6 +2934,40 @@ mod tests {
         assert_eq!(changed, vec![L10nKey::SettingsNotifyThreshold]);
     }
 
+    /// The title-bar switch is found under Appearance by its config key and by
+    /// its own name in every language, and flipping it marks that row — and
+    /// only that row — as changed, so its reset link resets the right thing.
+    #[test]
+    fn the_titlebar_buttons_switch_is_found_by_key_and_name_and_marks_only_itself() {
+        let entry = settings_search_entries()
+            .iter()
+            .find(|e| e.title == L10nKey::SettingsAutoHideTitlebarButtons)
+            .unwrap();
+        assert!(entry.section == SettingsSection::Appearance);
+        for locale in ["en", "zh-CN", "ja-JP"] {
+            crate::ui::i18n::set_locale(locale);
+            let name = t(L10nKey::SettingsAutoHideTitlebarButtons);
+            for query in ["auto_hide_titlebar_buttons", name] {
+                assert!(entry_matches(entry, query), "{locale}: {query}");
+                assert_eq!(
+                    best_matching_section(query).unwrap().profile_label(),
+                    SettingsSection::Appearance.profile_label(),
+                    "{locale}: {query}"
+                );
+            }
+        }
+        crate::ui::i18n::set_locale("en");
+
+        let mut cfg = Config::default();
+        cfg.auto_hide_titlebar_buttons = true;
+        let changed = settings_search_entries()
+            .iter()
+            .filter(|e| e.modified(&cfg))
+            .map(|e| e.title)
+            .collect::<Vec<_>>();
+        assert_eq!(changed, vec![L10nKey::SettingsAutoHideTitlebarButtons]);
+    }
+
     /// A shortcut is the first thing someone searching a settings window for a
     /// feature by name is after, and the Keybindings page was the one page the
     /// search could not see into: searching "split" found the settings that
@@ -3360,6 +3406,7 @@ mod tests {
             "Tab completion",
             "Command history search",
             "Dim inactive panes",
+            "Show title bar buttons on hover",
             "Option (⌥) acts as Meta",
             "Install the tty7 command on PATH",
         ] {

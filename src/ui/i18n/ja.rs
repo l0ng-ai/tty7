@@ -353,6 +353,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FollowTheme => "テーマに従う",
         L10nKey::SettingsDimInactivePanes => "非アクティブなペインを暗くする",
         L10nKey::SettingsDimInactivePanesDesc => "フォーカス外のペインを暗くします",
+        L10nKey::SettingsAutoHideTitlebarButtons => "タイトルバーのボタンをホバー時に表示",
+        L10nKey::SettingsAutoHideTitlebarButtonsDesc => {
+            "新規タブやサイドバーのボタンを、ポインタがタイトルバーに乗ったときだけ表示します"
+        }
         L10nKey::SettingsOpenThemesFolder => "テーマフォルダを開く",
         L10nKey::SettingsChangeThemeImage => "変更…",
         L10nKey::SettingsChooseThemeImage => "選択…",
@@ -971,6 +975,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchDimInactivePanesKeywords => {
             "非アクティブ ペイン 暗く フォーカス 分割 fade unfocused inactive split pane focus opacity highlight active dimming"
+        }
+        L10nKey::SettingsSearchAutoHideTitlebarButtonsKeywords => {
+            "自動 隠す タイトルバー ボタン ホバー ポインタ すっきり 新規タブ サイドバー auto hide title bar buttons hover"
         }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => {
             "ペイン ホバー アクティブ focus follows mouse pane hover activate"

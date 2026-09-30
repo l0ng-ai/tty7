@@ -316,6 +316,57 @@ fn strip_band(viewport: Size<Pixels>, pad: Edges<Pixels>) -> Bounds<Pixels> {
 
 pub(crate) const WINDOW_MARK_SIZE: f32 = 20.;
 
+/// A transparent sheet that answers one question: is the pointer inside the
+/// box it covers. Lay it over a region as that region's *last* child and read
+/// the flag to reveal chrome only while the pointer is there.
+///
+/// The obvious way to write this is `group_hover` on the region itself, and it
+/// does not work. Group hover asks whether the group's *hitbox* is the one
+/// under the pointer, and gpui's hit test stops at the first `occlude()`d
+/// element it meets on the way down. Tab chips and the chrome tiles are all
+/// occluding, so the region stopped counting as hovered the instant the
+/// pointer reached the very button it was revealing, and the button vanished
+/// from under the cursor. Painted last, this sheet's own hitbox sits in front
+/// of all of them, and it blocks nothing — it is not opaque, so the rows,
+/// chips and tiles underneath keep their clicks, cursors and tooltips.
+pub(crate) fn hover_sheet(id: &'static str, flag: &Rc<Cell<bool>>) -> gpui::Stateful<gpui::Div> {
+    use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
+    let flag = flag.clone();
+    gpui::div()
+        .id(id)
+        .absolute()
+        .inset_0()
+        .on_hover(move |over, window, _cx| {
+            if flag.get() != *over {
+                flag.set(*over);
+                window.refresh();
+            }
+        })
+}
+
+/// Whether a group of title-bar tiles paints this frame: always, unless
+/// `auto_hide_titlebar_buttons` is on, and then only while the pointer is over
+/// the bar the group sits in.
+pub(crate) fn titlebar_chrome_shown(auto_hide: bool, pointer_over_bar: bool) -> bool {
+    !auto_hide || pointer_over_bar
+}
+
+/// Take the paint off a chrome tile that [`titlebar_chrome_shown`] says is
+/// resting, and nothing else.
+///
+/// Opacity, not `invisible()`. Both keep the tile's slot, so revealing it never
+/// shifts what is beside it. But gpui skips a hidden element's whole paint
+/// pass, and that is where its click handler, its accessibility actions and
+/// its tooltip are registered: a hidden tile still shows up to a screen reader,
+/// by label, from prepaint, and then does nothing when pressed from there. At
+/// zero opacity the tile is fully there and merely not drawn.
+pub(crate) fn resting_chrome<E: gpui::Styled>(tile: E, shown: bool) -> E {
+    match shown {
+        true => tile,
+        false => tile.opacity(0.),
+    }
+}
+
 pub(crate) fn title_bar_drag(
     row: gpui::Stateful<gpui::Div>,
     key: &'static str,
@@ -911,11 +962,15 @@ pub struct Tty7App {
     pub(crate) editor: crate::ui::code_editor::EditorPanelState,
     pub(crate) sidebar_width: Rc<Cell<f32>>,
     pub(crate) sidebar_dragging: Rc<Cell<bool>>,
-    /// Whether the pointer is over the sidebar and over the tab strip. The
-    /// chrome tiles in each — new tab, the panel toggles, the app menu — are
-    /// drawn only while its own flag is set, so a window nobody is pointing at
-    /// carries no buttons at all. The right panel's own title bar is the
-    /// exception: its tiles are always painted while the panel is open.
+    /// Whether the pointer is over the sidebar and over the tab strip. With
+    /// `auto_hide_titlebar_buttons` on, the chrome tiles in each — new tab and
+    /// the panel toggles — are painted only while its own flag is set, so a
+    /// window nobody is pointing at carries no buttons at all. The right
+    /// panel's own title bar is the exception: its tiles are always painted
+    /// while the panel is open. Written by [`hover_sheet`]; nobody reads them
+    /// while the setting is off.
+    pub(crate) sidebar_chrome_hover: Rc<Cell<bool>>,
+    pub(crate) strip_chrome_hover: Rc<Cell<bool>>,
     /// How much width a settings row will actually get, measured once per
     /// render. `settings_row` is called from page builders that never see the
     /// window, and the answer differs per page — the SSH page spends a host
@@ -1556,6 +1611,8 @@ impl Tty7App {
             editor,
             sidebar_width: Rc::new(Cell::new(sidebar_width)),
             sidebar_dragging: Rc::new(Cell::new(false)),
+            sidebar_chrome_hover: Rc::new(Cell::new(false)),
+            strip_chrome_hover: Rc::new(Cell::new(false)),
             settings_row_width: Cell::new(f32::MAX),
             settings_viewport_w: Cell::new(f32::MAX),
             settings_hit_anchored: Cell::new(false),
@@ -3563,6 +3620,10 @@ impl Tty7App {
 
     pub(crate) fn set_dim_inactive_panes(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.dim_inactive_panes = on);
+    }
+
+    pub(crate) fn set_auto_hide_titlebar_buttons(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.auto_hide_titlebar_buttons = on);
     }
 
     pub(crate) fn set_cursor_blink(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -6676,6 +6737,9 @@ impl Tty7App {
         match title {
             L10nKey::SettingsDimInactivePanes => {
                 self.set_dim_inactive_panes(defaults.dim_inactive_panes, cx)
+            }
+            L10nKey::SettingsAutoHideTitlebarButtons => {
+                self.set_auto_hide_titlebar_buttons(defaults.auto_hide_titlebar_buttons, cx)
             }
             L10nKey::SettingsCursorBlink => self.set_cursor_blink(defaults.cursor_blink, cx),
             L10nKey::SettingsCursorShape => self.set_cursor_style(defaults.cursor_style, cx),
@@ -11101,6 +11165,16 @@ mod tests {
         wd_path_saveable,
     };
     use gpui::{Edges, point, px, size};
+
+    #[test]
+    fn title_bar_buttons_rest_out_of_sight_only_when_asked_to_and_nobody_points() {
+        // Off: painted whether or not the pointer is anywhere near.
+        assert!(super::titlebar_chrome_shown(false, false));
+        assert!(super::titlebar_chrome_shown(false, true));
+        // On: painted exactly while the pointer is over the bar.
+        assert!(!super::titlebar_chrome_shown(true, false));
+        assert!(super::titlebar_chrome_shown(true, true));
+    }
 
     #[test]
     fn a_rename_box_left_alone_is_not_a_rename() {

@@ -334,6 +334,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsDimInactivePanesDesc => {
             "Fade unfocused panes so the active one stands out."
         }
+        L10nKey::SettingsAutoHideTitlebarButtons => "Show title bar buttons on hover",
+        L10nKey::SettingsAutoHideTitlebarButtonsDesc => {
+            "Keep the new tab and sidebar buttons out of sight until the pointer is over the title bar."
+        }
         L10nKey::SettingsOpenThemesFolder => "Open themes folder",
         L10nKey::SettingsChangeThemeImage => "Change…",
         L10nKey::SettingsChooseThemeImage => "Choose…",
@@ -950,6 +954,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchDetectUrlsKeywords => "links hyperlink clickable open",
         L10nKey::SettingsSearchDimInactivePanesKeywords => {
             "fade unfocused inactive split pane focus opacity highlight active dimming"
+        }
+        L10nKey::SettingsSearchAutoHideTitlebarButtonsKeywords => {
+            "auto hide autohide title bar titlebar buttons chrome hover pointer minimal clean new tab sidebar toggle"
         }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => "pane hover activate",
         L10nKey::SettingsSearchFontFamilyKeywords => "typeface monospace typography",
