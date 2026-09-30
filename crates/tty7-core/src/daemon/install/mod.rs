@@ -827,6 +827,59 @@ impl<'a> Installer<'a> {
         Ok(report)
     }
 
+    /// The answer [`Installer::run`] gives for a machine that already has this
+    /// dialect's server installed, serving, and the one running — found in one
+    /// round trip instead of the half dozen `run` spends finding it out.
+    ///
+    /// That is the answer on every connect to a machine tty7 has been to before,
+    /// and `run` pays for it in sequence: `uname`, a home lookup and a `stat`
+    /// over SFTP, a control probe, a process scan. Six round trips before the
+    /// first pane — and the SFTP session it opens stays open for the life of
+    /// the connection, one of the handful of sessions the server allows it.
+    ///
+    /// `None` means "go and ask properly", never "something is wrong": any
+    /// other state — nothing installed, nothing serving, another build running,
+    /// a remote shell that could not read the script — is `run`'s to handle.
+    pub fn quick_prove(&self) -> Option<ProvedServer> {
+        let out = self.ops.run(&self.quick_prove_command()).ok()?;
+        if !out.success() {
+            return None;
+        }
+        self.quick_verdict(&out.stdout)
+    }
+
+    fn quick_prove_command(&self) -> String {
+        let binary = format!(
+            "{}/{}",
+            asset::INSTALL_DIR_COMPONENTS.join("/"),
+            asset::binary_name(self.dialect.control, self.dialect.protocol)
+        );
+        // `sh -c`, because the login shell over there need not be a POSIX one.
+        let script = format!(
+            r#"b="$HOME/{binary}"; if [ -f "$b" ] && [ -x "$b" ] && "$b" --stdio --bridge </dev/null >/dev/null 2>&1; then printf '{QUICK_PROVE_MARK}%s\n' "$b"; {RUNNING_EXE_COMMAND}; fi"#
+        );
+        format!("sh -c {}", shell_quote(&script))
+    }
+
+    fn quick_verdict(&self, stdout: &str) -> Option<ProvedServer> {
+        let (first, rest) = stdout.split_once('\n')?;
+        let binary = first.strip_prefix(QUICK_PROVE_MARK)?;
+        if !binary.starts_with('/') {
+            return None;
+        }
+        // The same test `check_running_build` applies: whatever is running is
+        // either this very file or a build of the same dialect. Anything else
+        // is a mismatch to raise, and raising it is `run`'s job.
+        let running = rest.trim();
+        let ours = running.is_empty()
+            || running == binary
+            || asset::dialect_from_path(running) == Some(self.dialect.dialect());
+        ours.then(|| ProvedServer {
+            binary: binary.to_string(),
+            mismatch: None,
+        })
+    }
+
     fn adoptable_running_server(&self) -> Result<Option<(String, RemoteProtocol)>, InstallError> {
         let Some(exe) = self.running_server_exe() else {
             return Ok(None);
@@ -1179,6 +1232,10 @@ impl<'a> Installer<'a> {
 /// out its ten seconds for a daemon nobody had asked to stop.
 const RUNNING_EXE_COMMAND: &str = r#"if [ -d /proc ]; then for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) || continue; case "$e" in */tty7-server-*) printf '%s' "${e% (deleted)}"; break;; esac; done; else ps -xwwo pid=,comm= 2>/dev/null | while read -r pid e; do case "$e" in */tty7-server-*) printf '%s' "$e"; break;; esac; done; fi; true"#;
 
+/// Starts the line [`Installer::quick_prove`]'s script prints once the server
+/// answered, so nothing a login script prints can pass for it.
+const QUICK_PROVE_MARK: &str = "tty7-quick-prove ";
+
 const TERMINATE_RUNNING_COMMAND: &str = r#"if [ -d /proc ]; then for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) || continue; case "$e" in */tty7-server-*) kill -TERM "${p#/proc/}" 2>/dev/null; break;; esac; done; else ps -xwwo pid=,comm= 2>/dev/null | while read -r pid e; do case "$e" in */tty7-server-*) kill -TERM "$pid" 2>/dev/null; break;; esac; done; fi; true"#;
 
 /// The two files a launch writes beside the server binary. Named here because
@@ -1453,7 +1510,15 @@ pub fn ensure_remote_server_labeled(conn: &Arc<SshConnection>, host: &str) -> io
         let fetch = default_fetcher();
         let confirm = install_confirm();
         let source = BundledOrRelease::discover(fetch.as_ref());
-        let report = Installer::with_source(&ops, &source, confirm.as_ref(), host).run()?;
+        let installer = Installer::with_source(&ops, &source, confirm.as_ref(), host);
+        if let Some(proved) = installer.quick_prove() {
+            log::info!(
+                "remote {host}: tty7-server already serving at {}",
+                proved.binary
+            );
+            return Ok(proved);
+        }
+        let report = installer.run()?;
         log::info!(
             "remote {host}: {} at {} ({}{})",
             if report.installed {

@@ -2638,3 +2638,107 @@ mod proving_the_server_once_per_connection {
         );
     }
 }
+
+fn quick_with(stdout: &str) -> Option<ProvedServer> {
+    let (remote, release, user) = (FakeRemote::new(), FakeRelease::new(), FakeUser::approving());
+    installer(&remote, &release, &user, "box").quick_verdict(stdout)
+}
+
+const QUICK_BINARY: &str = "/home/u/.local/share/tty7/bin/tty7-server-c3p4";
+
+#[test]
+fn a_machine_already_serving_this_dialect_is_proved_in_one_round_trip() {
+    let proved = quick_with(&format!("{QUICK_PROVE_MARK}{QUICK_BINARY}\n{QUICK_BINARY}"))
+        .expect("installed, serving, and the one running");
+    assert_eq!(proved.binary, QUICK_BINARY);
+    assert_eq!(proved.mismatch, None);
+
+    let other_build_same_dialect = "/opt/tty7/tty7-server-c3p4";
+    assert!(
+        quick_with(&format!(
+            "{QUICK_PROVE_MARK}{QUICK_BINARY}\n{other_build_same_dialect}"
+        ))
+        .is_some(),
+        "a build of the same dialect serves us, as `check_running_build` agrees"
+    );
+    assert!(
+        quick_with(&format!("{QUICK_PROVE_MARK}{QUICK_BINARY}\n")).is_some(),
+        "nothing found by the process scan is not a mismatch either"
+    );
+}
+
+#[test]
+fn anything_short_of_that_goes_through_the_whole_install() {
+    assert!(quick_with("").is_none(), "not installed or not serving");
+    assert!(
+        quick_with(&format!(
+            "{QUICK_PROVE_MARK}{QUICK_BINARY}\n/x/tty7-server-c2p4"
+        ))
+        .is_none(),
+        "another dialect is running: the mismatch is run's to raise"
+    );
+    assert!(
+        quick_with(&format!("Last login: today\n{QUICK_BINARY}")).is_none(),
+        "only the marked line names the binary"
+    );
+    assert!(
+        quick_with(&format!("{QUICK_PROVE_MARK}relative/path\n")).is_none(),
+        "a path that is not absolute is not one the route can run"
+    );
+}
+
+#[test]
+fn the_quick_probe_through_its_real_ops_falls_back_when_the_answer_is_not_there() {
+    // FakeRemote answers the bridge probe with an empty stdout, the way a shell
+    // that never printed the marker would.
+    let remote = FakeRemote::new();
+    let (release, user) = (FakeRelease::new(), FakeUser::approving());
+    assert!(
+        installer(&remote, &release, &user, "box")
+            .quick_prove()
+            .is_none()
+    );
+}
+
+/// The script, run by a real `sh` against a real file, the way sshd would run
+/// it: a server that answers the bridge probe is named on the marked line.
+#[cfg(unix)]
+#[test]
+fn the_quick_probe_script_names_a_server_that_answers() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join(".local/share/tty7/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let server = bin.join(asset::binary_name(CONTROL, PROTOCOL));
+    std::fs::write(&server, "#!/bin/sh\n[ \"$1 $2\" = \"--stdio --bridge\" ]\n").unwrap();
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let remote = FakeRemote::new();
+    let (release, user) = (FakeRelease::new(), FakeUser::approving());
+    let cmd = installer(&remote, &release, &user, "box").quick_prove_command();
+    let run = |home: &std::path::Path| {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .env("HOME", home)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    let stdout = run(home.path());
+    let first = stdout.lines().next().unwrap_or_default();
+    assert_eq!(
+        first,
+        format!("{QUICK_PROVE_MARK}{}", server.display()),
+        "{stdout:?}"
+    );
+
+    std::fs::write(&server, "#!/bin/sh\nexit 1\n").unwrap();
+    assert_eq!(
+        run(home.path()),
+        "",
+        "a server that does not answer is not named"
+    );
+}
