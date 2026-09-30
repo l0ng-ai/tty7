@@ -488,6 +488,77 @@ async fn a_paired_phone_opens_a_tab() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_paired_phone_sends_a_file_and_learns_where_it_went() {
+    let rig = Rig::new().await;
+    let session = within(rig.paired()).await;
+
+    // Bigger than one frame of the upload, so it arrives in pieces.
+    let bytes: Vec<u8> = (0..700_000u32).map(|i| i as u8).collect();
+    let path = within(session.upload(None, "../screen shot.png", &bytes))
+        .await
+        .unwrap();
+    let path = std::path::PathBuf::from(path);
+    assert!(path.is_absolute(), "{}", path.display());
+    assert_eq!(path.file_name().unwrap(), "screen_shot.png");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+
+    // Only this machine takes files for now.
+    let err = within(session.upload(Some("me@build-box:22"), "a.txt", b"hi"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("this computer"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paired_phone_reads_a_working_trees_changes() {
+    let rig = Rig::new().await;
+    let session = within(rig.paired()).await;
+
+    let repo = std::env::temp_dir().join(format!("tty7-diff-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    let run = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "{args:?}");
+    };
+    run(&["init", "-q"]);
+    std::fs::write(repo.join("src/a.txt"), "one\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-qm", "first"]);
+    std::fs::write(repo.join("src/a.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(repo.join("new.txt"), "hi\n").unwrap();
+
+    // Asked from a directory inside the repository, as a pane's cwd often is.
+    let cwd = repo.join("src").to_string_lossy().into_owned();
+    let diff = within(session.diff(None, &cwd)).await.unwrap();
+    assert!(diff.patch.contains("+two"), "{}", diff.patch);
+    assert_eq!(diff.untracked, vec!["new.txt".to_string()]);
+    assert!(!diff.truncated);
+
+    let err = within(session.diff(None, &std::env::temp_dir().to_string_lossy()))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("not in a git repository"), "{err}");
+    std::fs::remove_dir_all(&repo).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_unpaired_phone_cannot_open_a_tab() {
     let rig = Rig::new().await;
     let host = tty7_mobile_client::Host {

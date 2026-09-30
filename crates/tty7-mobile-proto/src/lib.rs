@@ -14,7 +14,11 @@
 //! - a [`Open::Pane`] stream per terminal on screen: raw output down, raw
 //!   keystrokes up, and a few [`PaneEvent`]s beside them;
 //! - a one-shot [`Open::NewTab`] stream that starts a shell in a new tab and
-//!   answers with a [`TabCreated`].
+//!   answers with a [`TabCreated`];
+//! - a one-shot [`Open::Upload`] stream that carries a file from the phone to
+//!   the machine and answers with where it landed, an [`Uploaded`];
+//! - a one-shot [`Open::Diff`] stream that answers with a git working tree's
+//!   changes, a [`Diff`].
 //!
 //! Every frame is `u32` little-endian length, a one-byte kind, then the
 //! payload — the same shape as the daemon's frames, so there is one framing
@@ -37,6 +41,10 @@ pub const MDNS_SERVICE: &str = "tty7";
 /// Bumped when a message changes shape. Carried in [`OpenReply::Ok`] so an app
 /// can tell the user to update rather than misread a newer gateway.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// The largest file an [`Open::Upload`] may carry: photos, screenshots and
+/// small files, not a way to move a disk image.
+pub const MAX_UPLOAD: u64 = 20 << 20;
 
 /// The largest frame either side will accept. Output is forwarded in the chunks
 /// the daemon sends, and a replay segment is capped well below this on the
@@ -88,6 +96,33 @@ pub enum Open {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine: Option<String>,
     },
+    /// Put a file from the phone on the machine, for a pane to be handed its
+    /// path. After `Ok` the phone sends the file as bytes frames and finishes
+    /// its side; the gateway answers [`Uploaded`] once the file is written.
+    /// `Denied` before any bytes: too big, or a machine files cannot go to.
+    ///
+    /// A gateway older than this variant cannot parse it and drops the stream
+    /// unanswered.
+    /// What has changed in the git working tree `cwd` is in, against its last
+    /// commit: `Ok`, then a [`Diff`]. `Denied` when it is not in a repository.
+    ///
+    /// A gateway older than this variant cannot parse it and drops the stream
+    /// unanswered.
+    Diff {
+        cwd: String,
+        /// As on [`Open::Pane`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    Upload {
+        /// The file's name on the phone; the gateway keeps what it safely can.
+        name: String,
+        /// Its length in bytes, at most [`MAX_UPLOAD`].
+        size: u64,
+        /// As on [`Open::Pane`]: where the pane it is for runs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +136,32 @@ pub struct GridSize {
 pub struct TabCreated {
     pub tab_id: String,
     pub pane_id: u64,
+}
+
+/// The answer on a [`Open::Diff`] stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Diff {
+    /// The repository's top directory.
+    pub root: String,
+    /// `git diff HEAD`: staged and unstaged together, as a unified diff.
+    pub patch: String,
+    /// Files git does not track yet (and does not ignore), by path from `root`.
+    #[serde(default)]
+    pub untracked: Vec<String>,
+    /// The patch was cut at [`MAX_DIFF`] bytes.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// The most of a patch a [`Diff`] carries: enough to review an agent's work
+/// on a phone, not a vendored dependency's.
+pub const MAX_DIFF: usize = 2 << 20;
+
+/// The answer on a [`Open::Upload`] stream once the file is written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Uploaded {
+    /// Where the file is, absolute, on the machine the pane runs on.
+    pub path: String,
 }
 
 /// The gateway's answer to an [`Open`].
@@ -560,6 +621,21 @@ mod tests {
             .unwrap(),
             serde_json::json!({"type": "pane", "pane_id": 3})
         );
+    }
+
+    #[test]
+    fn an_upload_names_its_file_and_size() {
+        let open = Open::Upload {
+            name: "shot.png".into(),
+            size: 42,
+            machine: None,
+        };
+        let wire = serde_json::to_value(&open).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"type": "upload", "name": "shot.png", "size": 42})
+        );
+        assert_eq!(serde_json::from_value::<Open>(wire).unwrap(), open);
     }
 
     #[cfg(feature = "tokio")]

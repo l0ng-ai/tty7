@@ -35,8 +35,10 @@ struct AppState {
     dir: PathBuf,
     endpoint: OnceCell<Endpoint>,
     sessions: Mutex<HashMap<String, Session>>,
-    /// The refresh half of each machine's control stream, by host id.
-    controls: Mutex<HashMap<String, ControlSender>>,
+    /// The refresh half of each open watch, by watch id, with its host id.
+    /// Each screen's watch is its own: one never ends another's stream.
+    controls: Mutex<HashMap<u32, (String, ControlSender)>>,
+    next_watch: AtomicU32,
     panes: Mutex<HashMap<u32, mpsc::UnboundedSender<Up>>>,
     next_pane: AtomicU32,
 }
@@ -47,6 +49,18 @@ type CmdResult<T> = Result<T, String>;
 enum Up {
     Keys(Vec<u8>),
     Request(PaneRequest),
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn names_come_back_from_their_header_encoding() {
+        assert_eq!(
+            super::percent_decode("%E6%88%AA%E5%9B%BE%201.png"),
+            "截图 1.png"
+        );
+        assert_eq!(super::percent_decode("100%"), "100%");
+    }
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -93,9 +107,11 @@ impl AppState {
 
     /// The live session to a machine, dialing a new one if there is none or
     /// the last one has dropped (the app was backgrounded, the network moved).
+    ///
+    /// The lock is not held while dialing: a machine that is offline takes a
+    /// long time to fail, and `forget` must not wait behind it.
     async fn session(&self, host_id: &str) -> CmdResult<Session> {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(s) = sessions.get(host_id)
+        if let Some(s) = self.sessions.lock().await.get(host_id)
             && !s.is_closed()
         {
             return Ok(s.clone());
@@ -103,6 +119,19 @@ impl AppState {
         let host = self.host(host_id)?;
         let endpoint = self.endpoint().await.map_err(err)?;
         let session = Session::connect(endpoint, &host).await.map_err(err)?;
+        let mut sessions = self.sessions.lock().await;
+        // Forgotten while dialing: the session is not wanted.
+        if self.host(host_id).is_err() {
+            session.close();
+            return Err("that machine is not paired".into());
+        }
+        // Another call dialed it first: keep that one.
+        if let Some(s) = sessions.get(host_id)
+            && !s.is_closed()
+        {
+            session.close();
+            return Ok(s.clone());
+        }
         sessions.insert(host_id.to_string(), session.clone());
         Ok(session)
     }
@@ -149,12 +178,21 @@ async fn pair(
 
 #[tauri::command]
 async fn forget(state: State<'_, Arc<AppState>>, host_id: String) -> CmdResult<()> {
+    // Off the list first, so a dial still under way finds it gone.
+    let mut hosts = state.load_hosts();
+    hosts.retain(|h| h.id != host_id);
+    state.save_hosts(&hosts).map_err(err)?;
     if let Some(s) = state.sessions.lock().await.remove(&host_id) {
         s.close();
     }
-    let mut hosts = state.load_hosts();
-    hosts.retain(|h| h.id != host_id);
-    state.save_hosts(&hosts).map_err(err)
+    // After the close, so a refresh in flight on it fails rather than holds
+    // the lock.
+    state
+        .controls
+        .lock()
+        .await
+        .retain(|_, (host, _)| *host != host_id);
+    Ok(())
 }
 
 /// What a machine's screen hears about it.
@@ -174,14 +212,16 @@ async fn watch(
     state: State<'_, Arc<AppState>>,
     host_id: String,
     on_event: Channel<TreeMsg>,
-) -> CmdResult<()> {
+) -> CmdResult<u32> {
     let session = state.session(&host_id).await?;
     let (sender, mut events) = session.control().await.map_err(err)?.split();
-    state.controls.lock().await.insert(host_id.clone(), sender);
+    let id = state.next_watch.fetch_add(1, Ordering::Relaxed);
+    state.controls.lock().await.insert(id, (host_id, sender));
+    let app_state = state.inner().clone();
 
     tokio::spawn(async move {
         let mut link = tokio::time::interval(LINK_REPORT);
-        loop {
+        'stream: loop {
             tokio::select! {
                 event = events.next() => {
                     // A gateway-side error (it lost the daemon) keeps the
@@ -196,30 +236,39 @@ async fn watch(
                         Err(e) => (TreeMsg::Error { message: err(e) }, true),
                     };
                     if on_event.send(msg).is_err() {
-                        return;
+                        break 'stream;
                     }
                     if last {
                         let _ = on_event.send(TreeMsg::Closed);
-                        return;
+                        break 'stream;
                     }
                 }
                 _ = link.tick() => {
                     if on_event.send(TreeMsg::Link { link: session.link() }).is_err() {
-                        return;
+                        break 'stream;
                     }
                 }
             }
         }
+        app_state.controls.lock().await.remove(&id);
     });
-    Ok(())
+    Ok(id)
 }
 
 #[tauri::command]
-async fn refresh(state: State<'_, Arc<AppState>>, host_id: String) -> CmdResult<()> {
-    match state.controls.lock().await.get_mut(&host_id) {
-        Some(sender) => sender.refresh().await.map_err(err),
+async fn refresh(state: State<'_, Arc<AppState>>, watch: u32) -> CmdResult<()> {
+    match state.controls.lock().await.get_mut(&watch) {
+        Some((_, sender)) => sender.refresh().await.map_err(err),
         None => Err("not watching that machine".into()),
     }
+}
+
+/// Ends a watch: dropping its sender finishes the stream, the gateway stops
+/// sending, and the reading task ends with it.
+#[tauri::command]
+async fn unwatch(state: State<'_, Arc<AppState>>, watch: u32) -> CmdResult<()> {
+    state.controls.lock().await.remove(&watch);
+    Ok(())
 }
 
 /// Starts a shell in a new tab at the end of a workspace. The frontend opens
@@ -238,6 +287,72 @@ async fn tab_new(
         .new_tab(machine.as_deref(), &workspace_id, cwd, size)
         .await
         .map_err(err)
+}
+
+/// Sends a file to the machine for a pane, returning its path there. The
+/// file is the request's raw body, not JSON (a 20 MB photo would be 80 MB as
+/// a number array); which machine and the file's name ride in headers, the
+/// name percent-encoded since a header is ASCII.
+#[tauri::command]
+async fn upload(
+    state: State<'_, Arc<AppState>>,
+    request: tauri::ipc::Request<'_>,
+) -> CmdResult<String> {
+    let header = |name: &str| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(percent_decode)
+    };
+    let host_id = header("x-host").ok_or("no machine given")?;
+    let name = header("x-name").unwrap_or_default();
+    let machine = header("x-machine").filter(|m| !m.is_empty());
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("the file did not arrive as bytes".into());
+    };
+    let session = state.session(&host_id).await?;
+    session
+        .upload(machine.as_deref(), &name, bytes)
+        .await
+        .map_err(err)
+}
+
+/// What has changed in the repository a pane's directory is in.
+#[tauri::command]
+async fn diff(
+    state: State<'_, Arc<AppState>>,
+    host_id: String,
+    machine: Option<String>,
+    cwd: String,
+) -> CmdResult<tty7_mobile_proto::Diff> {
+    let session = state.session(&host_id).await?;
+    session.diff(machine.as_deref(), &cwd).await.map_err(err)
+}
+
+/// Undoes `encodeURIComponent`. A malformed escape is kept as written.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (
+            bytes[i],
+            bytes.get(i + 1).copied().and_then(hex),
+            bytes.get(i + 2).copied().and_then(hex),
+        ) {
+            (b'%', Some(hi), Some(lo)) => {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+            }
+            (b, _, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Opens a pane. Output arrives on `on_output` as `ArrayBuffer`s of raw
@@ -397,11 +512,14 @@ pub fn run() {
     // already in the tree. An `Err` means one is installed, which is fine.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let builder = tauri::Builder::default();
+    // Links tapped in a pane open in the phone's browser.
+    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
     // Scanning the pairing QR code. Phones only: the desktop dev build has no
     // camera to point and pastes the code instead.
     #[cfg(mobile)]
-    let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
+    let builder = builder
+        .plugin(tauri_plugin_barcode_scanner::init())
+        .plugin(tauri_plugin_biometric::init());
 
     builder
         .setup(|app| {
@@ -417,12 +535,13 @@ pub fn run() {
                 controls: Mutex::new(HashMap::new()),
                 panes: Mutex::new(HashMap::new()),
                 next_pane: AtomicU32::new(1),
+                next_watch: AtomicU32::new(1),
             }));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            hosts, pair, forget, watch, refresh, tab_new, pane_open, pane_input, pane_lease,
-            pane_close, appearance
+            hosts, pair, forget, watch, unwatch, refresh, tab_new, upload, diff, pane_open,
+            pane_input, pane_lease, pane_close, appearance
         ])
         .run(tauri::generate_context!())
         .expect("error while running tty7");

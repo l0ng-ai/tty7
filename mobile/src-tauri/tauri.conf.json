@@ -36,7 +36,8 @@
       "frameworks": [
         "SystemConfiguration"
       ],
-      "developmentTeam": "78SZC3DQ7B"
+      "developmentTeam": "78SZC3DQ7B",
+      "minimumSystemVersion": "15.0"
     }
   }
 }

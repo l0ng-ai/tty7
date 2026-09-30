@@ -20,8 +20,9 @@ use tty7_core::core::machine::Machine;
 use tty7_core::daemon::control::PaneAgentState;
 use tty7_core::daemon::protocol::{DaemonMsg, LeaseRequest, WinSize};
 use tty7_mobile_proto::{
-    ControlEvent, ControlRequest, Frame, GridSize, Open, OpenReply, PROTOCOL_VERSION, PaneEvent,
-    PaneRequest, RemoteView, TabCreated, Tree, read_frame, write_bytes, write_msg,
+    ControlEvent, ControlRequest, Diff, Frame, GridSize, MAX_DIFF, MAX_UPLOAD, Open, OpenReply,
+    PROTOCOL_VERSION, PaneEvent, PaneRequest, RemoteView, TabCreated, Tree, Uploaded, read_frame,
+    write_bytes, write_msg,
 };
 
 use crate::state::State;
@@ -202,6 +203,56 @@ async fn serve_stream(
             finish(send).await;
             Ok(())
         }
+        Open::Diff { cwd, machine } => {
+            let read = if machine.is_some() {
+                Err(io::Error::other(
+                    "changes can only be read on this computer for now",
+                ))
+            } else {
+                tokio::task::spawn_blocking(move || read_diff(&cwd))
+                    .await
+                    .map_err(io::Error::other)?
+            };
+            match read {
+                Ok(diff) => {
+                    write_msg(&mut send, &ok).await?;
+                    write_msg(&mut send, &diff).await?;
+                }
+                Err(e) => write_msg(&mut send, &denied(&e.to_string())).await?,
+            }
+            finish(send).await;
+            Ok(())
+        }
+        Open::Upload {
+            name,
+            size,
+            machine,
+        } => {
+            let refusal = if machine.is_some() {
+                Some("files can only go to panes on this computer for now".to_string())
+            } else if size > MAX_UPLOAD {
+                Some(format!(
+                    "that file is {} MB; files up to {} MB can be sent",
+                    size.div_ceil(1 << 20),
+                    MAX_UPLOAD >> 20
+                ))
+            } else {
+                None
+            };
+            if let Some(reason) = refusal {
+                write_msg(&mut send, &denied(&reason)).await?;
+                finish(send).await;
+                return Ok(());
+            }
+            write_msg(&mut send, &ok).await?;
+            // A failure after `Ok` is said in the place of the answer.
+            match receive_upload(&name, size, &mut recv).await {
+                Ok(path) => write_msg(&mut send, &Uploaded { path }).await?,
+                Err(e) => write_msg(&mut send, &denied(&e.to_string())).await?,
+            }
+            finish(send).await;
+            Ok(())
+        }
         Open::Pane { pane_id, machine } => {
             let feed = {
                 let (backend, machine) = (backend.clone(), machine.clone());
@@ -228,6 +279,126 @@ async fn serve_stream(
             }
         }
     }
+}
+
+/// The changes in the git working tree `cwd` is in, against its last commit
+/// (against nothing, in a repository with no commits yet).
+fn read_diff(cwd: &str) -> io::Result<Diff> {
+    let git = |args: &[&str]| -> io::Result<std::process::Output> {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+    };
+    let top = git(&["rev-parse", "--show-toplevel"])?;
+    if !top.status.success() {
+        return Err(io::Error::other(format!(
+            "{cwd} is not in a git repository"
+        )));
+    }
+    let root = String::from_utf8_lossy(&top.stdout).trim().to_string();
+    let args = ["--no-pager", "diff", "--no-color", "--no-ext-diff", "-M"];
+    let mut out = git(&[&args[..], &["HEAD"]].concat())?;
+    if !out.status.success() {
+        // No commit yet: what is staged is all there is to show.
+        out = git(&[&args[..], &["--cached"]].concat())?;
+    }
+    if !out.status.success() {
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    let truncated = out.stdout.len() > MAX_DIFF;
+    let mut patch = out.stdout;
+    patch.truncate(MAX_DIFF);
+    let untracked = git(&[
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "--full-name",
+        ":/",
+    ])?;
+    Ok(Diff {
+        root,
+        patch: String::from_utf8_lossy(&patch).into_owned(),
+        untracked: String::from_utf8_lossy(&untracked.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect(),
+        truncated,
+    })
+}
+
+/// Reads a file the phone sends and writes it where the desktop keeps pasted
+/// images, in a directory of its own so its name can stay as it was.
+async fn receive_upload(name: &str, size: u64, recv: &mut RecvStream) -> io::Result<String> {
+    let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
+    while let Some(frame) = read_frame(recv).await? {
+        match frame {
+            Frame::Bytes(chunk) => bytes.extend_from_slice(&chunk),
+            Frame::Json(_) => {
+                return Err(io::Error::other("the phone sent a message, not the file"));
+            }
+        }
+        if bytes.len() as u64 > size {
+            return Err(io::Error::other("the file was longer than the phone said"));
+        }
+    }
+    if bytes.len() as u64 != size {
+        return Err(io::Error::other("the file stopped partway; send it again"));
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir()
+        .join("tty7-clipboard")
+        .join(format!("phone-{nanos:x}"));
+    let path = dir.join(upload_file_name(name));
+    let written = path.clone();
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&written, bytes)
+    })
+    .await
+    .map_err(io::Error::other)??;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// A name that is safe to write and to type into a shell unquoted: the last
+/// path component, letters (any script), digits and `.-_` kept, the rest
+/// made `_`, and no leading dot to hide it.
+fn upload_file_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let safe: String = base
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe = safe.trim_start_matches('.');
+    if safe.is_empty() {
+        return "file".into();
+    }
+    // Long names are cut from the middle of the stem; the extension is what
+    // tells an agent what the file is.
+    let chars: Vec<char> = safe.chars().collect();
+    if chars.len() <= 100 {
+        return safe.to_string();
+    }
+    let ext = safe.rfind('.').map_or("", |i| &safe[i..]);
+    let ext: String = if ext.chars().count() <= 10 {
+        ext.to_string()
+    } else {
+        String::new()
+    };
+    let stem: String = chars[..100 - ext.chars().count()].iter().collect();
+    format!("{stem}{ext}")
 }
 
 fn denied(reason: &str) -> OpenReply {
@@ -556,6 +727,20 @@ fn short(id: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_upload_keeps_a_name_a_shell_can_take() {
+        assert_eq!(upload_file_name("IMG_0042.HEIC"), "IMG_0042.HEIC");
+        assert_eq!(upload_file_name("截图 2026.png"), "截图_2026.png");
+        assert_eq!(upload_file_name("../../etc/passwd"), "passwd");
+        assert_eq!(upload_file_name("a$(rm -rf ~).txt"), "a__rm_-rf___.txt");
+        assert_eq!(upload_file_name(".env"), "env");
+        assert_eq!(upload_file_name(""), "file");
+        let long = format!("{}.png", "x".repeat(300));
+        let cut = upload_file_name(&long);
+        assert_eq!(cut.chars().count(), 100);
+        assert!(cut.ends_with(".png"), "{cut}");
+    }
 
     #[test]
     fn no_server_names_the_fix() {

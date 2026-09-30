@@ -89,10 +89,13 @@ export const appearance = (style: "system" | "light" | "dark") => invoke<void>("
 export function watch(hostId: string, onMsg: (msg: TreeMsg) => void) {
   const onEvent = new Channel<TreeMsg>();
   onEvent.onmessage = onMsg;
-  return invoke<void>("watch", { hostId, onEvent });
+  return invoke<number>("watch", { hostId, onEvent });
 }
 
-export const refresh = (hostId: string) => invoke<void>("refresh", { hostId });
+/** Ends a watch by the id `watch` resolved with. */
+export const unwatch = (watch: number) => invoke<void>("unwatch", { watch });
+
+export const refresh = (watch: number) => invoke<void>("refresh", { watch });
 
 /** Output arrives as ArrayBuffers of raw terminal bytes, events as objects. */
 /** `machine` is a remote's key, or null for the paired machine itself. */
@@ -130,5 +133,32 @@ export const paneInput = (handle: number, data: string) =>
 /** Run the pane at `size`, the phone's grid; `null` gives it back. */
 export const paneLease = (handle: number, size: { cols: number; rows: number } | null) =>
   invoke<void>("pane_lease", { handle, size });
+
+/** The largest file the gateway takes (`tty7_mobile_proto::MAX_UPLOAD`),
+ * checked here too so a big video is refused before it is read in. */
+export const MAX_UPLOAD = 20 * 2 ** 20;
+
+/** Sends a file to the machine a pane runs on; resolves with its path there.
+ * The bytes go as the raw body; the rest rides in headers, encoded, since a
+ * header is ASCII and a file name need not be. */
+export const upload = (hostId: string, machine: string | null, name: string, bytes: Uint8Array) =>
+  invoke<string>("upload", bytes, {
+    headers: {
+      "x-host": encodeURIComponent(hostId),
+      "x-name": encodeURIComponent(name),
+      "x-machine": encodeURIComponent(machine ?? ""),
+    },
+  });
+
+export interface Diff {
+  root: string;
+  patch: string;
+  untracked: string[];
+  truncated: boolean;
+}
+
+/** What has changed in the repository `cwd` is in. */
+export const diff = (hostId: string, machine: string | null, cwd: string) =>
+  invoke<Diff>("diff", { hostId, machine, cwd });
 
 export const paneClose = (handle: number) => invoke<void>("pane_close", { handle });

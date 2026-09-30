@@ -3,18 +3,23 @@ import "./style.css";
 
 import { Terminal } from "@xterm/xterm";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { SearchAddon } from "@xterm/addon-search";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { authenticate, checkStatus } from "@tauri-apps/plugin-biometric";
 import type { ITheme } from "@xterm/xterm";
 import * as scanner from "@tauri-apps/plugin-barcode-scanner";
 
 import { getVersion } from "@tauri-apps/api/app";
 
 import * as api from "./api";
+import { MAX_UPLOAD } from "./api";
 import type {
   AgentStatus,
   AgentView,
   Host,
   LinkInfo,
   PaneView,
+  RemoteView,
   TabView,
   Tree,
   WorkspaceView,
@@ -99,9 +104,12 @@ interface Prefs {
   textSize: number;
   /** How a pane wider than the phone first shows: panning, or shrunk. */
   wide: "readable" | "fit";
+  /** Face ID (or the passcode) before the app shows, on launch and after a
+   * minute away. */
+  lock: boolean;
 }
 
-const PREFS: Prefs = { appearance: "system", textSize: 11, wide: "readable" };
+const PREFS: Prefs = { appearance: "system", textSize: 11, wide: "readable", lock: false };
 
 const prefs: Prefs = (() => {
   try {
@@ -188,8 +196,49 @@ let onResume: (() => void) | null = null;
 let onLeave: (() => void) | null = null;
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") onResume?.();
+  if (document.visibilityState === "visible") {
+    if (prefs.lock && Date.now() - hiddenAt > LOCK_AFTER_MS) lock();
+    onResume?.();
+  } else hiddenAt = Date.now();
 });
+
+// The app lock: a cover over everything until Face ID or the passcode says
+// it is the phone's owner. Streams go on underneath; nothing shows.
+const LOCK_AFTER_MS = 60_000;
+let hiddenAt = Date.now();
+let cover: HTMLElement | null = null;
+function lock() {
+  if (cover) return;
+  const unlock = h("button", { class: "button primary" }, "Unlock");
+  cover = h(
+    "div",
+    { class: "lock-cover" },
+    h("img", { class: "empty-mark", src: logoUrl, alt: "" }),
+    h("h2", { class: "empty-title" }, "tty7 is locked"),
+    unlock,
+  );
+  const tryUnlock = async () => {
+    try {
+      await authenticate("Unlock tty7", { allowDeviceCredential: true });
+      cover?.remove();
+      cover = null;
+    } catch {
+      // Cancelled or failed: the cover stays, Unlock tries again.
+    }
+  };
+  unlock.onclick = tryUnlock;
+  document.body.append(cover);
+  void tryUnlock();
+}
+
+/** Whether this phone can lock the app: Face ID, Touch ID or a passcode. */
+async function canLock() {
+  try {
+    return (await checkStatus()).isAvailable;
+  } catch {
+    return false;
+  }
+}
 
 const still = matchMedia("(prefers-reduced-motion: reduce)");
 
@@ -198,6 +247,7 @@ function go(direction: "push" | "pop", render: () => HTMLElement) {
     onLeave?.();
     onLeave = null;
     onResume = null;
+    onBack = null;
     app.replaceChildren(render());
   };
   if (!document.startViewTransition || still.matches || !app.firstChild) {
@@ -209,6 +259,63 @@ function go(direction: "push" | "pop", render: () => HTMLElement) {
     .startViewTransition(swap)
     .finished.finally(() => delete document.documentElement.dataset.nav);
 }
+
+// Swiping in from the left edge goes back, the way a phone's own apps do. The
+// WebView has no stack of pages to do it natively — each screen is swapped in
+// place (`go`) — so it is done here. Each pushed screen sets its way back.
+let onBack: (() => void) | null = null;
+const EDGE = 24;
+let edgeSwipe: { x: number; y: number; t: number; claimed: boolean } | null = null;
+// Listened for ahead of every screen's own touch handling, so the terminal's
+// scrolling and a wide pane's sideways pan never see an edge swipe.
+document.addEventListener(
+  "touchstart",
+  (e) => {
+    edgeSwipe = null;
+    if (!onBack || e.touches.length !== 1) return;
+    // Not from under a sheet: the scrim covers the screen it would leave.
+    if (!app.contains(e.target as Node)) return;
+    const t = e.touches[0];
+    if (t.clientX > EDGE) return;
+    edgeSwipe = { x: t.clientX, y: t.clientY, t: e.timeStamp, claimed: false };
+  },
+  { capture: true, passive: true },
+);
+document.addEventListener(
+  "touchmove",
+  (e) => {
+    if (!edgeSwipe || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    const dx = t.clientX - edgeSwipe.x;
+    const dy = Math.abs(t.clientY - edgeSwipe.y);
+    if (!edgeSwipe.claimed) {
+      if (Math.max(Math.abs(dx), dy) < 8) return;
+      // Mostly sideways and rightwards, it is a swipe back; anything else is
+      // the screen's own.
+      if (dx <= dy) return (edgeSwipe = null);
+      edgeSwipe.claimed = true;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  },
+  { capture: true, passive: false },
+);
+document.addEventListener(
+  "touchend",
+  (e) => {
+    const swipe = edgeSwipe;
+    edgeSwipe = null;
+    if (!swipe?.claimed) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const t = e.changedTouches[0];
+    const dx = t.clientX - swipe.x;
+    // Far enough across, or flicked.
+    if (dx > Math.min(80, innerWidth * 0.25) || dx / Math.max(1, e.timeStamp - swipe.t) > 0.4) onBack?.();
+  },
+  { capture: true, passive: false },
+);
+document.addEventListener("touchcancel", () => (edgeSwipe = null), { capture: true, passive: true });
 
 interface ScreenParts {
   title: string;
@@ -225,6 +332,7 @@ interface ScreenParts {
 /** A screen with a large title that folds into the bar as it scrolls away. */
 function screen(parts: ScreenParts) {
   const root = !parts.back;
+  onBack = parts.back?.onclick ?? null;
   const bar = h(
     "header",
     { class: "nav" },
@@ -401,6 +509,11 @@ function settingsScreen() {
   go("push", () => {
     const body = h("div", { class: "stack" });
     const version = h("span", { class: "row-meta" });
+    let lockable = false;
+    void canLock().then((ok) => {
+      lockable = ok;
+      if (ok) draw();
+    });
     void getVersion().then((v) => (version.textContent = v), () => {});
 
     /** One setting's options, as rows with a check on the chosen one. */
@@ -416,6 +529,34 @@ function settingsScreen() {
       );
     const note = (group: HTMLElement, text: string) => (group.append(h("p", { class: "group-note" }, text)), group);
 
+    const lockSetting = () =>
+      note(
+        section(
+          "Privacy",
+          h(
+            "button",
+            {
+              class: "row choice",
+              onclick: async () => {
+                // Turning it on proves it works first, so no one locks
+                // themselves out.
+                if (!prefs.lock) {
+                  try {
+                    await authenticate("Turn on the tty7 lock", { allowDeviceCredential: true });
+                  } catch {
+                    return;
+                  }
+                }
+                setPref("lock", !prefs.lock);
+                draw();
+              },
+            },
+            h("span", { class: "row-title" }, "Lock with Face ID"),
+            h("span", { class: prefs.lock ? "switch on" : "switch" }),
+          ),
+        ),
+        "Asks for Face ID or the passcode when tty7 opens, and when you come back after a minute away.",
+      );
     const draw = () => {
       const saved = sentHistory().length;
       const clear = h(
@@ -446,6 +587,20 @@ function settingsScreen() {
           "How such a pane first shows. Switch any time from its ⋯ menu.",
         ),
         note(
+          section(
+            "Key bar",
+            h(
+              "button",
+              { class: "row choice", onclick: () => keysScreen() },
+              h("span", { class: "row-title" }, "Keys above the message box"),
+              h("span", { class: "row-meta" }, remembered("keys") && remembered("keys") !== "null" ? "Custom" : "Default"),
+              ico("chevron", "icon row-chevron"),
+            ),
+          ),
+          "Choose, order and add the keys a pane shows. A key can send any text, so a prompt you use often can be one tap.",
+        ),
+        ...(lockable ? [lockSetting()] : []),
+        note(
           section("Message history", clear),
           "What you send from the message box is kept on this phone, to suggest as you write and to search from the history button.",
         ),
@@ -462,6 +617,147 @@ function settingsScreen() {
       body: [body],
     });
   });
+}
+
+/** Settings → Key bar: the key row's pages, each key removable and movable,
+ * keys added from a catalog or written out. */
+function keysScreen() {
+  go("push", () => {
+    let pages = keyPages().map((p) => [...p]);
+    const body = h("div", { class: "stack" });
+    const save = () => {
+      pages = pages.filter((p, i) => p.length || i === pages.length - 1);
+      if (!pages.length) pages = [[]];
+      saveKeyPages(pages);
+      draw();
+    };
+    // Up past a page's first key goes to the end of the page before; down
+    // past its last, to the start of the next — when that page has room.
+    const move = (pi: number, ki: number, by: -1 | 1) => {
+      const page = pages[pi];
+      const to = ki + by;
+      if (to >= 0 && to < page.length) {
+        [page[ki], page[to]] = [page[to], page[ki]];
+      } else {
+        const other = pages[pi + by];
+        if (!other || other.length >= KEYS_PER_PAGE) return;
+        const [k] = page.splice(ki, 1);
+        if (by < 0) other.push(k);
+        else other.unshift(k);
+      }
+      save();
+    };
+    const draw = () => {
+      const groups = pages.map((page, pi) => {
+        const rows = page.map((k, ki) => {
+          const first = pi === 0 && ki === 0;
+          const last = pi === pages.length - 1 && ki === page.length - 1;
+          return h(
+            "div",
+            { class: "row key-edit" },
+            h("span", { class: "key key-sample" }, keyFace(k)),
+            h("span", { class: "row-title" }, k.latch ? "ctrl (hold for the next key)" : k.paste ? "Paste" : k.label),
+            h("button", { class: "nav-icon", ariaLabel: `Move ${k.label} up`, disabled: first, onclick: () => move(pi, ki, -1) }, ico("up")),
+            h("button", { class: "nav-icon", ariaLabel: `Move ${k.label} down`, disabled: last, onclick: () => move(pi, ki, 1) }, ico("down")),
+            h(
+              "button",
+              { class: "nav-icon danger", ariaLabel: `Remove ${k.label}`, onclick: () => (page.splice(ki, 1), save()) },
+              ico("trash"),
+            ),
+          );
+        });
+        const full = page.length >= KEYS_PER_PAGE;
+        const add = h(
+          "button",
+          { class: "row choice", disabled: full, onclick: () => addKeySheet((k) => (page.push(k), save())) },
+          h("span", { class: "row-title accent" }, full ? "This page is full" : "Add a key"),
+          ico("plus", "icon row-chevron"),
+        );
+        return section(`Page ${pi + 1}`, ...rows, add);
+      });
+      const more = h(
+        "button",
+        {
+          class: "row choice",
+          disabled: pages.length >= MAX_KEY_PAGES || pages[pages.length - 1].length === 0,
+          onclick: () => (pages.push([]), draw()),
+        },
+        h("span", { class: "row-title accent" }, "Add a page"),
+      );
+      const reset = h(
+        "button",
+        {
+          class: "row choice",
+          onclick: () => {
+            saveKeyPages(null);
+            pages = KEY_PAGES.map((p) => [...p]);
+            draw();
+          },
+        },
+        h("span", { class: "row-title danger" }, "Reset to the default keys"),
+      );
+      body.replaceChildren(
+        ...groups,
+        section(null, more, reset),
+        h("p", { class: "group-note keys-note" }, "Swipe the key row sideways in a pane to reach the next page."),
+      );
+    };
+    draw();
+    return screen({
+      title: "Key bar",
+      back: { label: "Settings", onclick: () => settingsScreen() },
+      body: [body],
+    });
+  });
+}
+
+/** Picks a key to add: one of the catalog's, or one written out. */
+function addKeySheet(add: (k: Key) => void) {
+  const grid = h(
+    "div",
+    { class: "key-catalog" },
+    ...KEY_CATALOG.map((k) =>
+      h("button", { class: "key", ariaLabel: k.label, onclick: () => (sheet.close(), add(k)) }, keyFace(k)),
+    ),
+  );
+  const label = h("input", { class: "field-input", placeholder: "Label, e.g. compact", ariaLabel: "Label" });
+  const sends = h("input", {
+    class: "field-input code",
+    placeholder: "Sends, e.g. /compact\\r",
+    autocapitalize: "off",
+    spellcheck: false,
+    ariaLabel: "What it sends",
+  });
+  for (const f of [label, sends]) f.setAttribute("autocorrect", "off");
+  const error = h("p", { class: "field-error", role: "alert" });
+  const make = h("button", { class: "button primary wide" }, "Add key");
+  make.onclick = () => {
+    const seq = keySequence(sends.value);
+    if (!seq) {
+      error.textContent = "Write what the key sends.";
+      return;
+    }
+    const name = label.value.trim() || sends.value.trim();
+    sheet.close();
+    add({ label: name, seq, flex: Math.min(2, Math.max(1, name.length / 4)) });
+  };
+  const sheet = openSheet(
+    "Add a key",
+    h(
+      "div",
+      { class: "sheet-body" },
+      h("section", { class: "sheet-group" }, h("h3", { class: "group-title" }, "Keys"), grid),
+      h(
+        "section",
+        { class: "sheet-group" },
+        h("h3", { class: "group-title" }, "Your own"),
+        h("div", { class: "card form-card" }, h("label", { class: "row field" }, label), h("label", { class: "row field" }, sends)),
+        h("p", { class: "group-note" }, "Text as written. ^C for ctrl-C; \\r for Enter, \\e for Esc, \\t for Tab."),
+        error,
+        make,
+      ),
+    ),
+  );
 }
 
 function hostRow(host: Host) {
@@ -702,7 +998,10 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
       renderLink(link, info);
       seen.set(host.id, { link: info, tabs: seen.get(host.id)?.tabs ?? null });
     };
-    showLink({ path: "connecting", rtt_ms: 0 });
+    // Coming back to a machine whose link was up, it still is: the session
+    // outlives the screen, so the last report stands until a new one comes.
+    const lastLink = () => seen.get(host.id)?.link ?? { path: "connecting" as const, rtt_ms: 0 };
+    showLink(lastLink());
     const notice = h("div", { class: "notice-slot" });
     const body = h("div", { class: "stack" }, skeleton());
 
@@ -710,22 +1009,39 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
     let lastTree: Tree | null = null;
     let slow: number | undefined;
     let query = "";
+    // The one workspace on screen, kept per machine across visits.
+    let picked = remembered(`workspace.${host.id}`);
+    const pick = (key: string) => {
+      picked = key;
+      remember(`workspace.${host.id}`, key);
+      draw();
+    };
     const draw = () => {
-      if (lastTree) body.replaceChildren(...renderTree(host, lastTree, query));
+      if (lastTree) body.replaceChildren(...renderTree(host, lastTree, query, picked, pick));
     };
     const dock = floatingBar("Search tabs", (q) => {
       query = q;
       draw();
-    }, { label: "New tab", run: () => lastTree && newTabSheet(host, lastTree, failed) });
+    }, { label: "New tab", run: () => lastTree && newTabSheet(host, lastTree, failed, picked) });
 
     const menu = menuButton([
-      { label: "Refresh", icon: "refresh", run: () => api.refresh(host.id).catch(() => start()) },
+      {
+        label: "Refresh",
+        icon: "refresh",
+        run: () => (watching === null ? start() : api.refresh(watching).catch(() => start())),
+      },
       {
         label: "Forget this machine",
         icon: "trash",
         danger: true,
         run: async () => {
-          if (confirm(`Forget ${host.name}? You'll need a new pairing code to reach it again.`)) {
+          if (
+            await confirmSheet(
+              `Forget ${host.name}?`,
+              "You'll need a new pairing code to reach it again.",
+              "Forget",
+            )
+          ) {
             await api.forget(host.id);
             hostsScreen();
           }
@@ -744,6 +1060,15 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
 
     const retry = retrier(() => start());
     let offlineNow = false;
+    // The screen's one watch. Starting again ends the last, and only the
+    // newest is listened to: a watch that is ending says "closed", which is
+    // not this machine going away.
+    let watching: number | null = null;
+    let generation = 0;
+    const unwatch = () => {
+      if (watching !== null) api.unwatch(watching).catch(() => {});
+      watching = null;
+    };
     // The notice on screen is the dropped connection's, for a tree to clear.
     let dropped = false;
     // A network that comes back is the moment to try, not the next tick.
@@ -754,6 +1079,8 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
 
     onLeave = () => {
       alive = false;
+      generation++;
+      unwatch();
       clearTimeout(slow);
       retry.cancel();
       window.removeEventListener("online", online);
@@ -784,13 +1111,15 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
     };
 
     const start = async () => {
+      const mine = ++generation;
+      unwatch();
       offlineNow = false;
       retry.cancel();
       clearTimeout(slow);
       // Retrying under a tree, the dropped connection's notice stays up to
       // say why the tree may be stale, until a new one replaces it.
       if (!(lastTree && dropped)) notice.replaceChildren();
-      showLink({ path: "connecting", rtt_ms: 0 });
+      showLink(lastLink());
       if (!lastTree) body.replaceChildren(skeleton());
       // A machine that never answers leaves nothing to show but a spinner;
       // say what is likely wrong while still trying.
@@ -810,8 +1139,8 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
           );
       }, SLOW_CONNECT_MS);
       try {
-        await api.watch(host.id, (msg) => {
-          if (!alive) return;
+        const id = await api.watch(host.id, (msg) => {
+          if (!alive || mine !== generation) return;
           switch (msg.type) {
             case "tree":
               clearTimeout(slow);
@@ -835,8 +1164,12 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
               break;
           }
         });
+        // Left, or started again, while this one was coming up: it is no
+        // one's.
+        if (!alive || mine !== generation) api.unwatch(id).catch(() => {});
+        else watching = id;
       } catch (e) {
-        if (alive) {
+        if (alive && mine === generation) {
           clearTimeout(slow);
           offline(errorText(e));
         }
@@ -904,7 +1237,19 @@ function matching(ws: WorkspaceView, query: string): WorkspaceView {
   };
 }
 
-function renderTree(host: Host, tree: Tree, query = ""): Node[] {
+/** What names one entry of the workspace switcher: a workspace here, one on
+ * a linked machine, or a linked machine with no workspaces to show. */
+function spaceKey(place: Place, ws: WorkspaceView | null) {
+  return `${place?.key ?? "local"}:${ws?.id ?? ""}`;
+}
+
+function renderTree(
+  host: Host,
+  tree: Tree,
+  query: string,
+  picked: string | null,
+  pick: (key: string) => void,
+): Node[] {
   if (query) {
     const groups = [
       ...tree.workspaces.map((ws) => [null, matching(ws, query)] as const),
@@ -914,12 +1259,9 @@ function renderTree(host: Host, tree: Tree, query = ""): Node[] {
       ? groups.map(([place, ws]) => workspaceGroup(host, place, ws, place?.name))
       : [h("p", { class: "search-empty" }, `No tab matches “${query}”.`)];
   }
-  const out: Node[] = [];
   const remotes = tree.remotes ?? [];
-
-  out.push(...tree.workspaces.map((ws) => workspaceGroup(host, null, ws)));
-  if (tree.workspaces.length === 0) {
-    out.push(
+  if (tree.workspaces.length === 0 && remotes.length === 0) {
+    return [
       h(
         "div",
         { class: "empty" },
@@ -927,74 +1269,122 @@ function renderTree(host: Host, tree: Tree, query = ""): Node[] {
         h("h2", { class: "empty-title" }, "Nothing open"),
         h("p", { class: "empty-body" }, `Open a tab in tty7 on ${host.name} and it appears here.`),
       ),
+    ];
+  }
+
+  // One workspace at a time, picked from a row above it: this machine's
+  // workspaces first, then those of every machine it reaches over SSH. A
+  // linked machine with none to show gets one entry for its state.
+  type Space = { key: string; label: string; count: number | null; remote: RemoteView | null; ws: WorkspaceView | null };
+  const spaces: Space[] = [
+    ...tree.workspaces.map((ws) => ({
+      key: spaceKey(null, ws),
+      label: workspaceName(ws.name),
+      count: ws.tabs.length,
+      remote: null,
+      ws,
+    })),
+    ...remotes.flatMap((r): Space[] => {
+      const ready = r.connected && !r.error && !r.pending;
+      return ready && r.workspaces.length
+        ? r.workspaces.map((ws) => ({
+            key: spaceKey(r, ws),
+            label: `${r.name} · ${workspaceName(ws.name)}`,
+            count: ws.tabs.length,
+            remote: r,
+            ws,
+          }))
+        : [{ key: spaceKey(r, null), label: r.name, count: null, remote: r, ws: null }];
+    }),
+  ];
+  const on = spaces.find((sp) => sp.key === picked) ?? spaces[0];
+
+  const out: Node[] = [];
+  if (spaces.length > 1) {
+    const bar = h(
+      "div",
+      { class: "ws-bar", role: "tablist", ariaLabel: "Workspaces" },
+      ...spaces.map((sp) => {
+        const chip = h(
+          "button",
+          { class: sp === on ? "ws-chip on" : "ws-chip", role: "tab", onclick: () => pick(sp.key) },
+          sp.remote && ico("server"),
+          h("span", { class: "ws-chip-name" }, sp.label),
+          sp.count !== null && h("span", { class: "ws-chip-count" }, String(sp.count)),
+        );
+        chip.setAttribute("aria-selected", String(sp === on));
+        return chip;
+      }),
+    );
+    out.push(bar);
+    // The picked entry in view, when it is far along the row.
+    requestAnimationFrame(() =>
+      bar.querySelector<HTMLElement>(".ws-chip.on")?.scrollIntoView({ block: "nearest", inline: "nearest" }),
     );
   }
 
-  // Then every machine the desktop reaches over SSH, as the desktop's
-  // sidebar lists them: its own heading, its workspaces under it.
-  for (const remote of remotes) {
-    const state = !remote.connected
-      ? "Link down"
-      : remote.error
-        ? "Not answering"
-        : remote.pending
-          ? "Reading…"
-          : "Connected";
-    const tone = !remote.connected || remote.error ? "offline" : remote.pending ? "connecting" : "direct";
-    out.push(
-      h(
-        "section",
-        { class: "remote" },
-        h(
-          "div",
-          { class: "remote-head" },
-          h("span", { class: "tile" }, ico("server")),
-          h(
-            "div",
-            { class: "remote-titles" },
-            h("h2", { class: "remote-name" }, remote.name),
-            h(
-              "p",
-              { class: `link ${tone}` },
-              h("span", { class: "link-dot" }),
-              `SSH · ${state}`,
-            ),
-          ),
-        ),
-        !remote.connected &&
-          h(
-            "p",
-            { class: "remote-note" },
-            `tty7 on ${host.name} lost its link to ${remote.name}. Reconnect it there to reach its workspaces.`,
-          ),
-        remote.error && h("p", { class: "remote-note" }, sentence(remote.error)),
-        remote.pending && skeleton(),
-        remote.connected &&
-          !remote.error &&
-          !remote.pending &&
-          remote.workspaces.length === 0 &&
-          h("p", { class: "remote-note" }, `No workspaces on ${remote.name}.`),
-        ...remote.workspaces.map((ws) => workspaceGroup(host, remote, ws)),
-      ),
-    );
-  }
+  const remote = on.remote;
+  if (remote) out.push(remoteState(host, remote));
+  // The switcher already names it and counts its tabs.
+  if (on.ws) out.push(workspaceGroup(host, remote, on.ws, undefined, spaces.length === 1));
   return out;
+}
+
+/** A linked machine's heading: its name and the state of the link to it. */
+function remoteState(host: Host, remote: RemoteView) {
+  const state = !remote.connected
+    ? "Link down"
+    : remote.error
+      ? "Not answering"
+      : remote.pending
+        ? "Reading…"
+        : "Connected";
+  const tone = !remote.connected || remote.error ? "offline" : remote.pending ? "connecting" : "direct";
+  return h(
+    "section",
+    { class: "remote" },
+    h(
+      "div",
+      { class: "remote-head" },
+      h("span", { class: "tile" }, ico("server")),
+      h(
+        "div",
+        { class: "remote-titles" },
+        h("h2", { class: "remote-name" }, remote.name),
+        h("p", { class: `link ${tone}` }, h("span", { class: "link-dot" }), `SSH · ${state}`),
+      ),
+    ),
+    !remote.connected &&
+      h(
+        "p",
+        { class: "remote-note" },
+        `tty7 on ${host.name} lost its link to ${remote.name}. Reconnect it there to reach its workspaces.`,
+      ),
+    remote.error && h("p", { class: "remote-note" }, sentence(remote.error)),
+    remote.pending && skeleton(),
+    remote.connected &&
+      !remote.error &&
+      !remote.pending &&
+      remote.workspaces.length === 0 &&
+      h("p", { class: "remote-note" }, `No workspaces on ${remote.name}.`),
+  );
 }
 
 /** A workspace is one card of its tabs, named as the desktop's sidebar names
  * them; a split tab gives each of its panes a row. `where` names the machine
  * when a search mixes them. */
-function workspaceGroup(host: Host, place: Place, ws: WorkspaceView, where?: string) {
+function workspaceGroup(host: Host, place: Place, ws: WorkspaceView, where?: string, headed = true) {
   const rows = ws.tabs.flatMap((tab) => tab.panes.map((pane) => paneRow(host, place, tab, pane)));
   return h(
     "section",
     { class: "group" },
-    h(
-      "div",
-      { class: "group-head" },
-      h("h2", { class: "group-title" }, where ? `${where} · ${workspaceName(ws.name)}` : workspaceName(ws.name)),
-      h("span", { class: "group-count" }, String(ws.tabs.length)),
-    ),
+    headed &&
+      h(
+        "div",
+        { class: "group-head" },
+        h("h2", { class: "group-title" }, where ? `${where} · ${workspaceName(ws.name)}` : workspaceName(ws.name)),
+        h("span", { class: "group-count" }, String(ws.tabs.length)),
+      ),
     rows.length ? h("div", { class: "card" }, ...rows) : h("p", { class: "group-empty" }, "No tabs open."),
   );
 }
@@ -1025,7 +1415,7 @@ function remember(key: string, value: string) {
 /** The sheet "+" opens on a machine: pick what runs, pick the workspace, Open.
  * The tab starts in the directory its workspace's last tab is in, sized to
  * this screen, and the agent's command is typed into it once it is live. */
-function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void) {
+function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, picked: string | null) {
   type Target = { place: Place; ws: WorkspaceView };
   const targets: Target[] = [
     ...tree.workspaces.map((ws) => ({ place: null, ws })),
@@ -1034,7 +1424,8 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void) 
       .flatMap((r) => r.workspaces.map((ws) => ({ place: { key: r.key, name: r.name }, ws }))),
   ];
   let starter = Math.max(0, STARTERS.findIndex((s) => (s.kind ?? "shell") === remembered("newtab.agent")));
-  let target = 0;
+  // The workspace on screen, unless it cannot take a new tab.
+  let target = Math.max(0, targets.findIndex((t) => spaceKey(t.place, t.ws) === picked));
 
   const agents = h("div", { class: "agent-grid" });
   const places = h("div", { class: "card" });
@@ -1124,6 +1515,97 @@ function openSheet(title: string, ...content: Child[]) {
   return { close, remove: () => scrim.remove() };
 }
 
+/** What has changed in the repository a pane is in: a block per file, its
+ * lines coloured, then the files git does not track yet. */
+function changesSheet(host: Host, place: Place, cwd: string) {
+  const body = h("div", { class: "sheet-body diff-body" }, skeleton());
+  openSheet("Changes", body);
+  api.diff(host.id, place?.key ?? null, cwd).then(
+    (d) => body.replaceChildren(...renderDiff(d)),
+    (e) => body.replaceChildren(h("p", { class: "group-empty" }, sentence(errorText(e)))),
+  );
+}
+
+function renderDiff(d: api.Diff): Node[] {
+  const files = d.patch.split(/^(?=diff --git )/m).filter((f) => f.startsWith("diff --git "));
+  const out: Node[] = [
+    h("p", { class: "diff-root" }, shortPath(d.root), files.length || d.untracked.length ? "" : " · no changes"),
+  ];
+  for (const f of files) {
+    const lines = f.split("\n");
+    const name =
+      /^\+\+\+ b\/(.*)$/m.exec(f)?.[1] ?? /^--- a\/(.*)$/m.exec(f)?.[1] ?? /^diff --git a\/(.*) b\//.exec(f)?.[1] ?? "?";
+    let add = 0;
+    let del = 0;
+    const code = h("div", { class: "diff-code" });
+    let inHunk = false;
+    for (const line of lines) {
+      if (line.startsWith("@@")) inHunk = true;
+      if (!inHunk) continue;
+      const kind = line.startsWith("@@") ? "hunk" : line[0] === "+" ? "add" : line[0] === "-" ? "del" : "ctx";
+      if (kind === "add") add++;
+      if (kind === "del") del++;
+      code.append(h("div", { class: `diff-line ${kind}` }, line || " "));
+    }
+    const binary = !inHunk && /^Binary files/m.test(f);
+    const block = h(
+      "details",
+      { class: "diff-file", open: files.length <= 6 },
+      h(
+        "summary",
+        {},
+        h("span", { class: "diff-name" }, name),
+        h("span", { class: "diff-add" }, `+${add}`),
+        h("span", { class: "diff-del" }, `−${del}`),
+      ),
+      binary ? h("p", { class: "group-empty" }, "A binary file.") : code,
+    );
+    out.push(block);
+  }
+  if (d.truncated) out.push(h("p", { class: "group-empty" }, "Cut short: the rest is too long to show here."));
+  if (d.untracked.length) {
+    out.push(
+      section(
+        `Not tracked yet · ${d.untracked.length}`,
+        ...d.untracked.slice(0, 200).map((p) => h("div", { class: "row choice static" }, h("span", { class: "row-title diff-name" }, p))),
+      ),
+    );
+  }
+  return out;
+}
+
+/** Asks before something that cannot be undone. `window.confirm` is no use:
+ * the iOS WebView shows nothing for it and answers "no" at once. */
+function confirmSheet(title: string, text: string, action: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let answered = false;
+    const answer = (yes: boolean) => {
+      if (answered) return;
+      answered = true;
+      sheet.close();
+      resolve(yes);
+    };
+    const sheet = openSheet(
+      title,
+      h(
+        "div",
+        { class: "sheet-body" },
+        h("p", { class: "sheet-text" }, text),
+        h("button", { class: "button danger wide", onclick: () => answer(true) }, action),
+        h("button", { class: "button tinted wide", onclick: () => answer(false) }, "Cancel"),
+      ),
+    );
+    // Closed with its × or by tapping outside it: a no.
+    const scrim = document.body.lastElementChild!;
+    new MutationObserver((_, obs) => {
+      if (!scrim.isConnected || scrim.classList.contains("leaving")) {
+        obs.disconnect();
+        answer(false);
+      }
+    }).observe(scrim, { attributes: true, attributeFilter: ["class"] });
+  });
+}
+
 /** The grid that fills this screen at the readable size: what a tab started
  * here is spawned at, since no desktop window is showing it yet. */
 function phoneGrid() {
@@ -1188,6 +1670,10 @@ function avatar(agent: AgentView | null | undefined, cls = "avatar") {
   if (agent) {
     const look = agentLook(agent.kind);
     el.title = `${look.name}: ${STATUS_WORD[agent.status]}`;
+    // The agent's own colours, the disc the desktop's sidebar draws.
+    el.classList.add("branded");
+    el.style.setProperty("--brand-field", look.field);
+    el.style.setProperty("--brand-ink", look.ink);
     if (look.mark) {
       const mark = h("span", { class: "mark" });
       mark.style.setProperty("--mark", `url("${look.mark}")`);
@@ -1326,7 +1812,7 @@ type Key = {
 };
 
 /** The key row, a page at a time: what an agent and a shell need most first,
- * a swipe away the rest. */
+ * a swipe away the rest. Settings → Key bar changes it. */
 const KEY_PAGES: Key[][] = [
   [
     { label: "esc", seq: "\x1b", flex: 1.2 },
@@ -1367,6 +1853,70 @@ const KEY_PAGES: Key[][] = [
   ],
 ];
 
+/** A page holds this many keys before they get too narrow to hit. */
+const KEYS_PER_PAGE = 8;
+const MAX_KEY_PAGES = 6;
+
+/** The key row as this phone has it: its own, or the default. */
+function keyPages(): Key[][] {
+  try {
+    const saved = JSON.parse(remembered("keys") ?? "null");
+    if (
+      Array.isArray(saved) &&
+      saved.length &&
+      saved.every(
+        (page) =>
+          Array.isArray(page) &&
+          page.every((k) => k && typeof k.label === "string" && typeof k.seq === "string"),
+      )
+    )
+      return saved;
+  } catch {
+    // Unreadable: the default stands.
+  }
+  return KEY_PAGES;
+}
+
+function saveKeyPages(pages: Key[][] | null) {
+  remember("keys", pages ? JSON.stringify(pages.filter((p) => p.length)) : "null");
+}
+
+/** Keys to add from, beyond the default row: the rest of what a shell or an
+ * agent is driven with. */
+const KEY_CATALOG: Key[] = [
+  ...KEY_PAGES.flat(),
+  { label: "ctrl D", text: "^D", seq: "\x04" },
+  { label: "ctrl Z", text: "^Z", seq: "\x1a" },
+  { label: "ctrl L", text: "^L", seq: "\x0c" },
+  { label: "ctrl A", text: "^A", seq: "\x01" },
+  { label: "ctrl E", text: "^E", seq: "\x05" },
+  { label: "ctrl U", text: "^U", seq: "\x15" },
+  { label: "ctrl W", text: "^W", seq: "\x17" },
+  { label: "Page Up", text: "PgUp", seq: "\x1b[5~", flex: 1.3 },
+  { label: "Page Down", text: "PgDn", seq: "\x1b[6~", flex: 1.3 },
+  { label: "Delete", text: "del", seq: "\x1b[3~", flex: 1.2 },
+  { label: "Backspace", text: "⌫", seq: "\x7f" },
+  { label: "Space", text: "␣", seq: " " },
+  ...[":", ";", "@", "#", "$", "*", "&", "=", "'", '"', "`", "\\", "<", ">", "[", "]", "{", "}", "(", ")"].map(
+    (c) => ({ label: c, seq: c }),
+  ),
+].filter((k, i, all) => all.findIndex((o) => o.label === k.label) === i);
+
+/** What a custom key's "sends" field means: text as written, with `^X` for
+ * ctrl-X and `\e \r \n \t \\` for escape, Enter, newline, tab and a
+ * backslash. */
+function keySequence(written: string) {
+  return written.replace(/\^([A-Za-z@\[\]\\^_?])|\\([ernt\\])/g, (_, ctrl?: string, esc?: string) => {
+    if (ctrl) return ctrl === "?" ? "\x7f" : String.fromCharCode(ctrl.toUpperCase().charCodeAt(0) & 0x1f);
+    return { e: "\x1b", r: "\r", n: "\n", t: "\t", "\\": "\\" }[esc as "e"];
+  });
+}
+
+/** A key as the bar shows it. */
+function keyFace(k: Key) {
+  return k.icon ? ico(k.icon) : (k.text ?? k.label);
+}
+
 /** Hack's advance width, in ems — what the fit divides by. */
 const CELL_EM = 0.602;
 /** The smallest font a pane is read at before it pans instead of shrinking:
@@ -1389,12 +1939,15 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     const where = (path: string | null | undefined) =>
       place && path ? `${place.name}:${shortPath(path)}` : shortPath(path);
     const cwd = h("span", { class: "term-cwd" }, where(pane.cwd));
+    let paneCwd = pane.cwd ?? null;
     const sub = h("span", { class: "term-sub" }, state, cwd);
     // Copying, the fit and the phone's size live in the ⋯ menu; the bar keeps
     // only the way back and what this is.
     const menu = menuButton(
       () => [
         { label: "Select text", icon: "copy", run: () => selecting(copyView.hidden) },
+        { label: "Find", icon: "search", run: () => finding(true) },
+        ...(paneCwd ? [{ label: "Changes", icon: "compose" as const, run: () => changesSheet(host, place, paneCwd!) }] : []),
         ...(cramped && !leased
           ? [
               {
@@ -1412,10 +1965,12 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       ],
       "round",
     );
+    const back = () => hostScreen(host);
+    onBack = back;
     const bar = h(
       "header",
       { class: "term-nav" },
-      h("button", { class: "round", ariaLabel: `Back to ${host.name}`, onclick: () => hostScreen(host) }, ico("back")),
+      h("button", { class: "round", ariaLabel: `Back to ${host.name}`, onclick: back }, ico("back")),
       h("div", { class: "term-titles" }, h("span", { class: "term-title" }, title), sub),
       menu,
     );
@@ -1431,6 +1986,29 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       { class: "term-copy", hidden: true },
       h("div", { class: "term-copy-bar" }, h("span", {}, "Select text to copy"), copyDone),
       copyText,
+    );
+    // Find in the pane's scrollback: the match is selected and scrolled to.
+    const findInput = h("input", {
+      type: "search",
+      class: "search-input",
+      placeholder: "Find in this pane",
+      enterKeyHint: "search",
+      autocapitalize: "off",
+      spellcheck: false,
+      ariaLabel: "Find in this pane",
+    });
+    findInput.setAttribute("autocorrect", "off");
+    const findCount = h("span", { class: "find-count" });
+    const findPrev = h("button", { class: "nav-icon", ariaLabel: "Previous match" }, ico("up"));
+    const findNext = h("button", { class: "nav-icon", ariaLabel: "Next match" }, ico("down"));
+    const findDone = h("button", { class: "button tinted small" }, "Done");
+    const findBar = h(
+      "div",
+      { class: "find-bar", hidden: true },
+      h("label", { class: "search" }, ico("search"), findInput, findCount),
+      findPrev,
+      findNext,
+      findDone,
     );
     const pages = h("div", { class: "key-pages" });
     const dots = h("div", { class: "key-dots", ariaHidden: "true" });
@@ -1454,8 +2032,16 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // Past messages: the whole list, searchable, while the box is empty; the
     // ones that match, in place of the key row, as it is written in.
     const historyKey = h("button", { class: "round", ariaLabel: "History" }, ico("history"));
-    const compose = h("div", { class: "compose" }, historyKey, field, sendKey, keyboard);
+    // A photo or a file, put on the machine; its path goes into the box, for
+    // an agent to be pointed at with whatever is written around it.
+    const attachKey = h("button", { class: "round", ariaLabel: "Attach a photo or file" }, ico("attach"));
+    const picker = h("input", { type: "file", multiple: true, hidden: true });
+    const compose = h("div", { class: "compose" }, attachKey, historyKey, field, sendKey, keyboard, picker);
     const suggest = h("div", { class: "suggest", hidden: true });
+    // An agent's numbered choices — a permission to grant, a question — as
+    // buttons over the key row while it waits for an answer.
+    const answers = h("div", { class: "answers", hidden: true, role: "group", ariaLabel: "Answers" });
+    let agentWaiting = pane.agent?.status === "waiting";
     // What typing straight into the terminal goes through. xterm's own hidden
     // textarea is not: iOS input methods never commit into it (a pinyin
     // candidate stays unwritten), so this one, a plain field the keyboard
@@ -1475,8 +2061,8 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       "div",
       { class: "screen term-screen" },
       bar,
-      h("div", { class: "term-wrap" }, screenEl, typing, copyView, banner),
-      h("div", { class: "term-dock" }, h("div", { class: "key-slot" }, pages, suggest), dots, compose),
+      h("div", { class: "term-wrap" }, screenEl, typing, copyView, findBar, banner),
+      h("div", { class: "term-dock" }, h("div", { class: "key-slot" }, pages, answers, suggest), dots, compose),
     );
 
     const term = new Terminal({
@@ -1494,6 +2080,77 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       // which owns the pane, answers those already, and a second answer from
       // here arrives late, on a replay, and lands in the shell as typed text.
       disableStdin: true,
+      // The search add-on's match highlights.
+      allowProposedApi: true,
+    });
+
+    const search = new SearchAddon();
+    term.loadAddon(search);
+    const findOptions = { caseSensitive: false, decorations: {
+      matchOverviewRuler: "#888888",
+      activeMatchColorOverviewRuler: "#ff9f0a",
+      matchBackground: "#ffd60a55",
+      activeMatchBackground: "#ff9f0a",
+    } };
+    search.onDidChangeResults(({ resultIndex, resultCount }) => {
+      findCount.textContent = findInput.value
+        ? resultCount
+          ? `${resultIndex + 1} of ${resultCount}`
+          : "None"
+        : "";
+    });
+    const finding = (on: boolean) => {
+      findBar.hidden = !on;
+      if (on) findInput.focus();
+      else {
+        search.clearDecorations();
+        term.clearSelection();
+        findInput.value = "";
+        findCount.textContent = "";
+      }
+    };
+    // Up is back through the scrollback, as the pane reads.
+    const find = (back: boolean) => {
+      if (!findInput.value) return;
+      if (back) search.findPrevious(findInput.value, findOptions);
+      else search.findNext(findInput.value, findOptions);
+    };
+    findInput.oninput = () => {
+      if (findInput.value) {
+        search.findPrevious(findInput.value, { ...findOptions, incremental: true });
+      } else {
+        search.clearDecorations();
+        term.clearSelection();
+        findCount.textContent = "";
+      }
+    };
+    findInput.onkeydown = (e) => {
+      if (e.key === "Enter") find(!e.shiftKey);
+    };
+    findPrev.onclick = () => find(true);
+    findNext.onclick = () => find(false);
+    findDone.onclick = () => finding(false);
+
+    // A program copying (OSC 52: tmux, an editor, an agent's "copy") gets a
+    // Copy button rather than the clipboard outright: a replay repeats old
+    // copies, and iOS only lets a tap write the clipboard anyway.
+    term.parser.registerOscHandler(52, (data) => {
+      const b64 = data.slice(data.indexOf(";") + 1);
+      if (!b64 || b64 === "?" || !live) return true;
+      let text: string;
+      try {
+        text = new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
+      } catch {
+        return true;
+      }
+      showBanner("The pane copied some text.", {
+        label: "Copy",
+        run: () => {
+          void navigator.clipboard?.writeText(text).catch(() => {});
+          clearBanner();
+        },
+      });
+      return true;
     });
 
     let handle: number | null = null;
@@ -1572,7 +2229,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       }
     };
 
-    for (const page of KEY_PAGES) {
+    for (const page of keyPages()) {
       const row = h("div", { class: "key-page" });
       for (const k of page) {
         if (k.paste && !canPaste) continue;
@@ -1632,8 +2289,8 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       );
       suggest.hidden = found.length === 0;
       suggest.scrollLeft = 0;
-      pages.classList.toggle("covered", found.length > 0);
-      dots.classList.toggle("covered", found.length > 0);
+      pages.classList.toggle("covered", found.length > 0 || !answers.hidden);
+      dots.classList.toggle("covered", found.length > 0 || !answers.hidden);
     };
     field.addEventListener("focus", offer);
     field.addEventListener("blur", offer);
@@ -1689,6 +2346,42 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         h("div", { class: "sheet-body" }, list, empty),
       );
       fill();
+    };
+    attachKey.onpointerdown = (e) => e.preventDefault();
+    attachKey.onclick = () => {
+      if (place) {
+        showBanner(`Files can only go to panes on ${host.name} itself for now.`, { label: "OK", run: clearBanner });
+        return;
+      }
+      picker.value = "";
+      picker.click();
+    };
+    picker.onchange = async () => {
+      const files = [...(picker.files ?? [])];
+      if (!files.length) return;
+      attachKey.classList.add("busy");
+      attachKey.disabled = true;
+      const paths: string[] = [];
+      try {
+        for (const file of files) {
+          if (file.size > MAX_UPLOAD) {
+            throw new Error(`${file.name} is ${Math.ceil(file.size / 2 ** 20)} MB; files up to ${MAX_UPLOAD / 2 ** 20} MB can be sent`);
+          }
+          paths.push(await api.upload(host.id, null, file.name, new Uint8Array(await file.arrayBuffer())));
+        }
+      } catch (e) {
+        showBanner(`Couldn't send the file: ${sentence(errorText(e))}`, { label: "OK", run: clearBanner });
+      } finally {
+        attachKey.classList.remove("busy");
+        attachKey.disabled = false;
+      }
+      if (!paths.length) return;
+      // Its own word, before and after, so it reads as a path whatever is
+      // written around it.
+      const before = field.value && !/\s$/.test(field.value) ? `${field.value} ` : field.value;
+      field.value = `${before}${paths.join(" ")} `;
+      edited();
+      field.focus({ preventScroll: true });
     };
     field.addEventListener("input", edited);
     // A password typed into the box is sent, never kept: the line the cursor
@@ -1857,6 +2550,32 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // Finger movement not yet applied, and the frame that will apply it.
     let pending = 0;
     let frame = 0;
+    // The web address under a point on the screen, if any: the cell it falls
+    // in, then the line that cell is part of, wrapped rows joined.
+    const linkAt = (x: number, y: number) => {
+      const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen");
+      if (!drawn || !term.cols || !term.rows) return null;
+      const box = drawn.getBoundingClientRect();
+      const col = Math.floor(((x - box.left) / box.width) * term.cols);
+      const row = Math.floor(((y - box.top) / box.height) * term.rows);
+      if (col < 0 || row < 0 || col >= term.cols || row >= term.rows) return null;
+      const buf = term.buffer.active;
+      const at = buf.viewportY + row;
+      let start = at;
+      while (start > 0 && buf.getLine(start)?.isWrapped) start--;
+      let text = "";
+      for (let y2 = start; y2 === start || buf.getLine(y2)?.isWrapped; y2++) {
+        const line = buf.getLine(y2);
+        if (!line) break;
+        text += line.translateToString(false);
+      }
+      const offset = (at - start) * term.cols + col;
+      for (const m of text.matchAll(/https?:\/\/[^\s<>"'`]+/g)) {
+        const url = m[0].replace(/[.,;:!?)\]}'"]+$/, "");
+        if (offset >= m.index && offset < m.index + url.length) return url;
+      }
+      return null;
+    };
     const rowHeight = () => {
       const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen");
       return drawn && term.rows ? drawn.clientHeight / term.rows : 14;
@@ -1988,13 +2707,56 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         // focus to its own textarea.
         if (lifted && !lifted.axis && e.cancelable) {
           e.preventDefault();
-          typing.focus({ preventScroll: true });
+          // A link under the finger opens in the browser instead.
+          const at = e.changedTouches[0];
+          const url = at && linkAt(at.clientX, at.clientY);
+          if (url) void openUrl(url).catch(() => {});
+          else typing.focus({ preventScroll: true });
           return;
         }
         if (lifted?.axis === "y") glide(lifted);
       },
       { passive: false },
     );
+    // Pinching: out to read closer, in to see more. A step at a time, on
+    // lifting — from the whole width to the readable size, then through the
+    // text sizes Settings offers; the chosen size is kept as the setting.
+    let pinch: { from: number; to: number } | null = null;
+    const spread = (t: TouchList) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    screenEl.addEventListener(
+      "touchstart",
+      (e) => {
+        if (e.touches.length === 2) pinch = { from: spread(e.touches), to: spread(e.touches) };
+      },
+      { passive: true },
+    );
+    screenEl.addEventListener(
+      "touchmove",
+      (e) => {
+        if (!pinch || e.touches.length !== 2) return;
+        e.preventDefault();
+        pinch.to = spread(e.touches);
+      },
+      { passive: false },
+    );
+    screenEl.addEventListener("touchend", (e) => {
+      if (!pinch || e.touches.length >= 2) return;
+      const scale = pinch.to / Math.max(1, pinch.from);
+      pinch = null;
+      if (scale > 0.87 && scale < 1.15) return;
+      const closer = scale > 1;
+      if (cramped && !leased && readable !== closer) {
+        toggleZoom();
+        return;
+      }
+      const sizes = TEXT_SIZES.map((t) => t.value);
+      const at = sizes.indexOf(prefs.textSize);
+      const next = sizes[Math.min(sizes.length - 1, Math.max(0, (at < 0 ? 1 : at) + (closer ? 1 : -1)))];
+      if (next === prefs.textSize) return;
+      setPref("textSize", next);
+      fit();
+      askLease();
+    });
     const glide = (lifted: NonNullable<typeof touch>) => {
       if (lifted.samples.length < 2) return;
       const [y0, t0] = lifted.samples[0];
@@ -2158,6 +2920,54 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       state.className = `term-state ${cls}`;
       stateWord.textContent = label;
     };
+    const clearBanner = () => banner.replaceChildren();
+
+    // The choices on screen, read off the bottom of the pane when the agent
+    // is waiting: the last run of lines numbered from 1, as Claude Code and
+    // Codex draw them ("❯ 1. Yes", "2. No, and tell Claude…"), box edges and
+    // the cursor mark stripped.
+    const readChoices = () => {
+      const found: { n: string; label: string }[] = [];
+      if (agentWaiting) {
+        const buf = term.buffer.active;
+        const bottom = buf.baseY + term.rows;
+        let run: typeof found = [];
+        for (let y = Math.max(0, bottom - 24); y < bottom; y++) {
+          const text = (buf.getLine(y)?.translateToString(true) ?? "")
+            .replace(/^[\s│┃|]+|[\s│┃|]+$/g, "")
+            .replace(/^[❯›>▸●◉○]\s*/, "");
+          const m = /^(\d{1,2})[.)]\s+(.+)$/.exec(text);
+          if (!m) continue;
+          if (m[1] === "1") run = [];
+          if (Number(m[1]) === run.length + 1) run.push({ n: m[1], label: m[2] });
+          if (run.length >= 2) found.splice(0, found.length, ...run);
+        }
+      }
+      const shown = answers.dataset.shown ?? "";
+      const now = found.map((c) => `${c.n}${c.label}`).join("\n");
+      if (shown === now) return;
+      answers.dataset.shown = now;
+      answers.replaceChildren(
+        ...found.map((c) => {
+          const b = h("button", { class: "answer" }, h("b", {}, c.n), h("span", {}, c.label));
+          b.onpointerdown = (e) => e.preventDefault();
+          b.onclick = () => send(c.n);
+          return b;
+        }),
+      );
+      answers.hidden = found.length === 0;
+      answers.scrollLeft = 0;
+      pages.classList.toggle("covered", found.length > 0 || !suggest.hidden);
+      dots.classList.toggle("covered", found.length > 0 || !suggest.hidden);
+    };
+    let choicesFrame = 0;
+    term.onWriteParsed(() => {
+      if (!agentWaiting || choicesFrame) return;
+      choicesFrame = requestAnimationFrame(() => {
+        choicesFrame = 0;
+        readChoices();
+      });
+    });
     const showBanner = (text: string, action?: { label: string; run: () => void }) =>
       banner.replaceChildren(
         h(
@@ -2206,11 +3016,14 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
                 fit();
                 break;
               case "agent":
+                agentWaiting = event.agent?.status === "waiting";
+                readChoices();
                 field.placeholder = event.agent
                   ? `Message ${agentLook(event.agent.kind).name}…`
                   : "Type a command…";
                 break;
               case "cwd":
+                paneCwd = event.path;
                 cwd.textContent = where(event.path);
                 break;
               case "exited":
@@ -2307,4 +3120,5 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
   });
 }
 
+if (prefs.lock) lock();
 hostsScreen("push");

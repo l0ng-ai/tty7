@@ -71,6 +71,16 @@ npm run tauri ios init       # once: generates src-tauri/gen/apple
 npm run tauri ios dev        # simulator, or pick a connected device
 ```
 
+To send a build to TestFlight (Xcode signed in to an account on the team):
+
+```sh
+scripts/testflight.sh              # archive, sign for the App Store, upload
+scripts/testflight.sh --no-upload  # a signed .ipa in build/testflight/ instead
+```
+
+The build is `<version>.<n>`; `n` defaults to the time, so each upload is higher than the
+last. `--build-number 7` picks it.
+
 ### Android
 
 Needs Android Studio's SDK and NDK, with `ANDROID_HOME` and `NDK_HOME` set.

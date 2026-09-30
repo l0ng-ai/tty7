@@ -14,9 +14,9 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use serde::{Deserialize, Serialize};
 use tty7_mobile_proto::{
-    ALPN, ControlEvent, ControlRequest, Frame, GridSize, MDNS_SERVICE, Open, OpenReply,
-    PROTOCOL_VERSION, PairCode, PaneEvent, PaneRequest, TabCreated, read_frame, write_bytes,
-    write_msg,
+    ALPN, ControlEvent, ControlRequest, Diff, Frame, GridSize, MAX_UPLOAD, MDNS_SERVICE, Open,
+    OpenReply, PROTOCOL_VERSION, PairCode, PaneEvent, PaneRequest, TabCreated, Uploaded,
+    read_frame, write_bytes, write_msg,
 };
 
 /// How long to wait for a gateway to answer an [`Open`].
@@ -209,6 +209,70 @@ impl Session {
         Ok(created)
     }
 }
+
+impl Session {
+    /// Sends a file to the machine for a pane to be handed, returning where
+    /// it landed. `machine` is where that pane runs, as on [`Session::pane`].
+    pub async fn upload(&self, machine: Option<&str>, name: &str, bytes: &[u8]) -> Result<String> {
+        if bytes.len() as u64 > MAX_UPLOAD {
+            bail!(
+                "that file is {} MB; files up to {} MB can be sent",
+                (bytes.len() as u64).div_ceil(1 << 20),
+                MAX_UPLOAD >> 20
+            );
+        }
+        let ask = Open::Upload {
+            name: name.to_string(),
+            size: bytes.len() as u64,
+            machine: machine.map(str::to_string),
+        };
+        let (mut send, mut recv) = open(&self.conn, &ask).await.map_err(|e| {
+            if e.to_string().contains("without answering") {
+                anyhow!("tty7 on this computer is too old to take files — update it")
+            } else {
+                e
+            }
+        })?;
+        for chunk in bytes.chunks(UPLOAD_CHUNK) {
+            write_bytes(&mut send, chunk).await?;
+        }
+        let _ = send.finish();
+        let answer = read_frame(&mut recv)
+            .await?
+            .ok_or_else(|| anyhow!("the machine did not say where the file went"))?;
+        if let Ok(OpenReply::Denied { reason }) = answer.msg::<OpenReply>() {
+            bail!(reason);
+        }
+        Ok(answer.msg::<Uploaded>()?.path)
+    }
+}
+
+impl Session {
+    /// What has changed in the repository `cwd` is in, on `machine`.
+    pub async fn diff(&self, machine: Option<&str>, cwd: &str) -> Result<Diff> {
+        let ask = Open::Diff {
+            cwd: cwd.to_string(),
+            machine: machine.map(str::to_string),
+        };
+        let (mut send, mut recv) = open(&self.conn, &ask).await.map_err(|e| {
+            if e.to_string().contains("without answering") {
+                anyhow!("tty7 on this computer is too old to show changes — update it")
+            } else {
+                e
+            }
+        })?;
+        let _ = send.finish();
+        let diff = read_frame(&mut recv)
+            .await?
+            .ok_or_else(|| anyhow!("the machine did not send the changes"))?
+            .msg::<Diff>()?;
+        Ok(diff)
+    }
+}
+
+/// How much of a file goes in one frame: well under the frame limit, and small
+/// enough that a slow link shows progress rather than one long wait.
+const UPLOAD_CHUNK: usize = 256 << 10;
 
 async fn open(conn: &Connection, open: &Open) -> Result<(SendStream, RecvStream)> {
     let (mut send, mut recv) = conn.open_bi().await.context("opening a stream")?;

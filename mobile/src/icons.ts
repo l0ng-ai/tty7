@@ -42,6 +42,9 @@ export const icon = {
   settings: stroke(
     `<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/>`,
   ),
+  attach: stroke(
+    `<path d="m19.5 11.8-7.3 7.3a4.7 4.7 0 0 1-6.6-6.6l7.6-7.6a3.1 3.1 0 0 1 4.4 4.4l-7.6 7.6a1.5 1.5 0 0 1-2.1-2.1l7-7"/>`,
+  ),
   history: stroke(`<path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.5V9H9"/><path d="M12 8v4.2l2.8 1.8"/>`),
   alert: stroke(`<path d="M12 4 2.8 19.5h18.4Z"/><path d="M12 10v4M12 17h.01"/>`),
 };

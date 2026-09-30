@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The app's single window: its own commands and the core IPC they ride on.",
+  "description": "The app's single window: its own commands, the core IPC they ride on, and opening a tapped link in the browser.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "opener:default"]
 }

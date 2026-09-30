@@ -15,6 +15,10 @@
 	     Settings → Mobile (tauri-plugin-barcode-scanner). -->
 	<key>NSCameraUsageDescription</key>
 	<string>tty7 uses the camera to scan the pairing code your computer shows.</string>
+	<!-- The optional app lock (Settings → Lock with Face ID;
+	     tauri-plugin-biometric). -->
+	<key>NSFaceIDUsageDescription</key>
+	<string>tty7 uses Face ID to unlock the app when you turn on the lock in Settings.</string>
 	<!-- The only encryption is standard TLS/QUIC (rustls, iroh), which is
 	     exempt from export documentation. Saying so here spares the
 	     compliance question on every TestFlight upload. -->
