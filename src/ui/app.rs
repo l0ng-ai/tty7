@@ -20,7 +20,7 @@ use crate::core::session::{
 use crate::core::shells::ShellInventory;
 use crate::core::ssh_config;
 use crate::core::window_state::{WindowGeometry as _, WindowState};
-use crate::daemon::protocol::{RemoteContext, ShellSpec, ssh_option_takes_value};
+use crate::daemon::protocol::{RemoteContext, RemoteKind, ShellSpec, ssh_option_takes_value};
 use crate::daemon::spawn::DaemonMismatch;
 use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::forwards::{ForwardFields, added_forward, rule_of};
@@ -3944,8 +3944,50 @@ impl Tty7App {
         }
     }
 
+    /// ⌘T. From an SSH pane it dials the same host again, the way ⌘D does:
+    /// a local shell opened from one would land in a directory the pane never
+    /// showed, and in Ungrouped rather than under the host the user was on.
     pub(crate) fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.new_tab_with_shell(None, window, cx);
+        let source = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.pane.focused_or_first(window, cx))
+            .map(|view| {
+                let view = view.read(cx);
+                let remote = view
+                    .remote_context()
+                    .filter(|r| matches!(r.kind, RemoteKind::Ssh | RemoteKind::NativeSsh));
+                (view.ssh_spec(), remote, view.cwd())
+            });
+        match source {
+            Some((Some(spec), remote, _)) => {
+                let place = self.spawn_group(None, cx).on_host(remote.map(|r| r.target));
+                let spec = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
+                let before = self.tabs.len();
+                self.open_native_ssh_tab(spec, window, cx);
+                if self.tabs.len() > before
+                    && let Some(tab) = self.tabs.get(self.active)
+                {
+                    place.seat(tab);
+                    self.save_session(cx);
+                }
+            }
+            // A shell that ssh'd onward from a local prompt: the far side is
+            // only reachable by typing the same command again, from the
+            // directory it was typed in.
+            Some((None, Some(remote), cwd)) if remote.kind == RemoteKind::Ssh => {
+                let line = crate::terminal::git_data::shell_quote(&remote.argv);
+                let place = self.spawn_group(None, cx).on_host(Some(remote.target));
+                if let Some(slot) = self.new_tab_slot(cwd, None, window, cx) {
+                    if let Some(tab) = self.tabs.get(self.active) {
+                        place.seat(tab);
+                        self.save_session(cx);
+                    }
+                    crate::ui::agent_launch::run_when_ready(&slot, line, cx);
+                }
+            }
+            _ => self.new_tab_with_shell(None, window, cx),
+        }
     }
 
     pub(crate) fn new_tab_at(

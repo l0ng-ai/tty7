@@ -2903,6 +2903,15 @@ pub(crate) struct SpawnPlace {
 }
 
 impl SpawnPlace {
+    /// Seed the auto group with SSH host `host`, for a tab dialling a machine
+    /// whose pane has not reported its remote context yet.
+    pub(crate) fn on_host(mut self, host: Option<String>) -> Self {
+        if let Some(auto) = auto_key(host.as_deref(), None) {
+            self.auto = Some(auto);
+        }
+        self
+    }
+
     /// Put `tab` where this says.
     pub(crate) fn seat(&self, tab: &Tab) {
         if let Some(id) = self.group {
@@ -3422,6 +3431,24 @@ mod fold_tests {
                 Some(Some(AutoKey::Repo(PathBuf::from("/w/probed")))),
                 "and the cwd seeds the auto group from the warm cache"
             );
+        });
+    }
+
+    /// ⌘T from an SSH tab dials the same host, and the new tab is filed
+    /// under that host before its pane has reported where it is — not in
+    /// Ungrouped, which is where the local shell it used to open landed.
+    #[gpui::test]
+    fn a_tab_dialling_a_host_is_filed_under_it(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        app.update(&mut vcx, |app, cx| {
+            let place = app.spawn_group(None, cx).on_host(Some("hermes_ali".into()));
+            assert_eq!(
+                place.auto,
+                Some(Some(AutoKey::SshHost("hermes_ali".into())))
+            );
+            let place = app.spawn_group(None, cx).on_host(None);
+            assert_eq!(place.auto, None, "no host, no opinion");
         });
     }
 
