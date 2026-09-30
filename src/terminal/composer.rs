@@ -1563,8 +1563,9 @@ impl TerminalView {
                 .flex_none()
                 .w_full()
                 .pt(px(8.))
+                // The pane's own padding is already between it and the edges.
                 .px(px(BOX_INSET - GRID_PAD_X))
-                .pb(px(BOX_INSET))
+                .pb(px(BOX_INSET - GRID_PAD_Y))
                 .child(frame)
                 .into_any_element(),
         };
