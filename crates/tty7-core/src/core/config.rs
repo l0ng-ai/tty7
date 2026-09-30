@@ -383,7 +383,8 @@ pub struct Config {
     pub clipboard_trim_trailing_spaces: bool,
     pub copy_on_select: bool,
     /// Optional HTTP/SOCKS proxy for tty7's *own* update checks and release
-    /// downloads; when set it overrides the system proxy and the environment.
+    /// downloads, and (HTTP only) the mobile gateway's relay; when set it is
+    /// tried before the system proxy and the environment.
     /// Programs running in a pane are unaffected — they inherit their proxy
     /// from their own environment, as in any other terminal.
     ///

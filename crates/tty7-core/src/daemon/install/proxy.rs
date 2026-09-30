@@ -1,6 +1,8 @@
 //! Resolve an effective HTTP(S)/SOCKS proxy for tty7's *own* downloads.
 //!
-//! Scope: the update check and the release / remote-server asset downloads.
+//! Scope: the update check and the release / remote-server asset downloads,
+//! and the mobile gateway's connection to its relay (which takes the URLs from
+//! [`system_url`] and [`env_url`] rather than a `ureq::Proxy`).
 //! Programs running inside a pane are deliberately untouched — they inherit
 //! whatever their environment says, exactly like in any other terminal.
 //!
@@ -61,18 +63,44 @@ fn parse_manual(value: &str) -> Option<Proxy> {
     proxy_from_url(&normalize_manual(value)?, &[]).ok()
 }
 
-#[cfg(windows)]
 fn system_proxy(target_url: &str) -> Option<Proxy> {
-    windows::system_proxy(target_url)
+    let (url, no_proxy) = system_proxy_url(target_url)?;
+    proxy_from_url(&url, &no_proxy).ok()
+}
+
+/// The platform's system proxy for `target_url`, as a URL: what [`resolve`]
+/// uses, for a client that is not `ureq`. The platform's bypass list is not
+/// applied — the caller knows where it is going.
+pub fn system_url(target_url: &str) -> Option<String> {
+    system_proxy_url(target_url).map(|(url, _)| url)
+}
+
+/// The proxy the environment names for `target_url`, as a URL. `NO_PROXY` is
+/// not applied, as in [`system_url`].
+pub fn env_url(target_url: &str) -> Option<String> {
+    let names: &[&str] = if target_scheme(target_url) == "https" {
+        &["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+    } else {
+        &["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
+    };
+    names
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find_map(|value| normalize_manual(&value))
+}
+
+#[cfg(windows)]
+fn system_proxy_url(target_url: &str) -> Option<(String, Vec<String>)> {
+    windows::system_proxy_url(target_url)
 }
 
 #[cfg(target_os = "macos")]
-fn system_proxy(target_url: &str) -> Option<Proxy> {
-    macos::system_proxy(target_url)
+fn system_proxy_url(target_url: &str) -> Option<(String, Vec<String>)> {
+    macos::system_proxy_url(target_url)
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-fn system_proxy(_target_url: &str) -> Option<Proxy> {
+fn system_proxy_url(_target_url: &str) -> Option<(String, Vec<String>)> {
     None
 }
 
@@ -186,14 +214,13 @@ fn parse_windows_proxy_server(server: &str, target_scheme: &str) -> Option<Strin
 
 #[cfg(windows)]
 mod windows {
-    use super::{parse_windows_proxy_server, proxy_from_url, target_scheme};
-    use ureq::Proxy;
+    use super::{parse_windows_proxy_server, target_scheme};
     use winreg::RegKey;
     use winreg::enums::HKEY_CURRENT_USER;
 
     const INTERNET_SETTINGS: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 
-    pub fn system_proxy(target_url: &str) -> Option<Proxy> {
+    pub fn system_proxy_url(target_url: &str) -> Option<(String, Vec<String>)> {
         let key = RegKey::predef(HKEY_CURRENT_USER)
             .open_subkey(INTERNET_SETTINGS)
             .ok()?;
@@ -213,13 +240,13 @@ mod windows {
             .collect();
 
         let proxy_url = parse_windows_proxy_server(&server, target_scheme(target_url))?;
-        proxy_from_url(&proxy_url, &no_proxy).ok()
+        Some((proxy_url, no_proxy))
     }
 }
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{proxy_from_url, target_scheme};
+    use super::target_scheme;
     // Via `system_configuration`'s re-export, so these are the same
     // core-foundation types `get_proxies` hands back. `daemon::pane` keeps its
     // own, newer core-foundation; the two never exchange values.
@@ -235,7 +262,6 @@ mod macos {
         kSCPropNetProxiesHTTPSProxy, kSCPropNetProxiesSOCKSEnable, kSCPropNetProxiesSOCKSPort,
         kSCPropNetProxiesSOCKSProxy,
     };
-    use ureq::Proxy;
 
     /// The proxy settings dictionary `SCDynamicStore` hands back.
     type Proxies = CFDictionary<CFString, CFType>;
@@ -277,7 +303,7 @@ mod macos {
         }
     }
 
-    pub fn system_proxy(target_url: &str) -> Option<Proxy> {
+    pub fn system_proxy_url(target_url: &str) -> Option<(String, Vec<String>)> {
         let store = SCDynamicStoreBuilder::new("tty7").build();
         let proxies = store.get_proxies()?;
 
@@ -292,7 +318,7 @@ mod macos {
             .into_iter()
             .find_map(|kind| read_proxy(&proxies, kind))?;
 
-        proxy_from_url(&proxy_url, &read_exceptions(&proxies)).ok()
+        Some((proxy_url, read_exceptions(&proxies)))
     }
 
     fn read_proxy(proxies: &Proxies, kind: Kind) -> Option<String> {

@@ -11653,6 +11653,7 @@ dependencies = [
  "tty7-core",
  "tty7-mobile-client",
  "tty7-mobile-proto",
+ "url",
 ]
 
 [[package]]

@@ -8,6 +8,7 @@
 
 pub mod daemon;
 pub mod poller;
+pub mod route;
 pub mod serve;
 pub mod service;
 pub mod state;

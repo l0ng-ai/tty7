@@ -10,18 +10,31 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use iroh::endpoint::{BindOpts, presets};
-use iroh::{Endpoint, SecretKey};
+use iroh::{Endpoint, SecretKey, Watcher as _};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use tokio::sync::oneshot;
 use tty7_mobile_proto::{ALPN, MDNS_SERVICE, PairCode};
 
 use crate::daemon::{Daemon, hostname};
+use crate::route::{self, Route};
 use crate::serve::{self, Backend as _};
 use crate::state::{Reachable, State, Status, failed, running};
+
+/// How long a relay may stay out of reach before the gateway tries other ways
+/// out to it. Long enough for a healthy one to connect, which takes a second
+/// or two.
+const RELAY_WAIT: Duration = Duration::from_secs(10);
+/// How often, while no way out reaches a relay, the gateway tries them again.
+const RELAY_RETRY: Duration = Duration::from_secs(60);
+/// How often the relay's state is looked at.
+const RELAY_POLL: Duration = Duration::from_secs(2);
+/// How long a way out being tried has to reach a relay.
+const PROBE_WAIT: Duration = Duration::from_secs(8);
+const PROBE_POLL: Duration = Duration::from_millis(250);
 
 /// A gateway running on its own thread. Dropping it stops it.
 pub struct Running {
@@ -92,7 +105,7 @@ pub fn start(state: State) -> Result<Running> {
     }
 }
 
-async fn run(state: State, ready: std_mpsc::Sender<Result<()>>, stop: oneshot::Receiver<()>) {
+async fn run(state: State, ready: std_mpsc::Sender<Result<()>>, mut stop: oneshot::Receiver<()>) {
     // Another gateway already serving this config dir owns `status.json`; one
     // that could not take the lock must not overwrite what it says.
     let lock = match state.lock_serve() {
@@ -102,20 +115,16 @@ async fn run(state: State, ready: std_mpsc::Sender<Result<()>>, stop: oneshot::R
             return;
         }
     };
+    // The most likely way out, taken without waiting to see: phones on this
+    // network need none, and a better one is found while they are served.
+    let mut route = routes().await.into_iter().next().unwrap_or(Route::Direct);
     let started = async {
-        let endpoint = bind(state.secret_key()?, state.port()).await?;
-        if let Some(port) = endpoint
-            .bound_sockets()
-            .iter()
-            .map(SocketAddr::port)
-            .find(|&p| p != 0)
-            && state.port() != Some(port)
-        {
-            state.set_port(port).context("remembering the port")?;
-        }
-        anyhow::Ok(endpoint)
+        let key = state.secret_key()?;
+        let endpoint = bind(key.clone(), state.port(), &route).await?;
+        remember_port(&endpoint, &state)?;
+        anyhow::Ok((key, endpoint))
     };
-    let endpoint = match started.await {
+    let (key, mut endpoint) = match started.await {
         Ok(up) => up,
         Err(e) => {
             let _ = state.set_status(&failed(&e));
@@ -124,7 +133,7 @@ async fn run(state: State, ready: std_mpsc::Sender<Result<()>>, stop: oneshot::R
         }
     };
     let id = endpoint.id().to_string();
-    log::info!("mobile gateway listening as {id}");
+    log::info!("mobile gateway listening as {id} (relay: {route})");
     let _ = state.set_status(&running(&id));
     let _ = ready.send(Ok(()));
 
@@ -135,44 +144,165 @@ async fn run(state: State, ready: std_mpsc::Sender<Result<()>>, stop: oneshot::R
         log::warn!("{}", serve::server_down(&daemon.hostname(), &e));
     }
 
-    // Keep the addresses a pairing code carries current. The local ones are
-    // known at once and are all a phone on the same network needs; the relay
-    // only arrives once the endpoint gets online, which on a network that
-    // blocks the relays is never — a code must not wait for it.
-    let addrs = tokio::spawn({
-        let (endpoint, state) = (endpoint.clone(), state.clone());
-        async move {
-            loop {
-                let addr = endpoint.addr();
-                let reachable = Reachable {
-                    relay: addr.relay_urls().next().map(|u| u.to_string()),
-                    addrs: addr.ip_addrs().map(|a| a.to_string()).collect(),
-                };
-                if state.reachable() != reachable {
-                    let _ = state.set_reachable(&reachable);
-                }
-                tokio::time::sleep(Duration::from_secs(5)).await;
+    loop {
+        let addrs = tokio::spawn(keep_reachable(endpoint.clone(), state.clone()));
+        let switch = tokio::select! {
+            () = serve::run(endpoint.clone(), state.clone(), daemon.clone()) => None,
+            _ = &mut stop => None,
+            better = better_route(&endpoint, &route) => Some(better),
+        };
+        addrs.abort();
+        let _ = addrs.await;
+        let Some(better) = switch else { break };
+        // iroh takes its proxy when an endpoint is built, so a new way out is
+        // a new endpoint: the same key on the same port, so phones' pairing
+        // codes still reach it. Only a relay that has stayed out of reach gets
+        // here, so what this drops is at most connections on this network,
+        // which the phone makes again.
+        log::info!("mobile gateway: its relay answers {better}, not {route} — switching");
+        // Every handle on the old endpoint has to be gone before its port is
+        // free to bind again.
+        endpoint.close().await;
+        drop(endpoint);
+        let rebound = async {
+            let endpoint = bind(key.clone(), state.port(), &better).await?;
+            remember_port(&endpoint, &state)?;
+            anyhow::Ok(endpoint)
+        };
+        match rebound.await {
+            Ok(new) => {
+                endpoint = new;
+                route = better;
+            }
+            Err(e) => {
+                log::warn!("mobile gateway: {e:#}");
+                let _ = state.set_status(&failed(&e));
+                drop(lock);
+                return;
             }
         }
-    });
-
-    tokio::select! {
-        () = serve::run(endpoint.clone(), state.clone(), daemon) => {}
-        _ = stop => {}
     }
-    addrs.abort();
     endpoint.close().await;
     let _ = state.set_status(&Status::Stopped);
     drop(lock);
     log::info!("mobile gateway stopped");
 }
 
+/// Keeps the port a restart should bind again, so the addresses in phones'
+/// pairing codes still reach this machine.
+fn remember_port(endpoint: &Endpoint, state: &State) -> Result<()> {
+    if let Some(port) = endpoint
+        .bound_sockets()
+        .iter()
+        .map(SocketAddr::port)
+        .find(|&p| p != 0)
+        && state.port() != Some(port)
+    {
+        state.set_port(port).context("remembering the port")?;
+    }
+    Ok(())
+}
+
+/// Keeps the addresses a pairing code carries current. The local ones are
+/// known at once and are all a phone on the same network needs. The relay is
+/// only written down once it is connected: the one iroh picks by latency is
+/// not necessarily one it can reach, and a code naming it sends a phone
+/// somewhere this machine is not.
+async fn keep_reachable(endpoint: Endpoint, state: State) {
+    loop {
+        let reachable = Reachable {
+            relay: connected_relay(&endpoint),
+            addrs: endpoint.addr().ip_addrs().map(|a| a.to_string()).collect(),
+        };
+        if state.reachable() != reachable {
+            let _ = state.set_reachable(&reachable);
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+fn connected_relay(endpoint: &Endpoint) -> Option<String> {
+    endpoint
+        .home_relay_status()
+        .get()
+        .iter()
+        .find(|status| status.is_connected())
+        .map(|status| status.url().to_string())
+}
+
+/// Every way out to try, most likely first. Reading them touches the config
+/// file and, on macOS, the system configuration store.
+async fn routes() -> Vec<Route> {
+    tokio::task::spawn_blocking(route::routes)
+        .await
+        .unwrap_or_else(|_| vec![Route::Direct])
+}
+
+/// Resolves, never, while `endpoint`'s relay is up. Once it has been out of
+/// reach for a while, tries every other way out on an endpoint of its own and
+/// resolves with the first that reaches a relay — and if none does, looks
+/// again every so often: a proxy is started, a network changes.
+async fn better_route(endpoint: &Endpoint, current: &Route) -> Route {
+    let mut down_for = RELAY_WAIT;
+    let mut said = false;
+    loop {
+        relay_down_for(endpoint, down_for).await;
+        for route in routes().await.into_iter().filter(|r| r != current) {
+            if reaches_relay(&route).await {
+                return route;
+            }
+        }
+        if !said {
+            log::warn!(
+                "mobile gateway: no relay answers ({current}, or any proxy tty7 knows of) — \
+                 phones on other networks cannot reach this machine"
+            );
+            said = true;
+        }
+        down_for = RELAY_RETRY;
+    }
+}
+
+/// Resolves once `endpoint` has gone `span` without a connected relay.
+async fn relay_down_for(endpoint: &Endpoint, span: Duration) {
+    let mut since = Instant::now();
+    loop {
+        tokio::time::sleep(RELAY_POLL).await;
+        if connected_relay(endpoint).is_some() {
+            since = Instant::now();
+        } else if since.elapsed() >= span {
+            return;
+        }
+    }
+}
+
+/// Whether a relay answers by `route`, asked on a throwaway endpoint so the
+/// one phones use is not disturbed.
+async fn reaches_relay(route: &Route) -> bool {
+    let mut builder = Endpoint::builder(presets::N0).clear_address_lookup();
+    if let Some(proxy) = route.proxy() {
+        builder = builder.proxy_url(proxy.clone());
+    }
+    let Ok(probe) = builder.bind().await else {
+        return false;
+    };
+    let reached = tokio::time::timeout(PROBE_WAIT, async {
+        while connected_relay(&probe).is_none() {
+            tokio::time::sleep(PROBE_POLL).await;
+        }
+    })
+    .await
+    .is_ok();
+    probe.close().await;
+    reached
+}
+
 /// Binds the gateway's endpoint on the port it had last time, so the
 /// addresses in phones' pairing codes still reach it, and advertises it on the
 /// local network. Each of those is given up, with a note, rather than let it
 /// keep the gateway from starting: the port may be taken, and multicast may be
-/// off.
-async fn bind(key: SecretKey, port: Option<u16>) -> Result<Endpoint> {
+/// off. Its relay is reached by `route`.
+async fn bind(key: SecretKey, port: Option<u16>, route: &Route) -> Result<Endpoint> {
     let mut attempts = Vec::new();
     if let Some(port) = port {
         attempts.extend([(port, true), (port, false)]);
@@ -181,7 +311,7 @@ async fn bind(key: SecretKey, port: Option<u16>) -> Result<Endpoint> {
 
     let mut failures = Vec::new();
     for (port, mdns) in attempts {
-        let builder = Endpoint::builder(presets::N0)
+        let mut builder = Endpoint::builder(presets::N0)
             .secret_key(key.clone())
             .alpns(vec![ALPN.to_vec()])
             .clear_ip_transports()
@@ -191,6 +321,9 @@ async fn bind(key: SecretKey, port: Option<u16>) -> Result<Endpoint> {
                 SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
                 BindOpts::default().set_is_required(false),
             )?;
+        if let Some(proxy) = route.proxy() {
+            builder = builder.proxy_url(proxy.clone());
+        }
         let builder = match mdns {
             true => builder.address_lookup(MdnsAddressLookup::builder().service_name(MDNS_SERVICE)),
             false => builder,
