@@ -171,6 +171,13 @@ pub(crate) const LINE_HEIGHT_STEP: f32 = 0.05;
 
 const MAX_CLOSED_TABS: usize = 20;
 
+/// How long ⌘⇧T waits for this window's queued edits to reach the machine
+/// before asking it for the newest closed tab: polls of [`REOPEN_SETTLE_POLL`].
+/// A close is one round trip; two seconds covers a slow link without making a
+/// wedged one hang the keypress.
+const REOPEN_SETTLE_POLLS: u32 = 40;
+const REOPEN_SETTLE_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 const RESIZE_STEP: f32 = 0.05;
 
 pub(crate) const RECORD_COMMIT_DELAY_MS: u64 = 650;
@@ -1131,16 +1138,45 @@ pub struct Tty7App {
 pub(crate) enum CloseTarget {
     Tab(tty7_core::core::machine::TabId),
     Pane,
+    /// Close Other Tabs, keeping this one.
+    OtherTabs(tty7_core::core::machine::TabId),
+    /// Close Tabs to the Right of this one.
+    TabsRightOf(tty7_core::core::machine::TabId),
 }
 
 /// Why closing needs a question first. Closing a tab is the highest-frequency
 /// destructive key in any terminal, and the product's headline claim is that
 /// shells outlive the app — so the one action that permanently ends one has to
 /// name what it is about to end.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CloseReason {
     LiveSsh,
     Busy(crate::terminal::view::PaneBusy),
+    /// Nothing is running; the user asked to be asked anyway
+    /// ([`ConfirmClose::Always`](crate::core::config::ConfirmClose::Always)).
+    Idle,
+    /// A bulk close of this many tabs, asked about once for all of them.
+    Tabs(usize),
+}
+
+/// Whether closing one pane needs a question, and which.
+///
+/// The SSH warning comes first and is not governed by `mode`: it is an opt-in
+/// of its own, and `Never` must not quietly switch it off.
+fn close_reason(
+    mode: crate::core::config::ConfirmClose,
+    warn_ssh: bool,
+    busy: Option<crate::terminal::view::PaneBusy>,
+) -> Option<CloseReason> {
+    use crate::core::config::ConfirmClose;
+    if warn_ssh {
+        return Some(CloseReason::LiveSsh);
+    }
+    match mode {
+        ConfirmClose::Never => None,
+        ConfirmClose::WhenBusy => busy.map(CloseReason::Busy),
+        ConfirmClose::Always => Some(busy.map_or(CloseReason::Idle, CloseReason::Busy)),
+    }
 }
 
 /// The question to put to the user before ending work that is still going on.
@@ -1163,6 +1199,17 @@ fn close_prompt(ends_the_tab: bool, reason: &CloseReason) -> (String, String) {
             };
             (title.to_string(), body)
         }
+        CloseReason::Idle => {
+            let title = match ends_the_tab {
+                true => t(L10nKey::CloseTabBusyTitle),
+                false => t(L10nKey::ClosePaneBusyTitle),
+            };
+            (title.to_string(), t(L10nKey::CloseIdleBody).to_string())
+        }
+        CloseReason::Tabs(count) => (
+            crate::ui::i18n::t_plural(L10nKey::CloseTabsTitle, *count, &[]),
+            t(L10nKey::CloseTabsBody).to_string(),
+        ),
     }
 }
 
@@ -2060,10 +2107,92 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// ⌘⇧T. Asks the machine first, where it keeps closed tabs: that list
+    /// outlives this window and the app, and holds every close the machine
+    /// took. The window's own list is what is left when the machine keeps none
+    /// — an older daemon or remote server — or has nothing more to give; it
+    /// only ever fills while the machine could not take a close.
     fn reopen_closed_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((client, machine_ws)) = crate::ui::tree_sync::closed_tabs_link(cx, self.workspace)
+        else {
+            self.reopen_closed_here(window, cx);
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            // The close being undone may still be queued for the machine.
+            // Asking before it lands would reopen the tab closed before it.
+            for _ in 0..REOPEN_SETTLE_POLLS {
+                let settled = this
+                    .update(cx, |app, cx| {
+                        crate::ui::tree_sync::tree_ops_settled(cx, app.workspace)
+                    })
+                    .unwrap_or(true);
+                if settled {
+                    break;
+                }
+                cx.background_executor().timer(REOPEN_SETTLE_POLL).await;
+            }
+            let answer = cx
+                .background_executor()
+                .spawn(async move {
+                    client.call(tty7_core::daemon::control::ControlRequest::TabReopen {
+                        workspace: machine_ws,
+                        tab: None,
+                    })
+                })
+                .await;
+            let _ = this.update_in(cx, |app, window, cx| {
+                use tty7_core::daemon::control::ReplyOk;
+                match answer {
+                    Ok(ReplyOk::ReopenedTab(Some(reopened))) => {
+                        let host = WorkspaceStore::host_of(cx, app.workspace);
+                        crate::ui::machine_mirror::MachineMirrors::note_reopened(
+                            cx,
+                            host,
+                            machine_ws,
+                            reopened.tab.id,
+                        );
+                        let st = crate::ui::tree_sync::session_tab_from_reopened(&reopened);
+                        if let Err(st) = app.put_back_closed_tab(st, window, cx) {
+                            // The entry is off the machine's list now; keep it
+                            // here so another ⌘⇧T can try it again.
+                            app.remember_closed_here(st);
+                        }
+                    }
+                    Ok(ReplyOk::ReopenedTab(None)) => app.reopen_closed_here(window, cx),
+                    Ok(other) => {
+                        log::warn!("the machine answered TabReopen with {other:?}");
+                        app.reopen_closed_here(window, cx);
+                    }
+                    Err(e) => {
+                        log::warn!("could not ask the machine for a closed tab ({e})");
+                        app.reopen_closed_here(window, cx);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn reopen_closed_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(st) = self.closed.pop() else {
             return;
         };
+        if let Err(st) = self.put_back_closed_tab(st, window, cx) {
+            self.closed.push(st);
+        }
+    }
+
+    /// Rebuild a closed tab and open it where a new tab would go. Every pane
+    /// asks the daemon for the one it names: attached if it is somehow still
+    /// running, otherwise a fresh shell in its cwd opening on its last screen.
+    /// Hands the tab back when no pane in it would start.
+    fn put_back_closed_tab(
+        &mut self,
+        st: SessionTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), SessionTab> {
         let pane_ws = self.window_workspace(cx);
         let alive = alive_panes_on(&crate::terminal::PaneRoute::for_workspace(pane_ws.as_ref()));
         let Some(pane) = session_to_pane(
@@ -2079,8 +2208,7 @@ impl Tty7App {
                 gpui_component::notification::Notification::error(t(L10nKey::AppReopenTabFailed)),
                 cx,
             );
-            self.closed.push(st);
-            return;
+            return Err(st);
         };
         self.remember_active_pane(window, cx);
         self.maximized = None;
@@ -2101,7 +2229,12 @@ impl Tty7App {
                 // Reopened here, so it is this window's new tab: walking into
                 // a pinned folder files it there like any other.
                 folder_watch: std::cell::Cell::new(crate::core::group_key::EntryWatch::fresh()),
-                tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
+                // A tab the machine kept comes back under its own id; one from
+                // this window's list never had one the machine still knows.
+                tree_id: std::cell::Cell::new(
+                    st.tree_id
+                        .unwrap_or_else(tty7_core::core::machine::TabId::new),
+                ),
                 last_used: std::cell::Cell::new(0),
                 focus_origin: Default::default(),
                 asleep: None,
@@ -2111,6 +2244,7 @@ impl Tty7App {
         self.focus_active(window, cx);
         self.save_session(cx);
         cx.notify();
+        Ok(())
     }
 
     pub(crate) fn owns_leaf(&self, leaf_id: u64) -> bool {
@@ -3688,6 +3822,14 @@ impl Tty7App {
 
     pub(crate) fn set_new_tab_position(&mut self, pos: NewTabPosition, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.new_tab_position = pos);
+    }
+
+    pub(crate) fn set_confirm_close(
+        &mut self,
+        mode: crate::core::config::ConfirmClose,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.confirm_close = mode);
     }
 
     pub(crate) fn set_tab_bar_position(&mut self, pos: TabBarPosition, cx: &mut Context<Self>) {
@@ -5385,12 +5527,41 @@ impl Tty7App {
         self.editor_forget_tab(closing, cx);
         let worktree_cwd = self.tab_host_cwd(index, window, cx);
         let snapshot = tab_to_session(&self.tabs[index], cx);
-        self.closed.push(snapshot);
-        if self.closed.len() > MAX_CLOSED_TABS {
-            self.closed.remove(0);
+        let leaves: Vec<(u64, crate::terminal::PaneRoute, bool)> = self.tabs[index]
+            .pane
+            .terminals()
+            .iter()
+            .map(|leaf| {
+                let view = leaf.read(cx);
+                (view.pane_id, view.pane_route(), view.ssh_spec().is_some())
+            })
+            .collect();
+        // Where the machine keeps closed tabs, the tab is closed into its list
+        // and the machine stops the panes: a kill from here would drop the
+        // screens a reopen restores from. That happens in the sync the
+        // `save_session` below runs, once the tab is gone from the window.
+        let remembered = crate::ui::tree_sync::remembers_closed_tab(cx, self.workspace, closing);
+        let remote = WorkspaceStore::all(cx)
+            .get(self.workspace)
+            .is_some_and(|w| w.is_remote());
+        let (held, here) = split_machine_held(remote, &leaves);
+        if remembered {
+            let retiring = crate::ui::tree_sync::Retiring {
+                tab: closing,
+                panes: held.iter().map(|(id, _)| *id).collect(),
+                route: crate::terminal::PaneRoute::for_workspace(
+                    self.window_workspace(cx).as_ref(),
+                ),
+            };
+            crate::ui::tree_sync::retire_tab(cx, self.workspace, retiring);
+        } else {
+            self.remember_closed_here(snapshot.clone());
         }
-        for leaf in self.tabs[index].pane.terminals() {
-            kill_pane_off_thread(leaf.read(cx).pane_route(), leaf.read(cx).pane_id, cx);
+        for (pane, route) in match remembered {
+            true => here,
+            false => held.into_iter().chain(here).collect(),
+        } {
+            kill_pane_off_thread(route, pane, cx);
         }
         self.tabs.remove(index);
         // Only losing the renaming tab itself ends the rename — closing an
@@ -5412,8 +5583,29 @@ impl Tty7App {
         self.wake_active_if_asleep(window, cx);
         self.focus_active(window, cx);
         self.save_session(cx);
+        if remembered
+            && let Some(unsent) =
+                crate::ui::tree_sync::take_unsent_retirement(cx, self.workspace, closing)
+        {
+            // The sync never got the close to the machine — the link went, or
+            // the window was told to re-pull just now. Close it the way a
+            // machine without the list would: kept here, ended from here.
+            self.remember_closed_here(snapshot);
+            for pane in unsent.panes {
+                kill_pane_off_thread(unsent.route.clone(), pane, cx);
+            }
+        }
         cx.notify();
         self.offer_worktree_cleanup(worktree_cwd, cx);
+    }
+
+    /// Keep a closed tab in this window's own list, for a machine that keeps
+    /// none — see [`Self::reopen_closed_tab`].
+    fn remember_closed_here(&mut self, snapshot: SessionTab) {
+        self.closed.push(snapshot);
+        if self.closed.len() > MAX_CLOSED_TABS {
+            self.closed.remove(0);
+        }
     }
 
     fn offer_worktree_cleanup(
@@ -5527,8 +5719,56 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_other_tabs_inner(index, false, window, cx);
+    }
+
+    /// Which of the tabs at `indices` a bulk close takes: all but the ones
+    /// whose connection asked to be warned about, or that hold unsaved editor
+    /// files — see [`Self::close_other_tabs_inner`].
+    fn bulk_closable(&self, indices: impl Iterator<Item = usize>, cx: &App) -> Vec<usize> {
+        indices
+            .filter(|&i| !self.tab_has_warn_ssh(i, cx) && self.editor_unsaved_in_tab(i).is_empty())
+            .collect()
+    }
+
+    /// Under [`ConfirmClose::Always`](crate::core::config::ConfirmClose::Always)
+    /// a bulk close is asked about once, for all the tabs it takes; one dialog
+    /// per tab would be a question nobody can answer. Answers whether the
+    /// question went up, in which case the close waits for it.
+    fn ask_before_bulk_close(
+        &mut self,
+        target: CloseTarget,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let always =
+            cx.global::<Config>().confirm_close == crate::core::config::ConfirmClose::Always;
+        if !always || count == 0 {
+            return false;
+        }
+        self.ask_before_closing(target, CloseReason::Tabs(count), window, cx);
+        true
+    }
+
+    fn close_other_tabs_inner(
+        &mut self,
+        index: usize,
+        confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if index >= self.tabs.len() {
             return;
+        }
+        if !confirmed {
+            let count = self
+                .bulk_closable((0..self.tabs.len()).filter(|&i| i != index), cx)
+                .len();
+            let keep = CloseTarget::OtherTabs(self.tabs[index].tree_id.get());
+            if self.ask_before_bulk_close(keep, count, window, cx) {
+                return;
+            }
         }
         // A bulk close skips the tabs whose profile asked to be warned about,
         // and closes the rest outright — one dialog per tab is not a question
@@ -5555,6 +5795,23 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_tabs_right_of_inner(index, false, window, cx);
+    }
+
+    fn close_tabs_right_of_inner(
+        &mut self,
+        index: usize,
+        confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !confirmed && let Some(tab) = self.tabs.get(index) {
+            let count = self.bulk_closable((index + 1)..self.tabs.len(), cx).len();
+            let from = CloseTarget::TabsRightOf(tab.tree_id.get());
+            if self.ask_before_bulk_close(from, count, window, cx) {
+                return;
+            }
+        }
         // Same bargain as `close_other_tabs`.
         for i in ((index + 1)..self.tabs.len()).rev() {
             if self.tab_has_warn_ssh(i, cx) || !self.editor_unsaved_in_tab(i).is_empty() {
@@ -6804,6 +7061,7 @@ impl Tty7App {
             L10nKey::SettingsNewTabPosition => {
                 self.set_new_tab_position(defaults.new_tab_position, cx)
             }
+            L10nKey::SettingsConfirmClose => self.set_confirm_close(defaults.confirm_close, cx),
             L10nKey::SettingsTabBarPosition => {
                 self.set_tab_bar_position(defaults.tab_bar_position, cx)
             }
@@ -8029,6 +8287,16 @@ impl Tty7App {
                         }
                     }
                     CloseTarget::Pane => this.close_pane_inner(true, window, cx),
+                    CloseTarget::OtherTabs(id) => {
+                        if let Some(i) = this.tabs.iter().position(|t| t.tree_id.get() == id) {
+                            this.close_other_tabs_inner(i, true, window, cx);
+                        }
+                    }
+                    CloseTarget::TabsRightOf(id) => {
+                        if let Some(i) = this.tabs.iter().position(|t| t.tree_id.get() == id) {
+                            this.close_tabs_right_of_inner(i, true, window, cx);
+                        }
+                    }
                 }
             });
         })
@@ -8037,10 +8305,16 @@ impl Tty7App {
 
     /// The first reason this pane should not simply vanish.
     fn leaf_close_reason(&self, leaf: &Entity<TerminalView>, cx: &App) -> Option<CloseReason> {
-        if self.leaf_is_warn_ssh(leaf, cx) {
-            return Some(CloseReason::LiveSsh);
-        }
-        leaf.read(cx).busy().map(CloseReason::Busy)
+        self.leaf_close_reason_as(cx.global::<Config>().confirm_close, leaf, cx)
+    }
+
+    fn leaf_close_reason_as(
+        &self,
+        mode: crate::core::config::ConfirmClose,
+        leaf: &Entity<TerminalView>,
+        cx: &App,
+    ) -> Option<CloseReason> {
+        close_reason(mode, self.leaf_is_warn_ssh(leaf, cx), leaf.read(cx).busy())
     }
 
     /// Whether closing this tab would drop a connection the user asked to be
@@ -8055,13 +8329,24 @@ impl Tty7App {
         })
     }
 
+    /// The first reason any pane of the tab gives. Under `Always` a busy pane
+    /// or a warned connection still names itself — the idle question is only
+    /// what is left when no pane has anything more specific to say.
     fn tab_close_reason(&self, index: usize, cx: &App) -> Option<CloseReason> {
-        self.tabs
+        use crate::core::config::ConfirmClose;
+        let mode = cx.global::<Config>().confirm_close;
+        let asked_as = match mode {
+            ConfirmClose::Always => ConfirmClose::WhenBusy,
+            other => other,
+        };
+        let specific = self
+            .tabs
             .get(index)?
             .pane
             .terminals()
             .iter()
-            .find_map(|l| self.leaf_close_reason(l, cx))
+            .find_map(|l| self.leaf_close_reason_as(asked_as, l, cx));
+        specific.or((mode == ConfirmClose::Always).then_some(CloseReason::Idle))
     }
 
     fn focused_pane_close_reason(&self, window: &Window, cx: &App) -> Option<CloseReason> {
@@ -10624,6 +10909,31 @@ fn build_terminal_view(
     view
 }
 
+/// Split a closing tab's panes into the ones its machine stops for it and the
+/// ones this window ends itself: `(pane id, route, is native SSH)` in, and the
+/// same pairs out, machine-held first.
+///
+/// A native SSH pane in a remote window lives in this computer's daemon, not
+/// on the window's machine — the tree never holds it (see
+/// `leaf_shares_the_window_daemon`) — so the machine cannot stop it and it is
+/// ended from here. Without `remote_window` every pane is the machine's.
+fn split_machine_held(
+    remote_window: bool,
+    leaves: &[(u64, crate::terminal::PaneRoute, bool)],
+) -> (
+    Vec<(u64, crate::terminal::PaneRoute)>,
+    Vec<(u64, crate::terminal::PaneRoute)>,
+) {
+    let (held, here): (Vec<_>, Vec<_>) = leaves
+        .iter()
+        .cloned()
+        .partition(|(_, _, native_ssh)| leaf_shares_the_window_daemon(remote_window, *native_ssh));
+    let strip = |v: Vec<(u64, crate::terminal::PaneRoute, bool)>| {
+        v.into_iter().map(|(id, route, _)| (id, route)).collect()
+    };
+    (strip(held), strip(here))
+}
+
 fn kill_pane_off_thread(route: crate::terminal::PaneRoute, pane_id: u64, cx: &mut App) {
     cx.background_executor()
         .spawn(async move { crate::terminal::RemoteTerminal::kill_pane_on(&route, pane_id) })
@@ -11245,13 +11555,14 @@ mod window_drag_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::close_reason;
     use super::{
         CloseReason, DOCUMENT_MIN_W, Dir, OpenedFrom, Pane, Rename, TERMINAL_MIN_W,
         TITLE_BAR_HEIGHT, Tab, TabAgentSession, clear_window_override_values, close_prompt,
         document_column_px, inherited_start_dir, join_shell_args, leaf_shares_the_window_daemon,
         mru_order, native_ssh_pane_alive, one_slot_move, pane_free_for, parse_ssh_connect_input,
-        parse_ssh_option_words, rename_outcome, side_panel_max, split_shell_args, step_in_order,
-        strip_band, wd_path_saveable,
+        parse_ssh_option_words, rename_outcome, side_panel_max, split_machine_held,
+        split_shell_args, step_in_order, strip_band, wd_path_saveable,
     };
     use gpui::{Edges, point, px, size};
 
@@ -11535,6 +11846,75 @@ mod tests {
         let (ssh_title, ssh_body) = close_prompt(true, &CloseReason::LiveSsh);
         assert_ne!(ssh_title, title);
         assert!(!ssh_body.is_empty());
+    }
+
+    /// `WhenBusy` is the question tty7 always asked; `Always` adds one for an
+    /// idle shell without hiding what a busy one is doing; `Never` drops the
+    /// busy question — and none of them touches the SSH warning, which the
+    /// user turned on separately.
+    #[test]
+    fn each_confirm_mode_asks_what_it_says_and_the_ssh_warning_always_stands() {
+        use crate::core::config::ConfirmClose::{Always, Never, WhenBusy};
+        use crate::terminal::view::PaneBusy;
+        let build = || Some(PaneBusy::Command("cargo build".into()));
+
+        assert_eq!(close_reason(WhenBusy, false, None), None);
+        assert_eq!(
+            close_reason(WhenBusy, false, build()),
+            Some(CloseReason::Busy(PaneBusy::Command("cargo build".into())))
+        );
+        assert_eq!(close_reason(Always, false, None), Some(CloseReason::Idle));
+        assert_eq!(
+            close_reason(Always, false, build()),
+            Some(CloseReason::Busy(PaneBusy::Command("cargo build".into())))
+        );
+        assert_eq!(close_reason(Never, false, build()), None);
+        for mode in [Never, WhenBusy, Always] {
+            assert_eq!(
+                close_reason(mode, true, build()),
+                Some(CloseReason::LiveSsh),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_idle_and_bulk_questions_say_what_goes() {
+        crate::ui::i18n::set_locale("en");
+        let (tab_title, body) = close_prompt(true, &CloseReason::Idle);
+        assert!(tab_title.contains("tab"), "{tab_title}");
+        assert!(!body.is_empty());
+        let (pane_title, _) = close_prompt(false, &CloseReason::Idle);
+        assert!(pane_title.contains("pane"), "{pane_title}");
+
+        let (three, _) = close_prompt(true, &CloseReason::Tabs(3));
+        assert_eq!(three, "Close 3 tabs?");
+        let (one, _) = close_prompt(true, &CloseReason::Tabs(1));
+        assert_eq!(one, "Close 1 tab?");
+    }
+
+    /// The machine stops the panes it holds; a native SSH pane in a remote
+    /// window lives in this computer's daemon and is ended from here, because
+    /// nothing on the window's machine could.
+    #[test]
+    fn a_remote_windows_native_ssh_pane_is_ended_here_and_the_rest_by_its_machine() {
+        let local = crate::terminal::PaneRoute::Local;
+        let leaves = vec![(4, local.clone(), false), (5, local.clone(), true)];
+
+        let (held, here) = split_machine_held(true, &leaves);
+        let ids = |v: &[(u64, crate::terminal::PaneRoute)]| {
+            v.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&held), vec![4]);
+        assert_eq!(ids(&here), vec![5]);
+
+        let (held, here) = split_machine_held(false, &leaves);
+        assert_eq!(
+            ids(&held),
+            vec![4, 5],
+            "a local window's machine holds its SSH panes too"
+        );
+        assert!(here.is_empty());
     }
 
     #[test]

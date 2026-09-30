@@ -63,6 +63,202 @@ pub(crate) fn can_hibernate_on(cx: &App, client_ws: WorkspaceId) -> bool {
     }
 }
 
+/// Whether the machine holding `client_ws` keeps its recently closed tabs
+/// (#1021). A machine that does not — an older daemon, a remote server not yet
+/// updated — is closed and reopened against the way it always was, from the
+/// window's own list.
+pub(crate) fn keeps_closed_tabs_on(cx: &App, client_ws: WorkspaceId) -> bool {
+    let feature = tty7_core::daemon::control::feature::CLOSED_TABS;
+    let host = WorkspaceStore::host_of(cx, client_ws);
+    match host.is_local() {
+        true => crate::ui::local_link::LocalLink::supports(cx, feature),
+        false => crate::ui::remote_connect::HostLinks::peer_supports(cx, host, feature),
+    }
+}
+
+/// Whether closing `tab` can go to the machine's recently-closed list: the
+/// machine keeps one, and this window's next sync is certain to tell it about
+/// the close — it has pulled its layout, speaks for every tab in it, and the
+/// machine has the tab. Anything short of that and the close would never
+/// reach the machine, so the window keeps the tab to reopen itself.
+pub(crate) fn remembers_closed_tab(cx: &App, client_ws: WorkspaceId, tab: TabId) -> bool {
+    if !keeps_closed_tabs_on(cx, client_ws) {
+        return false;
+    }
+    let Some(state) = cx
+        .try_global::<TreeSync>()
+        .and_then(|t| t.windows.get(&client_ws))
+    else {
+        return false;
+    };
+    state.informed
+        && state.rehydrate.is_none()
+        && matches!(&state.sync, SyncPhase::Primed(mirror) if mirror.tabs.iter().any(|t| t.id == tab))
+}
+
+/// A tab this window closed into its machine's recently-closed list.
+///
+/// Its panes are left for the machine to stop, because the machine is what
+/// keeps their screens for the reopen — a kill from here drops them. Until the
+/// machine has said it did, this is also the window's note to end them itself
+/// if the close never gets there.
+#[derive(Clone, Debug)]
+pub(crate) struct Retiring {
+    pub tab: TabId,
+    /// The tab's panes on the window's machine.
+    pub panes: Vec<u64>,
+    pub route: crate::terminal::PaneRoute,
+}
+
+/// Hand a closing tab to the next sync, which tells the machine to remember it
+/// rather than forget it. See [`take_unsent_retirement`] for the other half.
+pub(crate) fn retire_tab(cx: &mut App, client_ws: WorkspaceId, retiring: Retiring) {
+    cx.default_global::<TreeSync>()
+        .windows
+        .entry(client_ws)
+        .or_default()
+        .retiring
+        .push(retiring);
+}
+
+/// After the sync a close ran: the retirement of `tab` if that sync did not
+/// pass it on to the machine, withdrawn, for the caller to close the tab the
+/// old way instead. `None` means the machine has it.
+pub(crate) fn take_unsent_retirement(
+    cx: &mut App,
+    client_ws: WorkspaceId,
+    tab: TabId,
+) -> Option<Retiring> {
+    let state = cx
+        .default_global::<TreeSync>()
+        .windows
+        .get_mut(&client_ws)?;
+    let at = state.retiring.iter().position(|r| r.tab == tab)?;
+    Some(state.retiring.remove(at))
+}
+
+/// Whether everything this window has told its machine has been answered.
+///
+/// ⌘⇧T asks the machine for the newest closed tab, and the close it means to
+/// undo may still be queued behind other edits: asking first would reopen the
+/// one before it.
+pub(crate) fn tree_ops_settled(cx: &App, client_ws: WorkspaceId) -> bool {
+    cx.try_global::<TreeSync>()
+        .and_then(|t| t.windows.get(&client_ws))
+        .is_none_or(|state| !state.inflight && state.queue.is_empty() && state.retiring.is_empty())
+}
+
+/// The link to ask for a closed tab back on, and the machine's id for the
+/// workspace — `None` when that machine keeps no list or cannot be reached.
+pub(crate) fn closed_tabs_link(
+    cx: &mut App,
+    client_ws: WorkspaceId,
+) -> Option<(Arc<ControlClient>, WorkspaceId)> {
+    if !keeps_closed_tabs_on(cx, client_ws) {
+        return None;
+    }
+    let host = WorkspaceStore::host_of(cx, client_ws);
+    match tree_control_for(cx, host) {
+        TreeLink::Ready(client) => Some((client, tree_workspace_id(cx, client_ws))),
+        TreeLink::Unserved | TreeLink::Down => None,
+    }
+}
+
+/// The tab a reopen answered, as the restore reads a tab: the same layout,
+/// each leaf carrying its old pane id for the new pane to open on the screen
+/// of, and the cwd, shell, SSH target and agent facts the machine kept for it.
+/// The tab keeps its id, so the machine hears it come back as itself.
+pub(crate) fn session_tab_from_reopened(
+    reopened: &tty7_core::core::machine::ReopenedTab,
+) -> SessionTab {
+    closed_session_tab(&reopened.tab, &reopened.panes)
+}
+
+fn closed_session_tab(tab: &TreeTab, panes: &[PaneRecord]) -> SessionTab {
+    SessionTab {
+        name: tab.name.clone(),
+        pane: session_pane_from_node(&tab.root, panes),
+        group: tab.group,
+        last_auto: tab.last_auto.clone(),
+        tree_id: Some(tab.id),
+        hibernated: false,
+        asleep_view: None,
+    }
+}
+
+/// The newest closed tab the machine keeps for `client_ws`, as this client's
+/// mirror of the machine knows it — what the home screen offers back. One
+/// past its day is not offered, whatever the mirror still holds: the machine
+/// has let it go, or is about to.
+pub(crate) fn newest_remembered_close(cx: &App, client_ws: WorkspaceId) -> Option<SessionTab> {
+    if !keeps_closed_tabs_on(cx, client_ws) {
+        return None;
+    }
+    let host = WorkspaceStore::host_of(cx, client_ws);
+    let machine = crate::ui::machine_mirror::MachineMirrors::machine(cx, host)?;
+    let machine_ws = tree_workspace_id(cx, client_ws);
+    let ws = machine.workspaces.iter().find(|w| w.id == machine_ws)?;
+    let now = crate::ui::home::now_secs();
+    let ttl = tty7_core::core::machine::CLOSED_TAB_TTL.as_secs();
+    let entry = ws
+        .closed
+        .iter()
+        .rev()
+        .find(|c| now.saturating_sub(c.closed_at) < ttl)?;
+    Some(closed_session_tab(&entry.tab, &machine.panes))
+}
+
+/// Turn the sync's `TabClose` for each retiring tab into the close that asks
+/// the machine to remember it, and answer the retirements that went out.
+///
+/// Done on the diff's output rather than inside it: the diff only knows that a
+/// tab is gone from the window, which is the same whether it was closed, moved
+/// to another window or never rebuilt. Only an explicit close registers a
+/// retirement, so only that is remembered.
+fn remember_closes(ops: &mut [ControlRequest], retiring: &mut Vec<Retiring>) -> Vec<Retiring> {
+    let mut sent = Vec::new();
+    for op in ops.iter_mut() {
+        let ControlRequest::TabClose { workspace, tab } = *op else {
+            continue;
+        };
+        let Some(at) = retiring.iter().position(|r| r.tab == tab) else {
+            continue;
+        };
+        let retired = retiring.remove(at);
+        *op = ControlRequest::TabCloseRemembered {
+            workspace,
+            tab,
+            panes: retired.panes.clone(),
+        };
+        sent.push(retired);
+    }
+    sent
+}
+
+/// End, from here, the panes of every remembered close in `dropped` — ops the
+/// machine was sent and refused, or that were never sent at all. Nobody else
+/// is going to stop those panes now, and a close that leaves its shells
+/// running is worse than one that loses their screens.
+fn end_unsent_retirements(cx: &mut App, retired: &mut Vec<Retiring>, dropped: &[ControlRequest]) {
+    for op in dropped {
+        let ControlRequest::TabCloseRemembered { tab, .. } = op else {
+            continue;
+        };
+        let Some(at) = retired.iter().position(|r| r.tab == *tab) else {
+            continue;
+        };
+        let Retiring { panes, route, .. } = retired.remove(at);
+        log::info!("the machine never took closed tab {tab}; ending its panes from here");
+        cx.background_executor()
+            .spawn(async move {
+                for pane in panes {
+                    crate::terminal::RemoteTerminal::kill_pane_on(&route, pane);
+                }
+            })
+            .detach();
+    }
+}
+
 fn tree_workspace_id(cx: &App, client_ws: WorkspaceId) -> WorkspaceId {
     WorkspaceStore::all(cx)
         .get(client_ws)
@@ -1065,6 +1261,12 @@ struct WsState {
     /// An edit to the workspace's sidebar groups made before this window's
     /// pull landed, sent on when it does — see [`push_groups`].
     unsent_groups: Option<WorkspaceGroups>,
+    /// Tabs closed since the last sync, waiting for it to tell the machine to
+    /// remember them — see [`retire_tab`].
+    retiring: Vec<Retiring>,
+    /// Remembered closes the sync has queued and the machine has not yet
+    /// answered, kept so a close that fails can still end its panes.
+    retired: Vec<Retiring>,
     /// Whether this window has already been told why it opened empty.
     ///
     /// The retry is as quiet as the failure was, so a window whose machine
@@ -1093,6 +1295,8 @@ impl Default for WsState {
             then_open: Vec::new(),
             chosen_name: None,
             unsent_groups: None,
+            retiring: Vec::new(),
+            retired: Vec::new(),
             said_why_empty: false,
         }
     }
@@ -1150,11 +1354,19 @@ pub(crate) fn sync_window(app: &Tty7App, cx: &mut App) {
                 .not_rebuilt
                 .retain(|id| mirror.tabs.iter().any(|t| t.id == *id));
             held.extend(state.not_rebuilt.iter().copied());
-            let ops = diff(machine_ws, mirror, &desired, desired_active, scope, &held);
+            let mut ops = diff(machine_ws, mirror, &desired, desired_active, scope, &held);
+            let sent = remember_closes(&mut ops, &mut state.retiring);
+            let remembered: Vec<TabId> = sent.iter().map(|r| r.tab).collect();
+            state.retired.extend(sent);
             if !ops.is_empty() {
                 let (tabs, active) = (mirror.tabs.clone(), mirror.active);
                 state.queue.extend(ops);
                 let host = WorkspaceStore::host_of(cx, client_ws);
+                // Before the tabs are replaced, while the mirror still has the
+                // closed ones to move onto its list.
+                crate::ui::machine_mirror::MachineMirrors::note_remembered_closes(
+                    cx, host, machine_ws, remembered,
+                );
                 crate::ui::machine_mirror::MachineMirrors::note_synced_workspace(
                     cx, host, machine_ws, tabs, active,
                 );
@@ -1285,6 +1497,7 @@ fn adopt_tab_ids(app: &Tty7App, cx: &App) {
 }
 
 pub(crate) fn on_preempted(cx: &mut App, client_ws: WorkspaceId) {
+    clear_queue(cx, client_ws);
     let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
         return;
     };
@@ -1292,15 +1505,30 @@ pub(crate) fn on_preempted(cx: &mut App, client_ws: WorkspaceId) {
         dirty: false,
         priming: false,
     };
-    state.queue.clear();
     state.informed = false;
     state.epoch += 1;
 }
 
 pub(crate) fn forget(cx: &mut App, client_ws: WorkspaceId) {
-    if let Some(state) = cx.try_global::<TreeSync>() {
-        let _ = state;
+    if cx.try_global::<TreeSync>().is_some() {
+        // What is still queued goes nowhere once the window is gone. A batch
+        // already in flight finishes on its own, and the machine answers it.
+        clear_queue(cx, client_ws);
         cx.default_global::<TreeSync>().windows.remove(&client_ws);
+    }
+}
+
+/// Throw away whatever this window still had queued for its machine, ending
+/// from here the panes of any remembered close among it.
+fn clear_queue(cx: &mut App, client_ws: WorkspaceId) {
+    let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
+        return;
+    };
+    let dropped: Vec<ControlRequest> = state.queue.drain(..).collect();
+    let mut retired = std::mem::take(&mut state.retired);
+    end_unsent_retirements(cx, &mut retired, &dropped);
+    if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) {
+        state.retired.extend(retired);
     }
 }
 
@@ -1735,26 +1963,47 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
         }
     };
     let batch: Vec<ControlRequest> = state.queue.drain(..).collect();
+    let remembered: Vec<TabId> = batch
+        .iter()
+        .filter_map(|op| match op {
+            ControlRequest::TabCloseRemembered { tab, .. } => Some(*tab),
+            _ => None,
+        })
+        .collect();
     state.inflight = true;
     cx.spawn(async move |cx| {
         let result = cx
             .background_executor()
             .spawn(async move {
-                for op in batch {
+                let mut ops = batch.into_iter();
+                while let Some(op) = ops.next() {
                     if let Err(e) = client.call(op.clone()) {
-                        return Err((op, e));
+                        let unsent: Vec<ControlRequest> =
+                            std::iter::once(op.clone()).chain(ops).collect();
+                        return Err((op, e, unsent));
                     }
                 }
                 Ok(())
             })
             .await;
         cx.update(|cx| {
+            let mut retired = Vec::new();
             if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) {
                 state.inflight = false;
+                retired = std::mem::take(&mut state.retired);
+            }
+            // The refused op and everything behind it never took; the rest of
+            // the batch did, and the machine has those panes now.
+            if let Err((_, _, unsent)) = &result {
+                end_unsent_retirements(cx, &mut retired, unsent);
+            }
+            retired.retain(|r| !remembered.contains(&r.tab));
+            if let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) {
+                state.retired.extend(retired);
             }
             match result {
                 Ok(()) => pump(cx, client_ws),
-                Err((op, e)) => {
+                Err((op, e, _)) => {
                     log::warn!("tree operation {op:?} failed: {e}; re-pulling the tree");
                     desync(cx, client_ws, "an operation was refused");
                 }
@@ -1766,10 +2015,10 @@ fn pump(cx: &mut App, client_ws: WorkspaceId) {
 
 fn desync(cx: &mut App, client_ws: WorkspaceId, why: &str) {
     log::info!("resynchronizing workspace {client_ws} with its machine ({why})");
+    clear_queue(cx, client_ws);
     let Some(state) = cx.default_global::<TreeSync>().windows.get_mut(&client_ws) else {
         return;
     };
-    state.queue.clear();
     state.inflight = false;
     state.sync = SyncPhase::Unprimed {
         dirty: true,
@@ -2043,6 +2292,7 @@ fn hydrate(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt) {
 fn hydrate_with(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt, showing: Vec<TabId>) {
     let host = WorkspaceStore::host_of(cx, client_ws);
     let machine_ws = tree_workspace_id(cx, client_ws);
+    clear_queue(cx, client_ws);
     let (epoch, failures) = {
         let state = cx
             .default_global::<TreeSync>()
@@ -2053,7 +2303,6 @@ fn hydrate_with(cx: &mut App, client_ws: WorkspaceId, adopt: Adopt, showing: Vec
             dirty: false,
             priming: true,
         };
-        state.queue.clear();
         state.epoch += 1;
         // This attempt takes over the debt; it re-records it if it fails too.
         state.rehydrate = None;
@@ -3123,6 +3372,135 @@ fn set_gui_ratio(pane: &mut Pane, path: &[Side], ratio: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn retiring(tab: TabId, panes: Vec<u64>) -> Retiring {
+        Retiring {
+            tab,
+            panes,
+            route: crate::terminal::PaneRoute::Local,
+        }
+    }
+
+    /// Only the close the user asked for is remembered. The diff says
+    /// `TabClose` for every tab gone from the window — moved to another window,
+    /// never rebuilt — and those stay plain closes.
+    #[test]
+    fn only_a_retiring_tab_is_closed_into_the_machines_list() {
+        let workspace = WorkspaceId::new();
+        let (closed, moved) = (TabId::new(), TabId::new());
+        let mut ops = vec![
+            ControlRequest::TabClose {
+                workspace,
+                tab: moved,
+            },
+            ControlRequest::TabClose {
+                workspace,
+                tab: closed,
+            },
+        ];
+        let mut waiting = vec![retiring(closed, vec![3, 4])];
+
+        let sent = remember_closes(&mut ops, &mut waiting);
+
+        assert_eq!(
+            ops,
+            vec![
+                ControlRequest::TabClose {
+                    workspace,
+                    tab: moved,
+                },
+                ControlRequest::TabCloseRemembered {
+                    workspace,
+                    tab: closed,
+                    panes: vec![3, 4],
+                },
+            ]
+        );
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].tab, closed);
+        assert!(
+            waiting.is_empty(),
+            "handed on, so nothing is left to fall back on"
+        );
+    }
+
+    /// A retirement the sync did not reach stays waiting, for the close to
+    /// take back and end the old way.
+    #[test]
+    fn a_retirement_with_no_close_in_the_sync_stays_waiting() {
+        let workspace = WorkspaceId::new();
+        let mut ops = vec![ControlRequest::TabMove {
+            workspace,
+            tab: TabId::new(),
+            to: 0,
+        }];
+        let tab = TabId::new();
+        let mut waiting = vec![retiring(tab, vec![3])];
+
+        assert!(remember_closes(&mut ops, &mut waiting).is_empty());
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].tab, tab);
+    }
+
+    /// A reopened tab comes back as the restore reads one: same shape, each
+    /// leaf on its old pane id — the key its screen is restored by — with the
+    /// cwd, shell, SSH target and agent the machine kept, under its old id.
+    #[test]
+    fn a_reopened_tab_reads_back_its_layout_and_what_each_pane_was() {
+        use tty7_core::core::machine::{PaneRecord, ReopenedTab};
+        let tab = TreeTab {
+            name: Some("api".into()),
+            root: PaneNode::Split {
+                axis: TreeAxis::Vertical,
+                ratio: 0.3,
+                a: Box::new(PaneNode::Leaf { pane: 7 }),
+                b: Box::new(PaneNode::Leaf { pane: 8 }),
+            },
+            ..TreeTab::leaf(0)
+        };
+        let mut agent_pane = PaneRecord::new(8);
+        agent_pane.cwd = Some("/repo".into());
+        agent_pane.agent = Some(AgentFacts {
+            agent: crate::core::cli_agent::CLIAgent::Claude,
+            session_id: Some("abc".into()),
+            launch_argv: None,
+            status: None,
+        });
+        let mut shell_pane = PaneRecord::new(7);
+        shell_pane.cwd = Some("/srv".into());
+        let reopened = ReopenedTab {
+            tab: tab.clone(),
+            closed_at: 1,
+            panes: vec![shell_pane, agent_pane],
+        };
+
+        let st = session_tab_from_reopened(&reopened);
+
+        assert_eq!(st.tree_id, Some(tab.id));
+        assert_eq!(st.name.as_deref(), Some("api"));
+        assert!(!st.hibernated);
+        let SessionPane::Split { ratio, a, b, .. } = st.pane else {
+            panic!("the split comes back a split");
+        };
+        assert_eq!(ratio, 0.3);
+        let SessionPane::Leaf { pane_id, cwd, .. } = *a else {
+            panic!("leaf");
+        };
+        assert_eq!(pane_id, Some(7));
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/srv")));
+        let SessionPane::Leaf {
+            pane_id,
+            agent,
+            agent_session_id,
+            ..
+        } = *b
+        else {
+            panic!("leaf");
+        };
+        assert_eq!(pane_id, Some(8));
+        assert_eq!(agent, Some(crate::core::cli_agent::CLIAgent::Claude));
+        assert_eq!(agent_session_id.as_deref(), Some("abc"));
+    }
 
     #[test]
     fn note_instance_reports_only_a_real_change() {

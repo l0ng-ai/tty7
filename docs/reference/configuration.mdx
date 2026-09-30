@@ -93,6 +93,7 @@ their id from the file name. [More about themes →](/customization/themes)
 |---|---|---|---|
 | `tab_bar_position` | enum | `"left"` | `left` (sidebar) or `top` (strip). |
 | `new_tab_position` | enum | `"after-current"` | Or `end`. |
+| `confirm_close` | enum | `"when-busy"` | When closing a tab or pane asks first: `never`, `when-busy` (a program or agent is still running), `always` (even an idle shell). `ssh_warn_on_close` is honoured either way. |
 | `sidebar_auto_grouping` | bool | `true` | Groups unpinned tabs by repository (SSH tabs by host). Off: a flat list below the pinned groups, which show either way. Pinned groups and folds are stored with the workspace, not here. |
 | `sidebar_width` | number | `220` | Pixels (100–2000). |
 | `sidebar_collapsed` | bool | `false` | |

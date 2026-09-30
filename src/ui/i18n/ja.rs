@@ -270,6 +270,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CloseSshConnectionBody => "接続中です。閉じると切断されます",
         L10nKey::ClosePaneBusyTitle => "このペインを閉じますか？",
         L10nKey::CloseTabBusyTitle => "このタブを閉じますか？",
+        L10nKey::CloseIdleBody => "中のシェルも終了します。",
+        L10nKey::CloseTabsTitle => "{count} 個のタブを閉じますか？",
+        L10nKey::CloseTabsBody => "中のシェルもすべて終了します。",
         L10nKey::CloseBusyCommandBody => "{what} はまだ実行中です。閉じると終了します。",
         L10nKey::CloseBusyAgentBody => {
             "{agent} はまだ作業中です。閉じるとこのターンは中断されます。"
@@ -740,6 +743,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsShowTrayIconDesc => "エージェントの入力待ちを通知",
         L10nKey::SettingsTabs => "タブ",
         L10nKey::SettingsNewTabPosition => "新規タブの表示位置",
+        L10nKey::SettingsConfirmClose => "閉じる前に確認",
+        L10nKey::SettingsConfirmCloseDesc => {
+            "タブやペインを閉じる前に確認するタイミング。「閉じる前に警告」を有効にした SSH ホストは常に確認します"
+        }
+        L10nKey::ConfirmCloseNever => "確認しない",
+        L10nKey::ConfirmCloseWhenBusy => "実行中のときのみ",
+        L10nKey::ConfirmCloseAlways => "常に確認",
         L10nKey::SettingsNewTabPositionDesc => "新しく開いたタブが挿入される場所",
         L10nKey::SettingsTabBarPosition => "タブバーの位置",
         L10nKey::SettingsTabBarPositionDesc => {
@@ -1022,6 +1032,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchNewTabPositionKeywords => {
             "タブ 順序 末尾 現在のタブの隣 new tab position tabs order end after current"
+        }
+        L10nKey::SettingsSearchConfirmCloseKeywords => {
+            "閉じる 確認 タブ ペイン 実行中 アイドル 常に しない confirm close tab pane ask prompt busy idle always never"
         }
         L10nKey::SettingsSearchNotifyOnCommandFinishKeywords => {
             "通知 アラート 完了 osc デスクトップ バナー 長い コマンド notify on command finish notification alert desktop"
@@ -2437,6 +2450,8 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SftpReplaceBody, "other") => {
             "{names} はこのフォルダに既に存在します。アップロードすると上書きされます。"
         }
+        (L10nKey::CloseTabsTitle, "one") => "1 個のタブを閉じますか？",
+        (L10nKey::CloseTabsTitle, "other") => "{count} 個のタブを閉じますか？",
         (L10nKey::AppTabsNotRestored, "one") => "前回のタブ 1 個を開き直せませんでした",
         (L10nKey::AppTabsNotRestored, "other") => "前回のタブ {count} 個を開き直せませんでした",
         (L10nKey::LaunchWorkspacesLeftRunning, "one") => {

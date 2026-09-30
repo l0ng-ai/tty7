@@ -230,6 +230,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CloseTabBusyTitle => "关闭这个标签页？",
         L10nKey::CloseBusyCommandBody => "{what} 还在运行，关闭会终止它。",
         L10nKey::CloseBusyAgentBody => "{agent} 还在工作，关闭会中断这一轮。",
+        L10nKey::CloseIdleBody => "里面的 shell 也会随之结束。",
+        L10nKey::CloseTabsTitle => "关闭 {count} 个标签页？",
+        L10nKey::CloseTabsBody => "里面的 shell 也会一并结束。",
         L10nKey::Keep => "保留",
         L10nKey::SettingsNavAppearance => "外观",
         L10nKey::SettingsNavTerminal => "终端",
@@ -637,6 +640,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsTabs => "标签页",
         L10nKey::SettingsNewTabPosition => "新标签页位置",
         L10nKey::SettingsNewTabPositionDesc => "新打开的标签页插入的位置。",
+        L10nKey::SettingsConfirmClose => "关闭前确认",
+        L10nKey::SettingsConfirmCloseDesc => {
+            "关闭标签页或窗格前是否先问一下。设了“关闭前警告”的 SSH 主机无论如何都会询问。"
+        }
+        L10nKey::ConfirmCloseNever => "从不",
+        L10nKey::ConfirmCloseWhenBusy => "有程序在运行时",
+        L10nKey::ConfirmCloseAlways => "总是",
         L10nKey::SettingsTabBarPosition => "标签栏位置",
         L10nKey::SettingsTabBarPositionDesc => "将标签页显示为顶部横向条或左侧垂直侧栏。",
         L10nKey::SettingsSidebarGrouping => "自动分组",
@@ -896,6 +906,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchNewTabPositionKeywords => {
             "新标签页位置 标签页 顺序 末尾 当前之后 new tab position tabs order end after current"
+        }
+        L10nKey::SettingsSearchConfirmCloseKeywords => {
+            "关闭前确认 关闭 标签页 窗格 询问 提示 运行中 空闲 总是 从不 confirm close tab pane ask prompt busy idle always never"
         }
         L10nKey::SettingsSearchNotifyOnCommandFinishKeywords => {
             "命令完成时通知 通知 提醒 命令 notify command finish notification alert desktop"
@@ -2207,6 +2220,8 @@ pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'stat
         }
         (L10nKey::SftpReplaceBody, "one") => "{names} 在这个文件夹里已经存在，上传会覆盖它。",
         (L10nKey::SftpReplaceBody, "other") => "{names} 在这个文件夹里已经存在，上传会覆盖它们。",
+        (L10nKey::CloseTabsTitle, "one") => "关闭 1 个标签页？",
+        (L10nKey::CloseTabsTitle, "other") => "关闭 {count} 个标签页？",
         (L10nKey::AppTabsNotRestored, "one") => "上次的 1 个标签页没能重新打开",
         (L10nKey::AppTabsNotRestored, "other") => "上次的 {count} 个标签页没能重新打开",
         (L10nKey::LaunchWorkspacesLeftRunning, "one") => {

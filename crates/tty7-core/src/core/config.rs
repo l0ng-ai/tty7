@@ -327,6 +327,9 @@ pub struct Config {
     pub notify_threshold_secs: u64,
     #[serde(default = "default_true")]
     pub restore_session: bool,
+    /// When closing a tab or a pane asks first — see [`ConfirmClose`].
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub confirm_close: ConfirmClose,
     #[serde(default = "default_true")]
     pub show_tray_icon: bool,
     #[serde(default, deserialize_with = "de_lenient")]
@@ -672,6 +675,26 @@ pub enum MouseZoomModifier {
     None,
 }
 
+/// When closing a tab or a pane asks first (#1021).
+///
+/// `WhenBusy` is the question tty7 has always asked, and the default: only
+/// when something would be cut off — a program still running in the
+/// foreground, an agent mid-turn. `Always` also asks about an idle shell, for
+/// people who would rather confirm every close than ever lose one; `Never`
+/// stops asking about busy panes.
+///
+/// The warning before dropping a live SSH connection is not governed by this.
+/// It is an opt-in of its own, per host or for all of them, so it is still
+/// honoured under `Never`: turning this down is not turning that off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfirmClose {
+    Never,
+    #[default]
+    WhenBusy,
+    Always,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BellMode {
@@ -802,6 +825,7 @@ impl Default for Config {
             gui_language: default_gui_language(),
             notify_threshold_secs: default_notify_threshold_secs(),
             restore_session: true,
+            confirm_close: ConfirmClose::WhenBusy,
             show_tray_icon: true,
             bell: BellMode::Visual,
             prompt_editor: true,
@@ -1758,6 +1782,36 @@ mod tests {
             last_used: now - 30 * day,
         };
         assert!(recent.score(now) > stale.score(now));
+    }
+
+    /// A config from before the setting keeps asking exactly what it asked
+    /// before, and a value this build does not know falls back to that too
+    /// rather than failing the file.
+    #[test]
+    fn confirm_close_defaults_to_asking_when_busy() {
+        assert_eq!(Config::default().confirm_close, ConfirmClose::WhenBusy);
+        let cfg: Config = serde_json::from_str(r#"{"restore_session": false}"#).unwrap();
+        assert_eq!(cfg.confirm_close, ConfirmClose::WhenBusy);
+        let cfg: Config = serde_json::from_str(r#"{"confirm_close": "sometimes"}"#).unwrap();
+        assert_eq!(cfg.confirm_close, ConfirmClose::WhenBusy);
+    }
+
+    #[test]
+    fn confirm_close_round_trips_under_its_written_names() {
+        for (mode, name) in [
+            (ConfirmClose::Never, "never"),
+            (ConfirmClose::WhenBusy, "when-busy"),
+            (ConfirmClose::Always, "always"),
+        ] {
+            let cfg = Config {
+                confirm_close: mode,
+                ..Config::default()
+            };
+            let json = serde_json::to_value(&cfg).unwrap();
+            assert_eq!(json["confirm_close"], name);
+            let back: Config = serde_json::from_value(json).unwrap();
+            assert_eq!(back.confirm_close, mode);
+        }
     }
 
     #[test]

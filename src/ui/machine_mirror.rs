@@ -215,6 +215,52 @@ impl MachineMirrors {
         cx.refresh_windows();
     }
 
+    /// Tabs this window has just closed into the machine's recently-closed
+    /// list (#1021), moved there in the mirror as the machine moves them.
+    ///
+    /// Nothing the machine sends says so — to other clients the close is a
+    /// plain `TabClosed`, and this window hears nothing of its own ops — yet
+    /// the home screen reads the list here to offer the tab back. Idempotent,
+    /// so a replay over a pull that already saw the close changes nothing.
+    pub fn note_remembered_closes(
+        cx: &mut App,
+        host: HostId,
+        machine_ws: WorkspaceId,
+        closed: Vec<TabId>,
+    ) {
+        let now = crate::ui::home::now_secs();
+        Self::write(cx, host, move |machine| {
+            let Some(ws) = machine.workspaces.iter_mut().find(|w| w.id == machine_ws) else {
+                return;
+            };
+            for id in &closed {
+                let Some(at) = ws.tabs.iter().position(|t| t.id == *id) else {
+                    continue;
+                };
+                let tab = ws.tabs.remove(at);
+                ws.closed.push(tty7_core::core::machine::ClosedTab {
+                    tab,
+                    closed_at: now,
+                });
+            }
+            let excess = ws
+                .closed
+                .len()
+                .saturating_sub(tty7_core::core::machine::MAX_CLOSED_TABS);
+            ws.closed.drain(..excess);
+        });
+    }
+
+    /// A closed tab the machine has handed back to this window.
+    pub fn note_reopened(cx: &mut App, host: HostId, machine_ws: WorkspaceId, tab: TabId) {
+        Self::write(cx, host, move |machine| {
+            if let Some(ws) = machine.workspaces.iter_mut().find(|w| w.id == machine_ws) {
+                ws.closed.retain(|c| c.tab.id != tab);
+            }
+        });
+        cx.refresh_windows();
+    }
+
     pub fn note_workspace_op(cx: &mut App, host: HostId, request: &ControlRequest) {
         let request = request.clone();
         // Read now rather than inside the write: a replay of the touch is the
@@ -552,6 +598,44 @@ mod tests {
 
     fn leaf_tab(pane: u64) -> Tab {
         Tab::leaf(pane)
+    }
+
+    /// The mirror moves a remembered close onto the workspace's list the way
+    /// the machine does — so the home screen can offer it back — and a reopen
+    /// takes it off again. Saying the same close twice moves nothing twice.
+    #[gpui::test]
+    fn a_remembered_close_moves_onto_the_mirrors_list_and_a_reopen_takes_it_off(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let id = WorkspaceId::new();
+            let (kept, closed) = (leaf_tab(1), leaf_tab(2));
+            MachineMirrors::install(cx, HostId::LOCAL, Machine::default());
+            MachineMirrors::note_synced_workspace(
+                cx,
+                HostId::LOCAL,
+                id,
+                vec![kept.clone(), closed.clone()],
+                None,
+            );
+
+            for _ in 0..2 {
+                MachineMirrors::note_remembered_closes(cx, HostId::LOCAL, id, vec![closed.id]);
+            }
+
+            let ws = |cx: &App| {
+                MachineMirrors::machine(cx, HostId::LOCAL)
+                    .unwrap()
+                    .workspaces[0]
+                    .clone()
+            };
+            assert_eq!(ws(cx).tabs, vec![kept.clone()]);
+            let listed: Vec<TabId> = ws(cx).closed.iter().map(|c| c.tab.id).collect();
+            assert_eq!(listed, vec![closed.id]);
+
+            MachineMirrors::note_reopened(cx, HostId::LOCAL, id, closed.id);
+            assert!(ws(cx).closed.is_empty());
+        });
     }
 
     #[gpui::test]

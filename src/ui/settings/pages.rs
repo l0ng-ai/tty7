@@ -1389,6 +1389,29 @@ impl Tty7App {
             TabBarPosition::Left => 1,
         };
         let sidebar_auto_grouping = cfg.sidebar_auto_grouping;
+        let confirm_idx = match cfg.confirm_close {
+            ConfirmClose::Never => 0,
+            ConfirmClose::WhenBusy => 1,
+            ConfirmClose::Always => 2,
+        };
+        let confirm = self.settings_choice(
+            "wt-confirm-close",
+            &[
+                t(L10nKey::ConfirmCloseNever),
+                t(L10nKey::ConfirmCloseWhenBusy),
+                t(L10nKey::ConfirmCloseAlways),
+            ],
+            confirm_idx,
+            cx,
+            |this, ix, _w, cx| {
+                let mode = match ix {
+                    0 => ConfirmClose::Never,
+                    1 => ConfirmClose::WhenBusy,
+                    _ => ConfirmClose::Always,
+                };
+                this.set_confirm_close(mode, cx);
+            },
+        );
         let new_tab = self.settings_choice(
             "wt-new-tab-pos",
             &[t(L10nKey::SettingsAfterCurrent), t(L10nKey::SettingsAtEnd)],
@@ -1447,6 +1470,12 @@ impl Tty7App {
                     t(L10nKey::SettingsSidebarGrouping),
                     t(L10nKey::SettingsSidebarGroupingDesc),
                     grouping,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsConfirmClose),
+                    t(L10nKey::SettingsConfirmCloseDesc),
+                    confirm,
                     cx,
                 ),
             ]
