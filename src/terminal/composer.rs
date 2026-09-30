@@ -86,12 +86,14 @@ const BOX_INSET: f32 = 16.;
 /// agent that has one.
 const BACK_TAB: &[u8] = b"\x1b[Z";
 
-/// The models `/model` takes by alias, each family with its 1M-context
-/// variant. An account without one says so itself.
-const CLAUDE_MODELS: [&str; 6] = [
+/// The models `/model` takes by alias, in the order its own list gives the
+/// families, with the 1M-context variants it offers. An account without one
+/// says so itself.
+const CLAUDE_MODELS: [&str; 7] = [
     "default",
     "opus",
     "opus[1m]",
+    "fable",
     "sonnet",
     "sonnet[1m]",
     "haiku",
@@ -628,6 +630,8 @@ fn model_alias(model: &str) -> Option<&'static str> {
         ["opus", "opus[1m]"]
     } else if model.contains("sonnet") {
         ["sonnet", "sonnet[1m]"]
+    } else if model.contains("fable") {
+        return Some("fable");
     } else if model.contains("haiku") {
         return Some("haiku");
     } else {
@@ -2161,7 +2165,8 @@ mod tests {
         assert_eq!(model_alias("claude-opus-5-5"), Some("opus"));
         assert_eq!(model_alias("claude-sonnet-5-5[1m]"), Some("sonnet[1m]"));
         assert_eq!(model_alias("claude-haiku-4-5-20251001"), Some("haiku"));
-        assert_eq!(model_alias("claude-fable-5-1"), None);
+        assert_eq!(model_alias("claude-fable-5-1"), Some("fable"));
+        assert_eq!(model_alias("gpt-5-codex"), None);
         assert_eq!(alias_label("sonnet[1m]"), "Sonnet · 1M");
         assert_eq!(alias_label("haiku"), "Haiku");
         assert_eq!(effort_label("medium"), "Medium");
