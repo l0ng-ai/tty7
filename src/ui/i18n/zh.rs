@@ -1728,6 +1728,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ComposerModeTip => "权限模式  ·  Shift+Tab 切换",
         L10nKey::ComposerModel => "模型",
         L10nKey::ComposerModelTip => "切换模型",
+        L10nKey::ComposerModelDefault => "默认（推荐）",
         L10nKey::ComposerEffort => "推理强度",
         L10nKey::ComposerEffortLevel => "强度：{level}",
         L10nKey::ComposerEffortTip => "推理强度",

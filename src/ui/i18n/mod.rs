@@ -1585,6 +1585,7 @@ l10n_keys! {
     ComposerModeTip,
     ComposerModel,
     ComposerModelTip,
+    ComposerModelDefault,
     ComposerEffort,
     ComposerEffortLevel,
     ComposerEffortTip,

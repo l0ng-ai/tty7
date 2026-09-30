@@ -1916,6 +1916,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ComposerModeTip => "権限モード  ·  Shift+Tab で切り替え",
         L10nKey::ComposerModel => "モデル",
         L10nKey::ComposerModelTip => "モデルを切り替え",
+        L10nKey::ComposerModelDefault => "デフォルト（推奨）",
         L10nKey::ComposerEffort => "推論の強さ",
         L10nKey::ComposerEffortLevel => "強さ: {level}",
         L10nKey::ComposerEffortTip => "推論の強さ",

@@ -15,7 +15,7 @@
 //! **What it sends.** Sending is typing, not an API: the text and then Enter,
 //! written to the pty — see [`submit_plan`] for why each agent is spoken to
 //! slightly differently. The toolbar's controls are the agent's own keys
-//! (Shift+Tab, its model picker, its `/effort` command), and what they show is
+//! (Shift+Tab, its `/model` and `/effort` commands), and what they show is
 //! what the agent said: the mode off the status row the box covers, the model
 //! and context off what its hooks report ([`crate::core::cli_agent::AgentReadout`]). Nothing reported
 //! means nothing shown.
@@ -81,10 +81,20 @@ const TEXT_PX: f32 = 13.5;
 const INPUT_PAD_X: f32 = 8.;
 const INPUT_PAD_Y: f32 = 2.;
 
-/// The keys the toolbar sends. Shift+Tab cycles the permission mode in every
-/// agent that has one; Alt+P is Claude Code's model picker.
+/// The key the toolbar sends: Shift+Tab cycles the permission mode in every
+/// agent that has one.
 const BACK_TAB: &[u8] = b"\x1b[Z";
-const CLAUDE_MODEL_PICKER: &[u8] = b"\x1bp";
+
+/// The models `/model` takes by alias, each family with its 1M-context
+/// variant. An account without one says so itself.
+const CLAUDE_MODELS: [&str; 6] = [
+    "default",
+    "opus",
+    "opus[1m]",
+    "sonnet",
+    "sonnet[1m]",
+    "haiku",
+];
 
 /// Claude Code's effort levels, lowest first. A model that takes fewer says so
 /// itself when `/effort` names one it does not.
@@ -603,8 +613,51 @@ pub(super) struct Composer {
     /// The effort level last picked from the toolbar. What the settings say
     /// catches up at the agent's next event; until then this is the truth.
     effort: Option<String>,
-    effort_menu: bool,
+    /// The model alias last picked from the toolbar, with the model the agent
+    /// reported then. Once it reports another, the pick has landed (or been
+    /// overridden) and the report is the truth again.
+    model: Option<(&'static str, Option<String>)>,
+    picker: Option<Picker>,
     _subs: Vec<Subscription>,
+}
+
+/// The toolbar's pop-up lists, each over its own button.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Picker {
+    Model,
+    Effort,
+}
+
+/// Which of [`CLAUDE_MODELS`] a reported model is: its family, and the 1M
+/// variant when the context window says so.
+fn model_alias(model: &str, window: Option<u64>) -> Option<&'static str> {
+    let long = model.contains("[1m]") || window.is_some_and(|w| w >= 1_000_000);
+    let pair = if model.contains("opus") {
+        ["opus", "opus[1m]"]
+    } else if model.contains("sonnet") {
+        ["sonnet", "sonnet[1m]"]
+    } else if model.contains("haiku") {
+        return Some("haiku");
+    } else {
+        return None;
+    };
+    Some(pair[long as usize])
+}
+
+/// How the model list spells an alias.
+fn alias_label(alias: &str) -> String {
+    if alias == "default" {
+        return t(L10nKey::ComposerModelDefault).to_string();
+    }
+    let (family, long) = match alias.strip_suffix("[1m]") {
+        Some(family) => (family, true),
+        None => (alias, false),
+    };
+    let mut name = family[..1].to_uppercase() + &family[1..];
+    if long {
+        name.push_str(" · 1M");
+    }
+    name
 }
 
 impl TerminalView {
@@ -664,7 +717,8 @@ impl TerminalView {
             files: Files::Unwalked,
             commands: None,
             effort: None,
-            effort_menu: false,
+            model: None,
+            picker: None,
             _subs: subs,
         });
     }
@@ -829,17 +883,23 @@ impl TerminalView {
         self.focus_composer(window, cx);
     }
 
-    fn toggle_effort_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_picker(&mut self, picker: Picker, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(c) = self.composer.as_mut() {
-            c.effort_menu = !c.effort_menu;
+            c.picker = (c.picker != Some(picker)).then_some(picker);
         }
         self.focus_composer(window, cx);
         cx.notify();
     }
 
-    /// Set the effort level the way the agent sets it: its `/effort` command,
-    /// sent like any message.
-    fn pick_effort(&mut self, level: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Pick from a toolbar list the way the agent takes it: its `/model` or
+    /// `/effort` command, sent like any message.
+    fn pick(
+        &mut self,
+        picker: Picker,
+        value: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(agent) = self.agent() else {
             return;
         };
@@ -849,13 +909,22 @@ impl TerminalView {
             .lock()
             .mode()
             .contains(TermMode::BRACKETED_PASTE);
+        let reported = self.agent_session().and_then(|s| s.readout.model);
         let Some(c) = self.composer.as_mut() else {
             return;
         };
-        c.effort = Some(level.to_string());
-        c.effort_menu = false;
-        c.queue
-            .extend(submit_plan(agent, &format!("/effort {level}"), bracketed));
+        let command = match picker {
+            Picker::Model => {
+                c.model = Some((value, reported));
+                format!("/model {value}")
+            }
+            Picker::Effort => {
+                c.effort = Some(value.to_string());
+                format!("/effort {value}")
+            }
+        };
+        c.picker = None;
+        c.queue.extend(submit_plan(agent, &command, bracketed));
         self.pump_composer(agent, cx);
         self.focus_composer(window, cx);
         cx.notify();
@@ -1245,7 +1314,8 @@ impl TerminalView {
         let element = match covering {
             // Over the input area, painted in the grid's own background so
             // what is under it is gone rather than showing through. At least
-            // as tall as the area; taller when the box needs it.
+            // as tall as the area; taller when the box needs it. The box sits
+            // at its top, where the agent's own input starts.
             Some(rows) => div()
                 .absolute()
                 .left_0()
@@ -1254,9 +1324,8 @@ impl TerminalView {
                 .min_h(self.line_height * rows as f32 + px(GRID_PAD_Y))
                 .flex()
                 .flex_col()
-                .justify_end()
                 .px(px(GRID_PAD_X))
-                .pb(px(12.))
+                .pb(px(8.))
                 .bg(cx.theme().background)
                 .occlude()
                 .child(frame)
@@ -1424,24 +1493,128 @@ impl TerminalView {
                 .mx(px(4.))
                 .bg(ink.opacity(0.12))
         });
-        let model = claude.then(|| {
-            let label = readout
-                .model
-                .as_deref()
-                .map(model_label)
-                .unwrap_or_else(|| t(L10nKey::ComposerModel).to_string());
-            tool("composer-model")
-                .gap(px(5.))
-                .tooltip(|window, cx| Tooltip::new(t(L10nKey::ComposerModelTip)).build(window, cx))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.toolbar_key(CLAUDE_MODEL_PICKER, window, cx)
-                }))
-                .child(label)
+        // A toolbar list, opened over its own button.
+        let popup = |picker: Picker,
+                     title: L10nKey,
+                     rows: Vec<(&'static str, String, bool)>,
+                     cx: &Context<Self>| {
+            div()
+                .absolute()
+                .left_0()
+                .bottom_full()
+                .mb(px(8.))
+                .min_w(px(180.))
+                .p(px(5.))
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .rounded(px(10.))
+                .bg(theme.popover)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_md()
+                .text_size(px(13.))
+                .text_color(ink)
+                .occlude()
                 .child(
-                    Icon::new(IconName::ChevronDown)
-                        .size(px(9.))
-                        .text_color(ink.opacity(0.4)),
+                    div()
+                        .h(px(24.))
+                        .px(px(9.))
+                        .flex()
+                        .items_center()
+                        .text_size(px(11.5))
+                        .text_color(ink.opacity(0.4))
+                        .child(t(title)),
                 )
+                .children(rows.into_iter().enumerate().map(|(i, (value, label, on))| {
+                    h_flex()
+                        .id(("composer-picker-row", i))
+                        .h(px(30.))
+                        .px(px(9.))
+                        .gap(px(16.))
+                        .rounded(px(6.))
+                        .hover(move |s| s.bg(ink.opacity(0.05)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                this.pick(picker, value, window, cx);
+                            }),
+                        )
+                        .child(div().flex_1().whitespace_nowrap().child(label))
+                        .child(div().w(px(12.)).when(on, |s| {
+                            s.child(
+                                Icon::new(IconName::Check)
+                                    .size(px(12.))
+                                    .text_color(ink.opacity(0.6)),
+                            )
+                        }))
+                }))
+        };
+        // A toolbar button that opens a list: the label, a chevron, and the
+        // list itself when it is open.
+        let picker_button = |picker: Picker,
+                             id: &'static str,
+                             label: String,
+                             tip: L10nKey,
+                             title: L10nKey,
+                             rows: Vec<(&'static str, String, bool)>,
+                             cx: &Context<Self>| {
+            let open = c.picker == Some(picker);
+            div()
+                .relative()
+                .flex_none()
+                .child(
+                    tool(id)
+                        .gap(px(5.))
+                        .when(open, |s| s.bg(ink.opacity(0.05)))
+                        .when(!open, |s| {
+                            s.tooltip(move |window, cx| Tooltip::new(t(tip)).build(window, cx))
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.toggle_picker(picker, window, cx)
+                        }))
+                        .child(label)
+                        .child(
+                            Icon::new(IconName::ChevronDown)
+                                .size(px(9.))
+                                .text_color(ink.opacity(0.4)),
+                        ),
+                )
+                .when(open, |s| s.child(popup(picker, title, rows, cx)))
+        };
+
+        let model = claude.then(|| {
+            let picked = c
+                .model
+                .as_ref()
+                .filter(|(_, then)| *then == readout.model)
+                .map(|(alias, _)| *alias);
+            let current = picked.or_else(|| {
+                readout
+                    .model
+                    .as_deref()
+                    .and_then(|m| model_alias(m, readout.context_window))
+            });
+            let label = match (picked, readout.model.as_deref()) {
+                (Some(alias), _) => alias_label(alias),
+                (None, Some(model)) => model_label(model),
+                (None, None) => t(L10nKey::ComposerModel).to_string(),
+            };
+            let rows = CLAUDE_MODELS
+                .iter()
+                .map(|&alias| (alias, alias_label(alias), current == Some(alias)))
+                .collect();
+            picker_button(
+                Picker::Model,
+                "composer-model",
+                label,
+                L10nKey::ComposerModelTip,
+                L10nKey::ComposerModel,
+                rows,
+                cx,
+            )
         });
         let current_effort = c.effort.clone().or_else(|| readout.effort.clone());
         let effort = claude.then(|| {
@@ -1449,17 +1622,22 @@ impl TerminalView {
                 Some(level) => t_fmt(L10nKey::ComposerEffortLevel, &[("level", level)]),
                 None => t(L10nKey::ComposerEffort).to_string(),
             };
-            tool("composer-effort")
-                .gap(px(5.))
-                .when(c.effort_menu, |s| s.bg(ink.opacity(0.05)))
-                .tooltip(|window, cx| Tooltip::new(t(L10nKey::ComposerEffortTip)).build(window, cx))
-                .on_click(cx.listener(|this, _, window, cx| this.toggle_effort_menu(window, cx)))
-                .child(label)
-                .child(
-                    Icon::new(IconName::ChevronDown)
-                        .size(px(9.))
-                        .text_color(ink.opacity(0.4)),
-                )
+            let rows = EFFORT_LEVELS
+                .iter()
+                .map(|&level| {
+                    let on = current_effort.as_deref() == Some(level);
+                    (level, level.to_string(), on)
+                })
+                .collect();
+            picker_button(
+                Picker::Effort,
+                "composer-effort",
+                label,
+                L10nKey::ComposerEffortTip,
+                L10nKey::ComposerEffort,
+                rows,
+                cx,
+            )
         });
         let context = readout
             .context_tokens
@@ -1610,61 +1788,6 @@ impl TerminalView {
                 }))
         });
 
-        let effort_popup = (claude && c.effort_menu).then(|| {
-            div()
-                .absolute()
-                .left_0()
-                .bottom_full()
-                .mb(px(6.))
-                .w(px(200.))
-                .p(px(5.))
-                .flex()
-                .flex_col()
-                .gap(px(1.))
-                .rounded(px(10.))
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.border)
-                .shadow_md()
-                .text_size(px(13.))
-                .child(
-                    div()
-                        .h(px(24.))
-                        .px(px(9.))
-                        .flex()
-                        .items_center()
-                        .text_size(px(11.5))
-                        .text_color(ink.opacity(0.4))
-                        .child(t(L10nKey::ComposerEffort)),
-                )
-                .children(EFFORT_LEVELS.iter().enumerate().map(|(i, level)| {
-                    let on = current_effort.as_deref() == Some(*level);
-                    h_flex()
-                        .id(("composer-effort-level", i))
-                        .h(px(30.))
-                        .px(px(9.))
-                        .gap(px(10.))
-                        .rounded(px(6.))
-                        .hover(move |s| s.bg(ink.opacity(0.05)))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                                window.prevent_default();
-                                cx.stop_propagation();
-                                this.pick_effort(level, window, cx);
-                            }),
-                        )
-                        .child(div().flex_1().child(*level))
-                        .when(on, |s| {
-                            s.child(
-                                Icon::new(IconName::Check)
-                                    .size(px(12.))
-                                    .text_color(ink.opacity(0.6)),
-                            )
-                        })
-                }))
-        });
-
         let menu_open = menu.is_some();
         Some(
             div()
@@ -1739,11 +1862,11 @@ impl TerminalView {
                         this.detach(last, cx);
                     }
                 }))
-                .when(c.effort_menu, |el| {
+                .when(c.picker.is_some(), |el| {
                     el.capture_action(cx.listener(|this, _: &input::Escape, _w, cx| {
                         cx.stop_propagation();
                         if let Some(c) = this.composer.as_mut() {
-                            c.effort_menu = false;
+                            c.picker = None;
                         }
                         cx.notify();
                     }))
@@ -1783,7 +1906,6 @@ impl TerminalView {
                     ))
                 })
                 .children(popup)
-                .children(effort_popup)
                 .child(
                     div()
                         .flex()
@@ -1995,6 +2117,26 @@ mod tests {
         assert_eq!(model_label("claude-sonnet-5-5[1m]"), "Sonnet 5.5");
         assert_eq!(model_label("claude-haiku-4-5-20251001"), "Haiku 4.5");
         assert_eq!(model_label("gpt-5-codex"), "gpt-5-codex");
+    }
+
+    #[test]
+    fn a_reported_model_is_checked_under_its_alias() {
+        assert_eq!(model_alias("claude-opus-5-5", Some(200_000)), Some("opus"));
+        assert_eq!(
+            model_alias("claude-opus-5-5", Some(1_000_000)),
+            Some("opus[1m]")
+        );
+        assert_eq!(
+            model_alias("claude-sonnet-5-5[1m]", None),
+            Some("sonnet[1m]")
+        );
+        assert_eq!(
+            model_alias("claude-haiku-4-5-20251001", None),
+            Some("haiku")
+        );
+        assert_eq!(model_alias("claude-fable-5-1", None), None);
+        assert_eq!(alias_label("sonnet[1m]"), "Sonnet · 1M");
+        assert_eq!(alias_label("haiku"), "Haiku");
     }
 
     #[test]

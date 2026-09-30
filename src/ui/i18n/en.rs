@@ -1863,6 +1863,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ComposerModeTip => "Permission mode  ·  Shift+Tab to cycle",
         L10nKey::ComposerModel => "Model",
         L10nKey::ComposerModelTip => "Switch model",
+        L10nKey::ComposerModelDefault => "Default (recommended)",
         L10nKey::ComposerEffort => "Effort",
         L10nKey::ComposerEffortLevel => "Effort: {level}",
         L10nKey::ComposerEffortTip => "Reasoning effort",
