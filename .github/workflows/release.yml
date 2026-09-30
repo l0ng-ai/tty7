@@ -35,11 +35,23 @@ jobs:
             os: windows
             arch: x86_64
             target: x86_64-pc-windows-msvc
+            wsl-server: tty7-server-linux-x86_64-musl
+          # Cross-compiled from the x64 runner, like `server-windows`'s ARM64
+          # leg. Experimental until it has shipped once: a failure here drops
+          # the ARM64 packages from the release instead of holding it up, and
+          # ARM64 machines still have the x64 build under emulation.
+          - runner: windows-latest
+            os: windows
+            arch: arm64
+            target: aarch64-pc-windows-msvc
+            wsl-server: tty7-server-linux-aarch64-musl
+            experimental: true
           - runner: ubuntu-latest
             os: linux
             arch: x86_64
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental == true }}
     steps:
       - name: Checkout tty7
         uses: actions/checkout@v4
@@ -69,6 +81,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tty7
+          # Two Windows legs share a runner OS; without the target in the key
+          # they would overwrite each other's cache.
+          key: ${{ matrix.target }}
 
       # `--locked` because a release must ship the dependency set the tag
       # recorded, not whatever cargo would re-resolve at build time. Safe here
@@ -147,7 +162,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          name: release-tty7-server-linux-x86_64-musl
+          name: release-${{ matrix.wsl-server }}
           path: tty7/bundled-server
 
       - name: Package Windows installer + zip
@@ -388,9 +403,10 @@ jobs:
   # redistributable — which a headless server is the likeliest machine to lack.
   # Symbols are stripped through the profile instead.
   #
-  # ARM64 is new ground for this repository's Windows builds (the app itself
-  # ships x64 only), so its leg may fail without holding up the release; an
-  # ARM64 host then gets a clear "could not download" instead of a server.
+  # ARM64 is new ground for this repository's Windows builds (the app's own
+  # ARM64 leg in `build` is experimental too), so its leg may fail without
+  # holding up the release; an ARM64 host then gets a clear "could not
+  # download" instead of a server.
   server-windows:
     strategy:
       fail-fast: false

@@ -84,11 +84,23 @@ jobs:
             os: windows
             arch: x86_64
             target: x86_64-pc-windows-msvc
+            wsl-server: tty7-server-linux-x86_64-musl
+          # Cross-compiled from the x64 runner, like `server-windows`'s ARM64
+          # leg. Experimental until it has shipped once: a failure here drops
+          # the ARM64 packages from the release instead of holding it up, and
+          # ARM64 machines still have the x64 build under emulation.
+          - runner: windows-latest
+            os: windows
+            arch: arm64
+            target: aarch64-pc-windows-msvc
+            wsl-server: tty7-server-linux-aarch64-musl
+            experimental: true
           - runner: ubuntu-latest
             os: linux
             arch: x86_64
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental == true }}
     steps:
       - name: Checkout tty7
         uses: actions/checkout@v4
@@ -121,6 +133,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tty7
+          # Two Windows legs share a runner OS; without the target in the key
+          # they would overwrite each other's cache.
+          key: ${{ matrix.target }}
 
       # The updater ships on every GUI platform now: inside the macOS bundle,
       # beside the Windows app, and inside the Linux AppImage.
@@ -200,7 +215,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          name: nightly-tty7-server-linux-x86_64-musl
+          name: nightly-${{ matrix.wsl-server }}
           path: tty7/bundled-server
 
       - name: Package Windows installer + zip

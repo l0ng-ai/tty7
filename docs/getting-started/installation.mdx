@@ -27,12 +27,17 @@ AppImage bundles its own X11/Wayland/font libraries.
   </Tab>
 
   <Tab title="Windows">
-    Two shapes, both x86-64:
+    Two shapes, each built for x86-64 (`x86_64`) and ARM64 (`arm64`, e.g.
+    Snapdragon laptops):
 
     | File | Use it when |
     |---|---|
-    | `tty7-<version>-windows-x86_64-setup.exe` | You want a normal install with Start-menu entries and an uninstaller. |
-    | `tty7-<version>-windows-x86_64.zip` | You want it portable — unzip anywhere and run `tty7-app.exe`. |
+    | `tty7-<version>-windows-<arch>-setup.exe` | You want a normal install with Start-menu entries and an uninstaller. |
+    | `tty7-<version>-windows-<arch>.zip` | You want it portable — unzip anywhere and run `tty7-app.exe`. |
+
+    The x86-64 build also runs on ARM64 Windows under emulation, but the
+    `arm64` one is native. Installing either over the other upgrades the same
+    install.
 
     The installer offers one optional setup task, off by default: **Add "Open in
     tty7" to the folder context menu**. It writes shell verbs under `HKCU`, so

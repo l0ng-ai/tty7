@@ -31,8 +31,9 @@ fn stage_bundled_conpty() {
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let vendored = match arch.as_str() {
         "x86_64" => "x64",
-        // Every other Windows architecture is unreleased, so nothing is
-        // vendored for it and the in-box conhost stays in charge.
+        "aarch64" => "arm64",
+        // 32-bit Windows is unreleased, so nothing is vendored for it and the
+        // in-box conhost stays in charge.
         _ => return,
     };
     let source = PathBuf::from("assets/windows/conpty").join(vendored);

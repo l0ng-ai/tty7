@@ -46,8 +46,11 @@ curl.exe -sL -o conpty.zip "https://api.nuget.org/v3-flatcontainer/microsoft.win
 Expand-Archive conpty.zip -DestinationPath conpty-pkg
 Copy-Item conpty-pkg/runtimes/win-x64/native/conpty.dll        x64/conpty.dll
 Copy-Item conpty-pkg/build/native/runtimes/x64/OpenConsole.exe x64/OpenConsole.exe
+Copy-Item conpty-pkg/runtimes/win-arm64/native/conpty.dll        arm64/conpty.dll
+Copy-Item conpty-pkg/build/native/runtimes/arm64/OpenConsole.exe arm64/OpenConsole.exe
 ```
 
-Only `x86_64-pc-windows-msvc` is released today, so only `x64/` is vendored. The
-package also carries `arm64` and `x86`; adding an architecture means adding the
-directory here and one `Copy-Item` in `.github/scripts/bundle-windows.ps1`.
+`x64/` and `arm64/` match the two released Windows targets
+(`x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`). The package also carries
+`x86`; adding an architecture means adding the directory here, one arm in
+`build.rs`, and one entry in `.github/scripts/bundle-windows.ps1`'s `$ConptyArch`.

@@ -2687,8 +2687,14 @@ impl WindowsUpdateLayout {
 
 #[cfg(target_os = "windows")]
 fn windows_package_for_layout(version: &str, layout: &WindowsUpdateLayout) -> Option<String> {
+    // Labelled like the macOS packages (`arm64`), not like the server assets
+    // (`aarch64`): these are the desktop app's names. An x64 build running
+    // under emulation on ARM64 keeps taking x64 packages — switching it to
+    // the native build is the user's reinstall, not something an update does.
     let arch = if cfg!(target_arch = "x86_64") {
         "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "arm64"
     } else {
         return None;
     };
@@ -3732,12 +3738,20 @@ mod tests {
         assert_eq!(
             windows_package_for_layout("26.8.2", &WindowsUpdateLayout::Inno(directory.clone()))
                 .as_deref(),
-            Some("tty7-26.8.2-windows-x86_64-setup.exe")
+            Some(if cfg!(target_arch = "aarch64") {
+                "tty7-26.8.2-windows-arm64-setup.exe"
+            } else {
+                "tty7-26.8.2-windows-x86_64-setup.exe"
+            })
         );
         assert_eq!(
             windows_package_for_layout("26.8.2", &WindowsUpdateLayout::Portable(directory))
                 .as_deref(),
-            Some("tty7-26.8.2-windows-x86_64.zip")
+            Some(if cfg!(target_arch = "aarch64") {
+                "tty7-26.8.2-windows-arm64.zip"
+            } else {
+                "tty7-26.8.2-windows-x86_64.zip"
+            })
         );
     }
 

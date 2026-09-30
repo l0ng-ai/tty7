@@ -7,6 +7,7 @@
 ;   /DStageDir=<abs path>   staged payload (app, CLI, updater, marker, resources)
 ;   /DOutputDir=<abs path>  where the setup exe is written
 ;   /DOutputName=<basename> setup exe filename, without ".exe"
+;   /DArchitectures=<id>    Inno architecture: x64compatible or arm64
 ;
 ; Defaults to a per-user install ({localappdata}\Programs\tty7 — no UAC
 ; prompt), with an "install for all users" escape hatch in the dialog. The
@@ -18,6 +19,9 @@
 #endif
 #ifndef VersionInfoVersion
   #error Missing /DVersionInfoVersion — this script is meant to be compiled via bundle-windows.ps1
+#endif
+#ifndef Architectures
+  #error Missing /DArchitectures — this script is meant to be compiled via bundle-windows.ps1
 #endif
 
 [Setup]
@@ -35,8 +39,8 @@ DefaultDirName={autopf}\tty7
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed={#Architectures}
+ArchitecturesInstallIn64BitMode={#Architectures}
 MinVersion=10.0
 LicenseFile={#StageDir}\LICENSE.txt
 SetupIconFile=..\..\assets\favicon.ico

@@ -50,7 +50,7 @@ Copy-Item README.md "$Stage/README.md"
 # swallows a pane's OSC 11 background query (#345); this pair forwards it. The
 # two files are one unit, so a missing half is an error rather than a warning.
 # See assets/windows/conpty/README.md.
-$ConptyArch = @{ 'x86_64-pc-windows-msvc' = 'x64' }[$Target]
+$ConptyArch = @{ 'x86_64-pc-windows-msvc' = 'x64'; 'aarch64-pc-windows-msvc' = 'arm64' }[$Target]
 if (-not $ConptyArch) { throw "no vendored ConPTY for $Target - see assets/windows/conpty/README.md" }
 foreach ($File in 'conpty.dll', 'OpenConsole.exe') {
     $Source = "assets/windows/conpty/$ConptyArch/$File"
@@ -68,9 +68,14 @@ Copy-Item "assets/windows/conpty/LICENSE.txt" "$Stage/LICENSE-ConPTY.txt"
 # naming the directories it searched.
 #
 # The *filename* is a contract too, not just the directory: `wsl.rs` looks for
-# `<dir>/<asset name>`, so this string has to stay whatever
-# `install::asset::ASSET_X86_64` says it is.
-$ServerAsset = "tty7-server-linux-x86_64-musl"
+# `<dir>/<asset name>`, so these strings have to stay whatever
+# `install::asset::ASSET_X86_64` / `ASSET_AARCH64` say they are. A WSL distro
+# runs the host's architecture, so each package carries the one that matches it.
+$ServerAsset = @{
+    'x86_64-pc-windows-msvc'  = 'tty7-server-linux-x86_64-musl'
+    'aarch64-pc-windows-msvc' = 'tty7-server-linux-aarch64-musl'
+}[$Target]
+if (-not $ServerAsset) { throw "no bundled WSL server asset known for $Target" }
 $ServerSrc = "bundled-server/$ServerAsset"
 if (Test-Path $ServerSrc) {
     New-Item -ItemType Directory -Force -Path "$Stage/server" | Out-Null
@@ -94,6 +99,15 @@ if ($PackageUpdater) {
     Set-Content -Path "$Stage/.tty7-inno-install" -Value 'inno-v1' -NoNewline -Encoding ascii
 }
 
+# Inno's architecture identifier for this payload. `x64compatible` also admits
+# ARM64 Windows, which runs the x64 build under emulation — so an ARM64 machine
+# can take either installer, and both upgrade the same install (one AppId).
+$InstallArch = @{
+    'x86_64-pc-windows-msvc'  = 'x64compatible'
+    'aarch64-pc-windows-msvc' = 'arm64'
+}[$Target]
+if (-not $InstallArch) { throw "no Inno architecture known for $Target" }
+
 # Installer, built from the same staged payload. ISCC is on PATH on GitHub's
 # windows-latest image; fall back to the default install location.
 $Iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
@@ -104,6 +118,7 @@ if (-not $Iscc) { $Iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
     "/DStageDir=$((Resolve-Path $Stage).Path)" `
     "/DOutputDir=$((Resolve-Path dist).Path)" `
     "/DOutputName=$Name-setup" `
+    "/DArchitectures=$InstallArch" `
     .github/scripts/windows-installer.iss
 if ($LASTEXITCODE -ne 0) { throw "ISCC exited with $LASTEXITCODE" }
 
