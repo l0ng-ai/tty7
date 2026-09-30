@@ -778,8 +778,11 @@ impl TerminalView {
                 window.focus(&self.focus_handle, cx);
             }
             _ => {
+                // Focused here and now. `refocus` is for a box coming back
+                // from stepping aside; set here it would outlive this focus
+                // and pull the keyboard back from the next click elsewhere.
                 c.open = true;
-                c.refocus = true;
+                c.refocus = false;
                 self.focus_composer(window, cx);
             }
         }

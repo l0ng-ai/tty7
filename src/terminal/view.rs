@@ -15800,6 +15800,33 @@ mod gpui_tests {
             "a sent message leaves the box"
         );
 
+        // A click on the grid takes the keyboard out of the box, and it
+        // stays out: the box does not pull it back on the next frame.
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| window.focus(&v.focus_handle, cx));
+            })
+            .unwrap();
+        draw(cx);
+        draw(cx);
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, _| {
+                    assert!(
+                        v.focus_handle.is_focused(window),
+                        "the keyboard stays where the click put it"
+                    );
+                    assert!(!v.composer_focused);
+                });
+            })
+            .unwrap();
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| v.toggle_composer(window, cx));
+            })
+            .unwrap();
+        draw(cx);
+
         // A picker takes the input's place. Past the grace period the box
         // steps aside and the keyboard goes to the TUI.
         DaemonMsg::Output(
