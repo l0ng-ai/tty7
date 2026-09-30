@@ -638,6 +638,17 @@ impl HookAgent {
         matches!(self, HookAgent::Crush | HookAgent::Cursor)
     }
 
+    /// The `name` tty7's hook-map entries carry, for an agent that shows one.
+    /// Gemini CLI prints `Executing Hook: <name>` above its input while a hook
+    /// runs, and falls back to the whole command — the quoted path of the
+    /// tty7 binary and its arguments — for a hook without a name.
+    fn hook_entry_name(self) -> Option<&'static str> {
+        match self {
+            HookAgent::Gemini => Some("tty7"),
+            _ => None,
+        }
+    }
+
     /// The schema version a hook map has to declare at its root, if the agent
     /// demands one. Cursor ignores a `hooks.json` without `"version": 1`, so a
     /// file tty7 creates — or finds without one — gets it; one the user already
@@ -1328,11 +1339,15 @@ fn hook_map_state(
             .get("hooks")
             .and_then(|h| h.get(hook_event))
             .and_then(|e| e.as_array())
-            .and_then(|list| list.iter().find_map(|m| marker_command(m, &marker)));
+            .and_then(|list| list.iter().find_map(|m| marker_hook(m, &marker)));
         match ours {
-            Some(cmd) => {
+            Some(hook) => {
                 any = true;
-                if cmd != target.hook_command(agent, tty7_event) {
+                let command = hook.get("command").and_then(|c| c.as_str());
+                let name = hook.get("name").and_then(|n| n.as_str());
+                if command != Some(target.hook_command(agent, tty7_event).as_str())
+                    || name != agent.hook_entry_name()
+                {
                     complete = false;
                 }
             }
@@ -1403,9 +1418,11 @@ fn hook_map_install(
         if agent.flat_hook_map() {
             list.push(serde_json::json!({ "command": command }));
         } else {
-            list.push(serde_json::json!({
-                "hooks": [{ "type": "command", "command": command }]
-            }));
+            let mut hook = serde_json::json!({ "type": "command", "command": command });
+            if let Some(name) = agent.hook_entry_name() {
+                hook["name"] = serde_json::Value::String(name.to_string());
+            }
+            list.push(serde_json::json!({ "hooks": [hook] }));
         }
     }
 
@@ -1457,22 +1474,26 @@ fn hook_map_uninstall(
 /// same level as its `matcher`. Both are one list under `hooks.<Event>`, so
 /// the state reader, the installer and the uninstaller all stay shared.
 fn marker_command<'a>(entry: &'a serde_json::Value, marker: &str) -> Option<&'a str> {
-    if let Some(command) = entry
-        .get("command")
-        .and_then(|c| c.as_str())
-        .filter(|c| c.contains(marker))
-    {
-        return Some(command);
+    marker_hook(entry, marker)?.get("command")?.as_str()
+}
+
+/// The object that holds tty7's command in an entry of a hook map — the
+/// entry itself when it is flat, else the hook nested in it — so the state
+/// reader can check the fields beside the command too.
+fn marker_hook<'a>(entry: &'a serde_json::Value, marker: &str) -> Option<&'a serde_json::Value> {
+    let ours = |h: &serde_json::Value| {
+        h.get("command")
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| c.contains(marker))
+    };
+    if ours(entry) {
+        return Some(entry);
     }
     entry
         .get("hooks")
         .and_then(|h| h.as_array())?
         .iter()
-        .find_map(|h| {
-            h.get("command")
-                .and_then(|c| c.as_str())
-                .filter(|c| c.contains(marker))
-        })
+        .find(|h| ours(h))
 }
 
 fn toml_hooks_state(
@@ -2949,6 +2970,80 @@ mod tests {
         assert_eq!(read()["version"], 1);
         assert_eq!(
             hooks_state(&target, HookAgent::Cursor),
+            HooksState::Installed
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Gemini shows a running hook by its `name`, else by its whole command,
+    /// so tty7's entries carry a short one — and an install from before they
+    /// did reads as outdated, for the launch-time refresh to name it.
+    #[test]
+    fn gemini_hooks_carry_a_short_name_and_unnamed_ones_are_refreshed() {
+        let host = FakeRemote::shared();
+        let base = std::env::temp_dir().join(format!("tty7-gemini-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let target = HookTarget::remote(&*host, base.clone());
+        let config = HookAgent::Gemini.target_path(&target);
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap()
+        };
+
+        install_hooks(&target, HookAgent::Gemini).expect("install succeeds");
+        for (hook, event) in GEMINI_HOOK_EVENTS {
+            assert_eq!(
+                read()["hooks"][*hook][0]["hooks"][0],
+                serde_json::json!({
+                    "type": "command",
+                    "command": target.hook_command(HookAgent::Gemini, event),
+                    "name": "tty7",
+                }),
+                "{hook}"
+            );
+        }
+
+        // What an earlier tty7 wrote: the same commands, no name.
+        let mut unnamed = serde_json::json!({ "ui": { "theme": "Default" }, "hooks": {} });
+        for (hook, event) in GEMINI_HOOK_EVENTS {
+            unnamed["hooks"][*hook] = serde_json::json!([{
+                "hooks": [{
+                    "type": "command",
+                    "command": target.hook_command(HookAgent::Gemini, event),
+                }]
+            }]);
+        }
+        std::fs::write(&config, unnamed.to_string()).unwrap();
+        assert_eq!(
+            hooks_state(&target, HookAgent::Gemini),
+            HooksState::Outdated
+        );
+        assert_eq!(refresh_hooks(&target), 1);
+        let refreshed = read();
+        assert_eq!(refreshed["ui"], unnamed["ui"]);
+        for (hook, _) in GEMINI_HOOK_EVENTS {
+            let entries = refreshed["hooks"][*hook].as_array().unwrap();
+            assert_eq!(entries.len(), 1, "{hook}: replaced, not doubled");
+            assert_eq!(entries[0]["hooks"][0]["name"], "tty7", "{hook}");
+        }
+        assert_eq!(
+            hooks_state(&target, HookAgent::Gemini),
+            HooksState::Installed
+        );
+
+        // Nobody else's entries get a name, and a named one of theirs is no
+        // reason to call Claude's hooks outdated.
+        install_hooks(&target, HookAgent::Claude).unwrap();
+        let claude = HookAgent::Claude.target_path(&target);
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&claude).unwrap()).unwrap();
+        assert!(
+            written["hooks"]["Stop"][0]["hooks"][0]
+                .get("name")
+                .is_none()
+        );
+        assert_eq!(
+            hooks_state(&target, HookAgent::Claude),
             HooksState::Installed
         );
 
