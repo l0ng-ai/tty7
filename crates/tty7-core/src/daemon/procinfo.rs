@@ -392,6 +392,63 @@ fn process_table() -> HashMap<u32, Row> {
     HashMap::new()
 }
 
+/// Whether `pid` runs under `ancestor`: is it, or is one of its parents.
+///
+/// What an agent hook's report is checked against before it is applied to a
+/// pane: the pane id it names comes from the environment, which a detached
+/// `tmux` server or a shell reached some other way carries into places that
+/// are not that pane any more.
+pub fn descends_from(pid: u32, ancestor: u32) -> bool {
+    runs_under(pid, ancestor, parent_pid)
+}
+
+/// How far up a chain [`descends_from`] climbs before giving up. A hook sits a
+/// handful of levels under the pane's shell: shell, agent, the agent's
+/// `sh -c`, the hook.
+const MAX_ANCESTRY: usize = 64;
+
+fn runs_under(pid: u32, ancestor: u32, parent_of: impl Fn(u32) -> Option<u32>) -> bool {
+    let mut cur = pid;
+    for _ in 0..MAX_ANCESTRY {
+        if cur == ancestor {
+            return true;
+        }
+        match parent_of(cur) {
+            Some(parent) if parent > 1 && parent != cur => cur = parent,
+            _ => return false,
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn parent_pid(pid: u32) -> Option<u32> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let ret = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    (ret == size).then_some(info.pbi_ppid)
+}
+
+#[cfg(target_os = "linux")]
+fn parent_pid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close = stat.rfind(')')?;
+    stat[close + 1..].split_whitespace().nth(1)?.parse().ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn parent_pid(pid: u32) -> Option<u32> {
+    process_table().get(&pid).map(|row| row.ppid)
+}
+
 /// The executable name behind a pid.
 ///
 /// One copy, shared with `pane.rs`. There used to be two, and each carried a
@@ -892,6 +949,46 @@ fn parse_listen_addr(name: &str) -> Option<(&str, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_process_runs_under_its_ancestors_only() {
+        // 1 ─ 10 (pane shell) ─ 20 (agent) ─ 30 (hook); 1 ─ 40 (tmux server) ─ 50
+        let parent_of = |pid: u32| match pid {
+            10 | 40 => Some(1),
+            20 => Some(10),
+            30 => Some(20),
+            50 => Some(40),
+            _ => None,
+        };
+        assert!(runs_under(30, 10, parent_of));
+        assert!(runs_under(10, 10, parent_of));
+        assert!(
+            !runs_under(50, 10, parent_of),
+            "a detached server is not the pane's"
+        );
+        assert!(
+            !runs_under(10, 30, parent_of),
+            "a parent is not under its child"
+        );
+        assert!(
+            !runs_under(99, 10, parent_of),
+            "a pid nobody knows is under nothing"
+        );
+        assert!(!runs_under(7, 10, |_| Some(7)), "a loop ends");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn this_process_descends_from_its_parent() {
+        let me = std::process::id();
+        let parent = unsafe { libc::getppid() } as u32;
+        assert_eq!(parent_pid(me), Some(parent));
+        assert!(descends_from(me, me));
+        if parent > 1 {
+            assert!(descends_from(me, parent));
+            assert!(!descends_from(parent, me));
+        }
+    }
 
     /// The uid every fabricated row belongs to unless a test says otherwise.
     const ME: u32 = 501;

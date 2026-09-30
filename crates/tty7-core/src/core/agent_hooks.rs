@@ -24,7 +24,34 @@ pub fn run_agent_hook(agent: &str, event: &str) {
     let Some(event) = effective_event(agent, event, &input) else {
         return;
     };
-    write_to_controlling_tty(&build_hook_sequence(agent, event, &input));
+    let body = build_hook_body(agent, event, &input);
+    if report_to_daemon(&body) {
+        return;
+    }
+    write_to_controlling_tty(&hook_sequence(&body));
+}
+
+/// Hand the report to the daemon that owns this pane, over its socket.
+///
+/// The tty is the channel of last resort. The agent draws on it too, and a
+/// tty write is not atomic — on macOS the kernel parks a writer mid-write
+/// whenever the output queue is full, which is exactly when an agent is busy
+/// redrawing — so the agent's output can land inside the sequence, break it,
+/// and leave the rest of it on screen as text. The socket has no such
+/// neighbour. It only works where the daemon runs, though: a hook the
+/// environment points at no daemon, at a daemon that predates this message,
+/// or at a pane it does not run in (see `DaemonPane::report_agent_event`)
+/// falls back to the tty.
+fn report_to_daemon(body: &str) -> bool {
+    let Some(pane) = std::env::var(crate::daemon::pane::TTY7_PANE_ENV)
+        .ok()
+        .and_then(|p| p.trim().parse::<u64>().ok())
+    else {
+        return false;
+    };
+    crate::client::PaneClient::local()
+        .report_agent_event(pane, std::process::id(), body)
+        .is_ok()
 }
 
 #[cfg(not(unix))]
@@ -97,7 +124,19 @@ fn effective_event<'a>(agent: &str, event: &'a str, stdin_json: &str) -> Option<
     Some(event)
 }
 
+#[cfg(test)]
 fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
+    hook_sequence(&build_hook_body(agent, event, stdin_json))
+}
+
+/// The report as it goes out on the tty: the body wrapped in the OSC 777
+/// notification the daemon's reader looks for.
+fn hook_sequence(body: &str) -> Vec<u8> {
+    format!("\x1b]777;notify;{AGENT_EVENT_SENTINEL};{body}\x07").into_bytes()
+}
+
+/// The report itself, as JSON — see `cli_agent::parse_agent_event_body`.
+fn build_hook_body(agent: &str, event: &str, stdin_json: &str) -> String {
     let payload: serde_json::Value =
         serde_json::from_str(stdin_json).unwrap_or(serde_json::json!({}));
     let mut body = serde_json::json!({
@@ -158,7 +197,7 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
     if agent == "claude" {
         claude_readout(event, &payload, &mut body);
     }
-    format!("\x1b]777;notify;{AGENT_EVENT_SENTINEL};{body}\x07").into_bytes()
+    body.to_string()
 }
 
 /// How much of the end of a transcript is read for the latest reply. One

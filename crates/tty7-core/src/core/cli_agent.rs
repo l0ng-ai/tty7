@@ -1199,8 +1199,12 @@ pub struct AgentEvent {
 pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
     let rest = payload.strip_prefix(b"777;notify;")?;
     let rest = rest.strip_prefix(AGENT_EVENT_SENTINEL.as_bytes())?;
-    let json = rest.strip_prefix(b";")?;
+    parse_agent_event_body(rest.strip_prefix(b";")?)
+}
 
+/// The JSON body of an agent event, without the OSC around it — what a hook
+/// hands the daemon over its socket.
+pub fn parse_agent_event_body(json: &[u8]) -> Option<AgentEvent> {
     #[derive(Deserialize)]
     struct Wire {
         #[serde(default)]

@@ -11,6 +11,10 @@ use crate::daemon::transport;
 
 const OPEN_REPLY_WAIT: Duration = Duration::from_secs(15);
 
+/// How long a hook waits on the daemon before it falls back to the tty. The
+/// agent waits on the hook, so this is time the agent stands still.
+const AGENT_EVENT_REPLY_WAIT: Duration = Duration::from_secs(2);
+
 #[derive(Clone, Debug, Default)]
 enum PaneEndpoint {
     #[default]
@@ -125,6 +129,27 @@ impl PaneClient {
             DaemonMsg::InputAck { .. } => Ok(()),
             DaemonMsg::Error(message) => Err(io::Error::other(message)),
             other => Err(unexpected_reply("SendInput", &other)),
+        }
+    }
+
+    /// Hand the daemon an agent hook's report about `pane_id` (see
+    /// `ClientMsg::AgentEvent`). An error — the pane is not this daemon's,
+    /// `pid` does not run in it, the daemon predates the message — means it
+    /// was not applied.
+    pub fn report_agent_event(&self, pane_id: u64, pid: u32, event: &str) -> io::Result<()> {
+        let mut stream = self.open()?;
+        let _ = stream.set_read_timeout(Some(AGENT_EVENT_REPLY_WAIT));
+        let _ = stream.set_write_timeout(Some(AGENT_EVENT_REPLY_WAIT));
+        ClientMsg::AgentEvent {
+            pane_id,
+            pid,
+            event: event.to_string(),
+        }
+        .encode(&mut stream)?;
+        match DaemonMsg::read(&mut stream)? {
+            DaemonMsg::InputAck { .. } => Ok(()),
+            DaemonMsg::Error(message) => Err(io::Error::other(message)),
+            other => Err(unexpected_reply("AgentEvent", &other)),
         }
     }
 

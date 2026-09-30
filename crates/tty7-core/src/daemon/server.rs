@@ -1152,6 +1152,23 @@ fn handle_conn(stream: Stream, registry: Arc<Registry>) -> anyhow::Result<()> {
             Ok(())
         }
 
+        ClientMsg::AgentEvent {
+            pane_id,
+            pid,
+            event,
+        } => {
+            let mut w = write_stream;
+            let applied = match registry.get(pane_id) {
+                Some(pane) => pane.report_agent_event(pid, &event),
+                None => Err(format!("no such pane {pane_id}")),
+            };
+            match applied {
+                Ok(()) => DaemonMsg::InputAck { pane_id }.encode(&mut w)?,
+                Err(message) => DaemonMsg::Error(message).encode(&mut w)?,
+            }
+            Ok(())
+        }
+
         ClientMsg::ListForwards { pane_id } => {
             let mut w = write_stream;
             let list = crate::daemon::ssh::SshManager::global().list_forwards(pane_id);

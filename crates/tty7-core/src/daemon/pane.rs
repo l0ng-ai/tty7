@@ -387,7 +387,7 @@ const TERM_PROGRAM_NAME: &str = "tty7";
 /// Publishing the directory instead means a CLI in this shell resolves both
 /// endpoints with the very same functions the server used to open them.
 const TTY7_CONFIG_DIR_ENV: &str = "TTY7_CONFIG_DIR";
-const TTY7_PANE_ENV: &str = "TTY7_PANE";
+pub(crate) const TTY7_PANE_ENV: &str = "TTY7_PANE";
 const TTY7_WS_ENV: &str = "TTY7_WS";
 
 fn config_dir_env() -> Option<String> {
@@ -2371,21 +2371,7 @@ impl DaemonPane {
                                 && let (Some(before), Some(after)) = (facts_before, facts_after)
                                 && facts_changed(&before, &after)
                             {
-                                crate::core::machine::observe_pane(pane, |p| {
-                                    if after.cwd.is_some() {
-                                        p.cwd = after.cwd;
-                                    }
-                                    // Unlike the others this one is also cleared
-                                    // by a reset, so it is assigned either way.
-                                    p.osc_title = after.osc_title;
-                                    p.agent = after.agent;
-                                    if after.shell.is_some() {
-                                        p.shell = after.shell;
-                                    }
-                                    if alive {
-                                        p.live = true;
-                                    }
-                                });
+                                publish_facts(pane, alive, after);
                             }
                         }
                         Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -2511,6 +2497,36 @@ impl DaemonPane {
     /// See [`expire_stale_agent`].
     pub fn expire_stale_agent(&self) {
         expire_stale_agent(&mut self.state.lock().unwrap(), std::time::Instant::now());
+    }
+
+    /// Apply an agent hook's report that came over the socket rather than
+    /// through the pane's output (`ClientMsg::AgentEvent`), exactly as if the
+    /// reader had found it there — once `pid`, the hook, is shown to run
+    /// under this pane's shell. The pane id the hook named came from its
+    /// environment, and a detached `tmux` server or the like carries that
+    /// into processes this pane does not own.
+    pub fn report_agent_event(&self, pid: u32, body: &str) -> Result<(), String> {
+        let shell = self
+            .pty()
+            .and_then(|pty| pty.shell_pid)
+            .ok_or_else(|| format!("pane {} runs no local process", self.id))?;
+        if !crate::daemon::procinfo::descends_from(pid, shell) {
+            return Err(format!("process {pid} does not run in pane {}", self.id));
+        }
+        let event = crate::core::cli_agent::parse_agent_event_body(body.as_bytes())
+            .ok_or_else(|| "not an agent event".to_string())?;
+        let mut st = self.state.lock().unwrap();
+        if !st.alive {
+            return Err(format!("pane {} is not running", self.id));
+        }
+        let before = observed_facts(&st);
+        apply_agent_signals(&mut st, vec![event], None);
+        let after = observed_facts(&st);
+        drop(st);
+        if !self.shutting_down.load(Ordering::SeqCst) && facts_changed(&before, &after) {
+            publish_facts(self.id, true, after);
+        }
+        Ok(())
     }
 
     pub fn gate(&self) -> Arc<OutputGate> {
@@ -3287,6 +3303,24 @@ fn observed_facts(st: &PaneState) -> ObservedFacts {
     }
 }
 
+fn publish_facts(pane: u64, alive: bool, after: ObservedFacts) {
+    crate::core::machine::observe_pane(pane, |p| {
+        if after.cwd.is_some() {
+            p.cwd = after.cwd;
+        }
+        // Unlike the others this one is also cleared by a reset, so it is
+        // assigned either way.
+        p.osc_title = after.osc_title;
+        p.agent = after.agent;
+        if after.shell.is_some() {
+            p.shell = after.shell;
+        }
+        if alive {
+            p.live = true;
+        }
+    });
+}
+
 fn facts_changed(before: &ObservedFacts, after: &ObservedFacts) -> bool {
     before.cwd != after.cwd
         || before.osc_title != after.osc_title
@@ -4052,6 +4086,54 @@ mod tests {
         let got = initial_working_directory(Some(file.clone()));
         assert_ne!(got.as_deref(), Some(file.as_path()));
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// A hook's report that arrives over the socket lands like one read off
+    /// the output — but only from a process that runs in the pane.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_hook_report_counts_only_from_inside_the_pane() {
+        let (tx, rx) = mpsc::channel();
+        let pane = DaemonPane::spawn(
+            1,
+            Some(PathBuf::from("/")),
+            ws(80, 24),
+            Some(ShellSpec {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exec cat".into()],
+                args_are_tty7_defaults: false,
+            }),
+            None,
+            None,
+            None,
+            false,
+            || {},
+        )
+        .expect("spawn pane");
+        pane.attach(tx);
+        let shell = pane.pty().and_then(|p| p.shell_pid).expect("shell pid");
+        let body = r#"{"v":1,"agent":"claude","event":"prompt-submit","session_id":"s-1"}"#;
+
+        let outsider = pane.report_agent_event(std::process::id(), body);
+        let garbled = pane.report_agent_event(shell, "{not json");
+        let applied = pane.report_agent_event(shell, body);
+        let mut status = None;
+        while let Ok(msg) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            if let DaemonMsg::AgentStatus(s) = msg {
+                status = s;
+            }
+        }
+        pane.kill();
+
+        assert!(
+            outsider.is_err(),
+            "the test runner does not run in the pane"
+        );
+        assert!(garbled.is_err());
+        assert_eq!(applied, Ok(()));
+        let status = status.expect("the report reached the pane's subscribers");
+        assert_eq!(status.status, crate::core::cli_agent::AgentStatus::Working);
+        assert_eq!(status.session_id.as_deref(), Some("s-1"));
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
