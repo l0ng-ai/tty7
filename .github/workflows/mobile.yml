@@ -135,6 +135,6 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
               --draft --latest=false --title "tty7 mobile $VERSION" \
-              --notes "Android: download the APK below on the phone and open it. Android asks once to allow installing apps from your browser or file manager. A later APK installs over this one and keeps your paired machines."
+              --notes-file .github/mobile-install.md
           fi
           gh release upload "$GITHUB_REF_NAME" dist/* --clobber --repo "$GITHUB_REPOSITORY"

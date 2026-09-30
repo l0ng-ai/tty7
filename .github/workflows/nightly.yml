@@ -546,7 +546,9 @@ jobs:
           git push -f origin "$GITHUB_SHA:refs/tags/nightly"
 
           TITLE="Nightly $VERSION"
-          NOTES="Automated nightly build of \`main\` @ ${GITHUB_SHA::7} ($(date -u +%F)). Rolling prerelease — assets are replaced every night; for the latest stable release see https://github.com/${GITHUB_REPOSITORY}/releases/latest."
+          NOTES="Automated nightly build of \`main\` @ ${GITHUB_SHA::7} ($(date -u +%F)). Rolling prerelease — assets are replaced every night; for the latest stable release see https://github.com/${GITHUB_REPOSITORY}/releases/latest.
+
+          $(cat .github/mobile-install.md)"
 
           if gh release view nightly >/dev/null 2>&1; then
             gh release edit nightly --prerelease --title "$TITLE" --notes "$NOTES"
