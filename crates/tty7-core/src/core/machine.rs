@@ -49,6 +49,19 @@ const BACKUP_GENERATIONS: usize = 3;
 /// *from*. Age is the only signal available here, so age is what is used.
 const BACKUP_SPACING: Duration = Duration::from_secs(300);
 
+/// How long a closed tab stays reopenable (#1021).
+///
+/// Long enough to cover "closed it before lunch, want it back after", short
+/// enough that a workspace's recently-closed list does not turn into an archive
+/// of terminal output nobody asked to keep: each entry pins its panes' last
+/// screens on disk, and those go when the entry does.
+pub const CLOSED_TAB_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How many closed tabs a workspace remembers, newest kept. The same bound the
+/// window's in-memory list has always had, so a workspace that moves from one
+/// to the other reopens exactly as far back as it did before.
+pub const MAX_CLOSED_TABS: usize = 20;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TabId(uuid::Uuid);
@@ -140,6 +153,60 @@ pub struct Workspace {
     /// the workspace draws the same groups in the same order.
     #[serde(default, skip_serializing_if = "WorkspaceGroups::is_empty")]
     pub groups: WorkspaceGroups,
+    /// Tabs closed from this workspace that ⌘⇧T can still put back, oldest
+    /// first (#1021).
+    ///
+    /// Kept here rather than in the window that closed them so the list
+    /// survives the window, the app and a restart of either, and reads the
+    /// same to every client of the workspace — a remote one included. Each
+    /// entry's panes were stopped when it closed; what it keeps is their
+    /// records in [`Machine::panes`] and, through those, their last screens on
+    /// disk, which is everything a reopen restores from. Bounded by
+    /// [`MAX_CLOSED_TABS`] and [`CLOSED_TAB_TTL`].
+    ///
+    /// Left out of the document while empty, so a tree that never closed a tab
+    /// this way reads the same to a build that predates the list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closed: Vec<ClosedTab>,
+}
+
+/// A tab closed from a workspace, as the machine keeps it for reopening.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClosedTab {
+    /// The tab as it stood when it closed: its id, name, group and layout. The
+    /// pane ids in `root` are dead by the time anyone reads this; they are the
+    /// keys a reopen asks the daemon to restore each pane's screen from.
+    pub tab: Tab,
+    /// When it closed, in seconds since the Unix epoch.
+    #[serde(default)]
+    pub closed_at: u64,
+}
+
+/// What [`MachineStore::tab_reopen`] hands back: the closed tab and the
+/// records of the panes it held, which are what its layout is rebuilt from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReopenedTab {
+    pub tab: Tab,
+    #[serde(default)]
+    pub closed_at: u64,
+    #[serde(default)]
+    pub panes: Vec<PaneRecord>,
+}
+
+/// What closing a tab into the recently-closed list leaves for the caller to
+/// do to the processes — see [`MachineStore::tab_close_remembered`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Remembered {
+    /// The tab's panes. Their processes are to be stopped with their screens
+    /// kept, because the entry that now names them restores from those.
+    pub stopped: Vec<u64>,
+    /// Panes the closing client held that the tree never recorded in the tab.
+    /// Nothing can bring them back, so they end the way a close always ended
+    /// a pane: screen and all.
+    pub strays: Vec<u64>,
+    /// Panes of entries the list outgrew, whose screens nothing will ask for
+    /// again.
+    pub dropped: Vec<u64>,
 }
 
 impl Default for Workspace {
@@ -152,6 +219,7 @@ impl Default for Workspace {
             active_tab: None,
             attachment: None,
             groups: WorkspaceGroups::default(),
+            closed: Vec::new(),
         }
     }
 }
@@ -751,6 +819,150 @@ impl MachineStore {
         })
     }
 
+    /// [`Self::tab_close`] for a tab the user closed and may want back: the tab
+    /// leaves the workspace exactly as a close takes it, and lands at the end
+    /// of the workspace's [`closed`](Workspace::closed) list instead of being
+    /// forgotten, with its panes' records kept for the reopen to read.
+    ///
+    /// `held` is every pane the closing client had in the tab. Ones the tree
+    /// never recorded there come back as strays, for the caller to end
+    /// outright. The list is trimmed to [`MAX_CLOSED_TABS`] and
+    /// [`CLOSED_TAB_TTL`] in the same mutation, measured from `now` (seconds
+    /// since the epoch) so the rule can be tested without a clock.
+    ///
+    /// Other windows hear the same `TabClosed` a plain close raises: to them
+    /// the tab is gone either way, and a client that predates the list decodes
+    /// nothing new.
+    pub fn tab_close_remembered(
+        &self,
+        workspace: WorkspaceId,
+        tab: TabId,
+        held: &[u64],
+        now: u64,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<Remembered> {
+        self.mutate(origin, |m| {
+            let ws = find_workspace(m, workspace)?;
+            let index = ws
+                .tabs
+                .iter()
+                .position(|t| t.id == tab)
+                .ok_or_else(|| not_found(format!("workspace {workspace} has no tab {tab}")))?;
+            let mut closed = ws.tabs.remove(index);
+            // A tab closed asleep comes back awake: reopening is itself the
+            // wake, through the same restore.
+            closed.hibernated = false;
+            let stopped = closed.root.pane_ids();
+            ws.closed.push(ClosedTab {
+                tab: closed,
+                closed_at: now,
+            });
+            let mut deltas = vec![(workspace, LayoutDelta::TabClosed { tab })];
+            if let Some(active) = heal_active_tab(ws, index) {
+                deltas.push((workspace, LayoutDelta::ActiveTabChanged { tab: active }));
+            }
+            let outgrown = prune_closed(m, now);
+            let orphans = collect_orphan_panes(m);
+            m.panes.retain(|p| !orphans.contains(&p.id));
+            let strays = held
+                .iter()
+                .copied()
+                .filter(|p| !stopped.contains(p) && !references(m, *p))
+                .collect();
+            let dropped = outgrown
+                .into_iter()
+                .filter(|p| orphans.contains(p))
+                .collect();
+            Ok((
+                Remembered {
+                    stopped,
+                    strays,
+                    dropped,
+                },
+                deltas,
+            ))
+        })
+    }
+
+    /// Take a closed tab back off the workspace's list: the one named, or the
+    /// most recently closed. `None` when there is nothing (left) to reopen.
+    ///
+    /// The tab does not go back into the workspace here. The client that asked
+    /// rebuilds it — every pane a fresh shell opening on its predecessor's
+    /// screen — and pushes it as the new tab it then is, under the same id.
+    ///
+    /// The records stay in the pane list until that push lands, and past it:
+    /// a record is what keeps the sweeps off a pane's stored screen, and the
+    /// screen is read when the successor spawns, which for a remote pane can
+    /// be a round trip after this answers. The next close collects them.
+    ///
+    /// Also trims the list, so an entry that has aged out is never handed back.
+    /// The second half of the answer is the panes that trim dropped.
+    pub fn tab_reopen(
+        &self,
+        workspace: WorkspaceId,
+        tab: Option<TabId>,
+        now: u64,
+        origin: Option<SubscriberId>,
+    ) -> io::Result<(Option<ReopenedTab>, Vec<u64>)> {
+        self.mutate(origin, |m| {
+            find_workspace(m, workspace)?;
+            let outgrown = prune_closed(m, now);
+            let orphans = collect_orphan_panes(m);
+            m.panes.retain(|p| !orphans.contains(&p.id));
+            let dropped: Vec<u64> = outgrown
+                .into_iter()
+                .filter(|p| orphans.contains(p))
+                .collect();
+            let ws = find_workspace(m, workspace)?;
+            let at = match tab {
+                Some(id) => ws.closed.iter().rposition(|c| c.tab.id == id),
+                None => ws.closed.len().checked_sub(1),
+            };
+            let Some(at) = at else {
+                return Ok(((None, dropped), Vec::new()));
+            };
+            let entry = ws.closed.remove(at);
+            let ids = entry.tab.root.pane_ids();
+            let panes = m
+                .panes
+                .iter()
+                .filter(|p| ids.contains(&p.id))
+                .cloned()
+                .collect();
+            let reopened = ReopenedTab {
+                tab: entry.tab,
+                closed_at: entry.closed_at,
+                panes,
+            };
+            Ok(((Some(reopened), dropped), Vec::new()))
+        })
+    }
+
+    /// Drop the closed tabs that have aged past [`CLOSED_TAB_TTL`], with their
+    /// records. Answers the panes dropped, whose stored screens the caller
+    /// forgets. Run by the daemon on a timer, so an entry expires on time
+    /// whether or not anyone closes or reopens a tab.
+    pub fn expire_closed_tabs(&self, now: u64) -> Vec<u64> {
+        let expired = self.mutate(None, |m| {
+            let outgrown = prune_closed(m, now);
+            if outgrown.is_empty() {
+                return Ok((Vec::new(), Vec::new()));
+            }
+            let orphans = collect_orphan_panes(m);
+            m.panes.retain(|p| !orphans.contains(&p.id));
+            let dropped = outgrown
+                .into_iter()
+                .filter(|p| orphans.contains(p))
+                .collect();
+            Ok((dropped, Vec::new()))
+        });
+        expired.unwrap_or_else(|e| {
+            log::warn!("could not expire closed tabs: {e}");
+            Vec::new()
+        })
+    }
+
     pub fn tab_rename(
         &self,
         workspace: WorkspaceId,
@@ -1320,16 +1532,31 @@ fn heal_active_tab(ws: &mut Workspace, removed: usize) -> Option<TabId> {
     Some(active)
 }
 
+/// A pane registers once: a second tab, a second split, a second seed for the
+/// same id is refused. The exception is a record nothing names any more — left
+/// by a reopened tab ([`MachineStore::tab_reopen`]) — which the pane it was
+/// kept for claims back, taking over what the tree still knew about it.
 fn register_pane(m: &mut Machine, seed: PaneSeed, live: bool) -> io::Result<()> {
-    let shown = m
-        .workspaces
-        .iter()
-        .any(|w| w.tabs.iter().any(|t| t.root.contains(seed.pane)));
-    if shown || m.panes.iter().any(|p| p.id == seed.pane) {
+    if references(m, seed.pane) {
         return Err(refuse(format!(
             "pane {} is already part of this machine's tree",
             seed.pane
         )));
+    }
+    if let Some(record) = m.panes.iter_mut().find(|p| p.id == seed.pane) {
+        let kept = std::mem::replace(record, seed.into_record(live));
+        record.title = kept.title;
+        record.osc_title = kept.osc_title;
+        if record.cwd.is_none() {
+            record.cwd = kept.cwd;
+        }
+        if record.agent.is_none() {
+            record.agent = kept.agent;
+        }
+        if record.shell.is_none() {
+            record.shell = kept.shell;
+        }
+        return Ok(());
     }
     if m.panes.len() >= MAX_PANES {
         return Err(refuse(format!(
@@ -1340,16 +1567,48 @@ fn register_pane(m: &mut Machine, seed: PaneSeed, live: bool) -> io::Result<()> 
     Ok(())
 }
 
+/// Whether a tab names `pane` — an open one, or one a workspace keeps to
+/// reopen. A closed tab's panes are still the tree's: their records and stored
+/// screens are what the reopen is made of.
+fn references(m: &Machine, pane: u64) -> bool {
+    m.workspaces.iter().any(|w| {
+        w.tabs.iter().any(|t| t.root.contains(pane))
+            || w.closed.iter().any(|c| c.tab.root.contains(pane))
+    })
+}
+
 fn collect_orphan_panes(m: &Machine) -> Vec<u64> {
     m.panes
         .iter()
         .map(|p| p.id)
-        .filter(|id| {
-            !m.workspaces
-                .iter()
-                .any(|w| w.tabs.iter().any(|t| t.root.contains(*id)))
-        })
+        .filter(|id| !references(m, *id))
         .collect()
+}
+
+/// Trim every workspace's recently-closed list to what it may keep at `now`:
+/// nothing older than [`CLOSED_TAB_TTL`], and the newest [`MAX_CLOSED_TABS`]
+/// of the rest. Answers the panes of the entries dropped.
+///
+/// An entry stamped in the future — a clock set back since it closed — counts
+/// as just closed rather than as expired: losing it to a clock change would be
+/// a surprise, keeping it a little longer is not.
+fn prune_closed(m: &mut Machine, now: u64) -> Vec<u64> {
+    let ttl = CLOSED_TAB_TTL.as_secs();
+    let mut dropped = Vec::new();
+    for ws in &mut m.workspaces {
+        ws.closed.retain(|c| {
+            let keep = now.saturating_sub(c.closed_at) < ttl;
+            if !keep {
+                dropped.extend(c.tab.root.pane_ids());
+            }
+            keep
+        });
+        let excess = ws.closed.len().saturating_sub(MAX_CLOSED_TABS);
+        for c in ws.closed.drain(..excess) {
+            dropped.extend(c.tab.root.pane_ids());
+        }
+    }
+    dropped
 }
 
 fn clamp_ratio(ratio: f32) -> io::Result<f32> {
@@ -1823,7 +2082,7 @@ fn env_dir(key: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn unix_now() -> u64 {
+pub fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -3068,5 +3327,255 @@ mod tests {
         };
         let back: Tab = serde_json::from_str(&serde_json::to_string(&asleep).unwrap()).unwrap();
         assert!(back.hibernated);
+    }
+
+    const NOON: u64 = 1_800_000_000;
+
+    /// A tab closed to be remembered leaves the workspace the way any close
+    /// takes it — other windows hear `TabClosed` — and lands on the list with
+    /// its layout and its panes' records, which is everything a reopen reads.
+    #[test]
+    fn a_remembered_close_keeps_the_tab_and_its_pane_records() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        store
+            .pane_split(ws, 1, Axis::Horizontal, 0.5, seed(2, "/else"), false, None)
+            .unwrap();
+        let (_sub, heard) = recorded(&store);
+
+        let closed = store
+            .tab_close_remembered(ws, tab.id, &[1, 2], NOON, None)
+            .unwrap();
+
+        assert_eq!(closed.stopped, vec![1, 2]);
+        assert!(closed.strays.is_empty() && closed.dropped.is_empty());
+        let m = store.machine();
+        assert!(m.workspaces[0].tabs.is_empty());
+        let entry = &m.workspaces[0].closed[0];
+        assert_eq!(entry.tab.id, tab.id);
+        assert_eq!(entry.closed_at, NOON);
+        assert_eq!(entry.tab.root.pane_ids(), vec![1, 2]);
+        assert!(
+            m.panes.iter().any(|p| p.id == 1) && m.panes.iter().any(|p| p.id == 2),
+            "the records are what the reopen restores cwd and shell from"
+        );
+        let heard = heard.lock().unwrap();
+        assert!(matches!(&heard[0].1, LayoutDelta::TabClosed { tab: t } if *t == tab.id));
+    }
+
+    /// A pane the window held but never got into the tree has no entry to
+    /// come back through, so the close ends it outright; one some other tab
+    /// still stands on is not the closing tab's to end at all.
+    #[test]
+    fn panes_the_tree_never_recorded_in_the_tab_are_strays() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        store
+            .tab_create(ws, None, seed(5, "/other"), None, None)
+            .unwrap();
+
+        let closed = store
+            .tab_close_remembered(ws, tab.id, &[1, 9, 5], NOON, None)
+            .unwrap();
+
+        assert_eq!(closed.stopped, vec![1]);
+        assert_eq!(closed.strays, vec![9]);
+    }
+
+    /// Reopening hands back the newest entry with its records, and takes it
+    /// off the list; asking again walks back through the older ones, and an
+    /// empty list answers nothing rather than an error.
+    #[test]
+    fn reopening_takes_the_newest_closed_tab_off_the_list() {
+        let (store, _dir, ws, first) = store_with_tab();
+        let second = store
+            .tab_create(ws, None, seed(2, "/second"), None, None)
+            .unwrap();
+        store
+            .tab_close_remembered(ws, first.id, &[1], NOON, None)
+            .unwrap();
+        store
+            .tab_close_remembered(ws, second.id, &[2], NOON + 5, None)
+            .unwrap();
+
+        let (reopened, dropped) = store.tab_reopen(ws, None, NOON + 10, None).unwrap();
+        let reopened = reopened.expect("two tabs were closed");
+        assert!(dropped.is_empty());
+        assert_eq!(reopened.tab.id, second.id);
+        assert_eq!(reopened.closed_at, NOON + 5);
+        assert_eq!(reopened.panes.len(), 1);
+        assert_eq!(reopened.panes[0].cwd.as_deref(), Some("/second"));
+
+        let (older, _) = store.tab_reopen(ws, None, NOON + 10, None).unwrap();
+        assert_eq!(older.unwrap().tab.id, first.id);
+        let (none, _) = store.tab_reopen(ws, None, NOON + 10, None).unwrap();
+        assert!(none.is_none());
+        assert!(store.machine().workspaces[0].closed.is_empty());
+    }
+
+    /// The tab a reopen rebuilds is pushed as a new tab under its old id, and
+    /// a successor still connecting stands on its predecessor's id. The record
+    /// the reopen left behind is claimed, not refused — and a pane an open tab
+    /// really does hold still cannot be registered twice.
+    #[test]
+    fn a_reopened_tab_can_be_pushed_back_under_its_old_ids() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        store
+            .tab_close_remembered(ws, tab.id, &[1], NOON, None)
+            .unwrap();
+        store.tab_reopen(ws, None, NOON, None).unwrap();
+
+        let back = store
+            .tab_create(ws, None, PaneSeed::bare(1), Some(tab.id), None)
+            .unwrap();
+
+        assert_eq!(back.id, tab.id);
+        let m = store.machine();
+        let record = m.panes.iter().find(|p| p.id == 1).unwrap();
+        assert_eq!(
+            record.cwd.as_deref(),
+            Some("/work"),
+            "what the seed does not say, the kept record still does"
+        );
+        assert_eq!(m.panes.iter().filter(|p| p.id == 1).count(), 1);
+        let twice = store.tab_create(ws, None, PaneSeed::bare(1), None, None);
+        assert_eq!(twice.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// A closed tab's panes are the tree's until the entry goes: an ordinary
+    /// close elsewhere in the machine must not collect their records, or the
+    /// sweeps would take the screens the reopen is going to ask for.
+    #[test]
+    fn another_close_does_not_collect_a_remembered_tabs_records() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        let other = store
+            .tab_create(ws, None, seed(2, "/other"), None, None)
+            .unwrap();
+        store
+            .tab_close_remembered(ws, tab.id, &[1], NOON, None)
+            .unwrap();
+
+        let orphans = store.tab_close(ws, other.id, None).unwrap();
+
+        assert_eq!(orphans, vec![2]);
+        assert!(store.machine().panes.iter().any(|p| p.id == 1));
+    }
+
+    /// Entries last a day. The one past it is dropped with its records and
+    /// answered, so its screen can be forgotten; the one inside it stays.
+    #[test]
+    fn closed_tabs_expire_after_a_day_with_their_records() {
+        let (store, _dir, ws, old) = store_with_tab();
+        let fresh = store
+            .tab_create(ws, None, seed(2, "/fresh"), None, None)
+            .unwrap();
+        let day = CLOSED_TAB_TTL.as_secs();
+        store
+            .tab_close_remembered(ws, old.id, &[1], NOON, None)
+            .unwrap();
+        store
+            .tab_close_remembered(ws, fresh.id, &[2], NOON + 60, None)
+            .unwrap();
+
+        assert!(store.expire_closed_tabs(NOON + day - 1).is_empty());
+        assert_eq!(store.expire_closed_tabs(NOON + day), vec![1]);
+
+        let m = store.machine();
+        let left: Vec<TabId> = m.workspaces[0].closed.iter().map(|c| c.tab.id).collect();
+        assert_eq!(left, vec![fresh.id]);
+        assert!(!m.panes.iter().any(|p| p.id == 1));
+        assert!(m.panes.iter().any(|p| p.id == 2));
+        let (reopened, _) = store.tab_reopen(ws, None, NOON + 2 * day, None).unwrap();
+        assert!(
+            reopened.is_none(),
+            "an entry past its day is never handed back, timer or no timer"
+        );
+    }
+
+    /// A clock set back since a tab closed must not expire it on the spot.
+    #[test]
+    fn an_entry_stamped_in_the_future_is_kept() {
+        let (store, _dir, ws, tab) = store_with_tab();
+        store
+            .tab_close_remembered(ws, tab.id, &[1], NOON, None)
+            .unwrap();
+        assert!(store.expire_closed_tabs(NOON - 3600).is_empty());
+        assert_eq!(store.machine().workspaces[0].closed.len(), 1);
+    }
+
+    /// The list holds the newest [`MAX_CLOSED_TABS`]; the close that makes it
+    /// one too long drops the oldest and answers its panes.
+    #[test]
+    fn the_list_keeps_only_the_newest_twenty() {
+        let (store, _dir, ws, first) = store_with_tab();
+        store
+            .tab_close_remembered(ws, first.id, &[1], NOON, None)
+            .unwrap();
+        for n in 0..MAX_CLOSED_TABS as u64 {
+            let pane = 100 + n;
+            let tab = store
+                .tab_create(ws, None, seed(pane, "/t"), None, None)
+                .unwrap();
+            let closed = store
+                .tab_close_remembered(ws, tab.id, &[pane], NOON + 1 + n, None)
+                .unwrap();
+            let expect: Vec<u64> = match n + 1 == MAX_CLOSED_TABS as u64 {
+                true => vec![1],
+                false => Vec::new(),
+            };
+            assert_eq!(closed.dropped, expect, "after close {n}");
+        }
+        let m = store.machine();
+        assert_eq!(m.workspaces[0].closed.len(), MAX_CLOSED_TABS);
+        assert!(m.workspaces[0].closed.iter().all(|c| c.tab.id != first.id));
+        assert!(!m.panes.iter().any(|p| p.id == 1));
+    }
+
+    /// The list is in the document, so it outlives the app and the daemon —
+    /// the whole point of keeping it here rather than in the window.
+    #[test]
+    fn closed_tabs_survive_the_tree_being_read_back() {
+        let (store, dir, ws, tab) = store_with_tab();
+        store.tab_set_hibernated(ws, tab.id, true, None).unwrap();
+        store
+            .tab_close_remembered(ws, tab.id, &[1], NOON, None)
+            .unwrap();
+        drop(store);
+
+        let reopened = MachineStore::open(dir.path().join(MACHINE_FILE));
+        let m = reopened.machine();
+        let entry = &m.workspaces[0].closed[0];
+        assert_eq!(entry.tab.id, tab.id);
+        assert_eq!(entry.closed_at, NOON);
+        assert!(!entry.tab.hibernated, "reopening is the wake");
+        assert_eq!(
+            m.panes.iter().find(|p| p.id == 1).unwrap().cwd.as_deref(),
+            Some("/work")
+        );
+    }
+
+    /// A tree written before the list existed has no `closed` key and reads as
+    /// an empty list; a workspace with nothing closed writes no key, so an
+    /// older build reads this build's tree unchanged.
+    #[test]
+    fn a_tree_without_the_list_loads_and_an_empty_list_is_not_written() {
+        let old = r#"{"workspaces":[{"id":"6f1c0c0e-3b1a-4a8e-9d57-3c2b7c1f0a11","tabs":[]}],"panes":[]}"#;
+        let m = parse_machine(old).unwrap();
+        assert!(m.workspaces[0].closed.is_empty());
+
+        let json = serde_json::to_string(&Workspace::default()).unwrap();
+        assert!(!json.contains("closed"), "{json}");
+
+        let entry = ClosedTab {
+            tab: Tab::leaf(3),
+            closed_at: NOON,
+        };
+        let ws = Workspace {
+            closed: vec![entry.clone()],
+            ..Workspace::default()
+        };
+        let back: Workspace = serde_json::from_str(&serde_json::to_string(&ws).unwrap()).unwrap();
+        assert_eq!(back.closed, vec![entry]);
+        let stampless: ClosedTab =
+            serde_json::from_str(r#"{"tab":{"root":{"Leaf":{"pane":3}}}}"#).unwrap();
+        assert_eq!(stampless.closed_at, 0);
     }
 }

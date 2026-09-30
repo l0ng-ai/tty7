@@ -109,6 +109,10 @@ impl crate::host::server::PaneDirectory for Registry {
         hibernate_pane(self, pane_id);
     }
 
+    fn close_pane(&self, pane_id: u64) {
+        kill_pane(self, pane_id);
+    }
+
     fn agent_states(&self) -> Vec<crate::daemon::control::PaneAgentState> {
         let panes: Vec<Arc<DaemonPane>> = self.panes.lock().unwrap().values().cloned().collect();
         let mut states: Vec<_> = panes.iter().filter_map(|p| p.agent_state()).collect();
@@ -233,6 +237,14 @@ fn spawn_snapshot_keeper(registry: Arc<Registry>) {
                     let (segments, title, mark) = pane.scrollback_snapshot();
                     crate::daemon::scrollback::save(pane.id, &segments, title.as_deref());
                     marks.insert(pane.id, mark);
+                }
+                // Before the sweep, so a closed tab that has aged out takes its
+                // screens with it on this pass rather than the next.
+                if let Some(store) = crate::core::machine::observed_store() {
+                    let now = crate::core::machine::unix_now();
+                    for pane in store.expire_closed_tabs(now) {
+                        kill_pane(&registry, pane);
+                    }
                 }
                 let restorable = restorable_pane_ids(&registry);
                 crate::daemon::scrollback::sweep(&restorable);

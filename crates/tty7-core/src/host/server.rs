@@ -38,6 +38,10 @@ pub trait PaneDirectory: Send + Sync {
     /// screen stays on disk for the wake to open with. Unlike closing a pane,
     /// which drops that screen because nobody will ask for it again.
     fn hibernate_pane(&self, pane_id: u64);
+    /// End a pane for good: the processes go and so does its stored screen,
+    /// because nothing will ask to restore it again — a pane the tree never
+    /// recorded, or one whose closed tab has aged off the recently-closed list.
+    fn close_pane(&self, pane_id: u64);
 }
 
 #[derive(Clone, Default)]
@@ -396,6 +400,9 @@ fn handshake<R: Read>(
     // or its shells stopped with nothing saying the tab is meant to wake.
     if services.machine.is_some() && services.panes.is_some() {
         features.push(feature::TAB_HIBERNATE.to_string());
+        // The same pair for the same reason: a closed tab is an entry in the
+        // tree *and* screens kept by whoever stops the panes.
+        features.push(feature::CLOSED_TABS.to_string());
     }
     // The pane daemon's features ride along, same as `protocol_version` above:
     // a pane connection answers exactly one message, so a client that wanted
@@ -796,6 +803,50 @@ fn run_request(
             ),
             Vec::new(),
         ),
+        ControlRequest::TabCloseRemembered {
+            workspace,
+            tab,
+            panes,
+        } => {
+            let Some(directory) = conn.panes.as_ref() else {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "this peer serves no panes, so it cannot keep a closed tab to reopen",
+                ));
+            };
+            let closed = conn.machine()?.tab_close_remembered(
+                workspace,
+                tab,
+                &panes,
+                crate::core::machine::unix_now(),
+                conn.machine_origin,
+            )?;
+            // After the entry is in the tree, for the reason a sleeping tab's
+            // panes are stopped after its mark: a pane stopped first reads, to
+            // anyone looking in between, as one that died with nothing to
+            // restore it for — and the sweeps take its screen.
+            for pane in &closed.stopped {
+                directory.hibernate_pane(*pane);
+            }
+            for pane in closed.strays.iter().chain(&closed.dropped) {
+                directory.close_pane(*pane);
+            }
+            (ReplyOk::Panes(closed.stopped), Vec::new())
+        }
+        ControlRequest::TabReopen { workspace, tab } => {
+            let (reopened, dropped) = conn.machine()?.tab_reopen(
+                workspace,
+                tab,
+                crate::core::machine::unix_now(),
+                conn.machine_origin,
+            )?;
+            if let Some(directory) = conn.panes.as_ref() {
+                for pane in &dropped {
+                    directory.close_pane(*pane);
+                }
+            }
+            (ReplyOk::ReopenedTab(reopened.map(Box::new)), Vec::new())
+        }
         ControlRequest::TabRename {
             workspace,
             tab,
@@ -1794,6 +1845,8 @@ mod aggregate_tests {
 
         fn hibernate_pane(&self, _pane_id: u64) {}
 
+        fn close_pane(&self, _pane_id: u64) {}
+
         fn agent_states(&self) -> Vec<PaneAgentState> {
             vec![PaneAgentState {
                 pane_id: 7,
@@ -2008,6 +2061,8 @@ mod aggregate_tests {
             });
             self.stopped.lock().unwrap().push((pane_id, asleep));
         }
+
+        fn close_pane(&self, _pane_id: u64) {}
     }
 
     fn seed(pane: u64) -> machine::PaneSeed {
@@ -2118,6 +2173,138 @@ mod aggregate_tests {
                 .is_err()
         );
         assert!(!store.machine().workspaces[0].tabs[0].hibernated);
+    }
+
+    /// Records what a remembered close does to the panes: each stopped pane
+    /// with whether the tree already listed it as a closed tab's at the time,
+    /// and each pane ended for good.
+    struct CloseRecorder {
+        store: Arc<MachineStore>,
+        stopped: std::sync::Mutex<Vec<(u64, bool)>>,
+        ended: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl PaneDirectory for CloseRecorder {
+        fn pane_count(&self) -> u64 {
+            0
+        }
+
+        fn panes(&self) -> Vec<PaneInfo> {
+            Vec::new()
+        }
+
+        fn pane_procs(&self, _pane_id: u64) -> crate::daemon::protocol::PaneProcs {
+            Default::default()
+        }
+
+        fn agent_states(&self) -> Vec<PaneAgentState> {
+            Vec::new()
+        }
+
+        fn hibernate_pane(&self, pane_id: u64) {
+            let remembered = self
+                .store
+                .machine()
+                .workspaces
+                .iter()
+                .any(|w| w.closed.iter().any(|c| c.tab.root.contains(pane_id)));
+            self.stopped.lock().unwrap().push((pane_id, remembered));
+        }
+
+        fn close_pane(&self, pane_id: u64) {
+            self.ended.lock().unwrap().push(pane_id);
+        }
+    }
+
+    /// Closing to remember stops the tab's panes keeping their screens — after
+    /// the entry is in the tree, so the sweeps never see them as nobody's —
+    /// ends the pane the tree never had, and reopening answers the tab with the
+    /// records it is rebuilt from, once.
+    #[test]
+    fn a_remembered_close_stops_the_panes_and_a_reopen_hands_the_tab_back() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = MachineStore::open(dir.path().join(machine::MACHINE_FILE));
+        let ws = store.workspace_create(None, None, None).unwrap();
+        let tab = store.tab_create(ws.id, None, seed(7), None, None).unwrap();
+        store
+            .pane_split(ws.id, 7, machine::Axis::Vertical, 0.5, seed(8), false, None)
+            .unwrap();
+        let recorder = Arc::new(CloseRecorder {
+            store: Arc::clone(&store),
+            stopped: std::sync::Mutex::new(Vec::new()),
+            ended: std::sync::Mutex::new(Vec::new()),
+        });
+        let client = client_with(Services {
+            machine: Some(Arc::clone(&store)),
+            attachments: Arc::new(AttachRegistry::default()),
+            panes: Some(recorder.clone()),
+        });
+        assert!(client.hello().has_feature(feature::CLOSED_TABS));
+
+        let ReplyOk::Panes(stopped) = client
+            .call(ControlRequest::TabCloseRemembered {
+                workspace: ws.id,
+                tab: tab.id,
+                panes: vec![7, 8, 11],
+            })
+            .unwrap()
+        else {
+            panic!("TabCloseRemembered must answer with the panes it stopped");
+        };
+        assert_eq!(stopped, vec![7, 8]);
+        assert_eq!(
+            *recorder.stopped.lock().unwrap(),
+            vec![(7, true), (8, true)],
+            "both stopped, each after the tree listed the tab as closed"
+        );
+        assert_eq!(*recorder.ended.lock().unwrap(), vec![11]);
+
+        let ReplyOk::ReopenedTab(Some(reopened)) = client
+            .call(ControlRequest::TabReopen {
+                workspace: ws.id,
+                tab: None,
+            })
+            .unwrap()
+        else {
+            panic!("TabReopen must answer with the closed tab");
+        };
+        assert_eq!(reopened.tab.id, tab.id);
+        assert_eq!(reopened.tab.root.pane_ids(), vec![7, 8]);
+        let cwds: Vec<_> = reopened.panes.iter().map(|p| p.cwd.as_deref()).collect();
+        assert_eq!(cwds, vec![Some("/repo"), Some("/repo")]);
+
+        let again = client
+            .call(ControlRequest::TabReopen {
+                workspace: ws.id,
+                tab: None,
+            })
+            .unwrap();
+        assert_eq!(again, ReplyOk::ReopenedTab(None));
+    }
+
+    /// Without panes there is nothing to keep a screen with, so the peer does
+    /// not offer the list — a client then closes and reopens the old way — and
+    /// refuses the close if asked anyway, leaving the tab where it was.
+    #[test]
+    fn a_peer_serving_no_panes_does_not_offer_closed_tabs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = MachineStore::open(dir.path().join(machine::MACHINE_FILE));
+        let ws = store.workspace_create(None, None, None).unwrap();
+        let tab = store.tab_create(ws.id, None, seed(7), None, None).unwrap();
+        let client = client_with(Services::with_machine(Arc::clone(&store)));
+        assert!(!client.hello().has_feature(feature::CLOSED_TABS));
+        assert!(
+            client
+                .call(ControlRequest::TabCloseRemembered {
+                    workspace: ws.id,
+                    tab: tab.id,
+                    panes: vec![7],
+                })
+                .is_err()
+        );
+        let machine = store.machine();
+        assert_eq!(machine.workspaces[0].tabs.len(), 1);
+        assert!(machine.workspaces[0].closed.is_empty());
     }
 }
 

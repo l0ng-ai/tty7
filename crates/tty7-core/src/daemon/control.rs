@@ -158,6 +158,13 @@ pub mod feature {
     /// request, and sending it would take the link down, so a client asks for
     /// the name first and tells the user the server needs updating instead.
     pub const CONTENT_SEARCH: &str = "content-search";
+    /// The peer keeps each workspace's recently closed tabs in its tree and
+    /// answers [`ControlRequest::TabCloseRemembered`] and
+    /// [`ControlRequest::TabReopen`] (#1021). Like [`TAB_HIBERNATE`] it needs
+    /// a tree and panes both — the entry and the screens it restores from.
+    /// Without it a client closes and reopens tabs the way it always did, from
+    /// a list of its own that ends with the window.
+    pub const CLOSED_TABS: &str = "closed-tabs";
 }
 
 pub use crate::host::{
@@ -166,7 +173,9 @@ pub use crate::host::{
 
 pub use crate::core::shells::{DetectedShell, ShellInventory};
 
-pub use crate::core::machine::{Axis, LayoutDelta, Machine, PaneSeed, Side, Tab, TabId};
+pub use crate::core::machine::{
+    Axis, LayoutDelta, Machine, PaneSeed, ReopenedTab, Side, Tab, TabId,
+};
 pub use crate::core::session::WorkspaceId;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -307,6 +316,27 @@ pub enum ControlRequest {
     TabClose {
         workspace: WorkspaceId,
         tab: TabId,
+    },
+    /// Close a tab into the workspace's recently-closed list rather than for
+    /// good: the peer stops its panes keeping their screens, so a later
+    /// [`Self::TabReopen`] — from any client, after any restart — can put it
+    /// back. `panes` is every pane the client held in the tab; any the tree
+    /// never recorded there are ended outright. Answers the panes stopped.
+    /// Gated on [`feature::CLOSED_TABS`].
+    TabCloseRemembered {
+        workspace: WorkspaceId,
+        tab: TabId,
+        #[serde(default)]
+        panes: Vec<u64>,
+    },
+    /// Take the named closed tab, or the most recently closed one, off the
+    /// workspace's list and answer it with its panes' records, for the client
+    /// to rebuild. Answers [`ReplyOk::ReopenedTab`]. Gated on
+    /// [`feature::CLOSED_TABS`].
+    TabReopen {
+        workspace: WorkspaceId,
+        #[serde(default)]
+        tab: Option<TabId>,
     },
     TabRename {
         workspace: WorkspaceId,
@@ -494,6 +524,8 @@ impl ControlRequest {
             | WorkspaceSetActiveTab { .. }
             | TabCreate { .. }
             | TabClose { .. }
+            | TabCloseRemembered { .. }
+            | TabReopen { .. }
             | TabRename { .. }
             | TabMove { .. }
             | TabSetGroup { .. }
@@ -544,17 +576,24 @@ pub enum ReplyOk {
     Bool(bool),
     Path(String),
     OptPath(Option<String>),
-    FileMeta { meta: Meta },
+    FileMeta {
+        meta: Meta,
+    },
     Hits(Vec<SearchHit>),
     ContentHits(ContentResults),
     Output(Output),
     WatchId(u64),
     Shells(ShellInventory),
     AgentSessions(Vec<crate::core::agent_history::PastSession>),
-    Attached { took_over_from: Option<String> },
+    Attached {
+        took_over_from: Option<String>,
+    },
     MachineTree(Box<Machine>),
     WorkspaceTree(Box<crate::core::machine::Workspace>),
     TabTree(Box<Tab>),
+    /// The answer to [`ControlRequest::TabReopen`]; `None` when the workspace
+    /// has nothing left to reopen.
+    ReopenedTab(Option<Box<ReopenedTab>>),
     Panes(Vec<u64>),
     AgentStates(Vec<PaneAgentState>),
     PaneProcs(crate::daemon::protocol::PaneProcs),
