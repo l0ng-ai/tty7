@@ -790,6 +790,7 @@ pub(crate) const AGENT_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
 /// kitty keyboard protocol and xterm `modifyOtherKeys` forms a TUI may have
 /// switched the terminal into. Only a whole write counts — the key arrives on
 /// its own, and a paste that happens to hold `0x03` is not a keypress.
+#[cfg(test)]
 fn is_interrupt_key(bytes: &[u8]) -> bool {
     interrupt_key(bytes).is_some()
 }
@@ -818,21 +819,15 @@ fn interrupt_key(bytes: &[u8]) -> Option<InterruptKey> {
         b"\x03" | b"\x1b[27;5;99~" => return Some(InterruptKey::CtrlC),
         _ => {}
     }
-    let Some(body) = bytes
+    let body = bytes
         .strip_prefix(b"\x1b[")
         .and_then(|b| b.strip_suffix(b"u"))
-        .and_then(|b| std::str::from_utf8(b).ok())
-    else {
-        return None;
-    };
+        .and_then(|b| std::str::from_utf8(b).ok())?;
     let mut fields = body.split(';');
-    let Some(code) = fields
+    let code = fields
         .next()
         .and_then(|f| f.split(':').next())
-        .and_then(|c| c.parse::<u32>().ok())
-    else {
-        return None;
-    };
+        .and_then(|c| c.parse::<u32>().ok())?;
     let mut modifiers = fields.next().unwrap_or("1").split(':');
     let mods = modifiers
         .next()
