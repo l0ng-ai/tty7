@@ -432,13 +432,34 @@ fn write_to_controlling_tty(bytes: &[u8]) -> bool {
     false
 }
 
+/// Write `bytes` to the terminal device at `path`.
+///
+/// The device is opened without waiting. A blocking open of a terminal whose
+/// other end has gone — the pane closed while the agent was still running its
+/// session-end hook — waits for a carrier that never comes, and on macOS it
+/// waits holding the lock every lookup under `/dev` needs: the hook hangs, the
+/// agent it belongs to cannot finish exiting, and every new terminal, `ps`
+/// and `tty` on the machine hangs behind them. Once open, the device goes back
+/// to blocking writes, so a full output queue delays the sequence rather than
+/// cutting it short; a terminal with no other end fails the write instead.
 #[cfg(unix)]
 fn write_dev(path: &std::path::Path, bytes: &[u8]) -> bool {
     use std::io::Write as _;
-    match std::fs::OpenOptions::new().write(true).open(path) {
-        Ok(mut tty) => tty.write_all(bytes).and_then(|_| tty.flush()).is_ok(),
-        Err(_) => false,
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let Ok(mut tty) = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+    else {
+        return false;
+    };
+    let fd = tty.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+        return false;
     }
+    tty.write_all(bytes).and_then(|_| tty.flush()).is_ok()
 }
 
 #[cfg(unix)]
@@ -2224,6 +2245,37 @@ export default function (pi: ExtensionAPI) {{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hook whose pane closed under it gives up instead of waiting on the
+    /// terminal's other end for good.
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_with_its_other_end_gone_fails_the_write_at_once() {
+        let (mut master, mut slave) = (0, 0);
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0);
+        let name = unsafe { std::ffi::CStr::from_ptr(libc::ttyname(slave)) }
+            .to_string_lossy()
+            .into_owned();
+        // The agent still holds its end; the pane's is gone.
+        unsafe { libc::close(master) };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(write_dev(std::path::Path::new(&name), b"x"));
+        });
+        let wrote = rx.recv_timeout(std::time::Duration::from_secs(5));
+        unsafe { libc::close(slave) };
+        assert_eq!(wrote, Ok(false));
+    }
 
     /// The turn's reply names the model: a subagent's entry after it and
     /// Claude Code's own synthetic notices are not the conversation's, and
