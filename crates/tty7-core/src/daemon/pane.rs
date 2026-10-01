@@ -2510,11 +2510,14 @@ impl DaemonPane {
             .pty()
             .and_then(|pty| pty.shell_pid)
             .ok_or_else(|| format!("pane {} runs no local process", self.id))?;
-        if !crate::daemon::procinfo::descends_from(pid, shell) {
-            return Err(format!("process {pid} does not run in pane {}", self.id));
-        }
         let event = crate::core::cli_agent::parse_agent_event_body(body.as_bytes())
             .ok_or_else(|| "not an agent event".to_string())?;
+        let running = self.state.lock().unwrap().agent;
+        if !crate::daemon::procinfo::descends_from(pid, shell)
+            && !owns_detached_report(event.agent, running)
+        {
+            return Err(format!("process {pid} does not run in pane {}", self.id));
+        }
         self.apply_reported_agent_event(event)
     }
 
@@ -3547,6 +3550,23 @@ fn apply_probed_cwd(st: &mut PaneState, probed: Option<PathBuf>) {
     st.cwd = Some(probed);
 }
 
+/// Whether a report from a process outside the pane it names still belongs
+/// to it, because the agent it is about runs its hooks there by design.
+///
+/// Prime Agent's TUI hands each session to a background daemon — started by
+/// the first session, detached, and outliving it — which runs that session's
+/// extensions, tty7's bridge among them, with the environment of the TUI that
+/// asked for it. The report's `$TTY7_PANE` is therefore right while the
+/// process is never under the pane's shell. Taking it on the pane's word is
+/// safe as long as that pane is running Prime Agent itself.
+fn owns_detached_report(
+    reported: Option<crate::core::cli_agent::CLIAgent>,
+    running: Option<crate::core::cli_agent::CLIAgent>,
+) -> bool {
+    use crate::core::cli_agent::CLIAgent;
+    reported == Some(CLIAgent::PrimeAgent) && running == reported
+}
+
 /// A pane as a Codex hook report sees it: whether Codex runs in it, where,
 /// and which session it last reported.
 #[derive(Debug, Clone)]
@@ -4055,6 +4075,20 @@ fn hex_val(b: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Only Prime Agent's daemon reports from outside the pane, and only to a
+    /// pane running Prime Agent.
+    #[test]
+    fn a_detached_report_is_taken_only_from_prime_agent_in_its_own_pane() {
+        use super::owns_detached_report;
+        use crate::core::cli_agent::CLIAgent;
+        let prime = Some(CLIAgent::PrimeAgent);
+        assert!(owns_detached_report(prime, prime));
+        assert!(!owns_detached_report(prime, None));
+        assert!(!owns_detached_report(prime, Some(CLIAgent::Pi)));
+        assert!(!owns_detached_report(Some(CLIAgent::Pi), Some(CLIAgent::Pi)));
+        assert!(!owns_detached_report(None, prime));
+    }
 
     /// A pane inherits the directory the last one *reported* — the logical
     /// path, `/tmp/x` and not the `/private/tmp/x` the kernel resolves it to.
