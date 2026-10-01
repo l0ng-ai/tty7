@@ -32,6 +32,7 @@ use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermMode};
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, Rgb};
 use gpui::{
     Context, Entity, ExternalPaths, Focusable as _, MouseButton, MouseDownEvent, Pixels,
     SharedString, Subscription, Window, div, prelude::*, px,
@@ -1221,6 +1222,52 @@ fn claude_mode(status_rows: &[String]) -> &'static str {
 
 /// The screen as text, one string per line, wide characters' spacer cells
 /// left out.
+/// The background the agent paints the screen row `line` in: the colour most
+/// of its cells have — an inverse cell's being its foreground — or `None` for
+/// the terminal's own background.
+fn row_backdrop<T: EventListener>(
+    term: &Term<T>,
+    line: usize,
+    palette: &[Rgb; 256],
+) -> Option<Rgb> {
+    let grid = term.grid();
+    if line >= grid.screen_lines() {
+        return None;
+    }
+    let row = &grid[Line(line as i32)];
+    let mut tally: Vec<(Option<Rgb>, usize)> = Vec::new();
+    for c in 0..grid.columns() {
+        let cell = &row[Column(c)];
+        let color = match cell.flags.contains(Flags::INVERSE) {
+            true => cell.fg,
+            false => cell.bg,
+        };
+        let rgb = match color {
+            AnsiColor::Spec(rgb) => Some(rgb),
+            AnsiColor::Indexed(i) => Some(palette[i as usize]),
+            AnsiColor::Named(named) => palette.get(named as usize).copied(),
+        };
+        match tally.iter_mut().find(|(seen, _)| *seen == rgb) {
+            Some((_, n)) => *n += 1,
+            None => tally.push((rgb, 1)),
+        }
+    }
+    tally
+        .into_iter()
+        .max_by_key(|(_, n)| *n)
+        .and_then(|(rgb, _)| rgb)
+}
+
+fn rgb_to_hsla(c: Rgb) -> gpui::Hsla {
+    gpui::Rgba {
+        r: c.r as f32 / 255.,
+        g: c.g as f32 / 255.,
+        b: c.b as f32 / 255.,
+        a: 1.,
+    }
+    .into()
+}
+
 fn screen_rows<T: EventListener>(term: &Term<T>) -> Vec<String> {
     let grid = term.grid();
     (0..grid.screen_lines())
@@ -1769,6 +1816,11 @@ pub(super) struct Composer {
     /// The box's height as last drawn empty — nothing typed, nothing
     /// attached — which is what it needs of the pane at the least.
     frame_height: Rc<Cell<Option<Pixels>>>,
+    /// The colour the agent paints the screen in around its input, when it
+    /// paints one of its own — the layer covering the input takes it, so it
+    /// is not a strip of another colour around the box — and how wide the
+    /// grid's columns paint it.
+    backdrop: Option<(Rgb, Pixels)>,
     _subs: Vec<Subscription>,
 }
 
@@ -1883,6 +1935,7 @@ impl TerminalView {
             picker: None,
             session: None,
             frame_height: Rc::new(Cell::new(None)),
+            backdrop: None,
             _subs: subs,
         });
     }
@@ -2155,12 +2208,27 @@ impl TerminalView {
         let session = agent
             .and_then(|_| self.agent_session())
             .and_then(|s| s.session_id);
-        let (found, screen_lines, offset) = {
+        let mut palette = self.terminal.palette;
+        if let Some(active) = cx.try_global::<super::palette::ActivePalette>() {
+            palette[..16].copy_from_slice(&active.ansi16);
+        }
+        let (found, backdrop, screen_lines, offset) = {
             let term = self.terminal.term.lock();
             let found = agent
                 .filter(|a| covers(*a))
                 .and_then(|a| input_area(a, &screen_rows(&term), term.columns()));
-            (found, term.screen_lines(), term.grid().display_offset())
+            // The row over the input is the screen around it: the input's own
+            // rows can be shaded apart from it.
+            let backdrop = found
+                .as_ref()
+                .and_then(|area| row_backdrop(&term, area.top.saturating_sub(1), &palette))
+                .map(|rgb| (rgb, self.cell_width * term.columns() as f32));
+            (
+                found,
+                backdrop,
+                term.screen_lines(),
+                term.grid().display_offset(),
+            )
         };
         let Some(c) = self.composer.as_mut() else {
             return;
@@ -2177,6 +2245,7 @@ impl TerminalView {
         match found {
             Some(area) => {
                 c.area = Some(area);
+                c.backdrop = backdrop;
                 c.missing_since = None;
             }
             None => {
@@ -2597,8 +2666,9 @@ impl TerminalView {
             .child(frame);
         let reserved = self.composer_reserved_rows();
         let element = match covering {
-            // Over the input area, painted in the grid's own background so
-            // what is under it is gone rather than showing through. At least
+            // Over the input area, painted in the background around it — the
+            // grid's own, or the one the agent paints — so what is under it
+            // is gone rather than showing through, and the layer is not seen. At least
             // as tall as the area; taller when the box needs it. The box sits
             // at the bottom of the pane, where a chat's input sits.
             Some(rows) => div()
@@ -2618,6 +2688,26 @@ impl TerminalView {
                 .px(px(BOX_INSET))
                 .pb(px(BOX_INSET))
                 .bg(cx.theme().background)
+                // Over the grid's own cells, the colour the agent paints
+                // them in; the pane's padding around them keeps the theme's.
+                .when_some(
+                    self.composer.as_ref().and_then(|c| c.backdrop),
+                    |d, (backdrop, width)| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left(px(GRID_PAD_X))
+                                .w(width)
+                                .bottom(
+                                    self.line_height * reserved as f32
+                                        + self.grid_slack
+                                        + px(GRID_PAD_Y),
+                                )
+                                .bg(rgb_to_hsla(backdrop)),
+                        )
+                    },
+                )
                 .occlude()
                 // Around the box is the terminal as far as a click goes: it
                 // takes the keyboard out of the box, as a click on the rows
@@ -3210,7 +3300,9 @@ impl TerminalView {
                         .flex()
                         .flex_col()
                         .rounded(px(12.))
-                        .bg(ink.opacity(0.035))
+                        // Opaque: under it can be whatever colour the agent
+                        // paints its screen in.
+                        .bg(theme.background.blend(ink.opacity(0.035)))
                         .relative()
                         .border_t(hairline)
                         .border_b(hairline)
