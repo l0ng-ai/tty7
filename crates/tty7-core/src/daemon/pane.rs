@@ -791,8 +791,31 @@ pub(crate) const AGENT_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
 /// switched the terminal into. Only a whole write counts — the key arrives on
 /// its own, and a paste that happens to hold `0x03` is not a keypress.
 fn is_interrupt_key(bytes: &[u8]) -> bool {
+    interrupt_key(bytes).is_some()
+}
+
+/// Which interrupt key one input write is — see [`is_interrupt_key`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptKey {
+    Escape,
+    CtrlC,
+}
+
+/// Whether `bytes` stops `agent`'s turn. Grok Build takes only Ctrl+C for
+/// that: its Esc leaves a running turn running, and counting it would call
+/// the turn over while it still works.
+fn interrupts(agent: Option<crate::core::cli_agent::CLIAgent>, bytes: &[u8]) -> bool {
+    match interrupt_key(bytes) {
+        Some(InterruptKey::Escape) => agent != Some(crate::core::cli_agent::CLIAgent::Grok),
+        Some(InterruptKey::CtrlC) => true,
+        None => false,
+    }
+}
+
+fn interrupt_key(bytes: &[u8]) -> Option<InterruptKey> {
     match bytes {
-        b"\x1b" | b"\x03" | b"\x1b[27;5;99~" => return true,
+        b"\x1b" => return Some(InterruptKey::Escape),
+        b"\x03" | b"\x1b[27;5;99~" => return Some(InterruptKey::CtrlC),
         _ => {}
     }
     let Some(body) = bytes
@@ -800,7 +823,7 @@ fn is_interrupt_key(bytes: &[u8]) -> bool {
         .and_then(|b| b.strip_suffix(b"u"))
         .and_then(|b| std::str::from_utf8(b).ok())
     else {
-        return false;
+        return None;
     };
     let mut fields = body.split(';');
     let Some(code) = fields
@@ -808,7 +831,7 @@ fn is_interrupt_key(bytes: &[u8]) -> bool {
         .and_then(|f| f.split(':').next())
         .and_then(|c| c.parse::<u32>().ok())
     else {
-        return false;
+        return None;
     };
     let mut modifiers = fields.next().unwrap_or("1").split(':');
     let mods = modifiers
@@ -817,12 +840,16 @@ fn is_interrupt_key(bytes: &[u8]) -> bool {
         .unwrap_or(1);
     let event = modifiers.next().map_or(Some(1), |e| e.parse::<u32>().ok());
     if event != Some(1) {
-        return false;
+        return None;
     }
     // Caps Lock and Num Lock ride along in the mask without changing the key.
     const LOCKS: u32 = 64 | 128;
     let mods = mods.saturating_sub(1) & !LOCKS;
-    (code == 27 && mods == 0) || (code == 99 && mods == 4)
+    match (code, mods) {
+        (27, 0) => Some(InterruptKey::Escape),
+        (99, 4) => Some(InterruptKey::CtrlC),
+        _ => None,
+    }
 }
 
 fn notify(st: &mut PaneState, msg: DaemonMsg) {
@@ -2560,7 +2587,8 @@ impl DaemonPane {
         if bytes.is_empty() {
             return;
         }
-        if is_interrupt_key(bytes) {
+        let agent = self.state.lock().unwrap().agent;
+        if interrupts(agent, bytes) {
             arm_interrupt(&self.state);
         }
         if let Ok(mut writer) = self.writer.lock() {
@@ -4086,7 +4114,10 @@ mod tests {
         assert!(owns_detached_report(prime, prime));
         assert!(!owns_detached_report(prime, None));
         assert!(!owns_detached_report(prime, Some(CLIAgent::Pi)));
-        assert!(!owns_detached_report(Some(CLIAgent::Pi), Some(CLIAgent::Pi)));
+        assert!(!owns_detached_report(
+            Some(CLIAgent::Pi),
+            Some(CLIAgent::Pi)
+        ));
         assert!(!owns_detached_report(None, prime));
     }
 
@@ -5858,6 +5889,19 @@ mod tests {
         ] {
             assert!(!is_interrupt_key(key), "{key:?}");
         }
+    }
+
+    /// Grok Build's Esc does not stop its turn; its Ctrl+C does.
+    #[test]
+    fn grok_builds_turn_is_stopped_by_ctrl_c_alone() {
+        use crate::core::cli_agent::CLIAgent;
+        let grok = Some(CLIAgent::Grok);
+        assert!(!interrupts(grok, b"\x1b"));
+        assert!(!interrupts(grok, b"\x1b[27;1:1u"));
+        assert!(interrupts(grok, b"\x03"));
+        assert!(interrupts(grok, b"\x1b[99;5u"));
+        assert!(interrupts(Some(CLIAgent::Pi), b"\x1b"));
+        assert!(interrupts(None, b"\x1b"));
     }
 
     fn working_session() -> crate::core::cli_agent::AgentSessionState {

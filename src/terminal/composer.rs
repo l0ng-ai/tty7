@@ -529,6 +529,15 @@ fn grok_input_top(rows: &[String], floor: usize, width: usize) -> Option<usize> 
         .then_some(top)
 }
 
+/// The key that stops `agent`'s turn. Grok Build's Esc leaves a running
+/// turn running; its Ctrl+C stops one, and empties the input when idle.
+fn interrupt_key(agent: Option<CLIAgent>) -> &'static [u8] {
+    match agent {
+        Some(CLIAgent::Grok) => b"\x03",
+        _ => b"\x1b",
+    }
+}
+
 /// The key that empties `agent`'s input, where one does so without doing
 /// anything else.
 fn clear_input_key(agent: CLIAgent) -> Option<&'static [u8]> {
@@ -1470,12 +1479,17 @@ impl TerminalView {
     }
 
     /// Esc in the box. Over the agent's input it is the agent's Esc — the one
-    /// that interrupts a turn — since the box is standing in for that input.
+    /// that interrupts a turn — since the box is standing in for that input;
+    /// for an agent whose Esc does not, its own interrupt key
+    /// ([`interrupt_key`]).
     /// Docked, it hands the keyboard back to the terminal and leaves the box
     /// where it is, so the next Esc is the agent's.
     pub(super) fn composer_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.presence() {
-            Presence::Covering(_) => self.send_to_pty(b"\x1b", cx),
+            Presence::Covering(_) => {
+                let key = interrupt_key(self.agent());
+                self.send_to_pty(key, cx)
+            }
             _ => {
                 window.focus(&self.focus_handle, cx);
                 cx.notify();
@@ -3599,6 +3613,9 @@ mod tests {
         assert!(!holds_text(CLIAgent::Pi, &left, 40));
         assert_eq!(clear_input_key(CLIAgent::Grok), Some(&b"\x15"[..]));
         assert_eq!(clear_input_key(CLIAgent::Claude), None);
+        // Its Esc does not stop a turn; Ctrl+C does.
+        assert_eq!(interrupt_key(Some(CLIAgent::Grok)), b"\x03");
+        assert_eq!(interrupt_key(Some(CLIAgent::Pi)), b"\x1b");
     }
 
     /// The grid gives up rows only for the part of the box an input does not
