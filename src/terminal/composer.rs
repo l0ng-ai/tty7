@@ -143,6 +143,10 @@ pub(super) struct Step {
 /// - **So is Copilot.** A typed leading `?` is the key that opens its help,
 ///   and the rest of the line goes out without it. Its shell mode is a
 ///   leading `!` it reads off a paste as well.
+/// - **So is Kimi Code.** It takes keys arriving faster than typing for an
+///   unbracketed paste, and the Enter right behind a typed line for one of its
+///   newlines: the message sat in its input, never sent. A bracketed paste it
+///   knows for one, and reads its `!`, `?` and `/` off it as typed.
 /// - **A leading `!` goes to Claude Code, CodeBuddy, Gemini, Qwen Code and
 ///   OpenCode on its own.** It
 ///   switches the input into shell mode only when it is typed into an empty
@@ -201,7 +205,11 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
         pasted = bracketed
             && (matches!(
                 agent,
-                CLIAgent::Codex | CLIAgent::OpenCode | CLIAgent::Amp | CLIAgent::Copilot
+                CLIAgent::Codex
+                    | CLIAgent::OpenCode
+                    | CLIAgent::Amp
+                    | CLIAgent::Copilot
+                    | CLIAgent::Kimi
             ) || reads_like_gemini(agent)
                 || !types_cleanly(body));
         let bytes = match pasted {
@@ -2339,6 +2347,17 @@ mod tests {
         // Anyone else gets the line as written.
         let steps = submit_plan(CLIAgent::Pi, "!git status", true);
         assert_eq!(bytes(&steps), [&b"!git status"[..], b"\r"]);
+    }
+
+    #[test]
+    fn kimi_is_always_pasted() {
+        // Typed, the Enter behind the line is one of its newlines.
+        for text in ["fix it", "?why", "!ls", "/usage"] {
+            let steps = submit_plan(CLIAgent::Kimi, text, true);
+            let pasted = format!("\x1b[200~{text}\x1b[201~");
+            assert_eq!(bytes(&steps), [pasted.as_bytes(), b"\r"], "{text}");
+            assert_eq!(steps[1].delay, SETTLE, "{text}");
+        }
     }
 
     #[test]
