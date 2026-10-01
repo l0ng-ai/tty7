@@ -363,6 +363,7 @@ fn covers(agent: CLIAgent) -> bool {
             | CLIAgent::Pi
             | CLIAgent::OhMyPi
             | CLIAgent::PrimeAgent
+            | CLIAgent::Grok
     )
 }
 
@@ -404,6 +405,7 @@ fn is_rule(row: &str, width: usize) -> bool {
 /// - **Oh My Pi** hangs it under its status line — see [`omp_input_top`].
 /// - **Prime Agent** shades it as a block over its footer — see
 ///   [`prime_input_top`].
+/// - **Grok Build** frames it in a rounded box — see [`grok_input_top`].
 ///
 /// `None` is the agent showing something else there — which is exactly when
 /// the box must get out of the way.
@@ -454,6 +456,9 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
         CLIAgent::PrimeAgent => {
             prime_input_top(rows, floor).map(|top| InputArea { top, mode: None })
         }
+        CLIAgent::Grok => {
+            grok_input_top(rows, floor, width).map(|top| InputArea { top, mode: None })
+        }
         _ => None,
     }
 }
@@ -470,6 +475,72 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
 ///
 /// Its borderless, field and rail shapes leave no frame to find, and the box
 /// stays aside for them.
+/// How many rows Grok Build draws under its input's frame at most: a blank
+/// row and its key hints.
+const GROK_FOOTER_MAX_ROWS: usize = 3;
+
+/// Where Grok Build's input starts: the top of its rounded frame, whose first
+/// line inside opens with `❯`, with the model named in its bottom edge and
+/// the key hints under it.
+///
+/// Its lists — `/` commands, the `/model` picker — open above the frame
+/// between two rules, the lower one right on top of the frame, and take the
+/// arrow keys and Enter there, so with one open the box steps aside. Its
+/// dialogs — the release notes, the shortcuts — are drawn over the frame,
+/// breaking its top edge, and the box steps aside for them too.
+fn grok_input_top(rows: &[String], floor: usize, width: usize) -> Option<usize> {
+    let bottom = (floor..rows.len()).rev().find(|&i| {
+        let t = rows[i].trim();
+        t.starts_with('╰') && t.ends_with('╯')
+    })?;
+    let footer = rows[bottom + 1..]
+        .iter()
+        .filter(|r| !r.trim().is_empty())
+        .count();
+    let top = (floor..bottom)
+        .rev()
+        .find(|&i| rows[i].trim_start().starts_with('╭'))?;
+    // An edge with anything on it is a dialog drawn over the frame.
+    let edge = rows[top]
+        .trim()
+        .chars()
+        .all(|c| matches!(c, '╭' | '─' | '╮'));
+    let prompt = rows.get(top + 1).is_some_and(|r| {
+        r.trim_start()
+            .trim_start_matches('│')
+            .trim_start()
+            .starts_with('❯')
+    });
+    let list_open = top > 0 && is_rule(&rows[top - 1], width);
+    (footer <= GROK_FOOTER_MAX_ROWS && top + 1 < bottom && edge && prompt && !list_open)
+        .then_some(top)
+}
+
+/// The key that empties `agent`'s input, where one does so without doing
+/// anything else.
+fn clear_input_key(agent: CLIAgent) -> Option<&'static [u8]> {
+    match agent {
+        CLIAgent::Grok => Some(b"\x15"),
+        _ => None,
+    }
+}
+
+/// Whether `agent`'s input, as `rows` show it, has text in it.
+///
+/// Grok Build keeps a command whose list was dismissed — `/model`, closed
+/// with Esc — in its input. Under the box nobody sees it, and the next
+/// message would be typed on after it.
+fn holds_text(agent: CLIAgent, rows: &[String], width: usize) -> bool {
+    let floor = rows.len().saturating_sub(INPUT_AREA_MAX_ROWS);
+    match agent {
+        CLIAgent::Grok => grok_input_top(rows, floor, width).is_some_and(|top| {
+            let line = rows[top + 1].trim().trim_matches('│').trim();
+            !line.trim_start_matches('❯').trim().is_empty()
+        }),
+        _ => false,
+    }
+}
+
 /// Where Prime Agent's input starts: the padding row atop its shaded block.
 ///
 /// The block is a blank row, the prompt line ` >  …` with any further lines
@@ -1853,13 +1924,32 @@ impl TerminalView {
             .lock()
             .mode()
             .contains(TermMode::BRACKETED_PASTE);
-        let steps = submit_message(
+        let mut steps = submit_message(
             agent,
             &c.input.read(cx).value(),
             &c.attached,
             shell.as_deref(),
             bracketed,
         );
+        // Text left in the agent's own input under the box would run into the
+        // message: clear it first.
+        if matches!(c.presence, Presence::Covering(_))
+            && let Some(clear) = clear_input_key(agent)
+            && {
+                let term = self.terminal.term.lock();
+                holds_text(agent, &screen_rows(&term), term.columns())
+            }
+            && let Some(first) = steps.first_mut()
+        {
+            first.delay = SETTLE;
+            steps.insert(
+                0,
+                Step {
+                    delay: Duration::ZERO,
+                    bytes: clear.to_vec(),
+                },
+            );
+        }
         c.attached.clear();
         c.dismissed = None;
         c.queue.extend(steps);
@@ -3344,6 +3434,101 @@ mod tests {
         // A transcript's last words are not a footer with a block over it.
         let rows = screen(&["  Reply with just the word PONG.", "", " PONG"]);
         assert_eq!(input_area(CLIAgent::PrimeAgent, &rows, 40), None);
+    }
+
+    const GROK_TOP: &str = "  ╭──────────────────────────────────────╮";
+    const GROK_BOTTOM: &str = "  ╰─────────────────── gpt-5.5 (relay) ─╯";
+
+    #[test]
+    fn grok_builds_input_is_its_rounded_frame() {
+        let rows = screen(&[
+            "  Update: v1.0.46 available, press ctrl+u to restart",
+            "",
+            GROK_TOP,
+            "  │ ❯                                    │",
+            GROK_BOTTOM,
+            "",
+            "                 Logged in with API key  │  [stable]",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::Grok, &rows, 40),
+            Some(InputArea { top: 2, mode: None })
+        );
+        // Several lines, while a turn runs.
+        let rows = screen(&[
+            "    ⠼ Waiting for response… 3.1s        3.1s ⇣2.26k [stop]",
+            "",
+            GROK_TOP,
+            "  │ ❯ line one                           │",
+            "  │   line two                           │",
+            GROK_BOTTOM,
+            "",
+            "  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+x:shortcuts",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::Grok, &rows, 40),
+            Some(InputArea { top: 2, mode: None })
+        );
+    }
+
+    /// A list open over the frame takes the keys the box would send; a framed
+    /// block in the transcript is not the input.
+    #[test]
+    fn grok_builds_lists_and_transcript_frames_are_not_its_input() {
+        let rows = screen(&[
+            "  ───────────────────────────────────────4─",
+            "    ❯ Grok 4.6                  SpaceXAI's latest",
+            "      gpt-5.5 (relay) (current)",
+            "  ────────────────────────────────────────",
+            GROK_TOP,
+            "  │ ❯ /model <model> [window] [effort]   │",
+            GROK_BOTTOM,
+            "",
+            "  Enter:send  │  Opt+Enter:newline  │  Ctrl+x:shortcuts",
+        ]);
+        assert_eq!(input_area(CLIAgent::Grok, &rows, 40), None);
+        // The release notes, drawn over the frame.
+        let rows = screen(&[
+            "  Update: │                                   │",
+            "  ╭───────│        ↑/↓ scroll  |  Esc back    │──╮",
+            "  │ ❯     └───────────────────────────────────┘  │",
+            GROK_BOTTOM,
+            "",
+            "                 Logged in with API key  │  [stable]",
+        ]);
+        assert_eq!(input_area(CLIAgent::Grok, &rows, 40), None);
+        let rows = screen(&[
+            GROK_TOP,
+            "  │ ❯ earlier                            │",
+            GROK_BOTTOM,
+            " reply line 1",
+            " reply line 2",
+            " reply line 3",
+            " reply line 4",
+        ]);
+        assert_eq!(input_area(CLIAgent::Grok, &rows, 40), None);
+    }
+
+    /// A dismissed `/model` stays in Grok Build's input under the box, and is
+    /// cleared before the next message rather than run into it.
+    #[test]
+    fn a_command_left_in_grok_builds_input_is_cleared_first() {
+        let frame = |line: &str| {
+            screen(&[
+                GROK_TOP,
+                line,
+                GROK_BOTTOM,
+                "",
+                "  Enter:send  │  Opt+Enter:newline",
+            ])
+        };
+        let left = frame("  │ ❯ /model                             │");
+        let empty = frame("  │ ❯                                    │");
+        assert!(holds_text(CLIAgent::Grok, &left, 40));
+        assert!(!holds_text(CLIAgent::Grok, &empty, 40));
+        assert!(!holds_text(CLIAgent::Pi, &left, 40));
+        assert_eq!(clear_input_key(CLIAgent::Grok), Some(&b"\x15"[..]));
+        assert_eq!(clear_input_key(CLIAgent::Claude), None);
     }
 
     /// The grid gives up rows only for the part of the box an input does not
