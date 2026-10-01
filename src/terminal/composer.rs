@@ -986,8 +986,22 @@ fn builtin_commands(agent: CLIAgent) -> &'static [(&'static str, &'static str)] 
             ("/settings", "Open settings"),
             ("/quit", "Quit Grok Build"),
         ],
-        // Amp has no typed commands: `/` on an empty input opens its command
-        // palette, which a message cannot drive.
+        CLIAgent::Goose => &[
+            ("/model", "Show or switch the model"),
+            ("/mode", "Set the mode: auto, approve, smart_approve, chat"),
+            ("/compact", "Compact the conversation"),
+            ("/clear", "Clear the chat history"),
+            ("/new", "Start a fresh session"),
+            ("/status", "Show model, provider, mode and token usage"),
+            ("/skills", "List or enable skills"),
+            ("/prompts", "List available prompts"),
+            ("/goal", "Set a goal to satisfy before finishing"),
+            ("/doctor", "Check the Goose setup"),
+            ("/help", "Show the commands"),
+            ("/exit", "Exit the session"),
+        ],
+        // Amp and Crush have no typed commands: `/` on an empty input opens
+        // their command palette, which a message cannot drive.
         _ => &[],
     }
 }
@@ -3670,6 +3684,7 @@ mod tests {
             CLIAgent::Qwen,
             CLIAgent::CodeBuddy,
             CLIAgent::Kimi,
+            CLIAgent::Goose,
         ] {
             let names: Vec<&str> = builtin_commands(agent).iter().map(|(n, _)| *n).collect();
             for (i, name) in names.iter().enumerate() {
