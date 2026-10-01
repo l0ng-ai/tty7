@@ -3609,14 +3609,17 @@ pub struct CodexCandidate {
 /// as long as that session lasts, so neither says which pane the report is
 /// about. The report does: its session, then its directory. A pane that has
 /// already reported the session owns it; otherwise it is the one pane running
-/// Codex in that directory — the one yet to report a session, when there are
-/// several, and the named pane when that still leaves a tie. `None` is no
-/// pane, or no telling which.
+/// Codex in that directory, or among every Codex pane when none runs there
+/// (`codex -C` leaves the shell elsewhere). Of several, a session `/new`
+/// started (`cleared`) goes to one that had a session before and any other to
+/// one yet to report, and the named pane breaks a tie that still stands.
+/// `None` is no pane, or no telling which.
 pub fn codex_report_target(
     panes: &[CodexCandidate],
     named: u64,
     session: Option<&str>,
     cwd: Option<&Path>,
+    cleared: bool,
 ) -> Option<u64> {
     let codex = || panes.iter().filter(|p| p.runs_codex);
     if let Some(session) = session
@@ -3624,16 +3627,23 @@ pub fn codex_report_target(
     {
         return Some(owner.pane);
     }
-    let cwd = cwd?;
     let here: Vec<&CodexCandidate> = codex()
-        .filter(|p| p.cwd.as_deref().is_some_and(|c| same_dir(c, cwd)))
+        .filter(|p| {
+            cwd.zip(p.cwd.as_deref())
+                .is_some_and(|(cwd, c)| same_dir(c, cwd))
+        })
         .collect();
-    let fresh: Vec<&CodexCandidate> = here
+    let pool = if here.is_empty() {
+        codex().collect()
+    } else {
+        here
+    };
+    let likely: Vec<&CodexCandidate> = pool
         .iter()
         .copied()
-        .filter(|p| p.session.is_none())
+        .filter(|p| p.session.is_some() == cleared)
         .collect();
-    let pool = if fresh.is_empty() { here } else { fresh };
+    let pool = if likely.is_empty() { pool } else { likely };
     match pool.as_slice() {
         [only] => Some(only.pane),
         [] => None,
@@ -4238,7 +4248,7 @@ mod tests {
             pane(5, true, "/work/c", None),
         ];
         let target = |named: u64, session: Option<&str>, cwd: &str| {
-            codex_report_target(&panes, named, session, Some(Path::new(cwd)))
+            codex_report_target(&panes, named, session, Some(Path::new(cwd)), false)
         };
 
         // The app-server was started in pane 1, so every hook names it.
@@ -4263,14 +4273,39 @@ mod tests {
             Some(1),
             "a new session in a pane that had one before (/new) is still that pane's"
         );
-        assert_eq!(target(1, Some("s-new"), "/work/none"), None);
+        assert_eq!(
+            codex_report_target(&panes, 1, Some("s-c2"), Some(Path::new("/work/c")), true),
+            Some(4),
+            "but a session /new started goes to the one that had a session"
+        );
+        assert_eq!(
+            target(1, Some("s-new"), "/work/none"),
+            None,
+            "a directory no pane runs Codex in leaves every fresh pane in the running"
+        );
+        let elsewhere = [
+            pane(1, true, "/work/a", Some("s-a")),
+            pane(2, true, "/home", None),
+        ];
+        assert_eq!(
+            codex_report_target(
+                &elsewhere,
+                1,
+                Some("s-b"),
+                Some(Path::new("/work/b")),
+                false
+            ),
+            Some(2),
+            "codex -C: the one Codex pane yet to report, not the app-server's"
+        );
 
         let twins = [
             pane(6, true, "/work/d", None),
             pane(7, true, "/work/d", None),
         ];
-        let twin =
-            |named| codex_report_target(&twins, named, Some("s"), Some(Path::new("/work/d")));
+        let twin = |named| {
+            codex_report_target(&twins, named, Some("s"), Some(Path::new("/work/d")), false)
+        };
         assert_eq!(twin(7), Some(7), "a tie goes to the pane the hook named");
         assert_eq!(twin(1), None, "and is no one's otherwise");
     }

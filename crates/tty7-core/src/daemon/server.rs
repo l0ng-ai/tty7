@@ -146,6 +146,10 @@ fn codex_report_pane(
         named,
         event.session_id.as_deref(),
         event.cwd.as_deref(),
+        // Codex's SessionStart says what started the session; `clear` is /new.
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .is_some_and(|body| body["source"] == "clear"),
     )?;
     let pane = panes.into_iter().find(|p| p.id == target)?;
     Some((pane, event))

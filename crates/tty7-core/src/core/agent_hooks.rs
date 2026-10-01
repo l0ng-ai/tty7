@@ -153,6 +153,9 @@ fn build_hook_body(agent: &str, event: &str, stdin_json: &str) -> String {
         ("cwd", "cwd"),
         // Goose spells the working directory its own way.
         ("cwd", "working_dir"),
+        // What started a session (startup, resume, clear…): routes a Codex
+        // report — see `daemon::pane::codex_report_target`.
+        ("source", "source"),
     ] {
         if let Some(v) = payload
             .get(key)
@@ -336,14 +339,20 @@ fn catalog_says_no_effort(catalogs: &[serde_json::Value], model: &str) -> bool {
 
 /// The model that wrote `reply` to the prompt `prompt_id`, once the
 /// transcript has it as its latest words. Claude Code runs `Stop` before
-/// that write is always on disk, so this waits a little for it.
+/// that write is always on disk, so this waits a little for it — reading
+/// the tail again only once the transcript has grown.
 fn turn_reply_model(path: &Path, reply: &str, prompt_id: Option<&str>) -> Option<String> {
     let deadline = std::time::Instant::now() + TRANSCRIPT_CATCH_UP;
+    let mut read = None;
     loop {
-        if let Some(model) =
-            transcript_tail(path).and_then(|t| reply_model_in(&t, reply, prompt_id))
-        {
-            return Some(model);
+        let len = std::fs::metadata(path).ok().map(|m| m.len());
+        if len != read {
+            read = len;
+            if let Some(model) =
+                transcript_tail(path).and_then(|t| reply_model_in(&t, reply, prompt_id))
+            {
+                return Some(model);
+            }
         }
         if std::time::Instant::now() >= deadline {
             return None;
@@ -2217,9 +2226,10 @@ export default function (pi: ExtensionAPI) {{
   // Whether this build says when a run is over for good. agent_end also ends
   // each attempt an automatic retry, a compaction or a queued message picks
   // up again, and reading that as "done" calls the pane finished while it
-  // still works. Pi's agent_settled comes once the run is really over; a Pi
-  // whose on() hands back an unsubscribe is new enough to always send it,
-  // and an older one that sends it shows so the first time it does.
+  // still works. Pi's agent_settled comes once the run is really over, and a
+  // build that sends it shows so the first time it does. Nothing earlier
+  // tells: on() returns nothing in Pi or Oh My Pi, and a build that takes the
+  // name without ever sending it must still end its turns on agent_end.
   let settles = false;
   pi.on("agent_start", (_event, ctx) => emit((turn = "prompt-submit"), ctx));
   pi.on("agent_end", (_event, ctx) => {{
@@ -2250,11 +2260,10 @@ export default function (pi: ExtensionAPI) {{
     pi.on("ui_prompt_end", (_event, ctx) => emit(turn, ctx));
   }} catch {{}}
   try {{
-    const off: unknown = pi.on("agent_settled" as any, (_event: unknown, ctx: SessionCtx) => {{
+    pi.on("agent_settled" as any, (_event: unknown, ctx: SessionCtx) => {{
       settles = true;
       emit((turn = "stop"), ctx);
     }});
-    if (typeof off === "function") settles = true;
   }} catch {{}}
   // Oh My Pi asks before running a tool through events of its own rather
   // than Pi's UI-prompt pair, and announces its retries — which follow an
