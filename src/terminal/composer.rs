@@ -1058,18 +1058,6 @@ fn opencode_input_top(rows: &[String], floor: usize) -> Option<usize> {
     (top + 2 <= edge && footer <= OPENCODE_FOOTER_MAX_ROWS && !list).then_some(top)
 }
 
-/// Where Oh My Pi's input starts, in the composer shapes that keep it findable.
-///
-/// - **The status band**, its default, and **the rounded box**: the status
-///   line — model, directory, branch, context gauge — on the row above the
-///   input, whose first line opens with `╰─ `. Its own lists open below that
-///   line. A dialog's frame closes with `╰──…╯` instead, and a tool approval
-///   or a picker takes the input's place, so neither reads as the input.
-/// - **The Pi and Claude Code shapes** rule the input off the way Pi does —
-///   see [`pi_input_top`].
-///
-/// Its borderless, field and rail shapes leave no frame to find, and the box
-/// stays aside for them.
 /// How many rows Grok Build draws under its input's frame at most: a blank
 /// row and its key hints.
 const GROK_FOOTER_MAX_ROWS: usize = 3;
@@ -1369,6 +1357,18 @@ fn prime_input_top(rows: &[String], floor: usize) -> Option<usize> {
     (top >= floor && rows[top].trim().is_empty()).then_some(top)
 }
 
+/// Where Oh My Pi's input starts, in the composer shapes that keep it findable.
+///
+/// - **The status band**, its default, and **the rounded box**: the status
+///   line — model, directory, branch, context gauge — on the row above the
+///   input, whose first line opens with `╰─ `. Its own lists open below that
+///   line. A dialog's frame closes with `╰──…╯` instead, and a tool approval
+///   or a picker takes the input's place, so neither reads as the input.
+/// - **The Pi and Claude Code shapes** rule the input off the way Pi does —
+///   see [`pi_input_top`].
+///
+/// Its borderless, field and rail shapes leave no frame to find, and the box
+/// stays aside for them.
 fn omp_input_top(rows: &[String], floor: usize, width: usize) -> Option<usize> {
     let line = (floor + 1..rows.len()).rev().find(|&i| {
         rows[i]
@@ -1510,8 +1510,6 @@ fn claude_mode(status_rows: &[String]) -> &'static str {
     .map_or("default", |(_, mode)| mode)
 }
 
-/// The screen as text, one string per line, wide characters' spacer cells
-/// left out.
 /// The background the agent paints the screen row `line` in: the colour most
 /// of its cells have — an inverse cell's being its foreground — or `None` for
 /// the terminal's own background.
@@ -1558,6 +1556,8 @@ fn rgb_to_hsla(c: Rgb) -> gpui::Hsla {
     .into()
 }
 
+/// The screen as text, one string per line, wide characters' spacer cells
+/// left out.
 fn screen_rows<T: EventListener>(term: &Term<T>) -> Vec<String> {
     let grid = term.grid();
     (0..grid.screen_lines())
@@ -1854,17 +1854,22 @@ fn custom_commands(cwd: Option<&Path>, home: Option<&Path>) -> Vec<(String, Stri
             L10nKey::ComposerCmdUser,
         ),
     ];
+    // Directories are followed through symlinks, as Claude Code follows
+    // them; the bound keeps a link back up the tree from walking forever.
+    const MAX_DEPTH: usize = 8;
     for (dir, scope) in roots {
         let Some(dir) = dir else { continue };
-        let mut stack = vec![dir];
-        while let Some(dir) = stack.pop() {
+        let mut stack = vec![(dir, 0)];
+        while let Some((dir, depth)) = stack.pop() {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    stack.push(path);
+                    if depth < MAX_DEPTH {
+                        stack.push((path, depth + 1));
+                    }
                 } else if path.extension().is_some_and(|e| e == "md")
                     && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
                 {
@@ -2082,6 +2087,10 @@ pub(super) struct Composer {
     presence: Presence,
     /// The input area as last found, and since when it has been missing.
     area: Option<InputArea>,
+    /// How many rows up from the bottom of the live screen that area starts,
+    /// however far the view is scrolled back — what the grid's reserved rows
+    /// are worked out from, so scrolling never resizes the pane.
+    area_rows: usize,
     missing_since: Option<Instant>,
     /// The box had the keyboard when it stepped aside, and gets it back when
     /// it returns.
@@ -2161,7 +2170,14 @@ fn model_alias(model: &str) -> Option<&'static str> {
 fn effort_label(level: &str) -> String {
     match level {
         "xhigh" => "Extra high".into(),
-        _ => level[..1].to_uppercase() + &level[1..],
+        // A level is whatever the environment or the settings file said, so
+        // its first character need not be one byte.
+        _ => {
+            let mut chars = level.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(chars).collect()
+            })
+        }
     }
 }
 
@@ -2225,6 +2241,7 @@ impl TerminalView {
             open: remembered.open,
             presence: Presence::Hidden,
             area: None,
+            area_rows: 0,
             missing_since: None,
             refocus: false,
             attached: remembered.attached,
@@ -2258,19 +2275,26 @@ impl TerminalView {
     /// and resizing their pane each time the box comes and goes would have
     /// them redraw for a row of padding.
     pub(super) fn composer_reserved_rows(&self) -> usize {
-        let Presence::Covering(area) = self.presence() else {
+        if !matches!(self.presence(), Presence::Covering(_)) {
             return 0;
-        };
+        }
         if !self.agent().is_some_and(makes_room) {
             return 0;
         }
-        let Some(frame) = self.composer.as_ref().and_then(|c| c.frame_height.get()) else {
+        let Some(c) = self.composer.as_ref() else {
             return 0;
         };
+        let Some(frame) = c.frame_height.get() else {
+            return 0;
+        };
+        // The input's rows on the live screen, not the ones left in view: a
+        // view scrolled back shows fewer of them, and taking that for an
+        // input shrinking under the box would resize the pane per line
+        // scrolled.
         rows_short(
             frame + px(BOX_INSET),
             self.line_height,
-            area,
+            c.area_rows,
             self.grid_slack + px(GRID_PAD_Y),
         )
     }
@@ -2372,15 +2396,21 @@ impl TerminalView {
 
     /// Typing at the grid while the box covers the agent's input: the input
     /// the keys were meant for is under the box, so they go into the box.
+    ///
+    /// So does text handed to the terminal while the box has the keyboard —
+    /// a file tree's "attach to agent", say. The box's own typing never comes
+    /// this way, and written to the pty it would land in the agent's input
+    /// under the box, unseen, and run into the next message.
     pub(super) fn composer_takes_typing(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
-        if self.composer_focused || !matches!(self.presence(), Presence::Covering(_)) {
+        if !matches!(self.presence(), Presence::Covering(_)) {
             return false;
         }
+        let focused = self.composer_focused;
         let Some(c) = self.composer.as_mut() else {
             return false;
         };
         c.typed.push_str(text);
-        c.grab = true;
+        c.grab |= !focused;
         cx.notify();
         true
     }
@@ -2517,15 +2547,22 @@ impl TerminalView {
         {
             self.ensure_composer(window, cx);
         }
+        // A pane whose box was never asked for, or is shut, has no input area
+        // to look for: the scan below reads the whole screen, every frame.
+        let Some(open) = self.composer.as_ref().map(|c| c.open) else {
+            return;
+        };
         let asking = self.agent_is_asking();
         let session = agent
             .and_then(|_| self.agent_session())
             .and_then(|s| s.session_id);
-        let mut palette = self.terminal.palette;
-        if let Some(active) = cx.try_global::<super::palette::ActivePalette>() {
-            palette[..16].copy_from_slice(&active.ansi16);
-        }
-        let (found, backdrop, screen_lines, offset) = {
+        let (found, backdrop, screen_lines, offset) = if !open {
+            (None, None, 0, 0)
+        } else {
+            let mut palette = self.terminal.palette;
+            if let Some(active) = cx.try_global::<super::palette::ActivePalette>() {
+                palette[..16].copy_from_slice(&active.ansi16);
+            }
             let term = self.terminal.term.lock();
             let found = agent
                 .filter(|a| covers(*a))
@@ -2556,6 +2593,11 @@ impl TerminalView {
         let now = Instant::now();
         let mut recheck = None;
         match found {
+            // Shut, nothing was looked for: what was found before is stale.
+            _ if !open => {
+                c.area = None;
+                c.missing_since = None;
+            }
             Some(area) => {
                 c.area = Some(area);
                 c.backdrop = backdrop;
@@ -2581,6 +2623,9 @@ impl TerminalView {
                 None => Presence::SteppedAside,
             },
         };
+        if let Some(area) = &c.area {
+            c.area_rows = screen_lines.saturating_sub(area.top);
+        }
 
         if let Some(agent) = agent
             && c.named != Some(agent)
@@ -2601,15 +2646,21 @@ impl TerminalView {
             c.refocus = c.presence == Presence::SteppedAside;
             self.composer_focused = false;
             window.focus(&self.focus_handle, cx);
-        } else if shown && (c.refocus || c.grab) && !self.composer_focused {
-            c.refocus = false;
-            c.grab = false;
+        } else if shown && ((c.refocus || c.grab) && !self.composer_focused || !c.typed.is_empty())
+        {
+            let take_focus = (c.refocus || c.grab) && !self.composer_focused;
+            if take_focus {
+                c.refocus = false;
+                c.grab = false;
+            }
             let typed = std::mem::take(&mut c.typed);
             let input = c.input.clone();
             if !typed.is_empty() {
                 input.update(cx, |state, cx| state.insert(typed, window, cx));
             }
-            self.focus_composer(window, cx);
+            if take_focus {
+                self.focus_composer(window, cx);
+            }
         }
 
         if let Some(wait) = recheck {
