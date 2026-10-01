@@ -1855,21 +1855,23 @@ fn custom_commands(cwd: Option<&Path>, home: Option<&Path>) -> Vec<(String, Stri
         ),
     ];
     // Directories are followed through symlinks, as Claude Code follows
-    // them; the bound keeps a link back up the tree from walking forever.
-    const MAX_DEPTH: usize = 8;
+    // them; each is read once, so a link back up the tree ends the walk
+    // instead of looping it.
+    let mut seen = std::collections::HashSet::new();
     for (dir, scope) in roots {
         let Some(dir) = dir else { continue };
-        let mut stack = vec![(dir, 0)];
-        while let Some((dir, depth)) = stack.pop() {
+        let mut stack = vec![dir];
+        while let Some(dir) = stack.pop() {
+            if !std::fs::canonicalize(&dir).is_ok_and(|real| seen.insert(real)) {
+                continue;
+            }
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    if depth < MAX_DEPTH {
-                        stack.push((path, depth + 1));
-                    }
+                    stack.push(path);
                 } else if path.extension().is_some_and(|e| e == "md")
                     && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
                 {
@@ -2170,15 +2172,18 @@ fn model_alias(model: &str) -> Option<&'static str> {
 fn effort_label(level: &str) -> String {
     match level {
         "xhigh" => "Extra high".into(),
-        // A level is whatever the environment or the settings file said, so
-        // its first character need not be one byte.
-        _ => {
-            let mut chars = level.chars();
-            chars.next().map_or_else(String::new, |first| {
-                first.to_uppercase().chain(chars).collect()
-            })
-        }
+        _ => capitalized(level),
     }
+}
+
+/// `text` with its first character upper-cased. A level is whatever the
+/// environment or the settings file said, so that character need not be one
+/// byte.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 /// How the model list spells an alias.
@@ -2190,7 +2195,7 @@ fn alias_label(alias: &str) -> String {
         Some(family) => (family, true),
         None => (alias, false),
     };
-    let mut name = family[..1].to_uppercase() + &family[1..];
+    let mut name = capitalized(family);
     if long {
         name.push_str(" · 1M");
     }
@@ -2275,15 +2280,16 @@ impl TerminalView {
     /// and resizing their pane each time the box comes and goes would have
     /// them redraw for a row of padding.
     pub(super) fn composer_reserved_rows(&self) -> usize {
-        if !matches!(self.presence(), Presence::Covering(_)) {
+        let Some(c) = self
+            .composer
+            .as_ref()
+            .filter(|c| matches!(c.presence, Presence::Covering(_)))
+        else {
             return 0;
-        }
+        };
         if !self.agent().is_some_and(makes_room) {
             return 0;
         }
-        let Some(c) = self.composer.as_ref() else {
-            return 0;
-        };
         let Some(frame) = c.frame_height.get() else {
             return 0;
         };
@@ -2619,13 +2625,13 @@ impl TerminalView {
             Some(a) if !covers(a) => Presence::Docked,
             Some(_) if asking => Presence::SteppedAside,
             Some(_) => match &c.area {
-                Some(area) => Presence::Covering(screen_lines.saturating_sub(area.top + offset)),
+                Some(area) => {
+                    c.area_rows = screen_lines.saturating_sub(area.top);
+                    Presence::Covering(c.area_rows.saturating_sub(offset))
+                }
                 None => Presence::SteppedAside,
             },
         };
-        if let Some(area) = &c.area {
-            c.area_rows = screen_lines.saturating_sub(area.top);
-        }
 
         if let Some(agent) = agent
             && c.named != Some(agent)
@@ -2646,8 +2652,7 @@ impl TerminalView {
             c.refocus = c.presence == Presence::SteppedAside;
             self.composer_focused = false;
             window.focus(&self.focus_handle, cx);
-        } else if shown && ((c.refocus || c.grab) && !self.composer_focused || !c.typed.is_empty())
-        {
+        } else if shown {
             let take_focus = (c.refocus || c.grab) && !self.composer_focused;
             if take_focus {
                 c.refocus = false;

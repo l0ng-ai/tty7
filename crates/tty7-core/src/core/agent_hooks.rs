@@ -153,8 +153,7 @@ fn build_hook_body(agent: &str, event: &str, stdin_json: &str) -> String {
         ("cwd", "cwd"),
         // Goose spells the working directory its own way.
         ("cwd", "working_dir"),
-        // What started a session (startup, resume, clear…): routes a Codex
-        // report — see `daemon::pane::codex_report_target`.
+        // What started a session — see `cli_agent::AgentEvent::source`.
         ("source", "source"),
     ] {
         if let Some(v) = payload
@@ -345,14 +344,10 @@ fn turn_reply_model(path: &Path, reply: &str, prompt_id: Option<&str>) -> Option
     let deadline = std::time::Instant::now() + TRANSCRIPT_CATCH_UP;
     let mut read = None;
     loop {
-        let len = std::fs::metadata(path).ok().map(|m| m.len());
-        if len != read {
-            read = len;
-            if let Some(model) =
-                transcript_tail(path).and_then(|t| reply_model_in(&t, reply, prompt_id))
-            {
-                return Some(model);
-            }
+        if let Some(model) =
+            transcript_tail(path, &mut read).and_then(|t| reply_model_in(&t, reply, prompt_id))
+        {
+            return Some(model);
         }
         if std::time::Instant::now() >= deadline {
             return None;
@@ -361,10 +356,15 @@ fn turn_reply_model(path: &Path, reply: &str, prompt_id: Option<&str>) -> Option
     }
 }
 
-fn transcript_tail(path: &Path) -> Option<String> {
+/// The transcript's last [`TRANSCRIPT_TAIL`] bytes, unless it is still the
+/// length `read` last saw — then nothing new is in it.
+fn transcript_tail(path: &Path, read: &mut Option<u64>) -> Option<String> {
     use std::io::{Seek as _, SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
+    if read.replace(len) == Some(len) {
+        return None;
+    }
     file.seek(SeekFrom::Start(len.saturating_sub(TRANSCRIPT_TAIL)))
         .ok()?;
     let mut tail = Vec::new();

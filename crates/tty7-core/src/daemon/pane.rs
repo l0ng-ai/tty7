@@ -6042,6 +6042,7 @@ mod tests {
                 session_id: None,
                 message: None,
                 cwd: None,
+                source: None,
                 readout: Default::default(),
             }],
             None,

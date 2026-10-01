@@ -1201,6 +1201,9 @@ pub struct AgentEvent {
     pub session_id: Option<String>,
     pub message: Option<String>,
     pub cwd: Option<std::path::PathBuf>,
+    /// What started the session, on a session start that says: `startup`,
+    /// `resume`, `clear` (Codex's `/new`), `compact`.
+    pub source: Option<String>,
     pub readout: AgentReadout,
 }
 
@@ -1227,6 +1230,8 @@ pub fn parse_agent_event_body(json: &[u8]) -> Option<AgentEvent> {
         message: Option<String>,
         #[serde(default)]
         cwd: Option<String>,
+        #[serde(default)]
+        source: Option<String>,
         #[serde(flatten)]
         readout: AgentReadout,
     }
@@ -1240,6 +1245,7 @@ pub fn parse_agent_event_body(json: &[u8]) -> Option<AgentEvent> {
         session_id: nonempty(w.session_id),
         message: nonempty(w.message),
         cwd: nonempty(w.cwd).map(std::path::PathBuf::from),
+        source: nonempty(w.source),
         readout: w.readout,
     })
 }
@@ -1258,6 +1264,7 @@ mod tests {
             session_id: None,
             message: None,
             cwd: None,
+            source: None,
             readout,
         };
         state.apply_event(&event(AgentReadout {
@@ -1769,6 +1776,7 @@ mod tests {
             session_id: id.map(String::from),
             message: msg.map(String::from),
             cwd: None,
+            source: None,
             readout: Default::default(),
         };
 
@@ -1832,6 +1840,7 @@ mod tests {
             session_id: Some("sid".into()),
             message: None,
             cwd: None,
+            source: None,
             readout: Default::default(),
         });
         assert_eq!(s.status, AgentStatus::Idle);
@@ -1848,6 +1857,7 @@ mod tests {
             session_id: None,
             message: None,
             cwd: None,
+            source: None,
             readout: Default::default(),
         };
 
@@ -1882,6 +1892,7 @@ mod tests {
             session_id: None,
             message: None,
             cwd: None,
+            source: None,
             readout: Default::default(),
         };
 
@@ -1934,6 +1945,7 @@ mod tests {
             session_id: None,
             message: None,
             cwd: None,
+            source: None,
             readout: Default::default(),
         };
 
@@ -1971,6 +1983,7 @@ mod tests {
             session_id: None,
             message: None,
             cwd: None,
+            source: None,
             readout: Default::default(),
         };
 
@@ -2003,6 +2016,7 @@ mod tests {
             session_id: None,
             message: None,
             cwd: cwd.map(PathBuf::from),
+            source: None,
             readout: Default::default(),
         };
 
