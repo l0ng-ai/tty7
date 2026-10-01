@@ -149,8 +149,8 @@ pub(super) struct Step {
 ///   box as a key of its own; arriving with the rest of the line it is just a
 ///   character. (Amp's shell mode is a leading `$`, which it reads off a paste
 ///   as well.)
-/// - **A message with an `@` mention gets a space after it for Gemini and
-///   Qwen Code.**
+/// - **A message with an `@` mention gets a space after it for Gemini, Qwen
+///   Code and Copilot.**
 ///   With the caret at the end of an `@` word it lists matching files, and
 ///   Enter then takes the list's pick instead of sending — so a message whose
 ///   attachments close it would sit in the input, under the box, unsent.
@@ -185,7 +185,10 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
     // Where the last word starts is a matter of Gemini's escaping and quoting,
     // so any `@` will do: a space after the message costs nothing. Not after a
     // command, though, where it would open the list of its arguments.
-    if reads_like_gemini(agent) && body.contains('@') && !body.starts_with('/') {
+    if (reads_like_gemini(agent) || agent == CLIAgent::Copilot)
+        && body.contains('@')
+        && !body.starts_with('/')
+    {
         spaced = format!("{body} ");
         body = &spaced;
     }
@@ -2458,6 +2461,9 @@ mod tests {
         assert_eq!(bytes(&steps), [&b"/memory"[..], b"\r"]);
         let steps = submit_plan(CLIAgent::Claude, "read @a.rs", true);
         assert_eq!(bytes(&steps), [&b"read @a.rs"[..], b"\r"]);
+        // Copilot's list takes that Enter as well.
+        let steps = submit_plan(CLIAgent::Copilot, "read @a.rs", false);
+        assert_eq!(bytes(&steps), [&b"read @a.rs "[..], b"\r"]);
     }
 
     #[test]
