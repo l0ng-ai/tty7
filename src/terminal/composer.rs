@@ -357,14 +357,20 @@ fn reads_like_gemini(agent: CLIAgent) -> bool {
 fn covers(agent: CLIAgent) -> bool {
     matches!(
         agent,
-        CLIAgent::Claude | CLIAgent::Codex | CLIAgent::Gemini | CLIAgent::Pi | CLIAgent::OhMyPi
+        CLIAgent::Claude
+            | CLIAgent::Codex
+            | CLIAgent::Gemini
+            | CLIAgent::Pi
+            | CLIAgent::OhMyPi
+            | CLIAgent::PrimeAgent
     )
 }
 
 /// Whether the grid gives up rows for the box covering `agent`'s input — see
-/// [`TerminalView::composer_reserved_rows`].
+/// [`TerminalView::composer_reserved_rows`]. Prime Agent's four-row block
+/// falls a row short, which cut its hint line above in half.
 fn makes_room(agent: CLIAgent) -> bool {
-    agent == CLIAgent::OhMyPi
+    matches!(agent, CLIAgent::OhMyPi | CLIAgent::PrimeAgent)
 }
 
 /// Whole rows of `line` it takes to make up what `area` rows of `line`, with
@@ -396,6 +402,8 @@ fn is_rule(row: &str, width: usize) -> bool {
 /// - **Pi** draws it between two rules, over its status rows — see
 ///   [`pi_input_top`].
 /// - **Oh My Pi** hangs it under its status line — see [`omp_input_top`].
+/// - **Prime Agent** shades it as a block over its footer — see
+///   [`prime_input_top`].
 ///
 /// `None` is the agent showing something else there — which is exactly when
 /// the box must get out of the way.
@@ -443,6 +451,9 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
         CLIAgent::OhMyPi => {
             omp_input_top(rows, floor, width).map(|top| InputArea { top, mode: None })
         }
+        CLIAgent::PrimeAgent => {
+            prime_input_top(rows, floor).map(|top| InputArea { top, mode: None })
+        }
         _ => None,
     }
 }
@@ -459,6 +470,42 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
 ///
 /// Its borderless, field and rail shapes leave no frame to find, and the box
 /// stays aside for them.
+/// Where Prime Agent's input starts: the padding row atop its shaded block.
+///
+/// The block is a blank row, the prompt line ` >  …` with any further lines
+/// indented under it, and another blank row, right over the footer — `←
+/// manage` and the model — which is the last thing on the screen. Its `/`
+/// list opens above the block. The model picker draws its own ` >` search
+/// line between two rules, away from the footer, and is not the input.
+fn prime_input_top(rows: &[String], floor: usize) -> Option<usize> {
+    let footer = (floor..rows.len())
+        .rev()
+        .find(|&i| !rows[i].trim().is_empty())?;
+    // The block's lower padding row, then its lines up to the prompt's.
+    let mut line = footer.checked_sub(1)?;
+    if line < floor || !rows[line].trim().is_empty() {
+        return None;
+    }
+    loop {
+        line = line.checked_sub(1)?;
+        if line < floor {
+            return None;
+        }
+        let row = &rows[line];
+        if row.trim().is_empty() {
+            return None;
+        }
+        if row.starts_with(' ') && row.trim_start().starts_with('>') {
+            break;
+        }
+        if !row.starts_with("    ") {
+            return None;
+        }
+    }
+    let top = line.checked_sub(1)?;
+    (top >= floor && rows[top].trim().is_empty()).then_some(top)
+}
+
 fn omp_input_top(rows: &[String], floor: usize, width: usize) -> Option<usize> {
     let line = (floor + 1..rows.len()).rev().find(|&i| {
         rows[i]
@@ -3242,6 +3289,61 @@ mod tests {
             "╰────────────────────────────────────────────────────╯",
         ]);
         assert_eq!(input_area(CLIAgent::OhMyPi, &picker, 40), None);
+    }
+
+    const PRIME_FOOTER: &str = "← manage                           claude-sonnet-4-6 · 0 (0%)";
+
+    #[test]
+    fn prime_agents_input_is_its_shaded_block_over_the_footer() {
+        let rows = screen(&[
+            "",
+            "                      Details mode (Ctrl+O to expand)",
+            "",
+            " >",
+            "",
+            PRIME_FOOTER,
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::PrimeAgent, &rows, 40),
+            Some(InputArea { top: 2, mode: None })
+        );
+        // Several lines, while a turn runs, its `/` list open above.
+        let rows = screen(&[
+            " ⠙ Writing · 4s · ↓ 99 tokens",
+            "    › model          [search]",
+            "      scoped-models",
+            "",
+            " >  /model",
+            "    second line",
+            "",
+            "Press Ctrl+C again to exit       claude-sonnet-4-6 · 0 (0%)",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::PrimeAgent, &rows, 40),
+            Some(InputArea { top: 3, mode: None })
+        );
+    }
+
+    #[test]
+    fn prime_agents_model_picker_is_not_its_input() {
+        let rows = screen(&[
+            "                      Details mode (Ctrl+O to expand)",
+            RULE,
+            " >  Search models",
+            RULE,
+            "› claude-sonnet-4-6 (relay)               current · relay",
+            "  gpt-5.5 (relay)                                  relay",
+            "  (1/1317)",
+            "",
+            " Input          Cached input          Output",
+            " $0             $0                    $0",
+            "",
+            " ↑/↓ model · ←/→ effort · Enter select · Esc close",
+        ]);
+        assert_eq!(input_area(CLIAgent::PrimeAgent, &rows, 40), None);
+        // A transcript's last words are not a footer with a block over it.
+        let rows = screen(&["  Reply with just the word PONG.", "", " PONG"]);
+        assert_eq!(input_area(CLIAgent::PrimeAgent, &rows, 40), None);
     }
 
     /// The grid gives up rows only for the part of the box an input does not
