@@ -353,7 +353,10 @@ fn reads_like_gemini(agent: CLIAgent) -> bool {
 
 /// Whether the box can be laid over this agent's input.
 fn covers(agent: CLIAgent) -> bool {
-    matches!(agent, CLIAgent::Claude | CLIAgent::Codex | CLIAgent::Gemini)
+    matches!(
+        agent,
+        CLIAgent::Claude | CLIAgent::Codex | CLIAgent::Gemini | CLIAgent::Pi
+    )
 }
 
 fn is_rule(row: &str, width: usize) -> bool {
@@ -368,6 +371,8 @@ fn is_rule(row: &str, width: usize) -> bool {
 /// - **Codex** starts its input line with `›`, on a padded block.
 /// - **Gemini** shades it as a block whose first line is `> ` — see
 ///   [`gemini_input_top`] for its other drawings.
+/// - **Pi** draws it between two rules, over its status rows — see
+///   [`pi_input_top`].
 ///
 /// `None` is the agent showing something else there — which is exactly when
 /// the box must get out of the way.
@@ -411,8 +416,47 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
         CLIAgent::Gemini => {
             gemini_input_top(rows, floor, width).map(|top| InputArea { top, mode: None })
         }
+        CLIAgent::Pi => pi_input_top(rows, floor, width).map(|top| InputArea { top, mode: None }),
         _ => None,
     }
+}
+
+/// How many rows Pi draws under its input at most: the directory and usage
+/// rows, an extension's status, and its own completion list, which opens
+/// there.
+const PI_FOOTER_MAX_ROWS: usize = 10;
+
+/// Where Pi's input starts: its upper rule.
+///
+/// Pi draws its editor between two full-width rules, the upper one carrying
+/// the turn's spinner (`── ⠹ Working ──`) while it works, with the
+/// directory and usage rows under the lower one. Its selectors — `/model`,
+/// `/resume`, `/tree`, `/login` — take the editor's place between the same
+/// rules, but open on a blank row and run on for several, and `/settings`
+/// opens on its `>` search line; the editor is one row when empty, and opens
+/// on its text otherwise. Only the lowest pair of rules counts: anything
+/// ruled higher up is the transcript's.
+fn pi_input_top(rows: &[String], floor: usize, width: usize) -> Option<usize> {
+    let rule = |row: &str| {
+        let t = row.trim();
+        t.starts_with("──")
+            && t.ends_with('─')
+            && t.chars().filter(|&c| c == '─').count() >= width * 3 / 5
+    };
+    let rules: Vec<usize> = (floor..rows.len()).filter(|&i| rule(&rows[i])).collect();
+    let (&lower, higher) = rules.split_last()?;
+    let &upper = higher.last()?;
+    let footer = rows[lower + 1..]
+        .iter()
+        .filter(|r| !r.trim().is_empty())
+        .count();
+    let inside = &rows[upper + 1..lower];
+    let opens_on_text = |row: &String| {
+        let t = row.trim_end();
+        !t.trim().is_empty() && t != ">" && !t.starts_with("> ")
+    };
+    let editor = inside.len() == 1 || inside.first().is_some_and(opens_on_text);
+    (footer <= PI_FOOTER_MAX_ROWS && editor).then_some(upper)
 }
 
 /// How many rows Gemini's footer — the workspace, sandbox and model, under
@@ -2858,6 +2902,99 @@ mod tests {
             input_area(CLIAgent::Gemini, &rows, 40),
             Some(InputArea { top: 5, mode: None })
         );
+    }
+
+    const PI_FOOTER: [&str; 2] = [
+        "/private/tmp/t7b5/proj (main)",
+        "↑29k ↓52 1.9%/200k (auto)          claude-sonnet-4-6",
+    ];
+
+    fn pi_screen(lines: &[&str]) -> Vec<String> {
+        let mut rows = screen(lines);
+        rows.extend(PI_FOOTER.iter().map(|r| r.to_string()));
+        rows
+    }
+
+    #[test]
+    fn pis_input_is_its_lowest_ruled_editor() {
+        // Empty, idle.
+        let rows = pi_screen(&[" 只回复两个字：好的", "", " 好的", "", RULE, "", RULE]);
+        assert_eq!(
+            input_area(CLIAgent::Pi, &rows, 40),
+            Some(InputArea { top: 4, mode: None })
+        );
+        // Several lines in it, while a turn runs and the spinner rides the
+        // upper rule.
+        let working = "── ⠼ Working ──────────────────────────────";
+        let rows = pi_screen(&["", working, "line one", "line two", RULE]);
+        assert_eq!(
+            input_area(CLIAgent::Pi, &rows, 40),
+            Some(InputArea { top: 1, mode: None })
+        );
+        // Its completion list opens between the editor and the status rows.
+        let rows = pi_screen(&[
+            RULE,
+            "/mod",
+            RULE,
+            "→ model          <provider/model> — Select model",
+            "  scoped-models  Enable/disable models for Ctrl+P cycling",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::Pi, &rows, 40),
+            Some(InputArea { top: 0, mode: None })
+        );
+    }
+
+    /// Pi's selectors take the editor's place between its rules: none of
+    /// them is the input.
+    #[test]
+    fn pis_selectors_are_not_its_input() {
+        let model = pi_screen(&[
+            " 好的",
+            "",
+            RULE,
+            "",
+            "Only showing models from configured providers. Use /login to add providers.",
+            "",
+            ">",
+            "",
+            "→ ✓ claude-sonnet-4-6 [relay] · default",
+            "    gpt-5.5 [relay]",
+            "",
+            "  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel",
+            RULE,
+        ]);
+        assert_eq!(input_area(CLIAgent::Pi, &model, 40), None);
+        let settings = pi_screen(&[
+            " Operation aborted",
+            "",
+            RULE,
+            ">",
+            "",
+            "→ Auto-compact                      true",
+            "  Auto-resize images                true",
+            "  (1/32)",
+            "",
+            "  Type to search · Enter/Space to change · Esc to cancel",
+            RULE,
+        ]);
+        assert_eq!(input_area(CLIAgent::Pi, &settings, 40), None);
+        let resume = pi_screen(&[
+            RULE,
+            "",
+            "Resume Session (Current Folder)     ◉ Current Folder | ○ All",
+            "tab scope · re:<pattern> regex · \"phrase\" exact",
+            "",
+            ">",
+            "",
+            "› Reply with just: ok1                         18 now",
+            RULE,
+        ]);
+        assert_eq!(input_area(CLIAgent::Pi, &resume, 40), None);
+        // A ruled block far above the bottom is the transcript's.
+        let mut scrolled = screen(&[RULE, "quoted", RULE]);
+        scrolled.extend((0..12).map(|i| format!(" reply line {i}")));
+        assert_eq!(input_area(CLIAgent::Pi, &scrolled, 40), None);
     }
 
     #[test]
