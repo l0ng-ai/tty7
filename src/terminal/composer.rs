@@ -44,7 +44,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, h_fle
 use super::view::{GRID_PAD_X, GRID_PAD_Y, TerminalView, pasted_paths_text, types_cleanly};
 use crate::core::cli_agent::{AgentStatus, CLIAgent};
 use crate::core::shell_quote::{Quoting, quoting_for};
-use crate::ui::host_ops::{HostId, HostOps};
+use crate::ui::host_ops::{Host, HostId, HostOps};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::search::files::{FileIndex, FileList, IndexedFile, rank, walk};
 
@@ -1842,17 +1842,16 @@ fn builtin_commands(agent: CLIAgent) -> &'static [(&'static str, &'static str)] 
 /// Custom slash commands Claude Code reads from `.claude/commands` — the
 /// project's under `cwd`, the user's under `home`. A file's name is its
 /// command; subdirectories only namespace the description.
-fn custom_commands(cwd: Option<&Path>, home: Option<&Path>) -> Vec<(String, String)> {
+fn custom_commands(
+    host: &dyn Host,
+    cwd: Option<&Path>,
+    home: Option<&Path>,
+) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
+    let commands = |root: &Path| host.join(&host.join(root, ".claude"), "commands");
     let roots = [
-        (
-            cwd.map(|c| c.join(".claude/commands")),
-            L10nKey::ComposerCmdProject,
-        ),
-        (
-            home.map(|h| h.join(".claude/commands")),
-            L10nKey::ComposerCmdUser,
-        ),
+        (cwd.map(commands), L10nKey::ComposerCmdProject),
+        (home.map(commands), L10nKey::ComposerCmdUser),
     ];
     // Directories are followed through symlinks, as Claude Code follows
     // them; each is read once, so a link back up the tree ends the walk
@@ -1862,18 +1861,16 @@ fn custom_commands(cwd: Option<&Path>, home: Option<&Path>) -> Vec<(String, Stri
         let Some(dir) = dir else { continue };
         let mut stack = vec![dir];
         while let Some(dir) = stack.pop() {
-            if !std::fs::canonicalize(&dir).is_ok_and(|real| seen.insert(real)) {
+            if !host.canonicalize(&dir).is_ok_and(|real| seen.insert(real)) {
                 continue;
             }
-            let Ok(entries) = std::fs::read_dir(&dir) else {
+            let Ok(entries) = host.read_dir(&dir, None) else {
                 continue;
             };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.extension().is_some_and(|e| e == "md")
-                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            for entry in entries {
+                if entry.is_dir {
+                    stack.push(host.join(&dir, &entry.name));
+                } else if let Some(stem) = entry.name.strip_suffix(".md").filter(|s| !s.is_empty())
                 {
                     let name = format!("/{stem}");
                     if !out.iter().any(|(n, _)| *n == name) {
@@ -2737,10 +2734,13 @@ impl TerminalView {
                 {
                     return;
                 }
-                let custom = match (local, agent) {
-                    (true, Some(CLIAgent::Claude)) => {
+                let host = local
+                    .then(|| crate::ui::host_registry::HostRegistry::lookup(cx, host_id))
+                    .flatten();
+                let custom = match (host, agent) {
+                    (Some(host), Some(CLIAgent::Claude)) => {
                         let home = std::env::var_os("HOME").map(PathBuf::from);
-                        custom_commands(cwd.as_deref(), home.as_deref())
+                        custom_commands(&*host, cwd.as_deref(), home.as_deref())
                     }
                     _ => Vec::new(),
                 };
@@ -5834,7 +5834,11 @@ mod tests {
         std::fs::write(project.join(".claude/commands/team/triage.md"), "").unwrap();
         std::fs::write(home.join(".claude/commands/standup.md"), "").unwrap();
         std::fs::write(home.join(".claude/commands/notes.txt"), "").unwrap();
-        let names: Vec<String> = custom_commands(Some(&project), Some(&home))
+        // A link back up the tree is read once, not walked forever.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("..", project.join(".claude/commands/team/up")).unwrap();
+        let host = tty7_core::host::local::LocalHost::new();
+        let names: Vec<String> = custom_commands(&*host, Some(&project), Some(&home))
             .into_iter()
             .map(|(n, _)| n)
             .collect();
