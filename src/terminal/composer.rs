@@ -519,12 +519,13 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
 }
 
 /// The prompts an input ruled off top and bottom opens with: Copilot's `❯`;
-/// Qwen Code's `>`, `*` in YOLO mode and `!` in shell mode; CodeBuddy's `>`.
+/// Qwen Code's `>`, `*` in YOLO mode and `!` in shell mode; CodeBuddy's `>`,
+/// `!` in bash mode.
 fn ruled_prompts(agent: CLIAgent) -> &'static [char] {
     match agent {
         CLIAgent::Copilot => &['❯'],
         CLIAgent::Qwen => &['>', '*', '!'],
-        _ => &['>'],
+        _ => &['>', '!'],
     }
 }
 
@@ -704,6 +705,20 @@ fn copilot_list_over(rows: &[String], top: usize) -> bool {
                 });
             (t.starts_with("❯ /") || t.starts_with("❯ @")) && !sent_at
         })
+}
+
+/// Whether `agent`'s input, as `rows` show it, is in its shell mode — which
+/// Qwen Code and CodeBuddy stay in after a `!` command has run, their prompt
+/// a `!`, until Esc takes them out.
+fn in_shell_mode(agent: CLIAgent, rows: &[String], width: usize) -> bool {
+    let floor = rows.len().saturating_sub(INPUT_AREA_MAX_ROWS);
+    match agent {
+        CLIAgent::Qwen | CLIAgent::CodeBuddy => {
+            ruled_input_top(rows, floor, width, ruled_prompts(agent))
+                .is_some_and(|top| rows[top + 1].starts_with('!'))
+        }
+        _ => false,
+    }
 }
 
 /// How many rows Kimi Code draws under its input's frame at most: its model
@@ -2446,27 +2461,46 @@ impl TerminalView {
             .lock()
             .mode()
             .contains(TermMode::BRACKETED_PASTE);
-        let mut steps = submit_message(
-            agent,
-            &c.input.read(cx).value(),
-            &c.attached,
-            shell.as_deref(),
-            bracketed,
-        );
-        // Text left in the agent's own input under the box would run into the
-        // message: clear it first.
-        if matches!(c.presence, Presence::Covering(_))
-            && let Some(clear) = {
+        let (held, shell_mode) = match c.presence {
+            Presence::Covering(_) => {
                 let term = self.terminal.term.lock();
-                clear_input(
-                    agent,
-                    held_lines(agent, &screen_rows(&term), term.columns()),
+                let rows = screen_rows(&term);
+                (
+                    held_lines(agent, &rows, term.columns()),
+                    in_shell_mode(agent, &rows, term.columns()),
                 )
             }
+            _ => (0, false),
+        };
+        let typed = c.input.read(cx).value().to_string();
+        // Already in its shell mode, the `!` would take the agent out of it.
+        let message = match shell_mode {
+            true => typed.strip_prefix('!').unwrap_or(&typed),
+            false => &typed,
+        };
+        let mut steps = submit_message(agent, message, &c.attached, shell.as_deref(), bracketed);
+        let mut before = Vec::new();
+        // Text left in the agent's own input under the box would run into the
+        // message: clear it first.
+        if let Some(clear) = clear_input(agent, held) {
+            before.extend(clear);
+        }
+        // The shell mode a `!` message left on would take this one for a
+        // command: leave it first.
+        if shell_mode && !typed.starts_with('!') {
+            before.push(Step {
+                delay: match before.is_empty() {
+                    true => Duration::ZERO,
+                    false => SETTLE,
+                },
+                bytes: b"\x1b".to_vec(),
+            });
+        }
+        if !before.is_empty()
             && let Some(first) = steps.first_mut()
         {
-            first.delay = SETTLE;
-            steps.splice(0..0, clear);
+            first.delay = first.delay.max(SETTLE);
+            steps.splice(0..0, before);
         }
         c.attached.clear();
         c.dismissed = None;
@@ -4591,6 +4625,35 @@ mod tests {
             );
             assert_eq!(held_lines(CLIAgent::Qwen, &rows, 40), held, "{lines:?}");
         }
+    }
+
+    /// Qwen Code stays in its shell mode after a `!` command, its prompt a
+    /// `!`; the next message leaves it first, and a `!` one stays in it.
+    #[test]
+    fn qwens_shell_mode_is_read_off_its_prompt() {
+        let at = |line: &str| {
+            screen(&[
+                RULE,
+                line,
+                RULE,
+                QWEN_FOOTER[0],
+                "  shell mode enabled (esc to disable)",
+            ])
+        };
+        assert!(in_shell_mode(CLIAgent::Qwen, &at("! commit this"), 40));
+        assert!(!in_shell_mode(
+            CLIAgent::Qwen,
+            &at(">   Type your message or @path/to/file"),
+            40
+        ));
+        assert!(!in_shell_mode(CLIAgent::Gemini, &at("! commit this"), 40));
+        // CodeBuddy's bash mode, the same way.
+        let bash = screen(&[RULE, "!", RULE, "! for bash mode  ·  shift+Tab for local"]);
+        assert!(in_shell_mode(CLIAgent::CodeBuddy, &bash, 40));
+        assert_eq!(
+            input_area(CLIAgent::CodeBuddy, &bash, 40),
+            Some(InputArea { top: 0, mode: None })
+        );
     }
 
     /// Qwen Code's `/` list opens under its input, a tool approval and its
