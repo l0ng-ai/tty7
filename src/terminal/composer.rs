@@ -59,6 +59,10 @@ const MAX_ROWS: usize = 8;
 /// to be inside the time a key press takes to feel instant.
 const SETTLE: Duration = Duration::from_millis(50);
 
+/// Between keys an agent must read one at a time: apart enough that each
+/// arrives as a read of its own.
+const KEY_GAP: Duration = Duration::from_millis(15);
+
 /// Copilot's input treats a CR that follows a paste too closely as part of it.
 /// So does Gemini's: it takes an Enter within 40ms of a paste it has finished
 /// reading for a line break — and a long paste takes it a while to read, so
@@ -380,6 +384,11 @@ fn covers(agent: CLIAgent) -> bool {
             | CLIAgent::Crush
             | CLIAgent::Goose
             | CLIAgent::Amp
+            | CLIAgent::Copilot
+            | CLIAgent::Qwen
+            | CLIAgent::CodeBuddy
+            | CLIAgent::Kimi
+            | CLIAgent::OpenCode
     )
 }
 
@@ -430,6 +439,11 @@ fn is_rule(row: &str, width: usize) -> bool {
 /// - **Goose** prints its prompt under its context gauge, wherever its output
 ///   ended — see [`goose_input_top`].
 /// - **Amp** frames it at the bottom of the screen — see [`amp_input_top`].
+/// - **Copilot**, **Qwen Code** and **CodeBuddy** rule it off top and bottom,
+///   over their status rows — see [`ruled_input_top`].
+/// - **Kimi Code** frames it over its model line — see [`kimi_input_top`].
+/// - **OpenCode** draws it on a bar over its key hints — see
+///   [`opencode_input_top`].
 ///
 /// `None` is the agent showing something else there — which is exactly when
 /// the box must get out of the way.
@@ -488,7 +502,29 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
         // is drawn under it, so it counts from any height.
         CLIAgent::Goose => goose_input_top(rows).map(|top| InputArea { top, mode: None }),
         CLIAgent::Amp => amp_input_top(rows, floor, width).map(|top| InputArea { top, mode: None }),
+        CLIAgent::Copilot => copilot_shaded_input(rows, floor, width)
+            .map(|(top, _)| top)
+            .or_else(|| ruled_input_top(rows, floor, width, ruled_prompts(agent)))
+            .map(|top| InputArea { top, mode: None }),
+        CLIAgent::Qwen | CLIAgent::CodeBuddy => {
+            ruled_input_top(rows, floor, width, ruled_prompts(agent))
+                .map(|top| InputArea { top, mode: None })
+        }
+        CLIAgent::Kimi => kimi_input_top(rows, floor).map(|top| InputArea { top, mode: None }),
+        CLIAgent::OpenCode => {
+            opencode_input_top(rows, floor).map(|top| InputArea { top, mode: None })
+        }
         _ => None,
+    }
+}
+
+/// The prompts an input ruled off top and bottom opens with: Copilot's `❯`;
+/// Qwen Code's `>`, `*` in YOLO mode and `!` in shell mode; CodeBuddy's `>`.
+fn ruled_prompts(agent: CLIAgent) -> &'static [char] {
+    match agent {
+        CLIAgent::Copilot => &['❯'],
+        CLIAgent::Qwen => &['>', '*', '!'],
+        _ => &['>'],
     }
 }
 
@@ -581,6 +617,166 @@ fn amp_input_top(rows: &[String], floor: usize, width: usize) -> Option<usize> {
     (framed && top + 1 < bottom && !overlay).then_some(top)
 }
 
+/// How many rows Copilot, Qwen Code and CodeBuddy draw under their input's
+/// lower rule at most: their status rows, which wrap in a narrow pane.
+const RULED_FOOTER_MAX_ROWS: usize = 5;
+
+/// Where an input ruled off top and bottom starts — Copilot's, Qwen Code's,
+/// CodeBuddy's: the upper of the last two full-width rules on the screen,
+/// with the prompt (one of `prompts`, at the very start of the row) on the
+/// line right under it and no more than the status rows under the lower one.
+///
+/// What they put in the input's place is no such block: their tool approvals
+/// and pickers are drawn between rules of their own — or in a frame — with
+/// the question, not the prompt, on the first line, or with the options
+/// under the lower rule; and their `/` and `@` lists open under the lower
+/// rule (Qwen Code, CodeBuddy) or right over the upper one (Copilot, its rows
+/// on a `┃` bar). They take the keys while open, so the box steps aside.
+fn ruled_input_top(rows: &[String], floor: usize, width: usize, prompts: &[char]) -> Option<usize> {
+    let mut rules = (floor..rows.len())
+        .rev()
+        .filter(|&i| is_rule(&rows[i], width));
+    let lower = rules.next()?;
+    let upper = rules.next()?;
+    let footer = rows[lower + 1..]
+        .iter()
+        .filter(|r| !r.trim().is_empty())
+        .count();
+    let prompt = rows[upper + 1]
+        .chars()
+        .next()
+        .is_some_and(|c| prompts.contains(&c));
+    let list_above = upper > 0 && rows[upper - 1].starts_with('┃');
+    (upper + 1 < lower && prompt && footer <= RULED_FOOTER_MAX_ROWS && !list_above).then_some(upper)
+}
+
+/// Where Copilot's input starts, and where it ends, when it shades it — as
+/// it does in a terminal with true colour: a block opened by a `╻▄▄▄` edge
+/// and closed by a `╹▀▀▀` one, its lines on a `┃` bar, the status rows under
+/// it. Elsewhere it rules the input off — see [`ruled_input_top`].
+///
+/// Its `/` and `@` lists open on a `┃` bar right over the block, and take the
+/// keys while open, so the box steps aside for them.
+fn copilot_shaded_input(rows: &[String], floor: usize, width: usize) -> Option<(usize, usize)> {
+    let edge = |r: &str, corner: char, run: char| {
+        let t = r.trim();
+        t.starts_with(corner)
+            && t.chars().count() >= width * 3 / 5
+            && t.chars().skip(1).all(|c| c == run)
+    };
+    let bottom = (floor..rows.len())
+        .rev()
+        .find(|&i| edge(&rows[i], '╹', '▀'))?;
+    let footer = rows[bottom + 1..]
+        .iter()
+        .filter(|r| !r.trim().is_empty())
+        .count();
+    let top = (floor..bottom).rev().find(|&i| !rows[i].starts_with('┃'))?;
+    let list_above = copilot_list_over(rows, top);
+    (edge(&rows[top], '╻', '▄')
+        && top + 1 < bottom
+        && footer <= RULED_FOOTER_MAX_ROWS
+        && !list_above)
+        .then_some((top, bottom))
+}
+
+/// How far over Copilot's shaded input its `/` and `@` lists reach: their
+/// rows, and the blank ones a short list leaves under it.
+const COPILOT_LIST_REACH: usize = 12;
+
+/// Whether one of Copilot's `/` or `@` lists is open over its input, whose
+/// top is `top`: on a `┃` bar right over it, or — drawn shaded — as rows
+/// whose selected one opens with `❯ /` or `❯ @`. A message sent before is
+/// drawn with a `❯` too, but with the time it was sent at the end.
+fn copilot_list_over(rows: &[String], top: usize) -> bool {
+    if top > 0 && rows[top - 1].starts_with('┃') {
+        return true;
+    }
+    rows[top.saturating_sub(COPILOT_LIST_REACH)..top]
+        .iter()
+        .any(|r| {
+            let t = r.trim();
+            let sent_at = t.len() >= 5
+                && t.is_char_boundary(t.len() - 5)
+                && t[t.len() - 5..].chars().enumerate().all(|(i, c)| match i {
+                    2 => c == ':',
+                    _ => c.is_ascii_digit(),
+                });
+            (t.starts_with("❯ /") || t.starts_with("❯ @")) && !sent_at
+        })
+}
+
+/// How many rows Kimi Code draws under its input's frame at most: its model
+/// and directory line and the context gauge, which wrap in a narrow pane.
+const KIMI_FOOTER_MAX_ROWS: usize = 4;
+
+/// Where Kimi Code's input starts: the top edge of the rounded frame whose
+/// first line inside opens with `>`, with its model line and context gauge
+/// under it.
+///
+/// Its `/` and `@` lists open under the frame, between it and the model
+/// line; a tool approval takes the frame's place between two rules; the
+/// welcome banner is a frame of its own, far up with the transcript under
+/// it. The box steps aside for the lists and approvals.
+fn kimi_input_top(rows: &[String], floor: usize) -> Option<usize> {
+    let edge = |r: &str, open: char, close: char| {
+        let t = r.trim();
+        t.starts_with(open) && t.ends_with(close) && t.chars().count() > 2
+    };
+    let bottom = (floor..rows.len())
+        .rev()
+        .find(|&i| edge(&rows[i], '╰', '╯'))?;
+    let footer = rows[bottom + 1..]
+        .iter()
+        .filter(|r| !r.trim().is_empty())
+        .count();
+    let top = (floor..bottom)
+        .rev()
+        .find(|&i| !rows[i].trim_start().starts_with('│'))?;
+    let prompt = rows.get(top + 1).is_some_and(|r| {
+        r.trim_start()
+            .trim_start_matches('│')
+            .trim_start()
+            .starts_with('>')
+    });
+    (edge(&rows[top], '╭', '╮') && top + 1 < bottom && prompt && footer <= KIMI_FOOTER_MAX_ROWS)
+        .then_some(top)
+}
+
+/// How many rows OpenCode draws under its input at most: its key hints, and
+/// on its home screen the directory at the bottom of the screen.
+const OPENCODE_FOOTER_MAX_ROWS: usize = 3;
+
+/// Where OpenCode's input starts: the top of the block it draws on a `┃`
+/// bar, the agent and model on its last line, closed by a `╹▀▀▀` edge with
+/// the key hints under it.
+///
+/// Its `/` and `@` lists open on the same bar right over the input, each row
+/// closed by a `┃` at its right; a permission request takes the input's
+/// place on a bar with no edge under it. The sent messages in the
+/// transcript are on a bar too, without the edge. The box steps aside for
+/// the lists and requests.
+fn opencode_input_top(rows: &[String], floor: usize) -> Option<usize> {
+    let bar = |r: &str| r.trim_start().starts_with('┃');
+    let edge = (floor..rows.len()).rev().find(|&i| {
+        let t = rows[i].trim();
+        t.starts_with('╹') && t.chars().skip(1).all(|c| c == '▀') && t.chars().count() > 2
+    })?;
+    let footer = rows[edge + 1..]
+        .iter()
+        .filter(|r| !r.trim().is_empty())
+        .count();
+    let mut top = edge;
+    while top > floor && bar(&rows[top - 1]) {
+        top -= 1;
+    }
+    let list = rows[top..edge].iter().any(|r| {
+        let t = r.trim();
+        t.chars().count() > 1 && t.ends_with('┃')
+    });
+    (top + 2 <= edge && footer <= OPENCODE_FOOTER_MAX_ROWS && !list).then_some(top)
+}
+
 /// Where Oh My Pi's input starts, in the composer shapes that keep it findable.
 ///
 /// - **The status band**, its default, and **the rounded box**: the status
@@ -654,18 +850,44 @@ fn interrupt_keys(agent: Option<CLIAgent>) -> Vec<Step> {
 /// The keys that empty `agent`'s input of `lines` lines of text, where some
 /// do so without doing anything else; none for an input with nothing in it.
 ///
-/// Grok Build's Ctrl+U empties its input whole. Crush's, Goose's and Amp's
-/// empty the caret's line, and a Backspace then steps up into the line above
-/// — a line at a time, from the end, where the caret is left.
-fn clear_input(agent: CLIAgent, lines: usize) -> Option<Vec<u8>> {
+/// Grok Build's Ctrl+U empties its input whole. The others' empty the
+/// caret's line, and a Backspace then steps up into the line above — a line
+/// at a time, from the end, where the caret is left. CodeBuddy takes keys
+/// that arrive together for a paste and does none of them, so it gets them
+/// one at a time.
+fn clear_input(agent: CLIAgent, lines: usize) -> Option<Vec<Step>> {
     if lines == 0 {
         return None;
     }
-    match agent {
-        CLIAgent::Grok => Some(b"\x15".to_vec()),
-        CLIAgent::Crush | CLIAgent::Goose | CLIAgent::Amp => Some(b"\x15\x7f".repeat(lines)),
-        _ => None,
-    }
+    let keys = match agent {
+        CLIAgent::Grok => b"\x15".to_vec(),
+        CLIAgent::Crush
+        | CLIAgent::Goose
+        | CLIAgent::Amp
+        | CLIAgent::Copilot
+        | CLIAgent::Qwen
+        | CLIAgent::CodeBuddy
+        | CLIAgent::Kimi
+        | CLIAgent::OpenCode => b"\x15\x7f".repeat(lines),
+        _ => return None,
+    };
+    Some(match agent {
+        CLIAgent::CodeBuddy => keys
+            .iter()
+            .enumerate()
+            .map(|(i, &key)| Step {
+                delay: match i {
+                    0 => Duration::ZERO,
+                    _ => KEY_GAP,
+                },
+                bytes: vec![key],
+            })
+            .collect(),
+        _ => vec![Step {
+            delay: Duration::ZERO,
+            bytes: keys,
+        }],
+    })
 }
 
 /// Crush's placeholders: what its empty editor says, idle, mid-turn and in
@@ -736,6 +958,70 @@ fn held_lines(agent: CLIAgent, rows: &[String], width: usize) -> usize {
                     .map(|r| r.trim_matches(|c: char| c == '│' || c == ' '))
                     .collect(),
             )
+        }),
+        CLIAgent::Copilot if let Some((top, bottom)) = copilot_shaded_input(rows, floor, width) => {
+            count(
+                rows[top + 1..bottom]
+                    .iter()
+                    .map(|r| r.trim_start_matches('┃').trim())
+                    .collect(),
+            )
+        }
+        CLIAgent::Copilot | CLIAgent::Qwen | CLIAgent::CodeBuddy => {
+            ruled_input_top(rows, floor, width, ruled_prompts(agent)).map_or(0, |top| {
+                let lines: Vec<&str> = rows[top + 1..]
+                    .iter()
+                    .take_while(|r| !is_rule(r, width))
+                    .enumerate()
+                    .map(|(i, r)| {
+                        let mut chars = r.chars();
+                        if i == 0 {
+                            chars.next();
+                        }
+                        let t = chars
+                            .as_str()
+                            .trim_matches(|c: char| c.is_whitespace() || c == '\u{200b}');
+                        // Placeholders, and a suggestion offered to send as is.
+                        match t == "Type your message or @path/to/file" || t.ends_with("↵ send") {
+                            true => "",
+                            false => t,
+                        }
+                    })
+                    .collect();
+                count(lines)
+            })
+        }
+        CLIAgent::Kimi => kimi_input_top(rows, floor).map_or(0, |top| {
+            count(
+                rows[top + 1..]
+                    .iter()
+                    .take_while(|r| r.trim_start().starts_with('│'))
+                    .enumerate()
+                    .map(|(i, r)| {
+                        let t = r.trim().trim_matches('│').trim();
+                        match i {
+                            0 => t.trim_start_matches('>').trim(),
+                            _ => t,
+                        }
+                    })
+                    .collect(),
+            )
+        }),
+        CLIAgent::OpenCode => opencode_input_top(rows, floor).map_or(0, |top| {
+            let block: Vec<&str> = rows[top..]
+                .iter()
+                .take_while(|r| r.trim_start().starts_with('┃'))
+                .map(|r| r.trim().trim_start_matches('┃').trim())
+                .collect();
+            // The last line names the agent and model.
+            let lines = block[..block.len().saturating_sub(1)]
+                .iter()
+                .map(|l| match l.starts_with("Ask anything...") {
+                    true => "",
+                    false => l,
+                })
+                .collect();
+            count(lines)
         }),
         _ => 0,
     }
@@ -2180,13 +2466,7 @@ impl TerminalView {
             && let Some(first) = steps.first_mut()
         {
             first.delay = SETTLE;
-            steps.insert(
-                0,
-                Step {
-                    delay: Duration::ZERO,
-                    bytes: clear,
-                },
-            );
+            steps.splice(0..0, clear);
         }
         c.attached.clear();
         c.dismissed = None;
@@ -2963,6 +3243,11 @@ mod tests {
 
     fn bytes(steps: &[Step]) -> Vec<&[u8]> {
         steps.iter().map(|s| s.bytes.as_slice()).collect()
+    }
+
+    /// The writes [`clear_input`] makes, one per step.
+    fn clear_keys(agent: CLIAgent, lines: usize) -> Option<Vec<Vec<u8>>> {
+        clear_input(agent, lines).map(|steps| steps.into_iter().map(|s| s.bytes).collect())
     }
 
     #[test]
@@ -3815,9 +4100,9 @@ mod tests {
         assert_eq!(held_lines(CLIAgent::Grok, &left, 40), 1);
         assert_eq!(held_lines(CLIAgent::Grok, &empty, 40), 0);
         assert_eq!(held_lines(CLIAgent::Pi, &left, 40), 0);
-        assert_eq!(clear_input(CLIAgent::Grok, 1), Some(b"\x15".to_vec()));
-        assert_eq!(clear_input(CLIAgent::Grok, 0), None);
-        assert_eq!(clear_input(CLIAgent::Claude, 1), None);
+        assert_eq!(clear_keys(CLIAgent::Grok, 1), Some(vec![b"\x15".to_vec()]));
+        assert_eq!(clear_keys(CLIAgent::Grok, 0), None);
+        assert_eq!(clear_keys(CLIAgent::Claude, 1), None);
         // Its Esc does not stop a turn; Ctrl+C does.
         assert_eq!(bytes(&interrupt_keys(Some(CLIAgent::Grok))), [b"\x03"]);
         assert_eq!(bytes(&interrupt_keys(Some(CLIAgent::Pi))), [b"\x1b"]);
@@ -4107,10 +4392,492 @@ mod tests {
         );
 
         assert_eq!(
-            clear_input(CLIAgent::Crush, 2),
-            Some(b"\x15\x7f\x15\x7f".to_vec())
+            clear_keys(CLIAgent::Crush, 2),
+            Some(vec![b"\x15\x7f\x15\x7f".to_vec()])
         );
-        assert_eq!(clear_input(CLIAgent::Amp, 0), None);
+        assert_eq!(clear_keys(CLIAgent::Amp, 0), None);
+    }
+
+    #[test]
+    fn copilots_input_is_ruled_off_over_its_status_rows() {
+        let rows = screen(&[
+            " ● MCP Servers reloaded: 0 servers connected",
+            "",
+            "",
+            " /private/tmp/t7dev/agents/smoke",
+            RULE,
+            "❯",
+            RULE,
+            " ← open sidebar · Interactive · Manual Approval",
+            " claude-sonnet-4-6",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::Copilot, &rows, 40),
+            Some(InputArea { top: 4, mode: None })
+        );
+        // Several lines, with the status rows wrapped in a narrow pane.
+        let rows = screen(&[
+            " /private/tmp/t7dev/agents/smoke",
+            RULE,
+            "❯ line one",
+            "  line two",
+            "  line three",
+            RULE,
+            " ← open    · Interactive · Manual ·/ commands",
+            " sidebar     Approval              tab next",
+            " claude-sonnet-4-6",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::Copilot, &rows, 40),
+            Some(InputArea { top: 1, mode: None })
+        );
+        assert_eq!(held_lines(CLIAgent::Copilot, &rows, 40), 3);
+        assert_eq!(
+            clear_keys(CLIAgent::Copilot, 3),
+            Some(vec![b"\x15\x7f\x15\x7f\x15\x7f".to_vec()])
+        );
+    }
+
+    const COPILOT_SHADE_TOP: &str = "╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄";
+    const COPILOT_SHADE_BOTTOM: &str = "╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀";
+
+    /// With true colour Copilot shades its input instead of ruling it off.
+    #[test]
+    fn copilots_shaded_input_is_the_block_over_its_status_rows() {
+        let at = |inside: &[&str]| {
+            let mut rows = vec![
+                String::new(),
+                " /private/tmp/t7b7/proj".to_string(),
+                COPILOT_SHADE_TOP.to_string(),
+            ];
+            rows.extend(inside.iter().map(|l| l.to_string()));
+            rows.push(COPILOT_SHADE_BOTTOM.to_string());
+            rows.push(" ← open sidebar · Interactive · Manual Approval".to_string());
+            rows.push(" claude-sonnet-4-6".to_string());
+            rows
+        };
+        for (inside, held) in [(&["┃"][..], 0), (&["┃ line one", "┃ line two"][..], 2)] {
+            let rows = at(inside);
+            assert_eq!(
+                input_area(CLIAgent::Copilot, &rows, 40),
+                Some(InputArea { top: 2, mode: None })
+            );
+            assert_eq!(held_lines(CLIAgent::Copilot, &rows, 40), held);
+        }
+        // Its `/` list over the block, drawn shaded too, with blank rows
+        // under a short one; a command sent before is no list.
+        let rows = screen(&[
+            "  ❯ /move                Move your uncommitted changes",
+            "    /memory              Show memory status",
+            "",
+            "",
+            COPILOT_SHADE_TOP,
+            "┃ /move",
+            COPILOT_SHADE_BOTTOM,
+            " Interactive · Manual Approval · /help show help",
+        ]);
+        assert_eq!(input_area(CLIAgent::Copilot, &rows, 40), None);
+        let rows = screen(&[
+            "  ❯ /model                                    13:31",
+            "",
+            " ● Model set to claude-sonnet-4-6",
+            "",
+            COPILOT_SHADE_TOP,
+            "┃",
+            COPILOT_SHADE_BOTTOM,
+            " Interactive · Manual Approval · / commands",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::Copilot, &rows, 40),
+            Some(InputArea { top: 4, mode: None })
+        );
+        // On a bar right over the block.
+        let rows = screen(&[
+            "┃ ❯ /add-dir           Allow file access to a directory",
+            "┃   /agent             Browse and select agents",
+            COPILOT_SHADE_TOP,
+            "┃ /add-dir",
+            COPILOT_SHADE_BOTTOM,
+            " Interactive · Manual Approval · /help show help",
+        ]);
+        assert_eq!(input_area(CLIAgent::Copilot, &rows, 40), None);
+    }
+
+    /// Copilot's lists open on a bar right over its input; its approvals and
+    /// pickers take the input's place, framed or between rules of their own.
+    #[test]
+    fn copilots_lists_and_dialogs_are_not_its_input() {
+        let slash = screen(&[
+            "┃ ❯ /add-dir           Allow file access to a directory",
+            "┃   /agent             Browse and select agents",
+            RULE,
+            "❯ /add-dir",
+            RULE,
+            " Interactive · Manual Approval · /help show help",
+        ]);
+        let mention = screen(&[
+            "┃   @cop.txt",
+            "┃ ❯ @/private/tmp/t7dev/agents/smoke/",
+            RULE,
+            "❯ @",
+            RULE,
+            " Interactive · Manual Approval · @ files · # issues",
+        ]);
+        let approval = screen(&[
+            " $ Shell Create cop.txt file",
+            "   touch /tmp/t7dev/agents/smoke/cop.txt",
+            "",
+            "╭──────────────────────────────────────╮",
+            "│ Create cop.txt file                  │",
+            "│ ──────────────────────────────────── │",
+            "│ Do you want to run this command?     │",
+            "│                                      │",
+            "│ ❯ 1. Yes                             │",
+            "│   2. Yes, and don't ask again        │",
+            "│   3. No, and tell Copilot (Esc)      │",
+            "│                                      │",
+            "│ ↑/↓ to navigate · enter to select    │",
+            "╰──────────────────────────────────────╯",
+        ]);
+        let picker = screen(&[
+            RULE,
+            "",
+            " Subagent Configuration",
+            "",
+            " ❯ explore   built-in   gpt-5.6-luna",
+            "   task      built-in   gpt-5.6-luna",
+            "",
+            " ↑/↓ to navigate · enter to select",
+            "",
+            RULE,
+        ]);
+        for rows in [slash, mention, approval, picker] {
+            assert_eq!(input_area(CLIAgent::Copilot, &rows, 40), None, "{rows:#?}");
+        }
+    }
+
+    const QWEN_FOOTER: [&str; 2] = [
+        "  ➜ smoke · claude-sonnet-4-6",
+        "  Auto mode (shift + tab to cycle)",
+    ];
+
+    #[test]
+    fn qwens_input_is_ruled_off_over_its_status_rows() {
+        let at = |lines: &[&str]| {
+            let mut rows = vec![
+                "  Tips: You can run any shell commands from Qwen Code.".to_string(),
+                String::new(),
+                RULE.to_string(),
+            ];
+            rows.extend(lines.iter().map(|l| l.to_string()));
+            rows.push(RULE.to_string());
+            rows.extend(QWEN_FOOTER.map(String::from));
+            // Drawn after the transcript, with the rest of the screen empty.
+            rows.extend(std::iter::repeat_n(String::new(), 14));
+            rows
+        };
+        for (lines, held) in [
+            (&[">   Type your message or @path/to/file"][..], 0),
+            (&["*   Type your message or @path/to/file"][..], 0),
+            (&["!   Type your message or @path/to/file"][..], 0),
+            (&["> line one", "  line two \u{200b}"][..], 2),
+            (&["> / \u{200b}"][..], 1),
+        ] {
+            let rows = at(lines);
+            assert_eq!(
+                input_area(CLIAgent::Qwen, &rows, 40),
+                Some(InputArea { top: 2, mode: None }),
+                "{lines:?}"
+            );
+            assert_eq!(held_lines(CLIAgent::Qwen, &rows, 40), held, "{lines:?}");
+        }
+    }
+
+    /// Qwen Code's `/` list opens under its input, a tool approval and its
+    /// dialogs take the input's place.
+    #[test]
+    fn qwens_lists_and_dialogs_are_not_its_input() {
+        let slash = screen(&[
+            RULE,
+            "> / \u{200b}",
+            RULE,
+            "  > model [--fast|--voice]   Switch the model for this session",
+            "    cd <path>                Move this session to a new directory",
+            "    btw                      Ask a quick side question",
+            "    bug <description>        submit a bug report",
+            "    ide                      manage IDE integration",
+            "    vim                      toggle vim mode on/off",
+            "  ▼",
+            "  (1/86)",
+        ]);
+        let approval = screen(&[
+            RULE,
+            "  > Use the shell to run: touch /tmp/t7dev/agents/smoke/qwen.txt",
+            "",
+            "  ? Shell touch /tmp/t7dev/agents/smoke/qwen.txt",
+            "",
+            "   Allow execution of: 'touch'?",
+            "",
+            "   › 1. Yes, allow once",
+            "     2. Always allow run 'touch *' commands in this project",
+            "     4. No, suggest changes (esc)",
+            "",
+            "  ⠏ Waiting for user confirmation...",
+        ]);
+        let model = screen(&[
+            "  ╭──────────────────────────────────────╮",
+            "  │ Select Model                         │",
+            "  │ › 1. [openai] claude-sonnet-4-6      │",
+            "  │ ──────────────────────────────────── │",
+            "  │ Enter to select, ↑↓ to navigate      │",
+            "  ╰──────────────────────────────────────╯",
+        ]);
+        for rows in [slash, approval, model] {
+            assert_eq!(input_area(CLIAgent::Qwen, &rows, 40), None, "{rows:#?}");
+        }
+    }
+
+    #[test]
+    fn codebuddys_input_is_ruled_off_over_its_key_help() {
+        let rows = screen(&[
+            "│      ████            ████      │ claude-sonnet-4-6      │",
+            "╰────────────────────────────────────────────────────────╯",
+            "",
+            RULE,
+            "> line one",
+            "  line two",
+            RULE,
+            "  ← for agents",
+            "",
+            "",
+            "",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::CodeBuddy, &rows, 40),
+            Some(InputArea { top: 3, mode: None })
+        );
+        assert_eq!(held_lines(CLIAgent::CodeBuddy, &rows, 40), 2);
+        // An empty input, or one offering a suggestion to send as it is.
+        for line in [">", "> verify file exists with ls command    ↵ send"] {
+            let rows = screen(&[
+                "✔ Worked for 22s",
+                RULE,
+                line,
+                RULE,
+                "? for shortcuts  ← for agents",
+            ]);
+            assert_eq!(
+                input_area(CLIAgent::CodeBuddy, &rows, 40),
+                Some(InputArea { top: 1, mode: None })
+            );
+            assert_eq!(held_lines(CLIAgent::CodeBuddy, &rows, 40), 0);
+        }
+        // Keys that arrive together it takes for a paste: one at a time.
+        assert_eq!(
+            clear_keys(CLIAgent::CodeBuddy, 1),
+            Some(vec![b"\x15".to_vec(), b"\x7f".to_vec()])
+        );
+        assert!(clear_input(CLIAgent::CodeBuddy, 1).unwrap()[1].delay >= KEY_GAP);
+    }
+
+    /// CodeBuddy's `/` list opens under its input; a tool approval takes
+    /// the input's place between rules of its own.
+    #[test]
+    fn codebuddys_lists_and_approvals_are_not_its_input() {
+        let slash = screen(&[
+            RULE,
+            "> /",
+            RULE,
+            "  /commit              Create a git commit",
+            "  /commit-push-pr      Commit, push, and open a PR",
+            "  /loop                Run a prompt on a recurring interval",
+            "  /security-review     Complete a security review",
+            "  /add-dir             Add a new working directory",
+            "  /agent-mode          Switch the main agent mode",
+            "",
+        ]);
+        let approval = screen(&[
+            "● Bash(touch /tmp/t7dev/agents/smoke/cb.txt)",
+            RULE,
+            " Bash command",
+            "",
+            "   touch /tmp/t7dev/agents/smoke/cb.txt",
+            "   Create cb.txt file",
+            "",
+            RULE,
+            "",
+            " Do you want to proceed?",
+            "",
+            " > 1. Yes",
+            "   2. Yes, and don't ask again for session (shift + tab)",
+            "   3. No, and tell CodeBuddy what to do differently (escape)",
+        ]);
+        for rows in [slash, approval] {
+            assert_eq!(
+                input_area(CLIAgent::CodeBuddy, &rows, 40),
+                None,
+                "{rows:#?}"
+            );
+        }
+    }
+
+    const KIMI_FOOTER: [&str; 2] = [
+        " claude-sonnet-4-6 thinking: high  …/t7dev/agents/smoke",
+        "                                   context: 0% (0/195k)",
+    ];
+
+    #[test]
+    fn kimis_input_is_the_frame_over_its_model_line() {
+        let at = |inside: &[&str]| {
+            let mut rows = vec![
+                " ╭──────────────────────────────────────╮".to_string(),
+                " │  ▐█▛█▛█▌  Welcome to Kimi Code!       │".to_string(),
+                " ╰──────────────────────────────────────╯".to_string(),
+                String::new(),
+                "   No session yet — one will be created.".to_string(),
+                String::new(),
+                " ╭──────────────────────────────────────╮".to_string(),
+            ];
+            rows.extend(inside.iter().map(|l| l.to_string()));
+            rows.push(" ╰──────────────────────────────────────╯".to_string());
+            rows.extend(KIMI_FOOTER.map(String::from));
+            rows.extend(std::iter::repeat_n(String::new(), 5));
+            rows
+        };
+        for (inside, held) in [
+            (&[" │ >                                    │"][..], 0),
+            (
+                &[
+                    " │ > line one                           │",
+                    " │   line two                           │",
+                    " │   line three                         │",
+                ][..],
+                3,
+            ),
+        ] {
+            let rows = at(inside);
+            assert_eq!(
+                input_area(CLIAgent::Kimi, &rows, 40),
+                Some(InputArea { top: 6, mode: None })
+            );
+            assert_eq!(held_lines(CLIAgent::Kimi, &rows, 40), held);
+        }
+    }
+
+    /// Kimi Code's lists open under its input's frame; a tool approval takes
+    /// the frame's place, with only its welcome banner framed far above.
+    #[test]
+    fn kimis_lists_and_approvals_are_not_its_input() {
+        let slash = screen(&[
+            " ╭──────────────────────────────────────╮",
+            " │ > /                                  │",
+            " ╰──────────────────────────────────────╯",
+            " │   → yolo           Ask When Needed    │",
+            " │     model          Switch LLM model   │",
+            " │     permission     Select permission  │",
+            " │     plan           Toggle plan mode   │",
+            " │     (1/51)                            │",
+            KIMI_FOOTER[0],
+            KIMI_FOOTER[1],
+        ]);
+        let approval = screen(&[
+            " ╰──────────────────────────────────────╯",
+            "",
+            " ✨ Use the shell to run: touch kimi.txt",
+            "",
+            " ● Running a command · $ touch kimi.txt",
+            " ──────────────────────────────────────",
+            "   ▶ Run this command?",
+            "",
+            "   ▶ 1. Approve once",
+            "     2. Approve for this session",
+            "     3. Reject",
+            "",
+            "   ↑/↓ select · 1/2/3/4 choose · ↵ confirm",
+            " ──────────────────────────────────────",
+            KIMI_FOOTER[0],
+            KIMI_FOOTER[1],
+        ]);
+        for rows in [slash, approval] {
+            assert_eq!(input_area(CLIAgent::Kimi, &rows, 40), None, "{rows:#?}");
+        }
+    }
+
+    const OPENCODE_EDGE: &str = "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀";
+
+    #[test]
+    fn opencodes_input_is_the_bar_over_its_key_hints() {
+        // Its home screen, the input in the middle over the directory.
+        let rows = screen(&[
+            "        █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█",
+            "",
+            "    ┃",
+            "    ┃  Ask anything... \"Fix broken tests\"",
+            "    ┃",
+            "    ┃  Build · claude-sonnet-4-6 Relay",
+            "    ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            "    tab agents  ctrl+p commands",
+            "",
+            "",
+            "  /private/tmp/t7dev/agents/smoke            1.18.4",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::OpenCode, &rows, 40),
+            Some(InputArea { top: 2, mode: None })
+        );
+        assert_eq!(held_lines(CLIAgent::OpenCode, &rows, 40), 0);
+        // A session, a turn running, two lines typed.
+        let rows = screen(&[
+            "  ┃  Use the shell to run: touch oc.txt",
+            "  ┃",
+            "",
+            "     ▣  Build · claude-sonnet-4-6",
+            "",
+            "  ┃",
+            "  ┃  line one",
+            "  ┃  line two",
+            "  ┃",
+            "  ┃  Build · claude-sonnet-4-6 Relay",
+            OPENCODE_EDGE,
+            "   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt         ctrl+p commands",
+            "",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::OpenCode, &rows, 40),
+            Some(InputArea { top: 5, mode: None })
+        );
+        assert_eq!(held_lines(CLIAgent::OpenCode, &rows, 40), 3);
+    }
+
+    /// OpenCode's lists open on its input's bar, closed by a bar at the
+    /// right; a permission request takes the input's place, with no edge.
+    #[test]
+    fn opencodes_lists_and_requests_are_not_its_input() {
+        let slash = screen(&[
+            "  ┃ /agents     Switch agent                ┃",
+            "  ┃ /connect    Connect provider            ┃",
+            "  ┃",
+            "  ┃  /",
+            "  ┃",
+            "  ┃  Build · claude-sonnet-4-6 Relay",
+            OPENCODE_EDGE,
+            "   tab agents  ctrl+p commands",
+        ]);
+        let request = screen(&[
+            "     $ touch /tmp/t7dev/agents/smoke/oc.txt",
+            "",
+            "  ┃",
+            "  ┃  △ Permission required",
+            "  ┃    ← Access external directory",
+            "  ┃",
+            "  ┃   Allow once   Allow always   Reject",
+            "  ┃",
+            "",
+        ]);
+        let sent = screen(&["  ┃", "  ┃  Reply with just PONG", "  ┃", "", "     PONG"]);
+        for rows in [slash, request, sent] {
+            assert_eq!(input_area(CLIAgent::OpenCode, &rows, 40), None, "{rows:#?}");
+        }
     }
 
     /// The grid gives up rows only for the part of the box an input does not
