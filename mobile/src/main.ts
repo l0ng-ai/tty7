@@ -2906,6 +2906,17 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       return true;
     });
 
+    // Whether the program asked for SGR mouse reports (`?1006`), the encoding
+    // a swipe over a full-screen program is reported in; xterm keeps it to
+    // itself. A replay restores it along with the other modes.
+    let sgrMouse = false;
+    const mouseEncoding = (on: boolean) => (params: (number | number[])[]) => {
+      if (params.includes(1006)) sgrMouse = on;
+      return false;
+    };
+    term.parser.registerCsiHandler({ prefix: "?", final: "h" }, mouseEncoding(true));
+    term.parser.registerCsiHandler({ prefix: "?", final: "l" }, mouseEncoding(false));
+
     let handle: number | null = null;
     // Whether keystrokes land: set by a successful open, cleared by anything
     // that says they no longer do.
@@ -3466,6 +3477,38 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       latest.hidden = true;
       requestAnimationFrame(showCursor);
     };
+    // A full-screen program (an agent's full-screen view, less, vim) is on
+    // the alternate screen, which keeps no scrollback: there is nothing here
+    // to scroll, and the program scrolls itself. A swipe over it turns the
+    // mouse wheel, as on the desktop, a notch a row: reported at the finger
+    // to a program that asked for the mouse, arrow keys to one that did not.
+    let wheelPx = 0;
+    let finger = { x: 0, y: 0 };
+    const wheel = (dy: number) => {
+      wheelPx += dy;
+      const row = rowHeight();
+      const notches = Math.trunc(wheelPx / row);
+      if (!notches) return;
+      wheelPx -= notches * row;
+      const up = notches > 0;
+      let notch: string;
+      if (term.modes.mouseTrackingMode === "none") {
+        notch = `\x1b${term.modes.applicationCursorKeysMode ? "O" : "["}${up ? "A" : "B"}`;
+      } else {
+        const drawn = screenEl.querySelector<HTMLElement>(".xterm-screen")?.getBoundingClientRect();
+        const clamp = (n: number, max: number) => Math.min(Math.max(1, n), max);
+        // The pane's own rows: the ones under them here are history.
+        const x = clamp(drawn ? Math.floor(((finger.x - drawn.left) / drawn.width) * term.cols) + 1 : 1, term.cols);
+        const y = clamp(drawn ? Math.floor((finger.y - drawn.top) / row) + 1 : 1, Math.min(paneRows, term.rows));
+        const button = up ? 64 : 65;
+        // The legacy encoding's bytes past 127 would not survive the trip as
+        // text; it is capped there.
+        notch = sgrMouse
+          ? `\x1b[<${button};${x};${y}M`
+          : `\x1b[M${String.fromCharCode(32 + button, 32 + Math.min(x, 95), 32 + Math.min(y, 95))}`;
+      }
+      void input(notch.repeat(Math.abs(notches)));
+    };
     // Moves the view by a distance in pixels. Dragging down goes back in the
     // scrollback.
     const scrollBy = (dy: number) => {
@@ -3477,6 +3520,11 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       const boxRoom = screenEl.scrollHeight - screenEl.clientHeight;
       if ((dy > 0 && screenEl.scrollTop > 0) || (dy < 0 && buf.viewportY >= buf.baseY && screenEl.scrollTop < boxRoom)) {
         screenEl.scrollTop -= dy;
+        return;
+      }
+      if (buf.type === "alternate") {
+        if (frac) setFrac(0);
+        wheel(dy);
         return;
       }
       const row = rowHeight();
@@ -3506,6 +3554,8 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         if ((e.target as Element).closest?.(".scrollbar")) return (touch = null);
         const t = e.touches[0];
         touch = { x: t.clientX, y: t.clientY, axis: null, samples: [[t.clientY, e.timeStamp]] };
+        finger = { x: t.clientX, y: t.clientY };
+        wheelPx = 0;
       },
       { passive: true },
     );
@@ -3522,6 +3572,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         }
         if (touch.axis !== "y") return;
         e.preventDefault();
+        finger = { x: t.clientX, y: t.clientY };
         const last = touch.samples[touch.samples.length - 1][0];
         pending += t.clientY - last;
         touch.samples.push([t.clientY, e.timeStamp]);
@@ -3917,6 +3968,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         replayed = true;
         loaded();
         term.reset();
+        sgrMouse = false;
       };
       live = false;
       retry.cancel();
