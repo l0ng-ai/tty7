@@ -2214,8 +2214,17 @@ export default function (pi: ExtensionAPI) {{
   // What the pane showed before a UI prompt put it on "waiting", so closing
   // the prompt can put it back.
   let turn = "session-start";
+  // Whether this build says when a run is over for good. agent_end also ends
+  // each attempt an automatic retry, a compaction or a queued message picks
+  // up again, and reading that as "done" calls the pane finished while it
+  // still works. Pi's agent_settled comes once the run is really over; a Pi
+  // whose on() hands back an unsubscribe is new enough to always send it,
+  // and an older one that sends it shows so the first time it does.
+  let settles = false;
   pi.on("agent_start", (_event, ctx) => emit((turn = "prompt-submit"), ctx));
-  pi.on("agent_end", (_event, ctx) => emit((turn = "stop"), ctx));
+  pi.on("agent_end", (_event, ctx) => {{
+    if (!settles) emit((turn = "stop"), ctx);
+  }});
   pi.on("session_shutdown", (_event, ctx) => emit("session-end", ctx));
   // Last, and guarded: the three above already worked, so a Pi build that
   // rejects this event name must not take them — or the whole extension —
@@ -2239,6 +2248,25 @@ export default function (pi: ExtensionAPI) {{
   // ever end it.
   try {{
     pi.on("ui_prompt_end", (_event, ctx) => emit(turn, ctx));
+  }} catch {{}}
+  try {{
+    const off: unknown = pi.on("agent_settled" as any, (_event: unknown, ctx: SessionCtx) => {{
+      settles = true;
+      emit((turn = "stop"), ctx);
+    }});
+    if (typeof off === "function") settles = true;
+  }} catch {{}}
+  // Oh My Pi asks before running a tool through events of its own rather
+  // than Pi's UI-prompt pair, and announces its retries — which follow an
+  // agent_end — where Pi does not.
+  try {{
+    pi.on("tool_approval_requested" as any, (_event: unknown, ctx: SessionCtx) =>
+      emit("permission-request", ctx),
+    );
+    pi.on("tool_approval_resolved" as any, (_event: unknown, ctx: SessionCtx) => emit(turn, ctx));
+    pi.on("auto_retry_start" as any, (_event: unknown, ctx: SessionCtx) =>
+      emit((turn = "prompt-submit"), ctx),
+    );
   }} catch {{}}
 }}
 "#
@@ -3826,6 +3854,10 @@ mod tests {
                 "session_shutdown",
                 "ui_prompt_start",
                 "ui_prompt_end",
+                "agent_settled",
+                "tool_approval_requested",
+                "tool_approval_resolved",
+                "auto_retry_start",
             ] {
                 assert!(
                     bridge.contains(&format!(r#"pi.on("{event}""#)),
