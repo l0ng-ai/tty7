@@ -352,6 +352,171 @@ pub(super) fn submit_message(
     steps
 }
 
+/// How long OpenCode's `@` list takes to search the project for a query.
+const OPENCODE_LIST_WAIT: Duration = Duration::from_millis(700);
+
+/// One stretch of a message cut at its mentions — see [`mention_pieces`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Piece<'a> {
+    Text(&'a str),
+    /// The path of an `@` mention, without the `@`.
+    Mention(&'a str),
+}
+
+/// `text` cut at its `@` mentions of paths that `exists` — an `@` at the
+/// start of a word, followed by the longest run of up to a few words that
+/// names one, a closing `.`, `,` and the like left out. An `@` that names
+/// nothing is left in the text.
+pub(super) fn mention_pieces<'a>(text: &'a str, exists: impl Fn(&str) -> bool) -> Vec<Piece<'a>> {
+    const MAX_WORDS: usize = 4;
+    let mut pieces = Vec::new();
+    let mut from = 0;
+    let mut at = 0;
+    while let Some(found) = text[at..].find('@') {
+        let sign = at + found;
+        at = sign + 1;
+        let starts_word = text[..sign]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace);
+        if !starts_word {
+            continue;
+        }
+        let rest = &text[sign + 1..];
+        // Where each of the next few words ends.
+        let mut ends = Vec::new();
+        let mut in_word = false;
+        for (i, c) in rest.char_indices() {
+            match (c.is_whitespace(), in_word) {
+                (true, true) => {
+                    ends.push(i);
+                    in_word = false;
+                    if ends.len() == MAX_WORDS {
+                        break;
+                    }
+                }
+                (false, false) => in_word = true,
+                _ => {}
+            }
+        }
+        if in_word && ends.len() < MAX_WORDS {
+            ends.push(rest.len());
+        }
+        let path = ends.iter().rev().find_map(|&end| {
+            let path = rest[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '"', '\'']);
+            (!path.is_empty() && exists(path)).then_some(path)
+        });
+        if let Some(path) = path {
+            if from < sign {
+                pieces.push(Piece::Text(&text[from..sign]));
+            }
+            pieces.push(Piece::Mention(path));
+            from = sign + 1 + path.len();
+            at = from;
+        }
+    }
+    if from < text.len() {
+        pieces.push(Piece::Text(&text[from..]));
+    }
+    pieces
+}
+
+/// The writes that send OpenCode a message whose `pieces` mention files.
+///
+/// OpenCode attaches a file to the message only when it was picked from its
+/// own `@` list; a mention typed or pasted is words to it, with or without a
+/// space in the path, and the model has to go looking for the file. So each
+/// mention goes the way a pick does: a typed `@` opens the list, the path —
+/// its spaces left out, as the list would end at one — goes in as the query,
+/// and Enter, once the list has had time to search, takes its top match.
+/// A space after it closes a list that found nothing, which would take the
+/// Enter that sends.
+///
+/// The `attached` paths follow, each a paste of its own as
+/// [`submit_message`] hands them over.
+///
+/// `None` for a message without mentions, a command or a shell line, which
+/// go the way [`submit_message`] sends them.
+pub(super) fn opencode_mention_plan(
+    pieces: &[Piece],
+    attached: &[String],
+    bracketed: bool,
+) -> Option<Vec<Step>> {
+    let first = match pieces.first()? {
+        Piece::Text(t) => t.trim_start(),
+        Piece::Mention(_) => "",
+    };
+    if !bracketed
+        || first.starts_with(['!', '/'])
+        || !pieces.iter().any(|p| matches!(p, Piece::Mention(_)))
+    {
+        return None;
+    }
+    let mut steps: Vec<Step> = Vec::new();
+    let step = |steps: &mut Vec<Step>, delay: Duration, bytes: Vec<u8>| {
+        let delay = match steps.is_empty() {
+            true => Duration::ZERO,
+            false => delay,
+        };
+        steps.push(Step { delay, bytes });
+    };
+    for (i, piece) in pieces.iter().enumerate() {
+        match piece {
+            Piece::Text(text) => {
+                let text = match i + 1 == pieces.len() {
+                    true => text.trim_end(),
+                    false => text,
+                };
+                // A pick ends in a space of its own.
+                let text = match i > 0 {
+                    true => text.strip_prefix(' ').unwrap_or(text),
+                    false => text,
+                };
+                if !text.is_empty() {
+                    step(
+                        &mut steps,
+                        SETTLE,
+                        tty7_core::core::paste::bracket(text.as_bytes()),
+                    );
+                }
+            }
+            Piece::Mention(path) => {
+                let query: String = path.chars().filter(|c| !c.is_whitespace()).collect();
+                step(&mut steps, SETTLE, b"@".to_vec());
+                step(
+                    &mut steps,
+                    SETTLE,
+                    tty7_core::core::paste::bracket(query.as_bytes()),
+                );
+                step(&mut steps, OPENCODE_LIST_WAIT, b"\r".to_vec());
+                // What follows closes a list that found nothing when it
+                // has a space in it; otherwise a space of its own does.
+                let spaced = match pieces.get(i + 1) {
+                    Some(Piece::Text(next)) => next
+                        .strip_prefix(' ')
+                        .unwrap_or(next)
+                        .trim_end()
+                        .contains(char::is_whitespace),
+                    _ => false,
+                };
+                if !spaced {
+                    step(&mut steps, SETTLE, b" ".to_vec());
+                }
+            }
+        }
+    }
+    for path in attached {
+        step(&mut steps, SETTLE, b" ".to_vec());
+        step(
+            &mut steps,
+            SETTLE,
+            tty7_core::core::paste::bracket(path.as_bytes()),
+        );
+    }
+    step(&mut steps, SETTLE_AFTER_PASTE_SLOW, b"\r".to_vec());
+    Some(steps)
+}
+
 // ---------------------------------------------------------------------------
 // Finding the agent's input area
 
@@ -2643,6 +2808,11 @@ impl TerminalView {
             return;
         }
         let shell = self.shell_program();
+        // Where OpenCode's mentions are looked up, to be picked from its list.
+        let mentions_from = match agent == CLIAgent::OpenCode && self.host_id().is_local() {
+            true => self.files_cwd(),
+            false => None,
+        };
         let Some(c) = self.composer.as_mut() else {
             return;
         };
@@ -2669,7 +2839,14 @@ impl TerminalView {
             true => typed.strip_prefix('!').unwrap_or(&typed),
             false => &typed,
         };
-        let mut steps = submit_message(agent, message, &c.attached, shell.as_deref(), bracketed);
+        let picked = mentions_from.as_deref().and_then(|cwd| {
+            let exists = |p: &str| Path::new(p).is_relative() && cwd.join(p).exists();
+            opencode_mention_plan(&mention_pieces(message, exists), &c.attached, bracketed)
+        });
+        let mut steps = match picked {
+            Some(steps) => steps,
+            None => submit_message(agent, message, &c.attached, shell.as_deref(), bracketed),
+        };
         let mut before = Vec::new();
         // Text left in the agent's own input under the box would run into the
         // message: clear it first.
@@ -3781,6 +3958,91 @@ mod tests {
             compose_message(CLIAgent::Qwen, "look", &attached, Some("zsh")),
             r"look @/tmp/a\ b.png"
         );
+    }
+
+    #[test]
+    fn mentions_are_cut_out_where_they_name_a_path() {
+        let exists = |p: &str| ["my notes.md", "plain.md", "src/a b/c.rs"].contains(&p);
+        assert_eq!(
+            mention_pieces("read @my notes.md and @plain.md.", exists),
+            [
+                Piece::Text("read "),
+                Piece::Mention("my notes.md"),
+                Piece::Text(" and "),
+                Piece::Mention("plain.md"),
+                Piece::Text("."),
+            ]
+        );
+        assert_eq!(
+            mention_pieces("@src/a b/c.rs", exists),
+            [Piece::Mention("src/a b/c.rs")]
+        );
+        // An `@` inside a word, or naming nothing, stays words.
+        for text in ["mail me@plain.md", "ask @someone about it", "@ plain.md"] {
+            assert_eq!(mention_pieces(text, exists), [Piece::Text(text)]);
+        }
+        assert_eq!(mention_pieces("", exists), []);
+    }
+
+    /// OpenCode attaches only what is picked from its `@` list, so each
+    /// mention is picked there: `@`, the path as the query, Enter.
+    #[test]
+    fn opencode_picks_each_mention_from_its_own_list() {
+        let pieces = [
+            Piece::Text("read "),
+            Piece::Mention("my notes.md"),
+            Piece::Text(" now, please"),
+        ];
+        let steps = opencode_mention_plan(&pieces, &[], true).unwrap();
+        assert_eq!(
+            bytes(&steps),
+            [
+                &b"\x1b[200~read \x1b[201~"[..],
+                b"@",
+                b"\x1b[200~mynotes.md\x1b[201~",
+                b"\r",
+                b"\x1b[200~now, please\x1b[201~",
+                b"\r",
+            ]
+        );
+        assert_eq!(steps[0].delay, Duration::ZERO);
+        assert_eq!(steps[3].delay, OPENCODE_LIST_WAIT);
+        assert_eq!(steps[5].delay, SETTLE_AFTER_PASTE_SLOW);
+        // With no space in what follows, one of its own closes the list.
+        let steps =
+            opencode_mention_plan(&[Piece::Mention("a.md"), Piece::Text(".")], &[], true).unwrap();
+        assert_eq!(
+            bytes(&steps),
+            [
+                &b"@"[..],
+                b"\x1b[200~a.md\x1b[201~",
+                b"\r",
+                b" ",
+                b"\x1b[200~.\x1b[201~",
+                b"\r",
+            ]
+        );
+        // Ending on one, a space closes a list that found nothing, and
+        // attachments still follow as pastes of their own.
+        let attached = vec!["/tmp/a.png".to_string()];
+        let steps = opencode_mention_plan(&[Piece::Mention("plain.md")], &attached, true).unwrap();
+        assert_eq!(
+            bytes(&steps),
+            [
+                &b"@"[..],
+                b"\x1b[200~plain.md\x1b[201~",
+                b"\r",
+                b" ",
+                b" ",
+                b"\x1b[200~/tmp/a.png\x1b[201~",
+                b"\r",
+            ]
+        );
+        // Without a mention, or as a command or shell line, it goes as usual.
+        assert_eq!(opencode_mention_plan(&[Piece::Text("hi")], &[], true), None);
+        assert_eq!(opencode_mention_plan(&pieces, &[], false), None);
+        let command = [Piece::Text("/review "), Piece::Mention("plain.md")];
+        assert_eq!(opencode_mention_plan(&command, &[], true), None);
     }
 
     #[test]
