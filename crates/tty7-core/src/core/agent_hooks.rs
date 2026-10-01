@@ -2168,7 +2168,10 @@ export default { id: "tty7", server, setup }
 /// rather than two copies drifting apart.
 fn pi_extension_ts(target: &HookTarget, agent: HookAgent) -> Option<String> {
     let (slug, package) = match agent {
-        HookAgent::Pi => ("pi", "@mariozechner/pi-coding-agent"),
+        // Pi moved from `@mariozechner/` to `@earendil-works/`. Current Pi
+        // resolves both names for extensions, and the import is type-only, so
+        // it is erased before an older Pi that knows only the old name runs it.
+        HookAgent::Pi => ("pi", "@earendil-works/pi-coding-agent"),
         HookAgent::OhMyPi => ("omp", "@oh-my-pi/pi-coding-agent"),
         HookAgent::PrimeAgent => ("prime-agent", "@earendil-works/pi-coding-agent"),
         _ => return None,
@@ -3011,6 +3014,32 @@ mod tests {
         assert_eq!(state.session_id.as_deref(), Some("cur-1"));
     }
 
+    /// A Pi bridge written before Pi changed its package name is ours but
+    /// stale, so launch's refresh rewrites it with the current import.
+    #[test]
+    fn a_pi_bridge_importing_the_old_package_is_refreshed() {
+        let host = FakeRemote::shared();
+        let base = std::env::temp_dir().join(format!("tty7-pi-bridge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let target = HookTarget::remote(&*host, base.clone());
+        let path = HookAgent::Pi.target_path(&target);
+        let current = pi_extension_ts(&target, HookAgent::Pi).expect("pi bridge builds");
+        let old = current.replace(
+            "@earendil-works/pi-coding-agent",
+            "@mariozechner/pi-coding-agent",
+        );
+        assert_ne!(old, current);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &old).unwrap();
+
+        assert_eq!(hooks_state(&target, HookAgent::Pi), HooksState::Outdated);
+        assert_eq!(refresh_hooks(&target), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+        assert_eq!(hooks_state(&target, HookAgent::Pi), HooksState::Installed);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// Cursor's `hooks.json` is flat like Crush's, but it is also ignored
     /// outright without `"version": 1` at the root — so a file tty7 creates
     /// has to carry one, and a user's own file keeps whatever it declares.
@@ -3772,7 +3801,7 @@ mod tests {
         );
 
         for (agent, slug, package) in [
-            (HookAgent::Pi, "pi", "@mariozechner/pi-coding-agent"),
+            (HookAgent::Pi, "pi", "@earendil-works/pi-coding-agent"),
             (HookAgent::OhMyPi, "omp", "@oh-my-pi/pi-coding-agent"),
             (
                 HookAgent::PrimeAgent,
