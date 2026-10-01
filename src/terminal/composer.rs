@@ -529,12 +529,20 @@ fn grok_input_top(rows: &[String], floor: usize, width: usize) -> Option<usize> 
         .then_some(top)
 }
 
-/// The key that stops `agent`'s turn. Grok Build's Esc leaves a running
+/// The keys that stop `agent`'s turn. Grok Build's Esc leaves a running
 /// turn running; its Ctrl+C stops one, and empties the input when idle.
-fn interrupt_key(agent: Option<CLIAgent>) -> &'static [u8] {
+/// Crush takes a first Esc as the question "press again to cancel", asked in
+/// the key help under the box where nobody reads it, and stops on a second
+/// one; the two must arrive as separate reads, or they are one key.
+fn interrupt_keys(agent: Option<CLIAgent>) -> Vec<Step> {
+    let key = |delay, bytes: &[u8]| Step {
+        delay,
+        bytes: bytes.to_vec(),
+    };
     match agent {
-        Some(CLIAgent::Grok) => b"\x03",
-        _ => b"\x1b",
+        Some(CLIAgent::Grok) => vec![key(Duration::ZERO, b"\x03")],
+        Some(CLIAgent::Crush) => vec![key(Duration::ZERO, b"\x1b"), key(SETTLE, b"\x1b")],
+        _ => vec![key(Duration::ZERO, b"\x1b")],
     }
 }
 
@@ -1495,14 +1503,17 @@ impl TerminalView {
     /// Esc in the box. Over the agent's input it is the agent's Esc — the one
     /// that interrupts a turn — since the box is standing in for that input;
     /// for an agent whose Esc does not, its own interrupt key
-    /// ([`interrupt_key`]).
+    /// ([`interrupt_keys`]).
     /// Docked, it hands the keyboard back to the terminal and leaves the box
     /// where it is, so the next Esc is the agent's.
     pub(super) fn composer_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.presence() {
             Presence::Covering(_) => {
-                let key = interrupt_key(self.agent());
-                self.send_to_pty(key, cx)
+                let Some(agent) = self.agent() else { return };
+                if let Some(c) = self.composer.as_mut() {
+                    c.queue.extend(interrupt_keys(Some(agent)));
+                }
+                self.pump_composer(agent, cx);
             }
             _ => {
                 window.focus(&self.focus_handle, cx);
@@ -3635,8 +3646,12 @@ mod tests {
         assert_eq!(clear_input_key(CLIAgent::Grok), Some(&b"\x15"[..]));
         assert_eq!(clear_input_key(CLIAgent::Claude), None);
         // Its Esc does not stop a turn; Ctrl+C does.
-        assert_eq!(interrupt_key(Some(CLIAgent::Grok)), b"\x03");
-        assert_eq!(interrupt_key(Some(CLIAgent::Pi)), b"\x1b");
+        assert_eq!(bytes(&interrupt_keys(Some(CLIAgent::Grok))), [b"\x03"]);
+        assert_eq!(bytes(&interrupt_keys(Some(CLIAgent::Pi))), [b"\x1b"]);
+        // Crush asks for its Esc twice, in separate reads.
+        let crush = interrupt_keys(Some(CLIAgent::Crush));
+        assert_eq!(bytes(&crush), [b"\x1b", b"\x1b"]);
+        assert!(crush[1].delay >= SETTLE);
     }
 
     /// The grid gives up rows only for the part of the box an input does not
