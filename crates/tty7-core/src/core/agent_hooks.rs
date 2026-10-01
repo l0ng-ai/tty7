@@ -2282,28 +2282,40 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_terminal_with_its_other_end_gone_fails_the_write_at_once() {
-        let (mut master, mut slave) = (0, 0);
-        let opened = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        assert_eq!(opened, 0);
-        let name = unsafe { std::ffi::CStr::from_ptr(libc::ttyname(slave)) }
+        // Both ends are opened close-on-exec from the start: the other tests
+        // spawn processes on threads of their own, and a child that inherited
+        // the pane's end would keep it open after it is closed here, so the
+        // write would go through.
+        let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
+        let master = unsafe { libc::posix_openpt(flags) };
+        assert!(master >= 0);
+        assert_eq!(unsafe { libc::grantpt(master) }, 0);
+        assert_eq!(unsafe { libc::unlockpt(master) }, 0);
+        let name = unsafe { std::ffi::CStr::from_ptr(libc::ptsname(master)) }
             .to_string_lossy()
             .into_owned();
+        let path = std::ffi::CString::new(name.clone()).unwrap();
+        let slave = unsafe { libc::open(path.as_ptr(), flags) };
+        assert!(slave >= 0);
         // The agent still holds its end; the pane's is gone.
         unsafe { libc::close(master) };
 
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(write_dev(std::path::Path::new(&name), b"x"));
-        });
-        let wrote = rx.recv_timeout(std::time::Duration::from_secs(5));
+        // A child another test forked a moment ago still holds a copy of the
+        // pane's end until it gets to exec, and a write in that moment goes
+        // through; one made once it has let go fails. None may wait.
+        let mut wrote = Ok(true);
+        for _ in 0..50 {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let name = name.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(write_dev(std::path::Path::new(&name), b"x"));
+            });
+            wrote = rx.recv_timeout(std::time::Duration::from_secs(5));
+            if wrote != Ok(true) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         unsafe { libc::close(slave) };
         assert_eq!(wrote, Ok(false));
     }
