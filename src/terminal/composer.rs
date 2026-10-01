@@ -140,6 +140,9 @@ pub(super) struct Step {
 ///   that opens its shortcuts, and a typed leading `/` for the one that opens
 ///   its command palette, with the rest of the burst landing in the input
 ///   under it and Enter running whatever the palette had on top.
+/// - **So is Copilot.** A typed leading `?` is the key that opens its help,
+///   and the rest of the line goes out without it. Its shell mode is a
+///   leading `!` it reads off a paste as well.
 /// - **A leading `!` goes to Claude Code, Gemini and OpenCode on its own.** It
 ///   switches the input into shell mode only when it is typed into an empty
 ///   box as a key of its own; arriving with the rest of the line it is just a
@@ -192,7 +195,11 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
         pasted = bracketed
             && (matches!(
                 agent,
-                CLIAgent::Codex | CLIAgent::Gemini | CLIAgent::OpenCode | CLIAgent::Amp
+                CLIAgent::Codex
+                    | CLIAgent::Gemini
+                    | CLIAgent::OpenCode
+                    | CLIAgent::Amp
+                    | CLIAgent::Copilot
             ) || !types_cleanly(body));
         let bytes = match pasted {
             true => tty7_core::core::paste::bracket(body.as_bytes()),
@@ -2313,8 +2320,20 @@ mod tests {
             [&b"!"[..], b"\x1b[200~git status\x1b[201~", b"\r"]
         );
         // Anyone else gets the line as written.
-        let steps = submit_plan(CLIAgent::Copilot, "!git status", true);
+        let steps = submit_plan(CLIAgent::Pi, "!git status", true);
         assert_eq!(bytes(&steps), [&b"!git status"[..], b"\r"]);
+    }
+
+    #[test]
+    fn copilot_is_always_pasted() {
+        // Typed, the leading `?` would open its help and be lost; its shell
+        // mode takes the `!` off the paste.
+        for text in ["?why", "!git status", "hi"] {
+            let steps = submit_plan(CLIAgent::Copilot, text, true);
+            let pasted = format!("\x1b[200~{text}\x1b[201~");
+            assert_eq!(bytes(&steps), [pasted.as_bytes(), b"\r"], "{text}");
+            assert_eq!(steps[1].delay, SETTLE_AFTER_PASTE_SLOW, "{text}");
+        }
     }
 
     #[test]
@@ -2359,7 +2378,7 @@ mod tests {
             let steps = submit_plan(agent, "a\nb", true);
             assert_eq!(steps[1].delay, SETTLE_AFTER_PASTE_SLOW, "{agent:?}");
         }
-        let steps = submit_plan(CLIAgent::Copilot, "ab", true);
+        let steps = submit_plan(CLIAgent::Copilot, "ab", false);
         assert_eq!(steps[1].delay, SETTLE);
     }
 
