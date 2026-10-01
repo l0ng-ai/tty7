@@ -130,8 +130,8 @@ pub(super) struct Step {
 /// - **Codex is always pasted.** It watches for bursts of fast keystrokes to
 ///   spot pastes from terminals that do not bracket them, and the Enter after
 ///   a typed burst is swallowed into it.
-/// - **So is Gemini.** It judges each key of a burst against the input as it
-///   was before the burst, so every `?` in a typed line reads as the key that
+/// - **So is Gemini**, and Qwen Code with it ([`reads_like_gemini`]). It
+///   judges each key of a burst against the input as it was before the burst, so every `?` in a typed line reads as the key that
 ///   opens its shortcuts on an empty input and is lost, and every `!` as the
 ///   one that switches it into shell mode — "hi! there" would run `there`.
 /// - **So are OpenCode and Amp.** OpenCode reads a typed burst the same way
@@ -143,12 +143,14 @@ pub(super) struct Step {
 /// - **So is Copilot.** A typed leading `?` is the key that opens its help,
 ///   and the rest of the line goes out without it. Its shell mode is a
 ///   leading `!` it reads off a paste as well.
-/// - **A leading `!` goes to Claude Code, Gemini and OpenCode on its own.** It
+/// - **A leading `!` goes to Claude Code, Gemini, Qwen Code and OpenCode on
+///   its own.** It
 ///   switches the input into shell mode only when it is typed into an empty
 ///   box as a key of its own; arriving with the rest of the line it is just a
 ///   character. (Amp's shell mode is a leading `$`, which it reads off a paste
 ///   as well.)
-/// - **A message with an `@` mention gets a space after it for Gemini.**
+/// - **A message with an `@` mention gets a space after it for Gemini and
+///   Qwen Code.**
 ///   With the caret at the end of an `@` word it lists matching files, and
 ///   Enter then takes the list's pick instead of sending — so a message whose
 ///   attachments close it would sit in the input, under the box, unsent.
@@ -167,10 +169,8 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
     let mut steps = Vec::new();
     let mut delay = Duration::ZERO;
 
-    if matches!(
-        agent,
-        CLIAgent::Claude | CLIAgent::Gemini | CLIAgent::OpenCode
-    ) && let Some(rest) = body.strip_prefix('!')
+    if (matches!(agent, CLIAgent::Claude | CLIAgent::OpenCode) || reads_like_gemini(agent))
+        && let Some(rest) = body.strip_prefix('!')
         && !rest.is_empty()
     {
         steps.push(Step {
@@ -185,7 +185,7 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
     // Where the last word starts is a matter of Gemini's escaping and quoting,
     // so any `@` will do: a space after the message costs nothing. Not after a
     // command, though, where it would open the list of its arguments.
-    if agent == CLIAgent::Gemini && body.contains('@') && !body.starts_with('/') {
+    if reads_like_gemini(agent) && body.contains('@') && !body.starts_with('/') {
         spaced = format!("{body} ");
         body = &spaced;
     }
@@ -195,12 +195,9 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
         pasted = bracketed
             && (matches!(
                 agent,
-                CLIAgent::Codex
-                    | CLIAgent::Gemini
-                    | CLIAgent::OpenCode
-                    | CLIAgent::Amp
-                    | CLIAgent::Copilot
-            ) || !types_cleanly(body));
+                CLIAgent::Codex | CLIAgent::OpenCode | CLIAgent::Amp | CLIAgent::Copilot
+            ) || reads_like_gemini(agent)
+                || !types_cleanly(body));
         let bytes = match pasted {
             true => tty7_core::core::paste::bracket(body.as_bytes()),
             false => body.as_bytes().to_vec(),
@@ -210,7 +207,8 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
 
     let enter_delay = match (steps.is_empty(), agent) {
         (true, _) => Duration::ZERO,
-        (false, CLIAgent::Copilot | CLIAgent::Gemini) if pasted => SETTLE_AFTER_PASTE_SLOW,
+        (false, CLIAgent::Copilot) if pasted => SETTLE_AFTER_PASTE_SLOW,
+        (false, agent) if pasted && reads_like_gemini(agent) => SETTLE_AFTER_PASTE_SLOW,
         (false, _) => SETTLE,
     };
     steps.push(Step {
@@ -224,7 +222,7 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
 /// words a drop onto the terminal would have typed — which is how an agent is
 /// pointed at a file or shown an image.
 ///
-/// Gemini is the exception. It turns a drop into `@` mentions itself, but only
+/// Gemini (and Qwen Code with it) is the exception. It turns a drop into `@` mentions itself, but only
 /// a paste that is nothing but paths; after the message's text, a path is
 /// just words to it and the file never reaches the model. So its attachments
 /// go as the mentions it would have made.
@@ -239,7 +237,7 @@ pub(super) fn compose_message(
         return text.to_string();
     }
     let words = match agent {
-        CLIAgent::Gemini => attached
+        _ if reads_like_gemini(agent) => attached
             .iter()
             .map(|p| mention(Some(agent), p, shell))
             .collect::<Vec<_>>()
@@ -317,6 +315,13 @@ pub(super) struct InputArea {
     /// The permission mode, in the agent's own words (`acceptEdits`, …),
     /// when its status rows name one.
     pub mode: Option<&'static str>,
+}
+
+/// Whether `agent` reads its input the way Gemini CLI does. Qwen Code is a
+/// fork of it and kept its input: the burst-typing traps, the shell-mode `!`,
+/// the `@` list that takes Enter, and `@` mentions escaped the same way.
+fn reads_like_gemini(agent: CLIAgent) -> bool {
+    matches!(agent, CLIAgent::Gemini | CLIAgent::Qwen)
 }
 
 /// Whether the box can be laid over this agent's input.
@@ -679,12 +684,14 @@ pub(super) fn command_items(commands: &[(String, String)], query: &str) -> Vec<M
 /// - **Gemini CLI** ends a mention at the first unescaped space, and reads it
 ///   back through its own `escapePath`: a backslash before each character a
 ///   shell would take, or — on Windows — the whole path in double quotes.
+///   **Qwen Code** keeps that spelling, and escapes a comma too: it ends a
+///   mention at one.
 ///
 /// The others take the path as it is.
 pub(super) fn mention(agent: Option<CLIAgent>, path: &str, shell: Option<&str>) -> String {
     let spaced = path.chars().any(char::is_whitespace);
     match agent {
-        Some(CLIAgent::Gemini) => {}
+        Some(a) if reads_like_gemini(a) => {}
         Some(CLIAgent::Claude) if spaced => return format!("@\"{path}\""),
         Some(CLIAgent::Codex) if spaced && !path.contains('"') => return format!("\"{path}\""),
         Some(CLIAgent::Codex) => return path.to_string(),
@@ -694,7 +701,9 @@ pub(super) fn mention(agent: Option<CLIAgent>, path: &str, shell: Option<&str>) 
         Quoting::Posix => {
             let mut out = String::with_capacity(path.len());
             for c in path.chars() {
-                if " \t()[]{};|*?$`'\"#&<>!~\\".contains(c) {
+                if " \t()[]{};|*?$`'\"#&<>!~\\".contains(c)
+                    || (c == ',' && agent == Some(CLIAgent::Qwen))
+                {
                     out.push('\\');
                 }
                 out.push(c);
@@ -2465,6 +2474,33 @@ mod tests {
         assert_eq!(
             mention(Some(CLIAgent::Gemini), r"C:\src\a.rs", Some("pwsh")),
             r"@C:\src\a.rs"
+        );
+    }
+
+    #[test]
+    fn qwen_is_spoken_to_the_way_gemini_is() {
+        // Typed, its leading `?` opens the shortcuts and is lost.
+        let steps = submit_plan(CLIAgent::Qwen, "?why", true);
+        assert_eq!(bytes(&steps), [&b"\x1b[200~?why\x1b[201~"[..], b"\r"]);
+        assert_eq!(steps[1].delay, SETTLE_AFTER_PASTE_SLOW);
+        let steps = submit_plan(CLIAgent::Qwen, "!ls", true);
+        assert_eq!(bytes(&steps), [&b"!"[..], b"\x1b[200~ls\x1b[201~", b"\r"]);
+        // Its `@` list takes an Enter that comes right after a mention.
+        let steps = submit_plan(CLIAgent::Qwen, "read @a.rs", false);
+        assert_eq!(bytes(&steps), [&b"read @a.rs "[..], b"\r"]);
+        // Mentions as Gemini spells them, with the comma Qwen ends one at.
+        assert_eq!(
+            mention(Some(CLIAgent::Qwen), "my notes, v2.md", Some("zsh")),
+            r"@my\ notes\,\ v2.md"
+        );
+        assert_eq!(
+            mention(Some(CLIAgent::Gemini), "a,b.md", Some("zsh")),
+            "@a,b.md"
+        );
+        let attached = vec!["/tmp/a b.png".to_string()];
+        assert_eq!(
+            compose_message(CLIAgent::Qwen, "look", &attached, Some("zsh")),
+            r"look @/tmp/a\ b.png"
         );
     }
 
