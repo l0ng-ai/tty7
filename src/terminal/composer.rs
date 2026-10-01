@@ -236,10 +236,15 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
 /// words a drop onto the terminal would have typed — which is how an agent is
 /// pointed at a file or shown an image.
 ///
-/// Gemini (and Qwen Code with it) is the exception. It turns a drop into `@` mentions itself, but only
-/// a paste that is nothing but paths; after the message's text, a path is
-/// just words to it and the file never reaches the model. So its attachments
-/// go as the mentions it would have made.
+/// Gemini (and Qwen Code with it) is the exception. It turns a drop into `@`
+/// mentions itself, but only a paste that is nothing but paths; after the
+/// message's text, a path is just words to it and the file never reaches the
+/// model. So its attachments go as the mentions it would have made.
+///
+/// Copilot and CodeBuddy attach a file only from an `@` mention — CodeBuddy
+/// reads it, an image included, into the turn, Copilot tags it — and a path
+/// is just words to them. Neither reads a mention back past a space, though,
+/// so a path with one still goes as words.
 pub(super) fn compose_message(
     agent: CLIAgent,
     text: &str,
@@ -254,6 +259,14 @@ pub(super) fn compose_message(
         _ if reads_like_gemini(agent) => attached
             .iter()
             .map(|p| mention(Some(agent), p, shell))
+            .collect::<Vec<_>>()
+            .join(" "),
+        CLIAgent::Copilot | CLIAgent::CodeBuddy => attached
+            .iter()
+            .map(|p| match p.chars().any(char::is_whitespace) {
+                true => pasted_paths_text(std::slice::from_ref(p), shell),
+                false => format!("@{p}"),
+            })
             .collect::<Vec<_>>()
             .join(" "),
         _ => pasted_paths_text(attached, shell),
@@ -2394,7 +2407,11 @@ mod tests {
     fn a_leading_bang_reaches_claude_and_gemini_as_a_key_of_its_own() {
         for agent in [CLIAgent::Claude, CLIAgent::CodeBuddy] {
             let steps = submit_plan(agent, "!git status", true);
-            assert_eq!(bytes(&steps), [&b"!"[..], b"git status", b"\r"], "{agent:?}");
+            assert_eq!(
+                bytes(&steps),
+                [&b"!"[..], b"git status", b"\r"],
+                "{agent:?}"
+            );
             assert_eq!(steps[1].delay, SETTLE, "{agent:?}");
         }
         let steps = submit_plan(CLIAgent::Gemini, "!git status", true);
@@ -2563,6 +2580,22 @@ mod tests {
             mention(Some(CLIAgent::Gemini), r"C:\src\a.rs", Some("pwsh")),
             r"@C:\src\a.rs"
         );
+    }
+
+    #[test]
+    fn copilot_and_codebuddy_get_their_attachments_as_mentions_where_they_can() {
+        let attached = vec!["/tmp/red.png".to_string(), "/tmp/a b.png".to_string()];
+        for agent in [CLIAgent::Copilot, CLIAgent::CodeBuddy] {
+            assert_eq!(
+                compose_message(agent, "look", &attached, Some("zsh")),
+                "look @/tmp/red.png '/tmp/a b.png'",
+                "{agent:?}"
+            );
+        }
+        // Copilot's list would take the Enter after a closing mention.
+        let message = compose_message(CLIAgent::Copilot, "look", &attached[..1], Some("zsh"));
+        let steps = submit_plan(CLIAgent::Copilot, &message, true);
+        assert_eq!(bytes(&steps)[0], b"\x1b[200~look @/tmp/red.png \x1b[201~");
     }
 
     #[test]
