@@ -149,6 +149,10 @@ pub(super) struct Step {
 ///   unbracketed paste, and the Enter right behind a typed line for one of its
 ///   newlines: the message sat in its input, never sent. A bracketed paste it
 ///   knows for one, and reads its `!`, `?` and `/` off it as typed.
+/// - **So is Prime Agent.** Its `@` list opens as a typed mention is
+///   typed, stays open past the space after it, and takes the Enter: "read
+///   @a.txt " went out as "read @a.txt .git/". A paste it reads whole, its
+///   `!` and `/` included.
 /// - **A leading `!` goes to Claude Code, CodeBuddy, Gemini, Qwen Code and
 ///   OpenCode on its own.** It
 ///   switches the input into shell mode only when it is typed into an empty
@@ -156,7 +160,7 @@ pub(super) struct Step {
 ///   character. (Amp's shell mode is a leading `$`, which it reads off a paste
 ///   as well.)
 /// - **A message with an `@` mention gets a space after it for Gemini, Qwen
-///   Code and Copilot.**
+///   Code, Copilot, Oh My Pi and Grok Build.**
 ///   With the caret at the end of an `@` word it lists matching files, and
 ///   Enter then takes the list's pick instead of sending — so a message whose
 ///   attachments close it would sit in the input, under the box, unsent.
@@ -194,7 +198,8 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
     // Where the last word starts is a matter of Gemini's escaping and quoting,
     // so any `@` will do: a space after the message costs nothing. Not after a
     // command, though, where it would open the list of its arguments.
-    if (reads_like_gemini(agent) || agent == CLIAgent::Copilot)
+    if (reads_like_gemini(agent)
+        || matches!(agent, CLIAgent::Copilot | CLIAgent::OhMyPi | CLIAgent::Grok))
         && body.contains('@')
         && !body.starts_with('/')
     {
@@ -212,6 +217,7 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
                     | CLIAgent::Amp
                     | CLIAgent::Copilot
                     | CLIAgent::Kimi
+                    | CLIAgent::PrimeAgent
             ) || reads_like_gemini(agent)
                 || !types_cleanly(body));
         let bytes = match pasted {
@@ -2960,6 +2966,28 @@ mod tests {
         let message = compose_message(CLIAgent::Copilot, "look", &attached[..1], Some("zsh"));
         let steps = submit_plan(CLIAgent::Copilot, &message, true);
         assert_eq!(bytes(&steps)[0], b"\x1b[200~look @/tmp/red.png \x1b[201~");
+    }
+
+    #[test]
+    fn mentions_close_before_enter_for_oh_my_pi_and_grok_and_prime_is_pasted() {
+        // Their `@` list would take the Enter after a closing mention.
+        for agent in [CLIAgent::OhMyPi, CLIAgent::Grok] {
+            let steps = submit_plan(agent, "read @plain.txt", true);
+            assert_eq!(
+                bytes(&steps),
+                [&b"read @plain.txt "[..], b"\r"],
+                "{agent:?}"
+            );
+            let steps = submit_plan(agent, "/model", true);
+            assert_eq!(bytes(&steps), [&b"/model"[..], b"\r"], "{agent:?}");
+        }
+        // Typed, Prime Agent's list stays open past the space and takes the
+        // Enter; pasted, it reads the line whole.
+        for text in ["read @plain.txt", "!ls", "/session", "hi"] {
+            let steps = submit_plan(CLIAgent::PrimeAgent, text, true);
+            let pasted = format!("\x1b[200~{text}\x1b[201~");
+            assert_eq!(bytes(&steps), [pasted.as_bytes(), b"\r"], "{text}");
+        }
     }
 
     /// Oh My Pi reads a mentioned file, an image too, into the turn; a
