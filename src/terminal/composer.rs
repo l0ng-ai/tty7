@@ -143,8 +143,8 @@ pub(super) struct Step {
 /// - **So is Copilot.** A typed leading `?` is the key that opens its help,
 ///   and the rest of the line goes out without it. Its shell mode is a
 ///   leading `!` it reads off a paste as well.
-/// - **A leading `!` goes to Claude Code, Gemini, Qwen Code and OpenCode on
-///   its own.** It
+/// - **A leading `!` goes to Claude Code, CodeBuddy, Gemini, Qwen Code and
+///   OpenCode on its own.** It
 ///   switches the input into shell mode only when it is typed into an empty
 ///   box as a key of its own; arriving with the rest of the line it is just a
 ///   character. (Amp's shell mode is a leading `$`, which it reads off a paste
@@ -169,7 +169,10 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
     let mut steps = Vec::new();
     let mut delay = Duration::ZERO;
 
-    if (matches!(agent, CLIAgent::Claude | CLIAgent::OpenCode) || reads_like_gemini(agent))
+    if (matches!(
+        agent,
+        CLIAgent::Claude | CLIAgent::CodeBuddy | CLIAgent::OpenCode
+    ) || reads_like_gemini(agent))
         && let Some(rest) = body.strip_prefix('!')
         && !rest.is_empty()
     {
@@ -2323,9 +2326,11 @@ mod tests {
 
     #[test]
     fn a_leading_bang_reaches_claude_and_gemini_as_a_key_of_its_own() {
-        let steps = submit_plan(CLIAgent::Claude, "!git status", true);
-        assert_eq!(bytes(&steps), [&b"!"[..], b"git status", b"\r"]);
-        assert_eq!(steps[1].delay, SETTLE);
+        for agent in [CLIAgent::Claude, CLIAgent::CodeBuddy] {
+            let steps = submit_plan(agent, "!git status", true);
+            assert_eq!(bytes(&steps), [&b"!"[..], b"git status", b"\r"], "{agent:?}");
+            assert_eq!(steps[1].delay, SETTLE, "{agent:?}");
+        }
         let steps = submit_plan(CLIAgent::Gemini, "!git status", true);
         assert_eq!(
             bytes(&steps),
