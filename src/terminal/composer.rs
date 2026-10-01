@@ -377,6 +377,9 @@ fn covers(agent: CLIAgent) -> bool {
             | CLIAgent::OhMyPi
             | CLIAgent::PrimeAgent
             | CLIAgent::Grok
+            | CLIAgent::Crush
+            | CLIAgent::Goose
+            | CLIAgent::Amp
     )
 }
 
@@ -384,7 +387,10 @@ fn covers(agent: CLIAgent) -> bool {
 /// [`TerminalView::composer_reserved_rows`]. Prime Agent's four-row block
 /// falls a row short, which cut its hint line above in half.
 fn makes_room(agent: CLIAgent) -> bool {
-    matches!(agent, CLIAgent::OhMyPi | CLIAgent::PrimeAgent)
+    matches!(
+        agent,
+        CLIAgent::OhMyPi | CLIAgent::PrimeAgent | CLIAgent::Goose
+    )
 }
 
 /// Whole rows of `line` it takes to make up what `area` rows of `line`, with
@@ -419,6 +425,11 @@ fn is_rule(row: &str, width: usize) -> bool {
 /// - **Prime Agent** shades it as a block over its footer — see
 ///   [`prime_input_top`].
 /// - **Grok Build** frames it in a rounded box — see [`grok_input_top`].
+/// - **Crush** draws its editor over its key help, its dialogs framed over
+///   it — see [`crush_input_top`].
+/// - **Goose** prints its prompt under its context gauge, wherever its output
+///   ended — see [`goose_input_top`].
+/// - **Amp** frames it at the bottom of the screen — see [`amp_input_top`].
 ///
 /// `None` is the agent showing something else there — which is exactly when
 /// the box must get out of the way.
@@ -472,8 +483,102 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
         CLIAgent::Grok => {
             grok_input_top(rows, floor, width).map(|top| InputArea { top, mode: None })
         }
+        CLIAgent::Crush => crush_input_top(rows, floor).map(|top| InputArea { top, mode: None }),
+        // Goose's input is the last thing printed, wherever that is: nothing
+        // is drawn under it, so it counts from any height.
+        CLIAgent::Goose => goose_input_top(rows).map(|top| InputArea { top, mode: None }),
+        CLIAgent::Amp => amp_input_top(rows, floor, width).map(|top| InputArea { top, mode: None }),
         _ => None,
     }
+}
+
+/// How many rows Crush draws under its editor at most: a blank row and its
+/// key help, which `ctrl+g` opens out to several.
+const CRUSH_FOOTER_MAX_ROWS: usize = 8;
+
+/// Where Crush's editor starts: its prompt line, `> ` (`!` in yolo mode),
+/// with every further line opening with `:::` — and the first one too while
+/// the chat, not the editor, has the keys. A blank row and the key help are
+/// under it, at the bottom of the screen.
+///
+/// Crush draws its dialogs — the command palette, the model and session
+/// lists, a permission request — framed over the screen, the editor left
+/// standing under them; they take the keys while open, so with a frame on
+/// screen the box steps aside.
+fn crush_input_top(rows: &[String], floor: usize) -> Option<usize> {
+    let frame_top = |r: &String| {
+        r.find('╭').is_some_and(|at| {
+            let edge = &r[at + '╭'.len_utf8()..];
+            let run = edge.chars().take_while(|&c| c == '─').count();
+            run >= 2 && edge.chars().nth(run) == Some('╮')
+        })
+    };
+    if rows.iter().any(frame_top) {
+        return None;
+    }
+    let more = |i: usize| rows[i].trim_start().starts_with(":::");
+    let last = (floor..rows.len()).rev().find(|&i| more(i))?;
+    let mut first = last;
+    while first > floor && more(first - 1) {
+        first -= 1;
+    }
+    let prompt = |row: &str| {
+        let t = row.trim_start();
+        t == ">" || t.starts_with("> ") || t.starts_with('!')
+    };
+    let top = match first.checked_sub(1) {
+        Some(above) if above >= floor && prompt(&rows[above]) => above,
+        _ => first,
+    };
+    let blank_under = rows.get(last + 1).is_some_and(|r| r.trim().is_empty());
+    let footer = rows[last + 1..]
+        .iter()
+        .filter(|r| !r.trim().is_empty())
+        .count();
+    (blank_under && footer <= CRUSH_FOOTER_MAX_ROWS).then_some(top)
+}
+
+/// Where Goose's input starts: the context gauge (`╌╌╌ 1% 5k/1.0M`) right
+/// over its `> ` line, which is the last thing on the screen.
+///
+/// Goose is a line-at-a-time prompt, not a full-screen one: while a turn
+/// runs its spinner and the turn's output are printed under the line just
+/// sent, and a question it asks — a tool approval — is printed there too,
+/// so the box steps aside until the next gauge and `> ` close the turn.
+fn goose_input_top(rows: &[String]) -> Option<usize> {
+    let last = rows.iter().rposition(|r| !r.trim().is_empty())?;
+    let gauge = last.checked_sub(1)?;
+    let t = rows[gauge].trim();
+    let prompt = rows[last] == ">" || rows[last].starts_with("> ");
+    (t.starts_with('╌') && t.contains('%') && prompt).then_some(gauge)
+}
+
+/// Where Amp's input starts: the top edge of the frame at the bottom of the
+/// screen, its mode named in that edge and the directory in the bottom one.
+///
+/// Its command palette and pickers open framed over the screen, indented from
+/// its left edge; a notice it puts in the input's place — out of credits — is
+/// a full-width frame with nothing in its bottom edge. The box steps aside
+/// for both.
+fn amp_input_top(rows: &[String], floor: usize, width: usize) -> Option<usize> {
+    let bottom = (floor..rows.len())
+        .rev()
+        .find(|&i| !rows[i].trim().is_empty())?;
+    let edge = rows[bottom].trim_end();
+    let labelled = edge.chars().any(|c| !matches!(c, '╰' | '─' | '╯' | ' '));
+    if !(edge.starts_with('╰')
+        && edge.ends_with('╯')
+        && edge.chars().count() >= width * 3 / 5
+        && labelled)
+    {
+        return None;
+    }
+    let top = (floor..bottom).rev().find(|&i| !rows[i].starts_with('│'))?;
+    let framed = rows[top].starts_with('╭') && rows[top].trim_end().ends_with('╮');
+    let overlay = rows[..top]
+        .iter()
+        .any(|r| !r.starts_with('╭') && r.trim_start().starts_with('╭'));
+    (framed && top + 1 < bottom && !overlay).then_some(top)
 }
 
 /// Where Oh My Pi's input starts, in the composer shapes that keep it findable.
@@ -546,28 +651,93 @@ fn interrupt_keys(agent: Option<CLIAgent>) -> Vec<Step> {
     }
 }
 
-/// The key that empties `agent`'s input, where one does so without doing
-/// anything else.
-fn clear_input_key(agent: CLIAgent) -> Option<&'static [u8]> {
+/// The keys that empty `agent`'s input of `lines` lines of text, where some
+/// do so without doing anything else; none for an input with nothing in it.
+///
+/// Grok Build's Ctrl+U empties its input whole. Crush's, Goose's and Amp's
+/// empty the caret's line, and a Backspace then steps up into the line above
+/// — a line at a time, from the end, where the caret is left.
+fn clear_input(agent: CLIAgent, lines: usize) -> Option<Vec<u8>> {
+    if lines == 0 {
+        return None;
+    }
     match agent {
-        CLIAgent::Grok => Some(b"\x15"),
+        CLIAgent::Grok => Some(b"\x15".to_vec()),
+        CLIAgent::Crush | CLIAgent::Goose | CLIAgent::Amp => Some(b"\x15\x7f".repeat(lines)),
         _ => None,
     }
 }
 
-/// Whether `agent`'s input, as `rows` show it, has text in it.
+/// Crush's placeholders: what its empty editor says, idle, mid-turn and in
+/// yolo mode.
+const CRUSH_PLACEHOLDERS: [&str; 11] = [
+    "Ready!",
+    "Ready?",
+    "Ready...",
+    "Ready for instructions",
+    "Working!",
+    "Working...",
+    "Brrrrr...",
+    "Prrrrrrrr...",
+    "Processing...",
+    "Thinking...",
+    "Go crazy",
+];
+
+/// How many lines of text `agent`'s input, as `rows` show it, holds — down
+/// to the last one with anything on it.
 ///
-/// Grok Build keeps a command whose list was dismissed — `/model`, closed
-/// with Esc — in its input. Under the box nobody sees it, and the next
-/// message would be typed on after it.
-fn holds_text(agent: CLIAgent, rows: &[String], width: usize) -> bool {
+/// Under the box nobody sees it, and the next message would be typed on
+/// after it. Grok Build keeps a command whose list was dismissed — `/model`,
+/// closed with Esc — in its input; Crush, Goose and Amp keep whatever was
+/// typed into them before the box was opened over them.
+fn held_lines(agent: CLIAgent, rows: &[String], width: usize) -> usize {
     let floor = rows.len().saturating_sub(INPUT_AREA_MAX_ROWS);
+    // Lines `first..` hold text; how many, down to the last that does.
+    let count = |lines: Vec<&str>| {
+        lines
+            .iter()
+            .rposition(|l| !l.trim().is_empty())
+            .map_or(0, |last| last + 1)
+    };
     match agent {
-        CLIAgent::Grok => grok_input_top(rows, floor, width).is_some_and(|top| {
+        CLIAgent::Grok => grok_input_top(rows, floor, width).map_or(0, |top| {
             let line = rows[top + 1].trim().trim_matches('│').trim();
-            !line.trim_start_matches('❯').trim().is_empty()
+            usize::from(!line.trim_start_matches('❯').trim().is_empty())
         }),
-        _ => false,
+        CLIAgent::Crush => crush_input_top(rows, floor).map_or(0, |top| {
+            let mut lines: Vec<&str> = rows[top..]
+                .iter()
+                .take_while(|r| !r.trim().is_empty())
+                .map(|r| {
+                    let t = r.trim_start();
+                    let t = t.strip_prefix(":::").unwrap_or(t);
+                    let t = t.strip_prefix('>').unwrap_or(t);
+                    t.strip_prefix('!').unwrap_or(t)
+                })
+                .collect();
+            if lines
+                .first()
+                .is_some_and(|l| CRUSH_PLACEHOLDERS.contains(&l.trim()))
+            {
+                lines[0] = "";
+            }
+            count(lines)
+        }),
+        CLIAgent::Goose => goose_input_top(rows).map_or(0, |top| {
+            let line = rows[top + 1].trim_start_matches('>').trim();
+            usize::from(!line.is_empty() && line != "Enter to send · Ctrl+J newline")
+        }),
+        CLIAgent::Amp => amp_input_top(rows, floor, width).map_or(0, |top| {
+            count(
+                rows[top + 1..]
+                    .iter()
+                    .take_while(|r| r.starts_with('│'))
+                    .map(|r| r.trim_matches(|c: char| c == '│' || c == ' '))
+                    .collect(),
+            )
+        }),
+        _ => 0,
     }
 }
 
@@ -2000,10 +2170,12 @@ impl TerminalView {
         // Text left in the agent's own input under the box would run into the
         // message: clear it first.
         if matches!(c.presence, Presence::Covering(_))
-            && let Some(clear) = clear_input_key(agent)
-            && {
+            && let Some(clear) = {
                 let term = self.terminal.term.lock();
-                holds_text(agent, &screen_rows(&term), term.columns())
+                clear_input(
+                    agent,
+                    held_lines(agent, &screen_rows(&term), term.columns()),
+                )
             }
             && let Some(first) = steps.first_mut()
         {
@@ -2012,7 +2184,7 @@ impl TerminalView {
                 0,
                 Step {
                     delay: Duration::ZERO,
-                    bytes: clear.to_vec(),
+                    bytes: clear,
                 },
             );
         }
@@ -3640,11 +3812,12 @@ mod tests {
         };
         let left = frame("  │ ❯ /model                             │");
         let empty = frame("  │ ❯                                    │");
-        assert!(holds_text(CLIAgent::Grok, &left, 40));
-        assert!(!holds_text(CLIAgent::Grok, &empty, 40));
-        assert!(!holds_text(CLIAgent::Pi, &left, 40));
-        assert_eq!(clear_input_key(CLIAgent::Grok), Some(&b"\x15"[..]));
-        assert_eq!(clear_input_key(CLIAgent::Claude), None);
+        assert_eq!(held_lines(CLIAgent::Grok, &left, 40), 1);
+        assert_eq!(held_lines(CLIAgent::Grok, &empty, 40), 0);
+        assert_eq!(held_lines(CLIAgent::Pi, &left, 40), 0);
+        assert_eq!(clear_input(CLIAgent::Grok, 1), Some(b"\x15".to_vec()));
+        assert_eq!(clear_input(CLIAgent::Grok, 0), None);
+        assert_eq!(clear_input(CLIAgent::Claude, 1), None);
         // Its Esc does not stop a turn; Ctrl+C does.
         assert_eq!(bytes(&interrupt_keys(Some(CLIAgent::Grok))), [b"\x03"]);
         assert_eq!(bytes(&interrupt_keys(Some(CLIAgent::Pi))), [b"\x1b"]);
@@ -3652,6 +3825,292 @@ mod tests {
         let crush = interrupt_keys(Some(CLIAgent::Crush));
         assert_eq!(bytes(&crush), [b"\x1b", b"\x1b"]);
         assert!(crush[1].delay >= SETTLE);
+    }
+
+    const CRUSH_HELP: &str =
+        " tab focus chat • shift+tab mode • / or ctrl+p commands • ctrl+m models";
+
+    #[test]
+    fn crushs_input_is_its_editor_over_the_key_help() {
+        let rows = screen(&[
+            " │ Reply with just PONG",
+            "",
+            "   PONG",
+            "",
+            "   ◇ claude-sonnet-4-6 (relay) via Kalowave relay in 3s ──────────",
+            "",
+            "",
+            "   > Ready...",
+            " :::",
+            " :::",
+            "",
+            CRUSH_HELP,
+            "",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::Crush, &rows, 80),
+            Some(InputArea { top: 7, mode: None })
+        );
+        // Several lines, yolo mode's prompt, the chat holding the keys.
+        for (first, top) in [
+            ("   > line one", 4),
+            ("  !  line one", 4),
+            (" ::: Ready...", 4),
+        ] {
+            let rows = screen(&[
+                "   PONG",
+                "",
+                "",
+                "",
+                first,
+                " ::: line two",
+                " ::: line three",
+                " ::: line four",
+                "",
+                " esc cancel • tab focus chat • shift+tab mode",
+                "",
+            ]);
+            assert_eq!(
+                input_area(CLIAgent::Crush, &rows, 80),
+                Some(InputArea { top, mode: None }),
+                "{first}"
+            );
+        }
+    }
+
+    /// Crush's dialogs are framed over the screen with its editor left under
+    /// them, and take the keys while open.
+    #[test]
+    fn crushs_dialogs_are_not_its_input() {
+        let rows = screen(&[
+            "   PONG                                    main",
+            "        ╭──────────────────────────────╮  /tmp/t7b6/proj",
+            "        │ Commands ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱ │",
+            "        │ > Type to filter             │",
+            "        │ New Session          ctrl+n  │",
+            "        ╰──────────────────────────────╯",
+            "",
+            "   > Ready...",
+            " :::",
+            " :::",
+            "",
+            CRUSH_HELP,
+        ]);
+        assert_eq!(input_area(CLIAgent::Crush, &rows, 80), None);
+        // A permission request runs down over the editor's first line.
+        let rows = screen(&[
+            "     ╭──────────────────────────────────────╮",
+            " │ Us│  Permission Required ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱  │",
+            "     │ Tool write                           │",
+            "     │        Allow   Allow for Session  Deny│",
+            "   > ╰──────────────────────────────────────╯",
+            " :::",
+            " :::",
+            "",
+            CRUSH_HELP,
+        ]);
+        assert_eq!(input_area(CLIAgent::Crush, &rows, 80), None);
+        // Its splash, before the editor is drawn.
+        let rows = screen(&[
+            "  Would you like to initialize now?",
+            "",
+            "    Yep!     Nope",
+            "",
+            " ctrl+c quit • ctrl+g more",
+        ]);
+        assert_eq!(input_area(CLIAgent::Crush, &rows, 80), None);
+    }
+
+    const GOOSE_GAUGE: &str = "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ 1% 5k/1.0M";
+
+    #[test]
+    fn gooses_input_is_its_prompt_under_the_gauge_at_any_height() {
+        let rows = screen(&[
+            "    __( O)>  ● new session · anthropic claude-sonnet-4-6",
+            "     L L     goose is ready",
+            "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ 0% 0/1.0M",
+            "> Enter to send · Ctrl+J newline",
+        ]);
+        let mut tall = rows.clone();
+        tall.extend(std::iter::repeat_n(String::new(), 60));
+        for rows in [rows, tall] {
+            assert_eq!(
+                input_area(CLIAgent::Goose, &rows, 80),
+                Some(InputArea { top: 2, mode: None })
+            );
+        }
+        let rows = screen(&["PONG", "  ⏱ 4.60s", GOOSE_GAUGE, "> ", ""]);
+        assert_eq!(
+            input_area(CLIAgent::Goose, &rows, 80),
+            Some(InputArea { top: 2, mode: None })
+        );
+    }
+
+    /// While a turn runs, its spinner and output are printed under the line
+    /// sent; a tool approval is printed there too.
+    #[test]
+    fn a_running_goose_turn_is_not_its_input() {
+        let spinner = screen(&[
+            GOOSE_GAUGE,
+            "> Reply with just PONG",
+            "",
+            "◓  Webbing connections...  (Ctrl+C to interrupt)",
+        ]);
+        let output = screen(&[
+            GOOSE_GAUGE,
+            "> Run the shell command: ls",
+            "  ────────────────────────────────────────",
+            "  ▸ shell",
+            "    command: ls",
+        ]);
+        let transcript = screen(&[GOOSE_GAUGE, "> earlier", "PONG", "  ⏱ 4.60s"]);
+        for rows in [spinner, output, transcript] {
+            assert_eq!(input_area(CLIAgent::Goose, &rows, 80), None);
+        }
+    }
+
+    const AMP_TOP: &str = "╭─────────────────────────────── medium ─╮";
+    const AMP_BOTTOM: &str = "╰──────────────── /tmp/t7b6/proj (main) ─╯";
+    const AMP_EMPTY: &str = "│                                      │";
+
+    #[test]
+    fn amps_input_is_the_frame_at_the_bottom() {
+        let rows = screen(&[
+            "                    •●●●●••     Welcome to Amp",
+            "",
+            AMP_TOP,
+            AMP_EMPTY,
+            AMP_EMPTY,
+            AMP_EMPTY,
+            AMP_BOTTOM,
+            "",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::Amp, &rows, 40),
+            Some(InputArea { top: 2, mode: None })
+        );
+        // Sending, with the thread above.
+        let rows = screen(&[
+            " ┃ Reply with just PONG",
+            "╭──────────────────────── $···· ─ medium ─╮",
+            "│ line one                               │",
+            "│ line two                               │",
+            "╰ ∼ Sending ───────── /tmp/t7b6/proj (main) ─╯",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::Amp, &rows, 40),
+            Some(InputArea { top: 1, mode: None })
+        );
+    }
+
+    /// Amp's palette opens framed over the screen; a notice in the input's
+    /// place is a frame with nothing in its bottom edge.
+    #[test]
+    fn amps_palette_and_notices_are_not_its_input() {
+        let rows = screen(&[
+            "      ╭─ Command Palette ────────────╮",
+            "      │ >                            │",
+            "   ●● │    thread  new in orb        │",
+            "      ╰──────────────────────────────╯",
+            "",
+            AMP_TOP,
+            AMP_EMPTY,
+            AMP_BOTTOM,
+        ]);
+        assert_eq!(input_area(CLIAgent::Amp, &rows, 40), None);
+        let rows = screen(&[
+            " ┃ Reply with just PONG",
+            "╭──────────────────────────────────────╮",
+            "│ Out of Credits                       │",
+            "│ ‣ Add Paid Credits                   │",
+            "│   Dismiss                            │",
+            "╰──────────────────────────────────────╯",
+        ]);
+        assert_eq!(input_area(CLIAgent::Amp, &rows, 40), None);
+    }
+
+    /// What was typed into Crush's, Goose's or Amp's own input before the box
+    /// was laid over it is cleared, line by line, before the next message.
+    #[test]
+    fn text_left_in_crush_goose_and_amp_inputs_is_cleared_first() {
+        let crush = |lines: &[&str]| {
+            let mut rows = vec!["   PONG".to_string(), String::new()];
+            rows.extend(lines.iter().map(|l| l.to_string()));
+            rows.extend(["", CRUSH_HELP].map(String::from));
+            rows
+        };
+        assert_eq!(
+            held_lines(
+                CLIAgent::Crush,
+                &crush(&["   > Ready...", " :::", " :::"]),
+                80
+            ),
+            0
+        );
+        assert_eq!(
+            held_lines(
+                CLIAgent::Crush,
+                &crush(&["  !  Go crazy", " :::", " :::"]),
+                80
+            ),
+            0
+        );
+        assert_eq!(
+            held_lines(CLIAgent::Crush, &crush(&["   > left", " :::", " :::"]), 80),
+            1
+        );
+        assert_eq!(
+            held_lines(
+                CLIAgent::Crush,
+                &crush(&["   > one", " ::: two", " ::: three", " :::"]),
+                80
+            ),
+            3
+        );
+
+        let goose = |line: &str| screen(&[GOOSE_GAUGE, line, ""]);
+        assert_eq!(
+            held_lines(
+                CLIAgent::Goose,
+                &goose("> Enter to send · Ctrl+J newline"),
+                80
+            ),
+            0
+        );
+        assert_eq!(held_lines(CLIAgent::Goose, &goose("> "), 80), 0);
+        assert_eq!(
+            held_lines(CLIAgent::Goose, &goose("> leftover words"), 80),
+            1
+        );
+
+        let amp = |inside: &[&str]| {
+            let mut rows = vec![AMP_TOP.to_string()];
+            rows.extend(inside.iter().map(|l| l.to_string()));
+            rows.push(AMP_BOTTOM.to_string());
+            rows
+        };
+        assert_eq!(
+            held_lines(CLIAgent::Amp, &amp(&[AMP_EMPTY, AMP_EMPTY]), 40),
+            0
+        );
+        assert_eq!(
+            held_lines(
+                CLIAgent::Amp,
+                &amp(&[
+                    "│ x @my notes.md                       │",
+                    "│ line two                             │",
+                    AMP_EMPTY,
+                ]),
+                40
+            ),
+            2
+        );
+
+        assert_eq!(
+            clear_input(CLIAgent::Crush, 2),
+            Some(b"\x15\x7f\x15\x7f".to_vec())
+        );
+        assert_eq!(clear_input(CLIAgent::Amp, 0), None);
     }
 
     /// The grid gives up rows only for the part of the box an input does not
