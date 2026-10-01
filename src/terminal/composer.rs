@@ -691,7 +691,8 @@ pub(super) fn command_items(commands: &[(String, String)], query: &str) -> Vec<M
 /// way the agent's own `@` list would have put it in.
 ///
 /// - **Claude Code** ends a bare mention at the first whitespace; a path with
-///   a space in it goes in double quotes, `@"my notes.md"`.
+///   a space in it goes in double quotes, `@"my notes.md"`. **Kimi Code**'s
+///   list spells one the same way.
 /// - **Codex** hands its mentions to the model as they are, and its list puts
 ///   in the path alone — without the `@`, in double quotes when it has a
 ///   space in it.
@@ -706,7 +707,7 @@ pub(super) fn mention(agent: Option<CLIAgent>, path: &str, shell: Option<&str>) 
     let spaced = path.chars().any(char::is_whitespace);
     match agent {
         Some(a) if reads_like_gemini(a) => {}
-        Some(CLIAgent::Claude) if spaced => return format!("@\"{path}\""),
+        Some(CLIAgent::Claude | CLIAgent::Kimi) if spaced => return format!("@\"{path}\""),
         Some(CLIAgent::Codex) if spaced && !path.contains('"') => return format!("\"{path}\""),
         Some(CLIAgent::Codex) => return path.to_string(),
         _ => return format!("@{path}"),
@@ -2554,6 +2555,11 @@ mod tests {
             mention(Some(CLIAgent::Gemini), "my notes.md", zsh),
             r"@my\ notes.md"
         );
+        assert_eq!(
+            mention(Some(CLIAgent::Kimi), "my notes.md", zsh),
+            r#"@"my notes.md""#
+        );
+        assert_eq!(mention(Some(CLIAgent::Kimi), "src/a.rs", zsh), "@src/a.rs");
         assert_eq!(mention(None, "my notes.md", zsh), "@my notes.md");
     }
 
