@@ -3258,17 +3258,36 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       if (document.activeElement === typing) typing.blur();
       else typing.focus({ preventScroll: true });
     };
-    typing.addEventListener("focus", () => keyboard.classList.add("on"));
-    typing.addEventListener("blur", () => keyboard.classList.remove("on"));
-
-    // Committed text goes to the pane and the field is emptied again; while
-    // an input method is composing, the field holds the candidate.
-    let imeOpen = false;
-    const flush = () => {
-      if (imeOpen || !typing.value) return;
-      const text = typing.value.replace(/\r?\n/g, "\r");
+    // While the field has the keys the pane's cursor is drawn solid, as a
+    // focused terminal's is, so a tap on the pane shows where typing lands.
+    typing.addEventListener("focus", () => {
+      keyboard.classList.add("on");
+      term.options.cursorInactiveStyle = "block";
+    });
+    typing.addEventListener("blur", () => {
+      keyboard.classList.remove("on");
+      term.options.cursorInactiveStyle = "outline";
       typing.value = "";
-      send(text);
+      typed = "";
+    });
+
+    // Committed text goes to the pane as the field changes; while an input
+    // method is composing, the field holds the candidate and nothing is sent.
+    // The field is not emptied while it has the keys: iOS keeps its own copy
+    // of the text, and a field cleared under it leaves the input method
+    // stuck after the first character it commits. What goes out is the
+    // change since the last send: characters taken off the end as DEL, one
+    // each, then what is new.
+    let imeOpen = false;
+    let typed = "";
+    const flush = () => {
+      if (imeOpen || typing.value === typed) return;
+      const was = Array.from(typed);
+      const now = Array.from(typing.value);
+      let same = 0;
+      while (same < was.length && same < now.length && was[same] === now[same]) same++;
+      typed = typing.value;
+      send("\x7f".repeat(was.length - same) + now.slice(same).join("").replace(/\r?\n/g, "\r"));
     };
     typing.addEventListener("compositionstart", () => (imeOpen = true));
     typing.addEventListener("compositionend", () => {
