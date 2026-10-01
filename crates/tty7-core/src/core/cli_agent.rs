@@ -1122,6 +1122,14 @@ impl AgentSessionState {
     }
 
     pub fn apply_event(&mut self, ev: &AgentEvent) {
+        // A status set before the first hook came from a desktop notification
+        // — Crush's "turn completed", say — which says the pane wants a look,
+        // not that a question is open. Taken for one, the first tool report
+        // turned it into a turn running, and nothing would ever end it.
+        if !self.rich && self.status == AgentStatus::Waiting {
+            self.status = AgentStatus::Idle;
+            self.message = None;
+        }
         self.rich = true;
         let guessed = std::mem::take(&mut self.inferred);
         if let Some(id) = &ev.session_id {
@@ -1807,6 +1815,29 @@ mod tests {
         s.apply_event(&ev(AgentEventKind::SessionEnd, None, None));
         assert_eq!(s.status, AgentStatus::Idle);
         assert_eq!(s.session_id.as_deref(), Some("sid-1"));
+    }
+
+    /// A desktop notification before any hook marks the pane waiting; the
+    /// first hook report must not read that as a question being answered.
+    #[test]
+    fn a_hook_after_a_notification_does_not_start_a_turn() {
+        let mut s = AgentSessionState {
+            status: AgentStatus::Waiting,
+            message: Some("Agent's turn completed".into()),
+            ..Default::default()
+        };
+        s.apply_event(&AgentEvent {
+            agent: Some(CLIAgent::Crush),
+            kind: AgentEventKind::ToolComplete,
+            session_id: Some("sid".into()),
+            message: None,
+            cwd: None,
+            readout: Default::default(),
+        });
+        assert_eq!(s.status, AgentStatus::Idle);
+        assert_eq!(s.message, None);
+        assert!(s.rich);
+        assert_eq!(s.activity, 1);
     }
 
     #[test]
