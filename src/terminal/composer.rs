@@ -660,9 +660,10 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
             };
             Some(InputArea { top, mode: None })
         }
-        CLIAgent::Gemini => {
-            gemini_input_top(rows, floor, width).map(|top| InputArea { top, mode: None })
-        }
+        CLIAgent::Gemini => gemini_input_top(rows, floor, width).map(|top| InputArea {
+            top: over_mode_line(rows, floor, width, top),
+            mode: None,
+        }),
         CLIAgent::Pi => pi_input_top(rows, floor, width).map(|top| InputArea { top, mode: None }),
         CLIAgent::OhMyPi => {
             omp_input_top(rows, floor, width).map(|top| InputArea { top, mode: None })
@@ -909,10 +910,10 @@ fn in_shell_mode(agent: CLIAgent, rows: &[String], width: usize) -> bool {
 /// line, which wraps in a narrow pane.
 const QODER_FOOTER_MAX_ROWS: usize = 3;
 
-/// How far over its input Qoder's mode line reaches, from the rule over it:
-/// in a narrow pane the mode and the MCP count go on rows of their own, a
-/// blank one between them.
-const QODER_MODE_MAX_ROWS: usize = 4;
+/// How far over its input the mode line of Gemini CLI and Qoder reaches,
+/// from the rule over it: in a narrow pane Qoder's mode and MCP count go on
+/// rows of their own, a blank one between them.
+const MODE_LINE_MAX_ROWS: usize = 4;
 
 /// Qoder's input, as [`qoder_input`] finds it.
 struct QoderInput {
@@ -957,14 +958,33 @@ fn qoder_input(rows: &[String], floor: usize, width: usize) -> Option<QoderInput
     if !(first < lower && prompt && footer.len() <= QODER_FOOTER_MAX_ROWS && !list) {
         return None;
     }
-    let mut top = (upper.saturating_sub(QODER_MODE_MAX_ROWS).max(floor)..upper)
+    let top = over_mode_line(rows, floor, width, upper);
+    Some(QoderInput { top, first, lower })
+}
+
+/// The row to cover from for an input starting at `top` that Gemini CLI or
+/// a fork of it draws: from the rule over its mode line ("Shift+Tab to
+/// accept edits", "shell mode enabled"), and the `? for shortcuts` hint over
+/// that, when they are there — left standing, they would show over the box.
+fn over_mode_line(rows: &[String], floor: usize, width: usize, top: usize) -> usize {
+    let Some(rule) = (top.saturating_sub(MODE_LINE_MAX_ROWS).max(floor)..top)
         .rev()
         .find(|&i| is_rule(&rows[i], width))
-        .unwrap_or(upper);
-    if top > floor && rows[top - 1].trim() == "? for shortcuts" {
-        top -= 1;
+    else {
+        return top;
+    };
+    let between = &rows[rule + 1..top];
+    let mode_line = between.iter().any(|r| !r.trim().is_empty())
+        && between
+            .iter()
+            .all(|r| !r.trim_start().starts_with(['>', '❯', '│', '╭', '╰']));
+    if !mode_line {
+        return top;
     }
-    Some(QoderInput { top, first, lower })
+    match rule > floor && rows[rule - 1].trim() == "? for shortcuts" {
+        true => rule - 1,
+        false => rule,
+    }
 }
 
 /// How many rows Kimi Code draws under its input's frame at most: its model
@@ -4259,9 +4279,10 @@ mod tests {
             " workspace (/directory)   sandbox   /model",
             " ~/proj                   no sandbox gpt-5",
         ]);
+        // The box covers its mode line, the rule over it and the hint too.
         assert_eq!(
             input_area(CLIAgent::Gemini, &rows, 40),
-            Some(InputArea { top: 9, mode: None })
+            Some(InputArea { top: 6, mode: None })
         );
         // Shell mode and YOLO mode change only the prompt's mark.
         for mark in [" ! ls", " * fix it"] {
@@ -4269,14 +4290,22 @@ mod tests {
             rows[10] = mark.to_string();
             assert_eq!(
                 input_area(CLIAgent::Gemini, &rows, 40).map(|a| a.top),
-                Some(9)
+                Some(6)
             );
         }
         // Without a footer, too.
         assert_eq!(
             input_area(CLIAgent::Gemini, &rows[..12], 40).map(|a| a.top),
-            Some(9)
+            Some(6)
         );
+        // Without a mode line, from the shaded block's top edge.
+        let mut bare = rows.clone();
+        bare.drain(6..9);
+        assert_eq!(
+            input_area(CLIAgent::Gemini, &bare, 40).map(|a| a.top),
+            Some(6)
+        );
+        assert_eq!(bare[6], LOWER_HALVES);
     }
 
     #[test]
@@ -4311,9 +4340,10 @@ mod tests {
             " >   Type your message or @path/to/file",
             " workspace (/directory)   sandbox   /model",
         ]);
+        // From the hint over its mode line's rule.
         assert_eq!(
             input_area(CLIAgent::Gemini, &rows, 40),
-            Some(InputArea { top: 5, mode: None })
+            Some(InputArea { top: 2, mode: None })
         );
     }
 
