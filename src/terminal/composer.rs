@@ -271,6 +271,13 @@ pub(super) fn compose_message(
             })
             .collect::<Vec<_>>()
             .join(" "),
+        // Oh My Pi reads a mentioned file — an image included — into the
+        // turn itself; a path is just words to it.
+        CLIAgent::OhMyPi => attached
+            .iter()
+            .map(|p| mention(Some(agent), p, shell))
+            .collect::<Vec<_>>()
+            .join(" "),
         _ => pasted_paths_text(attached, shell),
     };
     let words = words.trim_end();
@@ -1039,7 +1046,8 @@ pub(super) fn command_items(commands: &[(String, String)], query: &str) -> Vec<M
 ///
 /// - **Claude Code** ends a bare mention at the first whitespace; a path with
 ///   a space in it goes in double quotes, `@"my notes.md"`. **Kimi Code**'s
-///   list spells one the same way.
+///   list spells one the same way, and so do Pi's and its forks', Oh My Pi
+///   and Prime Agent.
 /// - **Codex** hands its mentions to the model as they are, and its list puts
 ///   in the path alone — without the `@`, in double quotes when it has a
 ///   space in it.
@@ -1054,7 +1062,13 @@ pub(super) fn mention(agent: Option<CLIAgent>, path: &str, shell: Option<&str>) 
     let spaced = path.chars().any(char::is_whitespace);
     match agent {
         Some(a) if reads_like_gemini(a) => {}
-        Some(CLIAgent::Claude | CLIAgent::Kimi) if spaced => return format!("@\"{path}\""),
+        Some(
+            CLIAgent::Claude
+            | CLIAgent::Kimi
+            | CLIAgent::Pi
+            | CLIAgent::OhMyPi
+            | CLIAgent::PrimeAgent,
+        ) if spaced => return format!("@\"{path}\""),
         Some(CLIAgent::Codex) if spaced && !path.contains('"') => return format!("\"{path}\""),
         Some(CLIAgent::Codex) => return path.to_string(),
         _ => return format!("@{path}"),
@@ -2948,6 +2962,21 @@ mod tests {
         assert_eq!(bytes(&steps)[0], b"\x1b[200~look @/tmp/red.png \x1b[201~");
     }
 
+    /// Oh My Pi reads a mentioned file, an image too, into the turn; a
+    /// mention with a space goes in its quotes.
+    #[test]
+    fn oh_my_pi_gets_its_attachments_as_mentions() {
+        let attached = vec!["/tmp/red.png".to_string(), "/tmp/a b.png".to_string()];
+        assert_eq!(
+            compose_message(CLIAgent::OhMyPi, "look", &attached, Some("zsh")),
+            "look @/tmp/red.png @\"/tmp/a b.png\""
+        );
+        assert_eq!(
+            compose_message(CLIAgent::Pi, "look", &attached, Some("zsh")),
+            "look /tmp/red.png '/tmp/a b.png'"
+        );
+    }
+
     #[test]
     fn qwen_is_spoken_to_the_way_gemini_is() {
         // Typed, its leading `?` opens the shortcuts and is lost.
@@ -3000,6 +3029,19 @@ mod tests {
             r#"@"my notes.md""#
         );
         assert_eq!(mention(Some(CLIAgent::Kimi), "src/a.rs", zsh), "@src/a.rs");
+        for agent in [CLIAgent::Pi, CLIAgent::OhMyPi, CLIAgent::PrimeAgent] {
+            assert_eq!(
+                mention(Some(agent), "my notes.md", zsh),
+                "@\"my notes.md\"",
+                "{agent:?}"
+            );
+            assert_eq!(mention(Some(agent), "src/a.rs", zsh), "@src/a.rs");
+        }
+        // Grok Build's own list puts the path in as it is.
+        assert_eq!(
+            mention(Some(CLIAgent::Grok), "my notes.md", zsh),
+            "@my notes.md"
+        );
         assert_eq!(mention(None, "my notes.md", zsh), "@my notes.md");
     }
 
