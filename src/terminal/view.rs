@@ -15888,6 +15888,7 @@ mod gpui_tests {
         // the box is sent as the answer.
         DaemonMsg::AgentStatus(Some(AgentSessionState {
             status: AgentStatus::Waiting,
+            rich: true,
             ..Default::default()
         }))
         .encode(&mut daemon)

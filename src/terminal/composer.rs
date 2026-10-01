@@ -1929,9 +1929,16 @@ impl TerminalView {
     /// The agent is asking a question only its TUI can put — a permission
     /// prompt, a choice. Whatever the box sent would be taken as the answer,
     /// so nothing is sent until the question is gone.
+    ///
+    /// Only a hook can say so. An agent without them — Amp — is marked
+    /// waiting by any desktop notification it raises, "Agent is ready" when
+    /// a turn ends included, and stays so; read as a question, that kept the
+    /// box aside, with nothing sendable, from the first finished turn on.
+    /// Its own dialogs it puts in its input's place, and the box steps aside
+    /// for those off the screen.
     fn agent_is_asking(&self) -> bool {
         self.agent_session()
-            .is_some_and(|s| s.status == AgentStatus::Waiting)
+            .is_some_and(|s| s.rich && s.status == AgentStatus::Waiting)
     }
 
     fn composer_can_send(&self, cx: &gpui::App) -> bool {
