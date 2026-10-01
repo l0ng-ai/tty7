@@ -137,8 +137,10 @@ pub(super) struct Step {
 /// - **Codex is always pasted.** It watches for bursts of fast keystrokes to
 ///   spot pastes from terminals that do not bracket them, and the Enter after
 ///   a typed burst is swallowed into it.
-/// - **So is Gemini**, and Qwen Code with it ([`reads_like_gemini`]). It
-///   judges each key of a burst against the input as it was before the burst, so every `?` in a typed line reads as the key that
+/// - **So is Gemini**, and Qwen Code and Qoder with it
+///   ([`reads_like_gemini`]). It judges each key of a burst against the
+///   input as it was before the burst, so every `?` in a typed line reads as
+///   the key that
 ///   opens its shortcuts on an empty input and is lost, and every `!` as the
 ///   one that switches it into shell mode — "hi! there" would run `there`.
 /// - **So are OpenCode and Amp.** OpenCode reads a typed burst the same way
@@ -249,8 +251,8 @@ pub(super) fn submit_plan(agent: CLIAgent, text: &str, bracketed: bool) -> Vec<S
 /// words a drop onto the terminal would have typed — which is how an agent is
 /// pointed at a file or shown an image.
 ///
-/// Gemini (and Qwen Code with it) is the exception. It turns a drop into `@`
-/// mentions itself, but only a paste that is nothing but paths; after the
+/// Gemini (and Qwen Code and Qoder with it) is the exception. It turns a drop
+/// into `@` mentions itself, but only a paste that is nothing but paths; after the
 /// message's text, a path is just words to it and the file never reaches the
 /// model. So its attachments go as the mentions it would have made.
 ///
@@ -364,11 +366,15 @@ pub(super) struct InputArea {
     pub mode: Option<&'static str>,
 }
 
-/// Whether `agent` reads its input the way Gemini CLI does. Qwen Code is a
-/// fork of it and kept its input: the burst-typing traps, the shell-mode `!`,
-/// the `@` list that takes Enter, and `@` mentions escaped the same way.
+/// Whether `agent` reads its input the way Gemini CLI does. Qwen Code and
+/// Qoder (both builds) are forks of it and kept its input: the burst-typing
+/// traps, the shell-mode `!`, the `@` list that takes Enter, the Enter right
+/// behind a paste taken for a newline, and `@` mentions escaped the same way.
 fn reads_like_gemini(agent: CLIAgent) -> bool {
-    matches!(agent, CLIAgent::Gemini | CLIAgent::Qwen)
+    matches!(
+        agent,
+        CLIAgent::Gemini | CLIAgent::Qwen | CLIAgent::QoderCLI | CLIAgent::QoderCLICn
+    )
 }
 
 /// Whether the box can be laid over this agent's input.
@@ -390,6 +396,8 @@ fn covers(agent: CLIAgent) -> bool {
             | CLIAgent::CodeBuddy
             | CLIAgent::Kimi
             | CLIAgent::OpenCode
+            | CLIAgent::QoderCLI
+            | CLIAgent::QoderCLICn
     )
 }
 
@@ -445,6 +453,8 @@ fn is_rule(row: &str, width: usize) -> bool {
 /// - **Kimi Code** frames it over its model line — see [`kimi_input_top`].
 /// - **OpenCode** draws it on a bar over its key hints — see
 ///   [`opencode_input_top`].
+/// - **Qoder** rules it off under its mode line, over its model line — see
+///   [`qoder_input`].
 ///
 /// `None` is the agent showing something else there — which is exactly when
 /// the box must get out of the way.
@@ -514,6 +524,12 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
         CLIAgent::Kimi => kimi_input_top(rows, floor).map(|top| InputArea { top, mode: None }),
         CLIAgent::OpenCode => {
             opencode_input_top(rows, floor).map(|top| InputArea { top, mode: None })
+        }
+        CLIAgent::QoderCLI | CLIAgent::QoderCLICn => {
+            qoder_input(rows, floor, width).map(|q| InputArea {
+                top: q.top,
+                mode: None,
+            })
         }
         _ => None,
     }
@@ -718,8 +734,72 @@ fn in_shell_mode(agent: CLIAgent, rows: &[String], width: usize) -> bool {
             ruled_input_top(rows, floor, width, ruled_prompts(agent))
                 .is_some_and(|top| rows[top + 1].starts_with('!'))
         }
+        CLIAgent::QoderCLI | CLIAgent::QoderCLICn => qoder_input(rows, floor, width)
+            .is_some_and(|q| rows[q.first].trim_start().starts_with('!')),
         _ => false,
     }
+}
+
+/// How many rows Qoder draws under its input's lower rule at most: its model
+/// line, which wraps in a narrow pane.
+const QODER_FOOTER_MAX_ROWS: usize = 3;
+
+/// How far over its input Qoder's mode line reaches, from the rule over it:
+/// in a narrow pane the mode and the MCP count go on rows of their own, a
+/// blank one between them.
+const QODER_MODE_MAX_ROWS: usize = 4;
+
+/// Qoder's input, as [`qoder_input`] finds it.
+struct QoderInput {
+    /// The first row the box covers.
+    top: usize,
+    /// The input's first line, the prompt's.
+    first: usize,
+    /// The rule under its last line.
+    lower: usize,
+}
+
+/// Where Qoder's input is: the lines between the last two full-width rules,
+/// the first opening with its prompt — ` > `, ` * ` in YOLO mode, ` ! ` in
+/// shell mode — and only its model line under the lower rule. Over the upper
+/// rule its mode line has a rule of its own, and the `? for shortcuts` hint
+/// sits over that; the box covers them too, or they would be left standing
+/// over it.
+///
+/// Its `/` and `@` lists open under the lower rule, in the model line's
+/// place, the selected row opening with `❯`, and take the keys while open.
+/// Its dialogs — the folder trust and sign-in prompts, `/model`, `/help` —
+/// open under a rule of their own with no prompt under it, and a sent message
+/// is a ` > ` line with no rules around it. The box steps aside for all of
+/// them.
+fn qoder_input(rows: &[String], floor: usize, width: usize) -> Option<QoderInput> {
+    let mut rules = (floor..rows.len())
+        .rev()
+        .filter(|&i| is_rule(&rows[i], width));
+    let lower = rules.next()?;
+    let upper = rules.next()?;
+    let first = upper + 1;
+    let prompt = rows[first].strip_prefix(' ').is_some_and(|t| {
+        let mut chars = t.chars();
+        matches!(chars.next(), Some('>' | '*' | '!')) && matches!(chars.next(), None | Some(' '))
+    });
+    let footer: Vec<&str> = rows[lower + 1..]
+        .iter()
+        .map(|r| r.trim())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let list = footer.iter().any(|t| t.starts_with(['❯', '▲', '▼']));
+    if !(first < lower && prompt && footer.len() <= QODER_FOOTER_MAX_ROWS && !list) {
+        return None;
+    }
+    let mut top = (upper.saturating_sub(QODER_MODE_MAX_ROWS).max(floor)..upper)
+        .rev()
+        .find(|&i| is_rule(&rows[i], width))
+        .unwrap_or(upper);
+    if top > floor && rows[top - 1].trim() == "? for shortcuts" {
+        top -= 1;
+    }
+    Some(QoderInput { top, first, lower })
 }
 
 /// How many rows Kimi Code draws under its input's frame at most: its model
@@ -884,7 +964,9 @@ fn clear_input(agent: CLIAgent, lines: usize) -> Option<Vec<Step>> {
         | CLIAgent::Qwen
         | CLIAgent::CodeBuddy
         | CLIAgent::Kimi
-        | CLIAgent::OpenCode => b"\x15\x7f".repeat(lines),
+        | CLIAgent::OpenCode
+        | CLIAgent::QoderCLI
+        | CLIAgent::QoderCLICn => b"\x15\x7f".repeat(lines),
         _ => return None,
     };
     Some(match agent {
@@ -1039,6 +1121,29 @@ fn held_lines(agent: CLIAgent, rows: &[String], width: usize) -> usize {
                 .collect();
             count(lines)
         }),
+        CLIAgent::QoderCLI | CLIAgent::QoderCLICn => {
+            qoder_input(rows, floor, width).map_or(0, |q| {
+                count(
+                    rows[q.first..q.lower]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, r)| {
+                            let t = r.trim();
+                            let t = match i {
+                                0 => t.get(1..).unwrap_or("").trim(),
+                                _ => t,
+                            };
+                            // Its placeholders, idle and in shell mode.
+                            match t {
+                                "Type your message or @path/to/file"
+                                | "Type your shell command" => "",
+                                _ => t,
+                            }
+                        })
+                        .collect(),
+                )
+            })
+        }
         _ => 0,
     }
 }
@@ -1526,6 +1631,23 @@ fn builtin_commands(agent: CLIAgent) -> &'static [(&'static str, &'static str)] 
             ("/help", "Show the commands"),
             ("/exit", "Exit the session"),
         ],
+        CLIAgent::QoderCLI | CLIAgent::QoderCLICn => &[
+            ("/compact", "Replace the context with a summary"),
+            ("/clear", "Start a new conversation"),
+            ("/model", "Set or manage the model"),
+            ("/effort", "Set reasoning effort"),
+            ("/resume", "Resume a previous session"),
+            ("/rewind", "Rewind the conversation"),
+            ("/init", "Create a context file for this repo"),
+            ("/context", "Show context usage"),
+            ("/plan", "Toggle plan mode"),
+            ("/permissions", "Manage permissions"),
+            ("/review", "Review code changes"),
+            ("/memory", "Manage memory"),
+            ("/mcp", "Manage MCP servers"),
+            ("/status", "Show account and session status"),
+            ("/help", "Show help"),
+        ],
         // Amp and Crush have no typed commands: `/` on an empty input opens
         // their command palette, which a message cannot drive.
         _ => &[],
@@ -1609,8 +1731,8 @@ pub(super) fn command_items(commands: &[(String, String)], query: &str) -> Vec<M
 /// - **Gemini CLI** ends a mention at the first unescaped space, and reads it
 ///   back through its own `escapePath`: a backslash before each character a
 ///   shell would take, or — on Windows — the whole path in double quotes.
-///   **Qwen Code** keeps that spelling, and escapes a comma too: it ends a
-///   mention at one.
+///   **Qwen Code** and **Qoder** keep that spelling, and Qwen Code escapes
+///   a comma too: it ends a mention at one.
 ///
 /// The others take the path as it is.
 pub(super) fn mention(agent: Option<CLIAgent>, path: &str, shell: Option<&str>) -> String {
@@ -3662,6 +3784,30 @@ mod tests {
     }
 
     #[test]
+    fn qoder_is_spoken_to_the_way_gemini_is() {
+        for agent in [CLIAgent::QoderCLI, CLIAgent::QoderCLICn] {
+            // Typed, its leading `?` opens the shortcuts and is lost, and an
+            // Enter right behind a paste is a newline.
+            let steps = submit_plan(agent, "?why", true);
+            assert_eq!(bytes(&steps), [&b"\x1b[200~?why\x1b[201~"[..], b"\r"]);
+            assert_eq!(steps[1].delay, SETTLE_AFTER_PASTE_SLOW);
+            let steps = submit_plan(agent, "!ls", true);
+            assert_eq!(bytes(&steps), [&b"!"[..], b"\x1b[200~ls\x1b[201~", b"\r"]);
+            // Its `@` list takes an Enter that comes right after a mention.
+            let steps = submit_plan(agent, "read @a.rs", true);
+            assert_eq!(
+                bytes(&steps),
+                [&b"\x1b[200~read @a.rs \x1b[201~"[..], b"\r"]
+            );
+            // Its list puts a path with a space in as `@my\ notes.md`.
+            assert_eq!(
+                mention(Some(agent), "my notes.md", Some("zsh")),
+                r"@my\ notes.md"
+            );
+        }
+    }
+
+    #[test]
     fn a_mention_with_a_space_is_spelled_the_way_each_agent_reads_it() {
         let zsh = Some("zsh");
         assert_eq!(
@@ -5035,6 +5181,160 @@ mod tests {
         }
     }
 
+    const QODER_HINT: &str = "                          ? for shortcuts";
+    const QODER_MODEL: &str = "  Model · ctx ░░░░░░░░░░ 0% · /private/tmp/t7b8/proj";
+
+    /// Qoder's screen from its banner down, `over` between the transcript and
+    /// the mode line's rule, `lines` between the input's rules.
+    fn qoder_screen(over: &[&str], mode: &[&str], lines: &[&str]) -> Vec<String> {
+        let mut rows = screen(&[
+            "   ████  ██  Not Login Please Auth   │ 4. Be specific for the best results │",
+            "                                     ╰─────────────────────────────────────╯",
+            "",
+            " > hello there",
+            "",
+            " x Qoder authentication is not ready. Please sign in again (e.g. via /login)",
+            "",
+        ]);
+        rows.extend(over.iter().map(|l| l.to_string()));
+        rows.push(RULE.to_string());
+        rows.extend(mode.iter().map(|l| l.to_string()));
+        rows.push(RULE.to_string());
+        rows.extend(lines.iter().map(|l| l.to_string()));
+        rows.push(RULE.to_string());
+        rows.push(QODER_MODEL.to_string());
+        rows
+    }
+
+    #[test]
+    fn qoders_input_is_ruled_off_under_its_mode_line() {
+        let mode = [" Shift+Tab to Accept Edits          1 MCP server · 20 skills"];
+        // Idle, with the hint over the mode line, the box covers from there.
+        for (lines, held) in [
+            (&[" >   Type your message or @path/to/file"][..], 0),
+            (&[" *   Type your message or @path/to/file"][..], 0),
+            (&[" !   Type your shell command"][..], 0),
+        ] {
+            let rows = qoder_screen(&[QODER_HINT], &mode, lines);
+            for agent in [CLIAgent::QoderCLI, CLIAgent::QoderCLICn] {
+                assert_eq!(
+                    input_area(agent, &rows, 40),
+                    Some(InputArea { top: 7, mode: None }),
+                    "{lines:?}"
+                );
+                assert_eq!(held_lines(agent, &rows, 40), held, "{lines:?}");
+            }
+        }
+        // Typing, the hint goes; a newline typed last leaves a blank line.
+        for (lines, held) in [
+            (&[" > hello there"][..], 1),
+            (&[" > hello there", "   second line"][..], 2),
+            (&[" > line one", "   line two", ""][..], 2),
+            (&[" ! echo pasted"][..], 1),
+        ] {
+            let rows = qoder_screen(&[""], &mode, lines);
+            assert_eq!(
+                input_area(CLIAgent::QoderCLI, &rows, 40),
+                Some(InputArea { top: 8, mode: None }),
+                "{lines:?}"
+            );
+            assert_eq!(held_lines(CLIAgent::QoderCLI, &rows, 40), held, "{lines:?}");
+        }
+        // In a narrow pane the mode line breaks in two around a blank row.
+        let narrow = [
+            " Shift+Tab to Accept Edits",
+            "",
+            "  1 MCP server · 20 skills",
+        ];
+        let rows = qoder_screen(&[QODER_HINT], &narrow, &[" > x"]);
+        assert_eq!(
+            input_area(CLIAgent::QoderCLI, &rows, 40),
+            Some(InputArea { top: 7, mode: None })
+        );
+    }
+
+    /// Qoder stays in its shell mode after a `!` command, its prompt a `!`.
+    #[test]
+    fn qoders_shell_mode_is_read_off_its_prompt() {
+        let shell = [" Shell mode enabled (esc to disable)  1 MCP server · 20 skills"];
+        let rows = qoder_screen(&[QODER_HINT], &shell, &[" !   Type your shell command"]);
+        assert!(in_shell_mode(CLIAgent::QoderCLI, &rows, 40));
+        assert!(in_shell_mode(CLIAgent::QoderCLICn, &rows, 40));
+        let mode = [" Shift+Tab to Accept Edits          1 MCP server · 20 skills"];
+        let rows = qoder_screen(&[QODER_HINT], &mode, &[" > ! not a command"]);
+        assert!(!in_shell_mode(CLIAgent::QoderCLI, &rows, 40));
+    }
+
+    /// Qoder's lists open under its input, its dialogs in its place.
+    #[test]
+    fn qoders_lists_and_dialogs_are_not_its_input() {
+        let mode = [" Shift+Tab to Accept Edits          1 MCP server · 20 skills"];
+        let mut slash = qoder_screen(&[""], &mode, &[" > /"]);
+        slash.pop();
+        slash.extend(screen(&[
+            " ❯ about                      Show version info",
+            "   add-dir                    Add a directory to the workspace context",
+            "   agents                     Manage agents",
+            "   batch                      Apply a batch change across the codebase",
+            "   branch                     Create a new session branch",
+            "   btw                        Ask a quick side question",
+            "   claim                      Check available campaigns",
+            " ▼ clear                      Clear the screen and start a new conversation",
+        ]));
+        let mut mention = qoder_screen(&[""], &mode, &[" > read @my"]);
+        mention.pop();
+        mention.push(" ❯ my notes.md".to_string());
+        let trust = screen(&[
+            " Do you trust the files in this folder?",
+            RULE,
+            " Please confirm this is your own project or from a trusted source.",
+            "",
+            " /private/tmp/t7b8/proj",
+            "",
+            "  ❯ 1. Trust folder",
+            "    2. Don't trust and exit",
+            "",
+            " ↑/↓ navigate · Enter select · Esc back",
+        ]);
+        let sign_in = screen(&[
+            " Welcome to Qoder CLI",
+            RULE,
+            " Sign in to get started, or exit the application.",
+            "",
+            "  ❯ 1. Sign in to continue",
+            "    2. Exit the application",
+            "",
+            " ↑/↓ navigate · Enter select · Esc back",
+        ]);
+        let model = screen(&[
+            " > /model",
+            "",
+            " Model ·  Default (0)   New (0)   Custom (0)",
+            RULE,
+            " Overview:",
+            "  · Current Model     : Auto",
+            "",
+            " ──────────────────────────────────────",
+            "  Press / to search models",
+            " ──────────────────────────────────────",
+            "  No models in this group.",
+            "",
+            "",
+            " Tab switch · r refresh · Esc back",
+        ]);
+        let sent = screen(&[
+            " > hello there",
+            "   second line",
+            "",
+            " x Qoder authentication is not ready.",
+        ]);
+        for rows in [slash, mention, trust, sign_in, model, sent] {
+            for agent in [CLIAgent::QoderCLI, CLIAgent::QoderCLICn] {
+                assert_eq!(input_area(agent, &rows, 40), None, "{rows:#?}");
+            }
+        }
+    }
+
     /// The grid gives up rows only for the part of the box an input does not
     /// already hold, and whole rows of it.
     #[test]
@@ -5081,6 +5381,7 @@ mod tests {
             CLIAgent::CodeBuddy,
             CLIAgent::Kimi,
             CLIAgent::Goose,
+            CLIAgent::QoderCLI,
         ] {
             let names: Vec<&str> = builtin_commands(agent).iter().map(|(n, _)| *n).collect();
             for (i, name) in names.iter().enumerate() {
