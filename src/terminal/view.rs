@@ -3705,6 +3705,15 @@ impl TerminalView {
     }
 
     fn paste_clipboard_image(&mut self, img: &gpui::Image, cx: &mut Context<Self>) {
+        // A screenshot pasted into the composer is one of its attachments,
+        // shown as a chip like a copied file. Forwarded as SYN it would land
+        // in the agent's own input, hidden under the box.
+        if self.composer_takes_files()
+            && let Some(path) = write_clipboard_image(img)
+        {
+            self.paste_local_paths(vec![path], cx);
+            return;
+        }
         if self.paste_clipboard_image_as_path(img, cx) {
             return;
         }

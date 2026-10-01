@@ -2385,6 +2385,13 @@ impl TerminalView {
         true
     }
 
+    /// Whether files pasted now become the composer's attachments: it has
+    /// the keyboard, or covers the input they would be pasted into.
+    pub(super) fn composer_takes_files(&self) -> bool {
+        let covering = matches!(self.presence(), Presence::Covering(_));
+        self.composer_focused && self.composer_shown() || covering
+    }
+
     /// Files arriving by way of the terminal's paste path — dropped on the
     /// box, a copied file or a screenshot pasted into it, an upload to a
     /// remote pane landing — become attachments while the box has the
@@ -2396,8 +2403,7 @@ impl TerminalView {
         spelled: Vec<String>,
         cx: &mut Context<Self>,
     ) -> Option<Vec<String>> {
-        let covering = matches!(self.presence(), Presence::Covering(_));
-        if !(self.composer_focused && self.composer_shown() || covering) {
+        if !self.composer_takes_files() {
             return Some(spelled);
         }
         let focused = self.composer_focused;
