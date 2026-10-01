@@ -20,8 +20,10 @@
 //! and context off what its hooks report ([`crate::core::cli_agent::AgentReadout`]). Nothing reported
 //! means nothing shown.
 
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -31,8 +33,8 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermMode};
 use gpui::{
-    Context, Entity, ExternalPaths, Focusable as _, MouseButton, MouseDownEvent, SharedString,
-    Subscription, Window, div, prelude::*, px,
+    Context, Entity, ExternalPaths, Focusable as _, MouseButton, MouseDownEvent, Pixels,
+    SharedString, Subscription, Window, div, prelude::*, px,
 };
 use gpui_component::input::{self, Input, InputEvent, InputState, RopeExt as _};
 use gpui_component::tooltip::Tooltip;
@@ -355,8 +357,28 @@ fn reads_like_gemini(agent: CLIAgent) -> bool {
 fn covers(agent: CLIAgent) -> bool {
     matches!(
         agent,
-        CLIAgent::Claude | CLIAgent::Codex | CLIAgent::Gemini | CLIAgent::Pi
+        CLIAgent::Claude | CLIAgent::Codex | CLIAgent::Gemini | CLIAgent::Pi | CLIAgent::OhMyPi
     )
+}
+
+/// Whether the grid gives up rows for the box covering `agent`'s input — see
+/// [`TerminalView::composer_reserved_rows`].
+fn makes_room(agent: CLIAgent) -> bool {
+    agent == CLIAgent::OhMyPi
+}
+
+/// Whole rows of `line` it takes to make up what `area` rows of `line`, with
+/// `below` under them, fall short of `need` — none when they don't.
+pub(super) fn rows_short(need: Pixels, line: Pixels, area: usize, below: Pixels) -> usize {
+    let line = line.as_f32();
+    if line <= 0. {
+        return 0;
+    }
+    let short = need.as_f32() - line * area as f32 - below.as_f32();
+    match short > 0. {
+        true => (short / line).ceil() as usize,
+        false => 0,
+    }
 }
 
 fn is_rule(row: &str, width: usize) -> bool {
@@ -373,6 +395,7 @@ fn is_rule(row: &str, width: usize) -> bool {
 ///   [`gemini_input_top`] for its other drawings.
 /// - **Pi** draws it between two rules, over its status rows — see
 ///   [`pi_input_top`].
+/// - **Oh My Pi** hangs it under its status line — see [`omp_input_top`].
 ///
 /// `None` is the agent showing something else there — which is exactly when
 /// the box must get out of the way.
@@ -417,7 +440,35 @@ pub(super) fn input_area(agent: CLIAgent, rows: &[String], width: usize) -> Opti
             gemini_input_top(rows, floor, width).map(|top| InputArea { top, mode: None })
         }
         CLIAgent::Pi => pi_input_top(rows, floor, width).map(|top| InputArea { top, mode: None }),
+        CLIAgent::OhMyPi => {
+            omp_input_top(rows, floor, width).map(|top| InputArea { top, mode: None })
+        }
         _ => None,
+    }
+}
+
+/// Where Oh My Pi's input starts, in the composer shapes that keep it findable.
+///
+/// - **The status band**, its default, and **the rounded box**: the status
+///   line — model, directory, branch, context gauge — on the row above the
+///   input, whose first line opens with `╰─ `. Its own lists open below that
+///   line. A dialog's frame closes with `╰──…╯` instead, and a tool approval
+///   or a picker takes the input's place, so neither reads as the input.
+/// - **The Pi and Claude Code shapes** rule the input off the way Pi does —
+///   see [`pi_input_top`].
+///
+/// Its borderless, field and rail shapes leave no frame to find, and the box
+/// stays aside for them.
+fn omp_input_top(rows: &[String], floor: usize, width: usize) -> Option<usize> {
+    let line = (floor + 1..rows.len()).rev().find(|&i| {
+        rows[i]
+            .trim_start()
+            .strip_prefix("╰─")
+            .is_some_and(|rest| !rest.starts_with('─'))
+    });
+    match line {
+        Some(line) => (!rows[line - 1].trim().is_empty()).then_some(line - 1),
+        None => pi_input_top(rows, floor, width),
     }
 }
 
@@ -1075,6 +1126,9 @@ pub(super) struct Composer {
     /// The agent session the picks above were made in. A pick says nothing
     /// about the next session, which starts from its own settings.
     session: Option<String>,
+    /// The box's height as last drawn empty — nothing typed, nothing
+    /// attached — which is what it needs of the pane at the least.
+    frame_height: Rc<Cell<Option<Pixels>>>,
     _subs: Vec<Subscription>,
 }
 
@@ -1188,8 +1242,37 @@ impl TerminalView {
             model: None,
             picker: None,
             session: None,
+            frame_height: Rc::new(Cell::new(None)),
             _subs: subs,
         });
+    }
+
+    /// Rows the grid leaves empty at its bottom so that the box, covering an
+    /// input shorter than itself, covers nothing above it: Oh My Pi's input
+    /// is a status line and a prompt line, where the box is some five rows
+    /// tall, and would otherwise hide the last lines of the reply. The agent
+    /// is told the pane is that much shorter and draws its input higher.
+    ///
+    /// Only for an agent whose input is that short ([`makes_room`]): the
+    /// others' inputs, with their rules and status rows, about hold the box,
+    /// and resizing their pane each time the box comes and goes would have
+    /// them redraw for a row of padding.
+    pub(super) fn composer_reserved_rows(&self) -> usize {
+        let Presence::Covering(area) = self.presence() else {
+            return 0;
+        };
+        if !self.agent().is_some_and(makes_room) {
+            return 0;
+        }
+        let Some(frame) = self.composer.as_ref().and_then(|c| c.frame_height.get()) else {
+            return 0;
+        };
+        rows_short(
+            frame + px(BOX_INSET),
+            self.line_height,
+            area,
+            self.grid_slack + px(GRID_PAD_Y),
+        )
     }
 
     pub(super) fn presence(&self) -> Presence {
@@ -1805,6 +1888,25 @@ impl TerminalView {
             Presence::Hidden | Presence::SteppedAside => return None,
         };
         let frame = self.render_composer_frame(window, cx)?;
+        // Measured while empty: the least the box needs of the pane, for
+        // [`Self::composer_reserved_rows`].
+        let measure = self.composer.as_ref().and_then(|c| {
+            (covering.is_some() && c.attached.is_empty() && c.input.read(cx).value().is_empty())
+                .then(|| c.frame_height.clone())
+        });
+        let frame = div()
+            .w_full()
+            .when_some(measure, |d, cell| {
+                d.on_children_prepainted(move |bounds, window, _| {
+                    let Some(b) = bounds.first() else { return };
+                    if cell.get() != Some(b.size.height) {
+                        cell.set(Some(b.size.height));
+                        window.refresh();
+                    }
+                })
+            })
+            .child(frame);
+        let reserved = self.composer_reserved_rows();
         let element = match covering {
             // Over the input area, painted in the grid's own background so
             // what is under it is gone rather than showing through. At least
@@ -1816,8 +1918,11 @@ impl TerminalView {
                 .right_0()
                 .bottom_0()
                 // Measured up from the pane's bottom edge: its padding, the
-                // part of a row the grid's height left over, then the rows.
-                .min_h(self.line_height * rows as f32 + self.grid_slack + px(GRID_PAD_Y))
+                // part of a row the grid's height left over, the rows the
+                // grid gave up for the box, then the input's rows.
+                .min_h(
+                    self.line_height * (rows + reserved) as f32 + self.grid_slack + px(GRID_PAD_Y),
+                )
                 .flex()
                 .flex_col()
                 .justify_end()
@@ -3059,6 +3164,97 @@ mod tests {
         let mut scrolled = screen(&[RULE, "quoted", RULE]);
         scrolled.extend((0..12).map(|i| format!(" reply line {i}")));
         assert_eq!(input_area(CLIAgent::Pi, &scrolled, 40), None);
+    }
+
+    const OMP_BAR: &str =
+        " π > ◒ claude-sonnet-4-6 (relay) > 🗑 t7b5/proj > ⑂ main ?15 ▶─4%─────┃────200K─";
+
+    #[test]
+    fn omps_input_hangs_under_its_status_line() {
+        let rows = screen(&[
+            " DONE",
+            "",
+            OMP_BAR,
+            "╰─                                  ⇧⇥ to change thinking effort",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::OhMyPi, &rows, 40),
+            Some(InputArea { top: 2, mode: None })
+        );
+        // Several lines, and its command list open under them.
+        let rows = screen(&[
+            RULE,
+            "",
+            OMP_BAR,
+            "╰─ /model",
+            "   second line",
+            "❯ ⬢  model         Model: relay/claude-sonnet-4-6                █",
+            "  ⬢  modelpreset   Presets: none saved                           █",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::OhMyPi, &rows, 40),
+            Some(InputArea { top: 2, mode: None })
+        );
+        // The rounded box shape.
+        let rows = screen(&[
+            "╭── π > ⬢ Sonnet 4.5 · ◒ high > 🗺 Plan ▶────────┃──◀ ◫ 62.0%/200K ⟲ ──╮",
+            "╰─ Ask anything, edit files, run tools                               ─╯",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::OhMyPi, &rows, 40),
+            Some(InputArea { top: 0, mode: None })
+        );
+        // The Claude Code shape, ruled like Pi's.
+        let rows = screen(&[
+            "───────────────────────────── gallery · ◫ 62.0%/200K ⟲ ─",
+            "❯ Ask anything, edit files, run tools",
+            RULE,
+            " π · ⬢ Sonnet 4.5 · ◒ high · 🗺 Plan",
+        ]);
+        assert_eq!(
+            input_area(CLIAgent::OhMyPi, &rows, 40),
+            Some(InputArea { top: 0, mode: None })
+        );
+    }
+
+    /// A tool approval and the model picker take the input's place, framed;
+    /// a frame's bottom edge is not the input's first line.
+    #[test]
+    fn omps_dialogs_are_not_its_input() {
+        let approval = screen(&[
+            "╭──────────────────────────────────────╮",
+            "│ $ touch omp2.txt                     │",
+            "╰──────────────────────────────────────╯",
+            "  ⎋ Creating omp2.txt",
+            "╭─ Allow tool: bash ───────────────────╮",
+            "│ Command: touch omp2.txt              │",
+            "│  ❯ Approve                           │",
+            "│    Deny                              │",
+            "│ ↑/↓ navigate  ⏎ select  ⎋ cancel     │",
+            "╰──────────────────────────────────────╯",
+        ]);
+        assert_eq!(input_area(CLIAgent::OhMyPi, &approval, 40), None);
+        let picker = screen(&[
+            "│   ○ anthropic   │   local/qwen2.5-1.5b          free█ │",
+            "│   ○ gmi-cloud   │   ● default ◒ · ○ smol · ○ slow   │",
+            "├─────────────────┴──────────────────────────────────┤",
+            "│ ⏎/→ models · ↑/↓ providers · type to search · ⎋ close │",
+            "╰────────────────────────────────────────────────────╯",
+        ]);
+        assert_eq!(input_area(CLIAgent::OhMyPi, &picker, 40), None);
+    }
+
+    /// The grid gives up rows only for the part of the box an input does not
+    /// already hold, and whole rows of it.
+    #[test]
+    fn the_grid_makes_room_only_for_what_the_input_does_not_hold() {
+        let (line, below) = (px(21.), px(9.));
+        // Claude Code's five rows hold the box.
+        assert_eq!(rows_short(px(101.), line, 5, below), 0);
+        // Oh My Pi's two do not: 101 - 42 - 9 = 50, three rows' worth.
+        assert_eq!(rows_short(px(101.), line, 2, below), 3);
+        assert_eq!(rows_short(px(101.), line, 4, below), 1);
+        assert_eq!(rows_short(px(101.), px(0.), 2, below), 0);
     }
 
     #[test]

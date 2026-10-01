@@ -2247,9 +2247,14 @@ impl Element for TerminalElement {
         let cols = (bounds.size.width.as_f32() / cell_width.as_f32())
             .floor()
             .max(1.0) as usize;
-        let rows = (bounds.size.height.as_f32() / line_height.as_f32())
+        let fits = (bounds.size.height.as_f32() / line_height.as_f32())
             .floor()
             .max(1.0) as usize;
+        // The composer covering an input shorter than itself takes rows off
+        // the bottom (see `composer_reserved_rows`); they stay part of the
+        // pane's leftover space as far as the layer laid over it goes.
+        let reserved = self.view.read(cx).composer_reserved_rows();
+        let rows = fits.saturating_sub(reserved).max(1);
 
         self.view.update(cx, |view, cx| {
             view.set_grid_size(
@@ -2262,7 +2267,7 @@ impl Element for TerminalElement {
             );
             // Whatever lays itself over the bottom rows (the composer)
             // measures up from the bottom, past this.
-            let slack = bounds.size.height - line_height * rows as f32;
+            let slack = bounds.size.height - line_height * fits as f32;
             if view.grid_slack != slack {
                 view.grid_slack = slack;
                 cx.notify();
