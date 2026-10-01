@@ -28,6 +28,8 @@ struct FakeMachine {
     typed: Mutex<Option<std_mpsc::Sender<Vec<u8>>>>,
     /// Every lease request that reached the "daemon".
     leased: Arc<Mutex<Vec<LeaseRequest>>>,
+    /// Every pane closed, with the machine it was closed on.
+    closed: Mutex<Vec<(Option<String>, u64)>>,
 }
 
 impl FakeMachine {
@@ -48,6 +50,7 @@ impl FakeMachine {
             },
             typed: Mutex::new(None),
             leased: Arc::default(),
+            closed: Mutex::default(),
         }
     }
 }
@@ -151,6 +154,20 @@ impl Backend for FakeMachine {
             tab_id: format!("{machine:?} {cwd:?} {size:?}"),
             pane_id: 2,
         })
+    }
+
+    fn close_pane(&self, machine: Option<&str>, pane_id: u64) -> io::Result<()> {
+        if machine == Some("me@gone:22") {
+            return Err(io::Error::other("the desktop's link to me@gone:22 is down"));
+        }
+        if pane_id != 1 {
+            return Err(io::Error::other("that pane is not open any more"));
+        }
+        self.closed
+            .lock()
+            .unwrap()
+            .push((machine.map(str::to_string), pane_id));
+        Ok(())
     }
 
     fn close_tab(
@@ -507,6 +524,28 @@ async fn a_paired_phone_opens_a_tab() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("no workspace nope"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paired_phone_closes_a_pane() {
+    let rig = Rig::new().await;
+    let session = within(rig.paired()).await;
+
+    within(session.close_pane(None, 1)).await.unwrap();
+    within(session.close_pane(Some("me@build-box:22"), 1))
+        .await
+        .unwrap();
+    assert_eq!(
+        *rig.machine.closed.lock().unwrap(),
+        vec![(None, 1), (Some("me@build-box:22".to_string()), 1)]
+    );
+
+    let err = within(session.close_pane(None, 9)).await.unwrap_err();
+    assert!(err.to_string().contains("not open any more"), "{err}");
+    let err = within(session.close_pane(Some("me@gone:22"), 1))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("is down"), "{err}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

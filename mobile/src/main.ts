@@ -1986,11 +1986,29 @@ interface TabRef {
   id: string;
   name: string;
   busy: boolean;
+  /** Split into more than one pane: one of them can be closed alone. */
+  split?: boolean;
 }
 
 function tabRef(ws: WorkspaceView, tab: TabView, name: string): TabRef {
   const busy = tab.panes.some((p) => p.agent && (p.agent.status === "working" || p.agent.status === "waiting"));
-  return { workspace: ws.id, id: tab.id, name, busy };
+  return { workspace: ws.id, id: tab.id, name, busy, split: tab.panes.length > 1 };
+}
+
+/** Closes one pane of a split tab on the machine, asking first: whatever runs
+ * there is ended, and the desktop loses it too. False when it was not
+ * closed: declined, or refused, which `failed` is told. */
+async function closePane(host: Host, place: Place, pane: PaneView, title: string, failed: (message: string) => void) {
+  const what = pane.agent ? `${agentLook(pane.agent.kind).name} and anything else running in it` : "Whatever runs in it";
+  if (!(await confirmSheet(`Close this pane of ${title}?`, `${what} will be stopped, and it closes on ${place?.name ?? host.name} too.`, "Close pane")))
+    return false;
+  try {
+    await api.paneKill(host.id, place?.key ?? null, pane.id);
+    return true;
+  } catch (e) {
+    failed(sentence(errorText(e)));
+    return false;
+  }
 }
 
 /** Closes a tab, asking first when an agent in it is at work. False when it
@@ -2177,6 +2195,13 @@ function paneRow(host: Host, place: Place, ws: WorkspaceView, tab: TabView, pane
         },
       );
     }
+    if (tab.panes.length > 1)
+      actions.push({
+        label: "Close this pane",
+        icon: "close",
+        danger: true,
+        run: () => void closePane(host, place, pane, name, (message) => closeFailed(name, message)),
+      });
     actions.push({
       label: "Close tab",
       icon: "close",
@@ -2594,6 +2619,19 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
           icon: "phone" as const,
           run: toggleTake,
         },
+        ...(tab?.split
+          ? [
+              {
+                label: "Close this pane",
+                icon: "close" as const,
+                danger: true,
+                run: async () => {
+                  // Nothing is left here to watch; the list drops it on its own.
+                  if (await closePane(host, place, pane, tab.name, (message) => showBanner(message))) hostScreen(host);
+                },
+              },
+            ]
+          : []),
         ...(tab
           ? [
               {

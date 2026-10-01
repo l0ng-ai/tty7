@@ -15,6 +15,8 @@
 //!   keystrokes up, and a few [`PaneEvent`]s beside them;
 //! - a one-shot [`Open::NewTab`] stream that starts a shell in a new tab and
 //!   answers with a [`TabCreated`];
+//! - a one-shot [`Open::ClosePane`] stream that closes a pane and ends what
+//!   runs in it;
 //! - a one-shot [`Open::Upload`] stream that carries a file from the phone to
 //!   the machine and answers with where it landed, an [`Uploaded`];
 //! - a one-shot [`Open::Diff`] stream that answers with a git working tree's
@@ -116,6 +118,19 @@ pub enum Open {
     /// unanswered.
     Diff {
         cwd: String,
+        /// As on [`Open::Pane`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
+    /// Close a pane, as closing it on the desktop does: it leaves its tab (the
+    /// tab with it, when it was the last pane there) and whatever runs in it
+    /// is ended. One-shot: `Ok` once it is closed, or `Denied` with what went
+    /// wrong. The tree on the control stream shows it gone on its own.
+    ///
+    /// A gateway older than this variant cannot parse it and drops the stream
+    /// unanswered.
+    ClosePane {
+        pane_id: u64,
         /// As on [`Open::Pane`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine: Option<String>,
@@ -666,6 +681,31 @@ mod tests {
             .unwrap(),
             serde_json::json!({"type": "pane", "pane_id": 3})
         );
+    }
+
+    #[test]
+    fn a_close_names_only_the_pane_for_this_machine() {
+        let open = Open::ClosePane {
+            pane_id: 7,
+            machine: None,
+        };
+        let wire = serde_json::to_value(&open).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"type": "close_pane", "pane_id": 7})
+        );
+        assert_eq!(serde_json::from_value::<Open>(wire).unwrap(), open);
+
+        let remote = Open::ClosePane {
+            pane_id: 7,
+            machine: Some("me@box:22".into()),
+        };
+        let wire = serde_json::to_value(&remote).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"type": "close_pane", "pane_id": 7, "machine": "me@box:22"})
+        );
+        assert_eq!(serde_json::from_value::<Open>(wire).unwrap(), remote);
     }
 
     #[test]

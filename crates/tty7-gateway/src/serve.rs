@@ -69,6 +69,9 @@ pub trait Backend: Send + Sync + 'static {
     /// Closes a tab and ends its panes, keeping it to reopen where the
     /// machine can.
     fn close_tab(&self, machine: Option<&str>, workspace_id: &str, tab_id: &str) -> io::Result<()>;
+    /// Closes a pane as the desktop does: out of its tab (the tab too, if it
+    /// was the last pane there), and whatever runs in it ended.
+    fn close_pane(&self, machine: Option<&str>, pane_id: u64) -> io::Result<()>;
     /// The panes this machine's server has running, when it can say.
     fn running_panes(&self) -> Option<HashSet<u64>> {
         None
@@ -225,6 +228,20 @@ async fn serve_stream(
                 })
                 .await
                 .map_err(io::Error::other)?
+            };
+            match closed {
+                Ok(()) => write_msg(&mut send, &ok).await?,
+                Err(e) => write_msg(&mut send, &denied(&e.to_string())).await?,
+            }
+            finish(send).await;
+            Ok(())
+        }
+        Open::ClosePane { pane_id, machine } => {
+            let closed = {
+                let backend = backend.clone();
+                tokio::task::spawn_blocking(move || backend.close_pane(machine.as_deref(), pane_id))
+                    .await
+                    .map_err(io::Error::other)?
             };
             match closed {
                 Ok(()) => write_msg(&mut send, &ok).await?,

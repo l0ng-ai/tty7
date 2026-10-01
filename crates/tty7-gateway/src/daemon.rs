@@ -310,6 +310,39 @@ impl Backend for Daemon {
         }
     }
 
+    /// What `tty7 pane close` does: take the pane out of its workspace's tree
+    /// on the machine it lives on, then hang up every pane that removal left
+    /// with no tab — the pane itself, normally.
+    fn close_pane(&self, machine: Option<&str>, pane_id: u64) -> io::Result<()> {
+        let tree = match self.request_on(machine, ControlRequest::MachineGet)? {
+            ReplyOk::MachineTree(tree) => *tree,
+            other => return Err(unexpected("MachineGet", &other)),
+        };
+        let workspace = tree
+            .workspaces
+            .iter()
+            .find(|ws| ws.tabs.iter().any(|tab| tab.root.contains(pane_id)))
+            .map(|ws| ws.id)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "that pane is not open any more")
+            })?;
+        let removed = match self.request_on(
+            machine,
+            ControlRequest::PaneClose {
+                workspace,
+                pane: pane_id,
+            },
+        )? {
+            ReplyOk::Panes(panes) => panes,
+            other => return Err(unexpected("PaneClose", &other)),
+        };
+        let panes = self.panes_on(machine)?;
+        for pane in removed {
+            panes.kill(pane)?;
+        }
+        Ok(())
+    }
+
     fn running_panes(&self) -> Option<std::collections::HashSet<u64>> {
         let panes = PaneClient::local().list().ok()?;
         Some(

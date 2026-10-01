@@ -162,6 +162,11 @@ export const tabNew = (
 export const tabClose = (hostId: string, machine: string | null, workspaceId: string, tabId: string) =>
   invoke<void>("tab_close", { hostId, machine, workspaceId, tabId });
 
+/** Closes a pane on the machine, ending what runs in it. Not `paneClose`,
+ * which only stops this phone watching one. */
+export const paneKill = (hostId: string, machine: string | null, paneId: number) =>
+  invoke<void>("pane_kill", { hostId, machine, paneId });
+
 export const paneInput = (handle: number, data: string) =>
   invoke<void>("pane_input", { handle, data });
 

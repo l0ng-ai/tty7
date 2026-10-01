@@ -309,6 +309,23 @@ async fn tab_new(
         .map_err(err)
 }
 
+/// Closes a pane on the machine for good, ending whatever runs in it — not
+/// [`pane_close`], which only stops this phone watching one. The tree drops
+/// it on its own.
+#[tauri::command]
+async fn pane_kill(
+    state: State<'_, Arc<AppState>>,
+    host_id: String,
+    machine: Option<String>,
+    pane_id: u64,
+) -> CmdResult<()> {
+    let session = state.session(&host_id).await?;
+    session
+        .close_pane(machine.as_deref(), pane_id)
+        .await
+        .map_err(err)
+}
+
 /// Closes a tab and its panes; the machine keeps it to reopen where it can.
 #[tauri::command]
 async fn tab_close(
@@ -588,6 +605,7 @@ pub fn run() {
             refresh,
             tab_new,
             tab_close,
+            pane_kill,
             upload,
             diff,
             pane_open,

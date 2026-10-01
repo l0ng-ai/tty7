@@ -250,6 +250,29 @@ impl Session {
 }
 
 impl Session {
+    /// Closes a pane, ending whatever runs in it. `machine` is where it runs,
+    /// as on [`Session::pane`]. The tree on the control stream shows it gone.
+    pub async fn close_pane(&self, machine: Option<&str>, pane_id: u64) -> Result<()> {
+        let ask = Open::ClosePane {
+            pane_id,
+            machine: machine.map(str::to_string),
+        };
+        // `Ok` is the whole answer: the pane is closed by the time it comes.
+        let (mut send, _recv) = open(&self.conn, &ask).await.map_err(|e| {
+            if e.to_string().contains("without answering") {
+                anyhow!(
+                    "tty7 on this computer is too old to close panes from the phone — update it"
+                )
+            } else {
+                e
+            }
+        })?;
+        let _ = send.finish();
+        Ok(())
+    }
+}
+
+impl Session {
     /// Sends a file to the machine for a pane to be handed, returning where
     /// it landed. `machine` is where that pane runs, as on [`Session::pane`].
     pub async fn upload(&self, machine: Option<&str>, name: &str, bytes: &[u8]) -> Result<String> {

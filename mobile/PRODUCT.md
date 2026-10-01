@@ -50,6 +50,8 @@ connects peer-to-peer over iroh by public key, end-to-end encrypted.
   | / ~ -) and a compose box that sends a whole message, then Enter. A copy view shows the pane's text
   for native selection.
 - Forget a machine (requires re-pairing).
+- Close a pane on the machine — hold its row, or Close pane in its ⋯ menu — after a
+  confirmation, since it ends whatever runs there; the desktop loses it too.
 - No framework: vanilla TypeScript with a tiny DOM helper; xterm.js for the terminal.
 - Not yet: QR scanning, push notifications, keychain storage.
 
