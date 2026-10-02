@@ -527,6 +527,8 @@ pub fn run() {
     // unless a process-wide provider is installed first. `ring` is the one
     // already in the tree. An `Err` means one is installed, which is fine.
     let _ = rustls::crypto::ring::default_provider().install_default();
+    #[cfg(target_os = "ios")]
+    launch_link::catch();
 
     // Links tapped in a pane open in the phone's browser.
     let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
@@ -536,8 +538,7 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_barcode_scanner::init())
         .plugin(tauri_plugin_biometric::init())
-        .plugin(tauri_plugin_haptics::init())
-        .plugin(tauri_plugin_deep_link::init());
+        .plugin(tauri_plugin_haptics::init());
 
     builder
         .setup(|app| {
@@ -575,10 +576,161 @@ pub fn run() {
             pane_close,
             appearance,
             insets,
-            to_background
+            to_background,
+            opened_link
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tty7");
+        .build(tauri::generate_context!())
+        .expect("error while building tty7")
+        .run(|_app, _event| {
+            #[cfg(any(target_os = "ios", target_os = "android"))]
+            if let tauri::RunEvent::Opened { urls } = _event {
+                opened(_app, urls);
+            }
+        });
+}
+
+/// A link the app was opened with that the page has not taken yet: one that
+/// launched the app arrives before the page is there to hear it.
+static OPENED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The desktop's pairing code is a `tty7pair:` link, so a phone's camera
+/// pointed at its QR code opens the app with it (`Info.ios.plist`, the
+/// Android manifest). Kept for the page to ask for, and told to it if it is
+/// already listening.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+fn opened(app: &tauri::AppHandle, urls: Vec<tauri::Url>) {
+    use tauri::Emitter as _;
+    let Some(link) = urls
+        .into_iter()
+        .map(String::from)
+        .find(|u| u.starts_with("tty7pair:"))
+    else {
+        return;
+    };
+    *OPENED.lock().unwrap_or_else(|e| e.into_inner()) = Some(link.clone());
+    let _ = app.emit("opened-link", link);
+}
+
+/// A link that launches the app on iOS. UIKit hands it to the app's first
+/// scene as that connects, in the connection options, and the event loop
+/// (tao) passes on only the links that come once the scene is up. So its
+/// scene delegate's connect is wrapped to keep the link on the way. The
+/// delegate class exists once the app delegate does, which is installed as
+/// UIKit starts: the wrap goes on then.
+#[cfg(target_os = "ios")]
+mod launch_link {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+    use objc2::sel;
+    use std::ffi::{CStr, c_char};
+    use std::sync::OnceLock;
+
+    static SET_DELEGATE: OnceLock<usize> = OnceLock::new();
+    static CONNECT: OnceLock<usize> = OnceLock::new();
+
+    type SetDelegate = unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject);
+    type Connect = unsafe extern "C-unwind" fn(
+        *mut AnyObject,
+        Sel,
+        *mut AnyObject,
+        *mut AnyObject,
+        *mut AnyObject,
+    );
+
+    /// Swaps `selector`'s implementation on `class` for `imp`, keeping the
+    /// one it had in `previous`.
+    unsafe fn wrap(class: *const AnyClass, selector: Sel, imp: Imp, previous: &OnceLock<usize>) {
+        unsafe {
+            let method = objc2::ffi::class_getInstanceMethod(class, selector);
+            if method.is_null() || previous.get().is_some() {
+                return;
+            }
+            if let Some(original) = objc2::ffi::method_setImplementation(method as *mut _, imp) {
+                let _ = previous.set(original as usize);
+            }
+        }
+    }
+
+    pub fn catch() {
+        if let Some(app) = AnyClass::get(c"UIApplication") {
+            unsafe {
+                let imp: Imp = std::mem::transmute(set_delegate as SetDelegate);
+                wrap(app, sel!(setDelegate:), imp, &SET_DELEGATE);
+            }
+        }
+    }
+
+    unsafe extern "C-unwind" fn set_delegate(
+        this: *mut AnyObject,
+        cmd: Sel,
+        delegate: *mut AnyObject,
+    ) {
+        unsafe {
+            if let Some(&previous) = SET_DELEGATE.get() {
+                let previous: SetDelegate = std::mem::transmute(previous);
+                previous(this, cmd, delegate);
+            }
+            if let Some(scene) = AnyClass::get(c"TaoSceneDelegate") {
+                let imp: Imp = std::mem::transmute(connect as Connect);
+                wrap(
+                    scene,
+                    sel!(scene:willConnectToSession:options:),
+                    imp,
+                    &CONNECT,
+                );
+            }
+        }
+    }
+
+    unsafe extern "C-unwind" fn connect(
+        this: *mut AnyObject,
+        cmd: Sel,
+        scene: *mut AnyObject,
+        session: *mut AnyObject,
+        options: *mut AnyObject,
+    ) {
+        unsafe {
+            if !options.is_null() {
+                let contexts: *mut AnyObject = msg_send![options, URLContexts];
+                let context: *mut AnyObject = if contexts.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    msg_send![contexts, anyObject]
+                };
+                let url: *mut AnyObject = if context.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    msg_send![context, URL]
+                };
+                let text: *mut AnyObject = if url.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    msg_send![url, absoluteString]
+                };
+                let utf8: *const c_char = if text.is_null() {
+                    std::ptr::null()
+                } else {
+                    msg_send![text, UTF8String]
+                };
+                if !utf8.is_null() {
+                    let link = CStr::from_ptr(utf8).to_string_lossy().into_owned();
+                    if link.starts_with("tty7pair:") {
+                        *super::OPENED.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
+                    }
+                }
+            }
+            if let Some(&previous) = CONNECT.get() {
+                let previous: Connect = std::mem::transmute(previous);
+                previous(this, cmd, scene, session, options);
+            }
+        }
+    }
+}
+
+/// The link the app was opened with, once.
+#[tauri::command]
+fn opened_link() -> Option<String> {
+    OPENED.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
 /// Light, dark or the system's, for what the page does not draw itself: the

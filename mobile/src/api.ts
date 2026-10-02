@@ -109,6 +109,9 @@ export interface Insets {
 /** What the system bars cover, in CSS pixels. Android only: zero elsewhere. */
 export const insets = () => invoke<Insets>("insets");
 
+/** The `tty7pair:` link the app was opened with and has not handled, once. */
+export const openedLink = () => invoke<string | null>("opened_link");
+
 /** Sends the app to the background, as Back from the first screen does. */
 export const toBackground = () => invoke<void>("to_background");
 

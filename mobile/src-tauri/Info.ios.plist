@@ -24,5 +24,18 @@
 	     compliance question on every TestFlight upload. -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<!-- The desktop's pairing code is a tty7pair: link, so the phone's Camera
+	     opens it in tty7 (lib.rs `opened`, `launch_link`). -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>dev.tty7.mobile.pair</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>tty7pair</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

@@ -10,8 +10,8 @@ import type { ITheme } from "@xterm/xterm";
 import * as scanner from "@tauri-apps/plugin-barcode-scanner";
 
 import { getVersion, onBackButtonPress } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
 import { impactFeedback, selectionFeedback } from "@tauri-apps/plugin-haptics";
-import { getCurrent as linkedWith, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 
 import * as api from "./api";
 import { MAX_UPLOAD } from "./api";
@@ -1112,7 +1112,13 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
       draw();
     };
     const draw = () => {
-      if (lastTree) body.replaceChildren(...renderTree(host, lastTree, query, picked, pick));
+      if (lastTree)
+        body.replaceChildren(
+          ...renderTree(host, lastTree, query, picked, pick, (key) => {
+            picked = key;
+            remember(`workspace.${host.id}`, key);
+          }),
+        );
     };
     const dock = floatingBar("Search tabs", (q) => {
       query = q;
@@ -1344,6 +1350,7 @@ function renderTree(
   query: string,
   picked: string | null,
   pick: (key: string) => void,
+  keep: (key: string) => void,
 ): Node[] {
   if (query) {
     const groups = [
@@ -1393,6 +1400,9 @@ function renderTree(
     }),
   ];
   const on = spaces.find((sp) => sp.key === picked) ?? spaces[0];
+  // What is on screen stays on screen: a workspace the desktop opens or
+  // turns to later does not take its place under the reader's thumb.
+  if (on.key !== picked) keep(on.key);
 
   const out: Node[] = [];
   if (spaces.length > 1) {
@@ -3585,24 +3595,35 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
 if (prefs.lock) lock();
 
 // A pairing code opened as a link — the desktop's QR code, read by the
-// phone's camera — goes straight to pairing.
-const pairingLink = (urls: string[] | null) => urls?.find((url) => url.startsWith("tty7pair:"));
-void onOpenUrl((urls) => {
-  const code = pairingLink(urls);
-  if (code) pairScreen(code);
-}).catch(() => {});
+// phone's camera — goes straight to pairing. The link is taken once, from
+// the native side, which holds it until asked: one that launched the app
+// can arrive before the page, or between the page's first look and its
+// first screen.
+let started = false;
+const takeLink = () =>
+  api.openedLink().then(
+    (code) => code && pairScreen(code),
+    () => {},
+  );
+const listening = listen("opened-link", () => started && void takeLink()).catch(() => {});
 
 // Back where it was left: the machine last open, unless it was left for the
 // list of machines; or pairing, when that is what opened the app.
-Promise.all([api.hosts(), linkedWith().catch(() => null)]).then(
-  ([hosts, urls]) => {
-    const code = pairingLink(urls);
-    const last = hosts.find((host) => host.id === remembered("last.host"));
-    if (code) {
+void listening.then(() =>
+  Promise.all([api.hosts(), api.openedLink().catch(() => null)]).then(
+    ([hosts, code]) => {
+      const last = hosts.find((host) => host.id === remembered("last.host"));
+      if (code) {
+        hostsScreen("push");
+        pairScreen(code);
+      } else if (last) hostScreen(last, "push");
+      else hostsScreen("push");
+      started = true;
+      void takeLink();
+    },
+    () => {
       hostsScreen("push");
-      pairScreen(code);
-    } else if (last) hostScreen(last, "push");
-    else hostsScreen("push");
-  },
-  () => hostsScreen("push"),
+      started = true;
+    },
+  ),
 );
