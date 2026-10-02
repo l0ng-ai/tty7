@@ -54,6 +54,17 @@ enum Up {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn an_error_says_each_thing_once() {
+        let e = anyhow::anyhow!("aborted by peer: refused")
+            .context("aborted by peer: refused")
+            .context("could not reach studio");
+        assert_eq!(
+            super::err(e),
+            "could not reach studio: aborted by peer: refused"
+        );
+    }
+
+    #[test]
     fn names_come_back_from_their_header_encoding() {
         assert_eq!(
             super::percent_decode("%E6%88%AA%E5%9B%BE%201.png"),
@@ -65,8 +76,17 @@ mod tests {
 
 fn err(e: impl std::fmt::Display) -> String {
     // `{:#}` walks anyhow's chain, so "could not reach studio: no route"
-    // reaches the user rather than just the outermost context.
-    format!("{e:#}")
+    // reaches the user rather than just the outermost context. A chain can
+    // say the same thing at several layers — QUIC's close reason is repeated
+    // by each wrapper around it — and once is enough.
+    let full = format!("{e:#}");
+    let mut said: Vec<&str> = Vec::new();
+    for part in full.split(": ") {
+        if !said.contains(&part) {
+            said.push(part);
+        }
+    }
+    said.join(": ")
 }
 
 impl AppState {

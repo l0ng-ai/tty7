@@ -257,21 +257,37 @@ impl Backend for Daemon {
                 format!("no workspace {workspace_id}"),
             )
         })?;
+        let for_phone = size.is_some();
         let size = size.map_or(NEW_TAB_SIZE, |s| WinSize {
             cols: s.cols.clamp(20, 500),
             rows: s.rows.clamp(5, 300),
             ..NEW_TAB_SIZE
         });
         let owner = workspace.to_string();
-        let session = self.panes_on(machine)?.spawn(
-            cwd.as_deref().map(PathBuf::from),
-            size,
-            None,
-            Some(owner.clone()),
-            Some(owner),
-        )?;
+        // A tab asked for with nowhere in mind starts at home, as a new
+        // window's does — not in whatever directory the server started in.
+        // A remote's own server knows its home; this one only knows this.
+        let start = match (cwd.as_deref(), machine) {
+            (Some(dir), _) => Some(PathBuf::from(dir)),
+            (None, None) => std::env::home_dir(),
+            (None, Some(_)) => None,
+        };
+        let session =
+            self.panes_on(machine)?
+                .spawn(start, size, None, Some(owner.clone()), Some(owner))?;
         let pane = session.pane_id();
         session.detach()?;
+        // The tab is about to reach the desktop, which lays every tab out at
+        // its window's size; the shell's first screen — a banner, a prompt —
+        // would be drawn that wide and then squeezed onto the phone. Held
+        // at the phone's size from before the desktop hears of it, until
+        // the phone's own view of it takes over.
+        if for_phone {
+            match self.observe(machine, pane) {
+                Ok(feed) => hold_for_phone(feed, size),
+                Err(e) => log::debug!("mobile gateway: holding new pane {pane}: {e}"),
+            }
+        }
         let seed = PaneSeed {
             pane,
             cwd,
@@ -366,6 +382,38 @@ impl PaneFeed for Observed {
             Err(e) => Err(e),
         }
     }
+}
+
+/// How long a new tab is held at the phone's size for the phone to open it.
+const PHONE_HOLD: Duration = Duration::from_secs(10);
+
+/// Takes the pane at `size` over `feed` and keeps it so on a thread of its
+/// own, until the phone's stream takes the lease from it (the daemon tells
+/// the one displaced), the pane ends, or [`PHONE_HOLD`] passes.
+fn hold_for_phone(mut feed: Box<dyn PaneFeed>, size: WinSize) {
+    let Some(mut leases) = feed.leases() else {
+        return;
+    };
+    let take = LeaseRequest::Take {
+        size,
+        by: "a phone".to_string(),
+    };
+    if leases.send(take).is_err() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let until = std::time::Instant::now() + PHONE_HOLD;
+        let mut held = false;
+        while std::time::Instant::now() < until {
+            match feed.recv(Duration::from_millis(250)) {
+                Ok(Some(DaemonMsg::Lease(Some(_)))) => held = true,
+                Ok(Some(DaemonMsg::Lease(None))) if held => return,
+                Ok(Some(DaemonMsg::Exited { .. })) | Err(_) => return,
+                _ => {}
+            }
+        }
+        drop(leases);
+    });
 }
 
 /// The observer connection's writing half, for leases.

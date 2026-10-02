@@ -66,6 +66,8 @@
   --accent-ink: #fcfcfb;
   --tint: var(--fill);
   --danger: #c43c43;
+  /* A filled control's red: the system's own. */
+  --danger-fill: #ff3b30;
   --warn-ink: #b7791f;
   --ok-ink: #248a3d;
   --term: var(--cell);
@@ -82,7 +84,7 @@
   --done: #22c55e;
 
   --ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", Roboto, "Segoe UI", system-ui, sans-serif;
-  --mono: Hack, "Symbols Nerd Font Mono", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Emoji", "SF Mono", Menlo, ui-monospace, monospace;
+  --mono: Hack, "Symbols Nerd Font Mono", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Emoji", "SF Mono", "PingFang SC", "Hiragino Sans", "Apple SD Gothic Neo", Menlo, ui-monospace, monospace;
   --ease: cubic-bezier(0.32, 0.72, 0, 1);
 
   /* The home indicator's gap; none while the keyboard is up, which covers
@@ -122,6 +124,7 @@
   --line: rgb(255 255 255 / 0.16);
   --accent-ink: #18181a;
   --danger: #f07878;
+  --danger-fill: #ff453a;
   --warn-ink: #e0a345;
   --ok-ink: #5fd07a;
   --bar: rgb(30 30 32 / 0.82);
@@ -314,6 +317,18 @@ code {
 .nav-back .icon {
   width: 20px;
   height: 20px;
+}
+
+/* Once the title shows, the pill would be cut to "Machin…" beside it: it
+   gives way to the round chevron alone, as the system's own bar does. */
+.nav.folded .nav-back {
+  width: 38px;
+  padding: 0;
+  justify-content: center;
+}
+
+.nav.folded .nav-back span:last-child {
+  display: none;
 }
 
 .nav-back:active,
@@ -988,7 +1003,7 @@ code {
 }
 
 .button.danger {
-  background: var(--danger);
+  background: var(--danger-fill);
   color: #fff;
 }
 
@@ -1463,6 +1478,11 @@ html.scanning #app {
   color: var(--ink-2);
 }
 
+.term-copy-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .term-copy-text {
   flex: 1;
   min-height: 0;
@@ -1472,10 +1492,9 @@ html.scanning #app {
   overscroll-behavior: contain;
   font: 12.5px/1.45 var(--mono);
   color: var(--ink);
-  /* Wrapped to the phone, not the desktop's width, so nothing needs panning
-     to select. */
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  /* Laid out as the pane has it: rewrapping to the phone breaks every
+     table, column and indented block into a jumble. A wide line pans. */
+  white-space: pre;
   -webkit-user-select: text;
   user-select: text;
   -webkit-touch-callout: default;
@@ -1512,6 +1531,16 @@ html.scanning #app {
 
 /* The dock under the terminal: a row of keys a page at a time, then the
    message box and the keyboard. */
+.term-screen.finding .term-dock {
+  display: none;
+}
+
+/* Room above the first row for the find bar, so a match there can be
+   scrolled out from under it. */
+.term-screen.finding .term .xterm {
+  margin-top: 60px;
+}
+
 .term-dock {
   flex: none;
   display: flex;
@@ -2444,7 +2473,7 @@ html[data-nav="pop"]::view-transition-new(root) {
   bottom: 0;
   width: 88px;
   border: 0;
-  background: var(--danger);
+  background: var(--danger-fill);
   color: #fff;
   font: inherit;
   font-size: 15px;
@@ -2565,4 +2594,34 @@ html[data-nav="pop"]::view-transition-new(root) {
     opacity: 0;
     transform: translateY(-16px);
   }
+}
+
+/* The way back down from the history (main.ts `latest`). */
+.to-latest {
+  position: absolute;
+  right: max(14px, var(--inset-right));
+  bottom: 12px;
+  z-index: 2;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 22px;
+  display: grid;
+  place-items: center;
+  background: var(--raised);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+
+.to-latest[hidden] {
+  display: none;
+}
+
+.to-latest .icon {
+  width: 20px;
+  height: 20px;
+}
+
+.to-latest:active {
+  background: var(--cell-press);
 }

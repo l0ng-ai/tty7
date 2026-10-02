@@ -126,6 +126,17 @@ function feel(kind: "key" | "tick") {
   (kind === "key" ? impactFeedback("light") : selectionFeedback()).catch(() => {});
 }
 
+/** Why a machine could not be reached, in words, for under a title that
+ * already names it: the transport's own phrasing is for logs. */
+function why(message: string, name: string) {
+  const cause = message.replace(new RegExp(`^could not reach ${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: `, "i"), "");
+  if (/refused to accept|connection refused|aborted by peer/i.test(cause))
+    return "It turned the connection away — tty7 there may be restarting.";
+  if (/timed? ?out|no route|unreachable|network is down/i.test(cause)) return "It didn't answer.";
+  if (/connection (was )?(lost|closed)/i.test(cause)) return "The connection dropped.";
+  return sentence(cause);
+}
+
 function errorText(e: unknown) {
   return typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
 }
@@ -510,11 +521,16 @@ function section(title: Child, ...rows: Child[]) {
 /** What the last visit to each machine saw: its link and how many tabs it
  * had. The list shows it rather than holding a stream open per machine. */
 const seen = new Map<string, { link: LinkInfo | null; tabs: number | null }>();
+/** Each machine's tree as last reported, drawn while a new watch comes up. */
+const trees = new Map<string, Tree>();
 
 function hostMeta(hostId: string): { tone: string; text: string } | null {
   const last = seen.get(hostId);
   if (!last) return null;
-  const tabs = last.tabs === null ? "" : ` · ${last.tabs} ${last.tabs === 1 ? "tab" : "tabs"}`;
+  const waiting = trees.has(hostId) ? waitingCount(trees.get(hostId)!) : 0;
+  const tabs =
+    (last.tabs === null ? "" : ` · ${last.tabs} ${last.tabs === 1 ? "tab" : "tabs"}`) +
+    (waiting ? ` · ${waiting} waiting` : "");
   if (last.link === null) return { tone: "offline", text: "Offline" };
   if (last.link.path === "connecting") return { tone: "connecting", text: `Connecting…${tabs}` };
   const path = last.link.path === "direct" ? "Direct" : "Relay";
@@ -1110,10 +1126,12 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
     const lastLink = () => seen.get(host.id)?.link ?? { path: "connecting" as const, rtt_ms: 0 };
     showLink(lastLink());
     const notice = h("div", { class: "notice-slot" });
-    const body = h("div", { class: "stack" }, skeleton());
+    const body = h("div", { class: "stack" });
 
     let alive = true;
-    let lastTree: Tree | null = null;
+    // Coming back, the tree last seen is drawn at once and brought up to
+    // date when the new watch reports, rather than a skeleton every time.
+    let lastTree: Tree | null = trees.get(host.id) ?? null;
     let slow: number | undefined;
     let query = "";
     // The one workspace on screen, kept per machine across visits.
@@ -1156,6 +1174,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
             )
           ) {
             await api.forget(host.id);
+            trees.delete(host.id);
             hostsScreen();
           }
         },
@@ -1210,10 +1229,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
       notice.replaceChildren(
         noticeCard({
           title: `Can't reach ${host.name}`,
-          body: [
-            sentence(message),
-            ` Check that tty7 is running on ${host.name} with phone access on.`,
-          ],
+          body: [why(message, host.name), ` Check that tty7 is running on ${host.name} with phone access on.`],
           actions: [
             { label: "Try now", run: start },
             { label: "Pair again", run: () => pairScreen() },
@@ -1261,6 +1277,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
               if (!lastTree || dropped) notice.replaceChildren();
               dropped = false;
               lastTree = msg.tree;
+              trees.set(host.id, msg.tree);
               seen.set(host.id, { link: seen.get(host.id)?.link ?? null, tabs: tabCount(msg.tree) });
               draw();
               break;
@@ -1292,6 +1309,7 @@ function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
     // behind: watching again covers both, since the gateway sends the whole
     // tree on every new watch.
     onResume = start;
+    if (lastTree) draw();
     start();
     return view;
   });
@@ -1329,6 +1347,15 @@ const STATUS_WORD: Record<AgentStatus, string> = {
 /** Which machine a pane or workspace is on: a remote the desktop is linked
  * to, or null for the paired machine itself. */
 type Place = { key: string; name: string } | null;
+
+/** Agents on a machine that are waiting for a reply. */
+function waitingCount(tree: Tree) {
+  const spaces = [...tree.workspaces, ...(tree.remotes ?? []).flatMap((r) => r.workspaces)];
+  return spaces.reduce(
+    (n, ws) => n + ws.tabs.reduce((m, tab) => m + tab.panes.filter((p) => p.agent?.status === "waiting").length, 0),
+    0,
+  );
+}
 
 function tabCount(tree: Tree) {
   const count = (list: WorkspaceView[]) => list.reduce((n, ws) => n + ws.tabs.length, 0);
@@ -1622,7 +1649,9 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, 
   // tab in front on the desktop first.
   const foldersOf = (ws: WorkspaceView) => {
     const tabs = [...ws.tabs].sort((a, b) => Number(b.id === ws.active_tab) - Number(a.id === ws.active_tab));
-    return [...new Set(tabs.flatMap((tab) => tab.panes.map((pane) => pane.cwd ?? "")).filter(Boolean))];
+    const used = [...new Set(tabs.flatMap((tab) => tab.panes.map((pane) => pane.cwd ?? "")).filter(Boolean))];
+    // Then home, where a shell starts when given nowhere: "" here, none sent.
+    return [...used, ""];
   };
   let folder = 0;
 
@@ -1667,8 +1696,8 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, 
         h(
           "button",
           { class: "row choice", onclick: () => ((folder = i), draw()) },
-          h("span", { class: "row-title" }, baseName(dir)),
-          h("span", { class: "row-meta" }, parentPath(dir)),
+          h("span", { class: "row-title" }, dir ? baseName(dir) : "Home"),
+          h("span", { class: "row-meta" }, dir ? parentPath(dir) : "~"),
           i === folder ? ico("check", "icon choice-check") : h("span", { class: "choice-check" }),
         ),
       ),
@@ -1696,14 +1725,14 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, 
     remember("newtab.agent", s.kind ?? "shell");
     open.disabled = true;
     error.textContent = "";
-    const cwd = foldersOf(ws)[folder] ?? null;
+    const cwd = foldersOf(ws)[folder] || null;
     try {
       const created = await api.tabNew(host.id, place?.key ?? null, ws.id, cwd, phoneGrid());
       remove();
       // Named as the list will name it: by its agent, or by its folder.
       const title = s.kind ? agentLook(s.kind).name : cwd ? baseName(cwd) : "Shell";
       const tab = { workspace: ws.id, id: created.tab_id, name: title, busy: false };
-      terminalScreen(host, place, { id: created.pane_id, title, cwd }, title, tab, s.command ?? undefined);
+      terminalScreen(host, place, { id: created.pane_id, title, cwd }, title, tab, s.command ?? undefined, true);
     } catch (e) {
       error.textContent = sentence(errorText(e));
       failed(errorText(e));
@@ -1784,7 +1813,14 @@ function changesSheet(host: Host, place: Place, cwd: string) {
   openSheet("Changes", body);
   api.diff(host.id, place?.key ?? null, cwd).then(
     (d) => body.replaceChildren(...renderDiff(d)),
-    (e) => body.replaceChildren(h("p", { class: "group-empty" }, sentence(errorText(e)))),
+    (e) => {
+      const text = errorText(e);
+      // The usual case is no failure at all: a folder outside any repository.
+      const said = /not in a git repository/.test(text)
+        ? `${baseName(cwd)} is not in a Git repository, so there are no changes to show.`
+        : sentence(text);
+      body.replaceChildren(h("p", { class: "group-empty" }, said));
+    },
   );
 }
 
@@ -2360,7 +2396,9 @@ const drafts = new Map<string, string>();
 
 /** `run` is typed into the pane, then Enter, once it is first live: the
  * agent a new tab was opened for. */
-function terminalScreen(host: Host, place: Place, pane: PaneView, title: string, tab?: TabRef, run?: string) {
+/** `made` is a tab this phone just opened: it runs at the phone's size from
+ * the start, since nobody is reading it anywhere else yet. */
+function terminalScreen(host: Host, place: Place, pane: PaneView, title: string, tab?: TabRef, run?: string, made = false) {
   go("push", () => {
     // What the pane is doing and whether keystrokes will land, in words: the
     // one line under the title.
@@ -2433,10 +2471,27 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // way — handles, magnifier, Copy.
     const copyText = h("pre", { class: "term-copy-text" });
     const copyDone = h("button", { class: "button tinted small" }, "Done");
+    // The whole pane in one tap, for pasting into a note or a message.
+    const copyAll = h("button", { class: "button tinted small" }, "Copy all");
+    copyAll.onclick = () => {
+      navigator.clipboard?.writeText(copyText.textContent ?? "").then(
+        () => {
+          feel("tick");
+          copyAll.textContent = "Copied";
+          setTimeout(() => (copyAll.textContent = "Copy all"), 1500);
+        },
+        () => {},
+      );
+    };
     const copyView = h(
       "div",
       { class: "term-copy", hidden: true },
-      h("div", { class: "term-copy-bar" }, h("span", {}, "Select text to copy"), copyDone),
+      h(
+        "div",
+        { class: "term-copy-bar" },
+        h("span", {}, "Select text to copy"),
+        h("div", { class: "term-copy-actions" }, copyAll, copyDone),
+      ),
       copyText,
     );
     // Find in the pane's scrollback: the match is selected and scrolled to.
@@ -2519,11 +2574,13 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     typing.setAttribute("autocorrect", "off");
     typing.setAttribute("autocomplete", "off");
 
+    // Back in the history, the way down to what is happening now is one tap.
+    const latest = h("button", { class: "to-latest", ariaLabel: "Jump to the latest output", hidden: true }, ico("down"));
     const view = h(
       "div",
       { class: "screen term-screen" },
       bar,
-      h("div", { class: "term-wrap" }, screenEl, typing, copyView, findBar, banner),
+      h("div", { class: "term-wrap" }, screenEl, typing, copyView, findBar, latest, banner),
       h("div", { class: "term-dock" }, h("div", { class: "key-slot" }, pages, answers, suggest), dots, compose),
     );
 
@@ -2531,7 +2588,11 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       cols: 80,
       rows: 24,
       fontSize: readablePx(),
-      fontFamily: 'Hack, "Symbols Nerd Font Mono", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Emoji", Menlo, ui-monospace, monospace',
+      // CJK named outright: drawing into the glyph atlas, WebKit does not
+      // fall back past the web fonts to the system's, and Chinese, Japanese
+      // and Korean come out as boxes.
+      fontFamily:
+        'Hack, "Symbols Nerd Font Mono", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Emoji", "PingFang SC", "Hiragino Sans", "Apple SD Gothic Neo", Menlo, ui-monospace, monospace',
       scrollback: 5000,
       cursorBlink: false,
       theme: terminalTheme(),
@@ -2563,6 +2624,9 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     });
     const finding = (on: boolean) => {
       findBar.hidden = !on;
+      // Searching, the keys and the message box are of no use: the matches
+      // get their room, up to the keyboard.
+      view.classList.toggle("finding", on);
       if (on) findInput.focus();
       else {
         search.clearDecorations();
@@ -2571,15 +2635,40 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         findCount.textContent = "";
       }
     };
+    // The find bar floats over the pane's top rows; a match scrolled to the
+    // top of the view would sit under it, so the view comes down a little.
+    const clearOfBar = () =>
+      requestAnimationFrame(() => {
+        const at = term.getSelectionPosition();
+        const buf = term.buffer.active;
+        if (!at) return;
+        const h = rowHeight();
+        const barBottom = findBar.offsetTop + findBar.offsetHeight + 4;
+        const box = screenEl.querySelector<HTMLElement>(".xterm");
+        const pad =
+          (parseFloat(getComputedStyle(screenEl).paddingTop) || 0) + (box ? parseFloat(getComputedStyle(box).marginTop) || 0 : 0);
+        // Where the match's row is in the pane's box, which itself scrolls
+        // when the keyboard leaves it short.
+        let top = pad + (at.start.y - buf.viewportY) * h;
+        if (top - screenEl.scrollTop < barBottom && buf.viewportY > 0) {
+          const back = Math.min(buf.viewportY, Math.ceil((barBottom - (top - screenEl.scrollTop)) / h) + 1);
+          term.scrollLines(-back);
+          top += back * h;
+        }
+        if (top - screenEl.scrollTop < barBottom) screenEl.scrollTop = Math.max(0, top - barBottom);
+        else if (top + h > screenEl.scrollTop + screenEl.clientHeight) screenEl.scrollTop = top + h - screenEl.clientHeight;
+      });
     // Up is back through the scrollback, as the pane reads.
     const find = (back: boolean) => {
       if (!findInput.value) return;
       if (back) search.findPrevious(findInput.value, findOptions);
       else search.findNext(findInput.value, findOptions);
+      clearOfBar();
     };
     findInput.oninput = () => {
       if (findInput.value) {
         search.findPrevious(findInput.value, { ...findOptions, incremental: true });
+        clearOfBar();
       } else {
         search.clearDecorations();
         term.clearSelection();
@@ -2628,7 +2717,9 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     let ended = false;
     // The phone's size: `wanted` is what the user asked for, `leased` what
     // the daemon confirmed, `sent` the grid last asked for.
-    let wanted = false;
+    // Kept per pane: one taken over last time is taken over again on return.
+    const takeKey = `take.${host.id}.${place?.key ?? ""}.${pane.id}`;
+    let wanted = made || remembered(takeKey) === "1";
     let leased = false;
     let releasing = false;
     let sent = "";
@@ -2657,7 +2748,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
               id: made.tab_id,
               name,
               busy: false,
-            });
+            }, undefined, true);
           } catch (e) {
             showBanner(sentence(errorText(e)));
           }
@@ -2669,7 +2760,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       if (/no such pane/i.test(message)) return gone();
       live = false;
       setState("connecting", "Reconnecting");
-      showBanner(`${sentence(message)} Reconnecting…`, { label: "Try now", run: reopen });
+      showBanner(`${why(message, host.name)} Reconnecting…`, { label: "Try now", run: reopen });
       retry.schedule();
     };
     // Only the first refusal speaks: a key typed just before it fails on its
@@ -2783,6 +2874,8 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       dots.classList.toggle("covered", found.length > 0 || !answers.hidden);
     };
     field.addEventListener("focus", offer);
+    // Typing goes where the cursor is: a view panned away comes back to it.
+    field.addEventListener("focus", () => follow());
     field.addEventListener("blur", offer);
 
     historyKey.onpointerdown = (e) => e.preventDefault();
@@ -2996,6 +3089,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       }
       const fitted = fittedSize();
       cramped = fitted < readablePx();
+      if (cramped) hintPhoneSize();
       term.options.fontSize = cramped && readable ? readablePx() : Math.max(4, fitted);
       screenEl.classList.toggle("panning", cramped && readable);
       follow();
@@ -3140,7 +3234,16 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     let ownScroll = false;
     term.onScroll(() => {
       if (!ownScroll && frac) setFrac(0);
+      const buf = term.buffer.active;
+      latest.hidden = buf.baseY - buf.viewportY < 3;
     });
+    latest.onclick = () => {
+      feel("tick");
+      setFrac(0);
+      term.scrollToBottom();
+      latest.hidden = true;
+      requestAnimationFrame(showCursor);
+    };
     // Moves the view by a distance in pixels. Dragging down goes back in the
     // scrollback.
     const scrollBy = (dy: number) => {
@@ -3303,6 +3406,27 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       if (x < screenEl.scrollLeft + cell * 4 || x > screenEl.scrollLeft + view - cell * 4)
         screenEl.scrollLeft = Math.max(0, x - view / 2);
     };
+    // The first few panes too wide to read whole say once that the pane can
+    // run at the phone's size: otherwise only the ⋯ menu knows.
+    let hinted = false;
+    const hintPhoneSize = () => {
+      const seen = Number(remembered("hint.phoneSize") ?? 0);
+      if (hinted || wanted || leased || seen >= 3 || !live || banner.hasChildNodes()) return;
+      hinted = true;
+      remember("hint.phoneSize", String(seen + 1));
+      showBanner("Wider than this phone.", {
+        label: "Use phone size",
+        run: () => {
+          remember("hint.phoneSize", "3");
+          banner.replaceChildren();
+          toggleTake();
+        },
+      });
+      const shown = banner.firstChild;
+      setTimeout(() => {
+        if (banner.firstChild === shown) banner.replaceChildren();
+      }, 8000);
+    };
     const toggleZoom = () => {
       readable = !readable;
       fit();
@@ -3339,6 +3463,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     const liveLabel = () => (leased ? "Live · phone size" : "Live");
     const toggleTake = () => {
       wanted = !wanted;
+      remember(takeKey, wanted ? "1" : "");
       if (wanted) {
         sent = "";
         askLease();
@@ -3365,6 +3490,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         releasing = false;
         if (refused) {
           wanted = false;
+          remember(takeKey, "");
           showBanner(sentence(refused));
         } else if (was && !ours) {
           // Nobody here let go: the desktop took it back, or another device
@@ -3581,6 +3707,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         retry.reset();
         banner.replaceChildren();
         setState("live", liveLabel());
+        if (cramped) hintPhoneSize();
         runSoon();
       } catch (e) {
         if (current()) offline(errorText(e));
