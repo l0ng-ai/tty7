@@ -3302,10 +3302,12 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     const readChoices = () => {
       const found: { n: string; label: string }[] = [];
       if (agentWaiting) {
+        // The whole screen: the terminal here can be taller than the pane,
+        // with the agent's menu well above its bottom rows.
         const buf = term.buffer.active;
         const bottom = buf.baseY + term.rows;
         let run: typeof found = [];
-        for (let y = Math.max(0, bottom - 24); y < bottom; y++) {
+        for (let y = buf.baseY; y < bottom; y++) {
           const text = (buf.getLine(y)?.translateToString(true) ?? "")
             .replace(/^[\s│┃|]+|[\s│┃|]+$/g, "")
             .replace(/^[❯›>▸●◉○]\s*/, "");
