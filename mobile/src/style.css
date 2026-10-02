@@ -2509,3 +2509,60 @@ html[data-nav="pop"]::view-transition-new(root) {
   height: 1.15em;
   vertical-align: -0.2em;
 }
+
+/* Another agent on the machine wants a look: a card that drops over the
+   top of the pane, tapped to go there. */
+.peek-slot {
+  position: absolute;
+  z-index: 6;
+  top: 8px;
+  right: max(10px, var(--inset-right));
+  left: max(10px, var(--inset-left));
+  pointer-events: none;
+}
+
+.peek {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 22px;
+  background: var(--bar);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  pointer-events: auto;
+  animation: peek-in 0.32s var(--ease);
+}
+
+.peek-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.peek-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.peek-sub {
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+@keyframes peek-in {
+  from {
+    opacity: 0;
+    transform: translateY(-16px);
+  }
+}

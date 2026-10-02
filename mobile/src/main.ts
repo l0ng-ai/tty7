@@ -3544,9 +3544,71 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     };
     window.addEventListener("online", online);
 
+    // The machine's other agents, heard while this pane is open: one that
+    // stops for an answer or finishes its turn says so over the pane, with
+    // a way there. Only changes count; what was already so when the pane
+    // opened is old news.
+    const peek = h("div", { class: "peek-slot" });
+    view.querySelector(".term-wrap")?.append(peek);
+    let others = new Map<string, AgentStatus>();
+    let heard = false;
+    let peekTimer: number | undefined;
+    const ownKey = `${place?.key ?? ""}/${pane.id}`;
+    const showPeek = (where: Place, ws: WorkspaceView, tab: TabView, other: PaneView) => {
+      const agent = other.agent!;
+      const name = /^[~/]/.test(tab.name) ? baseName(tab.name) : tab.name;
+      const card = h(
+        "button",
+        {
+          class: `peek ${agent.status}`,
+          onclick: () => terminalScreen(host, where, other, name, tabRef(ws, tab, name)),
+        },
+        avatar(agent),
+        h(
+          "span",
+          { class: "peek-text" },
+          h("span", { class: "peek-title" }, agent.status === "waiting" ? `${agentLook(agent.kind).name} needs you` : `${agentLook(agent.kind).name} is done`),
+          h("span", { class: "peek-sub" }, agent.message || name),
+        ),
+        ico("chevron", "icon row-chevron"),
+      );
+      peek.replaceChildren(card);
+      feel("tick");
+      clearTimeout(peekTimer);
+      peekTimer = window.setTimeout(() => peek.replaceChildren(), 15_000);
+    };
+    let peeking: number | null = null;
+    api
+      .watch(host.id, (msg) => {
+        if (msg.type !== "tree" || !alive) return;
+        const now = new Map<string, AgentStatus>();
+        const spaces: [Place, WorkspaceView][] = [
+          ...msg.tree.workspaces.map((ws): [Place, WorkspaceView] => [null, ws]),
+          ...(msg.tree.remotes ?? []).flatMap((r) => r.workspaces.map((ws): [Place, WorkspaceView] => [{ key: r.key, name: r.name }, ws])),
+        ];
+        for (const [where, ws] of spaces)
+          for (const tab of ws.tabs)
+            for (const other of tab.panes) {
+              if (!other.agent) continue;
+              const key = `${where?.key ?? ""}/${other.id}`;
+              now.set(key, other.agent.status);
+              const was = others.get(key);
+              const news = other.agent.status === "waiting" || other.agent.status === "done";
+              if (heard && key !== ownKey && news && was !== other.agent.status) showPeek(where, ws, tab, other);
+            }
+        others = now;
+        heard = true;
+      })
+      .then(
+        (id) => (alive ? (peeking = id) : void api.unwatch(id).catch(() => {})),
+        () => {},
+      );
+
     onLeave = () => {
       alive = false;
       retry.cancel();
+      clearTimeout(peekTimer);
+      if (peeking !== null) api.unwatch(peeking).catch(() => {});
       window.removeEventListener("online", online);
       window.removeEventListener("resize", fit);
       window.removeEventListener("resize", regridSoon);
