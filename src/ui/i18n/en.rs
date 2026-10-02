@@ -63,7 +63,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsMobilePairDesc => "Shows a one-time code for the tty7 app on your phone.",
         L10nKey::SettingsMobilePairNeedsAccess => "Turn on phone access first.",
         L10nKey::SettingsMobilePairScan => {
-            "Scan this with the tty7 app on your phone, or copy the code and paste it there."
+            "Point your phone's camera at this, or scan it in the tty7 app, or copy the code and paste it there."
         }
         L10nKey::SettingsMobilePairValid => "Expires in {time}. Works for one phone.",
         L10nKey::SettingsMobileNewCode => "New code",

@@ -71,7 +71,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "先にスマートフォンからのアクセスをオンにしてください。"
         }
         L10nKey::SettingsMobilePairScan => {
-            "スマートフォンの tty7 アプリでスキャンするか、コードをコピーして貼り付けてください。"
+            "スマートフォンのカメラを向けるか、tty7 アプリでスキャンするか、コードをコピーして貼り付けてください。"
         }
         L10nKey::SettingsMobilePairValid => {
             "あと {time} で失効します。1 台のスマートフォンに限ります。"
