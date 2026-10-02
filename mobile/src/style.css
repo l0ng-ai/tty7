@@ -2318,6 +2318,25 @@ html[data-nav="pop"]::view-transition-new(root) {
   gap: 10px;
 }
 
+/* Each block keeps its height; the sheet scrolls rather than squeezing a
+   file to nothing under a long list of untracked ones. */
+.diff-body > * {
+  flex-shrink: 0;
+}
+
+.diff-body > .group {
+  margin: 10px 0 0;
+}
+
+.diff-body .row {
+  min-height: 0;
+  padding: 9px 14px;
+}
+
+.diff-body .row-title {
+  font-size: 13px;
+}
+
 .diff-root {
   margin: 0 4px;
   font: 13px var(--mono);

@@ -1703,9 +1703,10 @@ function changesSheet(host: Host, place: Place, cwd: string) {
 
 function renderDiff(d: api.Diff): Node[] {
   const files = d.patch.split(/^(?=diff --git )/m).filter((f) => f.startsWith("diff --git "));
-  const out: Node[] = [
-    h("p", { class: "diff-root" }, shortPath(d.root), files.length || d.untracked.length ? "" : " · no changes"),
-  ];
+  const root = h("p", { class: "diff-root" }, shortPath(d.root), files.length || d.untracked.length ? "" : " · no changes");
+  const out: Node[] = [root];
+  let added = 0;
+  let removed = 0;
   for (const f of files) {
     const lines = f.split("\n");
     const name =
@@ -1722,10 +1723,15 @@ function renderDiff(d: api.Diff): Node[] {
       if (kind === "del") del++;
       code.append(h("div", { class: `diff-line ${kind}` }, line || " "));
     }
+    added += add;
+    removed += del;
     const binary = !inHunk && /^Binary files/m.test(f);
+    // What a tool wrote rather than a person starts folded: a lock file's
+    // hundreds of lines would bury the change that matters.
+    const generated = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|Gemfile\.lock|poetry\.lock|composer\.lock|go\.sum)$/.test(name);
     const block = h(
       "details",
-      { class: "diff-file", open: files.length <= 6 },
+      { class: "diff-file", open: files.length <= 6 && !generated },
       h(
         "summary",
         {},
@@ -1737,6 +1743,13 @@ function renderDiff(d: api.Diff): Node[] {
     );
     out.push(block);
   }
+  if (files.length)
+    root.append(
+      ` · ${files.length} ${files.length === 1 ? "file" : "files"} `,
+      h("span", { class: "diff-add" }, `+${added}`),
+      " ",
+      h("span", { class: "diff-del" }, `−${removed}`),
+    );
   if (d.truncated) out.push(h("p", { class: "group-empty" }, "Cut short: the rest is too long to show here."));
   if (d.untracked.length) {
     out.push(
