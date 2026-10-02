@@ -2116,8 +2116,8 @@ function paneRow(host: Host, place: Place, ws: WorkspaceView, tab: TabView, pane
       { class: "row-text" },
       h(
         "span",
-        { class: "row-title" },
-        name,
+        { class: "row-title tagged" },
+        h("span", { class: "row-name" }, name),
         // The tab in front on the desktop: where you were.
         current && h("span", { class: "tag current" }, "Current"),
         tab.hibernated && h("span", { class: "tag" }, "Asleep"),
@@ -2610,7 +2610,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     const bar = h(
       "header",
       { class: "term-nav" },
-      h("button", { class: "round", ariaLabel: `Back to ${host.name}`, onclick: back }, ico("back")),
+      h("button", { class: "round term-back", ariaLabel: `Back to ${host.name}`, onclick: back }, ico("back")),
       h("div", { class: "term-titles" }, h("span", { class: "term-title" }, title), sub),
       menu,
     );
@@ -3444,7 +3444,9 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       const buf = term.buffer.active;
       latest.hidden = buf.baseY - buf.viewportY < 3;
     });
+    latest.onpointerdown = (e) => e.preventDefault();
     latest.onclick = () => {
+      shield();
       feel("tick");
       setFrac(0);
       term.scrollToBottom();
@@ -3858,13 +3860,33 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         readChoices();
       });
     });
+    // A button over the pane that takes itself away when tapped leaves the
+    // tap to land again on the pane beneath, which brings up its keyboard;
+    // a clear cover takes that tap instead, for a moment.
+    const shield = () => {
+      const cover = h("div", { class: "term-shield" });
+      view.querySelector(".term-wrap")?.append(cover);
+      window.setTimeout(() => cover.remove(), 400);
+    };
     const showBanner = (text: string, action?: { label: string; run: () => void }) =>
       banner.replaceChildren(
         h(
           "div",
           { class: "term-banner" },
           h("span", {}, text),
-          action && h("button", { class: "button tinted small", onclick: action.run }, action.label),
+          action &&
+            h(
+              "button",
+              {
+                class: "button tinted small",
+                onpointerdown: (e: Event) => e.preventDefault(),
+                onclick: () => {
+                  shield();
+                  action.run();
+                },
+              },
+              action.label,
+            ),
         ),
       );
 
@@ -3995,14 +4017,33 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     let others = new Map<string, AgentStatus>();
     let heard = false;
     let peekTimer: number | undefined;
+    // The pane the card on screen is about, so it goes once that is settled.
+    let peekKey: string | null = null;
     const ownKey = `${place?.key ?? ""}/${pane.id}`;
-    const showPeek = (where: Place, ws: WorkspaceView, tab: TabView, other: PaneView) => {
+    const dropPeek = () => {
+      clearTimeout(peekTimer);
+      peekKey = null;
+      peek.replaceChildren();
+    };
+    const showPeek = (key: string, where: Place, ws: WorkspaceView, tab: TabView, other: PaneView) => {
       const agent = other.agent!;
       const name = /^[~/]/.test(tab.name) ? baseName(tab.name) : tab.name;
+      const close = h("button", { class: "peek-close", ariaLabel: "Dismiss" }, ico("close"));
+      close.onpointerdown = (e) => e.preventDefault();
+      // Faded, then gone: taken away under the finger at once, the tap
+      // lands again on the pane beneath and brings up its keyboard.
+      close.onclick = (e) => {
+        e.stopPropagation();
+        card.classList.add("leaving");
+        peekKey = null;
+        clearTimeout(peekTimer);
+        peekTimer = window.setTimeout(dropPeek, 400);
+      };
       const card = h(
-        "button",
+        "div",
         {
           class: `peek ${agent.status}`,
+          role: "button",
           onclick: () => terminalScreen(host, where, other, name, tabRef(ws, tab, name)),
         },
         avatar(agent),
@@ -4012,13 +4053,18 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
           h("span", { class: "peek-title" }, agent.status === "waiting" ? `${agentLook(agent.kind).name} needs you` : `${agentLook(agent.kind).name} is done`),
           h("span", { class: "peek-sub" }, agent.message || name),
         ),
-        ico("chevron", "icon row-chevron"),
+        close,
       );
       peek.replaceChildren(card);
+      peekKey = key;
       feel("tick");
       clearTimeout(peekTimer);
-      peekTimer = window.setTimeout(() => peek.replaceChildren(), 15_000);
+      // One waiting stays until it is answered or put away; one that is
+      // done is news for a moment.
+      if (agent.status !== "waiting") peekTimer = window.setTimeout(dropPeek, 15_000);
     };
+    // While another agent waits, the way back carries a dot, card or no card.
+    const backButton = view.querySelector<HTMLElement>(".term-back");
     let peeking: number | null = null;
     api
       .watch(host.id, (msg) => {
@@ -4036,8 +4082,10 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
               now.set(key, other.agent.status);
               const was = others.get(key);
               const news = other.agent.status === "waiting" || other.agent.status === "done";
-              if (heard && key !== ownKey && news && was !== other.agent.status) showPeek(where, ws, tab, other);
+              if (heard && key !== ownKey && news && was !== other.agent.status) showPeek(key, where, ws, tab, other);
             }
+        if (peekKey && now.get(peekKey) === "working") dropPeek();
+        backButton?.classList.toggle("attention", [...now].some(([key, status]) => key !== ownKey && status === "waiting"));
         others = now;
         heard = true;
       })

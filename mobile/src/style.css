@@ -2756,3 +2756,68 @@ html[data-nav="pop"]::view-transition-new(root) {
   opacity: 0.35;
   pointer-events: none;
 }
+
+.peek-close {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 15px;
+  display: grid;
+  place-items: center;
+  background: var(--fill);
+  color: var(--ink-2);
+}
+
+.peek-close .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* Another agent is waiting: a dot on the way back to the list. */
+.term-back {
+  position: relative;
+}
+
+.term-back.attention::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--waiting);
+  box-shadow: 0 0 0 2px var(--canvas);
+}
+
+/* A row's name gives way before its tags do: "Current" stays whole. */
+.row-title.tagged {
+  display: flex;
+  align-items: center;
+}
+
+.row-title.tagged .row-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-title.tagged .tag {
+  flex: none;
+}
+
+.peek.leaving {
+  opacity: 0;
+  transform: translateY(-8px);
+  transition:
+    opacity 0.2s,
+    transform 0.2s;
+}
+
+.term-shield {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+}
