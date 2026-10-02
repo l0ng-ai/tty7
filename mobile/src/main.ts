@@ -11,6 +11,7 @@ import * as scanner from "@tauri-apps/plugin-barcode-scanner";
 
 import { getVersion, onBackButtonPress } from "@tauri-apps/api/app";
 import { impactFeedback, selectionFeedback } from "@tauri-apps/plugin-haptics";
+import { getCurrent as linkedWith, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 
 import * as api from "./api";
 import { MAX_UPLOAD } from "./api";
@@ -896,7 +897,9 @@ async function scanCode(): Promise<string | null> {
   }
 }
 
-function pairScreen() {
+/** `linked`, when given, is a pairing code that arrived as a link: it is
+ * filled in and paired straight away, as a scanned one is. */
+function pairScreen(linked?: string) {
   go("push", () => {
     const code = h("textarea", {
       class: "field-input code",
@@ -957,6 +960,11 @@ function pairScreen() {
 
     code.oninput = sync;
     sync();
+    if (linked) {
+      code.value = linked;
+      sync();
+      queueMicrotask(() => submit.click());
+    }
 
     submit.onclick = async () => {
       submit.disabled = true;
@@ -1003,7 +1011,9 @@ function pairScreen() {
               {},
               "Click ",
               h("strong", {}, "Show code"),
-              canScan ? ", then scan it here, or copy the code and paste it below." : ", copy the code and paste it below.",
+              canScan
+                ? ", then point this phone's Camera at it, or scan it here, or paste the code below."
+                : ", copy the code and paste it below.",
             ),
           ),
         ),
@@ -3573,12 +3583,25 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
 }
 
 if (prefs.lock) lock();
+
+// A pairing code opened as a link — the desktop's QR code, read by the
+// phone's camera — goes straight to pairing.
+const pairingLink = (urls: string[] | null) => urls?.find((url) => url.startsWith("tty7pair:"));
+void onOpenUrl((urls) => {
+  const code = pairingLink(urls);
+  if (code) pairScreen(code);
+}).catch(() => {});
+
 // Back where it was left: the machine last open, unless it was left for the
-// list of machines.
-api.hosts().then(
-  (hosts) => {
+// list of machines; or pairing, when that is what opened the app.
+Promise.all([api.hosts(), linkedWith().catch(() => null)]).then(
+  ([hosts, urls]) => {
+    const code = pairingLink(urls);
     const last = hosts.find((host) => host.id === remembered("last.host"));
-    if (last) hostScreen(last, "push");
+    if (code) {
+      hostsScreen("push");
+      pairScreen(code);
+    } else if (last) hostScreen(last, "push");
     else hostsScreen("push");
   },
   () => hostsScreen("push"),

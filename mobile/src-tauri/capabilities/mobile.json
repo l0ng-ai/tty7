@@ -10,6 +10,7 @@
   "permissions": [
     "barcode-scanner:default",
     "biometric:default",
-    "haptics:default"
+    "haptics:default",
+    "deep-link:default"
   ]
 }
