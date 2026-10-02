@@ -207,6 +207,15 @@ impl PaneFeed for FakeFeed {
     }
 }
 
+/// A fresh drawing of a pane's screen (`mirror::Mirror::draw`), as text.
+fn drawing(item: Option<PaneItem>) -> String {
+    let Some(PaneItem::Output(bytes)) = item else {
+        panic!("expected the screen drawn, got {item:?}");
+    };
+    assert!(bytes.starts_with(b"\x1bc"), "a drawing starts from a reset");
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 struct Rig {
     _dir: tempfile::TempDir,
     machine: Arc<FakeMachine>,
@@ -322,10 +331,8 @@ async fn a_paired_phone_reads_the_tree_and_drives_a_pane() {
             rows: 30
         }))
     );
-    assert_eq!(
-        within(screen.next()).await.unwrap(),
-        Some(PaneItem::Output(b"$ ".to_vec()))
-    );
+    // The screen comes drawn afresh, as the desktop's emulator reads it.
+    assert!(drawing(within(screen.next()).await.unwrap()).contains("$"));
     keys.input(b"ls\r").await.unwrap();
     assert_eq!(
         within(screen.next()).await.unwrap(),
@@ -351,7 +358,7 @@ async fn typing_that_fails_is_reported_not_dropped() {
     let session = within(rig.paired()).await;
     let (mut keys, mut screen) = within(session.pane(None, 1)).await.unwrap();
     within(screen.next()).await.unwrap(); // size
-    within(screen.next()).await.unwrap(); // prompt
+    within(screen.next()).await.unwrap(); // the screen, drawn
 
     keys.input(b"refuse").await.unwrap();
     let Some(PaneItem::Event(PaneEvent::Error { message })) = within(screen.next()).await.unwrap()
@@ -377,7 +384,7 @@ async fn a_phone_takes_a_pane_over_at_its_size_and_gives_it_back() {
     let session = within(rig.paired()).await;
     let (mut keys, mut screen) = within(session.pane(None, 1)).await.unwrap();
     within(screen.next()).await.unwrap(); // size
-    within(screen.next()).await.unwrap(); // prompt
+    within(screen.next()).await.unwrap(); // the screen, drawn
 
     let size = GridSize { cols: 44, rows: 31 };
     keys.request(&PaneRequest::TakeOver { size }).await.unwrap();
@@ -385,6 +392,8 @@ async fn a_phone_takes_a_pane_over_at_its_size_and_gives_it_back() {
         within(screen.next()).await.unwrap(),
         Some(PaneItem::Event(PaneEvent::Size { cols: 44, rows: 31 }))
     );
+    // Redrawn at the new size rather than left to the phone to reflow.
+    assert!(drawing(within(screen.next()).await.unwrap()).contains("$"));
     assert_eq!(
         within(screen.next()).await.unwrap(),
         Some(PaneItem::Event(PaneEvent::Lease {
@@ -414,7 +423,7 @@ async fn a_take_over_the_pane_cannot_do_is_refused_and_the_pane_stays_up() {
     let session = within(rig.paired()).await;
     let (mut keys, mut screen) = within(session.pane(Some("old"), 1)).await.unwrap();
     within(screen.next()).await.unwrap(); // size
-    within(screen.next()).await.unwrap(); // prompt
+    within(screen.next()).await.unwrap(); // the screen, drawn
 
     let size = GridSize { cols: 44, rows: 31 };
     keys.request(&PaneRequest::TakeOver { size }).await.unwrap();
@@ -597,15 +606,13 @@ async fn linked_machines_come_with_the_tree_and_their_panes_open() {
     assert_eq!(up.workspaces[0].name, "pale-otter");
     assert_eq!((down.connected, down.workspaces.len()), (false, 0));
 
-    let (_, mut screen) = within(session.pane(Some(&up.key), 1)).await.unwrap();
-    assert!(matches!(
-        within(screen.next()).await.unwrap(),
-        Some(PaneItem::Event(PaneEvent::Size { .. }))
-    ));
-    assert_eq!(
-        within(screen.next()).await.unwrap(),
-        Some(PaneItem::Output(b"me@build-box:22$ ".to_vec()))
+    let (_keys, mut screen) = within(session.pane(Some(&up.key), 1)).await.unwrap();
+    let first = within(screen.next()).await.unwrap();
+    assert!(
+        matches!(first, Some(PaneItem::Event(PaneEvent::Size { .. }))),
+        "{first:?}"
     );
+    assert!(drawing(within(screen.next()).await.unwrap()).contains("me@build-box:22$"));
 
     let err = within(session.pane(Some(&down.key), 1))
         .await

@@ -11638,6 +11638,7 @@ dependencies = [
 name = "tty7-gateway"
 version = "26.9.4"
 dependencies = [
+ "alacritty_terminal",
  "anyhow",
  "clap",
  "getrandom 0.3.4",

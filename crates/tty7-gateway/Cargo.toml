@@ -35,6 +35,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 getrandom = "0.3"
 # iroh takes its proxy as a `Url`.
 url = "2"
+# Reads a pane's output the way the desktop's window does, so a phone is sent
+# the screen the desktop shows rather than bytes its own emulator re-wraps.
+alacritty_terminal.workspace = true
 # Draws the pairing code as a QR code right in the terminal.
 qrcode = { version = "0.14", default-features = false }
 

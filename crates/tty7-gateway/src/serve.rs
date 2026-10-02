@@ -10,7 +10,9 @@
 use std::io;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use crate::mirror::Mirror;
 
 use iroh::Endpoint;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
@@ -647,18 +649,34 @@ async fn pane_stream(
     }
 }
 
+/// How long a fresh drawing of the screen waits for the output that made it
+/// stale to stop, and the longest it waits while output keeps coming.
+const DRAW_SETTLE: Duration = Duration::from_millis(30);
+const DRAW_LIMIT: Duration = Duration::from_millis(200);
+
 fn read_pane(mut feed: Box<dyn PaneFeed>, down: mpsc::Sender<Down>) {
     // The daemon reports the agent and its status in separate messages; the
     // phone gets both together.
     let mut agent: Option<CLIAgent> = None;
     let mut status: Option<AgentSessionState> = None;
+    // The pane as the desktop reads it (`mirror`), and since when the phone's
+    // copy has been out of date: from the start, while the replay comes in,
+    // then after a resize or a full-screen program's exit. Output that
+    // arrives meanwhile goes into the drawing rather than past it.
+    let mut mirror: Option<Mirror> = None;
+    let mut size = (80, 24);
+    let mut stale: Option<Instant> = Some(Instant::now());
     loop {
         if down.is_closed() {
             return;
         }
-        let msg = match feed.recv(FEED_TICK) {
-            Ok(Some(msg)) => msg,
-            Ok(None) => continue,
+        let wait = if stale.is_some() {
+            DRAW_SETTLE
+        } else {
+            FEED_TICK
+        };
+        let msg = match feed.recv(wait) {
+            Ok(msg) => msg,
             Err(e) => {
                 let _ = down.blocking_send(Down::Event(PaneEvent::Error {
                     message: e.to_string(),
@@ -666,12 +684,48 @@ fn read_pane(mut feed: Box<dyn PaneFeed>, down: mpsc::Sender<Down>) {
                 return;
             }
         };
+        // Drawn once the burst is over, or anything other than output is
+        // about to be said, or it has waited long enough.
+        let burst = matches!(
+            msg,
+            Some(DaemonMsg::Size(_) | DaemonMsg::Snapshot(_) | DaemonMsg::Output(_))
+        );
+        if stale.is_some_and(|since| !burst || since.elapsed() >= DRAW_LIMIT) {
+            stale = None;
+            if let Some(mirror) = &mirror {
+                let (cols, rows) = size;
+                let drawn = [
+                    Down::Event(PaneEvent::Size { cols, rows }),
+                    Down::Bytes(mirror.draw()),
+                ];
+                for item in drawn {
+                    if down.blocking_send(item).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+        let Some(msg) = msg else { continue };
         let item = match msg {
-            DaemonMsg::Size(size) => Down::Event(PaneEvent::Size {
-                cols: size.cols,
-                rows: size.rows,
-            }),
-            DaemonMsg::Snapshot(bytes) | DaemonMsg::Output(bytes) => Down::Bytes(bytes),
+            DaemonMsg::Size(new) => {
+                size = (new.cols, new.rows);
+                match &mut mirror {
+                    Some(mirror) => mirror.resize(new.cols, new.rows),
+                    None => mirror = Some(Mirror::new(new.cols, new.rows)),
+                }
+                stale.get_or_insert_with(Instant::now);
+                continue;
+            }
+            DaemonMsg::Snapshot(bytes) | DaemonMsg::Output(bytes) => {
+                let mirror = mirror.get_or_insert_with(|| Mirror::new(size.0, size.1));
+                if mirror.feed(&bytes) {
+                    stale.get_or_insert_with(Instant::now);
+                }
+                if stale.is_some() {
+                    continue;
+                }
+                Down::Bytes(bytes)
+            }
             DaemonMsg::Cwd(path) => Down::Event(PaneEvent::Cwd {
                 path: path.to_string_lossy().into_owned(),
             }),
