@@ -233,11 +233,22 @@ function suggestions(typed: string, limit = 12) {
 let onResume: (() => void) | null = null;
 let onLeave: (() => void) | null = null;
 
+// Locked, the app is covered as it goes, so the picture the phone keeps for
+// its app switcher shows nothing of the panes.
+let shade: HTMLElement | null = null;
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
+    shade?.remove();
+    shade = null;
     if (prefs.lock && Date.now() - hiddenAt > LOCK_AFTER_MS) lock();
     onResume?.();
-  } else hiddenAt = Date.now();
+  } else {
+    hiddenAt = Date.now();
+    if (prefs.lock && !shade) {
+      shade = h("div", { class: "lock-cover" }, h("img", { class: "empty-mark", src: logoUrl, alt: "" }));
+      document.body.append(shade);
+    }
+  }
 });
 
 // The app lock: a cover over everything until Face ID or the passcode says
