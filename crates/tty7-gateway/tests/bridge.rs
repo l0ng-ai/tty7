@@ -152,6 +152,19 @@ impl Backend for FakeMachine {
             pane_id: 2,
         })
     }
+
+    fn close_tab(
+        &self,
+        _machine: Option<&str>,
+        workspace_id: &str,
+        tab_id: &str,
+    ) -> io::Result<()> {
+        let ws = &self.machine.workspaces[0];
+        if workspace_id != ws.id.to_string() || ws.tabs.iter().all(|t| t.id.to_string() != tab_id) {
+            return Err(io::Error::other(format!("no tab {tab_id}")));
+        }
+        Ok(())
+    }
 }
 
 struct FakeFeed {
@@ -460,7 +473,7 @@ async fn a_revoked_phone_is_cut_off_at_its_next_stream() {
 async fn a_paired_phone_opens_a_tab() {
     let rig = Rig::new().await;
     let session = within(rig.paired()).await;
-    let (_, mut tree) = within(session.control()).await.unwrap().split();
+    let (_asks, mut tree) = within(session.control()).await.unwrap().split();
     let Some(ControlEvent::Tree(first)) = within(tree.next()).await.unwrap() else {
         panic!("expected a tree first");
     };
@@ -494,6 +507,24 @@ async fn a_paired_phone_opens_a_tab() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("no workspace nope"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paired_phone_closes_a_tab() {
+    let rig = Rig::new().await;
+    let session = within(rig.paired()).await;
+    let (_asks, mut tree) = within(session.control()).await.unwrap().split();
+    let Some(ControlEvent::Tree(first)) = within(tree.next()).await.unwrap() else {
+        panic!("expected a tree first");
+    };
+    let ws = &first.workspaces[0];
+    within(session.close_tab(None, &ws.id, &ws.tabs[0].id))
+        .await
+        .unwrap();
+    let err = within(session.close_tab(None, &ws.id, "nope"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("no tab nope"), "{err}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -593,7 +624,7 @@ async fn an_unpaired_phone_cannot_open_a_tab() {
 async fn linked_machines_come_with_the_tree_and_their_panes_open() {
     let rig = Rig::new().await;
     let session = within(rig.paired()).await;
-    let (_, mut tree) = within(session.control()).await.unwrap().split();
+    let (_asks, mut tree) = within(session.control()).await.unwrap().split();
     let Some(ControlEvent::Tree(tree)) = within(tree.next()).await.unwrap() else {
         panic!("expected a tree first");
     };

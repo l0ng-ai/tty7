@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tty7_core::client::{ControlClient, PaneClient, PaneInput, PaneOutput};
-use tty7_core::core::machine::Machine;
+use tty7_core::core::machine::{Machine, TabId};
 use tty7_core::daemon::control::{
     ControlHello, ControlRequest, PaneAgentState, PaneSeed, ReplyOk, RouteInfo, WorkspaceId,
 };
@@ -292,6 +292,41 @@ impl Backend for Daemon {
             }),
             other => Err(unexpected("TabCreate", &other)),
         }
+    }
+
+    /// As the desktop closes a tab: onto the workspace's recently-closed
+    /// list, its panes stopped with their screens kept, so it can be put
+    /// back. A machine that keeps no such list closes it for good, and its
+    /// panes are ended from here, as `tty7 tab close` does.
+    fn close_tab(&self, machine: Option<&str>, workspace_id: &str, tab_id: &str) -> io::Result<()> {
+        let invalid =
+            |what: &str| io::Error::new(io::ErrorKind::InvalidInput, format!("no {what}"));
+        let workspace: WorkspaceId = workspace_id
+            .parse()
+            .map_err(|_| invalid(&format!("workspace {workspace_id}")))?;
+        // A tab id is a UUID on the wire; it has no `FromStr` of its own.
+        let tab: TabId = serde_json::from_value(serde_json::Value::String(tab_id.to_string()))
+            .map_err(|_| invalid(&format!("tab {tab_id}")))?;
+        let remembered = ControlRequest::TabCloseRemembered {
+            workspace,
+            tab,
+            panes: Vec::new(),
+        };
+        let ended = match self.request_on(machine, remembered) {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => {
+                match self.request_on(machine, ControlRequest::TabClose { workspace, tab })? {
+                    ReplyOk::Panes(panes) => panes,
+                    other => return Err(unexpected("TabClose", &other)),
+                }
+            }
+            Err(e) => return Err(e),
+        };
+        let panes = self.panes_on(machine)?;
+        for pane in ended {
+            panes.kill(pane)?;
+        }
+        Ok(())
     }
 }
 

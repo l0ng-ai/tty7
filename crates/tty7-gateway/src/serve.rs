@@ -65,6 +65,9 @@ pub trait Backend: Send + Sync + 'static {
         cwd: Option<String>,
         size: Option<GridSize>,
     ) -> io::Result<TabCreated>;
+    /// Closes a tab and ends its panes, keeping it to reopen where the
+    /// machine can.
+    fn close_tab(&self, machine: Option<&str>, workspace_id: &str, tab_id: &str) -> io::Result<()>;
 }
 
 /// One linked machine, as [`Backend::remotes`] reports it.
@@ -200,6 +203,26 @@ async fn serve_stream(
                     write_msg(&mut send, &ok).await?;
                     write_msg(&mut send, &created).await?;
                 }
+                Err(e) => write_msg(&mut send, &denied(&e.to_string())).await?,
+            }
+            finish(send).await;
+            Ok(())
+        }
+        Open::CloseTab {
+            workspace_id,
+            tab_id,
+            machine,
+        } => {
+            let closed = {
+                let backend = backend.clone();
+                tokio::task::spawn_blocking(move || {
+                    backend.close_tab(machine.as_deref(), &workspace_id, &tab_id)
+                })
+                .await
+                .map_err(io::Error::other)?
+            };
+            match closed {
+                Ok(()) => write_msg(&mut send, &ok).await?,
                 Err(e) => write_msg(&mut send, &denied(&e.to_string())).await?,
             }
             finish(send).await;
@@ -463,7 +486,10 @@ fn watch_tree(
         let event = match backend.snapshot() {
             Ok((machine, agents)) => {
                 failing = false;
-                let mut tree = tree::build(&host, &machine, &agents);
+                // This machine's directories are this process's to read.
+                let mut tree = tree::build_with(&host, &machine, &agents, |cwd| {
+                    tty7_core::core::git::head::read_head(std::path::Path::new(cwd)).map(|h| h.home)
+                });
                 tree.remotes = backend.remotes().into_iter().map(remote_view).collect();
                 if forced || last.as_ref() != Some(&tree) {
                     last = Some(tree.clone());

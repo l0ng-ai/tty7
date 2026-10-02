@@ -289,6 +289,22 @@ async fn tab_new(
         .map_err(err)
 }
 
+/// Closes a tab and its panes; the machine keeps it to reopen where it can.
+#[tauri::command]
+async fn tab_close(
+    state: State<'_, Arc<AppState>>,
+    host_id: String,
+    machine: Option<String>,
+    workspace_id: String,
+    tab_id: String,
+) -> CmdResult<()> {
+    let session = state.session(&host_id).await?;
+    session
+        .close_tab(machine.as_deref(), &workspace_id, &tab_id)
+        .await
+        .map_err(err)
+}
+
 /// Sends a file to the machine for a pane, returning its path there. The
 /// file is the request's raw body, not JSON (a 20 MB photo would be 80 MB as
 /// a number array); which machine and the file's name ride in headers, the
@@ -548,6 +564,7 @@ pub fn run() {
             unwatch,
             refresh,
             tab_new,
+            tab_close,
             upload,
             diff,
             pane_open,

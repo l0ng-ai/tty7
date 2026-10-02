@@ -211,6 +211,31 @@ impl Session {
 }
 
 impl Session {
+    /// Closes a tab on `machine`, its panes with it.
+    pub async fn close_tab(
+        &self,
+        machine: Option<&str>,
+        workspace_id: &str,
+        tab_id: &str,
+    ) -> Result<()> {
+        let ask = Open::CloseTab {
+            workspace_id: workspace_id.to_string(),
+            tab_id: tab_id.to_string(),
+            machine: machine.map(str::to_string),
+        };
+        let (mut send, _) = open(&self.conn, &ask).await.map_err(|e| {
+            if e.to_string().contains("without answering") {
+                anyhow!("tty7 on this computer is too old to close tabs — update it")
+            } else {
+                e
+            }
+        })?;
+        let _ = send.finish();
+        Ok(())
+    }
+}
+
+impl Session {
     /// Sends a file to the machine for a pane to be handed, returning where
     /// it landed. `machine` is where that pane runs, as on [`Session::pane`].
     pub async fn upload(&self, machine: Option<&str>, name: &str, bytes: &[u8]) -> Result<String> {

@@ -153,6 +153,10 @@ export const tabNew = (
   size: { cols: number; rows: number } | null,
 ) => invoke<TabCreated>("tab_new", { hostId, machine, workspaceId, cwd, size });
 
+/** Closes a tab and its panes; the machine keeps it to reopen where it can. */
+export const tabClose = (hostId: string, machine: string | null, workspaceId: string, tabId: string) =>
+  invoke<void>("tab_close", { hostId, machine, workspaceId, tabId });
+
 export const paneInput = (handle: number, data: string) =>
   invoke<void>("pane_input", { handle, data });
 

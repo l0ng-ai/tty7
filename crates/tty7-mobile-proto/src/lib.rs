@@ -96,13 +96,19 @@ pub enum Open {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine: Option<String>,
     },
-    /// Put a file from the phone on the machine, for a pane to be handed its
-    /// path. After `Ok` the phone sends the file as bytes frames and finishes
-    /// its side; the gateway answers [`Uploaded`] once the file is written.
-    /// `Denied` before any bytes: too big, or a machine files cannot go to.
+    /// Close a tab, its panes with it. One-shot: `Ok` once it is closed, or
+    /// `Denied` with why not. Where the machine keeps closed tabs, it goes on
+    /// the workspace's recently-closed list, for the desktop to reopen.
     ///
     /// A gateway older than this variant cannot parse it and drops the stream
     /// unanswered.
+    CloseTab {
+        workspace_id: String,
+        tab_id: String,
+        /// As on [`Open::Pane`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
+    },
     /// What has changed in the git working tree `cwd` is in, against its last
     /// commit: `Ok`, then a [`Diff`]. `Denied` when it is not in a repository.
     ///
@@ -114,6 +120,13 @@ pub enum Open {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine: Option<String>,
     },
+    /// Put a file from the phone on the machine, for a pane to be handed its
+    /// path. After `Ok` the phone sends the file as bytes frames and finishes
+    /// its side; the gateway answers [`Uploaded`] once the file is written.
+    /// `Denied` before any bytes: too big, or a machine files cannot go to.
+    ///
+    /// A gateway older than this variant cannot parse it and drops the stream
+    /// unanswered.
     Upload {
         /// The file's name on the phone; the gateway keeps what it safely can.
         name: String,
