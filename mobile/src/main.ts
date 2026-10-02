@@ -937,6 +937,9 @@ function pairScreen(linked?: string) {
       spellcheck: false,
       ariaLabel: "Pairing code",
     });
+    // A code, not words: no suggestions over the keyboard, no "fixing" it.
+    code.setAttribute("autocorrect", "off");
+    code.setAttribute("autocomplete", "off");
     const name = h("input", {
       class: "field-input",
       value: guessDeviceName(),
@@ -1002,7 +1005,14 @@ function pairScreen(linked?: string) {
         const host = await api.pair(code.value.trim(), name.value.trim() || "phone");
         hostScreen(host, "push");
       } catch (e) {
-        error.textContent = errorText(e);
+        const text = errorText(e);
+        error.textContent = /not a tty7 pairing code/i.test(text)
+          ? "That isn't a pairing code. On your computer, open Settings → Mobile and click Show code."
+          : /used up or expired/i.test(text)
+            ? "That code has expired or was already used. Make a new one with New code on your computer."
+            : /^could not reach /i.test(text)
+              ? `${why(text, text.replace(/^could not reach ([^:]+):.*$/i, "$1"))} Check that tty7 is running there with phone access on.`
+              : sentence(text);
         submit.classList.remove("busy");
         submit.textContent = "Pair";
         submit.disabled = false;
