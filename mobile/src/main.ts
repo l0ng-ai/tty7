@@ -2020,7 +2020,8 @@ function swipeable(row: HTMLElement, label: string, spoken: string, run: () => P
 function paneRow(host: Host, place: Place, ws: WorkspaceView, tab: TabView, pane: PaneView, current = false) {
   const agent = pane.agent;
   const sub: Child[] = [];
-  if (agent && agent.status !== "idle")
+  // A pane that is not running has no agent at work, whatever it last said.
+  if (agent && agent.status !== "idle" && !pane.stopped)
     sub.push(h("span", { class: `status-word ${agent.status}` }, STATUS_WORD[agent.status]));
   // A tab named after its directory goes by the directory's own name, the
   // end a narrow row would cut off; where it is goes underneath. What tells
@@ -2035,7 +2036,7 @@ function paneRow(host: Host, place: Place, ws: WorkspaceView, tab: TabView, pane
   const row = h(
     "button",
     {
-      class: tab.hibernated ? "row asleep" : "row",
+      class: tab.hibernated || pane.stopped ? "row asleep" : "row",
       onclick: () => terminalScreen(host, place, pane, name, tabRef(ws, tab, name)),
     },
     avatar(agent),
@@ -2049,10 +2050,11 @@ function paneRow(host: Host, place: Place, ws: WorkspaceView, tab: TabView, pane
         // The tab in front on the desktop: where you were.
         current && h("span", { class: "tag current" }, "Current"),
         tab.hibernated && h("span", { class: "tag" }, "Asleep"),
+        pane.stopped && h("span", { class: "tag" }, "Not running"),
       ),
       sub.length > 0 && h("span", { class: "row-sub" }, ...sub),
     ),
-    agent && agent.status !== "idle" && agent.status !== "done" && h("span", { class: `status-dot ${agent.status}` }),
+    agent && !pane.stopped && agent.status !== "idle" && agent.status !== "done" && h("span", { class: `status-dot ${agent.status}` }),
     ico("chevron", "icon row-chevron"),
   );
   // A split tab's panes each have a row; closing is the tab's, on its first.
@@ -2624,7 +2626,34 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // A drop is retried on its own, sooner at first; the pane stays on
     // screen as it was until the new stream replaces it.
     const retry = retrier(() => reopen());
+    // A pane its server no longer has — restarted since, and not started
+    // again — is not coming back by retrying: said so, with a way on.
+    const gone = () => {
+      ended = true;
+      live = false;
+      retry.cancel();
+      setState("offline", "Not running");
+      const fresh = tab && {
+        label: "New tab here",
+        run: async () => {
+          try {
+            const made = await api.tabNew(host.id, place?.key ?? null, tab.workspace, paneCwd, phoneGrid());
+            const name = paneCwd ? baseName(paneCwd) : "Shell";
+            terminalScreen(host, place, { id: made.pane_id, title: name, cwd: paneCwd }, name, {
+              workspace: tab.workspace,
+              id: made.tab_id,
+              name,
+              busy: false,
+            });
+          } catch (e) {
+            showBanner(sentence(errorText(e)));
+          }
+        },
+      };
+      showBanner(`This pane isn't running. tty7 on ${host.name} starts it again when it next opens the tab.`, fresh || undefined);
+    };
     const offline = (message: string) => {
+      if (/no such pane/i.test(message)) return gone();
       live = false;
       setState("connecting", "Reconnecting");
       showBanner(`${sentence(message)} Reconnecting…`, { label: "Try now", run: reopen });

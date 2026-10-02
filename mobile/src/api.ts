@@ -24,6 +24,8 @@ export interface PaneView {
   title: string;
   cwd?: string | null;
   agent?: AgentView | null;
+  /** Nothing runs in it: the machine's server restarted since. */
+  stopped?: boolean;
 }
 
 export interface TabView {

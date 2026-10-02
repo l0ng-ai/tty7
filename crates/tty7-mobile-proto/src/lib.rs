@@ -333,6 +333,11 @@ pub struct PaneView {
     pub cwd: Option<String>,
     #[serde(default)]
     pub agent: Option<AgentView>,
+    /// Nothing is running in it: the machine's server restarted, and no
+    /// window has opened the tab since to start it again. Absent from an
+    /// older gateway, which cannot tell.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

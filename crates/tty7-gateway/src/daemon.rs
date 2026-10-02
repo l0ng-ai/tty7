@@ -294,6 +294,17 @@ impl Backend for Daemon {
         }
     }
 
+    fn running_panes(&self) -> Option<std::collections::HashSet<u64>> {
+        let panes = PaneClient::local().list().ok()?;
+        Some(
+            panes
+                .into_iter()
+                .filter(|p| p.alive)
+                .map(|p| p.pane_id)
+                .collect(),
+        )
+    }
+
     /// As the desktop closes a tab: onto the workspace's recently-closed
     /// list, its panes stopped with their screens kept, so it can be put
     /// back. A machine that keeps no such list closes it for good, and its

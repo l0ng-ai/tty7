@@ -7,6 +7,7 @@
 //! channels are bounded: a phone that stops reading stalls its own thread, and
 //! through it only its own daemon connection, never the gateway.
 
+use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
@@ -68,6 +69,10 @@ pub trait Backend: Send + Sync + 'static {
     /// Closes a tab and ends its panes, keeping it to reopen where the
     /// machine can.
     fn close_tab(&self, machine: Option<&str>, workspace_id: &str, tab_id: &str) -> io::Result<()>;
+    /// The panes this machine's server has running, when it can say.
+    fn running_panes(&self) -> Option<HashSet<u64>> {
+        None
+    }
 }
 
 /// One linked machine, as [`Backend::remotes`] reports it.
@@ -487,9 +492,17 @@ fn watch_tree(
             Ok((machine, agents)) => {
                 failing = false;
                 // This machine's directories are this process's to read.
-                let mut tree = tree::build_with(&host, &machine, &agents, |cwd| {
-                    tty7_core::core::git::head::read_head(std::path::Path::new(cwd)).map(|h| h.home)
-                });
+                let running = backend.running_panes();
+                let mut tree = tree::build_with(
+                    &host,
+                    &machine,
+                    &agents,
+                    |cwd| {
+                        tty7_core::core::git::head::read_head(std::path::Path::new(cwd))
+                            .map(|h| h.home)
+                    },
+                    running.as_ref(),
+                );
                 tree.remotes = backend.remotes().into_iter().map(remote_view).collect();
                 if forced || last.as_ref() != Some(&tree) {
                     last = Some(tree.clone());

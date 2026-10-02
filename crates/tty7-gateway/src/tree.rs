@@ -7,6 +7,7 @@
 //! goes through `tab_view` so a tab reads the same here as in the CLI and the
 //! desktop's switcher.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use tty7_core::core::cli_agent::{AgentSessionState, AgentStatus as CoreStatus, CLIAgent};
@@ -19,7 +20,7 @@ use tty7_mobile_proto::{
 };
 
 pub fn build(host: &str, machine: &Machine, agents: &[PaneAgentState]) -> Tree {
-    build_with(host, machine, agents, |_| None)
+    build_with(host, machine, agents, |_| None, None)
 }
 
 /// [`build`], placing a tab the desktop has not filed yet by the repository
@@ -31,6 +32,7 @@ pub fn build_with(
     machine: &Machine,
     agents: &[PaneAgentState],
     repo_of: impl Fn(&str) -> Option<PathBuf>,
+    running: Option<&HashSet<u64>>,
 ) -> Tree {
     let mut workspaces: Vec<_> = machine.workspaces.iter().collect();
     // Most recently used first: on a phone the one you were just in is the
@@ -61,7 +63,14 @@ pub fn build_with(
                                 .root
                                 .pane_ids()
                                 .into_iter()
-                                .map(|id| pane_view(id, &machine.panes, agents))
+                                .map(|id| {
+                                    let mut view = pane_view(id, &machine.panes, agents);
+                                    // An asleep tab's panes are stopped on purpose,
+                                    // and say so as the tab.
+                                    view.stopped = !tab.hibernated
+                                        && running.is_some_and(|running| !running.contains(&id));
+                                    view
+                                })
                                 .collect(),
                         })
                         .collect(),
@@ -193,6 +202,7 @@ fn pane_view(id: u64, panes: &[PaneRecord], agents: &[PaneAgentState]) -> PaneVi
         title,
         cwd: record.and_then(|p| p.cwd.clone()),
         agent,
+        stopped: false,
     }
 }
 
@@ -377,7 +387,7 @@ mod tests {
             ],
         };
         let repo_of = |cwd: &str| cwd.starts_with("/w/k6").then(|| PathBuf::from("/w/k6"));
-        let view = &build_with("h", &machine, &[], repo_of).workspaces[0];
+        let view = &build_with("h", &machine, &[], repo_of, None).workspaces[0];
         let groups: Vec<_> = view
             .groups
             .iter()
@@ -390,6 +400,24 @@ mod tests {
                 (Some("Ungrouped"), vec![ids[2].clone()]),
             ]
         );
+    }
+
+    #[test]
+    fn a_pane_the_server_is_not_running_is_marked_stopped() {
+        let mut asleep = Tab::leaf(3);
+        asleep.hibernated = true;
+        let machine = Machine {
+            workspaces: vec![workspace("w", 1, vec![Tab::leaf(1), Tab::leaf(2), asleep])],
+            panes: Vec::new(),
+        };
+        let running = HashSet::from([1]);
+        let view = &build_with("h", &machine, &[], |_| None, Some(&running)).workspaces[0];
+        let stopped: Vec<bool> = view.tabs.iter().map(|t| t.panes[0].stopped).collect();
+        // The asleep tab says so as itself, not as a pane that stopped.
+        assert_eq!(stopped, [false, true, false]);
+        // A server that could not be asked marks nothing.
+        let view = &build("h", &machine, &[]).workspaces[0];
+        assert!(view.tabs.iter().all(|t| !t.panes[0].stopped));
     }
 
     #[test]
