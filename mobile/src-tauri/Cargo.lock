@@ -5809,6 +5809,7 @@ name = "tty7-mobile"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "block2",
  "iroh",
  "jni 0.21.1",
  "objc2",

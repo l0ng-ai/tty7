@@ -43,9 +43,11 @@ tauri-plugin-biometric = "2"
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 
-# Setting one WKWebView property the Tauri API does not reach (`edge_to_edge`).
+# What the Tauri API does not reach: the WKWebView's insets (`edge_to_edge`),
+# the keyboard's height and the bar WebKit puts over it (`keyboard`).
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"
+block2 = "0.6"
 
 # The Android library ships as built: stripping takes it from 30 MB to 20, and
 # the APK from 32 to 23. iOS strips at export either way.

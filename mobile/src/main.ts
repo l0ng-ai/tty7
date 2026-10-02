@@ -34,17 +34,20 @@ const android = /Android/.test(navigator.userAgent);
 
 // The keyboard. The WebView runs edge to edge and is never resized for it
 // (lib.rs `edge_to_edge`): the keyboard simply covers the bottom of the page.
-// What is left is the visual viewport, so the app is sized to that, and the
-// dock and the message box sit on top of the keyboard. Screens that lay out
-// by size hear it as a window resize. Android's WebView leaves the visual
-// viewport whole, so the keyboard's height comes from the app (MainActivity).
+// What is left is sized to by the app, so the dock and the message box sit on
+// top of the keyboard. Screens that lay out by size hear it as a window
+// resize. Neither phone's WebView says reliably how much the keyboard covers
+// — iOS's leaves the visual viewport whole when edge to edge, Android's
+// always — so the app's native side says it (lib.rs `keyboard`, MainActivity)
+// as the keyboard starts to move; the visual viewport stands in until it has.
 {
   const view = window.visualViewport;
   let last = 0;
-  let androidKeyboard = 0;
+  // The native side's word: how far down the page the keyboard leaves room.
+  let room: (() => number) | null = null;
   const fitView = () => {
     if (!view) return;
-    const height = Math.round(android ? window.innerHeight - androidKeyboard : view.height);
+    const height = Math.round(room ? Math.min(room(), window.innerHeight) : view.height);
     // iOS scrolls the page to show a focused field; the app does its own.
     if (window.scrollY) window.scrollTo(0, 0);
     if (height === last) return;
@@ -58,8 +61,10 @@ const android = /Android/.test(navigator.userAgent);
   };
   view?.addEventListener("resize", fitView);
   view?.addEventListener("scroll", fitView);
-  window.addEventListener("android-keyboard", (e) => {
-    androidKeyboard = (e as CustomEvent<number>).detail;
+  // iOS says where the keyboard's top edge lands, Android how tall it is.
+  window.addEventListener("native-keyboard", (e) => {
+    const { top, height } = (e as CustomEvent<{ top?: number; height?: number }>).detail;
+    room = top !== undefined ? () => top : () => window.innerHeight - (height ?? 0);
     fitView();
   });
 }
@@ -341,6 +346,22 @@ document.addEventListener(
   { capture: true, passive: false },
 );
 document.addEventListener("touchcancel", () => (edgeSwipe = null), { capture: true, passive: true });
+
+// A tap on nothing in particular puts the keyboard away, as it does in the
+// phone's own apps: there is no Done bar over it (lib.rs `keyboard`). Taps
+// on controls keep it — the key row and Send write into the focused field —
+// and a pane decides for itself (`terminalScreen`).
+document.addEventListener(
+  "pointerdown",
+  (e) => {
+    const field = document.activeElement;
+    if (!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement)) return;
+    const target = e.target as Element;
+    if (target.closest?.("button, input, textarea, select, label, a, .term")) return;
+    field.blur();
+  },
+  { capture: true, passive: true },
+);
 
 // Android's Back button and gesture. Left to the WebView, they would leave the
 // app, since it has no history. Back closes what is open over the screen
@@ -2129,10 +2150,19 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       class: "compose-input",
       rows: 1,
       value: drafts.get(draftKey) ?? "",
-      placeholder: pane.agent ? `Message ${agentLook(pane.agent.kind).name}…` : "Type a command…",
       enterKeyHint: "send",
       ariaLabel: "Message",
     });
+    // Prose for an agent, so the keyboard helps as it does in a chat:
+    // capitals, corrections. A command for a shell, where it only gets in
+    // the way: `ls` must not become `Ls`.
+    const writeFor = (agent: AgentView | null | undefined) => {
+      field.placeholder = agent ? `Message ${agentLook(agent.kind).name}…` : "Type a command…";
+      field.autocapitalize = agent ? "sentences" : "off";
+      field.spellcheck = !!agent;
+      field.setAttribute("autocorrect", agent ? "on" : "off");
+    };
+    writeFor(pane.agent);
     const sendKey = h("button", { class: "round send", ariaLabel: "Send" }, ico("send"));
     // Typing straight into the terminal, key by key, for what a message box
     // cannot do: a full-screen program, a password prompt.
@@ -2177,7 +2207,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       cols: 80,
       rows: 24,
       fontSize: readablePx(),
-      fontFamily: "Hack, Menlo, ui-monospace, monospace",
+      fontFamily: 'Hack, "Symbols Nerd Font Mono", Menlo, ui-monospace, monospace',
       scrollback: 5000,
       cursorBlink: false,
       theme: terminalTheme(),
@@ -2513,9 +2543,22 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       field.value = "";
       edited();
     };
+    // Return sends; Shift-Return, on a keyboard that has it, starts a line.
+    let newLine = false;
     field.addEventListener("keydown", (e) => {
+      newLine = e.key === "Enter" && e.shiftKey;
       // Enter that confirms an IME's candidate is the IME's, not a send.
       if (e.key !== "Enter" || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      void submit();
+    });
+    // A Return that comes as a line break with no key behind it — the
+    // on-screen keyboard can deliver it that way — sends too.
+    field.addEventListener("beforeinput", (e) => {
+      const wasShift = newLine;
+      newLine = false;
+      if (e.isComposing || wasShift) return;
+      if (e.inputType !== "insertLineBreak" && e.inputType !== "insertParagraph") return;
       e.preventDefault();
       void submit();
     });
@@ -2819,6 +2862,9 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
           const at = e.changedTouches[0];
           const url = at && linkAt(at.clientX, at.clientY);
           if (url) void openUrl(url).catch(() => {});
+          // Writing a message, a tap above it puts the keyboard away, as
+          // tapping outside a field does anywhere on the phone.
+          else if (document.activeElement === field) field.blur();
           else typing.focus({ preventScroll: true });
           return;
         }
@@ -3126,9 +3172,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
               case "agent":
                 agentWaiting = event.agent?.status === "waiting";
                 readChoices();
-                field.placeholder = event.agent
-                  ? `Message ${agentLook(event.agent.kind).name}…`
-                  : "Type a command…";
+                writeFor(event.agent);
                 break;
               case "cwd":
                 paneCwd = event.path;
@@ -3204,9 +3248,13 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     onResume = reopen;
 
     // Hack has to be loaded before xterm measures a cell, or the first fit is
-    // taken with the fallback face's metrics.
+    // taken with the fallback face's metrics; the symbols before a glyph is
+    // drawn, or the GPU's glyph cache keeps the empty box it got instead.
     requestAnimationFrame(() => {
-      document.fonts.load("12px Hack").finally(() => {
+      Promise.allSettled([
+        document.fonts.load("12px Hack"),
+        document.fonts.load('12px "Symbols Nerd Font Mono"', "\ue0a0"),
+      ]).finally(() => {
         if (!alive) return;
         term.open(screenEl);
         // Drawn on the GPU: the DOM renderer lays every row out again on each
