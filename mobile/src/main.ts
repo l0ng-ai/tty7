@@ -1427,6 +1427,8 @@ function renderTree(
           { class: sp === on ? "ws-chip on" : "ws-chip", role: "tab", onclick: () => pick(sp.key) },
           sp.remote && ico("server"),
           h("span", { class: "ws-chip-name" }, sp.label),
+          // An agent waiting or at work in a workspace not on screen.
+          sp !== on && sp.ws && urgentDot(sp.ws.tabs),
           sp.count !== null && h("span", { class: "ws-chip-count" }, String(sp.count)),
         );
         chip.setAttribute("aria-selected", String(sp === on));
@@ -1534,6 +1536,11 @@ function mostUrgent(tabs: TabView[]): AgentStatus | null {
   return order.find((s) => states.has(s)) ?? null;
 }
 
+function urgentDot(tabs: TabView[]) {
+  const urgent = mostUrgent(tabs.map((tab) => ({ ...tab, panes: tab.panes.filter((p) => !p.stopped) })));
+  return urgent && h("span", { class: `status-dot ${urgent}` });
+}
+
 /** One sidebar group: a header that folds it, over its rows. It starts folded
  * as the desktop has it; a fold here is this phone's own and is remembered,
  * and a search shows every match whatever is folded. */
@@ -1551,13 +1558,12 @@ function tabGroup(
   const key = `fold.${host.id}.${spaceKey(place, ws)}.${group.pinned ? "pin" : "auto"}.${group.name}`;
   const saved = remembered(key);
   let folded = !searching && (saved === null ? !!group.collapsed : saved === "1");
-  const urgent = mostUrgent(tabs);
   const head = h(
     "button",
     { class: "tgroup-head" },
     ico("chevron", "icon tgroup-chevron"),
     h("span", { class: "tgroup-name" }, group.name),
-    urgent && h("span", { class: `status-dot ${urgent}` }),
+    urgentDot(tabs),
     h("span", { class: "tgroup-count" }, String(tabs.length)),
   );
   const section = h("div", { class: "tgroup" }, head, card);
