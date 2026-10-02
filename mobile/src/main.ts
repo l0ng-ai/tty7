@@ -454,14 +454,24 @@ function floatingBar(placeholder: string, onSearch: (query: string) => void, add
     ariaLabel: placeholder,
   });
   field.setAttribute("autocorrect", "off");
-  field.oninput = () => onSearch(field.value.trim().toLowerCase());
+  const clear = h("button", { class: "search-clear", ariaLabel: "Clear", hidden: true }, ico("close"));
+  const changed = () => {
+    clear.hidden = !field.value;
+    onSearch(field.value.trim().toLowerCase());
+  };
+  field.oninput = changed;
   field.onkeydown = (e) => {
     if (e.key === "Enter") field.blur();
+  };
+  clear.onpointerdown = (e) => e.preventDefault();
+  clear.onclick = () => {
+    field.value = "";
+    changed();
   };
   return h(
     "div",
     { class: "float-bar" },
-    h("label", { class: "search" }, ico("search"), field),
+    h("label", { class: "search" }, ico("search"), field, clear),
     h("button", { class: "fab", ariaLabel: add.label, onclick: add.run }, ico("plus")),
   );
 }
@@ -493,6 +503,7 @@ function hostMeta(hostId: string): { tone: string; text: string } | null {
 }
 
 function hostsScreen(direction: "push" | "pop" = "pop") {
+  remember("last.host", "");
   go(direction, () => {
     const body = h("div", { class: "stack" });
     let all: Host[] = [];
@@ -537,6 +548,8 @@ function hostsScreen(direction: "push" | "pop" = "pop") {
         return;
       }
       dock.hidden = false;
+      // A few machines are found by eye; the search comes with more.
+      dock.querySelector<HTMLElement>(".search")!.hidden = hosts.length < 6;
       render();
     });
     return view;
@@ -1050,6 +1063,7 @@ function retrier(run: () => void) {
 const SLOW_CONNECT_MS = 10_000;
 
 function hostScreen(host: Host, direction: "push" | "pop" = "pop") {
+  remember("last.host", host.id);
   go(direction, () => {
     const link = h("p", { class: "link" });
     // Shown here and remembered for the machine list.
@@ -1441,7 +1455,7 @@ function workspaceGroup(
   searching = false,
 ) {
   const rowsOf = (tabs: TabView[]) =>
-    tabs.flatMap((tab) => tab.panes.map((pane) => paneRow(host, place, tab, pane, tab.id === ws.active_tab)));
+    tabs.flatMap((tab) => tab.panes.map((pane) => paneRow(host, place, ws, tab, pane, tab.id === ws.active_tab)));
   // The desktop sidebar's groups, each with the tabs still in it (a search
   // leaves some out). An older desktop sends none: one list, as before.
   const byId = new Map(ws.tabs.map((tab) => [tab.id, tab]));
@@ -1539,9 +1553,9 @@ function remember(key: string, value: string) {
   }
 }
 
-/** The sheet "+" opens on a machine: pick what runs, pick the workspace, Open.
- * The tab starts in the directory its workspace's last tab is in, sized to
- * this screen, and the agent's command is typed into it once it is live. */
+/** The sheet "+" opens on a machine: pick what runs, where, Open. The tab is
+ * sized to this screen, and the agent's command is typed into it once it is
+ * live. */
 function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, picked: string | null) {
   type Target = { place: Place; ws: WorkspaceView };
   const targets: Target[] = [
@@ -1554,8 +1568,24 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, 
   // The workspace on screen, unless it cannot take a new tab.
   let target = Math.max(0, targets.findIndex((t) => spaceKey(t.place, t.ws) === picked));
 
+  // Where it starts: one of the folders the workspace has tabs in, the
+  // tab in front on the desktop first.
+  const foldersOf = (ws: WorkspaceView) => {
+    const tabs = [...ws.tabs].sort((a, b) => Number(b.id === ws.active_tab) - Number(a.id === ws.active_tab));
+    return [...new Set(tabs.flatMap((tab) => tab.panes.map((pane) => pane.cwd ?? "")).filter(Boolean))];
+  };
+  let folder = 0;
+
   const agents = h("div", { class: "agent-grid" });
   const places = h("div", { class: "card" });
+  const folders = h("div", { class: "card" });
+  const folderGroup = h("section", { class: "sheet-group" }, h("h3", { class: "group-title" }, "Folder"), folders);
+  const placeGroup = h(
+    "section",
+    { class: "sheet-group" },
+    h("h3", { class: "group-title" }, "Workspace"),
+    targets.length ? places : h("p", { class: "group-empty" }, `Open a workspace in tty7 on ${host.name} first.`),
+  );
   const open = h("button", { class: "button primary wide sheet-open" }, "Open");
   const error = h("p", { class: "field-error", role: "alert" });
 
@@ -1574,13 +1604,28 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, 
       ...targets.map((t, i) =>
         h(
           "button",
-          { class: "row choice", onclick: () => ((target = i), draw()) },
+          { class: "row choice", onclick: () => ((target = i), (folder = 0), draw()) },
           h("span", { class: "row-title" }, workspaceName(t.ws.name)),
           h("span", { class: "row-meta" }, t.place?.name ?? `${t.ws.tabs.length} ${t.ws.tabs.length === 1 ? "tab" : "tabs"}`),
           i === target ? ico("check", "icon choice-check") : h("span", { class: "choice-check" }),
         ),
       ),
     );
+    const dirs = targets[target] ? foldersOf(targets[target].ws) : [];
+    folders.replaceChildren(
+      ...dirs.map((dir, i) =>
+        h(
+          "button",
+          { class: "row choice", onclick: () => ((folder = i), draw()) },
+          h("span", { class: "row-title" }, baseName(dir)),
+          h("span", { class: "row-meta" }, parentPath(dir)),
+          i === folder ? ico("check", "icon choice-check") : h("span", { class: "choice-check" }),
+        ),
+      ),
+    );
+    // Only a choice when there is one to make.
+    folderGroup.hidden = dirs.length < 2;
+    placeGroup.hidden = targets.length === 1;
     open.disabled = targets.length === 0;
   };
   draw();
@@ -1589,12 +1634,8 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, 
     "New tab",
     h("div", { class: "sheet-body" },
       h("section", { class: "sheet-group" }, h("h3", { class: "group-title" }, "Agent"), agents),
-      h(
-        "section",
-        { class: "sheet-group" },
-        h("h3", { class: "group-title" }, "Workspace"),
-        targets.length ? places : h("p", { class: "group-empty" }, `Open a workspace in tty7 on ${host.name} first.`),
-      ),
+      folderGroup,
+      placeGroup,
       error,
     ),
     open,
@@ -1605,12 +1646,14 @@ function newTabSheet(host: Host, tree: Tree, failed: (message: string) => void, 
     remember("newtab.agent", s.kind ?? "shell");
     open.disabled = true;
     error.textContent = "";
-    const cwd = ws.tabs.at(-1)?.panes[0]?.cwd ?? null;
+    const cwd = foldersOf(ws)[folder] ?? null;
     try {
       const created = await api.tabNew(host.id, place?.key ?? null, ws.id, cwd, phoneGrid());
       remove();
-      const title = s.kind ? agentLook(s.kind).name : "shell";
-      terminalScreen(host, place, { id: created.pane_id, title, cwd }, title, s.command ?? undefined);
+      // Named as the list will name it: by its agent, or by its folder.
+      const title = s.kind ? agentLook(s.kind).name : cwd ? baseName(cwd) : "Shell";
+      const tab = { workspace: ws.id, id: created.tab_id, name: title, busy: false };
+      terminalScreen(host, place, { id: created.pane_id, title, cwd }, title, tab, s.command ?? undefined);
     } catch (e) {
       error.textContent = sentence(errorText(e));
       failed(errorText(e));
@@ -1754,23 +1797,144 @@ function workspaceName(name: string) {
 
 /** A pane's row: its tab's name first, as on the desktop, then what the pane
  * is doing — its agent's state, or where its shell is. */
-function paneRow(host: Host, place: Place, tab: TabView, pane: PaneView, current = false) {
+/** A tab to close: where it is, what it is called, and whether an agent in
+ * it is at work, which closing would stop. */
+interface TabRef {
+  workspace: string;
+  id: string;
+  name: string;
+  busy: boolean;
+}
+
+function tabRef(ws: WorkspaceView, tab: TabView, name: string): TabRef {
+  const busy = tab.panes.some((p) => p.agent && (p.agent.status === "working" || p.agent.status === "waiting"));
+  return { workspace: ws.id, id: tab.id, name, busy };
+}
+
+/** Closes a tab, asking first when an agent in it is at work. False when it
+ * was not closed: declined, or refused, which `failed` is told. */
+async function closeTab(host: Host, place: Place, tab: TabRef, failed: (message: string) => void) {
+  if (
+    tab.busy &&
+    !(await confirmSheet(
+      `Close ${tab.name}?`,
+      "Its agent is still at work and stops with it. You can reopen the tab from tty7 on your computer.",
+      "Close tab",
+    ))
+  )
+    return false;
+  try {
+    await api.tabClose(host.id, place?.key ?? null, tab.workspace, tab.id);
+    return true;
+  } catch (e) {
+    failed(sentence(errorText(e)));
+    return false;
+  }
+}
+
+/** The row a swipe has opened, so opening another closes it. */
+let swiped: { close: () => void } | null = null;
+
+/** A row that slides left to show an action behind it, as a list on the
+ * phone does. A swipe far enough opens it; a tap anywhere then closes it. */
+function swipeable(row: HTMLElement, label: string, run: () => Promise<boolean>) {
+  const WIDTH = 88;
+  const action = h("button", { class: "swipe-action", ariaLabel: label }, label);
+  const wrap = h("div", { class: "swipe" }, action, row);
+  let at = 0;
+  let drag: { x: number; y: number; from: number; claimed: boolean } | null = null;
+  const move = (x: number) => {
+    at = x;
+    row.style.transform = x ? `translateX(${x}px)` : "";
+  };
+  const me = {
+    close: () => {
+      move(0);
+      if (swiped === me) swiped = null;
+    },
+  };
+  row.addEventListener(
+    "touchstart",
+    (e) => {
+      const t = e.touches[0];
+      drag = { x: t.clientX, y: t.clientY, from: at, claimed: false };
+    },
+    { passive: true },
+  );
+  row.addEventListener(
+    "touchmove",
+    (e) => {
+      if (!drag) return;
+      const t = e.touches[0];
+      const dx = t.clientX - drag.x;
+      const dy = Math.abs(t.clientY - drag.y);
+      if (!drag.claimed) {
+        if (Math.max(Math.abs(dx), dy) < 8) return;
+        // Mostly sideways it is the row's; anything else scrolls the list.
+        if (dy >= Math.abs(dx)) return (drag = null);
+        drag.claimed = true;
+        wrap.classList.add("dragging");
+        if (swiped && swiped !== me) swiped.close();
+      }
+      e.preventDefault();
+      const x = drag.from + dx;
+      // Past the action's width it gives, but grudgingly.
+      move(Math.min(0, x < -WIDTH ? -WIDTH + (x + WIDTH) / 3 : x));
+    },
+    { passive: false },
+  );
+  row.addEventListener("touchend", () => {
+    if (!drag?.claimed) return void (drag = null);
+    drag = null;
+    wrap.classList.remove("dragging");
+    if (at < -WIDTH / 2) {
+      move(-WIDTH);
+      swiped = me;
+    } else me.close();
+  });
+  // Open, a tap on the row closes it rather than opening the pane.
+  row.addEventListener(
+    "click",
+    (e) => {
+      if (at === 0) return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      me.close();
+    },
+    { capture: true },
+  );
+  action.onclick = async () => {
+    action.disabled = true;
+    if (await run()) {
+      wrap.classList.add("gone");
+    } else {
+      action.disabled = false;
+      me.close();
+    }
+  };
+  return wrap;
+}
+
+function paneRow(host: Host, place: Place, ws: WorkspaceView, tab: TabView, pane: PaneView, current = false) {
   const agent = pane.agent;
   const sub: Child[] = [];
   if (agent && agent.status !== "idle")
     sub.push(h("span", { class: `status-word ${agent.status}` }, STATUS_WORD[agent.status]));
-  // A tab named after its directory says the cwd already; what tells its
-  // panes apart then is what runs in them.
+  // A tab named after its directory goes by the directory's own name, the
+  // end a narrow row would cut off; where it is goes underneath. What tells
+  // a split's panes apart is what runs in them.
   const namedByPath = /^[~/]/.test(tab.name);
-  const split = tab.panes.length > 1 || namedByPath ? pane.title : null;
-  const dir = agent || namedByPath ? null : shortPath(pane.cwd);
+  const name = namedByPath ? baseName(tab.name) : tab.name;
+  const pathTitle = (t: string) => t === tab.name || t === pane.cwd || /^[~/]/.test(t);
+  const split = tab.panes.length > 1 && !pathTitle(pane.title) ? pane.title : null;
+  const dir = namedByPath ? parentPath(tab.name) : shortPath(pane.cwd);
   const detail = [split, agent?.message ?? dir].filter(Boolean).join(" · ");
   if (detail) sub.push(sub.length ? ` · ${detail}` : detail);
-  return h(
+  const row = h(
     "button",
     {
       class: tab.hibernated ? "row asleep" : "row",
-      onclick: () => terminalScreen(host, place, pane, tab.name),
+      onclick: () => terminalScreen(host, place, pane, name, tabRef(ws, tab, name)),
     },
     avatar(agent),
     h(
@@ -1779,7 +1943,7 @@ function paneRow(host: Host, place: Place, tab: TabView, pane: PaneView, current
       h(
         "span",
         { class: "row-title" },
-        tab.name,
+        name,
         // The tab in front on the desktop: where you were.
         current && h("span", { class: "tag current" }, "Current"),
         tab.hibernated && h("span", { class: "tag" }, "Asleep"),
@@ -1789,6 +1953,15 @@ function paneRow(host: Host, place: Place, tab: TabView, pane: PaneView, current
     agent && agent.status !== "idle" && agent.status !== "done" && h("span", { class: `status-dot ${agent.status}` }),
     ico("chevron", "icon row-chevron"),
   );
+  // A split tab's panes each have a row; closing is the tab's, on its first.
+  if (pane.id !== tab.panes[0]?.id) return row;
+  return swipeable(row, "Close", () => closeTab(host, place, tabRef(ws, tab, name), (message) => closeFailed(name, message)));
+}
+
+/** A close that did not go through, said in a sheet: the row it came from
+ * has no room for it. */
+function closeFailed(name: string, message: string) {
+  openSheet(`Couldn't close ${name}`, h("div", { class: "sheet-body" }, h("p", { class: "sheet-text" }, message)));
 }
 
 /** A pane's avatar, as the desktop's tab strip draws it: the agent's mark on
@@ -1810,6 +1983,18 @@ function avatar(agent: AgentView | null | undefined, cls = "avatar") {
     } else el.append(h("span", { class: "glyph" }, look.name.slice(0, 2)));
   } else el.append(h("span", { class: "glyph" }, ">_"));
   return el;
+}
+
+/** A path's last segment: a directory's own name. */
+function baseName(path: string) {
+  return path.split("/").filter(Boolean).pop() ?? path;
+}
+
+/** Where a directory is: the path up to its own name, its far end kept. */
+function parentPath(path: string) {
+  const parts = path.split("/").filter(Boolean);
+  if (parts.length <= 1) return "";
+  return shortPath(`${path.startsWith("/") ? "/" : ""}${parts.slice(0, -1).join("/")}`);
 }
 
 /** The last two segments of a path: the part that tells panes apart. */
@@ -2058,7 +2243,7 @@ const drafts = new Map<string, string>();
 
 /** `run` is typed into the pane, then Enter, once it is first live: the
  * agent a new tab was opened for. */
-function terminalScreen(host: Host, place: Place, pane: PaneView, title: string, run?: string) {
+function terminalScreen(host: Host, place: Place, pane: PaneView, title: string, tab?: TabRef, run?: string) {
   go("push", () => {
     // What the pane is doing and whether keystrokes will land, in words: the
     // one line under the title.
@@ -2091,6 +2276,27 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
           icon: "phone" as const,
           run: toggleTake,
         },
+        ...(tab
+          ? [
+              {
+                label: "Close tab",
+                icon: "close" as const,
+                danger: true,
+                run: async () => {
+                  // Asked here whatever runs in it: this is the screen it is
+                  // closed from, not a list it can be seen to leave.
+                  const busy = tab.busy || agentWaiting || paneAgentWorking;
+                  if (
+                    !busy &&
+                    !(await confirmSheet(`Close ${tab.name}?`, "You can reopen it from tty7 on your computer.", "Close tab"))
+                  )
+                    return;
+                  if (await closeTab(host, place, { ...tab, busy }, (message) => showBanner(message)))
+                    hostScreen(host);
+                },
+              },
+            ]
+          : []),
       ],
       "round",
     );
@@ -2180,6 +2386,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // buttons over the key row while it waits for an answer.
     const answers = h("div", { class: "answers", hidden: true, role: "group", ariaLabel: "Answers" });
     let agentWaiting = pane.agent?.status === "waiting";
+    let paneAgentWorking = pane.agent?.status === "working";
     // What typing straight into the terminal goes through. xterm's own hidden
     // textarea is not: iOS input methods never commit into it (a pinyin
     // candidate stays unwritten), so this one, a plain field the keyboard
@@ -3171,6 +3378,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
                 break;
               case "agent":
                 agentWaiting = event.agent?.status === "waiting";
+                paneAgentWorking = event.agent?.status === "working";
                 readChoices();
                 writeFor(event.agent);
                 break;
@@ -3277,4 +3485,13 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
 }
 
 if (prefs.lock) lock();
-hostsScreen("push");
+// Back where it was left: the machine last open, unless it was left for the
+// list of machines.
+api.hosts().then(
+  (hosts) => {
+    const last = hosts.find((host) => host.id === remembered("last.host"));
+    if (last) hostScreen(last, "push");
+    else hostsScreen("push");
+  },
+  () => hostsScreen("push"),
+);

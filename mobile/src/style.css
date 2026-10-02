@@ -261,6 +261,12 @@ code {
   transform: none;
 }
 
+/* Until it folds in, the title takes no room, so the way back is named in
+   full; once it shows, the back pill gives way to it. */
+.nav:not(.folded) .nav-title {
+  max-width: 0;
+}
+
 /* Back is a floating pill that names where it goes. */
 .nav-back {
   display: flex;
@@ -653,7 +659,10 @@ code {
   opacity: 0.55;
 }
 
-.row + .row::before {
+.row + .row::before,
+.swipe + .swipe > .row::before,
+.swipe + .row::before,
+.row + .swipe > .row::before {
   content: "";
   position: absolute;
   top: 0;
@@ -1635,7 +1644,26 @@ html.scanning #app {
   bottom: calc(12px + var(--safe-bottom));
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px;
+}
+
+.search-clear {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: -4px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--ink-3, #8e8e93);
+  color: var(--canvas);
+}
+
+.search .search-clear .icon {
+  width: 12px;
+  height: 12px;
 }
 
 /* The list softens into the canvas as it runs under the floating bar, as the
@@ -2346,4 +2374,42 @@ html[data-nav="pop"]::view-transition-new(root) {
   margin-top: 4px;
   color: var(--ink-2);
   background: var(--fill);
+}
+
+/* A row that slides to show an action behind it. */
+.swipe {
+  position: relative;
+  overflow: hidden;
+  transition:
+    max-height 0.25s var(--ease),
+    opacity 0.2s;
+  max-height: 160px;
+}
+
+.swipe > .row {
+  background: var(--cell);
+  transition: transform 0.25s var(--ease);
+}
+
+.swipe.dragging > .row {
+  transition: none;
+}
+
+.swipe-action {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 88px;
+  border: 0;
+  background: var(--danger);
+  color: #fff;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.swipe.gone {
+  max-height: 0;
+  opacity: 0;
 }
