@@ -2749,3 +2749,10 @@ html[data-nav="pop"]::view-transition-new(root) {
     transform: none;
   }
 }
+
+/* A pane that is not running: its keys and box are there but out of use. */
+.term-screen.ended .key-slot,
+.term-screen.ended .compose > button {
+  opacity: 0.35;
+  pointer-events: none;
+}

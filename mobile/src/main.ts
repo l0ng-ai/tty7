@@ -221,6 +221,15 @@ function keepSent(text: string) {
 
 /** Past messages for what is being written: those it begins, then those
  * that contain it. */
+function wordStarts(text: string, q: string) {
+  // Chinese and Japanese leave no spaces between words: anywhere will do.
+  if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(q)) return text.includes(q);
+  for (let at = text.indexOf(q); at >= 0; at = text.indexOf(q, at + 1)) {
+    if (at === 0 || !/[\p{L}\p{N}]/u.test(text[at - 1])) return true;
+  }
+  return false;
+}
+
 function suggestions(typed: string, limit = 12) {
   const q = typed.trim().toLowerCase();
   if (!q) return [];
@@ -230,7 +239,9 @@ function suggestions(typed: string, limit = 12) {
     const low = past.toLowerCase();
     if (low === q) continue;
     if (low.startsWith(q)) starts.push(past);
-    else if (low.includes(q)) within.push(past);
+    // Elsewhere only where a word starts: "ls" finds "git ls-files", not
+    // every message that mentions tools.
+    else if (wordStarts(low, q)) within.push(past);
   }
   return [...starts, ...within].slice(0, limit);
 }
@@ -1932,9 +1943,16 @@ function confirmSheet(title: string, text: string, action: string): Promise<bool
 function phoneGrid() {
   const cellW = readablePx() * CELL_EM;
   const cellH = readablePx() * 1.18;
-  // The terminal screen's bar, its dock (keys, page dots, message box, the
-  // home indicator's gap) and the xterm padding.
-  const chrome = 56 + 132 + 16;
+  // The terminal screen's bar under the status bar, its dock (keys, page
+  // dots, message box) over the home indicator, and the xterm padding. The
+  // two insets are the phone's own, read off the stylesheet's variables.
+  const probe = h("div");
+  probe.style.cssText = "position:absolute;visibility:hidden;padding:var(--inset-top) 0 var(--safe-bottom)";
+  document.body.append(probe);
+  const { paddingTop, paddingBottom } = getComputedStyle(probe);
+  const insets = (parseFloat(paddingTop) || 0) + (parseFloat(paddingBottom) || 0);
+  probe.remove();
+  const chrome = 44 + insets + 132 + 16;
   return {
     cols: Math.max(20, Math.floor((window.innerWidth - 12) / cellW)),
     rows: Math.max(5, Math.floor((window.innerHeight - chrome) / cellH)),
@@ -2890,7 +2908,10 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // the daemon confirmed, `sent` the grid last asked for.
     // Kept per pane: one taken over last time is taken over again on return.
     const takeKey = `take.${host.id}.${place?.key ?? ""}.${pane.id}`;
-    let wanted = made || remembered(takeKey) === "1";
+    // A tab opened here is the phone's: it keeps the phone's size on later
+    // visits too, so it follows the keyboard rather than hiding under it.
+    if (made) remember(takeKey, "1");
+    let wanted = remembered(takeKey) === "1";
     let leased = false;
     let releasing = false;
     let sent = "";
@@ -2909,6 +2930,13 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       live = false;
       retry.cancel();
       setState("offline", "Not running");
+      // Nothing typed here would go anywhere: the box and keys say so
+      // rather than taking it and doing nothing.
+      field.blur();
+      typing.blur();
+      field.disabled = true;
+      field.placeholder = "This pane isn't running";
+      view.classList.add("ended");
       const fresh = tab && {
         label: "New tab here",
         run: async () => {
@@ -3752,8 +3780,43 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // Codex draw them ("❯ 1. Yes", "2. No, and tell Claude…"), box edges and
     // the cursor mark stripped.
     const readChoices = () => {
-      const found: { n: string; label: string }[] = [];
-      if (agentWaiting) {
+      // `n` is typed to pick it; `keys`, where given, is sent instead.
+      const found: { n: string; label: string; keys?: string }[] = [];
+      // A menu picked with the arrows, no numbers — an agent's "trust this
+      // folder?" — said by the hint under it. Its options are the lines
+      // above, at the selected one's indent; picking one moves to it and
+      // presses Enter.
+      {
+        const buf = term.buffer.active;
+        const rows: string[] = [];
+        for (let y = buf.baseY; y < buf.baseY + term.rows; y++) rows.push(buf.getLine(y)?.translateToString(true) ?? "");
+        let hint = -1;
+        for (let y = rows.length - 1; y >= 0 && hint < 0; y--) if (/Enter to (confirm|select)/i.test(rows[y])) hint = y;
+        if (hint > 0) {
+          let y = hint - 1;
+          while (y >= 0 && !rows[y].trim()) y--;
+          const block: string[] = [];
+          for (; y >= 0 && rows[y].trim(); y--) block.unshift(rows[y]);
+          const sel = block.findIndex((l) => /^\s*❯\s/.test(l));
+          if (sel >= 0 && !/^\s*❯\s+\d{1,2}[.)]\s/.test(block[sel])) {
+            const col = block[sel].indexOf("❯");
+            const options = block
+              .map((l, i) => ({ l, i }))
+              .filter(({ l, i }) => i === sel || (l.slice(0, col + 2).trim() === "" && l[col + 2] !== " "));
+            const at = options.findIndex((o) => o.i === sel);
+            if (options.length >= 2 && options.length <= 9)
+              options.forEach((o, k) => {
+                const step = k > at ? "\x1b[B" : "\x1b[A";
+                found.push({
+                  n: String(k + 1),
+                  label: o.l.replace(/^\s*❯?\s*/, ""),
+                  keys: step.repeat(Math.abs(k - at)) + "\r",
+                });
+              });
+          }
+        }
+      }
+      if (agentWaiting && !found.length) {
         // The whole screen: the terminal here can be taller than the pane,
         // with the agent's menu well above its bottom rows.
         const buf = term.buffer.active;
@@ -3778,7 +3841,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         ...found.map((c) => {
           const b = h("button", { class: "answer" }, h("b", {}, c.n), h("span", {}, c.label));
           b.onpointerdown = (e) => e.preventDefault();
-          b.onclick = () => (feel("key"), send(c.n));
+          b.onclick = () => (feel("key"), send(c.keys ?? c.n));
           return b;
         }),
       );
@@ -3789,7 +3852,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     };
     let choicesFrame = 0;
     term.onWriteParsed(() => {
-      if (!agentWaiting || choicesFrame) return;
+      if (choicesFrame) return;
       choicesFrame = requestAnimationFrame(() => {
         choicesFrame = 0;
         readChoices();
