@@ -2436,3 +2436,50 @@ html[data-nav="pop"]::view-transition-new(root) {
   max-height: 0;
   opacity: 0;
 }
+
+/* A phone on its side has height to spare for nothing but the pane: the bar
+   slims, and the keys and the message box share one row. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .term-nav {
+    height: calc(44px + var(--inset-top));
+  }
+
+  .term-dock {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    padding-top: 6px;
+    padding-bottom: calc(6px + var(--safe-bottom));
+  }
+
+  .term-dock > .key-slot {
+    flex: 1.3;
+    min-width: 0;
+  }
+
+  .term-dock > .compose {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .term-dock > .key-dots {
+    display: none;
+  }
+
+  .key {
+    height: 38px;
+  }
+
+  .compose-input {
+    min-height: 38px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+}
+
+/* A hint is one line; it never makes the box taller than what is typed. */
+.compose-input::placeholder {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

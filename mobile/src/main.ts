@@ -1837,9 +1837,9 @@ let swiped: { close: () => void } | null = null;
 
 /** A row that slides left to show an action behind it, as a list on the
  * phone does. A swipe far enough opens it; a tap anywhere then closes it. */
-function swipeable(row: HTMLElement, label: string, run: () => Promise<boolean>) {
+function swipeable(row: HTMLElement, label: string, spoken: string, run: () => Promise<boolean>) {
   const WIDTH = 88;
-  const action = h("button", { class: "swipe-action", ariaLabel: label }, label);
+  const action = h("button", { class: "swipe-action", ariaLabel: spoken }, label);
   const wrap = h("div", { class: "swipe" }, action, row);
   let at = 0;
   let drag: { x: number; y: number; from: number; claimed: boolean } | null = null;
@@ -1955,7 +1955,7 @@ function paneRow(host: Host, place: Place, ws: WorkspaceView, tab: TabView, pane
   );
   // A split tab's panes each have a row; closing is the tab's, on its first.
   if (pane.id !== tab.panes[0]?.id) return row;
-  return swipeable(row, "Close", () => closeTab(host, place, tabRef(ws, tab, name), (message) => closeFailed(name, message)));
+  return swipeable(row, "Close", `Close ${name}`, () => closeTab(host, place, tabRef(ws, tab, name), (message) => closeFailed(name, message)));
 }
 
 /** A close that did not go through, said in a sheet: the row it came from
