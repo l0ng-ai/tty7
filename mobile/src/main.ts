@@ -2737,13 +2737,21 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     typing.setAttribute("autocorrect", "off");
     typing.setAttribute("autocomplete", "off");
 
+    // Until the pane's screen first arrives, a sign that it is on its way,
+    // not an empty pane; held back a moment so a quick link never flashes it.
+    const loading = h("div", { class: "term-loading", hidden: true }, h("span"), h("span"), h("span"));
+    const loadingSoon = window.setTimeout(() => (loading.hidden = false), 250);
+    const loaded = () => {
+      clearTimeout(loadingSoon);
+      loading.remove();
+    };
     // Back in the history, the way down to what is happening now is one tap.
     const latest = h("button", { class: "to-latest", ariaLabel: "Jump to the latest output", hidden: true }, ico("down"));
     const view = h(
       "div",
       { class: "screen term-screen" },
       bar,
-      h("div", { class: "term-wrap" }, screenEl, typing, copyView, findBar, latest, banner),
+      h("div", { class: "term-wrap" }, screenEl, loading, typing, copyView, findBar, latest, banner),
       h("div", { class: "term-dock" }, h("div", { class: "key-slot" }, pages, answers, suggest), dots, chips, compose),
     );
 
@@ -2896,6 +2904,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     // A pane its server no longer has — restarted since, and not started
     // again — is not coming back by retrying: said so, with a way on.
     const gone = () => {
+      loaded();
       ended = true;
       live = false;
       retry.cancel();
@@ -3808,6 +3817,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       const replay = () => {
         if (replayed) return;
         replayed = true;
+        loaded();
         term.reset();
       };
       live = false;

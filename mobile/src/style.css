@@ -2705,3 +2705,47 @@ html[data-nav="pop"]::view-transition-new(root) {
 .row {
   -webkit-touch-callout: none;
 }
+
+/* Three dots while a pane's screen is on its way (main.ts `loading`). */
+.term-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.term-loading[hidden] {
+  display: none;
+}
+
+.term-loading span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  animation: loading-dot 1s ease-in-out infinite;
+}
+
+.term-loading span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.term-loading span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes loading-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  40% {
+    opacity: 1;
+    transform: none;
+  }
+}
