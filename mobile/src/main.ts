@@ -10,6 +10,7 @@ import type { ITheme } from "@xterm/xterm";
 import * as scanner from "@tauri-apps/plugin-barcode-scanner";
 
 import { getVersion, onBackButtonPress } from "@tauri-apps/api/app";
+import { impactFeedback, selectionFeedback } from "@tauri-apps/plugin-haptics";
 
 import * as api from "./api";
 import { MAX_UPLOAD } from "./api";
@@ -116,6 +117,12 @@ function sentence(text: string) {
   const t = text.trim();
   if (!t) return "";
   return `${t[0].toUpperCase()}${t.slice(1)}${/[.!?]$/.test(t) ? "" : "."}`;
+}
+
+/** A tap felt under the finger: `key` for a key or a button that types,
+ * `tick` for a control passing a point (a swipe opening, a toggle). */
+function feel(kind: "key" | "tick") {
+  (kind === "key" ? impactFeedback("light") : selectionFeedback()).catch(() => {});
 }
 
 function errorText(e: unknown) {
@@ -1938,8 +1945,11 @@ function swipeable(row: HTMLElement, label: string, spoken: string, run: () => P
       }
       e.preventDefault();
       const x = drag.from + dx;
+      const was = at < -WIDTH / 2;
       // Past the action's width it gives, but grudgingly.
       move(Math.min(0, x < -WIDTH ? -WIDTH + (x + WIDTH) / 3 : x));
+      // Felt as it passes the point where letting go opens it.
+      if (was !== at < -WIDTH / 2) feel("tick");
     },
     { passive: false },
   );
@@ -2645,6 +2655,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         // so the soft keyboard stays as it is.
         key.onpointerdown = (e) => e.preventDefault();
         key.onclick = () => {
+          feel("key");
           if (k.latch) {
             ctrl = !ctrl;
             key.classList.toggle("on", ctrl);
@@ -2842,7 +2853,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       void submit();
     });
     sendKey.onpointerdown = (e) => e.preventDefault();
-    sendKey.onclick = () => void submit();
+    sendKey.onclick = () => (feel("key"), void submit());
 
     keyboard.onpointerdown = (e) => e.preventDefault();
     keyboard.onclick = () => {
@@ -3386,7 +3397,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         ...found.map((c) => {
           const b = h("button", { class: "answer" }, h("b", {}, c.n), h("span", {}, c.label));
           b.onpointerdown = (e) => e.preventDefault();
-          b.onclick = () => send(c.n);
+          b.onclick = () => (feel("key"), send(c.n));
           return b;
         }),
       );

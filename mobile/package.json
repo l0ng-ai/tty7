@@ -12,6 +12,7 @@
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-barcode-scanner": "^2.5.0",
     "@tauri-apps/plugin-biometric": "^2.4.0",
+    "@tauri-apps/plugin-haptics": "^2.4.1",
     "@tauri-apps/plugin-opener": "^2.6.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/addon-webgl": "^0.19.0",

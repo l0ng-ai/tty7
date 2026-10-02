@@ -37,6 +37,9 @@ tauri-plugin-opener = "2"
 tauri-plugin-barcode-scanner = "2"
 # Face ID / passcode before the app shows anything, when turned on.
 tauri-plugin-biometric = "2"
+# A tap felt under the finger for the keys and answers, as the phone's own
+# keyboard gives.
+tauri-plugin-haptics = "2"
 
 # Reading the system bars' size and leaving for the background (`insets`,
 # `to_background`), which the Tauri API does not reach.
