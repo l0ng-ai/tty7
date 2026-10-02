@@ -7,6 +7,8 @@
 //! goes through `tab_view` so a tab reads the same here as in the CLI and the
 //! desktop's switcher.
 
+use std::path::PathBuf;
+
 use tty7_core::core::cli_agent::{AgentSessionState, AgentStatus as CoreStatus, CLIAgent};
 use tty7_core::core::group_key::{AutoKey, GroupKey, auto_names, pinned_names, place};
 use tty7_core::core::machine::{Machine, PaneRecord, Workspace};
@@ -17,6 +19,19 @@ use tty7_mobile_proto::{
 };
 
 pub fn build(host: &str, machine: &Machine, agents: &[PaneAgentState]) -> Tree {
+    build_with(host, machine, agents, |_| None)
+}
+
+/// [`build`], placing a tab the desktop has not filed yet by the repository
+/// `repo_of` finds its directory in. The desktop files a tab as its sidebar
+/// draws it, so one opened from the phone while that window is out of sight
+/// would sit in Ungrouped until someone looked.
+pub fn build_with(
+    host: &str,
+    machine: &Machine,
+    agents: &[PaneAgentState],
+    repo_of: impl Fn(&str) -> Option<PathBuf>,
+) -> Tree {
     let mut workspaces: Vec<_> = machine.workspaces.iter().collect();
     // Most recently used first: on a phone the one you were just in is the
     // one you are coming back to.
@@ -50,7 +65,7 @@ pub fn build(host: &str, machine: &Machine, agents: &[PaneAgentState]) -> Tree {
                                 .collect(),
                         })
                         .collect(),
-                    groups: groups_of(ws),
+                    groups: groups_of(ws, &machine.panes, &repo_of),
                     active_tab: ws.active_tab.map(|t| t.to_string()),
                 }
             })
@@ -68,11 +83,22 @@ pub fn build(host: &str, machine: &Machine, agents: &[PaneAgentState]) -> Tree {
 /// writes the answer down so other readers need not. Auto grouping is taken
 /// to be on, as it is by default; a desktop that turned it off still keeps
 /// these hints, so its phone shows the repo groups its sidebar does not.
-fn groups_of(ws: &Workspace) -> Vec<GroupView> {
+fn groups_of(
+    ws: &Workspace,
+    panes: &[PaneRecord],
+    repo_of: &dyn Fn(&str) -> Option<PathBuf>,
+) -> Vec<GroupView> {
     let keys: Vec<Option<GroupKey>> = ws
         .tabs
         .iter()
-        .map(|tab| place(tab.group, &ws.groups, true, tab.last_auto.clone()))
+        .map(|tab| {
+            let auto = tab.last_auto.clone().or_else(|| {
+                let first = *tab.root.pane_ids().first()?;
+                let cwd = panes.iter().find(|p| p.id == first)?.cwd.as_deref()?;
+                repo_of(cwd).map(AutoKey::Repo)
+            });
+            place(tab.group, &ws.groups, true, auto)
+        })
         .collect();
     let members = |key: Option<&GroupKey>| -> Vec<String> {
         ws.tabs
@@ -335,6 +361,35 @@ mod tests {
             ]
         );
         assert_eq!(view.active_tab.as_deref(), Some(ids[3].as_str()));
+    }
+
+    #[test]
+    fn a_tab_the_desktop_has_not_filed_goes_by_its_directorys_repo() {
+        let mut ws = workspace("w", 1, vec![Tab::leaf(1), Tab::leaf(2), Tab::leaf(3)]);
+        ws.tabs[0].last_auto = Some(AutoKey::Repo("/w/k6".into()));
+        let ids: Vec<String> = ws.tabs.iter().map(|t| t.id.to_string()).collect();
+        let machine = Machine {
+            workspaces: vec![ws],
+            panes: vec![
+                record(1, "zsh", None, "/w/k6"),
+                record(2, "zsh", None, "/w/k6/src"),
+                record(3, "zsh", None, "/tmp"),
+            ],
+        };
+        let repo_of = |cwd: &str| cwd.starts_with("/w/k6").then(|| PathBuf::from("/w/k6"));
+        let view = &build_with("h", &machine, &[], repo_of).workspaces[0];
+        let groups: Vec<_> = view
+            .groups
+            .iter()
+            .map(|g| (g.name.as_deref(), g.tabs.clone()))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                (Some("k6"), vec![ids[0].clone(), ids[1].clone()]),
+                (Some("Ungrouped"), vec![ids[2].clone()]),
+            ]
+        );
     }
 
     #[test]
