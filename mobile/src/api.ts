@@ -37,6 +37,19 @@ export interface WorkspaceView {
   id: string;
   name: string;
   tabs: TabView[];
+  /** The desktop sidebar's groups, in its order; absent from an older desktop. */
+  groups?: GroupView[];
+  /** The tab the desktop last had in front here. */
+  active_tab?: string;
+}
+
+/** One of the desktop sidebar's groups: pinned, per repository or SSH host,
+ * or the tabs in none (unnamed when it is the only group). */
+export interface GroupView {
+  name?: string;
+  pinned?: boolean;
+  collapsed?: boolean;
+  tabs: string[];
 }
 
 export interface Tree {

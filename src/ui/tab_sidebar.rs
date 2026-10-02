@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 
 use crate::core::config::Config;
 use crate::core::group_key::{
-    AutoKey, GroupId, GroupKey, PinnedGroup, WorkspaceGroups, auto_key, place,
+    AutoKey, GroupId, GroupKey, PinnedGroup, WorkspaceGroups, auto_key, auto_names, pinned_names,
+    place,
 };
 use crate::terminal::git_status::GitStatusCache;
 use crate::ui::app::{TITLE_BAR_HEIGHT, Tab, Tty7App};
@@ -3220,93 +3221,6 @@ fn reordered_pinned(
         .collect()
 }
 
-/// What each pinned group's header reads, in list order: the name the user
-/// gave it, or its folder's last component — lengthened, like a repo's, when
-/// two folders end the same way. A label group always has a given name.
-fn pinned_names(pinned: &[PinnedGroup]) -> Vec<String> {
-    let unnamed: Vec<PathBuf> = pinned
-        .iter()
-        .filter(|g| g.given_name().is_none())
-        .filter_map(|g| g.folder_path().map(Path::to_path_buf))
-        .collect();
-    let mut from_folders = group_names(&unnamed.iter().collect::<Vec<_>>()).into_iter();
-    pinned
-        .iter()
-        .map(|g| match (g.given_name(), g.folder_path()) {
-            (Some(name), _) => name.to_string(),
-            (None, Some(_)) => from_folders
-                .next()
-                .expect("group_names answers one name per folder"),
-            (None, None) => String::new(),
-        })
-        .collect()
-}
-
-/// What each auto group's header reads, in `keys` order.
-///
-/// Only repo roots go through [`group_names`]. They are paths, so two of them
-/// can perfectly well end in the same component and need lengthening until
-/// they differ. A host group reads its `user@host` target as it is.
-fn auto_names(keys: &[&AutoKey]) -> Vec<String> {
-    let roots: Vec<&PathBuf> = keys
-        .iter()
-        .filter_map(|k| match k {
-            AutoKey::Repo(p) => Some(p),
-            AutoKey::SshHost(_) => None,
-        })
-        .collect();
-    let mut disambiguated = group_names(&roots).into_iter();
-    keys.iter()
-        .map(|k| match k {
-            AutoKey::Repo(_) => disambiguated
-                .next()
-                .expect("group_names answers one name per root"),
-            AutoKey::SshHost(host) => host.clone(),
-        })
-        .collect()
-}
-
-fn group_names(roots: &[&PathBuf]) -> Vec<String> {
-    let comps: Vec<Vec<String>> = roots
-        .iter()
-        .map(|r| {
-            r.components()
-                .filter(|c| matches!(c, std::path::Component::Normal(_)))
-                .map(|c| c.as_os_str().to_string_lossy().to_string())
-                .collect()
-        })
-        .collect();
-    let mut depth = vec![1usize; roots.len()];
-    loop {
-        let names: Vec<String> = comps
-            .iter()
-            .zip(&depth)
-            .enumerate()
-            .map(|(i, (c, &d))| {
-                if c.is_empty() {
-                    roots[i].display().to_string()
-                } else {
-                    c[c.len().saturating_sub(d)..].join("/")
-                }
-            })
-            .collect();
-        let mut grew = false;
-        for i in 0..names.len() {
-            let collides = names
-                .iter()
-                .enumerate()
-                .any(|(j, n)| j != i && *n == names[i]);
-            if collides && depth[i] < comps[i].len() {
-                depth[i] += 1;
-                grew = true;
-            }
-        }
-        if !grew {
-            return names;
-        }
-    }
-}
-
 /// Where a click on a tab's diff counts opens the overlay: the focused pane's
 /// repo.
 fn git_click(
@@ -4703,50 +4617,6 @@ mod tests {
         // A search hides the second; it keeps its place.
         let shown = [ids[0], ids[2], ids[3]];
         assert_eq!(reordered_pinned(&ids, &shown, 2, 0), Some(vec![3, 0, 1, 2]));
-    }
-
-    /// A label is the name the user typed. Running it through the path
-    /// splitter would chop one containing a `/` into components and then
-    /// "shorten" it to the tail, so `work/urgent` would print as `urgent`.
-    #[test]
-    fn a_label_is_never_shortened_the_way_a_path_is() {
-        let pinned = vec![
-            PinnedGroup::label("work/urgent"),
-            PinnedGroup::folder(Path::new("/home/u/tty7")),
-        ];
-        assert_eq!(pinned_names(&pinned), vec!["work/urgent", "tty7"]);
-    }
-
-    /// Two folders ending in the same component grow a prefix until they
-    /// differ, the way two repo roots do; a named one sits that out.
-    #[test]
-    fn pinned_folders_disambiguate_like_repo_roots() {
-        let mut named = PinnedGroup::folder(Path::new("/home/u/other/app"));
-        named.name = Some("mine".into());
-        let pinned = vec![
-            PinnedGroup::folder(Path::new("/home/u/work/app")),
-            named,
-            PinnedGroup::folder(Path::new("/home/u/fork/app")),
-        ];
-        assert_eq!(pinned_names(&pinned), vec!["work/app", "mine", "fork/app"]);
-    }
-
-    #[test]
-    fn group_names_disambiguate_only_the_collisions() {
-        let (a, b, c) = (
-            p("/home/u/work/app"),
-            p("/home/u/fork/app"),
-            p("/home/u/tty7"),
-        );
-        let names = group_names(&[&a, &b, &c]);
-        assert_eq!(names, vec!["work/app", "fork/app", "tty7"]);
-    }
-
-    #[test]
-    fn group_names_handle_suffix_roots() {
-        let (short, long) = (p("/app"), p("/x/app"));
-        let names = group_names(&[&short, &long]);
-        assert_eq!(names, vec!["app", "x/app"]);
     }
 
     /// A header with a long branch on it used to leave the heading as `DEL…`

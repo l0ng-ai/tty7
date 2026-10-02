@@ -450,6 +450,61 @@ code {
   overflow: hidden;
 }
 
+/* The desktop sidebar's groups within a workspace. */
+.tgroup + .tgroup {
+  margin-top: 16px;
+}
+
+.tgroup-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 0 4px 6px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+  text-align: left;
+}
+
+.tgroup-chevron {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  transform: rotate(90deg);
+  transition: transform 0.2s var(--ease);
+}
+
+.tgroup.folded .tgroup-chevron {
+  transform: none;
+}
+
+.tgroup-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tgroup-count {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.tgroup.folded .card {
+  display: none;
+}
+
+.tag.current {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+
 .remote {
   padding-top: 10px;
 }

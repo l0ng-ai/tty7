@@ -274,6 +274,33 @@ pub struct WorkspaceView {
     pub id: String,
     pub name: String,
     pub tabs: Vec<TabView>,
+    /// The desktop sidebar's groups, in its order: pinned groups, then the
+    /// ones it works out per repository or SSH host, then the tabs in none.
+    /// Every tab is in exactly one. Empty from a gateway that predates
+    /// groups, and the tabs are then one list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<GroupView>,
+    /// The tab the desktop last had in front in this workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tab: Option<String>,
+}
+
+/// One of the desktop sidebar's groups of tabs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupView {
+    /// What its header reads. `None` for the tabs in no group when there is
+    /// no other group to set them apart from, which the desktop draws without
+    /// a header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A group the user pinned, rather than one worked out from the tabs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// Folded shut on the desktop.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collapsed: bool,
+    /// Its tabs' ids, in the workspace's order.
+    pub tabs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

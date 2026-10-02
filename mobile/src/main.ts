@@ -16,6 +16,7 @@ import { MAX_UPLOAD } from "./api";
 import type {
   AgentStatus,
   AgentView,
+  GroupView,
   Host,
   LinkInfo,
   PaneView,
@@ -1293,7 +1294,7 @@ function renderTree(
       ...(tree.remotes ?? []).flatMap((r) => r.workspaces.map((ws) => [r, matching(ws, query)] as const)),
     ].filter(([, ws]) => ws.tabs.length > 0);
     return groups.length
-      ? groups.map(([place, ws]) => workspaceGroup(host, place, ws, place?.name))
+      ? groups.map(([place, ws]) => workspaceGroup(host, place, ws, place?.name, true, true))
       : [h("p", { class: "search-empty" }, `No tab matches “${query}”.`)];
   }
   const remotes = tree.remotes ?? [];
@@ -1410,8 +1411,28 @@ function remoteState(host: Host, remote: RemoteView) {
 /** A workspace is one card of its tabs, named as the desktop's sidebar names
  * them; a split tab gives each of its panes a row. `where` names the machine
  * when a search mixes them. */
-function workspaceGroup(host: Host, place: Place, ws: WorkspaceView, where?: string, headed = true) {
-  const rows = ws.tabs.flatMap((tab) => tab.panes.map((pane) => paneRow(host, place, tab, pane)));
+function workspaceGroup(
+  host: Host,
+  place: Place,
+  ws: WorkspaceView,
+  where?: string,
+  headed = true,
+  searching = false,
+) {
+  const rowsOf = (tabs: TabView[]) =>
+    tabs.flatMap((tab) => tab.panes.map((pane) => paneRow(host, place, tab, pane, tab.id === ws.active_tab)));
+  // The desktop sidebar's groups, each with the tabs still in it (a search
+  // leaves some out). An older desktop sends none: one list, as before.
+  const byId = new Map(ws.tabs.map((tab) => [tab.id, tab]));
+  const sections = ws.groups?.length
+    ? ws.groups
+        .map((group) => ({ group, tabs: group.tabs.flatMap((id) => byId.get(id) ?? []) }))
+        .filter((s) => s.tabs.length > 0)
+    : [{ group: null, tabs: ws.tabs }];
+  const body: Node[] =
+    sections.length === 1 && !sections[0].group?.name
+      ? [h("div", { class: "card" }, ...rowsOf(sections[0].tabs))]
+      : sections.map(({ group, tabs }) => tabGroup(host, place, ws, group, rowsOf(tabs), tabs, searching));
   return h(
     "section",
     { class: "group" },
@@ -1422,8 +1443,56 @@ function workspaceGroup(host: Host, place: Place, ws: WorkspaceView, where?: str
         h("h2", { class: "group-title" }, where ? `${where} · ${workspaceName(ws.name)}` : workspaceName(ws.name)),
         h("span", { class: "group-count" }, String(ws.tabs.length)),
       ),
-    rows.length ? h("div", { class: "card" }, ...rows) : h("p", { class: "group-empty" }, "No tabs open."),
+    ...(ws.tabs.length ? body : [h("p", { class: "group-empty" }, "No tabs open.")]),
   );
+}
+
+/** The most pressing state among some tabs' agents: what a folded group's
+ * header shows, so one waiting on you is not hidden by the fold. */
+function mostUrgent(tabs: TabView[]): AgentStatus | null {
+  const order: AgentStatus[] = ["waiting", "working"];
+  const states = new Set(tabs.flatMap((tab) => tab.panes.map((pane) => pane.agent?.status)));
+  return order.find((s) => states.has(s)) ?? null;
+}
+
+/** One sidebar group: a header that folds it, over its rows. It starts folded
+ * as the desktop has it; a fold here is this phone's own and is remembered,
+ * and a search shows every match whatever is folded. */
+function tabGroup(
+  host: Host,
+  place: Place,
+  ws: WorkspaceView,
+  group: GroupView | null,
+  rows: Node[],
+  tabs: TabView[],
+  searching: boolean,
+) {
+  const card = h("div", { class: "card" }, ...rows);
+  if (!group?.name) return h("div", { class: "tgroup" }, card);
+  const key = `fold.${host.id}.${spaceKey(place, ws)}.${group.pinned ? "pin" : "auto"}.${group.name}`;
+  const saved = remembered(key);
+  let folded = !searching && (saved === null ? !!group.collapsed : saved === "1");
+  const urgent = mostUrgent(tabs);
+  const head = h(
+    "button",
+    { class: "tgroup-head" },
+    ico("chevron", "icon tgroup-chevron"),
+    h("span", { class: "tgroup-name" }, group.name),
+    urgent && h("span", { class: `status-dot ${urgent}` }),
+    h("span", { class: "tgroup-count" }, String(tabs.length)),
+  );
+  const section = h("div", { class: "tgroup" }, head, card);
+  const show = () => {
+    section.classList.toggle("folded", folded);
+    head.setAttribute("aria-expanded", String(!folded));
+  };
+  head.onclick = () => {
+    folded = !folded;
+    if (!searching) remember(key, folded ? "1" : "0");
+    show();
+  };
+  show();
+  return section;
 }
 
 /** The agents a new tab can start in, and the command that starts each. */
@@ -1664,7 +1733,7 @@ function workspaceName(name: string) {
 
 /** A pane's row: its tab's name first, as on the desktop, then what the pane
  * is doing — its agent's state, or where its shell is. */
-function paneRow(host: Host, place: Place, tab: TabView, pane: PaneView) {
+function paneRow(host: Host, place: Place, tab: TabView, pane: PaneView, current = false) {
   const agent = pane.agent;
   const sub: Child[] = [];
   if (agent && agent.status !== "idle")
@@ -1690,6 +1759,8 @@ function paneRow(host: Host, place: Place, tab: TabView, pane: PaneView) {
         "span",
         { class: "row-title" },
         tab.name,
+        // The tab in front on the desktop: where you were.
+        current && h("span", { class: "tag current" }, "Current"),
         tab.hibernated && h("span", { class: "tag" }, "Asleep"),
       ),
       sub.length > 0 && h("span", { class: "row-sub" }, ...sub),
