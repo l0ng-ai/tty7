@@ -2553,6 +2553,37 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
     const attachKey = h("button", { class: "round", ariaLabel: "Attach a photo or file" }, ico("attach"));
     const picker = h("input", { type: "file", multiple: true, hidden: true });
     const compose = h("div", { class: "compose" }, attachKey, historyKey, field, sendKey, keyboard, picker);
+    // Files sent to the machine, waiting to go with the message: shown by
+    // name and picture, their paths written in only when it is sent.
+    const attached: { path: string; name: string; thumb: string | null }[] = [];
+    const chips = h("div", { class: "attach-chips", hidden: true });
+    const drawChips = () => {
+      chips.replaceChildren(
+        ...attached.map((a, i) => {
+          const drop = h("button", { class: "attach-drop", ariaLabel: `Remove ${a.name}` }, ico("close"));
+          drop.onpointerdown = (e) => e.preventDefault();
+          drop.onclick = () => {
+            if (a.thumb) URL.revokeObjectURL(a.thumb);
+            attached.splice(i, 1);
+            drawChips();
+            edited();
+          };
+          return h(
+            "div",
+            { class: "attach-chip" },
+            a.thumb ? h("img", { class: "attach-thumb", src: a.thumb, alt: "" }) : h("span", { class: "attach-thumb" }, ico("attach")),
+            h("span", { class: "attach-name" }, a.name),
+            drop,
+          );
+        }),
+      );
+      chips.hidden = attached.length === 0;
+    };
+    const clearAttached = () => {
+      for (const a of attached) if (a.thumb) URL.revokeObjectURL(a.thumb);
+      attached.length = 0;
+      drawChips();
+    };
     const suggest = h("div", { class: "suggest", hidden: true });
     // An agent's numbered choices — a permission to grant, a question — as
     // buttons over the key row while it waits for an answer.
@@ -2581,7 +2612,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       { class: "screen term-screen" },
       bar,
       h("div", { class: "term-wrap" }, screenEl, typing, copyView, findBar, latest, banner),
-      h("div", { class: "term-dock" }, h("div", { class: "key-slot" }, pages, answers, suggest), dots, compose),
+      h("div", { class: "term-dock" }, h("div", { class: "key-slot" }, pages, answers, suggest), dots, chips, compose),
     );
 
     const term = new Terminal({
@@ -2849,9 +2880,10 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       if (field.value) drafts.set(draftKey, field.value);
       else drafts.delete(draftKey);
       // Written, the round button sends; empty, it is the keyboard's.
-      sendKey.hidden = !field.value;
-      keyboard.hidden = !!field.value;
-      historyKey.hidden = !!field.value;
+      const ready = !!field.value || attached.length > 0;
+      sendKey.hidden = !ready;
+      keyboard.hidden = ready;
+      historyKey.hidden = ready;
       grow();
       offer();
     };
@@ -2944,13 +2976,16 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       if (!files.length) return;
       attachKey.classList.add("busy");
       attachKey.disabled = true;
-      const paths: string[] = [];
+      let added = 0;
       try {
         for (const file of files) {
           if (file.size > MAX_UPLOAD) {
             throw new Error(`${file.name} is ${Math.ceil(file.size / 2 ** 20)} MB; files up to ${MAX_UPLOAD / 2 ** 20} MB can be sent`);
           }
-          paths.push(await api.upload(host.id, null, file.name, new Uint8Array(await file.arrayBuffer())));
+          const path = await api.upload(host.id, null, file.name, new Uint8Array(await file.arrayBuffer()));
+          const thumb = file.type.startsWith("image/") ? URL.createObjectURL(file) : null;
+          attached.push({ path, name: baseName(path), thumb });
+          added++;
         }
       } catch (e) {
         showBanner(`Couldn't send the file: ${sentence(errorText(e))}`, { label: "OK", run: clearBanner });
@@ -2958,11 +2993,8 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         attachKey.classList.remove("busy");
         attachKey.disabled = false;
       }
-      if (!paths.length) return;
-      // Its own word, before and after, so it reads as a path whatever is
-      // written around it.
-      const before = field.value && !/\s$/.test(field.value) ? `${field.value} ` : field.value;
-      field.value = `${before}${paths.join(" ")} `;
+      if (!added) return;
+      drawChips();
       edited();
       field.focus({ preventScroll: true });
     };
@@ -2975,7 +3007,12 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       return /pass(word|phrase)|\bpin\b|密码|口令/i.test(line);
     };
     const submit = async () => {
-      const body = field.value.replace(/\r?\n/g, "\r");
+      // What was written, then the files, each its own word — quoted where
+      // a name has a space — so a shell takes them as a command's arguments
+      // and an agent as what the message is about.
+      const paths = attached.map((a) => (/\s/.test(a.path) ? `'${a.path.replace(/'/g, "'\\''")}'` : a.path));
+      const text = [field.value.trimEnd(), ...paths].filter(Boolean).join(" ");
+      const body = text.replace(/\r?\n/g, "\r");
       // Several lines go in as one paste where the program asked for that,
       // so an agent takes them as one message and a shell does not run each.
       const data = body.includes("\r") && term.modes.bracketedPasteMode ? `\x1b[200~${body}\x1b[201~` : body;
@@ -2984,8 +3021,9 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       // how the bytes arrive would otherwise take it as part of the text.
       // An empty box sends Enter alone.
       if (!(await input("\r"))) return;
-      if (!answersSecret()) keepSent(field.value);
+      if (!answersSecret() && field.value) keepSent(field.value);
       field.value = "";
+      clearAttached();
       edited();
     };
     // Return sends; Shift-Return starts a line, on a keyboard with a real

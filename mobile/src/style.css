@@ -2625,3 +2625,66 @@ html[data-nav="pop"]::view-transition-new(root) {
 .to-latest:active {
   background: var(--cell-press);
 }
+
+/* Files waiting to go with the message (main.ts `attached`). */
+.attach-chips {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.attach-chips[hidden] {
+  display: none;
+}
+
+.attach-chip {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 220px;
+  height: 44px;
+  padding: 4px 4px 4px 4px;
+  border-radius: 12px;
+  background: var(--cell);
+  box-shadow: 0 0 0 0.5px var(--hair);
+}
+
+.attach-thumb {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  object-fit: cover;
+  display: grid;
+  place-items: center;
+  background: var(--fill);
+  color: var(--ink-2);
+}
+
+.attach-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.attach-drop {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.attach-drop .icon {
+  width: 14px;
+  height: 14px;
+}
