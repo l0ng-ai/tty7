@@ -630,13 +630,14 @@ function settingsScreen() {
               class: "row choice",
               onclick: async () => {
                 // Turning it on proves it works first, so no one locks
-                // themselves out.
-                if (!prefs.lock) {
-                  try {
-                    await authenticate("Turn on the tty7 lock", { allowDeviceCredential: true });
-                  } catch {
-                    return;
-                  }
+                // themselves out; turning it off takes the owner too, not
+                // whoever holds the phone.
+                try {
+                  await authenticate(prefs.lock ? "Turn off the tty7 lock" : "Turn on the tty7 lock", {
+                    allowDeviceCredential: true,
+                  });
+                } catch {
+                  return;
                 }
                 setPref("lock", !prefs.lock);
                 draw();
