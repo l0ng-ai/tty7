@@ -2151,11 +2151,17 @@ interface MenuItem {
 
 /** A trailing ⋯ button with a small menu that drops from it. Items can be
  * given as a function, to be read afresh each time it opens. */
+/** When a menu was last put away by a press outside it: that press is the
+ * menu's, not whatever lies under it. */
+let menuDismissedAt = 0;
+
 function menuButton(items: MenuItem[] | (() => MenuItem[]), cls = "nav-icon") {
   const wrap = h("div", { class: "menu-wrap" });
   const list = h("div", { class: "menu", role: "menu", hidden: true });
   const outside = (e: Event) => {
-    if (!wrap.contains(e.target as Node)) close();
+    if (wrap.contains(e.target as Node)) return;
+    menuDismissedAt = performance.now();
+    close();
   };
   const close = () => {
     list.hidden = true;
@@ -3216,6 +3222,8 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         // focus to its own textarea.
         if (lifted && !lifted.axis && e.cancelable) {
           e.preventDefault();
+          // A tap that closed an open menu does only that.
+          if (performance.now() - menuDismissedAt < 500) return;
           // A link under the finger opens in the browser instead.
           const at = e.changedTouches[0];
           const url = at && linkAt(at.clientX, at.clientY);
