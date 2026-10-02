@@ -2414,7 +2414,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       cols: 80,
       rows: 24,
       fontSize: readablePx(),
-      fontFamily: 'Hack, "Symbols Nerd Font Mono", Menlo, ui-monospace, monospace',
+      fontFamily: 'Hack, "Symbols Nerd Font Mono", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Emoji", Menlo, ui-monospace, monospace',
       scrollback: 5000,
       cursorBlink: false,
       theme: terminalTheme(),
@@ -2750,23 +2750,35 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       field.value = "";
       edited();
     };
-    // Return sends; Shift-Return, on a keyboard that has it, starts a line.
+    // Return sends; Shift-Return starts a line, on a keyboard with a real
+    // Shift. The phone's own keyboard says Shift whenever it has armed a
+    // capital — at the start, after a full stop — so there it is ignored.
+    const hardKeys = matchMedia("(any-pointer: fine)");
     let newLine = false;
     field.addEventListener("keydown", (e) => {
-      newLine = e.key === "Enter" && e.shiftKey;
+      const shifted = e.shiftKey && hardKeys.matches;
+      newLine = e.key === "Enter" && shifted;
       // Enter that confirms an IME's candidate is the IME's, not a send.
-      if (e.key !== "Enter" || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+      if (e.key !== "Enter" || shifted || e.isComposing || e.keyCode === 229) return;
       e.preventDefault();
       void submit();
     });
-    // A Return that comes as a line break with no key behind it — the
-    // on-screen keyboard can deliver it that way — sends too.
-    field.addEventListener("beforeinput", (e) => {
+    // A Return that comes as text with no key behind it sends too. The
+    // on-screen keyboard delivers it that way — as a line break, or, with
+    // corrections on, as a typed newline once it has settled the word —
+    // and not always cancellably, so the newline is taken back out.
+    field.addEventListener("input", (e) => {
       const wasShift = newLine;
       newLine = false;
-      if (e.isComposing || wasShift) return;
-      if (e.inputType !== "insertLineBreak" && e.inputType !== "insertParagraph") return;
-      e.preventDefault();
+      const typed = e as InputEvent;
+      const newline =
+        typed.inputType === "insertLineBreak" || typed.inputType === "insertParagraph" || typed.data === "\n";
+      if (!newline || typed.isComposing || wasShift) return;
+      const at = field.selectionStart;
+      if (field.value[at - 1] === "\n") {
+        field.value = field.value.slice(0, at - 1) + field.value.slice(at);
+        edited();
+      }
       void submit();
     });
     sendKey.onpointerdown = (e) => e.preventDefault();
@@ -3462,6 +3474,9 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
       Promise.allSettled([
         document.fonts.load("12px Hack"),
         document.fonts.load('12px "Symbols Nerd Font Mono"', "\ue0a0"),
+        document.fonts.load('12px "Noto Sans Symbols"', "\u23bf"),
+        document.fonts.load('12px "Noto Sans Symbols 2"', "\u23fa"),
+        document.fonts.load('12px "Noto Emoji"', "\u23f0"),
       ]).finally(() => {
         if (!alive) return;
         term.open(screenEl);

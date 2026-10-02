@@ -25,6 +25,29 @@
   font-display: block;
 }
 
+/* What agents and TUIs draw their marks with — Claude Code's ⏺ and ⎿, ✔,
+   ⚠, braille spinners — which the phone's own fonts leave as empty boxes
+   in a canvas. Noto's symbols, cut down to those blocks. */
+@font-face {
+  font-family: "Noto Sans Symbols";
+  src: url("./assets/fonts/NotoSansSymbols-subset.woff2") format("woff2");
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Noto Sans Symbols 2";
+  src: url("./assets/fonts/NotoSansSymbols2-subset.woff2") format("woff2");
+  font-display: block;
+}
+
+/* The few of those that are emoji by default (⏰ ✅ ❌ ✨), in outline, as
+   text: a canvas leaves them as boxes rather than reach for colour ones. */
+@font-face {
+  font-family: "Noto Emoji";
+  src: url("./assets/fonts/NotoEmoji-subset.woff2") format("woff2");
+  font-display: block;
+}
+
 :root {
   --canvas: #f3f3f1;
   --cell: #fcfcfb;
@@ -59,7 +82,7 @@
   --done: #22c55e;
 
   --ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", Roboto, "Segoe UI", system-ui, sans-serif;
-  --mono: Hack, "Symbols Nerd Font Mono", "SF Mono", Menlo, ui-monospace, monospace;
+  --mono: Hack, "Symbols Nerd Font Mono", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Emoji", "SF Mono", Menlo, ui-monospace, monospace;
   --ease: cubic-bezier(0.32, 0.72, 0, 1);
 
   /* The home indicator's gap; none while the keyboard is up, which covers
