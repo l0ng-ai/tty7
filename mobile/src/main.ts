@@ -2030,13 +2030,14 @@ function paneRow(host: Host, place: Place, ws: WorkspaceView, tab: TabView, pane
   if (agent && agent.status !== "idle" && !pane.stopped)
     sub.push(h("span", { class: `status-word ${agent.status}` }, STATUS_WORD[agent.status]));
   // A tab named after its directory goes by the directory's own name, the
-  // end a narrow row would cut off; where it is goes underneath. What tells
-  // a split's panes apart is what runs in them.
+  // end a narrow row would cut off. What tells a split's panes apart is
+  // what runs in them.
   const namedByPath = /^[~/]/.test(tab.name);
   const name = namedByPath ? baseName(tab.name) : tab.name;
   const pathTitle = (t: string) => t === tab.name || t === pane.cwd || /^[~/]/.test(t);
   const split = tab.panes.length > 1 && !pathTitle(pane.title) ? pane.title : null;
-  const dir = namedByPath ? parentPath(tab.name) : shortPath(pane.cwd);
+  // Where it is, said the same way on every row, however the tab is named.
+  const dir = shortPath(pane.cwd ?? (namedByPath ? tab.name : null));
   const detail = [split, agent?.message ?? dir].filter(Boolean).join(" · ");
   if (detail) sub.push(sub.length ? ` · ${detail}` : detail);
   const row = h(
@@ -3517,6 +3518,7 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
             if (!current()) return;
             replay();
             term.write(bytes);
+            if (run) runSoon();
           },
           (event) => {
             if (!current()) return;
@@ -3571,15 +3573,30 @@ function terminalScreen(host: Host, place: Place, pane: PaneView, title: string,
         retry.reset();
         banner.replaceChildren();
         setState("live", liveLabel());
-        // A new tab's agent, started once: not again on a reconnect.
-        if (run) {
-          const command = run;
-          run = undefined;
-          void input(`${command}\r`);
-        }
+        runSoon();
       } catch (e) {
         if (current()) offline(errorText(e));
       }
+    };
+    // A new tab's agent is typed in once its shell has started: a key sent
+    // while the shell is still printing its greeting is eaten, and the
+    // command would sit at the prompt unrun. Started is when the output
+    // has gone quiet, or after a while whatever it is doing. Once: not
+    // again on a reconnect.
+    let runTimer: number | undefined;
+    const runBy = performance.now() + 6000;
+    const runSoon = () => {
+      if (!run) return;
+      clearTimeout(runTimer);
+      runTimer = window.setTimeout(
+        () => {
+          if (!run || !live || !alive) return;
+          const command = run;
+          run = undefined;
+          void input(`${command}\r`);
+        },
+        performance.now() > runBy ? 0 : 700,
+      );
     };
     const reopen = () => {
       if (handle !== null) api.paneClose(handle);
