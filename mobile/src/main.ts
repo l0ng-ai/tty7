@@ -559,7 +559,7 @@ function hostsScreen(direction: "push" | "pop" = "pop") {
             h(
               "p",
               { class: "empty-body" },
-              "Reach the panes open in tty7 on your computer, and type into them from here.",
+              "Reach the panes open in tty7 on your computer, and type into them from here. In tty7, open Settings → Mobile and point this phone's camera at the code.",
             ),
             h("button", { class: "button primary", onclick: () => pairScreen() }, "Pair a machine"),
           ),
