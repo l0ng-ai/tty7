@@ -2688,3 +2688,20 @@ html[data-nav="pop"]::view-transition-new(root) {
   width: 14px;
   height: 14px;
 }
+
+/* A row's held-down menu (main.ts `rowActions`). */
+.row .row-title.danger,
+.row .row-icon.danger {
+  color: var(--danger);
+}
+
+.row .row-icon {
+  margin-left: auto;
+  width: 20px;
+  height: 20px;
+  color: var(--ink-2);
+}
+
+.row {
+  -webkit-touch-callout: none;
+}

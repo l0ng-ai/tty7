@@ -2110,9 +2110,131 @@ function paneRow(host: Host, place: Place, ws: WorkspaceView, tab: TabView, pane
     agent && !pane.stopped && agent.status !== "idle" && agent.status !== "done" && h("span", { class: `status-dot ${agent.status}` }),
     ico("chevron", "icon row-chevron"),
   );
+  rowActions(row, () => {
+    const actions: { label: string; icon: keyof typeof icon; danger?: boolean; run: () => void }[] = [
+      { label: "Open", icon: "terminal", run: () => terminalScreen(host, place, pane, name, tabRef(ws, tab, name)) },
+      {
+        label: "Open at phone size",
+        icon: "phone",
+        run: () => {
+          remember(`take.${host.id}.${place?.key ?? ""}.${pane.id}`, "1");
+          terminalScreen(host, place, pane, name, tabRef(ws, tab, name));
+        },
+      },
+    ];
+    const cwd = pane.cwd;
+    if (cwd) {
+      actions.push(
+        { label: "Changes", icon: "compose", run: () => changesSheet(host, place, cwd) },
+        {
+          label: "New tab here",
+          icon: "plus",
+          run: async () => {
+            try {
+              const made = await api.tabNew(host.id, place?.key ?? null, ws.id, cwd, phoneGrid());
+              const title = baseName(cwd);
+              terminalScreen(host, place, { id: made.pane_id, title, cwd }, title, { workspace: ws.id, id: made.tab_id, name: title, busy: false }, undefined, true);
+            } catch (e) {
+              closeFailed(name, sentence(errorText(e)));
+            }
+          },
+        },
+        {
+          label: "Copy folder path",
+          icon: "copy",
+          run: () => void navigator.clipboard?.writeText(cwd).then(() => feel("tick"), () => {}),
+        },
+      );
+    }
+    actions.push({
+      label: "Close tab",
+      icon: "close",
+      danger: true,
+      run: () => void closeTab(host, place, tabRef(ws, tab, name), (message) => closeFailed(name, message)),
+    });
+    return { title: name, actions };
+  });
   // A split tab's panes each have a row; closing is the tab's, on its first.
   if (pane.id !== tab.panes[0]?.id) return row;
   return swipeable(row, "Close", `Close ${name}`, () => closeTab(host, place, tabRef(ws, tab, name), (message) => closeFailed(name, message)));
+}
+
+/** Holding a row brings up what can be done with it, as a list's rows do
+ * on the phone; the tap the press would end in is swallowed. */
+function rowActions(
+  row: HTMLElement,
+  menu: () => { title: string; actions: { label: string; icon: keyof typeof icon; danger?: boolean; run: () => void }[] },
+) {
+  let timer = 0;
+  let start: { x: number; y: number } | null = null;
+  let held = false;
+  const cancel = () => {
+    clearTimeout(timer);
+    start = null;
+  };
+  row.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.touches.length !== 1) return cancel();
+      held = false;
+      start = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      timer = window.setTimeout(() => {
+        start = null;
+        held = true;
+        feel("key");
+        const { title, actions } = menu();
+        const { remove } = openSheet(
+          title,
+          h(
+            "div",
+            { class: "sheet-body" },
+            h(
+              "div",
+              { class: "card" },
+              ...actions.map((a) =>
+                h(
+                  "button",
+                  {
+                    class: "row choice",
+                    onclick: () => {
+                      remove();
+                      a.run();
+                    },
+                  },
+                  h("span", { class: a.danger ? "row-title danger" : "row-title" }, a.label),
+                  ico(a.icon, a.danger ? "icon row-icon danger" : "icon row-icon"),
+                ),
+              ),
+            ),
+          ),
+        );
+      }, 480);
+    },
+    { passive: true },
+  );
+  row.addEventListener(
+    "touchmove",
+    (e) => {
+      if (!start) return;
+      const t = e.touches[0];
+      if (Math.hypot(t.clientX - start.x, t.clientY - start.y) > 8) cancel();
+    },
+    { passive: true },
+  );
+  row.addEventListener("touchend", cancel);
+  row.addEventListener("touchcancel", cancel);
+  row.addEventListener(
+    "click",
+    (e) => {
+      if (!held) return;
+      held = false;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+    },
+    { capture: true },
+  );
+  // No text callout or link preview of its own over the menu.
+  row.addEventListener("contextmenu", (e) => e.preventDefault());
 }
 
 /** A close that did not go through, said in a sheet: the row it came from
