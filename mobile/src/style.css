@@ -2483,3 +2483,10 @@ html[data-nav="pop"]::view-transition-new(root) {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* A control's mark, named in running text. */
+.inline-icon {
+  width: 1.15em;
+  height: 1.15em;
+  vertical-align: -0.2em;
+}

@@ -599,7 +599,7 @@ function settingsScreen() {
           o.value === chosen ? ico("check", "icon choice-check") : h("span", { class: "choice-check" }),
         ),
       );
-    const note = (group: HTMLElement, text: string) => (group.append(h("p", { class: "group-note" }, text)), group);
+    const note = (group: HTMLElement, ...text: Child[]) => (group.append(h("p", { class: "group-note" }, ...text)), group);
 
     const lockSetting = () =>
       note(
@@ -637,7 +637,9 @@ function settingsScreen() {
         h("span", { class: saved ? "row-title danger" : "row-title" }, "Clear message history"),
         h("span", { class: "row-meta" }, saved ? `${saved} saved` : "Empty"),
       );
-      clear.onclick = () => {
+      clear.onclick = async () => {
+        if (!(await confirmSheet("Clear message history?", `The ${saved} messages kept on this phone go for good.`, "Clear")))
+          return;
         remember("history", "[]");
         draw();
       };
@@ -656,7 +658,10 @@ function settingsScreen() {
         ),
         note(
           section("Panes wider than the phone", ...choices(WIDE, prefs.wide, (v) => setPref("wide", v))),
-          "How such a pane first shows. Switch any time from its ⋯ menu.",
+          "How such a pane first shows. Switch any time from its ",
+          // The menu's own mark: the phone's fonts have no ⋯ of their own.
+          ico("more", "icon inline-icon"),
+          " menu.",
         ),
         note(
           section(
