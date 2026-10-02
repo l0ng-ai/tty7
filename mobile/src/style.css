@@ -16,6 +16,15 @@
   font-display: block;
 }
 
+/* The icons a prompt draws (Powerline arrows, a branch, a folder): Nerd
+   Fonts' symbols alone, one cell wide, for the code points Hack lacks. A
+   phone has no fonts of its own to fall back on. */
+@font-face {
+  font-family: "Symbols Nerd Font Mono";
+  src: url("./assets/fonts/SymbolsNerdFontMono.woff2") format("woff2");
+  font-display: block;
+}
+
 :root {
   --canvas: #f3f3f1;
   --cell: #fcfcfb;
@@ -50,7 +59,7 @@
   --done: #22c55e;
 
   --ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", Roboto, "Segoe UI", system-ui, sans-serif;
-  --mono: Hack, "SF Mono", Menlo, ui-monospace, monospace;
+  --mono: Hack, "Symbols Nerd Font Mono", "SF Mono", Menlo, ui-monospace, monospace;
   --ease: cubic-bezier(0.32, 0.72, 0, 1);
 
   /* The home indicator's gap; none while the keyboard is up, which covers
