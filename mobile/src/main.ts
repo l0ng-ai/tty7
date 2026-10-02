@@ -1686,6 +1686,48 @@ function openSheet(title: string, ...content: Child[]) {
     scrim.classList.add("leaving");
     setTimeout(() => scrim.remove(), still.matches ? 0 : 220);
   };
+  // Pulled down, it goes, as the phone's own sheets do: from its top, or
+  // from anywhere while what it holds is scrolled to the start. Let go
+  // short of the way, it settles back.
+  let pull: { y: number; t: number; dy: number; claimed: boolean } | null = null;
+  sheet.addEventListener(
+    "touchstart",
+    (e) => {
+      const target = e.target as Element;
+      const scroller = target.closest?.(".sheet-body, .diff-code, input, textarea");
+      if (e.touches.length !== 1 || (scroller && scroller.scrollTop > 0) || target.closest?.("input, textarea")) return;
+      pull = { y: e.touches[0].clientY, t: e.timeStamp, dy: 0, claimed: false };
+    },
+    { passive: true },
+  );
+  sheet.addEventListener(
+    "touchmove",
+    (e) => {
+      if (!pull) return;
+      const dy = e.touches[0].clientY - pull.y;
+      if (!pull.claimed) {
+        if (Math.abs(dy) < 8) return;
+        if (dy < 0) return void (pull = null);
+        pull.claimed = true;
+        sheet.style.transition = "none";
+      }
+      e.preventDefault();
+      pull.dy = Math.max(0, dy);
+      sheet.style.transform = `translateY(${pull.dy}px)`;
+    },
+    { passive: false },
+  );
+  sheet.addEventListener("touchend", (e) => {
+    const done = pull;
+    pull = null;
+    if (!done?.claimed) return;
+    const fast = done.dy / Math.max(1, e.timeStamp - done.t) > 0.5;
+    if (done.dy > Math.min(140, sheet.offsetHeight / 3) || fast) close();
+    else {
+      sheet.style.transition = "transform 0.25s var(--ease)";
+      sheet.style.transform = "";
+    }
+  });
   document.body.append(scrim);
   return { close, remove: () => scrim.remove() };
 }
