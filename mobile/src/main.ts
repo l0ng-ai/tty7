@@ -1899,7 +1899,20 @@ function renderDiff(d: api.Diff): Node[] {
     out.push(
       section(
         `Not tracked yet · ${d.untracked.length}`,
-        ...d.untracked.slice(0, 200).map((p) => h("div", { class: "row choice static" }, h("span", { class: "row-title diff-name" }, p))),
+        ...d.untracked.slice(0, 200).map((p) => {
+          // A name to read and where it is, as the folder lists say it; a
+          // new directory keeps its slash.
+          const dir = p.endsWith("/");
+          const parts = p.replace(/\/$/, "").split("/");
+          const leaf = parts.pop() + (dir ? "/" : "");
+          return h(
+            "div",
+            { class: "row choice static" },
+            h("span", { class: "row-title" }, leaf),
+            // The end of the folder is the part that tells them apart.
+            parts.length > 0 && h("span", { class: "row-meta" }, parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : parts.join("/")),
+          );
+        }),
       ),
     );
   }

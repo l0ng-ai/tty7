@@ -343,10 +343,13 @@ fn read_diff(cwd: &str) -> io::Result<Diff> {
     let truncated = out.stdout.len() > MAX_DIFF;
     let mut patch = out.stdout;
     patch.truncate(MAX_DIFF);
+    // A new directory is one entry, as `git status` shows it, not every
+    // file under it: a generated folder would bury the rest.
     let untracked = git(&[
         "ls-files",
         "--others",
         "--exclude-standard",
+        "--directory",
         "--full-name",
         ":/",
     ])?;

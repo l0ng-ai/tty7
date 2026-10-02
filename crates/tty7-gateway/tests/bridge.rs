@@ -583,12 +583,19 @@ async fn a_paired_phone_reads_a_working_trees_changes() {
     run(&["commit", "-qm", "first"]);
     std::fs::write(repo.join("src/a.txt"), "one\ntwo\n").unwrap();
     std::fs::write(repo.join("new.txt"), "hi\n").unwrap();
+    std::fs::create_dir_all(repo.join("made/deep")).unwrap();
+    std::fs::write(repo.join("made/deep/x.txt"), "x\n").unwrap();
+    std::fs::write(repo.join("made/y.txt"), "y\n").unwrap();
 
     // Asked from a directory inside the repository, as a pane's cwd often is.
     let cwd = repo.join("src").to_string_lossy().into_owned();
     let diff = within(session.diff(None, &cwd)).await.unwrap();
     assert!(diff.patch.contains("+two"), "{}", diff.patch);
-    assert_eq!(diff.untracked, vec!["new.txt".to_string()]);
+    // A new directory comes as itself, not as each file in it.
+    assert_eq!(
+        diff.untracked,
+        vec!["made/".to_string(), "new.txt".to_string()]
+    );
     assert!(!diff.truncated);
 
     let err = within(session.diff(None, &std::env::temp_dir().to_string_lossy()))
