@@ -21,6 +21,10 @@ const SESSION_SIZE: WinSize = WinSize {
     cell_h: 16,
 };
 
+/// Reading a pane's size for a split must not hold the split up: a server
+/// that is slow to answer gets the stand-in size, as before this was asked.
+const PANE_SIZE_FIRST_WAIT: Duration = Duration::from_secs(2);
+const PANE_SIZE_SETTLE: Duration = Duration::from_millis(100);
 const REPLAY_FIRST_WAIT: Duration = Duration::from_secs(10);
 const REPLAY_SETTLE: Duration = Duration::from_millis(300);
 /// A backstop on reading the replay: it ends on the first live output or a
@@ -133,13 +137,18 @@ impl Backend for RealBackend {
         Ok(self.control_client()?.hello().clone())
     }
 
-    fn spawn_shell(&mut self, workspace: WorkspaceId, cwd: Option<String>) -> Result<u64> {
+    fn spawn_shell(
+        &mut self,
+        workspace: WorkspaceId,
+        cwd: Option<String>,
+        size: Option<WinSize>,
+    ) -> Result<u64> {
         let workspace = workspace.to_string();
         let session = self
             .pane_client()?
             .spawn(
                 cwd.map(PathBuf::from),
-                SESSION_SIZE,
+                size.unwrap_or(SESSION_SIZE),
                 None,
                 Some(workspace.clone()),
                 Some(workspace),
@@ -148,6 +157,30 @@ impl Backend for RealBackend {
         let pane = session.pane_id();
         session.detach()?;
         Ok(pane)
+    }
+
+    fn pane_size(&mut self, pane: u64) -> Option<WinSize> {
+        let mut session = self.pane_client().ok()?.observe(pane, SESSION_SIZE).ok()?;
+        // The ring replays as `Size`, `Snapshot` pairs, oldest first, and a
+        // segment only starts on a resize — so the last `Size` before anything
+        // else arrives is the size the pane has now. The replay is queued in
+        // one go, which is why a short quiet spell is enough to call it over.
+        let _ = session.set_recv_timeout(Some(PANE_SIZE_FIRST_WAIT));
+        let mut size = None;
+        loop {
+            match session.recv() {
+                Ok(DaemonMsg::Size(seen)) => {
+                    size = Some(seen);
+                    let _ = session.set_recv_timeout(Some(PANE_SIZE_SETTLE));
+                }
+                Ok(DaemonMsg::Snapshot(_)) => {
+                    let _ = session.set_recv_timeout(Some(PANE_SIZE_SETTLE));
+                }
+                _ => break,
+            }
+        }
+        let _ = session.detach();
+        size.filter(|s| s.cols > 0 && s.rows > 0)
     }
 
     fn send_input(&mut self, pane: u64, bytes: Vec<u8>) -> Result<()> {

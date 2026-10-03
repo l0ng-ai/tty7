@@ -34,7 +34,21 @@ pub trait Backend {
 
     fn hello(&mut self) -> Result<ControlHelloOk>;
 
-    fn spawn_shell(&mut self, workspace: WorkspaceId, cwd: Option<String>) -> Result<u64>;
+    /// Start a shell for `workspace`. `size` is the grid the GUI is going to
+    /// draw it at, when the caller can work that out: a shell spawned at the
+    /// wrong size runs whatever it is sent first at that size, and the resize
+    /// the GUI sends a moment later starts a new scrollback segment, so
+    /// `capture` would no longer show it.
+    fn spawn_shell(
+        &mut self,
+        workspace: WorkspaceId,
+        cwd: Option<String>,
+        size: Option<WinSize>,
+    ) -> Result<u64>;
+
+    /// The pane's grid as the server last sized it, or `None` when the pane
+    /// cannot be read. Best effort: only ever used to size a new pane.
+    fn pane_size(&mut self, pane: u64) -> Option<WinSize>;
 
     fn send_input(&mut self, pane: u64, bytes: Vec<u8>) -> Result<()>;
 
@@ -86,7 +100,7 @@ pub mod mock {
     use tty7_core::daemon::control::{
         CONTROL_VERSION, ControlEvent, ControlHelloOk, ControlRequest, ReplyOk, feature,
     };
-    use tty7_core::daemon::protocol::{PROTOCOL_VERSION, PaneInfo, PaneProcs};
+    use tty7_core::daemon::protocol::{PROTOCOL_VERSION, PaneInfo, PaneProcs, WinSize};
 
     use super::{Backend, CaptureSegment, RunSpec};
     use crate::exec::{ExecEnd, ExecRun};
@@ -97,6 +111,8 @@ pub mod mock {
         pub control_calls: Vec<ControlRequest>,
         pub spawned: Vec<(WorkspaceId, Option<String>)>,
         pub next_spawn_id: u64,
+        pub spawned_sizes: Vec<Option<WinSize>>,
+        pub pane_sizes: std::collections::HashMap<u64, WinSize>,
         pub sent: Vec<(u64, Vec<u8>)>,
         pub captured: Vec<(u64, bool)>,
         pub capture_segments: Vec<CaptureSegment>,
@@ -127,6 +143,8 @@ pub mod mock {
                 control_calls: Vec::new(),
                 spawned: Vec::new(),
                 next_spawn_id: 6,
+                spawned_sizes: Vec::new(),
+                pane_sizes: std::collections::HashMap::new(),
                 sent: Vec::new(),
                 captured: Vec::new(),
                 capture_segments: Vec::new(),
@@ -194,11 +212,21 @@ pub mod mock {
             })
         }
 
-        fn spawn_shell(&mut self, workspace: WorkspaceId, cwd: Option<String>) -> Result<u64> {
+        fn spawn_shell(
+            &mut self,
+            workspace: WorkspaceId,
+            cwd: Option<String>,
+            size: Option<WinSize>,
+        ) -> Result<u64> {
             self.spawned.push((workspace, cwd));
+            self.spawned_sizes.push(size);
             let id = self.next_spawn_id;
             self.next_spawn_id += 1;
             Ok(id)
+        }
+
+        fn pane_size(&mut self, pane: u64) -> Option<WinSize> {
+            self.pane_sizes.get(&pane).copied()
         }
 
         fn send_input(&mut self, pane: u64, bytes: Vec<u8>) -> Result<()> {
