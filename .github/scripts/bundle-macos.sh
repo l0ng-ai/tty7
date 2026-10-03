@@ -7,6 +7,10 @@
 # Signing posture is chosen from the environment:
 #   * Developer ID secrets present (APPLE_SIGNING_IDENTITY + APPLE_CERTIFICATE)
 #     -> hardened-runtime signature, then notarize + staple. Passes Gatekeeper.
+#     Notarization uses ASC_KEY_P8/ASC_KEY_ID/ASC_ISSUER_ID if set, else
+#     APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID.
+#   * APPLE_SIGNING_IDENTITY alone -> that identity from the login keychain,
+#     without a secure timestamp unless notarization credentials are set.
 #   * Otherwise -> adhoc signature, same as before. Fine for local dev, but the
 #     OS will quarantine it on other machines.
 #
@@ -155,34 +159,53 @@ PLIST
 
 SIGN_ID="${APPLE_SIGNING_IDENTITY:-}"
 
+# Notarization credentials: an App Store Connect API key, else an Apple ID
+# password. Decided before signing, because notarization rejects a signature
+# that carries no secure timestamp.
+NOTARY_WITH=""
+if [[ -n "${ASC_KEY_P8:-}" && -n "${ASC_KEY_ID:-}" && -n "${ASC_ISSUER_ID:-}" ]]; then
+    NOTARY_WITH=asc
+elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
+    NOTARY_WITH=apple-id
+fi
+
 if [[ -n "$SIGN_ID" ]]; then
-  # A local build signs with an identity already in the login keychain; only CI
-  # imports one, and only CI pays for a secure timestamp.
-  TIMESTAMP=--timestamp=none
-  if [[ -n "${APPLE_CERTIFICATE:-}" ]]; then
-    TIMESTAMP=--timestamp
-    # ---- Developer ID signing ------------------------------------------------
-    # Import the cert into a throwaway keychain so we never touch the login one.
-    KEYCHAIN="${RUNNER_TEMP:-/tmp}/tty7-sign.keychain-db"
-    CERT_PATH="${RUNNER_TEMP:-/tmp}/tty7-cert.p12"
-    KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-tty7-ci}"
-    # Scrub the decoded cert + temp keychain on any exit path.
+    # With a certificate (CI) it is imported into a throwaway keychain; without
+    # one, the identity is looked up in the login keychain (a local build). The
+    # secure timestamp is skipped only for a local build that is not notarized.
+    TIMESTAMP=--timestamp=none
+    if [[ -n "${APPLE_CERTIFICATE:-}" || -n "$NOTARY_WITH" ]]; then
+        TIMESTAMP=--timestamp
+    fi
+    KEYCHAIN=""
+    CERT_PATH=""
+    ASC_KEY_PATH=""
+    # Scrub the decoded cert, temp keychain and API key on any exit path.
     cleanup() {
-        security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true
-        rm -f "$CERT_PATH" "${ASC_KEY_PATH:-}"
+        if [[ -n "$KEYCHAIN" ]]; then
+            security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true
+        fi
+        rm -f "$CERT_PATH" "$ASC_KEY_PATH"
     }
     trap cleanup EXIT
 
-    security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-    security set-keychain-settings -lut 21600 "$KEYCHAIN"
-    security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-    echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
-    security import "$CERT_PATH" -P "${APPLE_CERTIFICATE_PASSWORD:-}" \
-        -A -t cert -f pkcs12 -k "$KEYCHAIN"
-    security set-key-partition-list -S apple-tool:,apple:,codesign: \
-        -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
-    security list-keychains -d user -s "$KEYCHAIN" login.keychain
-  fi
+    if [[ -n "${APPLE_CERTIFICATE:-}" ]]; then
+        # ---- Developer ID signing --------------------------------------------
+        # Import the cert into a throwaway keychain so we never touch the login one.
+        KEYCHAIN="${RUNNER_TEMP:-/tmp}/tty7-sign.keychain-db"
+        CERT_PATH="${RUNNER_TEMP:-/tmp}/tty7-cert.p12"
+        KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-tty7-ci}"
+
+        security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+        security set-keychain-settings -lut 21600 "$KEYCHAIN"
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+        echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+        security import "$CERT_PATH" -P "${APPLE_CERTIFICATE_PASSWORD:-}" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN"
+        security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+        security list-keychains -d user -s "$KEYCHAIN" login.keychain
+    fi
 
     # Hardened runtime forbids JIT / unsigned executable memory by default; the
     # GPU/Metal path gpui uses needs them, so grant them explicitly or the
@@ -235,12 +258,13 @@ ENT
 
     # ---- Notarization --------------------------------------------------------
     NOTARY_AUTH=()
-    if [[ -n "${ASC_KEY_P8:-}" && -n "${ASC_KEY_ID:-}" && -n "${ASC_ISSUER_ID:-}" ]]; then
-        # An App Store Connect API key, the alternative to an Apple ID password.
-        ASC_KEY_PATH="${RUNNER_TEMP:-/tmp}/AuthKey_${ASC_KEY_ID}.p8"
+    if [[ "$NOTARY_WITH" == asc ]]; then
+        # notarytool reads the key from a file. mktemp creates it 0600, so the
+        # key is never readable by others in a shared temp dir.
+        ASC_KEY_PATH="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tty7-asc-key.XXXXXX")"
         printf '%s\n' "$ASC_KEY_P8" > "$ASC_KEY_PATH"
         NOTARY_AUTH=(--key "$ASC_KEY_PATH" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID")
-    elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
+    elif [[ "$NOTARY_WITH" == apple-id ]]; then
         NOTARY_AUTH=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
     fi
     if [[ ${#NOTARY_AUTH[@]} -gt 0 ]]; then
@@ -340,7 +364,7 @@ if [[ "$BUNDLE_FAIL" -ne 0 ]]; then
     exit 1
 fi
 echo "✅ every Mach-O in $APP is a thin ${ARCH} binary (${SWEEP_SEEN} checked)"
-if [[ -n "${TTY7_BUNDLE_ONLY:-}" ]]; then
+if [[ "${TTY7_BUNDLE_ONLY:-0}" != "0" ]]; then
     exit 0
 fi
 
